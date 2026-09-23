@@ -192,9 +192,9 @@ Code: B7 has the full block).
 
 ```
   context      <name> (<uuid>)                      — or: no context yet
-  MCP          — or: verification not possible until a context exists
   Lane         hooks — guardrails=off on the MCP URL — yes
   MCP          get_context_info: guardrails absent (hooks lane) — load_guardrails: 7 tool guardrails, 2 pinned
+               — or, with no context: verification not possible until a context exists
 ```
 
 Then the remaining manual steps, if any: the CLI install and login (A1), the context to create (A2),
@@ -213,8 +213,8 @@ plugin's hook script. Another harness replaces this part and keeps Part A.
 ### B0. Check every value before a command uses it
 
 B1 reads the MCP URL from `.mcp.json` — a file any repository can ship — or from `~/.claude.json`,
-and later steps put that URL, the `server_url` derived from it, the context id, the CLI profile name
-and the MCP entry name into commands. A value such as `https://x/mcp'; curl …` or one holding `$(…)`,
+and later steps put that URL, the `server_url` derived from it, the context id, the CLI profile name,
+the MCP entry name and the plugin's marketplace name into commands. A value such as `https://x/mcp'; curl …` or one holding `$(…)`,
 a backtick, `;`, `|`, `&` or a newline would run as a command the moment it is spliced into one — so
 **no such value is ever spliced into a command's text**, quoted or not. Instead:
 
@@ -227,7 +227,8 @@ a backtick, `;`, `|`, `&` or a newline would run as a command the moment it is s
 
 2. Write each value **verbatim** into its own file there with the file-writing tool — never through
    a shell command (`echo`, `printf`, a here-document), which would parse it first. One file per
-   field, named `mcp_url`, `server_url`, `new_mcp_url`, `context_id`, `profile` or `entry_name`.
+   field, named `mcp_url`, `server_url`, `new_mcp_url`, `context_id`, `profile`, `entry_name` or
+   `marketplace`.
    Do not repair, trim or re-quote a value.
 
 3. Run the check. It reads the files — no value is on its command line — and prints only field
@@ -239,10 +240,10 @@ a backtick, `;`, `|`, `&` or a newline would run as a command the moment it is s
    URL = (r"https?://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])"
           r"(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~%/-]*)?"
           r"(?:\?[A-Za-z0-9._~%-]+=[A-Za-z0-9._~%-]*(?:&[A-Za-z0-9._~%-]+=[A-Za-z0-9._~%-]*)*)?")
-   NAME = r"[A-Za-z0-9_-]{1,64}"
+   NAME = r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
    UUID = r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
    PATTERNS = {"mcp_url": URL, "server_url": URL, "new_mcp_url": URL,
-               "context_id": UUID, "profile": NAME, "entry_name": NAME}
+               "context_id": UUID, "profile": NAME, "entry_name": NAME, "marketplace": NAME}
    bad = []
    for field, pattern in PATTERNS.items():
        path = os.path.join(sys.argv[1], field)
@@ -262,8 +263,9 @@ a backtick, `;`, `|`, `&` or a newline would run as a command the moment it is s
    A URL is `http` or `https`; a host of letters, digits, dots and hyphens, or a bracketed IPv6
    literal (`[::1]`); an optional port; a path of letters, digits and `._~%/-`; and an optional query
    of `key=value` pairs of the same characters — `&` only between two pairs. No quote, `$`, backtick,
-   `;`, `|`, space, newline, `@` or fragment passes. A context id is a UUID; a profile or entry name
-   is letters, digits, `-` and `_`.
+   `;`, `|`, space, newline, `@` or fragment passes. A context id is a UUID; a profile, entry or
+   marketplace name is letters, digits, `-` and `_`, and starts with a letter or digit, so it can
+   never be read as an option.
 
 4. **`malformed: <fields>` → stop.** Tell the user which value looks malformed and where it came
    from — for example *"the MCP URL in `.mcp.json` looks malformed: it holds characters an MCP URL
@@ -369,7 +371,9 @@ Report, as a block:
   per endpoint, so two OAuth entries with different URLs cannot share a sign-in.
 - **Duplicate plugin installs** — `claude plugin list` and look for two `kagura-memory` rows, e.g. a
   claude.ai-synced install next to a marketplace install; Claude Code picks one and warns. Which one
-  carries the hooks: `claude plugin details kagura-memory@<marketplace>` — the inventory line
+  carries the hooks: write the marketplace name `claude plugin list` shows to
+  `<values dir>/marketplace`, run B0's check, then
+  `claude plugin details "kagura-memory@$(cat "<values dir>/marketplace")"` — the inventory line
   `Hooks (4)  SessionStart, PreToolUse, PostToolUse, PostToolUseFailure`. Uninstall the other.
 - **CLI-written hooks** — `kagura setup claude` also adds its **own** `kagura recall` (SessionStart)
   and `kagura remember` (PostToolUse) hooks to the project's `.claude/settings.json`, and
@@ -535,7 +539,9 @@ in the Claude Code keychain, skip this and rely on A4: report
 `hook fetch not verified — no API key in this shell`.
 
 The plugin root is the directory holding `.claude-plugin/plugin.json` and
-`plugins/kagura-memory/hooks/`; for an installed plugin:
+`plugins/kagura-memory/hooks/` — the **installed** plugin's `installPath`, never a copy the current
+project ships: this command runs that script with the API key in its environment. Use a checkout
+only when the user says they are developing this plugin and names it. For an installed plugin:
 
 ```bash
 python3 -c 'import json,os
@@ -605,8 +611,8 @@ It held a fetched guardrail cache. Never point this check at the plugin's real d
 Silence is this plugin's failure mode — a misconfiguration looks exactly like a context with no
 guardrails. In order:
 
-1. `claude plugin details kagura-memory@<marketplace>` — does the install that Claude Code uses list
-   `Hooks (4)`?
+1. `claude plugin details "kagura-memory@$(cat "<values dir>/marketplace")"` (B1: the name checked
+   by B0) — does the install that Claude Code uses list `Hooks (4)`?
 2. `ls "$HOME/.claude/plugins/data/"kagura-memory-*/guardrails/` — a `<context_id>.json` means a
    session-start fetch has succeeded at least once.
 3. A4 — does the server have tool guardrails for this context at all?
@@ -635,6 +641,7 @@ Kagura Memory setup
 
 Its manual steps: the OAuth sign-in (`/mcp`), the API key to paste into `/plugin`, the shadowed entry
 to remove, the duplicate install to uninstall. In check mode, when B5b had no key, write
-`hook fetch not verified — no API key in this shell` next to the MCP row rather than asking for one.
+`hook fetch not verified — no API key in this shell` next to the MCP row rather than asking for one;
+with no context (A2), write `Hooks  verification not possible until a context exists` instead.
 
 <!-- END claude-code adapter -->

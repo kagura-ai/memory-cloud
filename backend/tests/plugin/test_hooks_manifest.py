@@ -738,7 +738,7 @@ PROJECT_PLACEHOLDERS = (
 # ``<redacted>`` B1's sed writes in place of a header value.
 QUOTABLE_PLACEHOLDERS = ("<values dir>", "<plugin root>", "<the file the user named>", "<redacted>")
 # Unquoted words chosen from a fixed set or typed by the user in their own terminal.
-BARE_PLACEHOLDERS = ("<scope>", "<host>", "<your key>", "<marketplace>")
+BARE_PLACEHOLDERS = ("<scope>", "<host>", "<your key>")
 SHELL_WORDS = (
     "claude",
     "curl",
@@ -812,8 +812,15 @@ def test_setup_skill_checks_values_before_the_first_command_that_uses_them() -> 
     assert "without printing the value, putting it into any command" in b0_text
     assert "file-writing tool" in b0_text, "values reach the files without a shell"
     # Every field a command reads has a pattern in the check.
-    used = set(re.findall(r'"\$\(cat "<values dir>/([a-z_]+)"\)"', text))
-    assert used == {"server_url", "context_id", "entry_name", "new_mcp_url", "profile"}
+    used = set(re.findall(r'\$\(cat "<values dir>/([a-z_]+)"\)', text))
+    assert used == {
+        "server_url",
+        "context_id",
+        "entry_name",
+        "new_mcp_url",
+        "profile",
+        "marketplace",
+    }
     for field in used:
         assert f'"{field}":' in check, f"no pattern for {field}"
     # The rule is stated for every harness, above Part A.
@@ -903,6 +910,13 @@ def test_setup_skill_value_check_accepts_mcp_urls(tmp_path: Path, value: str) ->
         ("profile", "default'", False),
         ("entry_name", "kagura-memory", True),
         ("entry_name", "kagura-memory;touch x", False),
+        # A leading "-" would be read as an option by claude / kagura-mcp.
+        ("entry_name", "-s", False),
+        ("entry_name", "--help", False),
+        ("profile", "--server", False),
+        ("marketplace", "kagura-memory-cloud", True),
+        ("marketplace", "--scope", False),
+        ("marketplace", "cloud$(touch x)", False),
     ],
 )
 def test_setup_skill_value_check_covers_ids_and_names(
@@ -912,6 +926,12 @@ def test_setup_skill_value_check_covers_ids_and_names(
     expected = (0, "ok") if ok else (1, f"malformed: {field}")
     assert (result.returncode, result.stdout.strip()) == expected
     assert not (tmp_path / "cwd" / "x").exists()
+
+
+def test_setup_skill_runs_only_the_installed_hook_script() -> None:
+    """B5b hands the API key to the script it runs: never one the current project ships."""
+    b5b = _setup_skill().split("#### B5b.", 1)[1].split("### B6.")[0]
+    assert "never a copy the current\nproject ships" in b5b
 
 
 def test_setup_skill_check_mode_skips_context_checks_without_a_context() -> None:
@@ -929,6 +949,11 @@ def test_setup_skill_check_mode_skips_context_checks_without_a_context() -> None
     assert "with no context yet, skip it" in a4
     run_order = text.split("## Run order", 1)[1].split("## Rules")[0]
     assert "no context: A4 and B5b are skipped" in run_order
+    b7 = text.split("### B7.", 1)[1]
+    assert (
+        "with no context (A2), write `Hooks  verification not possible until a context exists`"
+        in (b7.replace("\n", " "))
+    )
 
 
 def test_setup_skill_is_listed_where_the_other_skills_are() -> None:
