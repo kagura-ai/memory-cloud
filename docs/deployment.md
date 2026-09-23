@@ -317,8 +317,17 @@ With a version set:
   created, the signup gate never runs (so a beta invite is not spent), and the
   browser lands on `/login?error=terms_required` with its `return_to` kept.
   This also covers a direct request to `/api/v1/auth/{provider}/login` without
-  the parameter. Password login never creates accounts; accounts created with
-  the admin CLI are asked on first sign-in like any existing user.
+  the parameter. An invite sign-up (`/join/{token}`) that lacks the current
+  version is stopped earlier, at the login endpoint, and sent back to
+  `/join/{token}?error=terms_required` so the invite still works; the callback
+  only holds the invite's hash, so a refusal there (the version changed during
+  the few seconds at the provider) ends on `/login`. An identity whose e-mail
+  already belongs to another account is not a new sign-up here: it keeps the
+  `email_in_use` answer. Password login never creates accounts; accounts
+  created with the admin CLI are asked on first sign-in like any existing user.
+- The sign-in buttons on `/login`, `/join/{token}` and the invitation page stay
+  disabled until `/api/v1/system/info` has answered once; if it fails they
+  unlock without a version (the pre-#1665 behaviour).
 - **Existing users are never locked out.** A sign-in with a missing or older
   version succeeds. The web UI then sees `terms_acceptance_required: true` on
   `GET /api/v1/auth/me` and shows a blocking "updated terms" dialog; accepting

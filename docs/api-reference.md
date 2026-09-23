@@ -1276,7 +1276,7 @@ System information. Public (no authentication): the version plus non-sensitive d
 
 Issue #1665. Everything below is inert while the deployment's `TERMS_VERSION` is empty; see [Terms-of-service acceptance](deployment.md#terms-of-service-acceptance-issue-1665) for the operator view.
 
-- `GET /api/v1/auth/{google,github}/login?accepted_terms=<version>` — the version the person agreed to, bound to the OAuth state. A sign-up (an identity with no account yet) without the current version is refused: no account is created and the callback redirects to `{FRONTEND_URL}/login?error=terms_required&provider=<provider>` (plus the flow's `return_to` when it is safe). Existing users sign in regardless.
+- `GET /api/v1/auth/{google,github}/login?accepted_terms=<version>` — the version the person agreed to, bound to the OAuth state. A sign-up (an identity with no account yet) without the current version is refused: no account is created and the callback redirects to `{FRONTEND_URL}/login?error=terms_required&provider=<provider>` (plus the flow's `return_to` when it is safe). A browser flow that also carries a well-formed `invite=` (with `ENABLE_BETA_INVITES` on) is redirected by the login endpoint itself, before the provider, to `{FRONTEND_URL}/join/{token}?error=terms_required` (plus a safe `return_to`). Existing users — including an identity whose e-mail already belongs to an account, which still ends on `error=email_in_use` — are not refused.
 - `POST /api/v1/auth/login` accepts an optional `"accepted_terms": "<version>"` in the body; it is recorded on success (after `POST /api/v1/auth/mfa/verify` when MFA is on).
 - `GET /api/v1/auth/me` → `user.terms_acceptance_required`: `true` when a version is configured and the user's latest accepted version differs.
 
