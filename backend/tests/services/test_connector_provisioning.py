@@ -90,6 +90,43 @@ class TestConnectorProvisioningService:
         assert mock_db.execute.call_count == 1
 
     @pytest.mark.asyncio
+    async def test_seat_cap_keeps_connector_001_and_gains_the_quota_details(self, mock_db):
+        """#1644 S6: the code and the status are a documented contract and do
+        not move; the refusal gains the shared quota block so a client reads
+        it like every other cap."""
+        from config.plan_tiers import get_plan_tier
+
+        cap = get_plan_tier("pro").max_connectors
+        mock_db.execute.side_effect = [
+            _result(one=SimpleNamespace(plan_name="promax", effective_max_connectors=cap)),
+            *_lock_results(),
+            _result(scalar=cap),
+        ]
+
+        with patch("services.connector_provisioning.upsert_resource", new=AsyncMock()):
+            with pytest.raises(MemoryCloudException) as exc_info:
+                await ConnectorProvisioningService(mock_db).provision_connector(
+                    workspace_id=uuid4(),
+                    user_id="user-1",
+                    connector_type="slack",
+                    resource_id="slack_general",
+                )
+
+        exc = exc_info.value
+        assert exc.status_code == 403
+        assert exc.error_code == "CONNECTOR-001"
+        details = exc.details
+        assert details["gate"] == "quota"
+        assert details["quota_type"] == "connectors"
+        assert (details["current"], details["limit"]) == (cap, cap)
+        assert details["feature"] == "connectors"
+        assert details["current_plan"] == "promax"
+        assert details["required_plan"] == "promax"
+        # The legacy names an older client reads stay beside the canonical ones.
+        assert details["max_connectors"] == cap
+        assert details["active_connectors"] == cap
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("plan_name", ["free", "basic", "pro"])
     async def test_non_xl_plan_is_refused_by_the_feature_gate(self, mock_db, plan_name):
         """#1551: connectors are XL-only to CREATE. Refused before the seat

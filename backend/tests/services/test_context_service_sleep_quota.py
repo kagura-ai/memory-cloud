@@ -26,7 +26,7 @@ from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
 # ---------------------------------------------------------------------------
 
 
-def _make_workspace(*, limit: int, addon_bonus: int = 0) -> MagicMock:
+def _make_workspace(*, limit: int, addon_bonus: int = 0, plan_name: str = "pro") -> MagicMock:
     """Build a Workspace mock that mimics the model's effective-limit property.
 
     The real ``Workspace.effective_sleep_enabled_contexts_limit`` reads
@@ -37,6 +37,9 @@ def _make_workspace(*, limit: int, addon_bonus: int = 0) -> MagicMock:
     ws = MagicMock()
     ws.effective_sleep_enabled_contexts_limit = limit
     ws.addon_sleep_contexts_bonus = addon_bonus
+    # #1644: the refusal reports the workspace's own tier, so it must be a
+    # real key rather than an auto-created MagicMock attribute.
+    ws.plan_name = plan_name
     return ws
 
 
@@ -127,6 +130,49 @@ class TestAssertSleepQuotaOrRaise:
             await service._assert_sleep_quota_or_raise(workspace_id=uuid4())
 
         assert exc_info.value.details["addon_bonus"] == 2
+
+    @pytest.mark.asyncio
+    async def test_sleep_mode_refusal_derives_required_plan_numerically(self, service):
+        """#1644 S7: ``sleep_mode`` is in no tier's feature set, so the tier
+        that lifts the refusal is read off the tier rows' numeric cap instead
+        of the feature registry."""
+        from config.plan_tiers import get_plan_tier, lowest_tier_with_limit
+
+        ws = _make_workspace(limit=0, plan_name="basic")
+        _patch_workspace_and_count(service, workspace=ws, count=0)
+
+        with pytest.raises(FeatureNotAvailableError) as exc_info:
+            await service._assert_sleep_quota_or_raise(workspace_id=uuid4())
+
+        details = exc_info.value.details
+        assert details["gate"] == "plan"
+        assert details["feature"] == "sleep_mode"
+        assert details["current_plan"] == "basic"
+        expected = lowest_tier_with_limit("sleep_enabled_contexts_limit", 0)
+        assert details["required_plan"] == expected
+        assert details["required_plan_display"] == get_plan_tier(expected).display_name
+
+    @pytest.mark.asyncio
+    async def test_sleep_quota_refusal_is_a_quota_gate_with_no_upgrade(self, service):
+        """#1644 S8: over the cap on a tier that HAS the feature — the headroom
+        is an addon, not a tier, so no upgrade may be advertised."""
+        ws = _make_workspace(limit=5, addon_bonus=2, plan_name="pro")
+        _patch_workspace_and_count(service, workspace=ws, count=5)
+
+        with pytest.raises(QuotaExceededError) as exc_info:
+            await service._assert_sleep_quota_or_raise(workspace_id=uuid4())
+
+        details = exc_info.value.details
+        assert details["gate"] == "quota"
+        assert details["quota_type"] == "sleep_enabled_contexts"
+        assert details["feature"] == "sleep_mode"
+        assert (details["current"], details["limit"]) == (5, 5)
+        assert details["current_plan"] == "pro"
+        assert details["required_plan"] is None
+        assert details["required_plan_display"] is None
+        # The legacy per-site names an older client reads stay put.
+        assert details["addon_bonus"] == 2
+        assert details["requested"] == 6
 
 
 # ---------------------------------------------------------------------------
