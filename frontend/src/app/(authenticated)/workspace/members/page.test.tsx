@@ -216,7 +216,9 @@ describe("WorkspaceMembersPage invite gate", () => {
         name: /inviteMember/,
       });
       expect(invite).not.toBeDisabled();
-      expect(invite).not.toHaveTextContent("proPlanRequired");
+      // #1646: an allowed gate renders no notice, so nothing describes it.
+      expect(invite).not.toHaveAttribute("aria-describedby");
+      expect(screen.queryByText("plan.hint")).toBeNull();
       fireEvent.click(invite);
       expect(mockPush).not.toHaveBeenCalledWith("/workspace/settings/plan");
     },
@@ -231,7 +233,8 @@ describe("WorkspaceMembersPage invite gate", () => {
         name: /inviteMember/,
       });
       expect(invite).toBeDisabled();
-      expect(invite).toHaveTextContent("proPlanRequired");
+      // #1646 P9: the gate's hint sits beside the button, which points at it.
+      expect(invite).toHaveAccessibleDescription("plan.hint");
     },
   );
   it("invite stays disabled with no plan suffix while the matrix resolves (#1645)", async () => {
@@ -245,8 +248,10 @@ describe("WorkspaceMembersPage invite gate", () => {
       name: /inviteMember/,
     });
     expect(invite).toBeDisabled();
-    expect(invite).not.toHaveTextContent("proPlanRequired");
-    expect(invite).not.toHaveTextContent("ownerAdminOnly");
+    // A pending gate renders no notice at all (#1646 hard rule 1).
+    expect(invite).not.toHaveAttribute("aria-describedby");
+    expect(screen.queryByText("plan.hint")).toBeNull();
+    expect(screen.queryByText("role.admin.hint")).toBeNull();
   });
 
   it("team_invitations from the matrix, not the tier rank (#1645)", async () => {
@@ -268,7 +273,7 @@ describe("WorkspaceMembersPage invite gate", () => {
       name: /inviteMember/,
     });
     expect(invite).toBeDisabled();
-    expect(invite).toHaveTextContent("proPlanRequired");
+    expect(invite).toHaveAccessibleDescription("plan.hint");
   });
 
   it("an admin passes the admin-minimum role half, so the plan half speaks (#1645)", async () => {
@@ -282,8 +287,80 @@ describe("WorkspaceMembersPage invite gate", () => {
       name: /inviteMember/,
     });
     expect(invite).toBeDisabled();
-    expect(invite).toHaveTextContent("proPlanRequired");
-    expect(invite).not.toHaveTextContent("ownerAdminOnly");
+    expect(invite).toHaveAccessibleDescription("plan.hint");
+    expect(screen.queryByText("role.admin.hint")).toBeNull();
+  });
+});
+
+// #1646 P9/R1: the invite control renders the gate descriptor through the
+// `control` notice — badge and hint beside a disabled button that points at
+// the hint, a CTA only where the member may upgrade, and no tier name baked
+// into the button label.
+describe("WorkspaceMembersPage invite control notice (#1646 P9/R1)", () => {
+  async function findInvite() {
+    return screen.findByRole("button", { name: /inviteMember/ });
+  }
+
+  it("plan gate, owner on a Plan-page deployment: badge, hint and a CTA to the Plan page", async () => {
+    setupWithRole("owner", "free");
+    render(<WorkspaceMembersPage />);
+    const invite = await findInvite();
+
+    expect(invite).toBeDisabled();
+    // The label is the action alone — the old "(Pro Plan)" suffix is gone.
+    expect(invite).toHaveTextContent(/^inviteMember$/);
+    expect(invite).toHaveAccessibleDescription("plan.hint");
+    expect(screen.getByText("plan.badge")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "plan.action" }));
+    expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
+  });
+
+  it("plan gate, admin: the hint stays and the CTA is withheld", async () => {
+    setupWithRole("admin", "free");
+    render(<WorkspaceMembersPage />);
+    const invite = await findInvite();
+
+    expect(invite).toHaveAccessibleDescription("plan.hint");
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
+  });
+
+  it("plan gate, owner with the Plan page off: the hint stays and the CTA is withheld", async () => {
+    mockFeatures = {};
+    setupWithRole("owner", "free");
+    render(<WorkspaceMembersPage />);
+    const invite = await findInvite();
+
+    expect(invite).toHaveAccessibleDescription("plan.hint");
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
+  });
+
+  it("role gate (R1): the role hint once, no badge, no CTA", async () => {
+    // Members and viewers are redirected before the roster loads (#398), so
+    // the role state reaches the control only when the role drops under a
+    // loaded page. It must still read right: role outranks plan, and the
+    // role badge would repeat the hint word for word.
+    setupWithRole("admin", "pro");
+    const { rerender } = render(<WorkspaceMembersPage />);
+    expect(await findInvite()).not.toBeDisabled();
+
+    mockUseWorkspace.mockReturnValue({
+      currentWorkspaceId: WORKSPACE_ID,
+      currentWorkspace: {
+        id: WORKSPACE_ID,
+        plan_name: "free",
+        current_user_role: "member",
+      },
+      loading: false,
+    });
+    rerender(<WorkspaceMembersPage />);
+
+    const invite = await findInvite();
+    expect(invite).toBeDisabled();
+    expect(invite).toHaveAccessibleDescription("role.admin.hint");
+    expect(screen.getAllByText("role.admin.hint")).toHaveLength(1);
+    expect(screen.queryByText("role.admin.badge")).toBeNull();
+    expect(screen.queryByText("plan.hint")).toBeNull();
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
   });
 });
 
@@ -331,10 +408,13 @@ describe("WorkspaceMembersPage invite gate — the whole truth table (#1645)", (
         expect(invite).toBeDisabled();
       }
       // An admin passes the role half; the plan half speaks only once the
-      // matrix has answered — never a "(Pro Plan)" while it is pending.
-      expect(invite.textContent).not.toContain("ownerAdminOnly");
-      expect(invite.textContent?.includes("proPlanRequired")).toBe(
+      // matrix has answered — never a plan hint while it is pending.
+      expect(screen.queryByText("role.admin.hint")).toBeNull();
+      expect(screen.queryByText("plan.hint") !== null).toBe(
         known && plan === "free",
+      );
+      expect(invite).toHaveAccessibleDescription(
+        known && plan === "free" ? "plan.hint" : "",
       );
     },
   );

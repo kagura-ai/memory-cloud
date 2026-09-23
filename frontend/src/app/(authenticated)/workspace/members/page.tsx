@@ -17,6 +17,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
 import { ActionButton } from "@/components/common/ActionButton";
+import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { Button } from "@/components/ui/button";
 import {
   InlineSpinner,
@@ -37,7 +38,7 @@ import {
 } from "@/lib/api/workspaces";
 import { getContexts, Context } from "@/lib/api/contexts";
 import { ApiError } from "@/lib/api/base";
-import { gateFromFacts } from "@/lib/gates/featureGates";
+import { gateFromFacts, isBlocked } from "@/lib/gates/featureGates";
 import {
   listInvitations,
   createInvitation,
@@ -71,6 +72,9 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
+
+/** The invite gate's hint line; the invite button's `aria-describedby`. */
+const INVITE_GATE_HINT_ID = "members-invite-gate-hint";
 
 export default function WorkspaceMembersPage() {
   const t = useTranslations("workspace");
@@ -581,7 +585,7 @@ export default function WorkspaceMembersPage() {
     // stand here was unreachable — the only caller is the ActionButton below,
     // whose `disabled` already covers every non-allowed gate state (#1645) and
     // which forwards `disabled` to a real <button>. The explanation stays: the
-    // button keeps its suffix.
+    // gate notice beside the button (#1646).
     // Migration 042: Initialize with all shared contexts selected
     const sharedContextIds = contexts
       .filter((c) => !c.is_private)
@@ -589,6 +593,22 @@ export default function WorkspaceMembersPage() {
     setInviteContextIds(sharedContextIds);
     setShowInviteDialog(true);
   };
+
+  // #1646 P9/R1: the invite button is disabled for every state but
+  // `allowed`; when the gate refuses, the control notice says why beside it
+  // (role before plan, #1645) and the button points `aria-describedby` at the
+  // hint. A pending gate renders no notice, so the button stands alone.
+  const inviteBlocked = isBlocked(invite);
+  const inviteButton = (
+    <ActionButton
+      onClick={handleInviteClick}
+      icon={<UserPlus className="w-4 h-4" />}
+      disabled={invite.state !== "allowed"}
+      aria-describedby={inviteBlocked ? INVITE_GATE_HINT_ID : undefined}
+    >
+      {t("inviteMember")}
+    </ActionButton>
+  );
 
   if (workspaceLoading || loading) {
     return (
@@ -611,18 +631,19 @@ export default function WorkspaceMembersPage() {
             : t("memberCount", { count: members.length })
         }
         headerActions={
-          <ActionButton
-            onClick={handleInviteClick}
-            icon={<UserPlus className="w-4 h-4" />}
-            disabled={invite.state !== "allowed"}
-          >
-            {t("inviteMember")}{" "}
-            {invite.state === "role"
-              ? t("ownerAdminOnly")
-              : invite.state === "plan"
-                ? t("proPlanRequired")
-                : ""}
-          </ActionButton>
+          inviteBlocked ? (
+            // A role gate's badge and hint are the same words; show them once.
+            <FeatureGateNotice
+              variant="control"
+              gate={invite}
+              id={INVITE_GATE_HINT_ID}
+              showBadge={invite.state !== "role"}
+            >
+              {inviteButton}
+            </FeatureGateNotice>
+          ) : (
+            inviteButton
+          )
         }
       >
         <div className="overflow-x-auto">
