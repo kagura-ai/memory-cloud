@@ -6,8 +6,10 @@ from uuid import uuid4
 
 import pytest
 
+from config.constants import GATE_PLAN
+from config.plan_tiers import get_plan_tier
 from services.embedding_service import EmbeddingService
-from utils.exceptions import ConfigurationError, OpenAIError
+from utils.exceptions import ConfigurationError, FeatureNotAvailableError, OpenAIError
 
 
 def _make_mock_db() -> AsyncMock:
@@ -582,20 +584,75 @@ class TestManagedEmbeddingsPlanGate:
         patcher.start().return_value = mock_settings
         return patcher
 
-    @pytest.mark.asyncio
-    async def test_free_no_byok_denied_when_restriction_enabled(self, service):
-        """Restriction ON + free + no BYOK → ConfigurationError (BYOK/self-hosted required)."""
+    def _arm_denial(self, service, plan_name="free"):
+        """Set the gate up to refuse: restriction ON, no BYOK, unmanaged plan.
+
+        Returns the two patchers the caller must stop, plus the cap-service
+        mock so a test can assert the cap never fired.
+        """
         service.has_byok_key = AsyncMock(return_value=False)
-        ws = self._cap_ws("free")
+        ws = self._cap_ws(plan_name)
         cap_patcher, inst = self._patch_cap_service(ws)
         set_patcher = self._patch_settings(True)
+        return cap_patcher, set_patcher, inst
+
+    @pytest.mark.asyncio
+    async def test_free_no_byok_denied_when_restriction_enabled(self, service):
+        """Restriction ON + free + no BYOK → refused (BYOK/self-hosted required)."""
+        cap_patcher, set_patcher, inst = self._arm_denial(service)
         try:
-            with pytest.raises(ConfigurationError):
+            with pytest.raises(FeatureNotAvailableError):
                 await service._prepare_spend_cap_gate("00000000-0000-0000-0000-000000000001")
         finally:
             cap_patcher.stop()
             set_patcher.stop()
         inst.check_cap_or_raise.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_denial_is_a_403_plan_gate_not_a_500(self, service):
+        """#1644 S12: the refusal answers 403 ``FEAT-001``, not 500 ``CFG-001``.
+
+        A plan refusal can never succeed on retry, so answering 5xx put it in
+        the server-error class: it counted against error-rate SLOs and invited
+        clients to retry a request that is refused by policy.
+        """
+        cap_patcher, set_patcher, _ = self._arm_denial(service)
+        try:
+            with pytest.raises(FeatureNotAvailableError) as exc_info:
+                await service._prepare_spend_cap_gate("00000000-0000-0000-0000-000000000001")
+        finally:
+            cap_patcher.stop()
+            set_patcher.stop()
+
+        exc = exc_info.value
+        assert exc.status_code == 403
+        assert exc.error_code == "FEAT-001"
+        assert exc.details["gate"] == GATE_PLAN
+        assert exc.details["feature"] == "managed_embeddings"
+        assert exc.details["required_plan"] == "basic"
+        assert exc.details["required_plan_display"] == get_plan_tier("basic").display_name
+        assert exc.details["current_plan"] == "free"
+
+    @pytest.mark.asyncio
+    async def test_the_denial_still_names_all_three_remedies(self, service):
+        """The bespoke message survives the type change.
+
+        ``feature_denied_message`` would say only "upgrade"; this refusal has
+        two other ways out — a BYOK key, or a self-hosted model — and a Free
+        workspace that self-hosts needs to be told so.
+        """
+        cap_patcher, set_patcher, _ = self._arm_denial(service)
+        try:
+            with pytest.raises(FeatureNotAvailableError) as exc_info:
+                await service._prepare_spend_cap_gate("00000000-0000-0000-0000-000000000001")
+        finally:
+            cap_patcher.stop()
+            set_patcher.stop()
+
+        message = str(exc_info.value)
+        assert "BYOK" in message
+        assert "self-hosted" in message
+        assert "upgrade" in message
 
     @pytest.mark.asyncio
     async def test_free_no_byok_uncapped_when_restriction_disabled(self, service):
@@ -631,7 +688,7 @@ class TestManagedEmbeddingsPlanGate:
 
     @pytest.mark.asyncio
     async def test_embed_batch_propagates_configuration_error(self, service):
-        """#1030: a gate ConfigurationError (managed-plan denial) propagates from
+        """#1030: a gate ConfigurationError (a missing credential) propagates from
         embed_batch unchanged — NOT masked as OpenAIError (matches embed_with_usage)."""
         service._prepare_spend_cap_gate = AsyncMock(side_effect=ConfigurationError("denied"))
         with patch("services.embedding_service.get_cache", AsyncMock(return_value=None)):
@@ -641,6 +698,33 @@ class TestManagedEmbeddingsPlanGate:
                     user_id="u",
                     workspace_id="00000000-0000-0000-0000-000000000001",
                 )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method", ["embed_batch", "embed_with_usage"])
+    async def test_the_denial_is_not_wrapped_as_an_openai_error(self, service, method):
+        """#1644 S12: both embed paths must let ``FEAT-001`` through.
+
+        Each wraps everything its blanket ``except Exception`` catches into a
+        generic 500 ``OpenAIError``. Before S12 the refusal was a
+        ``ConfigurationError``, and the two pass-through clauses above that
+        blanket existed to spare it. Moving it to ``FeatureNotAvailableError``
+        without widening them would have re-buried the refusal as a 500 — the
+        exact thing S12 exists to stop — and no other test would have noticed.
+        """
+        refusal = FeatureNotAvailableError.for_feature("free", "managed_embeddings")
+        service._prepare_spend_cap_gate = AsyncMock(side_effect=refusal)
+        args = (["hello"],) if method == "embed_batch" else ("hello",)
+
+        with patch("services.embedding_service.get_cache", AsyncMock(return_value=None)):
+            with pytest.raises(FeatureNotAvailableError) as exc_info:
+                await getattr(service, method)(
+                    *args,
+                    user_id="u",
+                    workspace_id="00000000-0000-0000-0000-000000000001",
+                )
+
+        assert exc_info.value.status_code == 403
+        assert not isinstance(exc_info.value, OpenAIError)
 
 
 class TestKeySourceAndPaidByDedup:

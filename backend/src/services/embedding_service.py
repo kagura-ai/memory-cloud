@@ -22,7 +22,7 @@ from openai import AsyncOpenAI
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.plan_tiers import has_feature
+from config.plan_tiers import feature_gate_details, has_feature
 from db.redis import get_cache, set_cache
 from models.auth import ExternalAPIKey, Workspace
 from utils.datetime import utcnow
@@ -30,6 +30,7 @@ from utils.encryption import get_encryptor
 from utils.exceptions import (
     ConfigurationError,
     EmbeddingSpendCapExceeded,
+    FeatureNotAvailableError,
     NotFoundException,
     OpenAIError,
 )
@@ -296,9 +297,11 @@ class EmbeddingService:
           capping env-fallback would rate-limit the dev/demo workspaces that
           were never the threat model). Issue #1030: when
           ``embedding_platform_fallback_requires_managed_plan`` is enabled, this
-          path instead raises ``ConfigurationError`` (Free = "BYOK required or
-          self-host Ollama") — paid tiers carry ``managed_embeddings`` and never
-          reach this branch.
+          path instead raises ``FeatureNotAvailableError`` (Free = "BYOK
+          required or self-host Ollama") — paid tiers carry
+          ``managed_embeddings`` and never reach this branch. #1644 S12: that
+          refusal is a 403 ``FEAT-001`` plan gate; before S12 it was a 500
+          ``CFG-001``.
         - **No BYOK while ``disallow_env_fallback`` is set** — the Option A
           shared-context read path forbids the env fallback, so this call will
           raise ``NotFoundException`` in ``_get_client`` rather than embed on the
@@ -377,11 +380,19 @@ class EmbeddingService:
                 # the platform fallback with a clear, actionable error rather
                 # than silently embedding on the platform key. Paid tiers
                 # (basic/pro) have managed_embeddings, so they never reach here.
-                raise ConfigurationError(
+                # #1644 S12: this is a PLAN refusal, so it answers 403
+                # ``FEAT-001`` and carries the gate details block. It used to
+                # be a 500 ``CFG-001``, which put a refusal that can never
+                # succeed on retry into the server-error class — it polluted
+                # error-rate SLOs and invited clients to retry. The message is
+                # unchanged: it names the three remedies, which the generic
+                # ``feature_denied_message`` does not.
+                raise FeatureNotAvailableError(
                     "This workspace's plan does not include managed embeddings. "
                     "Add a BYOK OpenAI embedding key for the workspace, use a "
                     "self-hosted embedding model (e.g. Ollama, vLLM), or upgrade "
-                    "to a paid plan."
+                    "to a paid plan.",
+                    **feature_gate_details(cap_workspace.plan_name, "managed_embeddings"),
                 )
             # Restriction off (default): platform env-fallback stays uncapped —
             # the #708 drain-attack carve-out (Free has a $0.50/day drain guard,
@@ -612,6 +623,8 @@ class EmbeddingService:
         Raises:
             OpenAIError: If embedding generation fails
             ConfigurationError: If API key not configured
+            FeatureNotAvailableError: If the workspace plan does not carry
+                ``managed_embeddings`` and no BYOK key is configured (#1644 S12)
         """
         vector, _ = await self.embed_with_usage(
             text,
@@ -664,6 +677,8 @@ class EmbeddingService:
         Raises:
             OpenAIError: If embedding generation fails.
             ConfigurationError: If API key not configured.
+            FeatureNotAvailableError: If the workspace plan does not carry
+                ``managed_embeddings`` and no BYOK key is configured (#1644 S12).
         """
         # Issue #713: clear any source recorded by a prior embed on this
         # (reused) instance so ``resolve_paid_by`` can never read a stale tier.
@@ -746,7 +761,14 @@ class EmbeddingService:
 
             return vector, tokens_used
 
-        except ConfigurationError:
+        except (ConfigurationError, FeatureNotAvailableError):
+            # #1644 S12: ``FeatureNotAvailableError`` joins the pass-through.
+            # The managed-embeddings refusal used to be a ``ConfigurationError``
+            # and was let through here by that name; moving it to
+            # ``FEAT-001`` without widening this clause would drop it into the
+            # blanket ``except Exception`` below, which re-raises everything as
+            # a generic 500 ``OpenAIError`` — re-burying the refusal this
+            # commit exists to surface.
             raise
 
         except EmbeddingSpendCapExceeded:
@@ -879,10 +901,13 @@ class EmbeddingService:
             # Return all vectors (cached + newly generated)
             return [v for v in results if v is not None]
 
-        except ConfigurationError:
+        except (ConfigurationError, FeatureNotAvailableError):
             # Issue #1030: a missing key / managed-plan denial from the gate or
-            # _get_client must propagate unchanged (CFG-001), not be masked as a
-            # generic OpenAIError — mirrors embed_with_usage.
+            # _get_client must propagate unchanged, not be masked as a generic
+            # OpenAIError — mirrors embed_with_usage. #1644 S12: the
+            # managed-plan denial is now ``FEAT-001`` rather than ``CFG-001``,
+            # so it needs its own name here or the blanket handler below
+            # re-buries it.
             raise
 
         except EmbeddingSpendCapExceeded:

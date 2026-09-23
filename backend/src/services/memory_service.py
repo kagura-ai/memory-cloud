@@ -83,6 +83,7 @@ from utils.exceptions import (
     ConfigurationError,
     EmbeddingSpendCapExceeded,
     ExternalServiceError,
+    FeatureNotAvailableError,
     MemoryGoneError,
     NotFoundException,
     QuotaExceededError,
@@ -6166,13 +6167,22 @@ def is_configuration_failure(exc: BaseException) -> bool:
     deployment accumulated 467 memories that were saved, counted, billed
     against quota, and invisible to recall in both semantic and keyword mode.
 
-    Branching on these two types is safe because `EmbeddingService`
-    re-raises them UNWRAPPED, above its blanket `except Exception ->
-    OpenAIError`, so they arrive at the failure handler intact. Both are also
-    raised BEFORE the provider call — the spend-cap gate and the credential
-    lookup both precede `client.embeddings.create` — so re-probing one costs no
-    tokens and no HTTP request, which is what makes an unbounded retry
-    affordable here.
+    Branching on these types is safe because `EmbeddingService` re-raises them
+    UNWRAPPED, above its blanket `except Exception -> OpenAIError`, so they
+    arrive at the failure handler intact. They are also raised BEFORE the
+    provider call — the spend-cap gate and the credential lookup both precede
+    `client.embeddings.create` — so re-probing one costs no tokens and no HTTP
+    request, which is what makes an unbounded retry affordable here.
+
+    `FeatureNotAvailableError` is on the list for the same reason the other two
+    are (#1644 S12). The managed-embeddings refusal — "this plan has no managed
+    embeddings, add a BYOK key or upgrade" — used to be a `ConfigurationError`
+    and qualified by that type; S12 moved it to `FEAT-001` so it stops
+    answering 5xx. It is the same fixable workspace STATE it always was, on
+    exactly the Free-tier workspaces #1496 was written for, so it must keep
+    qualifying. Dropping it here would re-introduce #1496 for them: three
+    retries in about three minutes, then permanently invisible to recall even
+    after the key is added.
 
     KNOWN GAP: a *revoked or wrong* key surfaces as a plain `OpenAIError`,
     because the blanket wrapper erases the provider SDK's type. That is also a
@@ -6181,7 +6191,9 @@ def is_configuration_failure(exc: BaseException) -> bool:
     does not pin an upper bound on, so it is deliberately left for its own
     issue rather than guessed at here.
     """
-    return isinstance(exc, ConfigurationError | EmbeddingSpendCapExceeded)
+    return isinstance(
+        exc, ConfigurationError | EmbeddingSpendCapExceeded | FeatureNotAvailableError
+    )
 
 
 def embedding_failure_values(exc: BaseException, now: datetime) -> dict[str, Any]:

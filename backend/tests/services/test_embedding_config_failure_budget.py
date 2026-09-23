@@ -42,6 +42,7 @@ from services.memory_service import (
 from utils.exceptions import (
     ConfigurationError,
     EmbeddingSpendCapExceeded,
+    FeatureNotAvailableError,
     OpenAIError,
     ValidationError,
 )
@@ -53,14 +54,37 @@ def a_spend_cap_error() -> EmbeddingSpendCapExceeded:
     return EmbeddingSpendCapExceeded("cap reached", period="daily", cap_usd=5.0, current_usd=5.0)
 
 
+def a_managed_embeddings_refusal() -> FeatureNotAvailableError:
+    """The #1644 S12 refusal: this plan has no managed embeddings, no BYOK key."""
+    return FeatureNotAvailableError.for_feature("free", "managed_embeddings")
+
+
 class TestWhichFailuresAreConfiguration:
     @pytest.mark.parametrize(
         "factory",
-        [lambda: ConfigurationError("OpenAI API key not configured"), a_spend_cap_error],
-        ids=["no-credential", "spend-cap"],
+        [
+            lambda: ConfigurationError("OpenAI API key not configured"),
+            a_spend_cap_error,
+            a_managed_embeddings_refusal,
+        ],
+        ids=["no-credential", "spend-cap", "no-managed-embeddings"],
     )
     def test_fixable_states_are_configuration(self, factory):
         assert is_configuration_failure(factory()) is True
+
+    def test_the_managed_embeddings_refusal_stays_fixable_after_its_type_moved(self):
+        """#1644 S12 changed the refusal's TYPE; it must not change its CLASS.
+
+        "This plan has no managed embeddings — add a BYOK key or upgrade" was a
+        ``ConfigurationError`` and qualified by that name. S12 moved it to
+        ``FeatureNotAvailableError`` so it stops answering 5xx. It is the same
+        fixable workspace state, on exactly the Free-tier workspaces #1496 was
+        written for, so the budget refund has to follow it across.
+        """
+        exc = a_managed_embeddings_refusal()
+        assert exc.status_code == 403
+        assert is_configuration_failure(exc) is True
+        assert embedding_failure_values(exc, NOW)["embedding_retry_count"] == 0
 
     @pytest.mark.parametrize(
         "factory",
@@ -130,32 +154,59 @@ class TestTheExceptionTypesSurviveTheServiceLayer:
     """The load-bearing assumption, pinned where it can actually break.
 
     `is_configuration_failure` can only see these types if `embed_with_usage`
-    re-raises them above its blanket `except Exception -> OpenAIError`. Reverse
-    that ordering and the types are erased, this whole mechanism silently stops
-    working, and nothing else in the suite would notice.
+    and `embed_batch` re-raise them above their blanket
+    `except Exception -> OpenAIError`. Reverse that ordering — or add a type to
+    the predicate without adding it to the handlers — and the types are erased,
+    this whole mechanism silently stops working, and nothing else in the suite
+    would notice.
     """
 
     @staticmethod
-    def _src() -> str:
-        from services.embedding_service import EmbeddingService
+    def _named_handlers_before_the_blanket(fn) -> set[str]:
+        """Exception names caught by a handler that PRECEDES ``except Exception``.
 
-        return inspect.getsource(EmbeddingService.embed_with_usage)
+        Read off the AST rather than the source text so the assertion survives
+        a reformat and so a tuple handler — ``except (A, B)`` — counts both
+        names. #1644 S12 turned one of these into a tuple, and a substring
+        match would have started looking at a comment instead.
+        """
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        names: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            for handler in node.handlers:
+                caught = handler.type
+                if isinstance(caught, ast.Name):
+                    if caught.id == "Exception":
+                        break
+                    names.add(caught.id)
+                elif isinstance(caught, ast.Tuple):
+                    names.update(e.id for e in caught.elts if isinstance(e, ast.Name))
+        return names
 
     @pytest.mark.parametrize(
-        "handler", ["except ConfigurationError", "except EmbeddingSpendCapExceeded"]
+        "exc_name",
+        ["ConfigurationError", "EmbeddingSpendCapExceeded", "FeatureNotAvailableError"],
     )
-    def test_is_reraised_before_the_blanket_handler(self, handler):
-        src = self._src()
-        assert src.index(handler) < src.index("except Exception"), (
-            f"{handler} now falls to the blanket handler and is remapped to "
-            "OpenAIError — the type is erased before the failure handler sees "
-            "it, and configuration failures start going terminal again (#1496)"
+    @pytest.mark.parametrize("method", ["embed_with_usage", "embed_batch"])
+    def test_is_reraised_before_the_blanket_handler(self, exc_name, method):
+        from services.embedding_service import EmbeddingService
+
+        caught = self._named_handlers_before_the_blanket(getattr(EmbeddingService, method))
+        assert exc_name in caught, (
+            f"{exc_name} now falls to {method}'s blanket handler and is "
+            "remapped to OpenAIError — the type is erased before the failure "
+            "handler sees it, and configuration failures start going terminal "
+            "again (#1496). For FeatureNotAvailableError it also re-buries the "
+            "403 plan refusal #1644 S12 surfaced, as a generic 500."
         )
 
-    def test_neither_is_an_openai_error(self):
+    def test_none_of_them_is_an_openai_error(self):
         """A subclass relationship would make the ordering above moot."""
         assert not issubclass(ConfigurationError, OpenAIError)
         assert not issubclass(EmbeddingSpendCapExceeded, OpenAIError)
+        assert not issubclass(FeatureNotAvailableError, OpenAIError)
 
 
 class TestTheHandlerActuallyUsesTheDecision:
