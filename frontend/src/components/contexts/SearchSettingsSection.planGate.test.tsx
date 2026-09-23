@@ -4,10 +4,10 @@
  * WHY A SECOND FILE: SearchSettingsSection.test.tsx mocks `next-intl` with an
  * identity translator, so the message STRINGS are never formatted there. The
  * bug this pinned lived entirely in the string: the alert used to build its
- * sentence with `t("upgradeToBasic").split("Basic plan")`, which returns a
- * single chunk for every locale whose translation does not contain that
- * English literal — a Japanese reader got the whole sentence, then a hardcoded
- * English "Basic plan" link, then nothing at all from index [1].
+ * sentence by splitting the translated message on the English "Basic plan",
+ * which returns a single chunk for every locale whose translation does not
+ * contain that literal — a Japanese reader got the whole sentence, then a
+ * hardcoded English "Basic plan" link, then nothing at all from index [1].
  *
  * These tests therefore render against the REAL next-intl provider and the
  * REAL message catalogues, which is the only place that regression is visible.

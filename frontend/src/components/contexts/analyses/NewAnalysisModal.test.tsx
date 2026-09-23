@@ -82,11 +82,12 @@ describe("NewAnalysisModal — the footer keeps the allowlist silent (#1646)", (
     // Let the preview land so the whole modal is on screen.
     expect(await screen.findByText("12")).toBeInTheDocument();
 
-    expect(screen.queryByText("footerHint")).toBeNull();
+    // The footer holds its two actions and nothing else.
+    const footer = screen.getByRole("button", { name: "cancel" }).parentElement;
+    expect(
+      Array.from(footer?.children ?? []).map((el) => el.textContent),
+    ).toEqual(["cancel", "submit"]);
     expect(document.body.textContent).not.toMatch(/allowlist/i);
-    // The footer keeps its two actions.
-    expect(screen.getByRole("button", { name: "cancel" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "submit" })).toBeInTheDocument();
   });
 });
 

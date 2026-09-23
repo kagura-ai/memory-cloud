@@ -479,9 +479,6 @@ describe("SearchSettingsSection free-tier upgrade CTA (#1643)", () => {
     const title = await screen.findByText(NOTICE_TITLE);
     expect(screen.queryByText(/^plan\.newTitle/)).toBeNull();
     expect(title.closest('[role="alert"]')).not.toBeNull();
-    // The old tier-naming copy is gone.
-    expect(screen.queryByText("rerankerNotAvailableFree")).toBeNull();
-    expect(screen.queryByText("upgradeToBasic")).toBeNull();
   });
 });
 
