@@ -710,6 +710,20 @@ _LIST_CONTEXTS_FLAGS = ("include_stats", "include_summary", "include_details")
 _LIST_CONTEXTS_NAME_FILTER_MAX_LENGTH = 100
 _LIST_CONTEXTS_SUMMARY_PREVIEW_LENGTH = 300
 
+# #1658: a new account has a workspace but no context, and every memory tool
+# needs a context_id. Sent only when the caller can see no context at all
+# (``name_contains`` matching nothing is not that case). Static text, so it
+# stays right under ``?profile=core``, whose tools/list leaves out
+# create_context, without passing the URL query into the handler. Worded for a
+# member with no access as well as for an owner of an empty workspace.
+_EMPTY_CONTEXTS_HINT = (
+    "No contexts are visible to you yet. A workspace owner or admin can create "
+    'one with create_context(name="my-project"); otherwise ask one to create a '
+    "context or give you access. If create_context is not in your tool list "
+    "(for example under ?profile=core), create the context in the web UI, or "
+    "reconnect without ?profile=core."
+)
+
 
 def _validate_list_contexts_args(args: dict[str, Any]) -> list[TextContent] | None:
     """Validate list_contexts arguments (#1600).
@@ -904,6 +918,9 @@ async def handle_list_contexts(
                             "status": "success",
                             "contexts": context_list,
                             **quota_info,
+                            # #1658: counted before name_contains, so an empty filter
+                            # match on a non-empty list gets no hint.
+                            **({"hint": _EMPTY_CONTEXTS_HINT} if visible_count == 0 else {}),
                         }
                     ),
                 )

@@ -333,7 +333,9 @@ The v0.49.0 control plane builds on existing workspace RBAC: agents are registry
 | `include_summary` | Adds `summary` truncated to 300 characters; items that were cut also carry `summary_truncated: true` (a null summary stays null). |
 | `include_details` | Adds the full `summary` (up to 2,000 characters each) and `embedding_model` — the previous default item shape ([#1600](https://github.com/kagura-ai/memory-cloud/issues/1600)). Wins over `include_summary`; combine it with `name_contains`. |
 
-Envelope: `{status, contexts, count, total, limit, can_create}`. `count` is the number of contexts in the workspace (quota usage against `limit`; it can exceed what you are allowed to see and is not affected by `name_contains`), `total` is the number of contexts in this response. A non-boolean flag or an over-long `name_contains` returns a `validation_error`; an explicit `null` for any parameter is treated as omitted.
+Envelope: `{status, contexts, count, total, limit, can_create}`, plus `hint` on an empty list (below). `count` is the number of contexts in the workspace (quota usage against `limit`; it can exceed what you are allowed to see and is not affected by `name_contains`), `total` is the number of contexts in this response. A non-boolean flag or an over-long `name_contains` returns a `validation_error`; an explicit `null` for any parameter is treated as omitted.
+
+When you can see no context at all, the envelope also carries `hint`: one line saying that a workspace owner or admin can create one with `create_context(name=...)`, that a member can ask one of them for a context or for access, and that a client whose tool list has no `create_context` (for example under `?profile=core`) can create it in the web UI or reconnect without `?profile=core`. It is absent whenever at least one context is visible, including when `name_contains` matches nothing. No context is ever created automatically ([#1658](https://github.com/kagura-ai/memory-cloud/issues/1658)).
 
 ## Tags (1)
 

@@ -507,3 +507,63 @@ def test_stringified_flags_are_coerced_before_validation():
     )
 
     assert coerced == {"include_summary": True, "include_details": False}
+
+
+# ============================================================================
+# #1658: empty-account hint
+# ============================================================================
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workspace_id", [None, "ws-1"])
+async def test_no_visible_context_adds_a_hint_naming_create_context(workspace_id):
+    """A new account (or a member with no access) sees an empty list; the hint
+    says to create a context and what to do when create_context is not in the
+    client's tool list (``?profile=core`` leaves it out)."""
+    harness = _Harness([], workspace_count=0)
+
+    payload = await _payload(harness, {}, workspace_id=workspace_id)
+
+    assert payload["status"] == "success"
+    assert payload["contexts"] == []
+    hint = payload["hint"]
+    assert hint.startswith("No contexts are visible to you yet.")
+    assert "create_context(" in hint
+    # Owner/admin only (create_context refuses members), so a member is told
+    # to ask for a context or for access instead.
+    assert "owner or admin" in hint
+    assert "give you access" in hint
+    # The way forward when tools/list has no create_context.
+    assert "create_context is not in your tool list" in hint
+    assert "web UI" in hint
+    assert "without ?profile=core" in hint
+
+
+@pytest.mark.asyncio
+async def test_member_with_no_access_gets_the_hint_even_when_the_workspace_has_contexts():
+    """``count`` is workspace-wide quota usage; the hint follows what the caller
+    can see, so a member without access to any of 3 contexts still gets it."""
+    harness = _Harness([], workspace_count=3)
+
+    payload = await _payload(harness, {}, workspace_id="ws-1")
+
+    assert payload["count"] == 3
+    assert "hint" in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", [{}, {"name_contains": "no-such-context"}])
+async def test_no_hint_when_the_caller_can_see_a_context(args):
+    """Visible contexts, or a name_contains that matches none of them, keep
+    the pre-#1658 envelope — an empty filter match is not an empty account."""
+    harness = _Harness([_context("a")], workspace_count=1)
+
+    payload = await _payload(harness, args, workspace_id="ws-1")
+
+    assert "hint" not in payload
+    assert set(payload) == {"status", "contexts", "count", "total", "limit", "can_create"}
+
+
+def test_list_contexts_description_mentions_the_hint():
+    (tool,) = [t for t in get_tool_definitions() if t["name"] == "list_contexts"]
+    assert "hint" in tool["description"]

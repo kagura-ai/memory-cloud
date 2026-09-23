@@ -705,7 +705,7 @@ Returns: {status, context: {id, name, display_name, summary, usage_guide, is_pri
 
 The default carries no summaries, so it stays small on large workspaces. Narrow with name_contains; add include_summary=true to choose between a few contexts. For one context's full summary, usage guide and search config call get_context_info(context_id).
 
-Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], count, total, limit, can_create}. count = contexts in the workspace (quota usage, unaffected by name_contains); total = contexts in this response (0 on no match is still a success); limit = the plan's maximum.""",
+Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], count, total, limit, can_create, hint?}. count = contexts in the workspace (quota usage, unaffected by name_contains); total = contexts in this response (0 on no match is still a success); limit = the plan's maximum; hint = present only when you can see no context, says how to create one.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
