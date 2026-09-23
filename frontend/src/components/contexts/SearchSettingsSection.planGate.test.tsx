@@ -3,7 +3,7 @@
  *
  * WHY A SECOND FILE: SearchSettingsSection.test.tsx mocks `next-intl` with an
  * identity translator, so the message STRINGS are never formatted there. The
- * bug this pins lived entirely in the string: the alert used to build its
+ * bug this pinned lived entirely in the string: the alert used to build its
  * sentence with `t("upgradeToBasic").split("Basic plan")`, which returns a
  * single chunk for every locale whose translation does not contain that
  * English literal — a Japanese reader got the whole sentence, then a hardcoded
@@ -12,14 +12,20 @@
  * These tests therefore render against the REAL next-intl provider and the
  * REAL message catalogues, which is the only place that regression is visible.
  *
- * #1643: the <link> chunk is now a real <Link> only where the Plan page is
- * reachable (`plan_page` on AND the viewer is the workspace owner), so the
- * mocks below say so; the flag-off cases pin that the SENTENCE survives —
- * link text included, still translated — when the link does not.
+ * #1643: the upgrade action exists only where the Plan page is reachable
+ * (`plan_page` on AND the viewer is the workspace owner), so the mocks below
+ * say so; the flag-off cases pin that the explanation survives, still
+ * translated, when the action does not.
+ *
+ * #1646: the alert is now the `reranking` gate's FeatureGateNotice. Its copy is
+ * `gate.plan.*` — the tier the matrix names, in this deployment's label, never
+ * the old "Basic plan" literal — and its action is a CTA button to the Plan
+ * page. A message formatted without an argument it needs would surface here
+ * as a next-intl error, so any error fails the test.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 import { NextIntlClientProvider, type AbstractIntlMessages } from "next-intl";
 
 import en from "@/messages/en.json";
@@ -27,6 +33,11 @@ import ja from "@/messages/ja.json";
 
 vi.mock("@/hooks/use-toast", () => ({
   useToast: () => ({ toast: vi.fn() }),
+}));
+
+const mockPush = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mockPush }),
 }));
 
 const mockUseWorkspace = vi.fn();
@@ -88,36 +99,36 @@ import { SearchSettingsSection } from "./SearchSettingsSection";
 
 const PLAN_HREF = "/workspace/settings/plan";
 
-/** The whole sentence a reader must see, link text included, in one piece. */
-const EN_SENTENCE =
-  "Upgrade to Basic plan to enable AI-powered reranking for improved search quality.";
-const EN_LINK = "Basic plan";
-const JA_SENTENCE =
-  "Basicプランにアップグレードして、AI搭載リランキングで検索品質を向上させましょう。";
-const JA_LINK = "Basicプラン";
-
 /**
- * Match the INNERMOST element whose full text content is `text`.
- *
- * The default text matcher only looks at an element's own text nodes, so a
- * sentence interrupted by a <Link> never matches it — which is exactly the
- * shape this fix produces. Comparing `textContent` and rejecting any element
- * that has a child with the same text keeps the match on the <p>.
+ * The notice a free-tier reader must see, from the real catalogue: the tier
+ * that has reranking on the OSS matrix is `basic`, labelled "M".
  */
-const wholeText =
-  (text: string) => (_content: string, element: Element | null) => {
-    const normalize = (value: string | null) =>
-      (value ?? "").replace(/\s+/g, " ").trim();
-    if (!element || normalize(element.textContent) !== text) return false;
-    return !Array.from(element.children).some(
-      (child) => normalize(child.textContent) === text,
-    );
-  };
+const COPY = {
+  en: {
+    title: "The M plan includes reranking",
+    description: "Upgrade to the M plan to use reranking.",
+    action: "Upgrade to M",
+  },
+  ja: {
+    title: "リランキング は M プランで利用できます",
+    description: "リランキング を利用するには M プランにアップグレードしてください。",
+    action: "M にアップグレード",
+  },
+} as const;
+
+let intlErrors: string[] = [];
 
 function renderGate(locale: "en" | "ja") {
   const messages = (locale === "ja" ? ja : en) as AbstractIntlMessages;
   return render(
-    <NextIntlClientProvider locale={locale} messages={messages} timeZone="UTC">
+    <NextIntlClientProvider
+      locale={locale}
+      messages={messages}
+      timeZone="UTC"
+      onError={(error) => {
+        intlErrors.push(`${locale} ${error.code}: ${error.message}`);
+      }}
+    >
       <SearchSettingsSection contextId="ctx-1" />
     </NextIntlClientProvider>,
   );
@@ -125,6 +136,7 @@ function renderGate(locale: "en" | "ja") {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  intlErrors = [];
   mockPlanPage = true;
   // Free workspace → the upgrade alert is the gate that renders. The owner
   // role is what #1643 requires for the CTA half of it.
@@ -150,49 +162,53 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  // A gate message formatted without an argument it needs lands here.
+  expect(intlErrors).toEqual([]);
+});
 
 describe("SearchSettingsSection free-plan reranker gate (#1642)", () => {
-  it("renders the whole Japanese sentence with the link inside it", async () => {
+  it("renders the whole Japanese notice, naming the tier in this deployment's label", async () => {
     renderGate("ja");
 
-    // One element, one complete sentence — the tail after the link included.
-    const sentence = await screen.findByText(wholeText(JA_SENTENCE));
+    expect(await screen.findByText(COPY.ja.title)).toBeInTheDocument();
+    expect(screen.getByText(COPY.ja.description)).toBeInTheDocument();
 
-    const link = screen.getByRole("link", { name: JA_LINK });
-    expect(link).toHaveAttribute("href", PLAN_HREF);
-    expect(sentence).toContainElement(link);
+    fireEvent.click(screen.getByRole("button", { name: COPY.ja.action }));
+    expect(mockPush).toHaveBeenCalledWith(PLAN_HREF);
 
-    // The English literal the old split() keyed on must not reach a ja reader.
-    expect(document.body.textContent).not.toContain(EN_LINK);
+    // No tier literal from the old copy reaches a ja reader.
+    expect(document.body.textContent).not.toContain("Basic");
   });
 
-  it("still renders the English sentence with a linked plan name", async () => {
+  it("renders the English notice with the upgrade CTA", async () => {
     renderGate("en");
 
-    const sentence = await screen.findByText(wholeText(EN_SENTENCE));
+    expect(await screen.findByText(COPY.en.title)).toBeInTheDocument();
+    expect(screen.getByText(COPY.en.description)).toBeInTheDocument();
 
-    const link = screen.getByRole("link", { name: EN_LINK });
-    expect(link).toHaveAttribute("href", PLAN_HREF);
-    expect(sentence).toContainElement(link);
+    fireEvent.click(screen.getByRole("button", { name: COPY.en.action }));
+    expect(mockPush).toHaveBeenCalledWith(PLAN_HREF);
+    expect(document.body.textContent).not.toContain("Basic plan");
   });
 });
 
 describe("SearchSettingsSection reranker gate, CTA withheld (#1643)", () => {
-  it("ja: renders the whole sentence as plain text when plan_page is off", async () => {
+  it("ja: renders the whole notice with no CTA when plan_page is off", async () => {
     mockPlanPage = false;
     renderGate("ja");
 
-    // Same sentence, link text included and still translated — just not a link.
-    const sentence = await screen.findByText(wholeText(JA_SENTENCE));
-    expect(sentence.textContent).toContain(JA_LINK);
+    // Same explanation, still translated — just nothing to click.
+    expect(await screen.findByText(COPY.ja.title)).toBeInTheDocument();
+    expect(screen.getByText(COPY.ja.description)).toBeInTheDocument();
     expect(
-      screen.queryByRole("link", { name: JA_LINK }),
+      screen.queryByRole("button", { name: COPY.ja.action }),
     ).not.toBeInTheDocument();
     expect(document.querySelector(`a[href="${PLAN_HREF}"]`)).toBeNull();
   });
 
-  it("en: renders the whole sentence as plain text for a non-owner", async () => {
+  it("en: renders the whole notice with no CTA for a non-owner", async () => {
     mockUseWorkspace.mockReturnValue({
       currentWorkspace: {
         id: "ws-1",
@@ -204,22 +220,11 @@ describe("SearchSettingsSection reranker gate, CTA withheld (#1643)", () => {
     });
     renderGate("en");
 
-    const sentence = await screen.findByText(wholeText(EN_SENTENCE));
-    expect(sentence.textContent).toContain(EN_LINK);
+    expect(await screen.findByText(COPY.en.title)).toBeInTheDocument();
+    expect(screen.getByText(COPY.en.description)).toBeInTheDocument();
     expect(
-      screen.queryByRole("link", { name: EN_LINK }),
+      screen.queryByRole("button", { name: COPY.en.action }),
     ).not.toBeInTheDocument();
     expect(document.querySelector(`a[href="${PLAN_HREF}"]`)).toBeNull();
-  });
-});
-
-describe("searchSettings.upgradeToBasic message", () => {
-  it.each([
-    ["en", en],
-    ["ja", ja],
-  ] as const)("%s wraps the link text in a <link> tag", (_locale, messages) => {
-    expect(messages.searchSettings.upgradeToBasic).toMatch(
-      /<link>[^<]+<\/link>/,
-    );
   });
 });
