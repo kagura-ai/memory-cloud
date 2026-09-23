@@ -5,8 +5,9 @@
  * Shows plaintext token ONLY once (one-time display)
  */
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useId, useRef } from "react";
 import { useTranslations } from "next-intl";
+import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/lib/utils/clipboard";
 import {
@@ -35,6 +36,7 @@ import {
 } from "@/lib/api/resource-tokens";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { getContexts, type Context } from "@/lib/api/contexts";
+import { quotaGate } from "@/lib/gates/featureGates";
 
 import { MAX_QUOTA_PER_TOKEN } from "@/config/resource-tokens";
 
@@ -78,6 +80,26 @@ export function CreateResourceTokenDialog({
       : Math.max(0, maxQuotaCapacity - usedQuota);
   const quotaMax = Math.min(remainingQuota ?? maxPerToken, maxPerToken); // Max for this token: min(remaining, 10000)
   const quotaDefault = quotaMax; // Default: same as max
+
+  // #1646: the plan's token capacity is used up → the quota field's hint is
+  // the gate's "limit reached" control, and Create is disabled (no quota
+  // value could pass validation anyway: the max is 0). Built from the
+  // numbers this dialog judges — events/hour, where a capacity of 0 or
+  // unknown never blocks. No tier matrix is passed: the matrix's
+  // `max_resource_tokens` counts tokens, not events/hour, so it cannot name
+  // the tier that raises THIS figure — no tier guess, and so no CTA, as
+  // before.
+  const capacityGate = quotaGate({
+    key: "resource_tokens",
+    current: usedQuota,
+    limit: maxQuotaCapacity ?? 0,
+    planName: undefined,
+    tiers: null,
+    canUpgrade: false,
+    locale: undefined,
+  });
+  const capacityReached = capacityGate.state === "quota";
+  const capacityHintId = useId();
 
   const [resourceId, setResourceId] = useState(initialResourceId ?? "");
   const [description, setDescription] = useState("");
@@ -440,26 +462,30 @@ export function CreateResourceTokenDialog({
                   setQuotaInput(e.target.value);
                 }}
                 disabled={loading}
+                aria-describedby={capacityReached ? capacityHintId : undefined}
                 required
               />
-              <p className="text-xs text-slate-500">
-                {remainingQuota === null ? (
-                  t("createDialog.quotaCapUnknown", {
-                    maxPerToken: maxPerToken.toLocaleString(),
-                    unit: t("eventsPerHour"),
-                  })
-                ) : remainingQuota > 0 ? (
-                  t("createDialog.quotaRemaining", {
-                    remaining: remainingQuota.toLocaleString(),
-                    unit: t("eventsPerHour"),
-                    maxPerToken: maxPerToken.toLocaleString(),
-                  })
-                ) : (
-                  <span className="text-red-600">
-                    {t("createDialog.quotaLimitReached")}
-                  </span>
-                )}
-              </p>
+              {capacityReached ? (
+                <FeatureGateNotice
+                  variant="control"
+                  gate={capacityGate}
+                  id={capacityHintId}
+                  showBadge={false}
+                />
+              ) : (
+                <p className="text-xs text-slate-500">
+                  {remainingQuota === null
+                    ? t("createDialog.quotaCapUnknown", {
+                        maxPerToken: maxPerToken.toLocaleString(),
+                        unit: t("eventsPerHour"),
+                      })
+                    : t("createDialog.quotaRemaining", {
+                        remaining: remainingQuota.toLocaleString(),
+                        unit: t("eventsPerHour"),
+                        maxPerToken: maxPerToken.toLocaleString(),
+                      })}
+                </p>
+              )}
               <p className="text-xs text-slate-400 italic">
                 {t("createDialog.quotaNote")}
               </p>
@@ -477,7 +503,10 @@ export function CreateResourceTokenDialog({
             </Button>
             <Button
               type="submit"
-              disabled={loading || resourceContexts.length === 0}
+              disabled={
+                loading || resourceContexts.length === 0 || capacityReached
+              }
+              aria-describedby={capacityReached ? capacityHintId : undefined}
             >
               {loading ? t("createDialog.creating") : t("createDialog.create")}
             </Button>
