@@ -7,6 +7,7 @@
  */
 
 import { render, screen, within } from "@testing-library/react";
+import { useEffect, useState } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import { PlanFeatureMatrix } from "./PlanFeatureMatrix";
@@ -16,17 +17,38 @@ vi.mock("next-intl", () => ({
   useTranslations: (_ns: string) => stableTranslator,
 }));
 vi.mock("@/i18n", () => ({ useLocale: () => ({ locale: "en" }) }));
-// Keep the real PLAN_TIER_ORDER (drives TIER_KEYS); echo the tier as its label.
-vi.mock("@/lib/utils/planLabel", async () => ({
-  ...(await vi.importActual<typeof import("@/lib/utils/planLabel")>(
+// Keep the real PLAN_TIER_ORDER; echo a canonical tier as its label (#1645:
+// through planLabelForTier, which the table now calls for every column).
+vi.mock("@/lib/utils/planLabel", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/utils/planLabel")>(
     "@/lib/utils/planLabel",
-  )),
-  planLabelFromEnv: (tier: string) => tier,
-}));
+  );
+  return {
+    ...actual,
+    planLabelFromEnv: (tier: string) => tier,
+    planLabelForTier: (name: string, displayName: string | undefined) =>
+      actual.isPlanTier(name) ? name : (displayName ?? name),
+  };
+});
 
+// #1645: the table reads the shared matrix cache (usePlanTierMatrixState)
+// instead of fetching on its own. The stand-in serves that hook's contract
+// from `mockGetMatrix`, so each case still sets its payload the same way.
 const mockGetMatrix = vi.fn();
-vi.mock("@/lib/api/workspaces", () => ({
-  getPlanTierMatrix: () => mockGetMatrix(),
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanTierMatrixState: () => {
+    const [state, setState] = useState<{
+      tiers: unknown[] | null;
+      failed: boolean;
+    }>({ tiers: null, failed: false });
+    useEffect(() => {
+      Promise.resolve(mockGetMatrix()).then(
+        (tiers) => setState({ tiers, failed: false }),
+        () => setState({ tiers: null, failed: true }),
+      );
+    }, []);
+    return state;
+  },
 }));
 
 const TIERS = [
@@ -327,5 +349,60 @@ describe("PlanFeatureMatrix (#1138)", () => {
     expect(
       rowOf("planMatrix.row_memories").queryByText("planMatrix.beta"),
     ).toBeNull();
+  });
+});
+
+// #1645: against the REAL shared cache — a fresh module graph per case, the
+// API call the only stand-in.
+describe("PlanFeatureMatrix on the shared matrix cache (#1645)", () => {
+  async function loadReal(getPlanTierMatrix: () => Promise<unknown>) {
+    vi.resetModules();
+    vi.doUnmock("@/hooks/usePlanFeatures");
+    vi.doMock("@/lib/api/workspaces", () => ({ getPlanTierMatrix }));
+    const hooks = await import("@/hooks/usePlanFeatures");
+    const { PlanFeatureMatrix: Table } = await import("./PlanFeatureMatrix");
+    return { hooks, Table };
+  }
+
+  it("reads the shared cache instead of issuing its own fetch", async () => {
+    const getPlanTierMatrix = vi.fn().mockResolvedValue(TIERS);
+    const { hooks, Table } = await loadReal(getPlanTierMatrix);
+    // A gate elsewhere on the page (the Sidebar, say) reads the same matrix.
+    function Gate() {
+      return (
+        <span>{hooks.usePlanTierMatrix() ? "gate:ready" : "gate:pending"}</span>
+      );
+    }
+
+    render(
+      <>
+        <Gate />
+        <Table currentTier="basic" />
+      </>,
+    );
+    await screen.findByText("planMatrix.row_connectors");
+    expect(screen.getByText("gate:ready")).toBeInTheDocument();
+    expect(getPlanTierMatrix).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders an error banner when the retried fetch fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const getPlanTierMatrix = vi
+        .fn()
+        .mockRejectedValue(new Error("upstream said no"));
+      const { Table } = await loadReal(getPlanTierMatrix);
+
+      render(<Table currentTier="basic" />);
+      // It inherits the shared hook's three attempts (500 ms / 1000 ms back-off).
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(getPlanTierMatrix).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(0);
+      // A translated message, never the transport's raw text.
+      expect(screen.getByText("loadError")).toBeInTheDocument();
+      expect(screen.queryByText(/upstream said no/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

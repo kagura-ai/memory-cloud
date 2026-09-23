@@ -5,15 +5,16 @@
  *
  * Per-tier capability comparison (free / basic / pro / promax) for the owner
  * Plan page.
- * Source of truth = backend `GET /api/v1/workspaces/plan-tiers` (curated from
- * `config/plan_tiers.py`, env-overridable). **No price column** — pricing lives
- * on the payment side (#1141 / #1096); this surface is feature limits only.
+ * Source of truth = backend `GET /api/v1/workspaces/plans/tiers` (curated from
+ * `config/plan_tiers.py`, env-overridable), read through the shared module
+ * cache every gate uses (#1645) — one fetch, with its retry, instead of a
+ * private one. **No price column** — pricing lives on the payment side
+ * (#1141 / #1096); this surface is feature limits only.
  *
  * Numeric `0` renders as ✗ ("not available on this tier"); booleans render
  * ✓ / ✗. The caller's current tier column is highlighted.
  */
 
-import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import {
   Table,
@@ -26,12 +27,9 @@ import {
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { TableLoadingState } from "@/components/common/LoadingState";
 import { useLocale } from "@/i18n";
-import {
-  PLAN_TIER_ORDER,
-  planLabelFromEnv,
-  type PlanTier,
-} from "@/lib/utils/planLabel";
-import { getPlanTierMatrix, type PlanTierFeature } from "@/lib/api/workspaces";
+import { usePlanTierMatrixState } from "@/hooks/usePlanFeatures";
+import { planLabelForTier } from "@/lib/utils/planLabel";
+import type { PlanTierFeature } from "@/lib/api/workspaces";
 
 type RowKind = "number" | "bytes" | "bool";
 
@@ -88,8 +86,6 @@ const ROWS: MatrixRow[] = [
   { key: "publicFeatures", field: "public_contexts", kind: "bool" },
 ];
 
-const TIER_KEYS = new Set<string>(PLAN_TIER_ORDER);
-
 // GiB/MiB storage, matching the admin plan-tiers convention. The shared
 // `formatBytes` util renders MB/GB, which diverges from the GiB convention
 // used for plan quotas (see admin/plans/_addon-types.ts).
@@ -111,29 +107,14 @@ export function PlanFeatureMatrix({
   currentTier?: string | null;
 }) {
   const t = useTranslations("workspace");
+  const tTiers = useTranslations("admin.plans.tiersTable");
   const { locale } = useLocale();
-  const [tiers, setTiers] = useState<PlanTierFeature[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // #1645: the shared matrix cache. Unlike the gates, which read a failure
+  // as pending, this surface owns an error UI, so it reads the failure too.
+  const { tiers, failed } = usePlanTierMatrixState();
 
-  useEffect(() => {
-    let alive = true;
-    getPlanTierMatrix()
-      .then((data) => {
-        if (alive) setTiers(data);
-      })
-      .catch((e) => {
-        if (alive) setError(e instanceof Error ? e.message : String(e));
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  if (error) return <ErrorBanner error={error} />;
+  if (failed) return <ErrorBanner error={tTiers("loadError")} />;
   if (!tiers) return <TableLoadingState rows={6} />;
-
-  const tierLabel = (name: string, display: string) =>
-    TIER_KEYS.has(name) ? planLabelFromEnv(name as PlanTier, locale) : display;
 
   const no = (
     <span
@@ -178,7 +159,7 @@ export function PlanFeatureMatrix({
                   tier.name === currentTier ? "font-bold text-primary" : ""
                 }`}
               >
-                {tierLabel(tier.name, tier.display_name)}
+                {planLabelForTier(tier.name, tier.display_name, locale)}
                 {tier.name === currentTier && (
                   <span className="ml-1 text-xs font-normal text-gray-500">
                     ({t("planMatrix.current")})
