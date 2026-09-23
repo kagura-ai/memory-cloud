@@ -9,7 +9,13 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import {
+  render,
+  screen,
+  waitFor,
+  cleanup,
+  fireEvent,
+} from "@testing-library/react";
 
 import ContextsPage from "./page";
 
@@ -499,5 +505,147 @@ describe("ContextsPage current marker (#561)", () => {
     // but exactly one Current badge should be inside an aria-current row.
     const badge = currentRows[0].querySelector('[aria-label="current"]');
     expect(badge).not.toBeNull();
+  });
+});
+
+// ---------- Issue #1643: quota upsells stop at the Plan page's own gate -----
+
+/**
+ * The banner and the dialog both offered a route to `/workspace/settings/plan`
+ * unconditionally. That page is behind the `plan_page` deployment flag and is
+ * owner-only, so on a default self-hosted deployment both dead-ended.
+ *
+ * `mockFeatures` here defaults to `{ byok: true }` — `plan_page` absent, which
+ * is the OSS truth — so a case that wants the CTA opts in explicitly.
+ */
+describe("ContextsPage quota upsells behind the plan_page gate (#1643)", () => {
+  /** At the cap with nothing visible: banner shown AND the empty state renders. */
+  function setupAtCap(role: Role = "owner") {
+    mockUseAuth.mockReturnValue({
+      user: { current_workspace_id: WORKSPACE_ID },
+      refetchUser: vi.fn(),
+    });
+    mockUseWorkspace.mockReturnValue({
+      currentWorkspace: {
+        id: WORKSPACE_ID,
+        plan_name: "pro",
+        current_user_role: role,
+        max_contexts: 20,
+        context_count: 20,
+      },
+    });
+    mockGetContexts.mockResolvedValue({ contexts: [] });
+    mockCheckOpenAIKeyStatus.mockResolvedValue({
+      has_key: true,
+      embedding_available: true,
+    });
+    mockGetEmbeddingModels.mockResolvedValue({
+      models: [],
+      default_model: "small",
+    });
+  }
+
+  /** The empty-state Create button routes to the quota dialog at the cap. */
+  async function openQuotaDialog() {
+    const create = await screen.findByRole("button", { name: /^create$/i });
+    fireEvent.click(create);
+    // The dialog's own explanation — it renders in every case below.
+    expect(await screen.findByText("quotaDialogTitle")).toBeInTheDocument();
+    expect(screen.getByText("quotaDialogDescription")).toBeInTheDocument();
+  }
+
+  it("quota banner: explanation renders, plan link withheld when plan_page is off", async () => {
+    setupAtCap();
+    render(<ContextsPage />);
+
+    // The banner div mixes an emoji, the sentence and (when shown) the link,
+    // so match the substring — this is the shape create-gate.test.tsx uses.
+    const banner = await screen.findByText(/quotaReachedDetail/);
+    expect(screen.queryByText("quotaReachedPlansLink")).toBeNull();
+    // The separating space moved inside the guard, so nothing dangles.
+    const text = banner.textContent ?? "";
+    expect(text).toBe(text.trimEnd());
+  });
+
+  it("quota banner: owner on a plan_page deployment gets the View plans link", async () => {
+    mockFeatures = { byok: true, plan_page: true };
+    setupAtCap();
+    render(<ContextsPage />);
+
+    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "quotaReachedPlansLink" }),
+    ).toHaveAttribute("href", "/workspace/settings/plan");
+  });
+
+  it("quota banner: a non-owner gets no plan link even with plan_page on", async () => {
+    mockFeatures = { byok: true, plan_page: true };
+    setupAtCap("admin");
+    render(<ContextsPage />);
+
+    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
+    expect(screen.queryByText("quotaReachedPlansLink")).toBeNull();
+  });
+
+  it("quota banner: no plan link while /system/info is unresolved", async () => {
+    mockFeatures = null;
+    setupAtCap();
+    render(<ContextsPage />);
+
+    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
+    expect(screen.queryByText("quotaReachedPlansLink")).toBeNull();
+  });
+
+  it("quota dialog: footer shows only a Close control when plan_page is off", async () => {
+    setupAtCap();
+    render(<ContextsPage />);
+    await openQuotaDialog();
+
+    // The prose that IS the CTA goes with the button — leaving it would tell
+    // the reader to visit a page this deployment does not have.
+    expect(screen.queryByText("quotaDialogUpgradeHeading")).toBeNull();
+    expect(screen.queryByText("quotaDialogUpgradeBody")).toBeNull();
+    expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
+    // A footer whose only control is "Cancel" reads wrong once there is
+    // nothing to cancel.
+    expect(screen.getByRole("button", { name: "close" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "cancel" })).toBeNull();
+  });
+
+  it("quota dialog: owner on a plan_page deployment gets View plans", async () => {
+    mockFeatures = { byok: true, plan_page: true };
+    setupAtCap();
+    render(<ContextsPage />);
+    await openQuotaDialog();
+
+    expect(screen.getByText("quotaDialogUpgradeHeading")).toBeInTheDocument();
+    expect(screen.getByText("quotaDialogUpgradeBody")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "viewPlans" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "cancel" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "close" })).toBeNull();
+  });
+
+  it("quota dialog: a non-owner gets the explanation and a Close control only", async () => {
+    mockFeatures = { byok: true, plan_page: true };
+    setupAtCap("admin");
+    render(<ContextsPage />);
+    await openQuotaDialog();
+
+    expect(screen.queryByText("quotaDialogUpgradeHeading")).toBeNull();
+    expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
+    expect(screen.getByRole("button", { name: "close" })).toBeInTheDocument();
+  });
+
+  it("quota dialog: no CTA while /system/info is unresolved", async () => {
+    mockFeatures = null;
+    setupAtCap();
+    render(<ContextsPage />);
+    await openQuotaDialog();
+
+    expect(screen.queryByText("quotaDialogUpgradeHeading")).toBeNull();
+    expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
+    expect(screen.getByRole("button", { name: "close" })).toBeInTheDocument();
   });
 });

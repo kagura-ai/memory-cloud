@@ -64,6 +64,14 @@ vi.mock("@/hooks/use-toast", () => ({
   useToast: () => ({ toast: vi.fn() }),
 }));
 
+// #1643: useCanUpgrade reads /system/info. Without this mock the real hook
+// fires a jsdom fetch, retries three times and leaves a module-level cache
+// that leaks between cases in this file. `null` = still resolving.
+let mockFeatures: Record<string, boolean> | null = { plan_page: true };
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => mockFeatures,
+}));
+
 // ---------- Helpers ----------------------------------------------------------
 
 type Role = "owner" | "admin" | "member" | "viewer";
@@ -100,6 +108,7 @@ beforeEach(() => {
   mockGetMemberQuota.mockReset();
   mockGetContexts.mockReset();
   mockPush.mockReset();
+  mockFeatures = { plan_page: true };
 });
 
 afterEach(() => {
@@ -194,4 +203,86 @@ describe("WorkspaceMembersPage invite gate", () => {
       expect(invite).toHaveTextContent("proPlanRequired");
     },
   );
+});
+
+/**
+ * #1643 — the seat-limit surfaces inside the invite dialog.
+ *
+ * Both used to render a <Link> wrapping a <button> (an <a> containing a
+ * <button>, invalid interactive nesting). They are now a single <Button
+ * asChild><Link>, and they only render where the Plan page is reachable; the
+ * seat-limit copy stays either way.
+ */
+describe("WorkspaceMembersPage seat-limit upgrade links (#1643)", () => {
+  const AT_LIMIT_QUOTA = {
+    current_members: 5,
+    pending_invitations: 0,
+    total_used: 5,
+    limit: 5,
+    available: 0,
+    percentage: 100,
+    can_invite: false,
+  };
+
+  async function openInviteDialogAtLimit(role: Role = "owner") {
+    setupWithRole(role, "pro");
+    mockGetMemberQuota.mockResolvedValue(AT_LIMIT_QUOTA);
+
+    render(<WorkspaceMembersPage />);
+
+    const invite = await screen.findByRole("button", { name: /inviteMember/ });
+    fireEvent.click(invite);
+    // The seat-limit copy is the explanation — it renders in every case here.
+    await waitFor(() =>
+      expect(screen.getAllByText("seatLimitReached").length).toBeGreaterThan(0),
+    );
+  }
+
+  it("seat limit reached, plan_page off: the limit copy renders with no upgrade link", async () => {
+    mockFeatures = {};
+    await openInviteDialogAtLimit();
+
+    expect(screen.getByText("seatLimitReachedDesc")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "upgradeToAddMembers" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "upgradeToAddMembers" }),
+    ).toBeNull();
+  });
+
+  it("seat limit reached, admin: the limit copy renders with no upgrade link", async () => {
+    await openInviteDialogAtLimit("admin");
+
+    expect(screen.getByText("seatLimitReachedDesc")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "upgradeToAddMembers" }),
+    ).toBeNull();
+  });
+
+  it("seat limit reached, /system/info pending: no upgrade link", async () => {
+    mockFeatures = null;
+    await openInviteDialogAtLimit();
+
+    expect(
+      screen.queryByRole("link", { name: "upgradeToAddMembers" }),
+    ).toBeNull();
+  });
+
+  it("seat limit reached, owner on a plan_page deployment: anchors, not nested buttons", async () => {
+    await openInviteDialogAtLimit();
+
+    // One for the seat badge, one for the at-limit panel — both plain anchors.
+    const links = screen.getAllByRole("link", { name: "upgradeToAddMembers" });
+    expect(links).toHaveLength(2);
+    for (const link of links) {
+      expect(link).toHaveAttribute("href", "/workspace/settings/plan");
+      // The invalid <a><button> nesting is gone: no button inside the anchor,
+      // and no standalone button carrying the same label.
+      expect(link.querySelector("button")).toBeNull();
+    }
+    expect(
+      screen.queryByRole("button", { name: "upgradeToAddMembers" }),
+    ).toBeNull();
+  });
 });
