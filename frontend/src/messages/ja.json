@@ -4315,95 +4315,118 @@
     "features": {
       "resources": {
         "label": "リソース",
-        "plural": "リソース"
+        "plural": "リソース",
+        "singular": "リソース"
       },
       "connectors": {
         "label": "コネクタ",
-        "plural": "コネクタ"
+        "plural": "コネクタ",
+        "singular": "コネクタ"
       },
       "public_contexts": {
         "label": "公開コンテキスト",
-        "plural": "公開コンテキスト"
+        "plural": "公開コンテキスト",
+        "singular": "公開コンテキスト"
       },
       "shared_contexts": {
         "label": "共有コンテキスト",
-        "plural": "共有コンテキスト"
+        "plural": "共有コンテキスト",
+        "singular": "共有コンテキスト"
       },
       "team_invitations": {
         "label": "チーム招待",
-        "plural": "チーム招待"
+        "plural": "チーム招待",
+        "singular": "チーム招待"
       },
       "reranking": {
         "label": "検索リランキング",
-        "plural": "検索リランキング"
+        "plural": "検索リランキング",
+        "singular": "検索リランキング"
       },
       "sleep_reports": {
         "label": "Sleep Maintenance",
-        "plural": "Sleep Maintenance"
+        "plural": "Sleep Maintenance",
+        "singular": "Sleep Maintenance"
       },
       "memory_analysis": {
         "label": "メモリー分析",
-        "plural": "メモリー分析"
+        "plural": "メモリー分析",
+        "singular": "メモリー分析"
       },
       "managed_llm": {
         "label": "マネージド LLM レーン",
-        "plural": "マネージド LLM レーン"
+        "plural": "マネージド LLM レーン",
+        "singular": "マネージド LLM レーン"
       },
       "managed_embeddings": {
         "label": "マネージド埋め込み",
-        "plural": "マネージド埋め込み"
+        "plural": "マネージド埋め込み",
+        "singular": "マネージド埋め込み"
       },
       "secret_store": {
         "label": "シークレットストア",
-        "plural": "シークレットストア"
+        "plural": "シークレットストア",
+        "singular": "シークレットストア"
       },
       "plan_page": {
         "label": "プランページ",
-        "plural": "プランページ"
+        "plural": "プランページ",
+        "singular": "プランページ"
       },
       "byok": {
         "label": "外部 API キー",
-        "plural": "外部 API キー"
+        "plural": "外部 API キー",
+        "singular": "外部 API キー"
       },
       "cost_dashboard": {
         "label": "コストダッシュボード",
-        "plural": "コストダッシュボード"
+        "plural": "コストダッシュボード",
+        "singular": "コストダッシュボード"
       },
       "contexts": {
         "label": "コンテキスト",
-        "plural": "コンテキスト"
+        "plural": "コンテキスト",
+        "singular": "コンテキスト"
       },
       "members": {
         "label": "チームメンバー",
-        "plural": "チームメンバー"
+        "plural": "チームメンバー",
+        "singular": "チームメンバー"
       },
       "workspaces": {
         "label": "ワークスペース",
-        "plural": "ワークスペース"
+        "plural": "ワークスペース",
+        "singular": "ワークスペース"
       },
       "resource_tokens": {
         "label": "Resource Token",
-        "plural": "Resource Token"
+        "plural": "Resource Token",
+        "singular": "Resource Token"
       },
       "storage": {
         "label": "ストレージ",
-        "plural": "ストレージ"
+        "plural": "ストレージ",
+        "singular": "ストレージ"
       },
       "memories": {
         "label": "メモリー",
-        "plural": "メモリー"
+        "plural": "メモリー",
+        "singular": "メモリー"
       },
       "agents": {
         "label": "エージェント",
-        "plural": "エージェント"
+        "plural": "エージェント",
+        "singular": "エージェント"
       },
       "embedding_spend": {
         "label": "埋め込みコスト",
-        "plural": "埋め込みコスト"
+        "plural": "埋め込みコスト",
+        "singular": "埋め込みコスト"
       },
       "api_calls": {
         "label": "API 呼び出し",
-        "plural": "API 呼び出し"
+        "plural": "API 呼び出し",
+        "singular": "API 呼び出し"
       }
     }
   }

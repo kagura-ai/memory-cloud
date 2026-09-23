@@ -282,9 +282,9 @@ const BRANCHES: readonly Branch[] = [
     }),
     expected: {
       en: {
-        title: "Contexts limit reached",
+        title: "You've reached the context limit",
         description:
-          "Your S plan includes 1 contexts in this workspace, and 1 are in use. The M plan raises this limit.",
+          "Your S plan's context limit in this workspace is 1, and 1 is in use. The M plan raises this limit.",
         action: "View plans",
         badge: "Limit reached",
         hint: "Limit reached",
@@ -314,9 +314,9 @@ const BRANCHES: readonly Branch[] = [
     }),
     expected: {
       en: {
-        title: "Team members limit reached",
+        title: "You've reached the team member limit",
         description:
-          "Your S plan includes 3 team members in this workspace, and 3 are in use.",
+          "Your S plan's team member limit in this workspace is 3, and 3 are in use.",
         action: null,
         badge: "Limit reached",
         hint: "Limit reached",
@@ -347,9 +347,9 @@ const BRANCHES: readonly Branch[] = [
     }),
     expected: {
       en: {
-        title: "Storage limit reached",
+        title: "You've reached the storage limit",
         description:
-          "Your S plan includes 10 storage in this workspace, and 10 are in use.",
+          "Your S plan's storage limit in this workspace is 10, and 10 are in use.",
         action: "View plans",
         badge: "Limit reached",
         hint: "Limit reached",
@@ -374,8 +374,8 @@ const BRANCHES: readonly Branch[] = [
     }),
     expected: {
       en: {
-        title: "Agents limit reached",
-        description: "This workspace includes 5 agents, and 5 are in use.",
+        title: "You've reached the agent limit",
+        description: "This workspace's agent limit is 5, and 5 are in use.",
         action: null,
         badge: "Limit reached",
         hint: "Limit reached",
@@ -400,7 +400,7 @@ const BRANCHES: readonly Branch[] = [
     }),
     expected: {
       en: {
-        title: "Embedding spend limit reached",
+        title: "You've reached the embedding spend limit",
         description: "This workspace has reached its embedding spend limit.",
         action: null,
         badge: "Limit reached",
@@ -733,6 +733,54 @@ describe("FeatureGateNotice hard rules", () => {
         expect(values.limit).toBe(hasNumbers ? gate.limit : undefined);
       }
     }
+  });
+});
+
+// ── English count agreement ─────────────────────────────────────────────────
+//
+// `{feature}` arrives as one pre-chosen string, so ICU cannot inflect it: a
+// noun next to `{limit}` would read "includes 1 contexts". The quota copy
+// keeps the noun away from the numbers ("context limit … is 1") and agrees
+// the verb through `{current, plural, …}`.
+
+describe("quota copy agrees with its counts (en)", () => {
+  const withPlan = (current: number, limit: number) =>
+    gateOf({
+      state: "quota",
+      feature: "contexts",
+      currentPlan: "free",
+      currentPlanLabel: "S",
+      current,
+      limit,
+    });
+  const noPlan = (current: number, limit: number) =>
+    gateOf({ state: "quota", feature: "contexts", current, limit });
+
+  it.each([
+    [
+      "description, 1 of 1",
+      withPlan(1, 1),
+      "Your S plan's context limit in this workspace is 1, and 1 is in use.",
+    ],
+    [
+      "description, 2 of 5",
+      withPlan(2, 5),
+      "Your S plan's context limit in this workspace is 5, and 2 are in use.",
+    ],
+    [
+      "descriptionNoPlan, 1 of 1",
+      noPlan(1, 1),
+      "This workspace's context limit is 1, and 1 is in use.",
+    ],
+    [
+      "descriptionNoPlan, 2 of 5",
+      noPlan(2, 5),
+      "This workspace's context limit is 5, and 2 are in use.",
+    ],
+  ])("%s", (_name, gate, expected) => {
+    const text = featureGateText(gate, gateT("en"));
+    expect(text?.title).toBe("You've reached the context limit");
+    expect(text?.description).toBe(expected);
   });
 });
 

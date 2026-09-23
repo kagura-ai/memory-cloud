@@ -124,13 +124,19 @@ export type GateMessageKey =
 /**
  * Which `gate.features.<key>` sub-key a message interpolates as `{feature}`:
  * `label` is Title-cased and starts a sentence ("Resources is available…"),
- * `plural` is lowercase mid-sentence ("New resources require…"). `null`
- * means the message takes no `{feature}` at all. A property of the MESSAGE,
- * declared once here — never chosen at a call site. The test keeps it in step
- * with the catalogues.
+ * `plural` is lowercase mid-sentence ("New resources require…"), `singular`
+ * is lowercase and modifies a noun ("the context limit"). `null` means the
+ * message takes no `{feature}` at all. A property of the MESSAGE, declared
+ * once here — never chosen at a call site. The test keeps it in step with
+ * the catalogues.
+ *
+ * The quota messages take `singular`: `{feature}` is one pre-chosen string
+ * ICU cannot inflect, so a noun beside `{limit}` would read "includes 1
+ * contexts". They keep the noun off the numbers ("context limit … is 1") and
+ * agree the verb through `{current, plural, …}` instead.
  */
 export const GATE_NOUN_FORM: Readonly<
-  Record<GateMessageKey, "label" | "plural" | null>
+  Record<GateMessageKey, "label" | "plural" | "singular" | null>
 > = {
   "plan.title": "label",
   "plan.description": "plural",
@@ -142,10 +148,10 @@ export const GATE_NOUN_FORM: Readonly<
   "plan.badge": null,
   "plan.hint": null,
   "plan.hintNoTier": null,
-  "quota.title": "label",
-  "quota.description": "plural",
-  "quota.descriptionNoPlan": "plural",
-  "quota.descriptionNoNumbers": "plural",
+  "quota.title": "singular",
+  "quota.description": "singular",
+  "quota.descriptionNoPlan": "singular",
+  "quota.descriptionNoNumbers": "singular",
   "quota.upsell": null,
   "quota.action": null,
   "quota.badge": null,

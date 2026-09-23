@@ -196,6 +196,53 @@ const SUPERSEDED_GATE_KEYS: readonly string[] = [
 
 const ICU_ARGS = ["feature", "plan", "currentPlan", "current", "limit"];
 
+/**
+ * The argument names an ICU message interpolates. A regex over `{name` would
+ * read the option bodies of `{current, plural, one {is} other {are}}` as
+ * arguments `is` and `are`, so this walks the message: an argument's name
+ * is recorded, and the bodies of a `plural` / `select` / `selectordinal`
+ * are walked as messages in turn. (No gate.* message uses ICU quoting.)
+ */
+function icuArgs(message: string): string[] {
+  const names: string[] = [];
+  // Walks a message from `i` to its closing `}` (or the end); returns the
+  // index after it.
+  const walk = (i: number): number => {
+    while (i < message.length) {
+      const c = message[i];
+      if (c === "}") return i + 1;
+      if (c !== "{") {
+        i += 1;
+        continue;
+      }
+      const head = /^\{\s*([^\s,{}]+)\s*(?:,\s*(\w+)\s*)?/.exec(
+        message.slice(i),
+      );
+      if (!head) throw new Error(`unparseable argument in: ${message}`);
+      names.push(head[1]);
+      i += head[0].length;
+      if (head[2] === undefined || message[i] === "}") {
+        i += 1;
+        continue;
+      }
+      const branching = ["plural", "select", "selectordinal"].includes(head[2]);
+      i += 1; // the "," after the type
+      while (i < message.length && message[i] !== "}") {
+        if (message[i] === "{") {
+          if (branching) i = walk(i + 1);
+          else throw new Error(`nested style in: ${message}`);
+        } else {
+          i += 1;
+        }
+      }
+      i += 1;
+    }
+    return i;
+  };
+  walk(0);
+  return names;
+}
+
 /** The refusal subtrees (`role` has no direct leaves). */
 const REFUSAL_SUBTREES = [
   "plan",
@@ -280,11 +327,7 @@ describe.each(CATALOGUES)("%s gate.* contract", (locale, messages) => {
 
   // 4
   it("interpolates only {feature}, {plan}, {currentPlan}, {current} and {limit}", () => {
-    const used = new Set(
-      gateLeaves.flatMap(([, message]) =>
-        [...message.matchAll(/\{\s*([A-Za-z_]\w*)/g)].map((m) => m[1]),
-      ),
-    );
+    const used = new Set(gateLeaves.flatMap(([, message]) => icuArgs(message)));
     expect([...used].filter((name) => !ICU_ARGS.includes(name))).toEqual([]);
 
     // And by the real ICU formatter: with the five supplied, nothing is
@@ -301,6 +344,12 @@ describe.each(CATALOGUES)("%s gate.* contract", (locale, messages) => {
         }),
       ).not.toThrow();
     }
+  });
+
+  it("reads ICU plural option bodies as text, not as arguments", () => {
+    expect(
+      icuArgs("{current} {current, plural, one {is} other {are}} of {limit}"),
+    ).toEqual(["current", "current", "limit"]);
   });
 
   // 5
@@ -353,12 +402,17 @@ describe.each(CATALOGUES)("%s gate.* contract", (locale, messages) => {
   );
 
   // 8
-  it("has a label and a plural noun for every GateKey, and no other", () => {
+  it("has a label, a plural and a singular noun for every GateKey, and no other", () => {
     expect(Object.keys(messages.gate.features).sort()).toEqual(
       [...GATE_KEYS].sort(),
     );
     for (const key of GATE_KEYS) {
-      for (const form of ["label", "plural"]) {
+      expect(Object.keys(messages.gate.features[key]).sort(), key).toEqual([
+        "label",
+        "plural",
+        "singular",
+      ]);
+      for (const form of ["label", "plural", "singular"]) {
         const noun = messageAt(messages.gate.features, `${key}.${form}`);
         expect(typeof noun, `gate.features.${key}.${form}`).toBe("string");
         expect((noun as string).trim()).not.toBe("");
