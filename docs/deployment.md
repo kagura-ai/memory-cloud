@@ -257,6 +257,42 @@ The 7-day lifetime is fixed in code. Notes for operators:
   whose `user_metadata` cross-reference the two invites (`reissued_from` /
   `reissued_to`, ids only — never the label).
 
+### Invites and device or MCP sign-in (Issue #1655)
+
+An invite only counts when it rides the OAuth login that `/join/{token}`
+builds. Two other sign-in paths start at `/login` instead: the device flow
+(`/device` sends a signed-out visitor to `/login?return_to=/device?user_code=…`)
+and an MCP client's OAuth sign-in (`/api/v1/oauth/authorize` sends it to
+`/login?return_to=<the authorize URL>`). Two ways carry an invite through them:
+
+- **`/join/{token}?return_to=<path>`** — the invite link accepts an optional
+  `return_to`. After sign-up the new user lands there instead of the
+  dashboard. A CLI can print one link that signs up with the invite and resumes
+  the device login, for example
+  `https://<host>/join/<token>?return_to=%2Fdevice%3Fuser_code%3D<code>`.
+  `return_to` is only a destination, checked the same way as on `/login`: a
+  single-`/` path or a same-origin `http(s)` URL, with no backslash or control
+  character, checked again by the API before the post-login redirect. A value
+  that fails the check is dropped silently and the link still works as a plain
+  invite (dashboard). An already signed-in visitor gets a link to the
+  `return_to` path; the "back to login" link on the expired, invalid, disabled
+  and error screens keeps it too.
+- **"I have an invite link" on `/login`** — shown when `features.beta_invites`
+  is on. The person pastes the link (or the bare token); the page sends them to
+  `/join/{token}` with the page's own `return_to` beside it, so an MCP sign-in
+  continues after sign-up. A value that is not a `/join/{token}` link or a
+  well-formed token (`[A-Za-z0-9_-]`, 20–128 characters) shows an inline error
+  and goes nowhere. The pasted token is never logged or stored by the page.
+
+`/join/{token}` asks for the same terms-of-service acceptance as `/login`: the
+provider buttons stay disabled until the box is ticked. As on `/login`, this is
+a client-side check; acceptance is not yet recorded on the server.
+
+The MCP path resumes only when the API and the frontend share an origin. On a
+split-origin deployment `/login` already drops the API-origin `return_to`, with
+or without an invite. The device flow is not affected: its `return_to` is a
+frontend path.
+
 ## Hosted-mode UI gates (Issue #1571)
 
 The web UI reads `GET /api/v1/system/info` → `features.*` at runtime, so a

@@ -42,6 +42,13 @@ vi.mock("next-intl", () => ({
     vars && Object.keys(vars).length > 0 ? `${k}:${JSON.stringify(vars)}` : k,
 }));
 
+// #1655: /join reads an optional return_to. One stable instance, cleared in
+// beforeEach, like the /login tests.
+const mockSearchParams = new URLSearchParams();
+vi.mock("next/navigation", () => ({
+  useSearchParams: () => mockSearchParams,
+}));
+
 vi.mock("@/components/LanguageSelector", () => ({
   LanguageSelector: () => null,
 }));
@@ -74,6 +81,11 @@ const consoleSpies = (["log", "info", "warn", "error", "debug"] as const).map(
   (level) => vi.spyOn(console, level),
 );
 
+/** Tick the terms box — both provider buttons stay disabled until then (#1655). */
+async function agreeToTerms() {
+  fireEvent.click(await screen.findByRole("checkbox", { name: /agreeToTerms/ }));
+}
+
 function renderPage() {
   // params type is Promise<{token}>; the react.use mock above unwraps plain values.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -86,6 +98,9 @@ beforeEach(() => {
   window.sessionStorage.clear();
   hrefAssignments = [];
   mockFeatures = { beta_invites: true };
+  for (const key of [...mockSearchParams.keys()]) {
+    mockSearchParams.delete(key);
+  }
 
   Object.defineProperty(window, "location", {
     configurable: true,
@@ -179,6 +194,7 @@ describe("/join/[token] — valid", () => {
     async (provider, label) => {
       vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
       renderPage();
+      await agreeToTerms();
       fireEvent.click(await screen.findByRole("button", { name: label }));
 
       await waitFor(() => expect(hrefAssignments).toHaveLength(1));
@@ -323,5 +339,212 @@ describe("/join/[token] — already signed in", () => {
     expect(mockApiClientGet).toHaveBeenCalledWith("/api/v1/auth/me");
     expect(mockPreview).not.toHaveBeenCalled();
     expect(screen.queryByRole("button")).toBeNull();
+  });
+});
+
+// ---------- #1655: return_to and terms --------------------------------------
+
+const PROVIDERS = [
+  ["google", "join.valid.continueWithGoogle"],
+  ["github", "join.valid.continueWithGitHub"],
+] as const;
+
+function loginUrl(provider: string, returnTo: string) {
+  return (
+    `https://api.example.com/api/v1/auth/${provider}/login` +
+    `?return_to=${encodeURIComponent(returnTo)}` +
+    `&invite=${encodeURIComponent(TOKEN)}`
+  );
+}
+
+async function signUpWith(label: string) {
+  renderPage();
+  await agreeToTerms();
+  fireEvent.click(await screen.findByRole("button", { name: label }));
+  await waitFor(() => expect(hrefAssignments).toHaveLength(1));
+  return hrefAssignments[0];
+}
+
+// Each of these must fall back to the dashboard, silently.
+const UNSAFE_RETURN_TO = [
+  ["a cross-origin URL", "https://evil.example/device"],
+  ["a protocol-relative URL", "//evil.example"],
+  ["a backslash", "/\\evil.example"],
+  ["a TAB", "/\t/evil.example"],
+  ["an LF", "/device\n?user_code=X"],
+  ["a CR", "/device\r?user_code=X"],
+  ["a NUL", "/device\u0000"],
+  ["javascript:", "javascript:alert(1)"],
+] as const;
+
+describe("/join/[token] — return_to (#1655)", () => {
+  beforeEach(() => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+  });
+
+  it.each(PROVIDERS)(
+    "%s sign-up returns to a relative return_to with the invite",
+    async (provider, label) => {
+      mockSearchParams.set("return_to", "/device?user_code=ABCD1234");
+      expect(await signUpWith(label)).toBe(
+        loginUrl(provider, `${FRONTEND_ORIGIN}/device?user_code=ABCD1234`),
+      );
+    },
+  );
+
+  it.each(PROVIDERS)(
+    "%s sign-up keeps a same-origin absolute return_to",
+    async (provider, label) => {
+      const authorize = `${FRONTEND_ORIGIN}/api/v1/oauth/authorize?client_id=c&state=s`;
+      mockSearchParams.set("return_to", authorize);
+      expect(await signUpWith(label)).toBe(loginUrl(provider, authorize));
+    },
+  );
+
+  it.each(UNSAFE_RETURN_TO)(
+    "falls back to the dashboard for %s",
+    async (_label, value) => {
+      mockSearchParams.set("return_to", value);
+      expect(await signUpWith("join.valid.continueWithGitHub")).toBe(
+        loginUrl("github", `${FRONTEND_ORIGIN}/workspace/dashboard`),
+      );
+      // Still a working invite: no error on the page.
+      expect(screen.queryByRole("heading", { name: /error|invalid/ })).toBeNull();
+    },
+  );
+});
+
+describe("/join/[token] — terms of service (#1655)", () => {
+  it("keeps both provider buttons disabled until the terms box is ticked", async () => {
+    renderPage();
+    const google = await screen.findByRole("button", {
+      name: "join.valid.continueWithGoogle",
+    });
+    const github = screen.getByRole("button", {
+      name: "join.valid.continueWithGitHub",
+    });
+    expect(google).toBeDisabled();
+    expect(github).toBeDisabled();
+
+    fireEvent.click(google);
+    fireEvent.click(github);
+    expect(hrefAssignments).toHaveLength(0);
+
+    await agreeToTerms();
+    expect(google).toBeEnabled();
+    expect(github).toBeEnabled();
+  });
+
+  it("shows no terms box when there is no provider to sign up with", async () => {
+    mockGetAuthConfig.mockRejectedValue(new Error("boom"));
+    renderPage();
+    expect(await screen.findByText("join.valid.noProviders")).toBeVisible();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+  });
+});
+
+describe("/join/[token] — already signed in, with return_to (#1655)", () => {
+  beforeEach(() => {
+    mockApiClientGet.mockResolvedValue({ user_id: "u1" });
+  });
+
+  async function continueLink() {
+    await screen.findByRole("heading", { name: "join.alreadySignedIn.title" });
+    return screen.getByRole("link");
+  }
+
+  it("continues to a validated relative return_to", async () => {
+    mockSearchParams.set("return_to", "/device?user_code=ABCD1234");
+    renderPage();
+    const link = await continueLink();
+    expect(link).toHaveAttribute("href", "/device?user_code=ABCD1234");
+    expect(link).toHaveTextContent("join.alreadySignedIn.continue");
+    expect(mockPreview).not.toHaveBeenCalled();
+  });
+
+  it("reduces a same-origin absolute return_to to a path", async () => {
+    mockSearchParams.set(
+      "return_to",
+      `${FRONTEND_ORIGIN}/api/v1/oauth/authorize?client_id=c`,
+    );
+    renderPage();
+    expect(await continueLink()).toHaveAttribute(
+      "href",
+      "/api/v1/oauth/authorize?client_id=c",
+    );
+    expect(mockPreview).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ...UNSAFE_RETURN_TO,
+    ["a same-origin //host pathname", `${FRONTEND_ORIGIN}//evil.example/x`] as const,
+  ])("links to the dashboard for %s", async (_label, value) => {
+    mockSearchParams.set("return_to", value);
+    renderPage();
+    const link = await continueLink();
+    expect(link).toHaveAttribute("href", "/workspace/dashboard");
+    expect(mockPreview).not.toHaveBeenCalled();
+  });
+});
+
+describe("/join/[token] — back to login keeps return_to (#1655)", () => {
+  const STATES = [
+    [
+      "expired",
+      "join.expired.title",
+      () =>
+        mockPreview.mockRejectedValue(
+          new ApiError({ message: "gone", status: 410 }),
+        ),
+    ],
+    [
+      "invalid",
+      "join.invalid.title",
+      () =>
+        mockPreview.mockRejectedValue(
+          new ApiError({ message: "not found", status: 404 }),
+        ),
+    ],
+    [
+      "disabled",
+      "join.disabled.title",
+      () => {
+        mockFeatures = { beta_invites: false };
+        mockPreview.mockRejectedValue(
+          new ApiError({ message: "not found", status: 404 }),
+        );
+      },
+    ],
+    [
+      "error",
+      "join.error.title",
+      () =>
+        mockPreview.mockRejectedValue(
+          new ApiError({ message: "nope", status: 503 }),
+        ),
+    ],
+  ] as const;
+
+  it.each(STATES)("%s: keeps a validated return_to", async (_s, title, arrange) => {
+    arrange();
+    mockSearchParams.set("return_to", "/device?user_code=ABCD1234");
+    renderPage();
+    await screen.findByRole("heading", { name: title });
+    expect(
+      screen.getByRole("link", { name: "join.backToLogin" }),
+    ).toHaveAttribute(
+      "href",
+      `/login?return_to=${encodeURIComponent("/device?user_code=ABCD1234")}`,
+    );
+  });
+
+  it.each(STATES)("%s: drops an invalid return_to", async (_s, title, arrange) => {
+    arrange();
+    mockSearchParams.set("return_to", "https://evil.example/device");
+    renderPage();
+    await screen.findByRole("heading", { name: title });
+    expect(
+      screen.getByRole("link", { name: "join.backToLogin" }),
+    ).toHaveAttribute("href", "/login");
   });
 });

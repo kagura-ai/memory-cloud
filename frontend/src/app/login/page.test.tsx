@@ -83,6 +83,13 @@ vi.mock("next/navigation", () => ({
   },
 }));
 
+// #1655: the invite entry shows only when the deployment reports
+// `features.beta_invites`. Reset in beforeEach.
+let mockFeatures: Record<string, boolean> | null = null;
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => mockFeatures,
+}));
+
 vi.mock("@/components/LanguageSelector", () => ({
   LanguageSelector: () => null,
 }));
@@ -120,6 +127,7 @@ beforeEach(() => {
   mockPush.mockReset();
   mockReplace.mockReset();
   safeReturnToBypass.enabled = false;
+  mockFeatures = null;
   searchParamsSuspense.pending = null;
   // Clear URL params between tests so return_to from one test doesn't bleed
   for (const key of [...mockSearchParams.keys()]) {
@@ -818,5 +826,147 @@ describe("LoginPage forwards a live session (#1594)", () => {
     // Component tests mock useTranslations, so a missing key would not show.
     expect(en.login.checkingSession).toBeTruthy();
     expect(ja.login.checkingSession).toBeTruthy();
+  });
+});
+
+// ---------- #1655: "I have an invite link" ----------------------------------
+
+describe("LoginPage invite entry (#1655)", () => {
+  const TOKEN = "tok_SECRET-login-0123456789";
+
+  const consoleSpies = () =>
+    (["log", "info", "warn", "error", "debug"] as const).map((level) =>
+      vi.spyOn(console, level),
+    );
+
+  async function openEntry() {
+    renderLogin();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "inviteEntry.toggle" }),
+    );
+    return screen.getByLabelText("inviteEntry.label") as HTMLInputElement;
+  }
+
+  async function submitInvite(value: string) {
+    const input = await openEntry();
+    fireEvent.change(input, { target: { value } });
+    fireEvent.click(screen.getByRole("button", { name: "inviteEntry.submit" }));
+  }
+
+  beforeEach(() => {
+    mockFeatures = { beta_invites: true };
+  });
+
+  it.each([
+    ["the flag is off", { beta_invites: false }],
+    ["the flag is missing", {}],
+    ["the flags are not known yet", null],
+  ])("is hidden when %s", async (_label, features) => {
+    mockFeatures = features;
+    renderLogin();
+    await screen.findByRole("heading", { name: "signInToAccount" });
+    expect(
+      screen.queryByRole("button", { name: "inviteEntry.toggle" }),
+    ).toBeNull();
+  });
+
+  it("shows when features.beta_invites is on, collapsed until opened", async () => {
+    renderLogin();
+    expect(
+      await screen.findByRole("button", { name: "inviteEntry.toggle" }),
+    ).toBeVisible();
+    expect(screen.queryByLabelText("inviteEntry.label")).toBeNull();
+  });
+
+  it.each([
+    ["a pasted link", `https://app.example/join/${TOKEN}`],
+    ["a relative link", `/join/${TOKEN}`],
+    ["a bare token", TOKEN],
+  ])(
+    "navigates %s to /join/<token> with the validated return_to",
+    async (_label, value) => {
+      mockSearchParams.set("return_to", "/device?user_code=ABCD1234");
+      await submitInvite(value);
+      expect(mockPush).toHaveBeenCalledTimes(1);
+      expect(mockPush).toHaveBeenCalledWith(
+        `/join/${TOKEN}?return_to=${encodeURIComponent("/device?user_code=ABCD1234")}`,
+      );
+    },
+  );
+
+  it("keeps a same-origin absolute return_to (an MCP authorize request)", async () => {
+    const authorize = `${window.location.origin}/api/v1/oauth/authorize?client_id=c&state=s`;
+    mockSearchParams.set("return_to", authorize);
+    await submitInvite(TOKEN);
+    expect(mockPush).toHaveBeenCalledWith(
+      `/join/${TOKEN}?return_to=${encodeURIComponent(authorize)}`,
+    );
+  });
+
+  it("navigates to /join/<token> alone when there is no return_to", async () => {
+    await submitInvite(TOKEN);
+    expect(mockPush).toHaveBeenCalledWith(`/join/${TOKEN}`);
+  });
+
+  it.each([
+    ["a cross-origin URL", "https://evil.example/device"],
+    ["a protocol-relative URL", "//evil.example"],
+    ["a backslash", "/\\evil.example"],
+    ["a TAB", "/\t/evil.example"],
+    ["javascript:", "javascript:alert(1)"],
+  ])("does not forward an unsafe return_to (%s)", async (_label, value) => {
+    mockSearchParams.set("return_to", value);
+    await submitInvite(TOKEN);
+    expect(mockPush).toHaveBeenCalledWith(`/join/${TOKEN}`);
+  });
+
+  it.each([
+    ["empty", ""],
+    ["too short", "abc"],
+    ["another page", `https://app.example/invite/${TOKEN}`],
+    ["a bad character", `${TOKEN}!`],
+  ])("does not navigate on a malformed value (%s)", async (_label, value) => {
+    await submitInvite(value);
+    expect(await screen.findByText("inviteEntry.invalid")).toBeVisible();
+    expect(mockPush).not.toHaveBeenCalled();
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it("clears the error once the value changes", async () => {
+    await submitInvite("abc");
+    expect(await screen.findByText("inviteEntry.invalid")).toBeVisible();
+    fireEvent.change(screen.getByLabelText("inviteEntry.label"), {
+      target: { value: TOKEN },
+    });
+    expect(screen.queryByText("inviteEntry.invalid")).toBeNull();
+  });
+
+  it("never logs or stores the token", async () => {
+    const spies = consoleSpies();
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    await submitInvite(`https://app.example/join/${TOKEN}`);
+    expect(mockPush).toHaveBeenCalledTimes(1);
+    for (const spy of spies) {
+      expect(JSON.stringify(spy.mock.calls)).not.toContain("tok_SECRET");
+    }
+    expect(
+      JSON.stringify([{ ...window.localStorage }, { ...window.sessionStorage }]),
+    ).not.toContain("tok_SECRET");
+  });
+
+  it("has the entry strings in both catalogs", () => {
+    for (const messages of [en, ja]) {
+      const entry = messages.login.inviteEntry;
+      for (const value of [
+        entry.toggle,
+        entry.label,
+        entry.placeholder,
+        entry.submit,
+        entry.invalid,
+      ]) {
+        expect(value).toBeTruthy();
+      }
+    }
   });
 });
