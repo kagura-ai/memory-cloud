@@ -739,9 +739,12 @@ plan-comparison matrix name — is recomputed from the *effective* tiers (the
 lowest tier that has the feature), so with the example above a free workspace
 is told to upgrade to M, not XL. `allows_shared_contexts` follows
 `shared_contexts` automatically. The effective set per tier is logged once at
-startup (`plan_tier_features_effective`). Note that the web UI's create buttons
-currently unlock by tier rank (XL); the REST API and MCP tools honour the
-override.
+startup (`plan_tier_features_effective`). The web UI honours the override too:
+since #1560 its create gates for `resources`, `connectors`, `public_contexts`
+and `shared_contexts` read the per-tier booleans from
+`GET /api/v1/workspaces/plans/tiers` rather than ranking tier names
+(`frontend/src/hooks/usePlanFeatures.ts`). Surfaces that still pre-check a tier
+rank rather than the matrix are being migrated in #1645.
 
 ### What a feature entry does at runtime (enforcement modes)
 
