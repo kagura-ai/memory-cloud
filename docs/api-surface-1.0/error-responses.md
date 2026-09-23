@@ -30,7 +30,7 @@ Emitted by `memory_cloud_exception_handler` (`backend/src/api/main.py:313-339`) 
 HTTP status comes from `exc.status_code` (per-class; see catalogue). Notable headers:
 
 - `DatabaseConnectionError` paths (incl. the `SQLAlchemyError` and connection-error handlers, `main.py:342-403`) add `Retry-After: 5` and return the same 3-field body via `_database_unavailable_response` (wraps `DatabaseConnectionError` → `DB-002`, 503). The connection-error handler is registered on `ConnectionRefusedError` / `ConnectionResetError` / `ConnectionAbortedError` / `BrokenPipeError` (not base `ConnectionError`).
-- Rate-limit middleware (`backend/src/api/middleware/rate_limit.py:121-163`) returns the **same 3-field shape inline** (not via the handler): `RATE-001` 429 with `X-RateLimit-Limit/Remaining/Reset` + `Retry-After: 60`; `QUOTA-001` 429 with `Retry-After: 86400`.
+- Rate-limit middleware (`backend/src/api/middleware/rate_limit.py:121-163`) returns the **same 3-field shape inline** (not via the handler): `RATE-001` 429 with `X-RateLimit-Limit/Remaining/Reset` + `Retry-After: 60`; `QUOTA-001` 429 with `Retry-After: 86400`. Since #1644 that inline body merges the exception's own `details` (so the gate annotation and `quota_type` survive) instead of replacing them with `{retry_after}`.
 - Deprecated `/api/v1/attachments/*` returns the same 3-field shape inline as `RES-004` 410 with RFC 8594 `Sunset` / `Deprecation` / `Link` headers (`backend/src/api/routes/attachments.py:29-54`) — emitted inline precisely because the global handler does not propagate those headers.
 
 > ⚠ Note vs. intent: issues #401/#602/#603/#604 standardized on this `{error, message, details}` shape (confirmed in the #602 PR body: callers read `exc.reason` instead of `exc.detail`; frontend consumes the uniform shape). The shape is **not** `{detail, error_code}` — `detail` is the *non-conforming* FastAPI default, below.
@@ -167,15 +167,15 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `RES-002` | `ConflictError` — exceptions.py:188 | 409 | Resource conflict. |
 | `RES-003` | `MemoryGoneError` — exceptions.py:174; `BetaInviteGoneError` — exceptions.py:595 | 410 | Resource soft-deleted (distinct from 404 so clients stop retrying). Since #1581 also a closed-beta invite link that existed but is expired or already redeemed (`GET /beta-invites/{token}/preview`) — one message for both reasons. |
 | `RES-004` | *(no class — inline `JSONResponse`)* — api/routes/attachments.py:30 | 410 | Deprecated `/api/v1/attachments/*` retired; carries Sunset/Deprecation/Link headers. |
-| `VAL-001` | `ValidationError` — exceptions.py:195 | 422 | Service-layer validation error (shape/format). ⚠ Coexists with the non-conforming FastAPI 422. |
+| `VAL-001` | `ValidationError` — exceptions.py:195 | 422 | Service-layer validation error (shape/format). ⚠ Coexists with the non-conforming FastAPI 422. Since #1644 the shared-context refusal is **no longer** here — it moved to `FEAT-001` at 403, matching what the REST route already answered for the same condition. The managed-LLM refusal stays `VAL-001`/422 and gains a [gate annotation](#gate-refusals-1644) (`plan` when the deployment has a managed model, `deployment` when it has none). |
 | `REQ-001` | `BadRequestError` (default) — exceptions.py:217 | 400 | State-precondition failure (call sites may override the code, e.g. `REQ-101`/`REQ-102`). |
 | `MEDIA-001` | `UnsupportedMediaTypeError` — exceptions.py:254 | 415 | Content-Type not in allow-list; `details.allowed` lists accepted types. |
 | `BONUS-001` | `InsufficientReasonError` — exceptions.py:283 | 400 | Slot-bonus shrink below owned count requires a reason. |
 | `BONUS-002` | `BonusBelowZeroError` — exceptions.py:301 | 400 | Resulting workspace_slot_bonus would be negative. |
 | `RATE-001` | `RateLimitError` — exceptions.py:318; also inline at api/middleware/rate_limit.py:124 | 429 | Per-minute rate limit exceeded; `Retry-After` + `X-RateLimit-*` headers on the middleware path. |
-| `QUOTA-001` | `QuotaExceededError` — exceptions.py:339; also inline at api/middleware/rate_limit.py:156 | 429 | Daily quota exceeded; `Retry-After: 86400` on the middleware path. |
-| `QUOTA-002` | `EmbeddingSpendCapExceeded` — exceptions.py:383 | 429 | BYOK embedding spend cap reached (`details.period` = daily/monthly). |
-| `FEAT-001` | `FeatureNotAvailableError` — exceptions.py:602 | 403 | Feature not available on current plan tier. Since #1551 also the "may create" refusal for XL-only features — `POST /resource-tokens` (`details.feature="resources"`), connector provisioning (`"connectors"`, REST and MCP `setup_connector`, where MCP surfaces it under `plan_required` with `required_plan`), `PUT /contexts/{id}` with `is_public=true` and the bound public API-key mint (`"public_contexts"`). The message names the minimum tier from the plan registry (`feature_denied_message`). Existing objects on lower tiers are never refused (block-new-only). |
+| `QUOTA-001` | `QuotaExceededError` — exceptions.py:339; also inline at api/middleware/rate_limit.py:156 | 429 (**403** on two caps) | Quota exceeded; `Retry-After: 86400` on the middleware path. Since #1644 every instance carries the [quota gate block](#gate-refusals-1644) (`gate: "quota"`, `quota_type`, and `current`/`limit` where counts exist). ⚠ Two caps answer **403**, not 429, because they always have and clients branch on it: the resource-token cap (`POST /resource-tokens`) and — under its own `CONNECTOR-001` code — the connector seat cap. `QuotaExceededError` takes a `status_code` kwarg for exactly those two; everything else uses the 429 default. |
+| `QUOTA-002` | `EmbeddingSpendCapExceeded` — exceptions.py:383 | 429 | BYOK embedding spend cap reached (`details.period` = daily/monthly). Carries `gate: "quota"` and `quota_type` (`embedding_spend_daily` / `embedding_spend_monthly`) but **no** `current`/`limit`: the cap is USD, and the canonical count pair is integers. `cap_usd` / `current_usd` remain the numbers to render. |
+| `FEAT-001` | `FeatureNotAvailableError` — exceptions.py:602 | 403 | Feature not available on current plan tier. Since #1551 also the "may create" refusal for XL-only features — `POST /resource-tokens` (`details.feature="resources"`), connector provisioning (`"connectors"`, REST and MCP `setup_connector`, where MCP surfaces it under `plan_required` with `required_plan`), `PUT /contexts/{id}` with `is_public=true` and the bound public API-key mint (`"public_contexts"`). The message names the minimum tier from the plan registry (`feature_denied_message`). Existing objects on lower tiers are never refused (block-new-only). Since #1644 it also covers `team_invitations` (`POST /invitations`, previously a raw `HTTPException(403)`), `shared_contexts` (previously `VAL-001`/422 on the service path), `sleep_mode`, `managed_embeddings` (previously `CFG-001`/500) and `managed_llm`; every instance carries the [feature gate block](#gate-refusals-1644), and `details.gate` distinguishes a **plan** refusal from an **allowlist** (rollout kill switch) or **deployment** (operator switch) refusal — the three used to be wire-identical. |
 | `DB-001` | `DatabaseError` — exceptions.py:406 | 500 | Database operation failed. |
 | `DB-002` | `DatabaseConnectionError` — exceptions.py:416; also via `SQLAlchemyError`/connection-error handlers (api/main.py:342-403) | 503 | DB unavailable; `Retry-After: 5`. |
 | `EXT-001` | `ExternalServiceError` (default) — exceptions.py:426; inherited by `QdrantError` (exceptions.py:434-438) and direct raises in storage/factory.py:47,65, storage/r2.py:102 | 502 | Generic external-service error. ⚠ Qdrant has no dedicated code; `EXT-101` is an unexplained gap before Redis's `EXT-102`. |
@@ -186,7 +186,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `EXT-204` | `StripeError` — exceptions.py:482 | 502 | Stripe API unexpected-shape error. |
 | `EXT-205` | `EmailDispatchError` — exceptions.py:511 (status overridden to 503 at :515) | 503 | Email-provider dispatch failed; retriable. |
 | `invalid_token` | `TokenRevokedError` — exceptions.py:526; `InvalidTokenError` — exceptions.py:535; RFC 6750 challenge — mcp_server/transport.py:547 | 401 | OAuth2 token revoked/invalid. ⚠ RFC 6750-mandated lowercase vocabulary, intentionally outside the `NAMESPACE-NNN` convention; on the REST path it surfaces in the canonical body as `"error": "invalid_token"`. |
-| `CFG-001` | `ConfigurationError` — exceptions.py:546 | 500 | Server configuration error. |
+| `CFG-001` | `ConfigurationError` — exceptions.py:546 | 500 | Server configuration error. Since #1644 this **no longer** includes the managed-embeddings plan refusal ("add a BYOK key, self-host a model, or upgrade"): a refusal that can never succeed on retry does not belong in the server-error class, so it answers `FEAT-001` at 403. A genuinely missing credential is still `CFG-001`. |
 | `CFG-002` | `ConfigReadOnlyError` — exceptions.py:206 | 409 | #1580: `PUT /config/{key}` / `POST /config/batch` always refuse — every key is env-backed (set via environment, applied on restart/redeploy) and nothing reads a stored override. `details.keys` lists the refused keys; a batch is refused as a whole. |
 | `INT-001` | `InternalError` — exceptions.py:553 | 500 | Internal server error (structured). |
 | `ERASURE-001` | `ErasureRequestNotFoundError` — exceptions.py:564 | 404 | No erasure request found. |
@@ -203,7 +203,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 
 | Code | Call site | HTTP | Meaning |
 |---|---|---|---|
-| `CONNECTOR-001` | `MemoryCloudException` — services/connector_provisioning.py:407 | 403 | Connector seat limit reached for plan. |
+| `CONNECTOR-001` | `MemoryCloudException` — services/connector_provisioning.py:407 | 403 | Connector seat limit reached for plan. Code and status are unchanged by #1644; the refusal gains the [quota gate block](#gate-refusals-1644) with `quota_type: "connectors"`, so a client reads it the same way it reads every other cap. `max_connectors` / `active_connectors` stay beside the canonical `limit` / `current`. |
 | `CONNECTOR-002` | `MemoryCloudException` — services/connector_provisioning.py:503 | 503 | Connector seat lock unavailable (PG 55P03 lock timeout); retry. |
 | `EXT-ANA-001` | `ExternalServiceError` subclass — services/analysis/llm_caller.py:83 | 502 | Entire OpenAI fallback chain exhausted (`details.upstream_provider_error=true`, `attempted_models`). |
 | `REQ-101` | `BadRequestError` — services/system_admin_service.py:111 | 400 | User is already a system admin. ✅ **#992 Phase 2**: re-namespaced from `ADMIN-101` to the `REQ-*` (BadRequestError) family — resolves the `ADMIN-001` (403 protection) vs `ADMIN-1xx` (400 precondition) collision; `ADMIN-*` now uniformly means admin-protection. |
@@ -247,6 +247,123 @@ These 41 distinct snake_case literals are passed directly as the first argument 
 `internal_error` (37), `validation_error` (29), `missing_fields` (20), `workspace_required` (13), `invalid_context_id_format` (5), `invalid_report_id` (3), `invalid_memory_id_format` (3), `db_error` (3), `workspace_not_found` (2), `permission_denied` (2), `not_found` (2), `invalid_arguments` (2), and one each of: `update_search_config_error`, `update_context_error`, `unknown_tool`, `setup_resource_error`, `setup_connector_error`, `service_unavailable`, `quota_exceeded`, `missing_required_fields`, `merge_contexts_error`, `list_tags_error`, `list_resource_tokens_error`, `list_my_bindings_error`, `list_analyses_error`, `invalid_search_config`, `invalid_context_id`, `invalid_argument`, `ingest_events_error`, `get_usage_error`, `get_resource_schema_error`, `get_resource_impact_error`, `get_cluster_error`, `get_analysis_error`, `get_active_analysis_error`, `describe_binding_error`, `delete_context_error`, `create_context_error`, `conflict` (also §C), `binding_not_found`, `analyze_context_error`.
 
 ⚠ `invalid_argument` vs `invalid_arguments`, and `missing_fields` vs `missing_required_fields`, are accidental near-duplicates.
+
+---
+
+## Gate refusals (#1644)
+
+A **gate refusal** is a refusal caused by what the caller's workspace is allowed to do —
+its plan, a quota, a rollout allowlist or an operator switch — rather than by the shape of
+the request. Since #1644 every one of them carries a machine-readable `details` block, so a
+client never has to match on prose or infer a reason from a bare status code.
+
+`details.gate` is an **additive annotation, orthogonal to `error` and `status`**. Nothing was
+renamed and nothing was removed: an older client that ignores the new keys sees the same
+status, the same message and the same pre-existing detail fields it always did.
+
+### The `gate` vocabulary
+
+| `gate` | Meaning | Carries an upgrade path? |
+|---|---|---|
+| `plan` | The workspace's tier does not include the feature, or its cap was reached. | Yes — `required_plan` when a tier lifts it. |
+| `quota` | A cap was reached. | Only when a higher tier raises that cap. |
+| `allowlist` | A rollout kill switch. Plan-neutral: no tier turns it on. | Never. |
+| `deployment` | The operator disabled the feature on this deployment. | Never. |
+| `role` | Vocabulary member only — **never serialized**. Role refusals are `AUTH-101` and have their `details` stripped wholesale (CWE-639 defence in depth); a client identifies them by the code. | — |
+
+### `FEAT-001` (403) — feature gate
+
+```jsonc
+{
+  "error": "FEAT-001",
+  "message": "Feature 'team_invitations' not available on M plan. Upgrade to L plan to access this feature.",
+  "details": {
+    "gate": "plan",                  // "plan" | "allowlist" | "deployment"
+    "feature": "team_invitations",   // registry key
+    "required_plan": "pro",          // nullable — PLAN_ORDER key
+    "required_plan_display": "L",    // nullable — the tier's display_name
+    "current_plan": "basic"          // nullable
+  }
+}
+```
+
+| Field | Type | Required | `null` when |
+|---|---|---|---|
+| `gate` | `"plan" \| "allowlist" \| "deployment"` | yes | — |
+| `feature` | `string` | yes | — |
+| `required_plan` | `string \| null` | no | no tier carries the feature (a `PLAN_<KEY>_FEATURES` override can strip it); always absent or `null` for `gate != "plan"` |
+| `required_plan_display` | `string \| null` | no | mirrors `required_plan`. **Never** the `"higher"` prose fallback that `required_plan_display_name` returns for the message — that is a sentence fragment, not a label |
+| `current_plan` | `string \| null` | no | the caller had no workspace row |
+
+Both halves ship on purpose: `required_plan` is the **key** a UI decides with (display labels
+are per-deployment and per-locale, and the server cannot know the browser's locale), while
+`required_plan_display` is the **label** a CLI or SDK consumer renders, having no tier matrix
+of its own.
+
+### `QUOTA-001` / `QUOTA-002` / `CONNECTOR-001` — quota gate
+
+```jsonc
+{
+  "error": "QUOTA-001",
+  "message": "Context limit reached. Your S plan allows 1 context(s) per workspace. Upgrade to M plan for more contexts.",
+  "details": {
+    "gate": "quota",
+    "quota_type": "contexts",        // frozen vocabulary, below
+    "current": 1,                    // int
+    "limit": 1,                      // int
+    "required_plan": "basic",        // nullable
+    "required_plan_display": "M",    // nullable
+    "current_plan": "free",          // nullable
+    "feature": null,                 // set when the cap belongs to a named feature
+    "resets_at": null                // ISO-8601, time-windowed quotas only
+  }
+}
+```
+
+`current` / `limit` are **added alongside** every pre-existing field, never replacing it. The
+legacy names that keep shipping, per refusal:
+
+| Refusal | Pre-existing keys that stay | Canonical aliases added |
+|---|---|---|
+| Analysis daily quota | `used_today`, `limit_today`, `addon_bonus`, `remaining_today`, `resets_at` | `current`, `limit` |
+| Memories per day | `limit`, `used_today`, `requested`, `resets_at` | `current` |
+| Workspace cap | `owned_count`, `cap`, `tier`, `next_tier` | `current`, `limit` |
+| Storage bytes | `limit`, `current`, `requested` | already canonical |
+| Sleep-enabled contexts | `limit`, `current`, `addon_bonus`, `requested` | already canonical |
+| Connector seats (`CONNECTOR-001`) | `max_connectors`, `active_connectors` | `current`, `limit` |
+| Embedding spend (`QUOTA-002`) | `period`, `cap_usd`, `current_usd` | none — the cap is USD |
+| Daily API quotas (rate-limit middleware) | `retry_after` on the 429 | none — a rolling counter, no cap pair to render |
+
+**Two families therefore carry no numbers**: `QUOTA-002` and the rate-limit family. They are
+still `gate: "quota"`, and a client renders a number-free message for them rather than
+interpolating a `limit` it was never sent.
+
+### `quota_type` vocabulary (frozen)
+
+`contexts`, `members`, `workspace_limit_reached`, `memories_per_day`, `memory_analysis`,
+`sleep_enabled_contexts`, `storage_bytes`, `agents`, `resource_tokens`, `connectors`,
+`embedding_spend_daily`, `embedding_spend_monthly`, `api_mcp_daily`, `api_rest_daily`,
+`api_public_daily`.
+
+Frozen in `backend/src/config/constants.py` and enumerated by
+`backend/tests/api/test_gate_error_contract.py`, which fails if a refusal emits a type outside
+this set, if a type here has no live refusal, or if a new refusal site is added without
+declaring which vocabulary it belongs to. `workspace_limit_reached` reads like prose but is
+kept verbatim: it is already on the wire and renaming it would break existing clients.
+
+### Status codes
+
+Codes and statuses do not move for the sake of the annotation. #1644 moved exactly two, each
+as its own revertable commit:
+
+| Refusal | Was | Now | Why |
+|---|---|---|---|
+| Shared contexts, service path | `VAL-001` / 422 | `FEAT-001` / 403 | The REST route already answered `FEAT-001`/403 for the identical condition; one condition was producing two different refusals depending on which door the caller came through. |
+| Managed embeddings | `CFG-001` / 500 | `FEAT-001` / 403 | A plan refusal can never succeed on retry; answering 5xx polluted error-rate SLOs and invited clients to retry. |
+
+The resource-token cap keeps **403** and becomes `QUOTA-001`; the connector seat cap keeps
+**403** under `CONNECTOR-001`. Unifying those two with the 429 default is a follow-up.
+
 
 ---
 
