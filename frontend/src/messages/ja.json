@@ -2015,7 +2015,7 @@
     "otherEndpointsLabel": "その他 ({count})",
     "sleepEnabledContexts": "Sleep 有効コンテキスト",
     "sleepContextsWithAddon": "extra_sleep_contexts アドオンによる +{addon} を含む",
-    "sleepContextsTier": "プラン基本上限 (Sleep メンテナンスは PRO 専用機能)",
+    "sleepContextsTier": "プランの基本上限",
     "ownedWorkspaces": "所有 Workspace",
     "ownedWorkspacesTier": "所有ワークスペース上限（招待 join は無制限）",
     "memoriesCreatedToday": "本日の作成: {count} / {limit}（UTC 0時にリセット）"

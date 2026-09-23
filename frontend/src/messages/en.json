@@ -2015,7 +2015,7 @@
     "otherEndpointsLabel": "Other ({count})",
     "sleepEnabledContexts": "Sleep-enabled Contexts",
     "sleepContextsWithAddon": "Includes +{addon} from extra_sleep_contexts addon",
-    "sleepContextsTier": "Plan-tier limit (PRO required to enable Sleep Maintenance)",
+    "sleepContextsTier": "Plan-tier limit",
     "ownedWorkspaces": "Owned Workspaces",
     "ownedWorkspacesTier": "Owned workspace cap (joined workspaces are uncapped)",
     "memoriesCreatedToday": "Created today: {count} / {limit} (resets at midnight UTC)"
