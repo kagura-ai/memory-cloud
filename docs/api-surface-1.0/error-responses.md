@@ -173,7 +173,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `BONUS-001` | `InsufficientReasonError` — exceptions.py:283 | 400 | Slot-bonus shrink below owned count requires a reason. |
 | `BONUS-002` | `BonusBelowZeroError` — exceptions.py:301 | 400 | Resulting workspace_slot_bonus would be negative. |
 | `RATE-001` | `RateLimitError` — exceptions.py:318; also inline at api/middleware/rate_limit.py:124 | 429 | Per-minute rate limit exceeded; `Retry-After` + `X-RateLimit-*` headers on the middleware path. |
-| `QUOTA-001` | `QuotaExceededError` — exceptions.py:339; also inline at api/middleware/rate_limit.py:156 | 429 (**403** on two caps) | Quota exceeded; `Retry-After: 86400` on the middleware path. Since #1644 every instance carries the [quota gate block](#gate-refusals-1644) (`gate: "quota"`, `quota_type`, and `current`/`limit` where counts exist). ⚠ Two caps answer **403**, not 429, because they always have and clients branch on it: the resource-token cap (`POST /resource-tokens`) and — under its own `CONNECTOR-001` code — the connector seat cap. `QuotaExceededError` takes a `status_code` kwarg for exactly those two; everything else uses the 429 default. |
+| `QUOTA-001` | `QuotaExceededError` — exceptions.py:339; also inline at api/middleware/rate_limit.py:156 | 429 (**403** on two caps) | Quota exceeded; `Retry-After: 86400` on the middleware path. Since #1644 every **typed** instance — one whose `quota_type` is in the [frozen vocabulary](#quota_type-vocabulary-frozen) — carries the [quota gate block](#gate-refusals-1644) (`gate: "quota"`, `quota_type`, and `current`/`limit` where counts exist). An untyped `QUOTA-001` (the 1 MB memory-size guard, the total memory cap, a missing workspace) is not a plan quota and carries **no** `gate` — see [Not every `QUOTA-001` is a gate](#not-every-quota-001-is-a-gate). ⚠ Two caps answer **403**, not 429, because they always have and clients branch on it: the resource-token cap (`POST /resource-tokens`) and — under its own `CONNECTOR-001` code — the connector seat cap. `QuotaExceededError` takes a `status_code` kwarg for exactly those two; everything else uses the 429 default. |
 | `QUOTA-002` | `EmbeddingSpendCapExceeded` — exceptions.py:383 | 429 | BYOK embedding spend cap reached (`details.period` = daily/monthly). Carries `gate: "quota"` and `quota_type` (`embedding_spend_daily` / `embedding_spend_monthly`) but **no** `current`/`limit`: the cap is USD, and the canonical count pair is integers. `cap_usd` / `current_usd` remain the numbers to render. |
 | `FEAT-001` | `FeatureNotAvailableError` — exceptions.py:602 | 403 | Feature not available on current plan tier. Since #1551 also the "may create" refusal for XL-only features — `POST /resource-tokens` (`details.feature="resources"`), connector provisioning (`"connectors"`, REST and MCP `setup_connector`, where MCP surfaces it under `plan_required` with `required_plan`), `PUT /contexts/{id}` with `is_public=true` and the bound public API-key mint (`"public_contexts"`). The message names the minimum tier from the plan registry (`feature_denied_message`). Existing objects on lower tiers are never refused (block-new-only). Since #1644 it also covers `team_invitations` (`POST /invitations`, previously a raw `HTTPException(403)`), `shared_contexts` (previously `VAL-001`/422 on the service path), `sleep_mode`, `managed_embeddings` (previously `CFG-001`/500) and `managed_llm`; every instance carries the [feature gate block](#gate-refusals-1644), and `details.gate` distinguishes a **plan** refusal from an **allowlist** (rollout kill switch) or **deployment** (operator switch) refusal — the three used to be wire-identical. |
 | `DB-001` | `DatabaseError` — exceptions.py:406 | 500 | Database operation failed. |
@@ -337,6 +337,29 @@ legacy names that keep shipping, per refusal:
 **Two families therefore carry no numbers**: `QUOTA-002` and the rate-limit family. They are
 still `gate: "quota"`, and a client renders a number-free message for them rather than
 interpolating a `limit` it was never sent.
+
+### Not every `QUOTA-001` is a gate
+
+`QuotaExceededError` is also raised for limits no tier lifts: the 1 MB memory-size guard on
+remember / update / patch, the total memory cap, and the "workspace not found" anomalies. They
+answer `QUOTA-001` / 429 as they always have, but with `details: {"quota_type": null}` and no
+`gate`: the server stamps `gate: "quota"` only on a refusal whose `quota_type` is in the frozen
+vocabulary below, so an untyped raise cannot be read as an upsell. A client falling back to the
+error code (a server predating #1644 sends no `gate`) applies the same rule — `QUOTA-001` is a
+quota gate only when it names a frozen `quota_type`; counts alone do not qualify. `QUOTA-002`
+and `CONNECTOR-001` each name exactly one cap, so their code is enough.
+
+### MCP envelopes carry the same block
+
+On the MCP surface a gate refusal arrives as the in-band tool error (§4). The mappers that see
+one forward the same keys the REST `details` carries — `gate`, `feature`, `required_plan`,
+`required_plan_display`, `current_plan`, and on a quota `quota_type` / `current` / `limit` /
+`resets_at` — as top-level envelope fields: `feature_not_available` and `quota_exceeded` from
+the analysis tools, `plan_required` from `create_context` and `setup_connector` (whose seat cap
+keeps its `CONNECTOR-001` code), `quota_exceeded` from `remember`, `init_file_upload` and
+`register_agent`. The `quota_exceeded` envelopes omit `null` values, which a client reads the
+same as `null`. `test_gate_error_contract.py`
+lists which refusals reach an MCP mapper and why the rest do not.
 
 ### `quota_type` vocabulary (frozen)
 

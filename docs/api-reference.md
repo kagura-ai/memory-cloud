@@ -1599,6 +1599,9 @@ Reading them:
   and the daily API quotas. Render a number-free message when they are missing.
 - Pre-existing detail fields (`used_today`, `owned_count`, `max_connectors`, …) are unchanged
   and still shipped; the canonical names were added beside them.
+- A `QUOTA-001` with no `gate` and no `quota_type` — the 1 MB memory-size limit, for one — is
+  **not** a plan quota: no tier lifts it, so show the message and no upgrade.
+- MCP tools return the same keys as top-level fields of their error envelope.
 
 ---
 
