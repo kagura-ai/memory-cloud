@@ -69,8 +69,13 @@ function LoginContent() {
   const { user, isLoading: authLoading } = useAuth();
   const features = useSystemFeatures();
   // #1665: the terms version the checkbox refers to, or undefined when the
-  // deployment does not record acceptance (or /system/info is still loading).
-  const termsVersion = useSystemInfo()?.terms_version ?? undefined;
+  // deployment does not record acceptance. The sign-in buttons wait for the
+  // first /system/info answer so a quick click cannot go out without the
+  // version; a failed fetch resolves (to no version), so this never locks
+  // anyone out.
+  const systemInfo = useSystemInfo();
+  const systemInfoPending = systemInfo === null;
+  const termsVersion = systemInfo?.terms_version ?? undefined;
 
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -287,9 +292,7 @@ function LoginContent() {
       setInviteInputInvalid(true);
       return;
     }
-    const query = returnTo
-      ? `?return_to=${encodeURIComponent(returnTo)}`
-      : "";
+    const query = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
     router.push(`/join/${token}${query}`);
   };
 
@@ -508,6 +511,7 @@ function LoginContent() {
                         disabled={
                           loadingAction !== null ||
                           !agreedToTerms ||
+                          systemInfoPending ||
                           !loginId ||
                           !password
                         }
@@ -536,7 +540,11 @@ function LoginContent() {
                 {authConfig?.google_oauth_enabled && (
                   <Button
                     onClick={handleGoogleLogin}
-                    disabled={loadingAction !== null || !agreedToTerms}
+                    disabled={
+                      loadingAction !== null ||
+                      !agreedToTerms ||
+                      systemInfoPending
+                    }
                     size="lg"
                     variant={showAdminLogin ? "outline" : "default"}
                     className={`group relative h-14 w-full overflow-hidden text-base font-semibold transition-all hover:scale-[1.02] disabled:opacity-50 disabled:hover:scale-100 ${
@@ -594,7 +602,11 @@ function LoginContent() {
                     )}
                     <Button
                       onClick={handleGitHubLogin}
-                      disabled={loadingAction !== null || !agreedToTerms}
+                      disabled={
+                        loadingAction !== null ||
+                        !agreedToTerms ||
+                        systemInfoPending
+                      }
                       size="lg"
                       variant="outline"
                       className="group relative mt-2 h-14 w-full overflow-hidden text-base font-semibold shadow-md transition-all hover:scale-[1.02] hover:shadow-lg disabled:opacity-50 disabled:hover:scale-100"

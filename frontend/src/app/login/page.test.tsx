@@ -88,12 +88,14 @@ vi.mock("next/navigation", () => ({
 let mockFeatures: Record<string, boolean> | null = null;
 // #1665: the terms version /system/info reports; null = not recorded.
 let mockTermsVersion: string | null = null;
+// #1665: true = /system/info has not answered yet (the hook returns null).
+let mockSystemInfoPending = false;
 vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
-  useSystemInfo: () => ({
-    features: mockFeatures ?? {},
-    terms_version: mockTermsVersion,
-  }),
+  useSystemInfo: () =>
+    mockSystemInfoPending
+      ? null
+      : { features: mockFeatures ?? {}, terms_version: mockTermsVersion },
 }));
 
 vi.mock("@/components/LanguageSelector", () => ({
@@ -135,6 +137,7 @@ beforeEach(() => {
   safeReturnToBypass.enabled = false;
   mockFeatures = null;
   mockTermsVersion = null;
+  mockSystemInfoPending = false;
   searchParamsSuspense.pending = null;
   // Clear URL params between tests so return_to from one test doesn't bleed
   for (const key of [...mockSearchParams.keys()]) {
@@ -958,7 +961,10 @@ describe("LoginPage invite entry (#1655)", () => {
       expect(JSON.stringify(spy.mock.calls)).not.toContain("tok_SECRET");
     }
     expect(
-      JSON.stringify([{ ...window.localStorage }, { ...window.sessionStorage }]),
+      JSON.stringify([
+        { ...window.localStorage },
+        { ...window.sessionStorage },
+      ]),
     ).not.toContain("tok_SECRET");
   });
 
@@ -1076,5 +1082,35 @@ describe("LoginPage sends the accepted terms version (#1665)", () => {
 
     expect(await screen.findByText("termsRequired")).toBeTruthy();
     expect(screen.queryByText("terms_required")).toBeNull();
+  });
+});
+
+describe("LoginPage waits for /system/info before signing in (#1665)", () => {
+  it("keeps the OAuth and password buttons disabled until it answers", async () => {
+    mockSystemInfoPending = true;
+    mockGetAuthConfig.mockResolvedValue({
+      password_login_enabled: true,
+      google_oauth_enabled: true,
+      github_oauth_enabled: true,
+    });
+    const view = renderLogin();
+
+    const google = await screen.findByRole("button", {
+      name: /continueWithGoogle/i,
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: /agreeToTerms/i }));
+    expect(google).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /continueWithGitHub/i }),
+    ).toBeDisabled();
+
+    // /system/info answers (here: no terms version) — the buttons unlock.
+    mockSystemInfoPending = false;
+    view.rerender(
+      <AuthProvider>
+        <LoginPage />
+      </AuthProvider>,
+    );
+    await waitFor(() => expect(google).not.toBeDisabled());
   });
 });

@@ -23,8 +23,13 @@ vi.mock("@/lib/api/base", async () => {
 
 // #1665: the terms version /system/info reports; null = not recorded.
 let mockTermsVersion: string | null = null;
+// #1665: true = /system/info has not answered yet (the hook returns null).
+let mockSystemInfoPending = false;
 vi.mock("@/hooks/useSystemFeatures", () => ({
-  useSystemInfo: () => ({ features: {}, terms_version: mockTermsVersion }),
+  useSystemInfo: () =>
+    mockSystemInfoPending
+      ? null
+      : { features: {}, terms_version: mockTermsVersion },
 }));
 
 vi.mock("next-intl", () => ({
@@ -70,6 +75,7 @@ beforeEach(() => {
   mockPush.mockReset();
   hrefAssignments = [];
   mockTermsVersion = null;
+  mockSystemInfoPending = false;
 
   Object.defineProperty(window, "location", {
     configurable: true,
@@ -210,5 +216,20 @@ describe("AcceptInvitationPage terms acceptance (#1665)", () => {
     expect(hrefAssignments[0]).toBe(
       `https://api.example.com/api/v1/auth/github/login?return_to=${encodeURIComponent(INVITE_URL)}&accepted_terms=2026-09`,
     );
+  });
+});
+
+describe("AcceptInvitationPage waits for /system/info (#1665)", () => {
+  it("keeps the login buttons disabled until it answers", async () => {
+    mockSystemInfoPending = true;
+    await renderInLoginRequiredState();
+
+    const google = screen.getByRole("button", { name: /loginButton/i });
+    expect(google).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /continueWithGitHub/i }),
+    ).toBeDisabled();
+    fireEvent.click(google);
+    expect(hrefAssignments).toHaveLength(0);
   });
 });

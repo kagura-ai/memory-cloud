@@ -3774,6 +3774,7 @@
     "join": {
       "loading": "Checking your invite...",
       "backToLogin": "Back to Login",
+      "termsRequired": "The terms have been updated. Please tick the box to agree to the current Terms of Service and Privacy Policy, then continue again.",
       "valid": {
         "title": "You've been invited to the Kagura Memory Cloud closed beta",
         "message": "Sign up with one of the options below to accept the invite.",

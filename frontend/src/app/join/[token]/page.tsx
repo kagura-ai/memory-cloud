@@ -160,9 +160,17 @@ function JoinContent({ token }: { token: string }) {
   const t = useTranslations("betaInvites");
   const locale = useLocale();
   const features = useSystemFeatures();
-  // #1665: the terms version the checkbox refers to, when the deployment has one.
-  const termsVersion = useSystemInfo()?.terms_version ?? undefined;
+  // #1665: the terms version the checkbox refers to, when the deployment has
+  // one. The buttons wait for the first /system/info answer (a failed fetch
+  // resolves to "no version", so this never locks anyone out).
+  const systemInfo = useSystemInfo();
+  const systemInfoPending = systemInfo === null;
+  const termsVersion = systemInfo?.terms_version ?? undefined;
   const searchParams = useSearchParams();
+  // #1665: the login endpoint sends an invite sign-up without the current
+  // terms version back here with this token (the version changed while the
+  // page was open, or the link skipped the page).
+  const termsRequired = searchParams.get("error") === "terms_required";
   const origin = typeof window !== "undefined" ? window.location.origin : "";
   // #1655: the validated destination, or undefined. Never parsed for a token.
   const returnTo = safeReturnTo(searchParams.get("return_to"), origin);
@@ -222,7 +230,7 @@ function JoinContent({ token }: { token: string }) {
           : probe.kind;
 
   const startSignUp = (provider: OAuthProvider) => {
-    if (!agreedToTerms) return;
+    if (!agreedToTerms || systemInfoPending) return;
     // #1594: without a return_to, come back to the dashboard — "/" only
     // redirects to /login, which greeted the freshly signed-in invitee with
     // the login form. #1655: a validated return_to (e.g. /device?user_code=…)
@@ -269,6 +277,15 @@ function JoinContent({ token }: { token: string }) {
             })}
           </p>
 
+          {termsRequired && probe.providers.length > 0 && (
+            <p
+              role="alert"
+              data-testid={T.joinTermsRequired}
+              className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200"
+            >
+              {t("join.termsRequired")}
+            </p>
+          )}
           {probe.providers.length > 0 && (
             <div className="mb-4">
               <TermsAgreement
@@ -282,7 +299,7 @@ function JoinContent({ token }: { token: string }) {
           {probe.providers.includes("google") && (
             <Button
               onClick={() => startSignUp("google")}
-              disabled={!agreedToTerms}
+              disabled={!agreedToTerms || systemInfoPending}
               data-testid={T.joinProvider("google")}
               size="lg"
               className="w-full mb-3 text-base [&_svg]:size-5"
@@ -294,7 +311,7 @@ function JoinContent({ token }: { token: string }) {
           {probe.providers.includes("github") && (
             <Button
               onClick={() => startSignUp("github")}
-              disabled={!agreedToTerms}
+              disabled={!agreedToTerms || systemInfoPending}
               data-testid={T.joinProvider("github")}
               variant="outline"
               size="lg"

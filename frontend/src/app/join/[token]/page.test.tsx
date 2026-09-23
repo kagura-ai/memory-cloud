@@ -34,10 +34,12 @@ vi.mock("@/lib/auth/auth", () => ({
 let mockFeatures: Record<string, boolean> | null = { beta_invites: true };
 // #1665: the terms version /system/info reports; null = not recorded.
 let mockTermsVersion: string | null = null;
+// #1665: true = /system/info has not answered yet (the hook returns null).
+let mockSystemInfoPending = false;
 vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
   useSystemInfo: () =>
-    mockFeatures === null
+    mockFeatures === null || mockSystemInfoPending
       ? null
       : { features: mockFeatures, terms_version: mockTermsVersion },
 }));
@@ -89,7 +91,9 @@ const consoleSpies = (["log", "info", "warn", "error", "debug"] as const).map(
 
 /** Tick the terms box — both provider buttons stay disabled until then (#1655). */
 async function agreeToTerms() {
-  fireEvent.click(await screen.findByRole("checkbox", { name: /agreeToTerms/ }));
+  fireEvent.click(
+    await screen.findByRole("checkbox", { name: /agreeToTerms/ }),
+  );
 }
 
 function renderPage() {
@@ -105,6 +109,7 @@ beforeEach(() => {
   hrefAssignments = [];
   mockFeatures = { beta_invites: true };
   mockTermsVersion = null;
+  mockSystemInfoPending = false;
   for (const key of [...mockSearchParams.keys()]) {
     mockSearchParams.delete(key);
   }
@@ -416,7 +421,9 @@ describe("/join/[token] — return_to (#1655)", () => {
         loginUrl("github", `${FRONTEND_ORIGIN}/workspace/dashboard`),
       );
       // Still a working invite: no error on the page.
-      expect(screen.queryByRole("heading", { name: /error|invalid/ })).toBeNull();
+      expect(
+        screen.queryByRole("heading", { name: /error|invalid/ }),
+      ).toBeNull();
     },
   );
 });
@@ -484,7 +491,10 @@ describe("/join/[token] — already signed in, with return_to (#1655)", () => {
 
   it.each([
     ...UNSAFE_RETURN_TO,
-    ["a same-origin //host pathname", `${FRONTEND_ORIGIN}//evil.example/x`] as const,
+    [
+      "a same-origin //host pathname",
+      `${FRONTEND_ORIGIN}//evil.example/x`,
+    ] as const,
   ])("links to the dashboard for %s", async (_label, value) => {
     mockSearchParams.set("return_to", value);
     renderPage();
@@ -532,28 +542,34 @@ describe("/join/[token] — back to login keeps return_to (#1655)", () => {
     ],
   ] as const;
 
-  it.each(STATES)("%s: keeps a validated return_to", async (_s, title, arrange) => {
-    arrange();
-    mockSearchParams.set("return_to", "/device?user_code=ABCD1234");
-    renderPage();
-    await screen.findByRole("heading", { name: title });
-    expect(
-      screen.getByRole("link", { name: "join.backToLogin" }),
-    ).toHaveAttribute(
-      "href",
-      `/login?return_to=${encodeURIComponent("/device?user_code=ABCD1234")}`,
-    );
-  });
+  it.each(STATES)(
+    "%s: keeps a validated return_to",
+    async (_s, title, arrange) => {
+      arrange();
+      mockSearchParams.set("return_to", "/device?user_code=ABCD1234");
+      renderPage();
+      await screen.findByRole("heading", { name: title });
+      expect(
+        screen.getByRole("link", { name: "join.backToLogin" }),
+      ).toHaveAttribute(
+        "href",
+        `/login?return_to=${encodeURIComponent("/device?user_code=ABCD1234")}`,
+      );
+    },
+  );
 
-  it.each(STATES)("%s: drops an invalid return_to", async (_s, title, arrange) => {
-    arrange();
-    mockSearchParams.set("return_to", "https://evil.example/device");
-    renderPage();
-    await screen.findByRole("heading", { name: title });
-    expect(
-      screen.getByRole("link", { name: "join.backToLogin" }),
-    ).toHaveAttribute("href", "/login");
-  });
+  it.each(STATES)(
+    "%s: drops an invalid return_to",
+    async (_s, title, arrange) => {
+      arrange();
+      mockSearchParams.set("return_to", "https://evil.example/device");
+      renderPage();
+      await screen.findByRole("heading", { name: title });
+      expect(
+        screen.getByRole("link", { name: "join.backToLogin" }),
+      ).toHaveAttribute("href", "/login");
+    },
+  );
 });
 
 describe("/join/[token] — server-side terms acceptance (#1665)", () => {
@@ -578,5 +594,40 @@ describe("/join/[token] — server-side terms acceptance (#1665)", () => {
       loginUrl("google", `${FRONTEND_ORIGIN}/workspace/dashboard`),
     );
     expect(url).not.toContain("accepted_terms");
+  });
+});
+
+describe("/join/[token] — terms_required and a pending /system/info (#1665)", () => {
+  it("shows the terms banner when sent back with ?error=terms_required", async () => {
+    mockSearchParams.set("error", "terms_required");
+    renderPage();
+
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("join.termsRequired");
+    // The invite is still usable from here: checkbox and buttons are shown.
+    expect(
+      screen.getByRole("checkbox", { name: /agreeToTerms/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no banner without the error", async () => {
+    renderPage();
+    await screen.findByRole("button", {
+      name: "join.valid.continueWithGoogle",
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps the buttons disabled until /system/info answers", async () => {
+    mockSystemInfoPending = true;
+    renderPage();
+
+    const google = await screen.findByRole("button", {
+      name: "join.valid.continueWithGoogle",
+    });
+    fireEvent.click(screen.getByRole("checkbox", { name: /agreeToTerms/i }));
+    expect(google).toBeDisabled();
+    fireEvent.click(google);
+    expect(hrefAssignments).toHaveLength(0);
   });
 });

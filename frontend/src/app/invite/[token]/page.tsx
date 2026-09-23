@@ -73,10 +73,14 @@ export default function AcceptInvitationPage({
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [result, setResult] = useState<AcceptInvitationResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // #1665: only asked when the deployment names a terms version.
-  const termsVersion = useSystemInfo()?.terms_version ?? undefined;
+  // #1665: only asked when the deployment names a terms version. Until the
+  // first /system/info answer the buttons wait; a failed fetch resolves to
+  // "no version", so that never locks anyone out.
+  const systemInfo = useSystemInfo();
+  const termsVersion = systemInfo?.terms_version ?? undefined;
   const [agreedToTerms, setAgreedToTerms] = useState(false);
-  const termsPending = termsVersion !== undefined && !agreedToTerms;
+  const termsPending =
+    systemInfo === null || (termsVersion !== undefined && !agreedToTerms);
 
   useEffect(() => {
     initializeAcceptanceFlow();
