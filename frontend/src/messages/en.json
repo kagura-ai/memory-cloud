@@ -3988,6 +3988,14 @@
         "title": "Analyses are not yet enabled for this workspace",
         "description": "Memory Analysis is gated to selected workspaces during the v1 rollout. Reach out if you would like access."
       },
+      "ownerOnly": {
+        "title": "Memory Analysis is available to the workspace owner",
+        "description": "Only the owner of this workspace can run analyses and view their results."
+      },
+      "planRequired": {
+        "title": "Memory Analysis requires the {plan} plan",
+        "description": "This workspace's plan does not include Memory Analysis. It is available on the {plan} plan."
+      },
       "loadFailed": "Failed to load analyses — check connection and try again."
     }
   },
