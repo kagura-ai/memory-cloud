@@ -92,6 +92,7 @@ import {
 } from "@/lib/api/contexts";
 import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { ApiError } from "@/lib/api/base";
 import type { Context, ContextStats } from "@/lib/types/context";
@@ -215,6 +216,10 @@ export default function ContextsPage() {
       WorkspaceRole.Owner,
     ) && currentWorkspace?.analyses_enabled === true;
   const tAnalyses = useTranslations("analyses");
+  // #1643: may we point this member at /workspace/settings/plan at all? The
+  // explanatory copy around every upsell stays either way — only the
+  // actionable element is withheld.
+  const canUpgrade = useCanUpgrade();
 
   const fetchContexts = useCallback(async () => {
     try {
@@ -589,13 +594,22 @@ export default function ContextsPage() {
           {t("quotaReachedDetail", {
             plan: currentWorkspace?.plan_name ?? "current",
             limit: maxContexts ?? 0,
-          })}{" "}
-          <a
-            href="/workspace/settings/plan"
-            className="underline hover:text-yellow-700 dark:hover:text-yellow-300 font-medium"
-          >
-            {t("quotaReachedPlansLink")}
-          </a>
+          })}
+          {/* #1643: the explanation above always renders; only the link to the
+              Plan page is withheld where that page does not exist or this
+              member cannot load it. The separating space moves inside the
+              guard so the banner never ends in a dangling space. */}
+          {canUpgrade === true && (
+            <>
+              {" "}
+              <a
+                href="/workspace/settings/plan"
+                className="underline hover:text-yellow-700 dark:hover:text-yellow-300 font-medium"
+              >
+                {t("quotaReachedPlansLink")}
+              </a>
+            </>
+          )}
         </div>
       )}
 
@@ -897,18 +911,22 @@ export default function ContextsPage() {
                     </div>
                   </div>
                 </label>
+                {/* #1643: the Pro badge and the explanation above stay for
+                    every free/basic workspace; only this CTA needs a reachable
+                    Plan page. */}
                 {(currentWorkspace?.plan_name === "free" ||
-                  currentWorkspace?.plan_name === "basic") && (
-                  <Button
-                    type="button"
-                    variant="link"
-                    size="sm"
-                    className="h-auto p-0 text-xs text-purple-700 dark:text-purple-300"
-                    onClick={() => router.push("/workspace/settings/plan")}
-                  >
-                    {t("upgradeToProCta")}
-                  </Button>
-                )}
+                  currentWorkspace?.plan_name === "basic") &&
+                  canUpgrade === true && (
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="sm"
+                      className="h-auto p-0 text-xs text-purple-700 dark:text-purple-300"
+                      onClick={() => router.push("/workspace/settings/plan")}
+                    >
+                      {t("upgradeToProCta")}
+                    </Button>
+                  )}
               </div>
             </div>
 
@@ -1408,18 +1426,22 @@ export default function ContextsPage() {
                     </div>
                   </div>
                 </label>
+                {/* #1643: the Pro badge and the explanation above stay for
+                    every free/basic workspace; only this CTA needs a reachable
+                    Plan page. */}
                 {(currentWorkspace?.plan_name === "free" ||
-                  currentWorkspace?.plan_name === "basic") && (
-                  <Button
-                    type="button"
-                    variant="link"
-                    size="sm"
-                    className="h-auto p-0 text-xs text-purple-700 dark:text-purple-300"
-                    onClick={() => router.push("/workspace/settings/plan")}
-                  >
-                    {t("upgradeToProCta")}
-                  </Button>
-                )}
+                  currentWorkspace?.plan_name === "basic") &&
+                  canUpgrade === true && (
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="sm"
+                      className="h-auto p-0 text-xs text-purple-700 dark:text-purple-300"
+                      onClick={() => router.push("/workspace/settings/plan")}
+                    >
+                      {t("upgradeToProCta")}
+                    </Button>
+                  )}
               </div>
             </div>
 
@@ -1535,22 +1557,36 @@ export default function ContextsPage() {
             <AlertDialogDescription>
               {t("quotaDialogDescription")}
             </AlertDialogDescription>
-            <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mt-3">
-              <p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
-                {t("quotaDialogUpgradeHeading")}
-              </p>
-              <p className="text-sm text-blue-800 dark:text-blue-200">
-                {t("quotaDialogUpgradeBody")}
-              </p>
-            </div>
+            {/* #1643: the documented exception to "the copy always stays".
+                This block's prose IS the CTA — it tells the reader to upgrade
+                and to see the Plan page — so leaving it while withholding the
+                button would still dead-end them. The title and description
+                above explain why creation failed and do stay. */}
+            {canUpgrade === true && (
+              <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mt-3">
+                <p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
+                  {t("quotaDialogUpgradeHeading")}
+                </p>
+                <p className="text-sm text-blue-800 dark:text-blue-200">
+                  {t("quotaDialogUpgradeBody")}
+                </p>
+              </div>
+            )}
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>{tCommon("cancel")}</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => router.push("/workspace/settings/plan")}
-            >
-              {t("viewPlans")}
-            </AlertDialogAction>
+            {/* With no action left, "Cancel" reads wrong — there is nothing to
+                cancel, only a notice to dismiss. `common.close` already exists
+                in both locales, so this needs no new key. */}
+            <AlertDialogCancel>
+              {canUpgrade === true ? tCommon("cancel") : tCommon("close")}
+            </AlertDialogCancel>
+            {canUpgrade === true && (
+              <AlertDialogAction
+                onClick={() => router.push("/workspace/settings/plan")}
+              >
+                {t("viewPlans")}
+              </AlertDialogAction>
+            )}
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

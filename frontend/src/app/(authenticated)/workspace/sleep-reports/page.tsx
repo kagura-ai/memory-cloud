@@ -22,6 +22,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { planAtLeast } from "@/lib/utils/planLabel";
 import { fetchWorkspaceSleepReports } from "@/lib/api";
@@ -30,6 +31,9 @@ export default function WorkspaceSleepReportsPage() {
   const t = useTranslations("workspace");
   const router = useRouter();
   const { currentWorkspace, currentWorkspaceId, loading } = useWorkspace();
+  // #1643: called here, above every conditional return, because hooks may not
+  // sit below one. The plan-gate copy below renders either way.
+  const canUpgrade = useCanUpgrade();
 
   // Sleep Maintenance is Pro-or-better (sleep_enabled_contexts_limit = 0 on
   // free/basic). Mirror the resources page: keep the sidebar entry, gate the
@@ -65,12 +69,19 @@ export default function WorkspaceSleepReportsPage() {
           title={t("sleepReports.title")}
           description={t("sleepReports.description")}
         />
+        {/* #1643: EmptyState renders its Button only when both actionLabel
+            and onAction are set, so withholding them is how "no action" is
+            expressed here. The title and description always render. */}
         <EmptyState
           icon={Moon}
           title={t("sleepReports.planGate.title")}
           description={t("sleepReports.planGate.description")}
-          actionLabel={t("sleepReports.planGate.action")}
-          onAction={() => router.push("/workspace/settings/plan")}
+          {...(canUpgrade === true
+            ? {
+                actionLabel: t("sleepReports.planGate.action"),
+                onAction: () => router.push("/workspace/settings/plan"),
+              }
+            : {})}
         />
       </PageContainer>
     );

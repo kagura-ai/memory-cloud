@@ -55,6 +55,7 @@ import { apiClient } from "@/lib/api/base";
 import { useToast } from "@/hooks/use-toast";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useSystemFeatures, useSystemInfo } from "@/hooks/useSystemFeatures";
+import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { cn } from "@/styles/design-tokens";
 
 interface TelemetryServiceStatus {
@@ -137,6 +138,9 @@ export function SearchSettingsSection({
   const rerankingDisabledByDeployment = systemFeatures?.reranking === false;
 
   const isFree = currentWorkspace?.plan_name === "free";
+  // #1643: the whole sentence renders either way; only its <link> chunk
+  // becomes a real link, and only where the Plan page is reachable.
+  const canUpgrade = useCanUpgrade();
   const isDirty = Object.keys(editedConfig).length > 0;
 
   const providerLabel = (provider: string) =>
@@ -534,15 +538,21 @@ export function SearchSettingsSection({
                           the English "Basic plan" left the link label
                           untranslated and dropped the sentence tail in every
                           other locale (#1642). */}
+                      {/* #1643: only the `link` renderer branches, so the
+                          sentence and its label stay translated when the Plan
+                          page is unreachable — it just is not a link. */}
                       {t.rich("upgradeToBasic", {
-                        link: (chunks) => (
-                          <Link
-                            href="/workspace/settings/plan"
-                            className="underline font-medium"
-                          >
-                            {chunks}
-                          </Link>
-                        ),
+                        link: (chunks) =>
+                          canUpgrade === true ? (
+                            <Link
+                              href="/workspace/settings/plan"
+                              className="underline font-medium"
+                            >
+                              {chunks}
+                            </Link>
+                          ) : (
+                            <>{chunks}</>
+                          ),
                       })}
                     </p>
                   </AlertDescription>

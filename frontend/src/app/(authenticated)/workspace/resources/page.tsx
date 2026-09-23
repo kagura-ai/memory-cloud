@@ -34,6 +34,7 @@ import { formatRelativeTime } from "@/lib/utils/datetime";
 import { planLabelFromEnv } from "@/lib/utils/planLabel";
 import { listResources, type ResourceListItem } from "@/lib/api/resources";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { usePlanFeature } from "@/hooks/usePlanFeatures";
 
 export default function ResourcesListPage() {
@@ -60,6 +61,9 @@ export default function ResourcesListPage() {
   // #1560: read from the tier matrix's `resources` boolean; `null` while it
   // resolves, and the banner renders only on an explicit `false`.
   const canCreate = usePlanFeature("resources");
+  // #1643: the banner's title and description always render; only the button
+  // needs a Plan page this member can actually reach.
+  const canUpgrade = useCanUpgrade();
   const xlLabel = planLabelFromEnv("promax", locale);
 
   const fetchResources = useCallback(async () => {
@@ -107,13 +111,15 @@ export default function ResourcesListPage() {
           <AlertTitle>{t("planGate.title", { plan: xlLabel })}</AlertTitle>
           <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
             <span>{t("planGate.description", { plan: xlLabel })}</span>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => router.push("/workspace/settings/plan")}
-            >
-              {t("planGate.action", { plan: xlLabel })}
-            </Button>
+            {canUpgrade === true && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => router.push("/workspace/settings/plan")}
+              >
+                {t("planGate.action", { plan: xlLabel })}
+              </Button>
+            )}
           </AlertDescription>
         </Alert>
       )}
