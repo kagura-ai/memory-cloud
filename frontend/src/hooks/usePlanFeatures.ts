@@ -20,15 +20,24 @@
  * older API omits reads as "not included", mirroring the backend's free-tier
  * fallback for unrecognised plan names. Fail-PENDING on TRANSPORT: when the
  * fetch keeps failing the hook stays `null` instead of resolving to `false`,
- * because "matrix unavailable" must never upsell an entitled tenant or fire a
- * consumer's not-included branch (the connectors page strips its one-time
- * Slack install handle on `false`). The failure is not cached, so the next
- * mount retries.
+ * and the failure is not cached, so the next mount retries. That is the
+ * opposite direction to `useSystemFeatures` (fail-closed), on purpose; how
+ * the two compose into one gate answer is documented once, above
+ * `resolveGate` in `lib/gates/featureGates.ts` — read it before changing
+ * either hook.
+ *
+ * Gate DECISIONS go through `useFeatureGate` (`hooks/useFeatureGate.ts`);
+ * this module owns the shared matrix cache it reads.
  */
 
 import { useEffect, useMemo, useState } from "react";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { getPlanTierMatrix, type PlanTierFeature } from "@/lib/api/workspaces";
+
+// The scan lives in the pure gate module (which cannot import this React
+// module back — `lib/api/base.ts` imports it); re-exported beside
+// `planFeaturesFor`, the other pure matrix lookup.
+export { requiredTierFor } from "@/lib/gates/featureGates";
 
 /**
  * Every boolean column of the served tier row (#1551 create gates, #1583
@@ -40,7 +49,9 @@ import { getPlanTierMatrix, type PlanTierFeature } from "@/lib/api/workspaces";
  * `managed_llm?` (absent on an API predating #1569) in the union.
  */
 export type PlanFeature = {
-  [K in keyof PlanTierFeature]-?: NonNullable<PlanTierFeature[K]> extends boolean
+  [K in keyof PlanTierFeature]-?: NonNullable<
+    PlanTierFeature[K]
+  > extends boolean
     ? K
     : never;
 }[keyof PlanTierFeature];

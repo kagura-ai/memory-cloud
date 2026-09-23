@@ -13,6 +13,8 @@ import { renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/lib/api/base";
+import type { PlanTierFeature } from "@/lib/api/workspaces";
+import { WorkspaceRole } from "@/lib/auth/rbac";
 import type {
   FeatureGateFacts,
   RefusedGateState,
@@ -38,6 +40,13 @@ vi.mock("next-intl", () => ({
   useLocale: () => "en",
 }));
 
+// #1645: the shared tier matrix is passed through. `null` (unresolved) by
+// default, so every case above the matrix block behaves exactly as in #1644.
+let mockTiers: PlanTierFeature[] | null = null;
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanTierMatrix: () => mockTiers,
+}));
+
 function refusal(gate: FeatureGateFacts | undefined, status = 403): ApiError {
   return new ApiError({ message: "refused", status, gate });
 }
@@ -53,6 +62,7 @@ beforeEach(() => {
     currentWorkspace: { current_user_role: "owner" },
     loading: false,
   };
+  mockTiers = null;
 });
 
 describe("useErrorGate — not a gate refusal", () => {
@@ -178,10 +188,36 @@ describe("useErrorGate — feature resolution", () => {
     const gate = renderHook(() =>
       useErrorGate(refusal({ state: "role" }), "team_invitations"),
     ).result.current;
+    // #1645: the wire never names the role; GATE_SPECS does.
     expect(gate).toEqual({
       state: "role",
       feature: "team_invitations",
+      requiredRole: WorkspaceRole.Admin,
       canUpgrade: false,
     });
+  });
+});
+
+describe("useErrorGate — the matrix is passed through (#1645)", () => {
+  const row = (name: string, over: Partial<PlanTierFeature>) =>
+    ({ name, display_name: name, connectors: false, ...over }) as PlanTierFeature;
+
+  it("a refusal from a server that names no tier gets the matrix scan", () => {
+    mockTiers = [
+      row("free", {}),
+      row("team", { connectors: true, display_name: "Team" }),
+    ];
+    const gate = run(refusal({ state: "plan", feature: "connectors" }));
+    expect(gate).toMatchObject({
+      state: "plan",
+      requiredPlan: "team",
+      planLabel: "Team",
+      canUpgrade: true,
+    });
+  });
+
+  it("without the matrix the same refusal names no tier", () => {
+    const gate = run(refusal({ state: "plan", feature: "connectors" }));
+    expect(gate).not.toHaveProperty("requiredPlan");
   });
 });
