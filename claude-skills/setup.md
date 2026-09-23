@@ -24,6 +24,9 @@ Claude Code only. Codex CLI setup is the "Tool guardrails (hooks)" section of
   the key goes; do not go and fetch it.
 - When you read an MCP config file, project out `url`, `type` and *whether* an `Authorization`
   header exists — never the header's value.
+- **`claude mcp get` prints configured headers with their values**, so a Bearer entry puts its key on
+  your screen. Always pipe it through the redaction in Step 1, and do the same for any other command
+  that can echo a header.
 - Ask before every write, name the exact file, and show the before/after of the one value changing.
 
 ## Steps
@@ -32,12 +35,17 @@ Claude Code only. Codex CLI setup is the "Tool guardrails (hooks)" section of
 
 ```bash
 claude mcp list
-claude mcp get kagura-memory   # the entry name, if it is not this
+# claude mcp get prints configured headers WITH their values, so redact them before
+# reading the output: every header line is indented four spaces, nothing else is.
+claude mcp get kagura-memory | sed -E 's/^(    [A-Za-z0-9_-]+:).*/\1 <redacted>/'
 ```
 
 `claude mcp list` prints every configured server with its URL and health, and — when one name is
-defined in more than one scope — a **Conflicting scopes** diagnostic naming each scope and endpoint.
-`claude mcp get <name>` prints only the entry that **wins**: `Scope`, `Status`, `Type`, `URL`.
+defined in more than one scope — an `MCP config diagnostics` block with a `[Conflicting scopes]`
+warning. `claude mcp get <name>` prints only the entry that **wins**: `Scope`, `Status`, `Type`,
+`URL`, plus `Headers:` and `OAuth:` when the entry has them. The `sed` blanks the header *values* and
+leaves `Scope` / `Status` / `Type` / `URL` untouched; a redacted `Authorization:` line is still the
+signal that this entry carries a Bearer key. Never run `claude mcp get` unfiltered.
 
 Precedence, strongest first. A stronger scope shadows a weaker one of the same name silently, which
 is why editing the wrong file appears to do nothing:
@@ -174,6 +182,8 @@ Sends no key and no context id. Read the status:
 |---|---|
 | `401`, `403` | the MCP endpoint is there and wants credentials — **the URL is right** |
 | `404`, `405` | not an MCP endpoint; a site root answers `405`. Fix the path to end in `/mcp` or `/mcp/w/<workspace-id>` |
+| any other `4xx` | an MCP endpoint answered and rejected the probe on its merits (`400` a malformed session, `406` a stricter `Accept`) — the path is right; go to 6b |
+| `5xx` | the endpoint is there but the server is failing — retry, then check the deployment |
 | `000`, timeout | host unreachable: DNS, TLS, proxy, or the server is down |
 | `200` | something that answers an unauthenticated `tools/call` — not the Kagura endpoint |
 

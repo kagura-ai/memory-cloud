@@ -455,6 +455,15 @@ def test_setup_skill_never_echoes_a_credential() -> None:
     assert not re.search(r"kagura_(?!guardrails)[A-Za-z0-9]", text), "no key-shaped literal"
 
 
+def test_setup_skill_redacts_what_claude_mcp_get_echoes() -> None:
+    """`claude mcp get` prints configured headers with their values, key included (#1649)."""
+    text = _setup_skill()
+    assert "claude mcp get kagura-memory | sed" in text, "the detection step must pipe through sed"
+    assert "<redacted>" in text
+    assert "Never run `claude mcp get` unfiltered" in text
+    assert "prints configured headers with their values" in text
+
+
 def test_setup_skill_cleans_up_after_verifying() -> None:
     text = _setup_skill()
     assert 'KAGURA_SETUP_DATA="$(mktemp -d)"' in text
