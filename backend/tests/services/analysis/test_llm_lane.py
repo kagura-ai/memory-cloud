@@ -121,6 +121,47 @@ class TestResolveAnalysisLane:
         db.execute.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_managed_llm_refusal_is_plan_gate_when_the_provider_is_configured(
+        self, monkeypatch
+    ) -> None:
+        """#1644 S13: a managed model EXISTS and the tier lacks the feature —
+        so this arm of ``VAL-001`` is a plan gate with an upgrade path."""
+        from config.plan_tiers import get_plan_tier, required_plan_name
+
+        settings = _settings(monkeypatch, **_MANAGED)
+        db = _db(None, "basic")
+        with pytest.raises(ValidationError) as excinfo:
+            await resolve_analysis_lane(db, workspace_id=uuid4(), settings=settings)
+
+        details = excinfo.value.details
+        # Code and status are unchanged — the gate is an annotation beside them.
+        assert excinfo.value.status_code == 422
+        assert excinfo.value.error_code == "VAL-001"
+        assert details["field"] == "byok"
+        assert details["gate"] == "plan"
+        assert details["feature"] == "managed_llm"
+        assert details["current_plan"] == "basic"
+        required = required_plan_name("managed_llm")
+        assert details["required_plan"] == required
+        assert details["required_plan_display"] == get_plan_tier(required).display_name
+
+    @pytest.mark.asyncio
+    async def test_managed_llm_refusal_is_deployment_gate_without_a_managed_provider(
+        self, monkeypatch
+    ) -> None:
+        """No managed model configured at all — no tier the caller can buy
+        turns it on, so the refusal must carry no upgrade path."""
+        settings = _settings(monkeypatch)
+        db = _db(None)
+        with pytest.raises(ValidationError) as excinfo:
+            await resolve_analysis_lane(db, workspace_id=uuid4(), settings=settings)
+
+        details = excinfo.value.details
+        assert details["gate"] == "deployment"
+        assert details["feature"] == "managed_llm"
+        assert "required_plan" not in details
+
+    @pytest.mark.asyncio
     async def test_override_can_grant_managed_llm_to_free(self, monkeypatch) -> None:
         """PLAN_<KEY>_FEATURES (#1559) decides entitlement, not the tier name."""
         from config import plan_tiers

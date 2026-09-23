@@ -35,7 +35,8 @@ from uuid import UUID
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.plan_tiers import has_feature
+from config.constants import GATE_DEPLOYMENT
+from config.plan_tiers import feature_gate_details, has_feature
 from config.settings import Settings, get_settings
 from models.auth import ExternalAPIKey, Workspace
 from services.analysis.llm_caller import OPENAI_FALLBACK_CHAIN
@@ -261,11 +262,23 @@ async def resolve_analysis_lane(
             )
             return managed_lane(settings.managed_llm_provider, settings.managed_llm_model)
 
+    # #1644 S13: the code and the status stay (``VAL-001`` / 422 — this is not
+    # a plan refusal in every branch), but the details now say WHICH refusal it
+    # is. ``_refusal_message`` above already distinguishes the two worlds:
+    #   - the deployment HAS a managed model and the tier lacks the feature
+    #     → a plan gate, with an upgrade path;
+    #   - the deployment has no managed model at all → a deployment gate,
+    #     which is CTA-free by design; no tier the caller can buy turns it on.
     raise ValidationError(
         _refusal_message(settings, plan_name),
         field="byok",
         provider=DEFAULT_PROVIDER,
         workspace_id=str(workspace_uuid),
+        **(
+            feature_gate_details(plan_name, MANAGED_LLM_FEATURE)
+            if settings.managed_llm_provider
+            else {"gate": GATE_DEPLOYMENT, "feature": MANAGED_LLM_FEATURE}
+        ),
     )
 
 

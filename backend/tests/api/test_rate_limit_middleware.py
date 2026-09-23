@@ -383,3 +383,73 @@ class TestRateLimitMiddleware:
             await middleware._check_daily_quota(
                 "user123", "/api/v1/memory/remember", PlanName.FREE, None
             )
+
+
+class TestDailyQuotaBodyCarriesTheGate:
+    """#1644 S14: the inline 429 body used to SUBSTITUTE ``{"retry_after":
+    86400}`` for the exception's own ``details``, so the gate kind and the
+    quota type never reached the client on this path."""
+
+    @pytest.fixture
+    def middleware(self):
+        return RateLimitMiddleware(MagicMock())
+
+    @pytest.fixture
+    def mock_request(self):
+        request = MagicMock(spec=Request)
+        request.url.path = "/api/v1/memory/remember"
+        request.state.user_id = "test_user_123"
+        request.state.user = {"user_id": "test_user_123", "role": "user"}
+        return request
+
+    @pytest.mark.asyncio
+    @patch("api.middleware.rate_limit.increment_counter")
+    @patch.object(RateLimitMiddleware, "_get_user_plan")
+    async def test_daily_quota_body_preserves_exception_details_and_retry_after(
+        self, mock_get_plan, mock_increment, middleware, mock_request
+    ):
+        import json
+
+        mock_get_plan.return_value = ("free", None)
+        # Under the per-minute limit, over the daily one.
+        mock_increment.side_effect = [1, 10_000_000]
+
+        async def _call_next(request):
+            return Response(content=b"OK", media_type="text/plain")
+
+        response = await middleware.dispatch(mock_request, _call_next)
+
+        assert response.status_code == 429
+        body = json.loads(bytes(response.body))
+        assert body["error"] == "QUOTA-001"
+        details = body["details"]
+        # Still the key this path owns.
+        assert details["retry_after"] == 86400
+        # ...and now the exception's own annotation as well.
+        assert details["gate"] == "quota"
+        assert details["quota_type"] == "api_mcp_daily"
+        # This family has no counts to report (§ the wire contract).
+        assert "current" not in details
+        assert "limit" not in details
+
+    @pytest.mark.asyncio
+    @patch("api.middleware.rate_limit.increment_counter")
+    @patch("api.middleware.rate_limit.get_plan_tier")
+    async def test_zero_limit_raises_declare_their_quota_type_without_counts(
+        self, mock_get_tier, mock_increment, middleware
+    ):
+        from config.plan_tiers import PLAN_FREE
+
+        mock_get_tier.return_value = PLAN_FREE
+
+        for path, quota_type in (
+            ("/api/v1/users/me", "api_rest_daily"),
+            ("/api/v1/public/contexts", "api_public_daily"),
+        ):
+            with pytest.raises(QuotaExceededError) as exc_info:
+                await middleware._check_daily_quota("user123", path, PlanName.FREE, None)
+            details = exc_info.value.details
+            assert details["gate"] == "quota"
+            assert details["quota_type"] == quota_type
+            assert "current" not in details
+            assert "limit" not in details
