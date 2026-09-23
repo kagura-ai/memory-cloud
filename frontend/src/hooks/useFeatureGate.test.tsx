@@ -9,7 +9,7 @@
  */
 
 import { act, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PlanTierFeature } from "@/lib/api/workspaces";
 import type { FeatureGate } from "@/lib/gates/featureGates";
@@ -269,5 +269,349 @@ describe("useFeatureGate (#1645)", () => {
     rerender(<Harness tick={1} />);
     expect(out()).toBe("plan:1");
     expect(seen[seen.length - 1]).toBe(settled);
+  });
+});
+
+// ── The whole truth table, end to end ───────────────────────────────────────
+//
+// Every cell of {tier matrix} x {/system/info} x {workspace} x {role, tier},
+// through the REAL caches: a pending input is a promise that never settles, a
+// failed one is an API call that rejects on all three attempts. The expected
+// column is written from decisions.md §5.3 (precedence + pending truth table)
+// and §1.6 (canUpgrade), not from resolveGate, so the two are checked against
+// each other. The invariants below it restate the load-bearing rules on their
+// own, so a wrong table entry cannot hide a violation.
+
+type MatrixState = "pending" | "resolved" | "failed";
+type InfoState = "pending" | "on" | "off" | "absent" | "failed";
+type Role = "member" | "admin" | "owner";
+type WorkspaceCell =
+  | { kind: "unresolved" } // null, still loading
+  | { kind: "none" } // null, not loading: no workspace at all (row 12)
+  | { kind: "resolved"; role: Role; plan: "free" | "promax"; loading: boolean };
+
+const MATRIX_STATES: readonly MatrixState[] = ["pending", "resolved", "failed"];
+const INFO_STATES: readonly InfoState[] = [
+  "pending",
+  "on",
+  "off",
+  "absent",
+  "failed",
+];
+const WORKSPACE_CELLS: readonly WorkspaceCell[] = [
+  { kind: "unresolved" },
+  { kind: "none" },
+  ...(["member", "admin", "owner"] as const).flatMap((role) =>
+    (["free", "promax"] as const).map((plan): WorkspaceCell => ({
+      kind: "resolved",
+      role,
+      plan,
+      loading: false,
+    })),
+  ),
+  // A workspace switch in flight: the old workspace is still current.
+  { kind: "resolved", role: "owner", plan: "free", loading: true },
+];
+
+/** Every flag a gate key below reads; "absent" is an older backend. */
+const INFO_FEATURES: Record<
+  Exclude<InfoState, "pending" | "failed">,
+  Record<string, boolean>
+> = {
+  on: { plan_page: true, reranking: true, managed_llm: true },
+  off: { plan_page: false, reranking: false, managed_llm: false },
+  absent: {},
+};
+
+// Free lacks everything; promax has everything.
+const TABLE_TIERS: PlanTierFeature[] = [
+  row("free", {
+    reranking: false,
+    managed_llm: false,
+    analysis_runs_per_day: 0,
+    sleep_enabled_contexts_limit: 0,
+  }),
+  row("promax", {
+    shared_contexts: true,
+    team_invitations: true,
+    reranking: true,
+    managed_llm: true,
+    analysis_runs_per_day: 15,
+    sleep_enabled_contexts_limit: 15,
+  }),
+];
+
+/**
+ * The gate keys under test, described the way decisions.md §1.2 does:
+ * which flags (and their polarity), which minimum role, which matrix test.
+ */
+/** The /system/info payload, under a name the cells' `info` does not shadow. */
+const infoPayload = info;
+
+const KEY_FACTS = {
+  team_invitations: { flags: [], role: "admin", matrix: "team_invitations" },
+  shared_contexts: { flags: [], role: null, matrix: "shared_contexts" },
+  reranking: {
+    flags: [{ key: "reranking", defaultOn: true }],
+    role: null,
+    matrix: "reranking",
+  },
+  sleep_reports: {
+    flags: [],
+    role: "admin",
+    matrix: "sleep_enabled_contexts_limit",
+  },
+  memory_analysis: {
+    flags: [],
+    role: "owner",
+    matrix: "analysis_runs_per_day",
+  },
+  managed_llm: {
+    flags: [{ key: "managed_llm", defaultOn: false }],
+    role: null,
+    matrix: "managed_llm",
+  },
+  plan_page: {
+    flags: [{ key: "plan_page", defaultOn: false }],
+    role: "owner",
+    matrix: null,
+  },
+} as const satisfies Record<
+  string,
+  {
+    flags: readonly { key: string; defaultOn: boolean }[];
+    role: "admin" | "owner" | null;
+    matrix: keyof PlanTierFeature | null;
+  }
+>;
+type TableKey = keyof typeof KEY_FACTS;
+const TABLE_KEYS = Object.keys(KEY_FACTS) as TableKey[];
+
+const ROLE_RANK: Record<Role, number> = { member: 1, admin: 2, owner: 3 };
+
+/** decisions.md §5.3 + §1.6, cell by cell. Returns "state" or "plan+cta". */
+function expectedCell(
+  key: TableKey,
+  matrix: MatrixState,
+  info: InfoState,
+  ws: WorkspaceCell,
+): string {
+  const facts = KEY_FACTS[key];
+  const features =
+    info === "pending" ? null : info === "failed" ? {} : INFO_FEATURES[info];
+
+  // 1. deployment: only once /system/info has resolved (the failed {} too),
+  //    each flag by its own polarity.
+  if (
+    features !== null &&
+    facts.flags.some((f) =>
+      f.defaultOn ? features[f.key] === false : features[f.key] !== true,
+    )
+  ) {
+    return "deployment";
+  }
+  // 2. pending: an unresolved (or failed) matrix, an unresolved flag, or no
+  //    resolved workspace — never an upsell.
+  if (facts.flags.length > 0 && features === null) return "pending";
+  if (facts.matrix !== null && matrix !== "resolved") return "pending";
+  if (
+    (facts.matrix !== null || facts.role !== null) &&
+    ws.kind !== "resolved"
+  ) {
+    return "pending";
+  }
+  if (ws.kind !== "resolved") return "allowed"; // unreachable for these keys
+  // 3. role, above plan: a member cannot buy their way to owner.
+  if (facts.role !== null && ROLE_RANK[ws.role] < ROLE_RANK[facts.role]) {
+    return "role";
+  }
+  // 4. plan. The CTA: the Plan page is on here (resolved true), the workspace
+  //    has hydrated, and this member is the owner.
+  if (facts.matrix !== null) {
+    const tierRow = TABLE_TIERS.find((t) => t.name === ws.plan)!;
+    const value = tierRow[facts.matrix];
+    const passes = typeof value === "number" ? value > 0 : value === true;
+    if (!passes) {
+      const cta =
+        features !== null &&
+        features.plan_page === true &&
+        !ws.loading &&
+        ws.role === "owner";
+      return cta ? "plan+cta" : "plan";
+    }
+  }
+  return "allowed";
+}
+
+function cellName(ws: WorkspaceCell): string {
+  return ws.kind === "resolved"
+    ? `${ws.role}@${ws.plan}${ws.loading ? "(switching)" : ""}`
+    : ws.kind;
+}
+
+describe("useFeatureGates — every cell of the truth table (#1645)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * Render one harness per workspace cell under one (matrix, /system/info)
+   * pair, all on the same real caches, and read back every key's answer.
+   */
+  async function observe(
+    matrix: MatrixState,
+    info: InfoState,
+  ): Promise<{
+    cells: Map<string, Record<TableKey, string>>;
+    matrixCalls: number;
+    infoCalls: number;
+  }> {
+    vi.resetModules();
+    const never = () => new Promise<never>(() => {});
+    const getPlanTierMatrix = vi.fn(
+      matrix === "pending"
+        ? never
+        : matrix === "failed"
+          ? () => Promise.reject(new Error("tiers down"))
+          : () => Promise.resolve(TABLE_TIERS),
+    );
+    const getSystemInfo = vi.fn(
+      info === "pending"
+        ? never
+        : info === "failed"
+          ? () => Promise.reject(new Error("info down"))
+          : () => Promise.resolve(infoPayload(INFO_FEATURES[info])),
+    );
+    const { createContext, useContext } = await import("react");
+    const WsCtx = createContext<{
+      currentWorkspace: Workspace;
+      loading: boolean;
+    }>({ currentWorkspace: null, loading: true });
+    vi.doMock("@/lib/api/workspaces", () => ({ getPlanTierMatrix }));
+    vi.doMock("@/lib/api/system", () => ({ getSystemInfo }));
+    vi.doMock("@/contexts/WorkspaceContext", () => ({
+      useWorkspace: () => useContext(WsCtx),
+    }));
+    vi.doMock("next-intl", () => ({ useLocale: () => "en" }));
+    const { useFeatureGates } = await import("./useFeatureGate");
+
+    function Cell({ id }: { id: string }) {
+      const gates = useFeatureGates(TABLE_KEYS);
+      return (
+        <div data-testid={id}>
+          {JSON.stringify(
+            Object.fromEntries(
+              TABLE_KEYS.map((key) => [
+                key,
+                `${gates[key].state}${gates[key].canUpgrade ? "+cta" : ""}`,
+              ]),
+            ),
+          )}
+        </div>
+      );
+    }
+
+    vi.useFakeTimers();
+    render(
+      <>
+        {WORKSPACE_CELLS.map((ws) => (
+          <WsCtx.Provider
+            key={cellName(ws)}
+            value={
+              ws.kind === "resolved"
+                ? {
+                    currentWorkspace: {
+                      plan_name: ws.plan,
+                      current_user_role: ws.role,
+                    },
+                    loading: ws.loading,
+                  }
+                : { currentWorkspace: null, loading: ws.kind === "unresolved" }
+            }
+          >
+            <Cell id={cellName(ws)} />
+          </WsCtx.Provider>
+        ))}
+      </>,
+    );
+    // Past both hooks' three attempts (500 ms + 1000 ms back-off).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    const cells = new Map<string, Record<TableKey, string>>();
+    for (const ws of WORKSPACE_CELLS) {
+      cells.set(
+        cellName(ws),
+        JSON.parse(screen.getByTestId(cellName(ws)).textContent ?? "{}"),
+      );
+    }
+    return {
+      cells,
+      matrixCalls: getPlanTierMatrix.mock.calls.length,
+      infoCalls: getSystemInfo.mock.calls.length,
+    };
+  }
+
+  const PAIRS = MATRIX_STATES.flatMap((matrix) =>
+    INFO_STATES.map((info) => [matrix, info] as const),
+  );
+
+  it.each(PAIRS)("matrix %s, /system/info %s", async (matrix, info) => {
+    const { cells, matrixCalls, infoCalls } = await observe(matrix, info);
+
+    // The failure cells really are failures: all three attempts spent.
+    if (matrix === "failed") expect(matrixCalls).toBe(3);
+    if (info === "failed") expect(infoCalls).toBe(3);
+
+    const mismatches: string[] = [];
+    for (const ws of WORKSPACE_CELLS) {
+      const got = cells.get(cellName(ws))!;
+      for (const key of TABLE_KEYS) {
+        const want = expectedCell(key, matrix, info, ws);
+        if (got[key] !== want) {
+          mismatches.push(
+            `${cellName(ws)} ${key}: got ${got[key]}, want ${want}`,
+          );
+        }
+
+        const [state] = got[key].split("+");
+        const hasCta = got[key].endsWith("+cta");
+        const facts = KEY_FACTS[key];
+        // No upsell while any input it depends on is pending or failed.
+        if (state === "plan") {
+          expect(matrix).toBe("resolved");
+          expect(ws.kind).toBe("resolved");
+        }
+        // A matrix failure is pending (or a resolved flag-off), never plan.
+        if (facts.matrix !== null && matrix !== "resolved") {
+          expect(["pending", "deployment"]).toContain(state);
+        }
+        // An in-flight /system/info can never answer "deployment".
+        if (info === "pending") expect(state).not.toBe("deployment");
+        if (info === "pending" && facts.flags.length > 0) {
+          expect(state).toBe("pending");
+        }
+        // A failed /system/info falls closed for every default-off flag.
+        if (info === "failed" && facts.flags.some((f) => !f.defaultOn)) {
+          expect(state).toBe("deployment");
+        }
+        // A CTA only on a plan gate, for the owner, with the Plan page known on.
+        if (hasCta) {
+          expect(state).toBe("plan");
+          expect(info).toBe("on");
+          expect(ws.kind === "resolved" && ws.role).toBe("owner");
+          expect(ws.kind === "resolved" && ws.loading).toBe(false);
+        }
+        // No workspace at all: pending for every tier or role gate, never plan.
+        if (
+          ws.kind !== "resolved" &&
+          (facts.matrix !== null || facts.role !== null)
+        ) {
+          expect(["pending", "deployment"]).toContain(state);
+        }
+      }
+    }
+    expect(mismatches).toEqual([]);
   });
 });
