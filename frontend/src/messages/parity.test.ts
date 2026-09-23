@@ -28,6 +28,7 @@ import {
 } from "@/components/common/FeatureGateNotice";
 import { WorkspaceRole } from "@/lib/auth/rbac";
 import { GATE_KEYS, type RefusedGateState } from "@/lib/gates/featureGates";
+import { DEFAULT_PLAN_LABELS } from "@/lib/utils/planLabel";
 
 import en from "./en.json";
 import ja from "./ja.json";
@@ -307,6 +308,26 @@ describe.each(CATALOGUES)("%s gate.* contract", (locale, messages) => {
     const named = gateLeaves.filter(([, message]) =>
       tierWords(locale, message),
     );
+    expect(named).toEqual([]);
+  });
+
+  // 5, widened: the spec's two regexes cover the registry keys and the ja
+  // words, not the LABELS a default deployment renders (planLabel.ts: S / M /
+  // L / XL) or the other documented label sets (Trial / Starter, 無料 /
+  // スターター). A hardcoded "XL" pins a tier as surely as "Pro" does.
+  it("names no plan tier label either (S / M / L / XL, Trial, Starter, 無料 …)", () => {
+    const labels = Object.values(DEFAULT_PLAN_LABELS).join("|");
+    const asciiLabel = new RegExp(
+      `(?<![A-Za-z0-9_])(${labels})(?![A-Za-z0-9_])`,
+    );
+    const named = gateLeaves.filter(([, message]) => {
+      const prose = message.replace(/\{[^}]*\}/g, "");
+      return (
+        asciiLabel.test(prose) ||
+        /\b(trial|starter)\b/i.test(prose) ||
+        (locale === "ja" && /無料|スターター/.test(prose))
+      );
+    });
     expect(named).toEqual([]);
   });
 
