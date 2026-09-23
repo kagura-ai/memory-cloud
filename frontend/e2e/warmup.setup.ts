@@ -22,6 +22,8 @@ import { test as setup } from "@playwright/test";
 const WARM_ROUTES = [
   "/login",
   "/device",
+  "/join/e2e-a11y-warmup-token-0000000",
+  "/signup-blocked",
   "/invite/e2e-a11y-warmup-token",
   "/workspace/dashboard",
   "/profile",

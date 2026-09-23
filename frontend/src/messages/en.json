@@ -264,7 +264,14 @@
     "totpCode": "Verification Code",
     "verify": "Verify",
     "verifying": "Verifying...",
-    "adminLogin": "Admin Login"
+    "adminLogin": "Admin Login",
+    "inviteEntry": {
+      "toggle": "I have an invite link",
+      "label": "Invite link",
+      "placeholder": "Paste the invite link you received",
+      "submit": "Continue with invite",
+      "invalid": "That doesn't look like an invite link. Paste the whole link you received."
+    }
   },
   "landing": {
     "heroTitle": "Never lose your AI context",
@@ -3785,7 +3792,8 @@
       "alreadySignedIn": {
         "title": "You're already signed in",
         "message": "Invite links are for new accounts. This link has not been used, so it still works for someone else.",
-        "goToDashboard": "Go to the dashboard"
+        "goToDashboard": "Go to the dashboard",
+        "continue": "Continue"
       },
       "disabled": {
         "title": "Invites aren't available",

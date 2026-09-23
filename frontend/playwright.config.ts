@@ -51,7 +51,8 @@ export default defineConfig({
       stdout: "pipe",
       stderr: "pipe",
     },
-    // Mock OAuth IdP for the account-linking E2E (#937). Gated on PW_OAUTH_IDP
+    // Mock OAuth IdP for the account-linking (#937) and beta-invite hand-off
+    // (#1655) E2E specs. Gated on PW_OAUTH_IDP
     // (set by `npm run test:e2e:oauth`) so the a11y lanes are NOT coupled to the
     // mock's health — a bug in the mock must never fail an unrelated a11y run.
     ...(process.env.PW_OAUTH_IDP === "1"
@@ -84,7 +85,7 @@ export default defineConfig({
     {
       name: "authed",
       testMatch:
-        /e2e\/(authed-a11y\/.*|admin-.*|oauth-account-linking)\.spec\.ts$/,
+        /e2e\/(authed-a11y\/.*|admin-.*|oauth-account-linking|oauth-beta-invite-device)\.spec\.ts$/,
       dependencies: ["setup"],
       use: { browserName: "chromium", storageState: STORAGE_STATE },
     },

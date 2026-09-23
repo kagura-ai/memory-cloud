@@ -264,7 +264,14 @@
     "totpCode": "認証コード",
     "verify": "認証",
     "verifying": "認証中...",
-    "adminLogin": "管理者ログイン"
+    "adminLogin": "管理者ログイン",
+    "inviteEntry": {
+      "toggle": "招待リンクをお持ちの方",
+      "label": "招待リンク",
+      "placeholder": "受け取った招待リンクを貼り付け",
+      "submit": "招待リンクで続ける",
+      "invalid": "招待リンクの形式ではありません。受け取ったリンクをそのまま貼り付けてください。"
+    }
   },
   "landing": {
     "heroTitle": "AIコンテキストを二度と失わない",
@@ -3785,7 +3792,8 @@
       "alreadySignedIn": {
         "title": "すでにサインイン済みです",
         "message": "招待リンクは新規アカウント用です。このリンクは未使用のままなので、ほかの方が使えます。",
-        "goToDashboard": "ダッシュボードへ"
+        "goToDashboard": "ダッシュボードへ",
+        "continue": "続ける"
       },
       "disabled": {
         "title": "招待は利用できません",

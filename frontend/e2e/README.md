@@ -126,6 +126,20 @@ yet Required (#768); boot/timing may need tuning over the first runs. The
 (the admin fixture user is a password user, so that UI state is unreachable in
 this E2E without seeding a dedicated OAuth-only user).
 
+## Beta invite hand-off E2E (mock IdP) — `oauth-beta-invite-device.spec.ts` (#1655)
+
+Runs in the same `frontend-e2e-oauth` lane (`npm run test:e2e:oauth`). The API
+additionally needs `ENABLE_BETA_INVITES=true`; the spec turns the signup gate on
+in `manual` mode through the admin API and restores it afterwards.
+
+It registers a public client, starts a device authorization, mints an invite as
+the admin, and opens `/join/<token>?return_to=/device?user_code=<code>` in a
+fresh browser context. That context carries a `mock_idp_gh` cookie (base64url
+JSON `{ sub, login, email, name }`) that makes the mock IdP return a brand-new
+GitHub identity, so each run is a real first sign-up. It then asserts the device
+approval, the token poll and the redeemed invite, and that the same sign-in
+without an invite ends on `/signup-blocked`.
+
 ## Adding a new authenticated admin spec
 
 Use the admin auth fixture at `e2e/fixtures/admin-auth.ts`:
