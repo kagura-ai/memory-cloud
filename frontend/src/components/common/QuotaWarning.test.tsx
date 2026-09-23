@@ -8,16 +8,42 @@
  * `NextIntlClientProvider` loaded with ja.json, so the assertions are on the
  * Japanese sentences a Japanese user actually sees — and on the absence of the
  * English literals this issue removed.
+ *
+ * #1643 added the CTA-visibility rule INSIDE this component (it now subscribes
+ * to `useSystemFeatures` and `WorkspaceContext`), so both are mocked here; the
+ * defaults are "Plan page on, viewer is the owner" so every pre-existing
+ * assertion keeps its original meaning.
  */
 
 import { render, screen } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import type { ReactElement } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { QuotaWarning } from "./QuotaWarning";
 import en from "@/messages/en.json";
 import ja from "@/messages/ja.json";
+
+/** #1643: `null` means /system/info is still in flight. */
+let mockFeatures: Record<string, boolean> | null = { plan_page: true };
+let mockRole: string | null = "owner";
+
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => mockFeatures,
+}));
+
+vi.mock("@/contexts/WorkspaceContext", () => ({
+  useWorkspace: () => ({
+    currentWorkspace: { id: "ws-1", current_user_role: mockRole },
+    currentWorkspaceId: "ws-1",
+    loading: false,
+  }),
+}));
+
+beforeEach(() => {
+  mockFeatures = { plan_page: true };
+  mockRole = "owner";
+});
 
 /** The resource noun a Japanese caller passes (UsageStats sends t("memories")). */
 const RESOURCE_JA = ja.usageStats.memories;
@@ -149,5 +175,83 @@ describe("QuotaWarning i18n", () => {
     );
     expect(body).toBeInTheDocument();
     expect(body.textContent).not.toContain("memories");
+  });
+});
+
+describe("QuotaWarning upgrade CTA (#1643)", () => {
+  /** The usage numbers and the "you exceeded your quota" sentence always render. */
+  function expectQuotaCopy() {
+    expect(screen.getByText(ja.quotaWarning.titleExceeded)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        ja.quotaWarning.bodyExceeded.replace("{resource}", RESOURCE_JA),
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/100\.0%/)).toBeInTheDocument();
+  }
+
+  function renderExceeded() {
+    renderJa(
+      <QuotaWarning
+        current={100}
+        limit={100}
+        resourceLabel={RESOURCE_JA}
+        onUpgrade={vi.fn()}
+      />,
+    );
+  }
+
+  it("renders the quota copy but no Upgrade button when plan_page is off", () => {
+    mockFeatures = {};
+    renderExceeded();
+
+    expectQuotaCopy();
+    expect(
+      screen.queryByRole("button", { name: ja.quotaWarning.upgrade }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders no Upgrade button for a non-owner on a plan_page deployment", () => {
+    mockRole = "admin";
+    renderExceeded();
+
+    expectQuotaCopy();
+    expect(
+      screen.queryByRole("button", { name: ja.quotaWarning.upgrade }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders the Upgrade button for an owner at 100%", () => {
+    renderExceeded();
+
+    expectQuotaCopy();
+    expect(
+      screen.getByRole("button", { name: ja.quotaWarning.upgrade }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders no Upgrade button while /system/info is unresolved", () => {
+    mockFeatures = null;
+    renderExceeded();
+
+    expectQuotaCopy();
+    expect(
+      screen.queryByRole("button", { name: ja.quotaWarning.upgrade }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("still renders nothing below 80% regardless of canUpgrade", () => {
+    // Also proves the hook call above the `percentage < 80` early return is
+    // harmless: the component still short-circuits to null.
+    mockFeatures = null;
+    const { container } = renderJa(
+      <QuotaWarning
+        current={79}
+        limit={100}
+        resourceLabel={RESOURCE_JA}
+        onUpgrade={vi.fn()}
+      />,
+    );
+    expect(container).toBeEmptyDOMElement();
   });
 });

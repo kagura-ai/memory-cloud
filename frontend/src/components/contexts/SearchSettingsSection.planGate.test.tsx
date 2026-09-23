@@ -11,6 +11,11 @@
  *
  * These tests therefore render against the REAL next-intl provider and the
  * REAL message catalogues, which is the only place that regression is visible.
+ *
+ * #1643: the <link> chunk is now a real <Link> only where the Plan page is
+ * reachable (`plan_page` on AND the viewer is the workspace owner), so the
+ * mocks below say so; the flag-off cases pin that the SENTENCE survives —
+ * link text included, still translated — when the link does not.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -34,10 +39,16 @@ const SEARCH_DEFAULTS = {
   reranker_provider: "voyage",
   reranker_model: "rerank-2",
 };
+/** #1643: `plan_page` decides whether the chunk is a link. */
+let mockPlanPage = true;
 vi.mock("@/hooks/useSystemFeatures", () => ({
-  useSystemFeatures: () => ({ byok: true, reranking: true }),
+  useSystemFeatures: () => ({
+    byok: true,
+    reranking: true,
+    plan_page: mockPlanPage,
+  }),
   useSystemInfo: () => ({
-    features: { byok: true, reranking: true },
+    features: { byok: true, reranking: true, plan_page: mockPlanPage },
     search_defaults: SEARCH_DEFAULTS,
   }),
 }));
@@ -102,9 +113,17 @@ function renderGate(locale: "en" | "ja") {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // Free workspace → the upgrade alert is the gate that renders.
+  mockPlanPage = true;
+  // Free workspace → the upgrade alert is the gate that renders. The owner
+  // role is what #1643 requires for the CTA half of it.
   mockUseWorkspace.mockReturnValue({
-    currentWorkspace: { id: "ws-1", plan_name: "free" },
+    currentWorkspace: {
+      id: "ws-1",
+      plan_name: "free",
+      current_user_role: "owner",
+    },
+    currentWorkspaceId: "ws-1",
+    loading: false,
   });
   mockGetConfig.mockResolvedValue({
     context_id: "ctx-1",
@@ -144,6 +163,41 @@ describe("SearchSettingsSection free-plan reranker gate (#1642)", () => {
     const link = screen.getByRole("link", { name: EN_LINK });
     expect(link).toHaveAttribute("href", PLAN_HREF);
     expect(sentence).toContainElement(link);
+  });
+});
+
+describe("SearchSettingsSection reranker gate, CTA withheld (#1643)", () => {
+  it("ja: renders the whole sentence as plain text when plan_page is off", async () => {
+    mockPlanPage = false;
+    renderGate("ja");
+
+    // Same sentence, link text included and still translated — just not a link.
+    const sentence = await screen.findByText(wholeText(JA_SENTENCE));
+    expect(sentence.textContent).toContain(JA_LINK);
+    expect(
+      screen.queryByRole("link", { name: JA_LINK }),
+    ).not.toBeInTheDocument();
+    expect(document.querySelector(`a[href="${PLAN_HREF}"]`)).toBeNull();
+  });
+
+  it("en: renders the whole sentence as plain text for a non-owner", async () => {
+    mockUseWorkspace.mockReturnValue({
+      currentWorkspace: {
+        id: "ws-1",
+        plan_name: "free",
+        current_user_role: "admin",
+      },
+      currentWorkspaceId: "ws-1",
+      loading: false,
+    });
+    renderGate("en");
+
+    const sentence = await screen.findByText(wholeText(EN_SENTENCE));
+    expect(sentence.textContent).toContain(EN_LINK);
+    expect(
+      screen.queryByRole("link", { name: EN_LINK }),
+    ).not.toBeInTheDocument();
+    expect(document.querySelector(`a[href="${PLAN_HREF}"]`)).toBeNull();
   });
 });
 
