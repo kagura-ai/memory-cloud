@@ -49,6 +49,7 @@ import {
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatDate } from "@/lib/utils/datetime";
+import { isPlanTier, planLabelFromEnv } from "@/lib/utils/planLabel";
 import { QuotaWarning } from "@/components/common/QuotaWarning";
 
 interface CurrentUsage {
@@ -259,7 +260,10 @@ export const UsageStats = forwardRef<UsageStatsRef, UsageStatsProps>(
         {/* Current Usage Cards */}
         <div>
           <h2 className="text-2xl font-bold mb-4">
-            {t("usage")} - {currentUsage.plan.plan_name.toUpperCase()}{" "}
+            {t("usage")} -{" "}
+            {isPlanTier(currentUsage.plan.plan_name)
+              ? planLabelFromEnv(currentUsage.plan.plan_name, locale)
+              : currentUsage.plan.plan_name}{" "}
             {t("plan")}
           </h2>
 

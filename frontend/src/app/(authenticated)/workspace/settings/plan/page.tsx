@@ -39,7 +39,8 @@ import {
 } from "@/lib/utils/planLabel";
 import { PlanFeatureMatrix } from "@/components/plan/PlanFeatureMatrix";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { useFeatureGate } from "@/hooks/useFeatureGate";
+import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 
 export default function WorkspacePlanPage() {
   const t = useTranslations("workspace");
@@ -48,6 +49,10 @@ export default function WorkspacePlanPage() {
   const { currentWorkspaceId, currentWorkspace } = useWorkspace();
   const { toast } = useToast();
   const systemFeatures = useSystemFeatures();
+  // #1646 D3: the page's own deployment gate (ENABLE_PLAN_PAGE). Only
+  // `pending` and `deployment` are acted on here; the `role` answer falls
+  // through to the owner/non-owner flow below, unchanged (P-12 / P-25).
+  const planPage = useFeatureGate("plan_page");
 
   const [plan, setPlan] = useState<WorkspacePlanInfo | null>(null);
   const [loading, setLoading] = useState(true);
@@ -110,19 +115,19 @@ export default function WorkspacePlanPage() {
   // Issue #1145: the Plan page is gated behind the backend ENABLE_PLAN_PAGE
   // flag. Wait for it, then render a "not available" notice when it's off (the
   // sidebar entry is hidden too, so this only fires on direct navigation).
-  if (systemFeatures === null) {
+  if (planPage.state === "pending") {
     return <SpinnerLoading size="lg" message={tCommon("loading")} />;
   }
-  if (!systemFeatures.plan_page) {
+  if (planPage.state === "deployment") {
+    // A deployment notice never carries an upgrade CTA — here above all,
+    // where one would send the reader to the page they are on.
     return (
       <PageContainer>
         <PageHeader
           title={t("planPage.title")}
           description={t("planPage.description")}
         />
-        <Alert>
-          <AlertDescription>{t("planPage.featureDisabled")}</AlertDescription>
-        </Alert>
+        <FeatureGateNotice variant="page" gate={planPage} />
       </PageContainer>
     );
   }

@@ -10,8 +10,6 @@
  */
 
 import { useCallback } from "react";
-import { useRouter } from "next/navigation";
-import { Moon } from "lucide-react";
 import { useTranslations } from "next-intl";
 import {
   SleepReportsList,
@@ -20,7 +18,7 @@ import {
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
-import { EmptyState } from "@/components/ui/empty-state";
+import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
@@ -28,14 +26,14 @@ import { fetchWorkspaceSleepReports } from "@/lib/api";
 
 export default function WorkspaceSleepReportsPage() {
   const t = useTranslations("workspace");
-  const router = useRouter();
   const { currentWorkspace, currentWorkspaceId, loading } = useWorkspace();
 
   // Sleep Maintenance needs a tier with `sleep_enabled_contexts_limit > 0`
   // (#1645: read from the tier matrix, not a tier rank — the server's own
   // gate through its zero floor). Mirror the resources page: keep the sidebar
-  // entry, gate the page with an upgrade CTA that routes to the Plan page
-  // (#1137). Pending — workspace or matrix still resolving — never gates.
+  // entry, gate the page with the plan notice, whose CTA routes to the Plan
+  // page (#1137) where the member may upgrade. Pending — workspace or matrix
+  // still resolving — never gates.
   // The gate is admin-minimum and answers the role first, so a member on a
   // low tier falls through to the role branch below, never the upsell.
   const gate = useFeatureGate("sleep_reports");
@@ -61,33 +59,16 @@ export default function WorkspaceSleepReportsPage() {
   }
 
   if (gate.state === "plan") {
-    // The tier the matrix names, ready for copy that names one (#1646); none
-    // when no served tier has Sleep Maintenance.
-    const planValues =
-      gate.planLabel !== undefined ? { plan: gate.planLabel } : undefined;
+    // #1646 P8: the whole page is the plan notice — the tier the matrix
+    // names (none when no served tier has Sleep Maintenance), and a CTA only
+    // where the gate's canUpgrade allows one.
     return (
-      <PageContainer>
-        <PageHeader
-          title={t("sleepReports.title")}
-          description={t("sleepReports.description")}
-        />
-        {/* #1643: EmptyState renders its Button only when both actionLabel
-            and onAction are set, so withholding them is how "no action" is
-            expressed here. The title and description always render.
-            #1645: the gate's own canUpgrade, not the raw Plan-page answer —
-            a gate no served tier lifts offers no upgrade. */}
-        <EmptyState
-          icon={Moon}
-          title={t("sleepReports.planGate.title", planValues)}
-          description={t("sleepReports.planGate.description", planValues)}
-          {...(gate.canUpgrade
-            ? {
-                actionLabel: t("sleepReports.planGate.action"),
-                onAction: () => router.push("/workspace/settings/plan"),
-              }
-            : {})}
-        />
-      </PageContainer>
+      <FeatureGateNotice
+        variant="page"
+        gate={gate}
+        pageTitle={t("sleepReports.title")}
+        pageDescription={t("sleepReports.description")}
+      />
     );
   }
 

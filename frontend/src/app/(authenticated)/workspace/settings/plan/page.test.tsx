@@ -9,6 +9,10 @@
  *   - free (unsubscribed) owners keep the original "change plan" wording and
  *     see no billing-amount hint.
  *   - non-owners see the owner-only note and no billing button.
+ *
+ * #1646 D3: the ENABLE_PLAN_PAGE-off notice is the `plan_page` deployment
+ * gate rendered by FeatureGateNotice (`gate.deployment.*` — the key-echo
+ * translator shows the relative key), and it never carries a CTA.
  */
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -24,6 +28,17 @@ const stableTranslator = (key: string, values?: Record<string, unknown>) =>
   values && "price" in values ? `${key}|${values.price}` : key;
 vi.mock("next-intl", () => ({
   useTranslations: (_namespace: string) => stableTranslator,
+  useLocale: () => "en",
+}));
+// FeatureGateNotice routes any CTA with the app router — there must be none.
+const mockPush = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mockPush }),
+}));
+// useFeatureGate subscribes to the shared tier matrix; plan_page has no
+// matrix test, so it never waits on it. Mocked so jsdom never fetches.
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanTierMatrix: () => null,
 }));
 vi.mock("@/i18n", () => ({ useLocale: () => ({ locale: "en" }) }));
 
@@ -110,9 +125,7 @@ describe("WorkspacePlanPage (#1141)", () => {
     mockFeatures = { plan_page: false };
     mockWorkspace = { current_user_role: "owner", plan_name: "basic" };
     render(<WorkspacePlanPage />);
-    expect(
-      await screen.findByText("planPage.featureDisabled"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("deployment.title")).toBeInTheDocument();
     expect(screen.queryByText("planPage.currentPlan")).toBeNull();
     // Disabled → the owner-only plan fetch must be skipped (no wasted call).
     expect(mockGetWorkspacePlan).not.toHaveBeenCalled();
@@ -218,5 +231,60 @@ describe("WorkspacePlanPage (#1141)", () => {
     expect(await screen.findByText("planPage.ownerOnly")).toBeInTheDocument();
     expect(screen.queryByText("planPage.reviewOrChangePlan")).toBeNull();
     expect(screen.queryByText("planPage.manageBilling")).toBeNull();
+  });
+});
+
+describe("WorkspacePlanPage deployment notice (#1646 D3)", () => {
+  it.each([
+    ["ENABLE_PLAN_PAGE off", { plan_page: false }],
+    ["a failed /system/info (fail closed)", {}],
+  ] as const)(
+    "%s: the notice sits inside the page's own header",
+    async (_label, info) => {
+      mockFeatures = { ...info };
+      mockWorkspace = { current_user_role: "owner", plan_name: "basic" };
+      render(<WorkspacePlanPage />);
+
+      expect(
+        await screen.findByRole("heading", { name: "planPage.title" }),
+      ).toBeInTheDocument();
+      expect(screen.getByText("planPage.description")).toBeInTheDocument();
+      expect(screen.getByText("deployment.title")).toBeInTheDocument();
+      expect(screen.getByText("deployment.description")).toBeInTheDocument();
+      expect(mockGetWorkspacePlan).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["owner", "admin", "member"])(
+    "never offers a CTA — the Plan page cannot send you to the Plan page (%s)",
+    async (role) => {
+      mockFeatures = { plan_page: false };
+      mockWorkspace = { current_user_role: role, plan_name: "free" };
+      render(<WorkspacePlanPage />);
+
+      await screen.findByText("deployment.title");
+      expect(screen.queryAllByRole("button")).toHaveLength(0);
+      expect(screen.queryByText(/\.action$/)).toBeNull();
+      expect(mockPush).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps the spinner while /system/info is pending, and fetches nothing", () => {
+    mockFeatures = null;
+    mockWorkspace = { current_user_role: "owner", plan_name: "basic" };
+    render(<WorkspacePlanPage />);
+
+    expect(screen.getByText("loading")).toBeInTheDocument();
+    expect(screen.queryByText("deployment.title")).toBeNull();
+    expect(mockGetWorkspacePlan).not.toHaveBeenCalled();
+  });
+
+  it("a non-owner on an enabled page falls through to today's flow, not a role notice", async () => {
+    mockWorkspace = { current_user_role: "admin", plan_name: "basic" };
+    render(<WorkspacePlanPage />);
+
+    expect(await screen.findByText("planPage.ownerOnly")).toBeInTheDocument();
+    expect(screen.queryByText("role.owner.title")).toBeNull();
+    expect(screen.queryByText("deployment.title")).toBeNull();
   });
 });
