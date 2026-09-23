@@ -107,6 +107,63 @@ class TestResourceTokenCreate:
         with pytest.raises(FeatureNotAvailableError):
             await self._create(None)  # type: ignore[arg-type]
 
+    async def _create_at_cap(self):
+        from api.routes.resource_tokens import ResourceTokenCreate, create_resource_token
+        from config.plan_tiers import get_plan_tier
+
+        cap = get_plan_tier("promax").max_resource_tokens
+        db = MagicMock()
+        db.commit = AsyncMock()
+        db.refresh = AsyncMock()
+        db.execute = AsyncMock(
+            side_effect=[_result(one=uuid.uuid4()), _result(one="promax"), _result(scalar=cap)]
+        )
+        manager = MagicMock()
+        manager.create_token = AsyncMock()
+        with (
+            patch(
+                "api.routes.resource_tokens.resolve_resource_pk",
+                new=AsyncMock(return_value=uuid.uuid4()),
+            ),
+            pytest.raises(QuotaExceededError) as exc_info,
+        ):
+            await create_resource_token(
+                ResourceTokenCreate(resource_id="products", quota_events_per_hour=1000),
+                ("owner-1", _WS),
+                manager,
+                db,
+            )
+        manager.create_token.assert_not_awaited()
+        return exc_info.value, cap
+
+    @pytest.mark.asyncio
+    async def test_resource_token_cap_keeps_403_and_gains_quota_001(self) -> None:
+        """#1644 S5: the status must NOT move — it is what clients branch on —
+        but the code stops being the non-semantic ``HTTP-403`` placeholder."""
+        exc, cap = await self._create_at_cap()
+
+        assert exc.status_code == 403
+        assert exc.error_code == "QUOTA-001"
+        details = exc.details
+        assert details["gate"] == "quota"
+        assert details["quota_type"] == "resource_tokens"
+        assert (details["current"], details["limit"]) == (cap, cap)
+        assert details["feature"] == "resources"
+        assert details["current_plan"] == "promax"
+        # XL is the top tier for this cap, so nothing raises it.
+        assert details["required_plan"] is None
+
+    @pytest.mark.asyncio
+    async def test_resource_token_cap_message_uses_the_display_name_not_upper(self) -> None:
+        """``plan_name.upper()`` rendered a third tier vocabulary beside the
+        registry keys and the display names."""
+        from config.plan_tiers import get_plan_tier
+
+        exc, _ = await self._create_at_cap()
+
+        assert "PROMAX" not in exc.message
+        assert f"Your {get_plan_tier('promax').display_name} plan" in exc.message
+
 
 class TestResourceTokenQuotaUpdateKeepsServing:
     """PATCH /resource-tokens/{id}: the ``max_resource_tokens * 10000`` ceiling
