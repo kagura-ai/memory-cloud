@@ -207,3 +207,56 @@ TOMBSTONE_PURGER_CLAUSE = (
     f"platform cleanup sweep ({CLEANUP_TOMBSTONE_RETENTION_DAYS_ENV}, default "
     f"{CLEANUP_TOMBSTONE_RETENTION_DAYS_DEFAULT} days)"
 )
+
+# ============================================================================
+# Gate contract (#1644)
+# ============================================================================
+# The refusal KIND, carried in ``details.gate`` on every plan/quota refusal.
+# ``DEPLOY_COLORS`` above is the precedent for a frozen vocabulary here.
+#
+# ``gate`` is an ADDITIVE annotation, orthogonal to ``error`` and ``status``:
+# it says WHY a request was refused where the error code only said that it
+# was. A client that ignores it sees the same status, the same message and
+# the same pre-existing detail fields as before.
+#
+# Mirrors the terminal subset of the frontend's ``FeatureGate.state``;
+# "pending" and "allowed" are client-only states and never appear on the wire.
+GATE_PLAN = "plan"
+GATE_QUOTA = "quota"
+GATE_DEPLOYMENT = "deployment"
+GATE_ALLOWLIST = "allowlist"
+# ``GATE_ROLE`` is a vocabulary member only — never serialized. Role refusals
+# (``AUTH-101``) have their ``details`` stripped by
+# ``api.main.memory_cloud_exception_handler`` as CWE-639 defence in depth, and
+# #1644 does not touch that; a client identifies them by the error code.
+GATE_ROLE = "role"
+GATE_KINDS: frozenset[str] = frozenset(
+    {GATE_PLAN, GATE_QUOTA, GATE_DEPLOYMENT, GATE_ALLOWLIST, GATE_ROLE}
+)
+
+# Every ``details.quota_type`` a quota refusal may carry. Frozen: a later
+# issue adding a refusal must add its key here or the contract test
+# (``tests/api/test_gate_error_contract.py``) fails.
+#
+# ``workspace_limit_reached`` reads like prose but is kept verbatim — it is
+# already on the wire and an older client matches on it; renaming it would
+# break that client.
+QUOTA_TYPES: frozenset[str] = frozenset(
+    {
+        "contexts",
+        "members",
+        "workspace_limit_reached",
+        "memories_per_day",
+        "memory_analysis",
+        "sleep_enabled_contexts",
+        "storage_bytes",
+        "agents",
+        "resource_tokens",
+        "connectors",
+        "embedding_spend_daily",
+        "embedding_spend_monthly",
+        "api_mcp_daily",
+        "api_rest_daily",
+        "api_public_daily",
+    }
+)
