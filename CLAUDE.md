@@ -66,6 +66,6 @@ Comment `/review` on the PR to run AI review + quality checks via GitHub Actions
   - `/kagura-code-reviewer` — Ollama-powered diff review grounded in Kagura Memory (replaces the old `/self-review` + `/simplify` step)
   - `/kagura-engineer:*`, `/kagura-planner:plan`, `/claude-c-suite:*`, `/claude-phd-panel:*`
 - `.claude-plugin/` + `claude-skills/` — Kagura Memory Cloud plugin (marketplace-compatible)
-  - Commands: `/kagura-memory:session-start`, `/kagura-memory:session-summary`, `/kagura-memory:recall`, `/kagura-memory:remember`, `/kagura-memory:guide`, `/kagura-memory:smoke-test`
+  - Commands: `/kagura-memory:session-start`, `/kagura-memory:session-summary`, `/kagura-memory:recall`, `/kagura-memory:remember`, `/kagura-memory:guide`, `/kagura-memory:setup`, `/kagura-memory:smoke-test`
 - `.claude/agents/` — Specialized agents (`code-reviewer`, `test-runner`)
 - `docs/` — Detailed documentation (concepts, architecture, API reference)

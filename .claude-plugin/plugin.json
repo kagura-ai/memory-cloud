@@ -22,7 +22,7 @@
     "server_url": {
       "type": "string",
       "title": "Kagura Memory MCP URL",
-      "description": "The MCP endpoint from .mcp.json, e.g. https://<your-domain>/mcp/w/<workspace-id>. The hooks call load_guardrails here. Add ?guardrails=off to the .mcp.json URL itself (&guardrails=off when the URL already has a query, such as ?profile=core) so the server does not also send a guardrail digest."
+      "description": "The MCP endpoint from .mcp.json — the whole URL, ending in /mcp or /mcp/w/<workspace-id>, never the site root. Example: https://<host>/mcp (or https://<host>/mcp/w/<workspace-id>). The hooks POST load_guardrails to exactly this URL, so a site root answers http 404/405 and no guardrail is ever delivered. Add ?guardrails=off to the .mcp.json URL itself (&guardrails=off when the URL already has a query, such as ?profile=core) so the server does not also send a guardrail digest."
     },
     "api_key": {
       "type": "string",
@@ -33,7 +33,7 @@
     "context_id": {
       "type": "string",
       "title": "Guardrail context id",
-      "description": "UUID of the context whose guardrails apply (list_contexts). One context for all projects in v1."
+      "description": "A UUID from list_contexts (the context's id, not its name), naming the context whose guardrails apply. One context for all projects in v1. /kagura-memory:setup picks it for you."
     },
     "max_action": {
       "type": "string",

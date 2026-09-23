@@ -348,6 +348,51 @@ def test_server_down_with_fresh_and_stale_cache(plugin_env: PluginEnv, run_hook:
     assert run_hook(bash_pre("ps"), env=_env(plugin_env, url)).stdout == ""
 
 
+# A POST that reaches the host but not the MCP endpoint answers 404 / 405 — the site root
+# is the usual mistake (#1649). "server unreachable" would send the user to the network.
+@pytest.mark.parametrize("status", [404, 405])
+def test_wrong_endpoint_names_server_url_instead_of_the_network(
+    plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer, status: int
+) -> None:
+    stub_server.status = status
+    stub_server.raw_body = b"<html>nope</html>"
+    result = _start(plugin_env, run_hook, stub_server.url)
+    message = result.json["systemMessage"]
+    assert "server_url must be the MCP endpoint" in message
+    assert "https://<host>/mcp" in message
+    assert "/mcp/w/<workspace-id>" in message
+    assert "not the site root" in message
+    assert "server unreachable" not in message
+    assert "no guardrails fetched and no usable cache" in message
+    assert result.json.get("hookSpecificOutput") is None
+    assert stub_server.url.split("/")[2] not in result.stdout
+
+
+def test_wrong_endpoint_still_falls_back_to_a_usable_cache(
+    plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer
+) -> None:
+    stub_server.status = 405
+    stub_server.raw_body = b"<html>nope</html>"
+    plugin_env.write_cache(STANDARD, fetched_at=datetime.now(UTC) - timedelta(hours=1))
+    result = _start(plugin_env, run_hook, stub_server.url)
+    message = result.json["systemMessage"]
+    assert "server_url must be the MCP endpoint" in message
+    assert "no guardrails fetched, using cache from 1h" in message
+    assert "3 tool guardrails active" in result.specific["additionalContext"]
+    assert plugin_env.cache_path.exists()
+
+
+def test_other_http_errors_keep_the_unreachable_wording(
+    plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer
+) -> None:
+    stub_server.status = 401
+    stub_server.raw_body = b'{"error":"unauthorized"}'
+    result = _start(plugin_env, run_hook, stub_server.url)
+    assert result.json == {
+        "systemMessage": "kagura-memory guardrails: server unreachable and no usable cache"
+    }
+
+
 @pytest.mark.parametrize(
     "shape",
     ["isError", "jsonrpc_error", "http500", "not_json", "format2", "status_error", "unknown_tool"],

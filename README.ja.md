@@ -279,6 +279,7 @@ MCP ツールに加えてフル REST API を提供:
 | `/kagura-memory:recall` | 過去の知識を検索 |
 | `/kagura-memory:remember` | 新しい知識を保存 |
 | `/kagura-memory:guide` | 使い方ガイド・接続確認・セットアップ |
+| `/kagura-memory:setup` | MCP 接続とツールガードレール Hook の設定・検証 (`--check` は変更なしの診断のみ) |
 | `/kagura-memory:smoke-test` | 全 MCP ツールの動作確認 |
 
 **推奨ワークフロー:**

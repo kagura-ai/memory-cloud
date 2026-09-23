@@ -79,6 +79,7 @@ DOCS_TOUCHED = [
     "claude-skills/session-start.md",
     "claude-skills/remember.md",
     "claude-skills/session-summary.md",
+    "claude-skills/setup.md",
     "plugins/kagura-memory/skills/kagura-memory/SKILL.md",
     "docs/mcp-clients.md",
     "docs/mcp-tools.md",
@@ -132,6 +133,18 @@ def test_user_config_shape() -> None:
         "Add ?guardrails=off to the .mcp.json URL itself (&guardrails=off when the URL "
         "already has a query, such as ?profile=core)" in cfg["server_url"]["description"]
     )
+
+
+def test_user_config_descriptions_carry_the_traps() -> None:
+    """The two values a user can only get wrong silently (#1649)."""
+    cfg = _plugin_json()["userConfig"]
+    server_url = cfg["server_url"]["description"]
+    assert "https://<host>/mcp" in server_url, "an example endpoint, never a real host"
+    assert "/mcp/w/<workspace-id>" in server_url
+    assert "never the site root" in server_url
+    context_id = cfg["context_id"]["description"]
+    assert "UUID" in context_id
+    assert "list_contexts" in context_id
 
 
 # ---------------------------------------------------------------------------
@@ -384,3 +397,87 @@ def test_hook_script_exists_and_is_not_executable_dependent() -> None:
     """The sh guard execs python3 on the file, so the file needs no exec bit."""
     assert HOOK_SCRIPT.is_file()
     assert Path(HOOK_SCRIPT).suffix == ".py"
+
+
+# ---------------------------------------------------------------------------
+# /kagura-memory:setup (#1649)
+# ---------------------------------------------------------------------------
+
+SETUP_SKILL = REPO_ROOT / "claude-skills" / "setup.md"
+
+
+def _setup_skill() -> str:
+    return SETUP_SKILL.read_text(encoding="utf-8")
+
+
+def test_setup_skill_ships_as_a_plugin_command() -> None:
+    assert _plugin_json()["commands"] == ["./claude-skills/"]
+    assert SETUP_SKILL.is_file()
+    text = _setup_skill()
+    assert text.startswith("---\ndescription: "), "front matter must match the sibling skills"
+    first = text.split("---", 2)[1].strip()
+    assert first.startswith("description:") and "\n" not in first, "one front-matter key only"
+
+
+@pytest.mark.parametrize(
+    "needle",
+    [
+        # 1. detect the EFFECTIVE entry, not just some entry
+        "claude mcp get",
+        "shadow",
+        "claude plugin list",
+        # 2. the context comes from the tool, not from a pasted uuid
+        "list_contexts()",
+        # 3. server_url is derived from the active MCP URL
+        "https://<host>/mcp",
+        "/mcp/w/<workspace-id>",
+        # 4. the OAuth trap, before the change
+        "re-run `/mcp`",
+        # 5. verification actually runs the hook
+        "kagura_guardrails.py",
+        "CLAUDE_PLUGIN_OPTION_SERVER_URL",
+        # 6. doctor mode
+        "--check",
+    ],
+)
+def test_setup_skill_covers_every_load_bearing_step(needle: str) -> None:
+    assert needle in _setup_skill(), f"/kagura-memory:setup must cover {needle!r}"
+
+
+def test_setup_skill_never_echoes_a_credential() -> None:
+    text = _setup_skill()
+    assert "Never print an API key" in text
+    assert "never read a key out of a config file" in text.lower()
+    # The key reaches the hook by expansion only, so no value enters the transcript.
+    assert 'CLAUDE_PLUGIN_OPTION_API_KEY="$' in text
+    # Nothing key-shaped in the file; the hook script's own name is the only kagura_ token.
+    assert not re.search(r"kagura_(?!guardrails)[A-Za-z0-9]", text), "no key-shaped literal"
+
+
+def test_setup_skill_cleans_up_after_verifying() -> None:
+    text = _setup_skill()
+    assert 'KAGURA_SETUP_DATA="$(mktemp -d)"' in text
+    assert 'rm -rf "$KAGURA_SETUP_DATA"' in text
+
+
+def test_setup_skill_is_listed_where_the_other_skills_are() -> None:
+    guide = (REPO_ROOT / "claude-skills" / "guide.md").read_text(encoding="utf-8")
+    assert "| `setup` |" in guide, "guide.md's skill table must list setup"
+    clients = (REPO_ROOT / "docs" / "mcp-clients.md").read_text(encoding="utf-8")
+    assert "| `/kagura-memory:setup` |" in clients
+
+
+def test_docs_warn_that_changing_an_oauth_url_needs_reauthentication() -> None:
+    """The Migration note users follow when they add ?guardrails=off (#1649)."""
+    text = (REPO_ROOT / "docs" / "mcp-clients.md").read_text(encoding="utf-8")
+    assert "requires re-authentication" in text
+    assert "OAuth tokens per endpoint" in text
+    assert "?guardrails=off" in text
+
+
+def test_hook_names_the_endpoint_on_404_and_405() -> None:
+    """The stage -> message wiring; the behaviour is in test_guardrail_fetch.py."""
+    source = _source()
+    assert 'ENDPOINT_STAGES = ("http 404", "http 405")' in source
+    assert "server_url must be the MCP endpoint" in source
+    assert "_fallback_cache(config, old, messages, stage)" in source

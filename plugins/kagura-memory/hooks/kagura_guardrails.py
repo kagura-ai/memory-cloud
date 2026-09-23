@@ -86,6 +86,15 @@ GUARDRAILS_PARAM_WARNING = (
     "this URL also requests the server digest (guardrails=<context>); "
     "set guardrails=off in that query with the plugin hooks"
 )
+# 404 / 405 answer a POST that reached the host but not the MCP endpoint - the site root
+# is the usual mistake, and "server unreachable" would send the user looking at the network.
+ENDPOINT_STAGES = ("http 404", "http 405")
+ENDPOINT_WARNING = (
+    "server_url must be the MCP endpoint, e.g. https://<host>/mcp or "
+    "https://<host>/mcp/w/<workspace-id>, not the site root"
+)
+ENDPOINT_FETCH_REASON = "no guardrails fetched"
+UNREACHABLE_REASON = "server unreachable"
 
 TOOL_EVENTS = {"PreToolUse": "pre", "PostToolUse": "result", "PostToolUseFailure": "result"}
 KNOWN_ON = ("pre", "result")
@@ -1254,7 +1263,7 @@ def handle_session_start(adapter: Any, event: dict[str, Any], env: Any, stdout: 
         else:
             _debug(stage)
             _touch(fail_marker)
-            cache, source_desc = _fallback_cache(config, old, messages)
+            cache, source_desc = _fallback_cache(config, old, messages, stage)
     elif need_fetch:
         cache, source_desc = _fallback_cache(config, old, messages)
     else:
@@ -1295,18 +1304,23 @@ def handle_session_start(adapter: Any, event: dict[str, Any], env: Any, stdout: 
 
 
 def _fallback_cache(
-    config: Config, old: LoadedCache | None, messages: list[str]
+    config: Config, old: LoadedCache | None, messages: list[str], stage: str = ""
 ) -> tuple[LoadedCache | None, str]:
+    if stage in ENDPOINT_STAGES:
+        messages.append(ENDPOINT_WARNING)
+        reason = ENDPOINT_FETCH_REASON
+    else:
+        reason = UNREACHABLE_REASON
     if old is not None and old.age_seconds <= FALLBACK_MAX_AGE_S:
         age = format_age(old.age_seconds)
-        messages.append(f"server unreachable, using cache from {age}")
+        messages.append(f"{reason}, using cache from {age}")
         return old, f"cached {age}"
     if os.path.exists(config.cache_path):
         try:
             os.replace(config.cache_path, config.cache_path + ".stale")
         except OSError:
             pass  # the rename is bookkeeping; the too-old cache is not used either way
-    messages.append("server unreachable and no usable cache")
+    messages.append(f"{reason} and no usable cache")
     return None, ""
 
 
