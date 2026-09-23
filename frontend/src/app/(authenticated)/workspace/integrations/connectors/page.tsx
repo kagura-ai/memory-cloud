@@ -78,9 +78,8 @@ import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { planLabelFromEnv } from "@/lib/utils/planLabel";
-import { ApiError } from "@/lib/api/base";
+import { API_BASE_URL, ApiError } from "@/lib/api/base";
 import { gateFromFacts } from "@/lib/gates/featureGates";
-import { API_BASE_URL } from "@/lib/api/base";
 import { getContexts, type Context } from "@/lib/api/contexts";
 import {
   connectorDisplayName,
