@@ -562,6 +562,9 @@ jobs:
       # initialized". Non-secret throwaway values for an ephemeral CI run.
       GOOGLE_CLIENT_ID: e2e-mock-google-client-id
       GOOGLE_CLIENT_SECRET: e2e-mock-google-client-secret
+      # #1655: the beta-invite hand-off spec mints an invite and redeems it
+      # through the gate (which the spec turns on in manual mode itself).
+      ENABLE_BETA_INVITES: "true"
     services:
       postgres:
         image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
@@ -638,7 +641,7 @@ jobs:
         id: wait_api
         run: .github/scripts/wait-for-api.sh "$API_PID" "$RUNNER_TEMP/api.log"
 
-      - name: Run OAuth account-linking E2E
+      - name: Run OAuth E2E (account linking, beta invite hand-off)
         run: cd frontend && npm run test:e2e:oauth
 
       - name: Show API log

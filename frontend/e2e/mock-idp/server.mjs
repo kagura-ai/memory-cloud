@@ -24,6 +24,13 @@
  *   MOCK_IDP_GH_LOGIN    (default "e2e-octocat")
  *   MOCK_IDP_GH_EMAIL    (default "e2e-octocat@example.com")
  *   MOCK_IDP_GH_NAME     (default "E2E Octocat")
+ *
+ * Per-browser identity (#1655): a spec that needs a fresh GitHub identity (a
+ * brand-new signup) sets a `mock_idp_gh` cookie on `localhost` holding
+ * base64url JSON `{ sub, login, email, name }`. Cookies ignore the port, so the
+ * browser sends it on the authorize redirect to this server. The identity then
+ * rides the code and the access token, so parallel specs never share it.
+ * Without the cookie the env identity above is used, exactly as before.
  */
 import http from "node:http";
 
@@ -36,6 +43,48 @@ const GH = {
 };
 
 const ACCESS_TOKEN = "mock-github-access-token";
+const CODE = "mock-github-code";
+const IDENTITY_COOKIE = "mock_idp_gh";
+
+/** base64url JSON → identity, or null when it is not a usable one. */
+function decodeIdentity(encoded) {
+  if (!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded)) return null;
+  try {
+    const value = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    const fields = ["sub", "login", "email", "name"];
+    if (!fields.every((k) => typeof value[k] === "string" && value[k])) {
+      return null;
+    }
+    if (!/^[0-9]+$/.test(value.sub)) return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+/** The identity cookie's raw value from a Cookie header, if any. */
+function identityCookie(req) {
+  for (const part of (req.headers.cookie ?? "").split(";")) {
+    const [name, ...rest] = part.trim().split("=");
+    if (name === IDENTITY_COOKIE) return rest.join("=");
+  }
+  return null;
+}
+
+/** `<prefix>.<encoded identity>` → identity; the bare prefix → the env one. */
+function identityFrom(value, prefix) {
+  if (value === prefix) return GH;
+  if (value?.startsWith(`${prefix}.`)) {
+    return decodeIdentity(value.slice(prefix.length + 1));
+  }
+  return null;
+}
+
+function bearer(req) {
+  const header = req.headers.authorization ?? "";
+  const match = /^(?:Bearer|token)\s+(.+)$/i.exec(header);
+  return match ? match[1] : null;
+}
 
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body);
@@ -64,8 +113,11 @@ const server = http.createServer((req, res) => {
       sendJson(res, 400, { error: "missing redirect_uri" });
       return;
     }
+    const encoded = identityCookie(req);
+    const code =
+      encoded && decodeIdentity(encoded) ? `${CODE}.${encoded}` : CODE;
     const back = new URL(redirectUri);
-    back.searchParams.set("code", "mock-github-code");
+    back.searchParams.set("code", code);
     back.searchParams.set("state", state);
     res.writeHead(302, { location: back.toString() });
     res.end();
@@ -74,11 +126,19 @@ const server = http.createServer((req, res) => {
 
   // --- GitHub token exchange (backend posts here with Accept: application/json). ---
   if (req.method === "POST" && path === "/github/login/oauth/access_token") {
-    // Drain the body; the mock does not validate client_id/secret/code.
-    req.on("data", () => {});
+    // The mock does not validate client_id/secret; the code only carries the
+    // identity chosen at authorize time.
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
     req.on("end", () => {
+      const code = new URLSearchParams(body).get("code") ?? CODE;
+      const suffix = code.startsWith(`${CODE}.`)
+        ? code.slice(CODE.length)
+        : "";
       sendJson(res, 200, {
-        access_token: ACCESS_TOKEN,
+        access_token: `${ACCESS_TOKEN}${suffix}`,
         token_type: "bearer",
         scope: "read:user,user:email",
       });
@@ -87,11 +147,13 @@ const server = http.createServer((req, res) => {
   }
 
   // --- GitHub user profile. ---
+  const identity = identityFrom(bearer(req), ACCESS_TOKEN) ?? GH;
+
   if (req.method === "GET" && path === "/github/user") {
     sendJson(res, 200, {
-      id: Number(GH.sub),
-      login: GH.login,
-      name: GH.name,
+      id: Number(identity.sub),
+      login: identity.login,
+      name: identity.name,
       avatar_url: `http://localhost:${PORT}/avatar.png`,
     });
     return;
@@ -100,7 +162,7 @@ const server = http.createServer((req, res) => {
   // --- GitHub verified primary email (the backend trusts only this). ---
   if (req.method === "GET" && path === "/github/user/emails") {
     sendJson(res, 200, [
-      { email: GH.email, primary: true, verified: true },
+      { email: identity.email, primary: true, verified: true },
     ]);
     return;
   }
