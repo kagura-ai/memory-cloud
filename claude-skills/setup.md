@@ -146,6 +146,9 @@ A context's tool guardrails reach the agent by exactly one of two lanes:
 | **Hooks** — the client runs the plugin's hook script before each tool call | the harness has hooks and they are configured (Claude Code: B2) | carries `guardrails=off`, so the server does not also send a digest of the same memories |
 | **Server digest** — `get_context_info` carries a `guardrails` block | no hooks, or they are not set up | no `guardrails` parameter |
 
+For an entry that runs a local proxy, the MCP URL is the one the proxy forwards to, with the query
+its own flags add (Claude Code: B1).
+
 Recommend the hooks lane when the harness supports them. The duplicate digest is harmless, only
 wasteful, so the user may skip the URL change; B3 applies it for Claude Code, including the case
 where the change needs a re-authentication.
@@ -214,7 +217,7 @@ plugin's hook script. Another harness replaces this part and keeps Part A.
 
 B1 reads the MCP URL from `.mcp.json` — a file any repository can ship — or from `~/.claude.json`,
 and later steps put that URL, the `server_url` derived from it, the context id, the CLI profile name,
-the MCP entry name and the plugin's marketplace name into commands. A value such as `https://x/mcp'; curl …` or one holding `$(…)`,
+the proxy's tool profile, the MCP entry name and the plugin's marketplace name into commands. A value such as `https://x/mcp'; curl …` or one holding `$(…)`,
 a backtick, `;`, `|`, `&` or a newline would run as a command the moment it is spliced into one — so
 **no such value is ever spliced into a command's text**, quoted or not. Instead:
 
@@ -227,8 +230,8 @@ a backtick, `;`, `|`, `&` or a newline would run as a command the moment it is s
 
 2. Write each value **verbatim** into its own file there with the file-writing tool — never through
    a shell command (`echo`, `printf`, a here-document), which would parse it first. One file per
-   field, named `mcp_url`, `server_url`, `new_mcp_url`, `context_id`, `profile`, `entry_name` or
-   `marketplace`.
+   field, named `mcp_url`, `server_url`, `new_mcp_url`, `context_id`, `profile`, `tool_profile`,
+   `entry_name` or `marketplace`.
    Do not repair, trim or re-quote a value.
 
 3. Run the check. It reads the files — no value is on its command line — and prints only field
@@ -243,7 +246,8 @@ a backtick, `;`, `|`, `&` or a newline would run as a command the moment it is s
    NAME = r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}"
    UUID = r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
    PATTERNS = {"mcp_url": URL, "server_url": URL, "new_mcp_url": URL,
-               "context_id": UUID, "profile": NAME, "entry_name": NAME, "marketplace": NAME}
+               "context_id": UUID, "profile": NAME, "tool_profile": NAME, "entry_name": NAME,
+               "marketplace": NAME}
    bad = []
    for field, pattern in PATTERNS.items():
        path = os.path.join(sys.argv[1], field)
@@ -263,8 +267,8 @@ a backtick, `;`, `|`, `&` or a newline would run as a command the moment it is s
    A URL is `http` or `https`; a host of letters, digits, dots and hyphens, or a bracketed IPv6
    literal (`[::1]`); an optional port; a path of letters, digits and `._~%/-`; and an optional query
    of `key=value` pairs of the same characters — `&` only between two pairs. No quote, `$`, backtick,
-   `;`, `|`, space, newline, `@` or fragment passes. A context id is a UUID; a profile, entry or
-   marketplace name is letters, digits, `-` and `_`, and starts with a letter or digit, so it can
+   `;`, `|`, space, newline, `@` or fragment passes. A context id is a UUID; a profile, tool profile,
+   entry or marketplace name is letters, digits, `-` and `_`, and starts with a letter or digit, so it can
    never be read as an option.
 
 4. **`malformed: <fields>` → stop.** Tell the user which value looks malformed and where it came
@@ -331,11 +335,24 @@ for n,s in (d.get("mcpServers") or {}).items():
 | **Bearer key** | `Type: http` (or `url`), an `Authorization` header | a static API key in the entry | the entry's `URL` |
 | **CLI profile** | `Type: stdio`, `Command: kagura-mcp` — what `kagura setup claude --profile …` writes; also an absolute path ending in `kagura-mcp`, or a launcher (`uvx …`) whose `Args` run it | the CLI's refreshing OAuth profile; the entry holds **no secret** | **not in the MCP config** — see below |
 
-**The upstream URL of a CLI-profile entry.** `kagura-mcp` forwards to, in order:
+**The upstream URL of a CLI-profile entry.** Compute it the way `kagura-mcp` does:
 
-1. `--server <url>` in the entry's `Args`, when present — used verbatim, query included.
-2. Otherwise the profile's MCP URL. The profile is `--profile <name>` in `Args`, or the CLI's
+1. The base: `--server <url>` in the entry's `Args`, when present — used verbatim, query included.
+   Otherwise the profile's MCP URL. The profile is `--profile <name>` in `Args`, or the CLI's
    default profile when there is none.
+2. Then the query flags, each replacing every value of that key already in the base's query:
+   `--guardrails <v>` sets `guardrails=<v>` (`off` in any letter case counts as `off`), and
+   `--tool-profile <n>` sets `profile=<n>`. A flag that is absent leaves the base's value alone.
+
+Read each flag in both forms, `--flag value` and `--flag=value`; when one appears twice, the last
+wins. For example `--profile default --server https://<host>/mcp?guardrails=<context-id>
+--guardrails off --tool-profile core` forwards to `https://<host>/mcp?guardrails=off&profile=core`
+— `guardrails` from `--guardrails` (the `--server` query's value is replaced), `profile` from
+`--tool-profile`.
+
+`kagura-mcp` has these two flags from 0.39.0 (`kagura --version`); 0.38.1 and earlier reject them
+and the proxy does not start. An entry that carries either flag on an older CLI is the finding:
+upgrade the package (A1, step 1).
 
 Read the profiles without opening the credential file — after `kagura --version` shows 0.31.0 or
 later (A1); an older CLI has no `auth list --json`, and the pipe below then fails on empty input:
@@ -354,17 +371,19 @@ a new `kagura auth login`. A CLI-profile entry that `claude mcp list` shows as f
 `kagura` is not on this shell's `PATH`, report `CLI profile — upstream URL unknown (kagura not on
 PATH)` and ask the user to run `kagura auth list` where Claude Code starts; do not guess the URL.
 
-Before any command uses the URL, the profile name or the entry name, write them into the values
-directory as `mcp_url`, `profile` and `entry_name` and run B0's check. Reporting them needs no
-command; acting on them does.
+Before any command uses the URL, the profile name, the tool profile or the entry name, write them
+into the values directory as `mcp_url` (for a CLI profile, the computed upstream URL), `profile`,
+`tool_profile` (the `--tool-profile` value, when `Args` has one) and `entry_name`, and
+run B0's check. Reporting them needs no command; acting on them does.
 
 Report, as a block:
 
 - **Effective entry** — name, the file it comes from, the scope.
 - **Form** — OAuth, Bearer key, or CLI profile (with the profile name).
-- **URL** — the entry's URL, or for a CLI profile the upstream URL and where it came from
-  (`--server`, or the profile). The path (`/mcp`, or `/mcp/w/<workspace-id>`) and each query
-  parameter separately (`profile`, `guardrails`).
+- **URL** — the entry's URL, or for a CLI profile the computed upstream URL and its base (`--server`,
+  or the profile). The path (`/mcp`, or `/mcp/w/<workspace-id>`) and each query parameter
+  separately (`profile`, `guardrails`) — for a CLI profile, each with where it came from:
+  `--guardrails`, `--tool-profile`, `--server` or the profile.
 - **Shadowed entries** — every other scope defining the same name, with its file and URL. Fix:
   `claude mcp remove "$(cat "<values dir>/entry_name")" -s <scope>` on the one that should not be
   there (`<scope>` is `local`, `project` or `user`). OAuth tokens are stored
@@ -406,9 +425,9 @@ no guardrail is ever delivered.
 
 Derive it from B1 — never invent it, never ask the user to:
 
-- The source is the effective entry's `URL`, or for a CLI-profile entry the upstream URL B1 resolved
-  (`--server`, else the profile's `server` + `/mcp`). A CLI-profile entry has no `url` field — never
-  read one from it.
+- The source is the effective entry's `URL`, or for a CLI-profile entry the upstream URL B1
+  computed (`--server`, else the profile's `server` + `/mcp`, with the query flags on top).
+  A CLI-profile entry has no `url` field — never read one from it.
 - Keep the scheme, host and **path** exactly as they are: `https://<host>/mcp` or
   `https://<host>/mcp/w/<workspace-id>`.
 - Drop the query, except that `guardrails=off` may stay. A `guardrails=<context-id>` left in
@@ -446,7 +465,8 @@ Applying it:
 ### B3. Apply `?guardrails=off` (the hooks lane from A3)
 
 This is a change to the MCP entry, not to `server_url`: `guardrails=off` (`&guardrails=off` when the
-URL already has a query, such as `?profile=core`). How depends on the form.
+URL already has a query, such as `?profile=core`) — for a CLI-profile entry, a flag on the proxy
+that puts it there. How depends on the form.
 
 **OAuth or Bearer-key entry** — warn before changing it, and get an explicit yes:
 
@@ -466,34 +486,78 @@ URL already has a query, such as `?profile=core`). How depends on the form.
 Afterwards: `/mcp` → the entry → authenticate, then B1's redacted `claude mcp get` to confirm
 `Connected`.
 
-**CLI-profile entry** — the CLI profile **cannot carry the query**. `kagura auth login` stores the
-profile's MCP URL as `<server>/mcp`, and no `kagura` command edits it; putting the query into
-`--server` at login breaks the URL. Say so plainly, then offer the one place that can carry it: the
-proxy's own `--server` flag, which overrides the profile's URL verbatim. Add two items to the
-entry's `args`, after `--profile <name>`:
+**CLI-profile entry** — read the upstream URL B1 computed. If it already carries `guardrails=off`
+— from `--guardrails off` or from a `--server` query — the hooks lane is applied: offer nothing.
+
+Otherwise: the CLI profile **cannot carry the query**. `kagura auth login` stores the profile's MCP
+URL as `<server>/mcp`, and no `kagura` command edits it; putting the query into `--server` at login
+breaks the URL. Say so plainly, then offer the proxy's own flags, which set the query at run time.
+
+Both ways below share these mechanics:
+
+- If the project's `.mcp.json` is tracked (`git ls-files --error-unmatch .mcp.json` succeeds), a
+  change there reaches every teammate who uses the file — their proxy stops asking for the digest
+  too, and a `--server` sends *their* profile's token to this host. Say so, and offer a
+  `local`-scope entry instead (the `claude mcp add … -s local` form below): it shadows the project
+  entry for this user only — report it as the intended shadow.
+- Entry in a `.mcp.json` file → change **only** that entry's `args` array in place. Entry in
+  `~/.claude.json` → `claude mcp remove kagura-memory -s <scope>`, then the `claude mcp add` line
+  given below (for a new `local` entry beside a tracked `.mcp.json`, only the `add`, with
+  `-s local`). The `add` rebuilds the args from scratch, so it must carry the entry's existing
+  `--tool-profile` over — the value B1 wrote to `<values dir>/tool_profile`; leave that pair out
+  only when the entry has none.
+- No re-authentication: the proxy owns the token, so the entry reconnects on the next start (or
+  `/mcp` → reconnect) with the same sign-in.
+- Never edit `~/.kagura/credentials.json` to change the URL.
+
+**1. `--guardrails off`** — needs `kagura-mcp` 0.39.0 or later: check `kagura --version` first (an
+older proxy rejects the flag and does not start; with no `kagura` on this shell's `PATH`, ask the
+user to run it where Claude Code starts). Add two items to the entry's `args`, after
+`--profile <name>`:
+
+```json
+"args": ["--profile", "default", "--guardrails", "off"]
+```
+
+- If the `args` already carry `--guardrails <context-id>` (or `--guardrails=<context-id>`),
+  replace that value with `off` in place — never add a second `--guardrails`, and never a
+  `--server` for this: the flag replaces the `guardrails` in the `--server` query, so the URL
+  would keep the id.
+- The `~/.claude.json` rebuild (keep a `--server` the entry already has: write its value unchanged
+  to `<values dir>/new_mcp_url`, run B0's check, and add `--server "$(cat "<values dir>/new_mcp_url")"`
+  to the line):
+
+  ```bash
+  claude mcp add kagura-memory -s <scope> -- kagura-mcp --profile "$(cat "<values dir>/profile")" --guardrails off --tool-profile "$(cat "<values dir>/tool_profile")"
+  ```
+
+- For a `project` or `user` entry, say that `kagura setup claude --profile "$(cat "<values dir>/profile")" --guardrails off`
+  writes the same entry, less any `--server` — run in the project directory; add `--scope user`
+  for a user entry, and the entry's `--tool-profile` if it has one. `kagura setup claude` has
+  no `local` scope. A later re-run of it that leaves `--guardrails` out prints a note that the
+  flag is gone.
+- It pins no host of its own: without a `--server`, the entry keeps following the profile's
+  server.
+
+**2. `--server …?guardrails=off`** — only when `kagura --version` is below 0.39.0 and the user will
+not upgrade, and never while the entry's `args` carry `--guardrails` (the flag would replace the
+query's value). It overrides the profile's URL verbatim. Add two items to the entry's `args`, after
+`--profile <name>`:
 
 ```json
 "args": ["--profile", "default", "--server", "https://<host>/mcp?guardrails=off"]
 ```
 
 - The `--server` value is the profile's own MCP URL from B1 plus the query — **never another host**:
-  the proxy sends the profile's token to whatever `--server` names.
-- If the project's `.mcp.json` is tracked (`git ls-files --error-unmatch .mcp.json` succeeds), a
-  `--server` there reaches every teammate who uses the file, and sends *their* profile's token to
-  this host. Say so, and offer a `local`-scope entry instead (the `claude mcp add … -s local` form
-  below): it shadows the project entry for this user only — report it as the intended shadow.
+  the proxy sends the profile's token to whatever `--server` names. Keep a `profile=<n>` an
+  existing `--server` already has (a proxy before 0.39.0 has no `--tool-profile`).
 - Write the new `--server` value to `<values dir>/new_mcp_url` and run B0's check first; write it
   nowhere until that says `ok`.
-- Entry in a `.mcp.json` file → change **only** that entry's `args` array in place. Entry in
-  `~/.claude.json` → `claude mcp remove kagura-memory -s <scope>`, then
+- The `~/.claude.json` rebuild:
   `claude mcp add kagura-memory -s <scope> -- kagura-mcp --profile "$(cat "<values dir>/profile")" --server "$(cat "<values dir>/new_mcp_url")"`
-  (for a new `local` entry beside a tracked `.mcp.json`, only the `add`, with `-s local`).
-- No re-authentication: the proxy owns the token, so the entry reconnects on the next start (or
-  `/mcp` → reconnect) with the same sign-in.
 - The pin has two costs; name them. If the profile later points at another server, `--server` still
   wins — update or drop it. Re-running `kagura setup claude --profile …` rewrites the entry and
   drops `--server` — apply it again.
-- Never edit `~/.kagura/credentials.json` to change the URL.
 
 If the user declines, record `Lane  hooks — guardrails=off not set (digest also sent)`.
 
@@ -627,8 +691,8 @@ The full Claude Code block — B1–B5 rows around A5's three:
 
 ```
 Kagura Memory setup
-  MCP entry    kagura-memory — project (.mcp.json) — CLI profile (kagura-mcp --profile default)
-  Upstream     https://<host>/mcp?guardrails=off — from --server (profile default: https://<host>/mcp)
+  MCP entry    kagura-memory — project (.mcp.json) — CLI profile (kagura-mcp --profile default --guardrails off --tool-profile core)
+  Upstream     https://<host>/mcp?guardrails=off&profile=core — guardrails from --guardrails, profile from --tool-profile (profile default: https://<host>/mcp)
   Shadowed     user (~/.claude.json) — OAuth — https://<host>/mcp
   Plugin       kagura-memory@kagura-memory-cloud 0.74.0 — Hooks (4)
   server_url   https://<host>/mcp
