@@ -285,13 +285,60 @@ and an MCP client's OAuth sign-in (`/api/v1/oauth/authorize` sends it to
   and goes nowhere. The pasted token is never logged or stored by the page.
 
 `/join/{token}` asks for the same terms-of-service acceptance as `/login`: the
-provider buttons stay disabled until the box is ticked. As on `/login`, this is
-a client-side check; acceptance is not yet recorded on the server.
+provider buttons stay disabled until the box is ticked. With `TERMS_VERSION`
+set the acceptance is also recorded on the server — see
+[Terms-of-service acceptance](#terms-of-service-acceptance-issue-1665).
 
 The MCP path resumes only when the API and the frontend share an origin. On a
 split-origin deployment `/login` already drops the API-origin `return_to`, with
 or without an invite. The device flow is not affected: its `return_to` is a
 frontend path.
+
+## Terms-of-service acceptance (Issue #1665)
+
+`/login`, `/join/{token}` and the workspace invitation page ask for
+terms-of-service acceptance with a checkbox. By default that is all they do: a
+browser-side check. Setting `TERMS_VERSION` makes the server enforce and record
+it.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `TERMS_VERSION` | *(empty)* | The current terms version, any label you choose (`2026-09`, `v3`, …; 1–64 characters from `A-Z a-z 0-9 . _ -`, anything else fails startup). **Empty disables the feature**: nothing is enforced, nothing is recorded, nobody is asked to re-accept, and every sign-in request is exactly what it was before. |
+
+With a version set:
+
+- `GET /api/v1/system/info` reports it as `terms_version` (`null` when empty).
+  The sign-in pages send it back as `accepted_terms` once the box is ticked —
+  on the Google / GitHub login URL, where it is bound to the OAuth `state` in
+  Redis beside `return_to` and the invite (5-minute TTL, read and deleted once
+  by the callback after the CSRF check), and in the password-login body.
+- **New accounts need it.** A Google or GitHub sign-in whose identity has no
+  account yet is refused unless it carries the current version: no account is
+  created, the signup gate never runs (so a beta invite is not spent), and the
+  browser lands on `/login?error=terms_required` with its `return_to` kept.
+  This also covers a direct request to `/api/v1/auth/{provider}/login` without
+  the parameter. Password login never creates accounts; accounts created with
+  the admin CLI are asked on first sign-in like any existing user.
+- **Existing users are never locked out.** A sign-in with a missing or older
+  version succeeds. The web UI then sees `terms_acceptance_required: true` on
+  `GET /api/v1/auth/me` and shows a blocking "updated terms" dialog; accepting
+  calls `POST /api/v1/me/terms-acceptance` (the user can sign out instead).
+- Each acceptance is one row in `terms_acceptances` (user, version, source
+  `login` / `join` / `password` / `reaccept`, timestamp) and one audit row
+  `terms.accepted` carrying the version only. A sign-in with the version the
+  user already accepted writes nothing, so rows appear only when the accepted
+  version changes. The history is deleted with the account.
+
+**Changing `TERMS_VERSION`** (a new version of the terms) asks every existing
+user to accept again on their next page load — nobody is signed out, and
+sessions, API keys and MCP clients keep working; only the web UI is blocked
+until they accept. Sign-ups in flight with the old version (a login page opened
+before the change) are refused and see the `terms_required` banner; the page
+they return to already carries the new version. **Clearing it** switches
+enforcement off again; the recorded history stays in `terms_acceptances`.
+
+Adding an account from the account switcher follows the same rule: an identity
+that has no account yet is refused until it signs up from `/login`.
 
 ## Hosted-mode UI gates (Issue #1571)
 

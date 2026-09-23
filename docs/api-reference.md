@@ -1247,6 +1247,7 @@ System information. Public (no authentication): the version plus non-sensitive d
   "version": "<server_version>",
   "description": "Remote MCP Server + Web Management",
   "environment": "production",
+  "terms_version": null,
   "search_defaults": {
     "use_rerank": false,
     "reranker_provider": "voyage",
@@ -1267,7 +1268,37 @@ System information. Public (no authentication): the version plus non-sensitive d
 }
 ```
 
-`search_defaults` are the reranker values new contexts are created with (provider and model names only). Each `features` flag mirrors a deployment setting (`ENABLE_*`, `MANAGED_LLM_PROVIDER`); the values above are illustrative, not the defaults of every deployment.
+`search_defaults` are the reranker values new contexts are created with (provider and model names only). Each `features` flag mirrors a deployment setting (`ENABLE_*`, `MANAGED_LLM_PROVIDER`); the values above are illustrative, not the defaults of every deployment. `terms_version` is the deployment's `TERMS_VERSION`, or `null` when it is empty (server-side terms acceptance off) — see [Terms-of-service acceptance](#terms-of-service-acceptance).
+
+---
+
+## Terms-of-service acceptance
+
+Issue #1665. Everything below is inert while the deployment's `TERMS_VERSION` is empty; see [Terms-of-service acceptance](deployment.md#terms-of-service-acceptance-issue-1665) for the operator view.
+
+- `GET /api/v1/auth/{google,github}/login?accepted_terms=<version>` — the version the person agreed to, bound to the OAuth state. A sign-up (an identity with no account yet) without the current version is refused: no account is created and the callback redirects to `{FRONTEND_URL}/login?error=terms_required&provider=<provider>` (plus the flow's `return_to` when it is safe). Existing users sign in regardless.
+- `POST /api/v1/auth/login` accepts an optional `"accepted_terms": "<version>"` in the body; it is recorded on success (after `POST /api/v1/auth/mfa/verify` when MFA is on).
+- `GET /api/v1/auth/me` → `user.terms_acceptance_required`: `true` when a version is configured and the user's latest accepted version differs.
+
+### POST /api/v1/me/terms-acceptance
+
+Session cookie only. Records that the signed-in user accepts the current terms version (source `reaccept`) and writes a `terms.accepted` audit row naming the version.
+
+**Request:** `{"version": "2026-09"}`
+
+**Response (200):**
+
+```json
+{ "version": "2026-09", "recorded": true, "terms_acceptance_required": false }
+```
+
+`recorded` is `false` when that version was already the user's latest acceptance (a repeat is still `200`).
+
+| Status | When |
+|---|---|
+| `404` | `TERMS_VERSION` is empty — the feature is off |
+| `409` | `version` is not the current terms version (the page loaded before it changed); `detail` says to reload |
+| `401` / `403` | no session / an API key or bearer token instead of a session |
 
 ---
 
