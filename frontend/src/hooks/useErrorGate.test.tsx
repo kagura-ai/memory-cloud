@@ -200,7 +200,12 @@ describe("useErrorGate — feature resolution", () => {
 
 describe("useErrorGate — the matrix is passed through (#1645)", () => {
   const row = (name: string, over: Partial<PlanTierFeature>) =>
-    ({ name, display_name: name, connectors: false, ...over }) as PlanTierFeature;
+    ({
+      name,
+      display_name: name,
+      connectors: false,
+      ...over,
+    }) as PlanTierFeature;
 
   it("a refusal from a server that names no tier gets the matrix scan", () => {
     mockTiers = [

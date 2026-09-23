@@ -914,7 +914,10 @@ describe("resolveGate — the pending truth table (#1645)", () => {
 
   it("row 10: a passing flag and a failing matrix test answer plan", () => {
     const gate = resolveGate(
-      input("managed_llm", { features: { managed_llm: true }, planName: "basic" }),
+      input("managed_llm", {
+        features: { managed_llm: true },
+        planName: "basic",
+      }),
     );
     expect(gate.state).toBe("plan");
     expect(gate.requiredPlan).toBe("pro");
@@ -923,7 +926,10 @@ describe("resolveGate — the pending truth table (#1645)", () => {
   it("row 11: a passing flag and a passing matrix test answer allowed", () => {
     expect(
       resolveGate(
-        input("managed_llm", { features: { managed_llm: true }, planName: "pro" }),
+        input("managed_llm", {
+          features: { managed_llm: true },
+          planName: "pro",
+        }),
       ).state,
     ).toBe("allowed");
   });
@@ -932,9 +938,17 @@ describe("resolveGate — the pending truth table (#1645)", () => {
     // The caller feeds `currentWorkspace !== null`, which is false forever
     // for a user with no workspace; `!loading` would be true and fail the
     // matrix test closed on an undefined plan.
-    for (const key of ["shared_contexts", "resources", "team_invitations"] as const) {
+    for (const key of [
+      "shared_contexts",
+      "resources",
+      "team_invitations",
+    ] as const) {
       const gate = resolveGate(
-        input(key, { workspaceResolved: false, planName: undefined, role: undefined }),
+        input(key, {
+          workspaceResolved: false,
+          planName: undefined,
+          role: undefined,
+        }),
       );
       expect(gate.state).toBe("pending");
       expect(gate.canUpgrade).toBe(false);
@@ -947,7 +961,10 @@ describe("resolveGate — the pending truth table (#1645)", () => {
     for (const key of GATE_KEYS) {
       if (!("matrix" in GATE_SPECS[key])) continue;
       const gate = resolveGate(
-        input(key, { tiers: null, features: { reranking: true, managed_llm: true } }),
+        input(key, {
+          tiers: null,
+          features: { reranking: true, managed_llm: true },
+        }),
       );
       expect(gate.state).toBe("pending");
       expect(gate).not.toHaveProperty("requiredPlan");
@@ -972,9 +989,9 @@ describe("resolveGate — precedence (#1645)", () => {
     expect(
       resolveGate(input("managed_llm", { features: null, tiers: null })).state,
     ).toBe("pending");
-    expect(
-      resolveGate(input("cost_dashboard", { features: null })).state,
-    ).toBe("pending");
+    expect(resolveGate(input("cost_dashboard", { features: null })).state).toBe(
+      "pending",
+    );
   });
 
   it("role outranks plan: a member on a low tier is told about the role", () => {
@@ -991,8 +1008,9 @@ describe("resolveGate — precedence (#1645)", () => {
 
   it("an admin passes an admin-minimum gate and meets the plan", () => {
     expect(
-      resolveGate(input("team_invitations", { planName: "free", role: "admin" }))
-        .state,
+      resolveGate(
+        input("team_invitations", { planName: "free", role: "admin" }),
+      ).state,
     ).toBe("plan");
   });
 
@@ -1006,7 +1024,10 @@ describe("resolveGate — precedence (#1645)", () => {
     ).toBe("quota");
     expect(
       resolveGate(
-        input("shared_contexts", { planName: "pro", quota: { current: 4, limit: 5 } }),
+        input("shared_contexts", {
+          planName: "pro",
+          quota: { current: 4, limit: 5 },
+        }),
       ).state,
     ).toBe("allowed");
   });
@@ -1048,7 +1069,11 @@ describe("resolveGate — field presence (#1645)", () => {
     });
     expect(
       resolveGate(input("managed_llm", { features: {}, planName: "pro" })),
-    ).toEqual({ state: "deployment", feature: "managed_llm", canUpgrade: false });
+    ).toEqual({
+      state: "deployment",
+      feature: "managed_llm",
+      canUpgrade: false,
+    });
   });
 
   it("plan: required and current tier with labels, raw canUpgrade", () => {
@@ -1093,8 +1118,9 @@ describe("requiredTierFor / requiredPlan (#1645)", () => {
     expect(requiredTierFor(tiers, (t) => t.connectors === true)?.name).toBe(
       "promax",
     );
-    expect(resolveGate(input("connectors", { tiers, planName: "starter" })))
-      .toMatchObject({ state: "plan", requiredPlan: "promax" });
+    expect(
+      resolveGate(input("connectors", { tiers, planName: "starter" })),
+    ).toMatchObject({ state: "plan", requiredPlan: "promax" });
   });
 
   it("an operator override that moves shared_contexts to basic flows through with no code change", () => {
@@ -1121,7 +1147,10 @@ describe("requiredTierFor / requiredPlan (#1645)", () => {
   it("a non-canonical tier is labelled by its display_name; a canonical one by the env label", () => {
     const tiers = [
       tierRow("free"),
-      tierRow("enterprise", { public_contexts: true, display_name: "Enterprise" }),
+      tierRow("enterprise", {
+        public_contexts: true,
+        display_name: "Enterprise",
+      }),
     ];
     expect(
       resolveGate(input("public_contexts", { tiers, planName: "free" })),
@@ -1340,7 +1369,11 @@ describe("gateFromFacts with the matrix (#1645)", () => {
     // Pre-#1644 FEAT-001: no required_plan in details.
     expect(
       gateFromFacts({ state: "plan", feature: "resources" }, ctx),
-    ).toMatchObject({ requiredPlan: "promax", planLabel: "XL", canUpgrade: true });
+    ).toMatchObject({
+      requiredPlan: "promax",
+      planLabel: "XL",
+      canUpgrade: true,
+    });
     // ... and the sleep refusal, under the server's own feature name.
     expect(
       gateFromFacts(

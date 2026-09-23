@@ -17,10 +17,7 @@ beforeEach(() => {
 });
 
 // Only the fields the hook reads matter; the rest is filler for the type.
-function tier(
-  name: string,
-  gates: Partial<PlanTierFeature>,
-): PlanTierFeature {
+function tier(name: string, gates: Partial<PlanTierFeature>): PlanTierFeature {
   return {
     name,
     display_name: name,
