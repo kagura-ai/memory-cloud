@@ -101,12 +101,24 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockUseSystemFeatures(),
 }));
 
-// #1560: the create gate is the tier matrix's `connectors` boolean, read via
-// usePlanFeature — tri-state (`null` = still resolving). The hook is mocked
-// so the page is exercised against the API answer, not a tier name.
+// #1560: the create gate is the tier matrix's `connectors` boolean — tri-state
+// (`null` = still resolving). The hook is mocked so the page is exercised
+// against the API answer, not a tier name. #1645: read through
+// useFeatureGate; the tri-state maps onto its descriptor.
 let mockPlanFeature: boolean | null = true;
-vi.mock("@/hooks/usePlanFeatures", () => ({
-  usePlanFeature: () => mockPlanFeature,
+const MOCK_GATES = {
+  null: { state: "pending", feature: "connectors", canUpgrade: false },
+  true: { state: "allowed", feature: "connectors", canUpgrade: false },
+  false: {
+    state: "plan",
+    feature: "connectors",
+    requiredPlan: "promax",
+    planLabel: "XL",
+    canUpgrade: false,
+  },
+} as const;
+vi.mock("@/hooks/useFeatureGate", () => ({
+  useFeatureGate: () => MOCK_GATES[`${mockPlanFeature}`],
 }));
 
 // #1399: the fold/label tests differ only by llm_config_present, so build the

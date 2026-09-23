@@ -31,11 +31,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatRelativeTime } from "@/lib/utils/datetime";
-import { planLabelFromEnv } from "@/lib/utils/planLabel";
 import { listResources, type ResourceListItem } from "@/lib/api/resources";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useCanUpgrade } from "@/hooks/useCanUpgrade";
-import { usePlanFeature } from "@/hooks/usePlanFeatures";
+import { useFeatureGate } from "@/hooks/useFeatureGate";
 
 export default function ResourcesListPage() {
   const router = useRouter();
@@ -58,13 +57,13 @@ export default function ResourcesListPage() {
   // #1551: resources are XL-only to CREATE. Resources that already exist on
   // a lower tier keep serving, so the list always loads; the plan only
   // decides whether the "new resources need XL" banner is shown.
-  // #1560: read from the tier matrix's `resources` boolean; `null` while it
-  // resolves, and the banner renders only on an explicit `false`.
-  const canCreate = usePlanFeature("resources");
+  // #1560: read from the tier matrix's `resources` boolean. #1645: through
+  // the gate descriptor — `pending` while it resolves (no banner), and the
+  // required tier named from the matrix, not a hardcoded one.
+  const gate = useFeatureGate("resources");
   // #1643: the banner's title and description always render; only the button
   // needs a Plan page this member can actually reach.
   const canUpgrade = useCanUpgrade();
-  const xlLabel = planLabelFromEnv("promax", locale);
 
   const fetchResources = useCallback(async () => {
     try {
@@ -106,18 +105,23 @@ export default function ResourcesListPage() {
     <PageContainer>
       <PageHeader title={t("list.title")} description={t("list.description")} />
 
-      {workspaceReady && canCreate === false && (
+      {/* #1645: this copy names a tier, so it needs one — when no served tier
+          has the feature (an operator stripped it everywhere) there is none to
+          name, and the tier-less copy is #1646's. */}
+      {gate.state === "plan" && gate.planLabel !== undefined && (
         <Alert className="mb-4">
-          <AlertTitle>{t("planGate.title", { plan: xlLabel })}</AlertTitle>
+          <AlertTitle>
+            {t("planGate.title", { plan: gate.planLabel })}
+          </AlertTitle>
           <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
-            <span>{t("planGate.description", { plan: xlLabel })}</span>
+            <span>{t("planGate.description", { plan: gate.planLabel })}</span>
             {canUpgrade === true && (
               <Button
                 size="sm"
                 variant="outline"
                 onClick={() => router.push("/workspace/settings/plan")}
               >
-                {t("planGate.action", { plan: xlLabel })}
+                {t("planGate.action", { plan: gate.planLabel })}
               </Button>
             )}
           </AlertDescription>

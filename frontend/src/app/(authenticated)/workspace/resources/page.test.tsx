@@ -24,6 +24,7 @@ import {
 
 import ResourcesListPage from "./page";
 import type { ResourceListItem } from "@/lib/api/resources";
+import type { FeatureGate } from "@/lib/gates/featureGates";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -48,11 +49,17 @@ vi.mock("next/navigation", () => ({
 // that callback into a tight re-fetch loop (masquerades as flaky tests).
 // Cache per-namespace in module scope, same idea as the detail page test.
 const translatorCache = new Map<string, (k: string) => string>();
+// #1645: every call's interpolation values, so a test can see which tier a
+// message was given without changing what any message renders.
+const translatorValues: Array<[string, unknown]> = [];
 vi.mock("next-intl", () => ({
   useTranslations: (ns?: string) => {
     const key = ns ?? "";
     if (!translatorCache.has(key)) {
-      translatorCache.set(key, (k: string) => k);
+      translatorCache.set(key, (k: string, values?: unknown) => {
+        translatorValues.push([k, values]);
+        return k;
+      });
     }
     return translatorCache.get(key)!;
   },
@@ -71,11 +78,25 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
 }));
 
-// #1560: the create gate is the tier matrix's `resources` boolean via
-// usePlanFeature (tri-state; `null` = resolving), not a tier-name rank.
+// #1560: the create gate is the tier matrix's `resources` boolean, not a
+// tier-name rank. #1645: read through useFeatureGate; the tri-state below maps
+// onto its descriptor (`null` = resolving = "pending").
 let mockPlanFeature: boolean | null = true;
-vi.mock("@/hooks/usePlanFeatures", () => ({
-  usePlanFeature: () => mockPlanFeature,
+const MOCK_GATES = {
+  null: { state: "pending", feature: "resources", canUpgrade: false },
+  true: { state: "allowed", feature: "resources", canUpgrade: false },
+  false: {
+    state: "plan",
+    feature: "resources",
+    requiredPlan: "promax",
+    planLabel: "XL",
+    canUpgrade: false,
+  },
+} as const;
+// A test that needs a descriptor the tri-state cannot express sets this.
+let mockGate: FeatureGate | null = null;
+vi.mock("@/hooks/useFeatureGate", () => ({
+  useFeatureGate: () => mockGate ?? MOCK_GATES[`${mockPlanFeature}`],
 }));
 
 vi.mock("@/contexts/AuthContext", () => ({
@@ -107,6 +128,8 @@ beforeEach(() => {
   // #1551: resources are XL-only to create — promax is the "no upsell" tier.
   mockCurrentWorkspace = { plan_name: "promax", current_user_role: "owner" };
   mockPlanFeature = true; // #1560: resources included unless a test says otherwise
+  mockGate = null;
+  translatorValues.length = 0;
   mockFeatures = { plan_page: true };
 });
 
@@ -183,6 +206,48 @@ describe("ResourcesListPage", () => {
       expect(screen.getByText("ec_products")).toBeInTheDocument();
     });
     expect(screen.queryByText("planGate.title")).toBeNull();
+  });
+
+  it("the banner names the tier the gate resolves from the matrix, not a hardcoded XL (#1645)", async () => {
+    // An operator override moved `resources` to pro: the matrix names L.
+    mockCurrentWorkspace = { plan_name: "basic", current_user_role: "owner" };
+    mockGate = {
+      state: "plan",
+      feature: "resources",
+      requiredPlan: "pro",
+      planLabel: "L",
+      canUpgrade: false,
+    };
+    mockListResources.mockResolvedValue({ resources: [item()], total: 1 });
+
+    render(<ResourcesListPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("planGate.title")).toBeInTheDocument();
+    });
+    expect(translatorValues).toContainEqual(["planGate.title", { plan: "L" }]);
+    expect(translatorValues).toContainEqual([
+      "planGate.description",
+      { plan: "L" },
+    ]);
+  });
+
+  it("no served tier has resources: no tier-naming banner, list still served (#1645)", async () => {
+    // The copy needs a tier to name; there is none (#1646 adds the tier-less
+    // copy). It must never interpolate an undefined tier.
+    mockCurrentWorkspace = { plan_name: "basic", current_user_role: "owner" };
+    mockGate = { state: "plan", feature: "resources", canUpgrade: false };
+    mockListResources.mockResolvedValue({ resources: [item()], total: 1 });
+
+    render(<ResourcesListPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("ec_products")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("planGate.title")).toBeNull();
+    expect(translatorValues.filter(([k]) => k.startsWith("planGate."))).toEqual(
+      [],
+    );
   });
 
   it("pending gate: list served, no upsell flash while the matrix resolves (#1560)", async () => {

@@ -73,11 +73,10 @@ import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useCanUpgrade } from "@/hooks/useCanUpgrade";
-import { usePlanFeature } from "@/hooks/usePlanFeatures";
+import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
-import { planLabelFromEnv } from "@/lib/utils/planLabel";
 import { API_BASE_URL, ApiError } from "@/lib/api/base";
 import { gateFromFacts } from "@/lib/gates/featureGates";
 import { getContexts, type Context } from "@/lib/api/contexts";
@@ -213,13 +212,18 @@ export default function ConnectorsPage() {
   // keep being listed, configured and dispatched on any tier — only the
   // create controls (provider CTA, manual bind, empty-state action) gate.
   // #1560: the gate is the tier matrix's `connectors` boolean, not a tier
-  // name. Tri-state — `null` while resolving: controls stay disabled and the
-  // upsell is only rendered on an explicit `false`.
-  const canCreate = usePlanFeature("connectors");
+  // name. #1645: read through the gate descriptor, which also names the
+  // required tier from the matrix. `canCreate` is its tri-state view for the
+  // create controls below — `null` while resolving: controls stay disabled
+  // and the upsell is only rendered on an explicit `false`.
+  const gate = useFeatureGate("connectors");
+  const canCreate = gate.state === "pending" ? null : gate.state === "allowed";
+  // The plan-gate copy names a tier, so it renders only when there is one to
+  // name: no served tier having the feature is the tier-less copy #1646 adds.
+  const planLabel = gate.state === "plan" ? gate.planLabel : undefined;
   // #1643: the plan-gate copy always renders; only the button needs a Plan
   // page this member can actually reach.
   const canUpgrade = useCanUpgrade();
-  const xlLabel = planLabelFromEnv("promax", locale);
 
   // #1426: managed (hosted SaaS) mode. When true the shared worker/bridge
   // provides the pre-compile LLM and only OAuth is offered, so hide the BYO
@@ -410,10 +414,12 @@ export default function ConnectorsPage() {
     // callback would otherwise show an enabled form that only fails at the
     // backend 403. Surface the upsell and strip the one-time handle instead.
     if (!canCreate) {
-      toast({
-        title: t("planGate.title", { plan: xlLabel }),
-        description: t("planGate.description", { plan: xlLabel }),
-      });
+      if (planLabel !== undefined) {
+        toast({
+          title: t("planGate.title", { plan: planLabel }),
+          description: t("planGate.description", { plan: planLabel }),
+        });
+      }
       router.replace("/workspace/integrations/connectors");
       return;
     }
@@ -1053,14 +1059,14 @@ export default function ConnectorsPage() {
     <PageContainer>
       <PageHeader title={t("title")} description={t("description")} />
 
-      {canCreate === false && (
+      {planLabel !== undefined && (
         <Alert className="mb-4">
           <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
             <span>
               <span className="font-medium">
-                {t("planGate.title", { plan: xlLabel })}
+                {t("planGate.title", { plan: planLabel })}
               </span>{" "}
-              {t("planGate.description", { plan: xlLabel })}
+              {t("planGate.description", { plan: planLabel })}
             </span>
             {canUpgrade === true && (
               <Button
@@ -1068,7 +1074,7 @@ export default function ConnectorsPage() {
                 variant="outline"
                 onClick={() => router.push("/workspace/settings/plan")}
               >
-                {t("planGate.action", { plan: xlLabel })}
+                {t("planGate.action", { plan: planLabel })}
               </Button>
             )}
           </AlertDescription>
@@ -1199,8 +1205,8 @@ export default function ConnectorsPage() {
           icon={Plug}
           title={t("emptyTitle")}
           description={
-            canCreate === false
-              ? t("planGate.description", { plan: xlLabel })
+            planLabel !== undefined
+              ? t("planGate.description", { plan: planLabel })
               : t("emptyDesc")
           }
           actionLabel={
