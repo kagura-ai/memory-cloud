@@ -7,7 +7,7 @@ Based on: kagura-ai/src/kagura/exceptions.py
 
 from typing import Any
 
-from config.constants import GATE_ALLOWLIST, GATE_DEPLOYMENT, GATE_PLAN, GATE_QUOTA
+from config.constants import GATE_ALLOWLIST, GATE_DEPLOYMENT, GATE_PLAN, GATE_QUOTA, QUOTA_TYPES
 
 
 class MemoryCloudException(Exception):
@@ -632,11 +632,20 @@ class RateLimitError(MemoryCloudException):
 class QuotaExceededError(MemoryCloudException):
     """Quota exceeded (429 by default).
 
-    Every instance stamps ``details.gate = "quota"`` (#1644) so a client can
-    tell a cap from a plan refusal without matching on prose. Callers add the
-    canonical ``current`` / ``limit`` counts through
+    A TYPED instance — one whose ``quota_type`` is in the frozen
+    ``QUOTA_TYPES`` vocabulary — stamps ``details.gate = "quota"`` (#1644) so
+    a client can tell a cap from a plan refusal without matching on prose.
+    Callers add the canonical ``current`` / ``limit`` counts through
     ``config.plan_tiers.quota_gate_details``; the per-site legacy count names
     stay beside them, never replaced.
+
+    An UNTYPED instance carries no ``gate`` at all, and a caller-supplied one
+    is dropped. The type is also raised for limits that are not plan quotas —
+    the 1 MB memory-size guard, the "workspace not found" anomalies — and a
+    ``gate`` there would make a client offer an upgrade for a request-size
+    limit no tier lifts. Keying the stamp on the type, rather than on an
+    opt-out flag at those sites, means an untyped raise cannot be mislabelled
+    by forgetting the flag: the default is "not a gate".
 
     ``status_code`` exists only so the two caps that have always answered 403
     (resource tokens, connector seats) can carry the details block without
@@ -651,9 +660,13 @@ class QuotaExceededError(MemoryCloudException):
         status_code: int = 429,
         **details: Any,
     ) -> None:
-        # ``setdefault``: a caller that already splatted ``quota_gate_details``
-        # supplies its own ``gate`` and must not hit a duplicate kwarg.
-        details.setdefault("gate", GATE_QUOTA)
+        # ``gate`` is a keyword here (not a parameter) so a caller that splatted
+        # ``quota_gate_details`` does not hit a duplicate kwarg; it is then
+        # overwritten from the type, never trusted from the caller.
+        if quota_type in QUOTA_TYPES:
+            details["gate"] = GATE_QUOTA
+        else:
+            details.pop("gate", None)
         super().__init__(
             message,
             status_code=status_code,

@@ -30,9 +30,12 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import pathlib
 from dataclasses import dataclass, field
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -44,6 +47,7 @@ from config.constants import (
     GATE_PLAN,
     GATE_QUOTA,
     GATE_ROLE,
+    MAX_CONTENT_SIZE,
     QUOTA_TYPES,
 )
 from config.plan_tiers import (
@@ -54,6 +58,7 @@ from config.plan_tiers import (
     quota_gate_details,
     required_plan_display_name,
 )
+from models.schemas import PatchMemoryRequest, RememberRequest, UpdateMemoryRequest
 from services.connector_provisioning import ConnectorProvisioningService
 from utils.exceptions import (
     AuthorizationError,
@@ -908,3 +913,185 @@ class TestRoleRefusalsCarryNothing:
         assert response.status_code == 403
         assert '"gate":"plan"' in body.replace(" ", "")
         assert "team_invitations" in body
+
+
+# ---------------------------------------------------------------------------
+# Limits that are NOT gates carry no gate
+# ---------------------------------------------------------------------------
+
+_OVERSIZED = "x" * (MAX_CONTENT_SIZE + 1)
+
+
+async def _rest_details(exc: MemoryCloudException) -> dict:
+    """The ``details`` block of the REST body the global handler renders."""
+    from api.main import memory_cloud_exception_handler
+
+    request = MagicMock()
+    request.url.path = "/api/v1/memory"
+    response = await memory_cloud_exception_handler(request, exc)
+    body = json.loads(response.body)
+    assert body["error"] == exc.error_code
+    return body["details"]
+
+
+def _stored_memory() -> SimpleNamespace:
+    return SimpleNamespace(summary="stored summary", context_summary="", content="", details=None)
+
+
+def _execute_returning(*results: object) -> MagicMock:
+    """A mock session whose ``execute`` answers ``results`` in order."""
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=list(results))
+    return db
+
+
+def _workspace_result(workspace: object) -> MagicMock:
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = workspace
+    return result
+
+
+async def _raised_by(awaitable) -> QuotaExceededError:
+    with pytest.raises(QuotaExceededError) as exc:
+        await awaitable
+    return exc.value
+
+
+async def _remember_size_guard() -> QuotaExceededError:
+    from services.memory_service import MemoryService
+
+    service = MemoryService(_execute_returning())
+    context = MagicMock()
+    context.id = uuid4()
+    context.workspace_id = uuid4()
+    service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
+        return_value=(context, str(context.workspace_id), str(context.id))
+    )
+    permissive = MagicMock(
+        check_memory_quota=AsyncMock(return_value=(True, None)),
+        check_memories_per_day=AsyncMock(return_value=(True, None)),
+    )
+    with patch("services.quota_service.QuotaService", return_value=permissive):
+        return await _raised_by(
+            service.remember(
+                RememberRequest(summary="a summary long enough", content=_OVERSIZED, type="note"),
+                user_id="u",
+                current_context_id=context.id,
+            )
+        )
+
+
+async def _update_size_guard() -> QuotaExceededError:
+    from services.memory_service import MemoryService
+
+    with pytest.raises(QuotaExceededError) as exc:
+        MemoryService._update_guard_size(
+            _stored_memory(), UpdateMemoryRequest(memory_id=uuid4(), content=_OVERSIZED), None, None
+        )
+    return exc.value
+
+
+async def _patch_size_guard() -> QuotaExceededError:
+    from services.memory_service import MemoryService
+
+    with pytest.raises(QuotaExceededError) as exc:
+        MemoryService._patch_guard_size(
+            _stored_memory(), PatchMemoryRequest(content=_OVERSIZED), {"content"}, None
+        )
+    return exc.value
+
+
+async def _memories_per_day_workspace_missing() -> QuotaExceededError:
+    from services.quota_service import QuotaService
+
+    db = _execute_returning(_workspace_result(None))
+    return await _raised_by(
+        QuotaService(db).check_memories_per_day(uuid4(), raise_on_exceeded=True)
+    )
+
+
+async def _memory_quota_workspace_missing() -> QuotaExceededError:
+    from services.quota_service import QuotaService
+
+    db = _execute_returning(_workspace_result(None))
+    return await _raised_by(QuotaService(db).check_memory_quota(uuid4(), raise_on_exceeded=True))
+
+
+async def _memory_quota_total_cap() -> QuotaExceededError:
+    from services.quota_service import QuotaService
+
+    count = MagicMock()
+    count.scalar.return_value = 1000
+    db = _execute_returning(_workspace_result(SimpleNamespace(plan_name=_FREE)), count)
+    effective = MagicMock(get_effective_quotas=AsyncMock(return_value={"memory_limit": 1000}))
+    with patch("services.quota_service.EffectiveQuotaService", return_value=effective):
+        return await _raised_by(
+            QuotaService(db).check_memory_quota(uuid4(), raise_on_exceeded=True)
+        )
+
+
+# Every raise at every ``NOT_GATE_REFUSALS`` site, driven through the real
+# code. Keyed by site so a new entry in ``NOT_GATE_REFUSALS`` fails
+# ``test_every_non_gate_site_is_driven`` until it is exercised here too.
+NON_GATE_DRIVERS = {
+    "services.memory_service:MemoryService.remember": [_remember_size_guard],
+    "services.memory_service:MemoryService._update_guard_size": [_update_size_guard],
+    "services.memory_service:MemoryService._patch_guard_size": [_patch_size_guard],
+    "services.quota_service:QuotaService.check_memories_per_day": [
+        _memories_per_day_workspace_missing
+    ],
+    "services.quota_service:QuotaService.check_memory_quota": [
+        _memory_quota_workspace_missing,
+        _memory_quota_total_cap,
+    ],
+}
+_NON_GATE_CASES = [
+    pytest.param(driver, id=f"{site.rpartition('.')[2]}:{driver.__name__}")
+    for site, drivers in NON_GATE_DRIVERS.items()
+    for driver in drivers
+]
+
+
+class TestLimitsThatAreNotGatesCarryNoGate:
+    """``QuotaExceededError`` is also raised for things no tier lifts.
+
+    A ``gate`` on those would make a client offer an upgrade for a 1 MB
+    request-size limit. The constructor stamps ``gate`` only for a TYPED
+    refusal (a ``quota_type`` from ``QUOTA_TYPES``), so every untyped raise
+    reaches the wire with no gate — asserted here on the REST body the real
+    sites produce, not on a reconstruction of it.
+    """
+
+    def test_every_non_gate_site_is_driven(self) -> None:
+        assert set(NON_GATE_DRIVERS) == set(NOT_GATE_REFUSALS)
+
+    @pytest.mark.parametrize(
+        "site",
+        sorted(NOT_GATE_REFUSALS),
+    )
+    def test_the_non_gate_sites_raise_untyped(self, site: str) -> None:
+        """Statically: no raise at these sites passes a ``quota_type``, a
+        ``gate`` or a details builder, so nothing can type it by accident."""
+        module, _, qualname = site.partition(":")
+        path = SRC_ROOT / (module.replace(".", "/") + ".py")
+        calls = [call for found, call in _refusal_raises(path) if found == qualname]
+        assert calls, f"{site} raises nothing"
+        for call in calls:
+            assert len(call.args) <= 1, f"{site}: a positional quota_type is passed"
+            assert all(kw.arg not in ("quota_type", "gate") for kw in call.keywords), site
+            assert all(kw.arg is not None for kw in call.keywords), (
+                f"{site}: a ``**`` splat could carry quota_type / gate"
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("driver", _NON_GATE_CASES)
+    async def test_the_rest_body_carries_no_gate(self, driver) -> None:
+        exc = await driver()
+        details = await _rest_details(exc)
+
+        assert exc.error_code == "QUOTA-001"
+        assert "gate" not in details
+        # The whole block, pinned: ``frontend/src/lib/gates/featureGates.test.ts``
+        # feeds this exact body to ``normalizeGate`` and asserts it yields no
+        # gate — the QUOTA-001 code fallback needs a frozen ``quota_type``.
+        assert details == {"quota_type": None}

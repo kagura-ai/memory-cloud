@@ -222,6 +222,28 @@ class TestRateLimitErrors:
         assert exc.details["gate"] == GATE_QUOTA
         assert exc.details["quota_type"] == "contexts"
 
+    def test_untyped_quota_exceeded_carries_no_gate(self):
+        """#1644 review: the type is also raised for the 1 MB memory-size guard
+        and the "workspace not found" anomalies. Those are not plan quotas, so
+        a ``gate`` would make a client offer an upgrade no tier provides."""
+        exc = QuotaExceededError("Memory size 1,000,001 bytes exceeds limit 1,000,000 bytes (1MB).")
+        assert exc.error_code == "QUOTA-001"
+        assert exc.status_code == 429
+        assert "gate" not in exc.details
+
+    def test_untyped_quota_exceeded_drops_a_caller_supplied_gate(self):
+        """The type decides, not the caller: an untyped raise cannot be
+        mislabelled by passing ``gate`` by hand."""
+        exc = QuotaExceededError("Workspace x not found", gate=GATE_QUOTA)
+        assert "gate" not in exc.details
+
+    def test_quota_type_outside_the_frozen_vocabulary_carries_no_gate(self):
+        """A client maps ``quota_type`` onto a gate key; one it has no key for
+        would be an unrenderable gate, so it is not stamped as one."""
+        exc = QuotaExceededError("x", "not_a_frozen_type", current=1, limit=1)
+        assert "gate" not in exc.details
+        assert exc.details["quota_type"] == "not_a_frozen_type"
+
     def test_quota_exceeded_keeps_a_caller_supplied_gate(self):
         """``quota_gate_details`` already carries ``gate``; splatting it must not
         raise a duplicate-kwarg TypeError."""
