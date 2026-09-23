@@ -11,6 +11,9 @@
  * - row click navigates to detail page
  * - #1643: the upsell banner keeps its copy but drops the button when the
  *   Plan page is not reachable on this deployment
+ * - #1646: the banner is FeatureGateNotice (inline, scope "create") with the
+ *   gate.* copy — under the key-echo mock its text is the relative gate key
+ *   ("plan.newTitle"); a plan gate no tier lifts gets the tier-less copy
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
@@ -82,21 +85,26 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
 // tier-name rank. #1645: read through useFeatureGate; the tri-state below maps
 // onto its descriptor (`null` = resolving = "pending").
 let mockPlanFeature: boolean | null = true;
-const MOCK_GATES = {
-  null: { state: "pending", feature: "resources", canUpgrade: false },
-  true: { state: "allowed", feature: "resources", canUpgrade: false },
-  false: {
-    state: "plan",
-    feature: "resources",
-    requiredPlan: "promax",
-    planLabel: "XL",
-    canUpgrade: false,
-  },
-} as const;
+const mockGateFor = (planFeature: boolean | null): FeatureGate =>
+  planFeature === null
+    ? { state: "pending", feature: "resources", canUpgrade: false }
+    : planFeature
+      ? { state: "allowed", feature: "resources", canUpgrade: false }
+      : {
+          state: "plan",
+          feature: "resources",
+          requiredPlan: "promax",
+          planLabel: "XL",
+          // #1646: the notice reads the descriptor's own canUpgrade. The real
+          // hook derives it from /system/info (canUpgradeFrom, pinned in
+          // useFeatureGate.test.tsx); this stands in for that derivation so
+          // the #1643 cases below keep driving it through `mockFeatures`.
+          canUpgrade: mockFeatures?.plan_page === true,
+        };
 // A test that needs a descriptor the tri-state cannot express sets this.
 let mockGate: FeatureGate | null = null;
 vi.mock("@/hooks/useFeatureGate", () => ({
-  useFeatureGate: () => mockGate ?? MOCK_GATES[`${mockPlanFeature}`],
+  useFeatureGate: () => mockGate ?? mockGateFor(mockPlanFeature),
 }));
 
 vi.mock("@/contexts/AuthContext", () => ({
@@ -190,7 +198,13 @@ describe("ResourcesListPage", () => {
       });
       expect(mockListResources).toHaveBeenCalledTimes(1);
       // Block-new-only: the list is served, creation is what the banner gates.
-      expect(screen.getByText("planGate.title")).toBeInTheDocument();
+      expect(screen.getByText("plan.newTitle")).toBeInTheDocument();
+      // #1646: scope "create" — the copy says existing resources keep working.
+      expect(screen.getByText("plan.newDescription")).toBeInTheDocument();
+      expect(translatorValues).toContainEqual([
+        "plan.newTitle",
+        { plan: "XL", feature: "features.resources.plural" },
+      ]);
     },
   );
 
@@ -205,7 +219,7 @@ describe("ResourcesListPage", () => {
     await waitFor(() => {
       expect(screen.getByText("ec_products")).toBeInTheDocument();
     });
-    expect(screen.queryByText("planGate.title")).toBeNull();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
   });
 
   it("the banner names the tier the gate resolves from the matrix, not a hardcoded XL (#1645)", async () => {
@@ -223,18 +237,22 @@ describe("ResourcesListPage", () => {
     render(<ResourcesListPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("planGate.title")).toBeInTheDocument();
+      expect(screen.getByText("plan.newTitle")).toBeInTheDocument();
     });
-    expect(translatorValues).toContainEqual(["planGate.title", { plan: "L" }]);
     expect(translatorValues).toContainEqual([
-      "planGate.description",
-      { plan: "L" },
+      "plan.newTitle",
+      { plan: "L", feature: "features.resources.plural" },
+    ]);
+    expect(translatorValues).toContainEqual([
+      "plan.newDescription",
+      { plan: "L", feature: "features.resources.plural" },
     ]);
   });
 
   it("no served tier has resources: no tier-naming banner, list still served (#1645)", async () => {
-    // The copy needs a tier to name; there is none (#1646 adds the tier-less
-    // copy). It must never interpolate an undefined tier.
+    // The tier-naming copy needs a tier to name; there is none. #1646 renders
+    // the tier-less copy instead — no CTA, nothing to upgrade to — and it
+    // must never interpolate an undefined tier.
     mockCurrentWorkspace = { plan_name: "basic", current_user_role: "owner" };
     mockGate = { state: "plan", feature: "resources", canUpgrade: false };
     mockListResources.mockResolvedValue({ resources: [item()], total: 1 });
@@ -244,10 +262,16 @@ describe("ResourcesListPage", () => {
     await waitFor(() => {
       expect(screen.getByText("ec_products")).toBeInTheDocument();
     });
-    expect(screen.queryByText("planGate.title")).toBeNull();
-    expect(translatorValues.filter(([k]) => k.startsWith("planGate."))).toEqual(
-      [],
-    );
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
+    expect(screen.getByText("plan.titleNoTier")).toBeInTheDocument();
+    expect(screen.getByText("plan.descriptionNoTier")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
+    expect(
+      translatorValues.filter(
+        ([, values]) =>
+          typeof values === "object" && values !== null && "plan" in values,
+      ),
+    ).toEqual([]);
   });
 
   it("pending gate: list served, no upsell flash while the matrix resolves (#1560)", async () => {
@@ -260,7 +284,11 @@ describe("ResourcesListPage", () => {
     await waitFor(() => {
       expect(screen.getByText("ec_products")).toBeInTheDocument();
     });
-    expect(screen.queryByText("planGate.title")).toBeNull();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
+    // #1646: the notice renders nothing at all for a pending gate.
+    expect(
+      translatorValues.filter(([k]) => k.startsWith("plan.")),
+    ).toEqual([]);
   });
 
   it("promax is not plan-gated: fetches and renders, no upgrade CTA (#1548)", async () => {
@@ -273,7 +301,7 @@ describe("ResourcesListPage", () => {
       expect(screen.getByText("ec_products")).toBeInTheDocument();
     });
     expect(mockListResources).toHaveBeenCalledTimes(1);
-    expect(screen.queryByText("planGate.title")).toBeNull();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
   });
 
   it("promax is not plan-gated: fetches and renders, no upgrade CTA (#1548)", async () => {
@@ -286,7 +314,7 @@ describe("ResourcesListPage", () => {
       expect(screen.getByText("ec_products")).toBeInTheDocument();
     });
     expect(mockListResources).toHaveBeenCalledTimes(1);
-    expect(screen.queryByText("planGate.title")).toBeNull();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
   });
 
   it("upgrade CTA button navigates to the plan page", async () => {
@@ -297,9 +325,9 @@ describe("ResourcesListPage", () => {
     render(<ResourcesListPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("planGate.title")).toBeInTheDocument();
+      expect(screen.getByText("plan.newTitle")).toBeInTheDocument();
     });
-    fireEvent.click(screen.getByRole("button", { name: "planGate.action" }));
+    fireEvent.click(screen.getByRole("button", { name: "plan.action" }));
     expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
   });
 
@@ -312,13 +340,11 @@ describe("ResourcesListPage", () => {
     render(<ResourcesListPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("planGate.title")).toBeInTheDocument();
+      expect(screen.getByText("plan.newTitle")).toBeInTheDocument();
     });
     // The explanation is the point of the banner — it stays.
-    expect(screen.getByText("planGate.description")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "planGate.action" }),
-    ).toBeNull();
+    expect(screen.getByText("plan.newDescription")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
   });
 
   it("plan-gate banner drops the button while /system/info is pending", async () => {
@@ -330,11 +356,9 @@ describe("ResourcesListPage", () => {
     render(<ResourcesListPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("planGate.title")).toBeInTheDocument();
+      expect(screen.getByText("plan.newTitle")).toBeInTheDocument();
     });
-    expect(
-      screen.queryByRole("button", { name: "planGate.action" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
   });
 
   it("holds the fetch until WorkspaceContext hydrates", async () => {
