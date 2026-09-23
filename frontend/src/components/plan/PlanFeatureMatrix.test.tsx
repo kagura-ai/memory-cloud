@@ -6,7 +6,7 @@
  * requirement that NO price is rendered (pricing lives on the payment side).
  */
 
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -49,6 +49,17 @@ vi.mock("@/hooks/usePlanFeatures", () => ({
     }, []);
     return state;
   },
+}));
+
+// #1654: the deployment flags the table consults. Default: a deployment that
+// provides both flag-bearing features, i.e. the table exactly as the matrix
+// serves it. `null` = /system/info still in flight.
+let mockFeatures: Record<string, boolean> | null = {
+  reranking: true,
+  managed_llm: true,
+};
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => mockFeatures,
 }));
 
 const TIERS = [
@@ -167,6 +178,7 @@ const TIERS = [
 beforeEach(() => {
   vi.clearAllMocks();
   mockGetMatrix.mockResolvedValue(TIERS);
+  mockFeatures = { reranking: true, managed_llm: true };
 });
 
 const rowOf = (label: string) =>
@@ -349,6 +361,83 @@ describe("PlanFeatureMatrix (#1138)", () => {
     expect(
       rowOf("planMatrix.row_memories").queryByText("planMatrix.beta"),
     ).toBeNull();
+  });
+});
+
+describe("PlanFeatureMatrix and deployment flags (#1654)", () => {
+  const rowLabels = () =>
+    screen
+      .getAllByRole("row")
+      .map((tr) => tr.querySelector("td")?.textContent ?? "")
+      .filter(Boolean);
+
+  it("reranking off on this deployment: no tier shows it as a benefit", async () => {
+    mockFeatures = { reranking: false, managed_llm: true };
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await screen.findByText("planMatrix.row_connectors");
+
+    expect(screen.queryByText("planMatrix.row_reranking")).toBeNull();
+    // Only that row: the rest of the table is the matrix as served.
+    expect(rowLabels()).not.toContain("planMatrix.row_reranking");
+    expect(rowOf("planMatrix.row_managedLlm").getAllByText("✓").length).toBe(2);
+  });
+
+  it("reranking on: the table is unchanged", async () => {
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await screen.findByText("planMatrix.row_reranking");
+
+    const reranking = rowOf("planMatrix.row_reranking");
+    expect(reranking.getAllByText("✓").length).toBe(3);
+    expect(reranking.getAllByText("✗").length).toBe(1);
+    expect(rowLabels()).toHaveLength(22); // every row the matrix defines
+  });
+
+  it("an older backend with no reranking flag keeps the row (#1580 polarity)", async () => {
+    mockFeatures = { managed_llm: true };
+    render(<PlanFeatureMatrix currentTier="basic" />);
+
+    expect(
+      await screen.findByText("planMatrix.row_reranking"),
+    ).toBeInTheDocument();
+  });
+
+  it("/system/info pending: the table waits instead of listing a row it may withdraw", async () => {
+    mockFeatures = null;
+    const { rerender } = render(<PlanFeatureMatrix currentTier="basic" />);
+    await waitFor(() => expect(mockGetMatrix).toHaveBeenCalled());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // Matrix loaded, flags not: no row at all — never a ✓ for reranking
+    // that a moment later disappears.
+    expect(screen.queryByText("planMatrix.row_contexts")).toBeNull();
+    expect(screen.queryByText("planMatrix.row_reranking")).toBeNull();
+
+    mockFeatures = { reranking: false, managed_llm: true };
+    rerender(<PlanFeatureMatrix currentTier="basic" />);
+    expect(
+      await screen.findByText("planMatrix.row_contexts"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("planMatrix.row_reranking")).toBeNull();
+  });
+
+  it("is generic: the managed LLM row follows its own default-off flag", async () => {
+    // managed_llm is on /system/info as "the deployment has a managed LLM
+    // provider"; without one, no tier gets analysis on it.
+    mockFeatures = { reranking: true, managed_llm: false };
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await screen.findByText("planMatrix.row_reranking");
+
+    expect(screen.queryByText("planMatrix.row_managedLlm")).toBeNull();
+    expect(rowLabels()).toHaveLength(21);
+  });
+
+  it("a failed /system/info ({}) hides default-off rows and keeps the default-on reranker", async () => {
+    mockFeatures = {};
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await screen.findByText("planMatrix.row_reranking");
+
+    expect(screen.queryByText("planMatrix.row_managedLlm")).toBeNull();
   });
 });
 
