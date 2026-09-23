@@ -1325,7 +1325,6 @@
     "contextAccessNotApplicable": "制限なし",
     "noContextsAvailable": "利用可能なContextがありません",
     "authentication": "操作",
-    "credentialsSettings": "設定",
     "contextAccessInfo": "このメンバーがアクセスできるContextを選択",
     "selectAll": "すべて選択",
     "deselectAll": "すべて解除",
