@@ -53,6 +53,18 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
   }),
 }));
 
+// #1645: the reranker gate reads the shared tier matrix; the OSS default,
+// where the lowest tier has no reranking.
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanTierMatrix: () => OSS_TIERS,
+}));
+const OSS_TIERS = [
+  { name: "free", display_name: "S", reranking: false },
+  { name: "basic", display_name: "M", reranking: true },
+  { name: "pro", display_name: "L", reranking: true },
+  { name: "promax", display_name: "XL", reranking: true },
+];
+
 const mockGetConfig = vi.fn();
 vi.mock("@/lib/api/contexts", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
