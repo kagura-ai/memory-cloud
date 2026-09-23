@@ -13,6 +13,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -440,6 +441,27 @@ def test_generic_failure_clears_a_recorded_endpoint_stage(
     result = _start(plugin_env, run_hook, stub_server.url)
     assert "server unreachable and no usable cache" in result.json["systemMessage"]
     assert "server_url must be the MCP endpoint" not in result.json["systemMessage"]
+
+
+@pytest.mark.parametrize("status", [404, 401])
+def test_marker_write_never_follows_a_symlink(
+    plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer, tmp_path: Path, status: int
+) -> None:
+    # The marker now carries content, so writing it truncates: a symlink in its place must
+    # not turn that into a truncation (or a stage write) of whatever the link points at.
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"keep me")
+    marker = plugin_env.guardrails_dir / f"{CONTEXT_ID}.fetch-failed"
+    marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    old = time.time() - 120
+    os.symlink(victim, marker)
+    os.utime(victim, (old, old))  # the link's target is stale: the session fetches
+    stub_server.status = status
+    stub_server.raw_body = b"<html>nope</html>"
+    result = _start(plugin_env, run_hook, stub_server.url)
+    assert result.json is not None and "systemMessage" in result.json  # still fails open
+    assert victim.read_bytes() == b"keep me"
+    assert marker.is_symlink()
 
 
 def test_other_http_errors_keep_the_unreachable_wording(

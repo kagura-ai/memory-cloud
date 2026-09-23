@@ -1196,15 +1196,23 @@ def _touch(path: str, stage: str = "") -> None:
     """(Re)start the negative-cache marker; it carries the failure stage when that is one
     the fallback words differently (``ENDPOINT_STAGES``), else nothing - the generic case."""
     tag = stage.encode("ascii") if stage in ENDPOINT_STAGES else b""
+    # The marker is written, not only touched: O_NOFOLLOW + a regular-file check keep the
+    # truncation off whatever a symlink or FIFO in its place points at (O_NONBLOCK: no hang).
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+        fd = os.open(path, flags, 0o600)
         try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return
             os.ftruncate(fd, 0)
             if tag:
                 os.write(fd, tag)
+            if os.utime in os.supports_fd:
+                os.utime(fd, None)
+            else:
+                os.utime(path, None)
         finally:
             os.close(fd)
-        os.utime(path, None)
     except OSError:
         pass  # the negative-cache marker is an optimisation; without it we simply retry sooner
 
