@@ -1982,7 +1982,7 @@
     "titleExceeded": "Quota Exceeded",
     "titleCritical": "Critical: Approaching Limit",
     "titleWarning": "Warning: Quota Usage High",
-    "bodyExceeded": "You have exceeded your limit for {resource}. Please delete some entries or upgrade your plan.",
+    "bodyExceeded": "You have exceeded your limit for {resource}. Delete unneeded data or upgrade your plan.",
     "bodyCritical": "You are very close to your limit for {resource}. Consider upgrading to avoid service interruption.",
     "upgrade": "Upgrade Plan"
   },
