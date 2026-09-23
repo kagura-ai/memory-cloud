@@ -607,3 +607,125 @@ class TestQuotaServiceWorkspaceCreationCap:
 
         assert "temporarily unavailable" in str(exc_info.value).lower()
         assert exc_info.value.__cause__ is original
+
+
+class TestQuotaGateDetails:
+    """#1644 S3/S4: every cap refusal is machine-readable.
+
+    The context cap was the one quota refusal that carried no ``quota_type``,
+    no counts and a hardcoded upgrade sentence; the member cap carried no
+    ``quota_type`` either. Both now build their details from the registry, so
+    a client never has to parse the prose to learn which cap it hit.
+    """
+
+    @pytest.fixture
+    def mock_db(self):
+        db = MagicMock()
+        db.execute = AsyncMock()
+        return db
+
+    @pytest.fixture
+    def service(self, mock_db):
+        return QuotaService(mock_db)
+
+    @pytest.fixture
+    def workspace_id(self):
+        return uuid4()
+
+    @staticmethod
+    def _context_side_effects(plan_name: str, *, context_count: int, addon_bonus: int = 0):
+        """The two executes ``check_context_creation_allowed`` issues."""
+        from config.plan_tiers import get_plan_tier
+
+        workspace = MagicMock()
+        workspace.plan_name = plan_name
+        workspace.effective_max_contexts = (
+            get_plan_tier(plan_name).max_contexts_per_workspace + addon_bonus
+        )
+        workspace_result = MagicMock()
+        workspace_result.scalar_one_or_none = MagicMock(return_value=workspace)
+        count_result = MagicMock()
+        count_result.scalar = MagicMock(return_value=context_count)
+        return [workspace_result, count_result]
+
+    @pytest.mark.asyncio
+    async def test_context_cap_details_carry_contexts_current_limit(
+        self, service, mock_db, workspace_id
+    ):
+        from config.plan_tiers import get_plan_tier
+
+        free_cap = get_plan_tier("free").max_contexts_per_workspace
+        mock_db.execute.side_effect = self._context_side_effects("free", context_count=free_cap)
+
+        with pytest.raises(QuotaExceededError) as exc_info:
+            await service.check_context_creation_allowed(workspace_id, raise_on_denied=True)
+
+        details = exc_info.value.details
+        assert details["gate"] == "quota"
+        assert details["quota_type"] == "contexts"
+        assert (details["current"], details["limit"]) == (free_cap, free_cap)
+        assert details["current_plan"] == "free"
+        assert details["required_plan"] == "basic"
+        assert details["required_plan_display"] == get_plan_tier("basic").display_name
+
+    @pytest.mark.asyncio
+    async def test_context_cap_message_no_longer_hardcodes_basic_or_pro(
+        self, service, mock_db, workspace_id
+    ):
+        """The upgrade tier is interpolated from the registry, like the tier
+        the sentence above it already names."""
+        from config.plan_tiers import get_plan_tier
+
+        free_cap = get_plan_tier("free").max_contexts_per_workspace
+        mock_db.execute.side_effect = self._context_side_effects("free", context_count=free_cap)
+
+        can_create, error = await service.check_context_creation_allowed(workspace_id)
+
+        assert can_create is False
+        assert "Basic or Pro" not in error
+        assert f"Upgrade to {get_plan_tier('basic').display_name} plan" in error
+
+    @pytest.mark.asyncio
+    async def test_context_cap_upgrade_sentence_is_dropped_when_no_tier_raises_it(
+        self, service, mock_db, workspace_id
+    ):
+        """At the top tier's cap nothing raises it, so the message must not
+        promise an upgrade that does not exist — and the details carry no
+        ``required_plan`` for the CTA to key off either."""
+        from config.plan_tiers import get_plan_tier
+
+        top_cap = max(
+            get_plan_tier(p).max_contexts_per_workspace for p in ("free", "basic", "pro", "promax")
+        )
+        mock_db.execute.side_effect = self._context_side_effects(
+            "promax", context_count=top_cap, addon_bonus=0
+        )
+
+        with pytest.raises(QuotaExceededError) as exc_info:
+            await service.check_context_creation_allowed(workspace_id, raise_on_denied=True)
+
+        assert "Upgrade to" not in exc_info.value.message
+        assert exc_info.value.details["required_plan"] is None
+        assert exc_info.value.details["required_plan_display"] is None
+
+    @pytest.mark.asyncio
+    async def test_member_cap_details_carry_members_current_limit(
+        self, service, mock_db, workspace_id
+    ):
+        from config.plan_tiers import get_plan_tier
+
+        helper = TestQuotaServiceMemberQuota()
+        pro_seats = get_plan_tier("pro").max_members_per_workspace
+        workspace = helper._make_workspace(workspace_id, "pro")
+        mock_db.execute.side_effect = helper._make_side_effects(workspace, pro_seats, 0)
+
+        with pytest.raises(QuotaExceededError) as exc_info:
+            await service.check_member_quota(workspace_id, raise_on_exceeded=True)
+
+        details = exc_info.value.details
+        assert details["gate"] == "quota"
+        assert details["quota_type"] == "members"
+        assert (details["current"], details["limit"]) == (pro_seats, pro_seats)
+        assert details["feature"] == "team_invitations"
+        assert details["current_plan"] == "pro"
+        assert details["required_plan"] == "promax"
