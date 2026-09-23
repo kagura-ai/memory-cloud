@@ -162,27 +162,9 @@ describe("usePlanFeatures (#1560)", () => {
     expect(out()).toContain('"public_contexts":false');
   });
 
-  it("usePlanFeature narrows to one gate and is null while pending", async () => {
-    const getPlanTierMatrix = vi.fn().mockResolvedValue(MATRIX);
-    vi.doMock("@/lib/api/workspaces", () => ({ getPlanTierMatrix }));
-    vi.doMock("@/contexts/WorkspaceContext", () => ({
-      useWorkspace: () => ({ currentWorkspace: { plan_name: "pro" } }),
-    }));
-    const { usePlanFeature } = await import("./usePlanFeatures");
-    function Harness() {
-      const connectors = usePlanFeature("connectors");
-      const publicContexts = usePlanFeature("public_contexts");
-      return (
-        <div data-testid="out">
-          {String(connectors)}:{String(publicContexts)}
-        </div>
-      );
-    }
-
-    render(<Harness />);
-    expect(out()).toBe("null:null");
-    await waitFor(() => expect(out()).toBe("true:false"));
-  });
+  // #1645: the one-feature `usePlanFeature` is gone — every caller reads
+  // `useFeatureGate`, whose pending-then-resolved answer is pinned in
+  // useFeatureGate.test.tsx against this same cache.
 
   it("stays pending while the workspace is still unresolved", async () => {
     const getPlanTierMatrix = vi.fn().mockResolvedValue(MATRIX);

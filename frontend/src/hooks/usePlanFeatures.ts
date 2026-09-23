@@ -203,7 +203,9 @@ export function usePlanTierMatrix(): PlanTierFeature[] | null {
 
 /**
  * Create gates for the current workspace's plan, or `null` while unknown
- * (matrix still loading, or no workspace resolved yet).
+ * (matrix still loading, or no workspace resolved yet). The Sidebar's nav
+ * filter reads it; a gate DECISION reads `useFeatureGate` instead (#1645),
+ * which replaced the one-feature `usePlanFeature`.
  */
 export function usePlanFeatures(): PlanFeatures | null {
   const { currentWorkspace } = useWorkspace();
@@ -215,15 +217,4 @@ export function usePlanFeatures(): PlanFeatures | null {
     () => (ready && tiers ? planFeaturesFor(tiers, planName) : null),
     [ready, tiers, planName],
   );
-}
-
-/**
- * One create gate for the current workspace, as a tri-state: `true` (may
- * create), `false` (show the upsell), `null` (still resolving — keep the
- * control pending, never upsell). Callers must compare with `=== false`
- * before rendering an upsell so the pending state cannot flash one.
- */
-export function usePlanFeature(feature: PlanFeature): boolean | null {
-  const features = usePlanFeatures();
-  return features === null ? null : features[feature];
 }
