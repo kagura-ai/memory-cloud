@@ -35,6 +35,7 @@ import pytest
 from mcp_server.tools._arg_coercion import coerce_mcp_arguments
 from mcp_server.tools._definitions import get_tool_definitions
 from mcp_server.tools.context import handle_list_contexts
+from services.context_service import ContextService
 
 SLIM_KEYS = {"id", "name", "is_private", "is_locked", "last_used_at"}
 DETAIL_KEYS = SLIM_KEYS | {"summary", "embedding_model"}
@@ -537,6 +538,43 @@ async def test_no_visible_context_adds_a_hint_naming_create_context(workspace_id
     assert "create_context is not in your tool list" in hint
     assert "web UI" in hint
     assert "without ?profile=core" in hint
+
+
+@pytest.mark.asyncio
+async def test_hint_tells_an_admin_to_pass_is_private_false():
+    """create_context defaults to is_private=true and only an owner may create a
+    private context, so the bare call the hint shows fails for an admin; the
+    hint names the argument an admin needs."""
+    payload = await _payload(_Harness([]), {}, workspace_id="ws-1")
+
+    assert "owner can create one with create_context(" in payload["hint"]
+    assert "an admin must add is_private=false" in payload["hint"]
+
+
+@pytest.mark.asyncio
+async def test_create_context_default_is_private_is_owner_only():
+    """Pins the rule the admin half of the hint relies on: an admin calling
+    create_context with the default is_private is refused by the service."""
+    from auth.workspace_roles import WorkspaceRole
+    from utils.exceptions import ValidationError
+
+    workspace = SimpleNamespace(id=uuid4(), plan_name="pro")
+    member = SimpleNamespace(role=WorkspaceRole.ADMIN)
+    results = iter([workspace, member])
+
+    db = AsyncMock()
+
+    async def execute(*_a, **_k):
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = next(results, member)
+        return result
+
+    db.execute = AsyncMock(side_effect=execute)
+
+    with pytest.raises(ValidationError, match="Only workspace owners can create private"):
+        await ContextService(db).create_context(
+            workspace_id=workspace.id, name="my-project", created_by="u1"
+        )
 
 
 @pytest.mark.asyncio

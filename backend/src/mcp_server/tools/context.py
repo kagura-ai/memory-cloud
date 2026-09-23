@@ -716,12 +716,15 @@ _LIST_CONTEXTS_SUMMARY_PREVIEW_LENGTH = 300
 # stays right under ``?profile=core``, whose tools/list leaves out
 # create_context, without passing the URL query into the handler. Worded for a
 # member with no access as well as for an owner of an empty workspace.
+# create_context defaults to is_private=true, which only an
+# owner may create (ContextService.create_context), so an admin is told to pass
+# is_private=false.
 _EMPTY_CONTEXTS_HINT = (
-    "No contexts are visible to you yet. A workspace owner or admin can create "
-    'one with create_context(name="my-project"); otherwise ask one to create a '
-    "context or give you access. If create_context is not in your tool list "
-    "(for example under ?profile=core), create the context in the web UI, or "
-    "reconnect without ?profile=core."
+    "No contexts are visible to you yet. A workspace owner can create one with "
+    'create_context(name="my-project"); an admin must add is_private=false. '
+    "Otherwise ask an owner or admin to create a context or give you access. If "
+    "create_context is not in your tool list (for example under ?profile=core), "
+    "create the context in the web UI, or reconnect without ?profile=core."
 )
 
 
@@ -908,6 +911,12 @@ async def handle_list_contexts(
                     quota_info["limit"] = 0
                     quota_info["can_create"] = False
 
+            # #1658: counted before name_contains, so an empty filter match on a
+            # non-empty list gets no hint.
+            hint = None
+            if visible_count == 0:
+                hint = _EMPTY_CONTEXTS_HINT
+
             await _log_tool_usage(db, user_id, "list_contexts", start_time, 200, None, workspace_id)
 
             return [
@@ -918,9 +927,7 @@ async def handle_list_contexts(
                             "status": "success",
                             "contexts": context_list,
                             **quota_info,
-                            # #1658: counted before name_contains, so an empty filter
-                            # match on a non-empty list gets no hint.
-                            **({"hint": _EMPTY_CONTEXTS_HINT} if visible_count == 0 else {}),
+                            **({"hint": hint} if hint else {}),
                         }
                     ),
                 )
