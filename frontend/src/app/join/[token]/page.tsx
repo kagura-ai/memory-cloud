@@ -20,11 +20,18 @@
  *
  * The token is a credential: never log it, never persist it.
  *
+ * #1655: an optional `return_to` (validated by safeReturnTo) replaces the
+ * dashboard as the post-sign-up destination, so a device or MCP sign-in can
+ * resume after the invitee signs up. It is only ever a destination — the token
+ * comes from the path, never from `return_to`. The sign-up buttons wait for
+ * the same terms acceptance as /login.
+ *
  * Next.js 15: params is a Promise and must be unwrapped with React.use()
  */
 
-import { use, useEffect, useState, type ReactNode } from "react";
+import { Suspense, use, useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import { useLocale, useTranslations } from "next-intl";
 import {
   AlertCircle,
@@ -43,11 +50,18 @@ import {
   buildOAuthRedirect,
   type OAuthProvider,
 } from "@/lib/auth/buildOAuthRedirect";
+import {
+  DEFAULT_FORWARD_TARGET,
+  resolveForwardTarget,
+} from "@/lib/auth/resolveForwardTarget";
+import { safeReturnTo } from "@/lib/auth/safeReturnTo";
 import { formatDateTime } from "@/lib/utils/datetime";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { Button } from "@/components/ui/button";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { LanguageSelector } from "@/components/LanguageSelector";
+import { TermsAgreement } from "@/components/auth/TermsAgreement";
+import { INVITE_HANDOFF_TEST_IDS as T } from "@/components/auth/invite-handoff.testids";
 
 type PageState =
   | "loading"
@@ -128,15 +142,26 @@ function JoinCard({
   );
 }
 
-export default function JoinPage({
-  params,
-}: {
-  params: Promise<{ token: string }>;
-}) {
-  const { token } = use(params);
+function JoinLoading() {
+  const t = useTranslations("betaInvites");
+  return (
+    <JoinShell>
+      <div className="text-center">
+        <SpinnerLoading message={t("join.loading")} />
+      </div>
+    </JoinShell>
+  );
+}
+
+function JoinContent({ token }: { token: string }) {
   const t = useTranslations("betaInvites");
   const locale = useLocale();
   const features = useSystemFeatures();
+  const searchParams = useSearchParams();
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  // #1655: the validated destination, or undefined. Never parsed for a token.
+  const returnTo = safeReturnTo(searchParams.get("return_to"), origin);
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [probe, setProbe] = useState<Probe>({ kind: "pending" });
   // Bumped by Retry to run the probes again.
   const [attempt, setAttempt] = useState(0);
@@ -192,31 +217,33 @@ export default function JoinPage({
           : probe.kind;
 
   const startSignUp = (provider: OAuthProvider) => {
-    // #1594: come back to the dashboard — "/" only redirects to /login, which
-    // greeted the freshly signed-in invitee with the login form.
+    if (!agreedToTerms) return;
+    // #1594: without a return_to, come back to the dashboard — "/" only
+    // redirects to /login, which greeted the freshly signed-in invitee with
+    // the login form. #1655: a validated return_to (e.g. /device?user_code=…)
+    // wins; buildOAuthRedirect and the backend both check it again.
     window.location.href = buildOAuthRedirect(
       provider,
-      "/workspace/dashboard",
+      returnTo ?? DEFAULT_FORWARD_TARGET,
       {
         invite: token,
       },
     );
   };
 
+  // #1655: an existing user who followed a device / MCP sign-in link can still
+  // finish it from /login. /login validates the value again.
+  const loginHref = returnTo
+    ? `/login?return_to=${encodeURIComponent(returnTo)}`
+    : "/login";
   const backToLogin = (
     <Button asChild variant="secondary" className="w-full">
-      <Link href="/login">{t("join.backToLogin")}</Link>
+      <Link href={loginHref}>{t("join.backToLogin")}</Link>
     </Button>
   );
 
   if (state === "loading") {
-    return (
-      <JoinShell>
-        <div className="text-center">
-          <SpinnerLoading message={t("join.loading")} />
-        </div>
-      </JoinShell>
-    );
+    return <JoinLoading />;
   }
 
   if (state === "valid" && probe.kind === "valid") {
@@ -236,9 +263,21 @@ export default function JoinPage({
             })}
           </p>
 
+          {probe.providers.length > 0 && (
+            <div className="mb-4">
+              <TermsAgreement
+                checked={agreedToTerms}
+                onCheckedChange={setAgreedToTerms}
+                themed
+                testId={T.joinTerms}
+              />
+            </div>
+          )}
           {probe.providers.includes("google") && (
             <Button
               onClick={() => startSignUp("google")}
+              disabled={!agreedToTerms}
+              data-testid={T.joinProvider("google")}
               size="lg"
               className="w-full mb-3 text-base [&_svg]:size-5"
             >
@@ -249,6 +288,8 @@ export default function JoinPage({
           {probe.providers.includes("github") && (
             <Button
               onClick={() => startSignUp("github")}
+              disabled={!agreedToTerms}
+              data-testid={T.joinProvider("github")}
               variant="outline"
               size="lg"
               className="w-full mb-3 text-base [&_svg]:size-5"
@@ -268,6 +309,7 @@ export default function JoinPage({
   }
 
   if (state === "already_signed_in") {
+    const forwardTarget = resolveForwardTarget(returnTo, origin);
     return (
       <JoinShell>
         <JoinCard
@@ -279,8 +321,11 @@ export default function JoinPage({
             {t("join.alreadySignedIn.message")}
           </p>
           <Button asChild className="w-full">
-            <Link href="/workspace/dashboard">
-              {t("join.alreadySignedIn.goToDashboard")}
+            {/* #1655: the validated return_to, reduced to a same-origin path. */}
+            <Link href={forwardTarget}>
+              {forwardTarget !== DEFAULT_FORWARD_TARGET
+                ? t("join.alreadySignedIn.continue")
+                : t("join.alreadySignedIn.goToDashboard")}
             </Link>
           </Button>
         </JoinCard>
@@ -354,5 +399,19 @@ export default function JoinPage({
         {backToLogin}
       </JoinCard>
     </JoinShell>
+  );
+}
+
+export default function JoinPage({
+  params,
+}: {
+  params: Promise<{ token: string }>;
+}) {
+  const { token } = use(params);
+  // useSearchParams() suspends until hydration, as on /login.
+  return (
+    <Suspense fallback={<JoinLoading />}>
+      <JoinContent token={token} />
+    </Suspense>
   );
 }

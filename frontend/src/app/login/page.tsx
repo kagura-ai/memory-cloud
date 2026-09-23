@@ -10,6 +10,8 @@
  * Issue #360: Provider discovery.
  * Issue #1594: a visitor who already holds a session is forwarded, not shown
  * the form.
+ * Issue #1655: "I have an invite link" hands an invite holder to
+ * /join/<token>, keeping the validated return_to beside it.
  */
 
 import { useEffect, useRef, useState, Suspense } from "react";
@@ -31,11 +33,21 @@ import {
 import { safeReturnTo } from "@/lib/auth/safeReturnTo";
 import { buildOAuthRedirect } from "@/lib/auth/buildOAuthRedirect";
 import { resolveForwardTarget } from "@/lib/auth/resolveForwardTarget";
+import { parseBetaInviteInput } from "@/lib/auth/betaInviteToken";
+import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useAuth } from "@/contexts/AuthContext";
-import { ArrowRight, Info, Sparkles, Shield, Zap } from "lucide-react";
+import {
+  ArrowRight,
+  Info,
+  MailPlus,
+  Sparkles,
+  Shield,
+  Zap,
+} from "lucide-react";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { KaguraLogo } from "@/components/icons/KaguraLogo";
 import { LanguageSelector } from "@/components/LanguageSelector";
+import { TermsAgreement } from "@/components/auth/TermsAgreement";
 
 // #1594: how long the form waits for the session check before rendering
 // anyway. A slow or broken /auth/me must never lock anyone out of /login.
@@ -52,6 +64,7 @@ function LoginContent() {
   // guard still holds `user === null` (failed sign-out, transient error on the
   // provider's first fetch) and the two would bounce the visitor forever.
   const { user, isLoading: authLoading } = useAuth();
+  const features = useSystemFeatures();
 
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -66,6 +79,12 @@ function LoginContent() {
   // Password login state
   const [loginId, setLoginId] = useState("");
   const [password, setPassword] = useState("");
+
+  // #1655: "I have an invite link" entry. The pasted value holds a credential:
+  // it lives in component state only — never logged, never stored.
+  const [inviteEntryOpen, setInviteEntryOpen] = useState(false);
+  const [inviteInput, setInviteInput] = useState("");
+  const [inviteInputInvalid, setInviteInputInvalid] = useState(false);
 
   // MFA state
   const [mfaRequired, setMfaRequired] = useState(false);
@@ -241,6 +260,22 @@ function LoginContent() {
       return;
     }
     void submitMfa();
+  };
+
+  // #1655: the invite travels as the /join/<token> path segment, return_to as
+  // its own parameter — the sanitized value only, and only when there is one.
+  // /join validates it again. Nothing reads a token out of return_to.
+  const handleInviteSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const token = parseBetaInviteInput(inviteInput);
+    if (!token) {
+      setInviteInputInvalid(true);
+      return;
+    }
+    const query = returnTo
+      ? `?return_to=${encodeURIComponent(returnTo)}`
+      : "";
+    router.push(`/join/${token}${query}`);
   };
 
   const handleGoogleLogin = async () => {
@@ -437,34 +472,10 @@ function LoginContent() {
 
                       {/* Terms */}
                       <div>
-                        <label className="flex items-start gap-3 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={agreedToTerms}
-                            onChange={(e) => setAgreedToTerms(e.target.checked)}
-                            className="mt-1 h-4 w-4 rounded border-gray-300 text-kagura-accent focus:ring-kagura-accent"
-                          />
-                          <span className="text-sm text-gray-700">
-                            {t("agreeToTerms")}{" "}
-                            <a
-                              href="https://www.kagura-ai.com/terms"
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="font-medium text-kagura-link hover:underline"
-                            >
-                              {t("termsOfService")}
-                            </a>{" "}
-                            {t("termsAndPrivacy")}{" "}
-                            <a
-                              href="https://www.kagura-ai.com/privacy"
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="font-medium text-kagura-link hover:underline"
-                            >
-                              {t("privacyPolicy")}
-                            </a>
-                          </span>
-                        </label>
+                        <TermsAgreement
+                          checked={agreedToTerms}
+                          onCheckedChange={setAgreedToTerms}
+                        />
                       </div>
 
                       <Button
@@ -590,34 +601,72 @@ function LoginContent() {
                 {/* Terms (shown here when admin form is hidden) */}
                 {!showAdminLogin && (
                   <div className="mt-6">
-                    <label className="flex items-start gap-3 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={agreedToTerms}
-                        onChange={(e) => setAgreedToTerms(e.target.checked)}
-                        className="mt-1 h-4 w-4 rounded border-gray-300 text-kagura-accent focus:ring-kagura-accent"
-                      />
-                      <span className="text-sm text-gray-700">
-                        {t("agreeToTerms")}{" "}
-                        <a
-                          href="https://www.kagura-ai.com/terms"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="font-medium text-kagura-link hover:underline"
-                        >
-                          {t("termsOfService")}
-                        </a>{" "}
-                        {t("termsAndPrivacy")}{" "}
-                        <a
-                          href="https://www.kagura-ai.com/privacy"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="font-medium text-kagura-link hover:underline"
-                        >
-                          {t("privacyPolicy")}
-                        </a>
-                      </span>
-                    </label>
+                    <TermsAgreement
+                      checked={agreedToTerms}
+                      onCheckedChange={setAgreedToTerms}
+                    />
+                  </div>
+                )}
+
+                {/* #1655: invite holders go through /join/<token> */}
+                {features?.beta_invites === true && (
+                  <div className="mt-6 border-t border-gray-200 pt-4">
+                    {!inviteEntryOpen ? (
+                      <button
+                        type="button"
+                        onClick={() => setInviteEntryOpen(true)}
+                        className="inline-flex items-center gap-2 text-sm font-medium text-kagura-link hover:underline"
+                      >
+                        <MailPlus className="h-4 w-4" />
+                        {t("inviteEntry.toggle")}
+                      </button>
+                    ) : (
+                      <form
+                        onSubmit={handleInviteSubmit}
+                        className="space-y-2"
+                        noValidate
+                      >
+                        <Label htmlFor="inviteLink" className="text-gray-700">
+                          {t("inviteEntry.label")}
+                        </Label>
+                        <div className="flex gap-2">
+                          <Input
+                            id="inviteLink"
+                            type="text"
+                            value={inviteInput}
+                            onChange={(e) => {
+                              setInviteInput(e.target.value);
+                              setInviteInputInvalid(false);
+                            }}
+                            placeholder={t("inviteEntry.placeholder")}
+                            autoComplete="off"
+                            spellCheck={false}
+                            autoFocus
+                            aria-invalid={inviteInputInvalid}
+                            aria-describedby={
+                              inviteInputInvalid ? "inviteLinkError" : undefined
+                            }
+                            className="bg-white text-gray-900"
+                          />
+                          <Button
+                            type="submit"
+                            variant="outline"
+                            className="shrink-0"
+                          >
+                            {t("inviteEntry.submit")}
+                          </Button>
+                        </div>
+                        {inviteInputInvalid && (
+                          <p
+                            id="inviteLinkError"
+                            role="alert"
+                            className="text-sm text-red-700"
+                          >
+                            {t("inviteEntry.invalid")}
+                          </p>
+                        )}
+                      </form>
+                    )}
                   </div>
                 )}
               </>

@@ -36,6 +36,7 @@ import {
 } from "@/lib/auth/auth";
 import { useAuth } from "@/contexts/AuthContext";
 import { CheckCircle2, XCircle, Monitor } from "lucide-react";
+import { INVITE_HANDOFF_TEST_IDS as T } from "@/components/auth/invite-handoff.testids";
 
 type Phase =
   | "input"
@@ -271,7 +272,10 @@ function DevicePageInner() {
             {phase === "success" && (
               <div className="text-center space-y-4">
                 <CheckCircle2 className="mx-auto h-12 w-12 text-kagura-tokiwa" />
-                <h1 className="text-2xl font-bold text-gray-900">
+                <h1
+                  className="text-2xl font-bold text-gray-900"
+                  data-testid={T.deviceSuccess}
+                >
                   {t("device.successTitle")}
                 </h1>
                 <p className="text-gray-600">{t("device.successMessage")}</p>
@@ -397,6 +401,7 @@ function DevicePageInner() {
                   <Button
                     onClick={() => handleConfirm(true)}
                     disabled={phase === "submitting"}
+                    data-testid={T.deviceApprove}
                     className="h-12 flex-1 rounded-full bg-kagura-accent text-base font-semibold text-white shadow-sm transition-colors hover:bg-[#a8380a] disabled:opacity-50"
                   >
                     {phase === "submitting"
