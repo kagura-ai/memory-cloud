@@ -7,6 +7,9 @@
  *
  * #1643: the CTA is withheld wherever the Plan page is unreachable — the
  * gate's title and description are the explanation and always render.
+ *
+ * #1646 P8: the gate renders through FeatureGateNotice's `page` variant, so
+ * its copy is `gate.plan.*` (the key-echo translator shows the relative key).
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
@@ -100,7 +103,7 @@ describe("WorkspaceSleepReportsPage plan gate", () => {
       setWorkspace(plan);
       render(<WorkspaceSleepReportsPage />);
       expect(screen.getByTestId("sleep-reports-list")).toBeInTheDocument();
-      expect(screen.queryByText("sleepReports.planGate.title")).toBeNull();
+      expect(screen.queryByText("plan.title")).toBeNull();
     },
   );
 
@@ -110,11 +113,11 @@ describe("WorkspaceSleepReportsPage plan gate", () => {
       setWorkspace(plan);
       render(<WorkspaceSleepReportsPage />);
       expect(
-        screen.getByText("sleepReports.planGate.title"),
+        screen.getByText("plan.title"),
       ).toBeInTheDocument();
       expect(screen.queryByTestId("sleep-reports-list")).toBeNull();
       fireEvent.click(
-        screen.getByRole("button", { name: "sleepReports.planGate.action" }),
+        screen.getByRole("button", { name: "plan.action" }),
       );
       expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
     },
@@ -125,12 +128,12 @@ describe("WorkspaceSleepReportsPage plan gate", () => {
     setWorkspace("free");
     render(<WorkspaceSleepReportsPage />);
 
-    expect(screen.getByText("sleepReports.planGate.title")).toBeInTheDocument();
+    expect(screen.getByText("plan.title")).toBeInTheDocument();
     expect(
-      screen.getByText("sleepReports.planGate.description"),
+      screen.getByText("plan.description"),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "sleepReports.planGate.action" }),
+      screen.queryByRole("button", { name: "plan.action" }),
     ).toBeNull();
   });
 
@@ -138,9 +141,9 @@ describe("WorkspaceSleepReportsPage plan gate", () => {
     setWorkspace("free", "admin");
     render(<WorkspaceSleepReportsPage />);
 
-    expect(screen.getByText("sleepReports.planGate.title")).toBeInTheDocument();
+    expect(screen.getByText("plan.title")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "sleepReports.planGate.action" }),
+      screen.queryByRole("button", { name: "plan.action" }),
     ).toBeNull();
   });
 
@@ -149,9 +152,9 @@ describe("WorkspaceSleepReportsPage plan gate", () => {
     setWorkspace("free");
     render(<WorkspaceSleepReportsPage />);
 
-    expect(screen.getByText("sleepReports.planGate.title")).toBeInTheDocument();
+    expect(screen.getByText("plan.title")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "sleepReports.planGate.action" }),
+      screen.queryByRole("button", { name: "plan.action" }),
     ).toBeNull();
   });
 
@@ -162,7 +165,7 @@ describe("WorkspaceSleepReportsPage plan gate", () => {
       loading: true,
     };
     render(<WorkspaceSleepReportsPage />);
-    expect(screen.queryByText("sleepReports.planGate.title")).toBeNull();
+    expect(screen.queryByText("plan.title")).toBeNull();
     expect(mockPush).not.toHaveBeenCalled();
   });
 
@@ -175,7 +178,7 @@ describe("WorkspaceSleepReportsPage plan gate", () => {
     setWorkspace("basic");
     render(<WorkspaceSleepReportsPage />);
     expect(screen.getByTestId("sleep-reports-list")).toBeInTheDocument();
-    expect(screen.queryByText("sleepReports.planGate.title")).toBeNull();
+    expect(screen.queryByText("plan.title")).toBeNull();
   });
 
   it("no served tier has Sleep Maintenance: the copy renders, with no action (#1645)", () => {
@@ -185,20 +188,16 @@ describe("WorkspaceSleepReportsPage plan gate", () => {
     setWorkspace("free");
     render(<WorkspaceSleepReportsPage />);
 
-    expect(screen.getByText("sleepReports.planGate.title")).toBeInTheDocument();
-    expect(
-      screen.getByText("sleepReports.planGate.description"),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "sleepReports.planGate.action" }),
-    ).toBeNull();
+    expect(screen.getByText("plan.titleNoTier")).toBeInTheDocument();
+    expect(screen.getByText("plan.descriptionNoTier")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
   });
 
   it("neither gates nor loads reports while the tier matrix is still resolving (#1645)", () => {
     mockTiers = null;
     setWorkspace("free");
     render(<WorkspaceSleepReportsPage />);
-    expect(screen.queryByText("sleepReports.planGate.title")).toBeNull();
+    expect(screen.queryByText("plan.title")).toBeNull();
     // The list holds its skeleton: no reports before the plan answer.
     expect(screen.getByTestId("sleep-reports-list")).toHaveAttribute(
       "data-ready",
@@ -221,7 +220,29 @@ describe("WorkspaceSleepReportsPage plan gate", () => {
     expect(
       screen.getByText("sleepReports.errors.forbiddenWorkspace"),
     ).toBeInTheDocument();
-    expect(screen.queryByText("sleepReports.planGate.title")).toBeNull();
+    expect(screen.queryByText("plan.title")).toBeNull();
+  });
+});
+
+describe("WorkspaceSleepReportsPage plan notice (#1646 P8)", () => {
+  it("is the whole page: the page's own title and description head the notice", () => {
+    setWorkspace("free");
+    render(<WorkspaceSleepReportsPage />);
+
+    expect(
+      screen.getByRole("heading", { name: "sleepReports.title" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("sleepReports.description")).toBeInTheDocument();
+    expect(screen.getByText("plan.title")).toBeInTheDocument();
+  });
+
+  it("uses the whole-feature copy (scope all), not the create-only copy", () => {
+    setWorkspace("free");
+    render(<WorkspaceSleepReportsPage />);
+
+    expect(screen.getByText("plan.description")).toBeInTheDocument();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
+    expect(screen.queryByText("plan.newDescription")).toBeNull();
   });
 });
 
@@ -282,9 +303,9 @@ describe("WorkspaceSleepReportsPage — the whole gate truth table (#1645)", () 
             };
       render(<WorkspaceSleepReportsPage />);
 
-      const upsell = screen.queryByText("sleepReports.planGate.title");
+      const upsell = screen.queryByText("plan.title");
       const cta = screen.queryByRole("button", {
-        name: "sleepReports.planGate.action",
+        name: "plan.action",
       });
       const forbidden = screen.queryByText(
         "sleepReports.errors.forbiddenWorkspace",
