@@ -538,15 +538,22 @@ describe("ContextsPage current marker (#561)", () => {
 // ---------- Issue #1643: quota upsells stop at the Plan page's own gate -----
 
 /**
- * The banner and the dialog both offered a route to `/workspace/settings/plan`
- * unconditionally. That page is behind the `plan_page` deployment flag and is
- * owner-only, so on a default self-hosted deployment both dead-ended.
+ * The cap used to get two treatments — a yellow banner that linked to
+ * `/workspace/settings/plan` and a quota dialog with a "View plans" action —
+ * and both offered that route unconditionally. That page is behind the
+ * `plan_page` deployment flag and is owner-only, so on a default self-hosted
+ * deployment both dead-ended (#1643).
+ *
+ * #1646 (Q1): ONE inline gate notice replaces both. Its CTA follows the
+ * descriptor's narrowed `canUpgrade`, so these cases now pin the notice.
+ * Under this file's key-echo mock the notice renders `gate.*` keys relative
+ * to `gate` ("quota.title", "quota.action", …) with their arguments.
  *
  * `mockFeatures` here defaults to `{ byok: true }` — `plan_page` absent, which
  * is the OSS truth — so a case that wants the CTA opts in explicitly.
  */
 describe("ContextsPage quota upsells behind the plan_page gate (#1643)", () => {
-  /** At the cap with nothing visible: banner shown AND the empty state renders. */
+  /** At the cap with nothing visible: notice shown AND the empty state renders. */
   function setupAtCap(role: Role = "owner", plan = "pro", cap = 20) {
     mockUseAuth.mockReturnValue({
       user: { current_workspace_id: WORKSPACE_ID },
@@ -572,150 +579,96 @@ describe("ContextsPage quota upsells behind the plan_page gate (#1643)", () => {
     });
   }
 
-  /** The empty-state Create button routes to the quota dialog at the cap. */
-  async function openQuotaDialog() {
-    const create = await screen.findByRole("button", { name: /^create$/i });
-    fireEvent.click(create);
-    // The dialog's own explanation — it renders in every case below.
-    expect(await screen.findByText("quotaDialogTitle")).toBeInTheDocument();
-    expect(screen.getByText("quotaDialogDescription")).toBeInTheDocument();
+  /** The cap notice (an Alert), found by its title. */
+  async function findCapNotice(): Promise<HTMLElement> {
+    const title = await screen.findByText(/^quota\.title/);
+    const notice = title.closest('[role="alert"]');
+    if (!(notice instanceof HTMLElement)) throw new Error("no cap notice");
+    return notice;
   }
 
-  it("quota banner: explanation renders, plan link withheld when plan_page is off", async () => {
+  const CTA = /^quota\.action/;
+
+  it("quota notice: explanation renders, plan CTA withheld when plan_page is off", async () => {
     setupAtCap();
     render(<ContextsPage />);
 
-    // The banner div mixes an emoji, the sentence and (when shown) the link,
-    // so match the substring — this is the shape create-gate.test.tsx uses.
-    const banner = await screen.findByText(/quotaReachedDetail/);
-    expect(screen.queryByText("quotaReachedPlansLink")).toBeNull();
-    // The separating space moved inside the guard, so nothing dangles.
-    const text = banner.textContent ?? "";
-    expect(text).toBe(text.trimEnd());
+    const notice = await findCapNotice();
+    expect(notice).toHaveTextContent(/quota\.description/);
+    expect(screen.queryByRole("button", { name: CTA })).toBeNull();
+    // Never promise an upgrade the reader cannot act on.
+    expect(notice).not.toHaveTextContent(/quota\.upsell/);
   });
 
-  it("quota banner: owner on a plan_page deployment gets the View plans link", async () => {
+  it("quota notice: owner on a plan_page deployment gets the View plans CTA", async () => {
     mockFeatures = { byok: true, plan_page: true };
     setupAtCap();
     render(<ContextsPage />);
 
-    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
-    expect(
-      screen.getByRole("link", { name: "quotaReachedPlansLink" }),
-    ).toHaveAttribute("href", "/workspace/settings/plan");
+    const notice = await findCapNotice();
+    // pro's cap is raised by promax (XL on this deployment).
+    expect(notice).toHaveTextContent(/quota\.upsell \{"plan":"XL"/);
+    fireEvent.click(screen.getByRole("button", { name: CTA }));
+    expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
   });
 
-  it("quota banner: a non-owner gets no plan link even with plan_page on", async () => {
+  it("quota notice: a non-owner gets no plan CTA even with plan_page on", async () => {
     mockFeatures = { byok: true, plan_page: true };
     setupAtCap("admin");
     render(<ContextsPage />);
 
-    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
-    expect(screen.queryByText("quotaReachedPlansLink")).toBeNull();
+    await findCapNotice();
+    expect(screen.queryByRole("button", { name: CTA })).toBeNull();
   });
 
-  it("quota banner: no plan link while /system/info is unresolved", async () => {
+  it("quota notice: no plan CTA while /system/info is unresolved", async () => {
     mockFeatures = null;
     setupAtCap();
     render(<ContextsPage />);
 
-    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
-    expect(screen.queryByText("quotaReachedPlansLink")).toBeNull();
-  });
-
-  it("quota dialog: footer shows only a Close control when plan_page is off", async () => {
-    setupAtCap();
-    render(<ContextsPage />);
-    await openQuotaDialog();
-
-    // The prose that IS the CTA goes with the button — leaving it would tell
-    // the reader to visit a page this deployment does not have.
-    expect(screen.queryByText("quotaDialogUpgradeHeading")).toBeNull();
-    expect(screen.queryByText("quotaDialogUpgradeBody")).toBeNull();
-    expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
-    // A footer whose only control is "Cancel" reads wrong once there is
-    // nothing to cancel.
-    expect(screen.getByRole("button", { name: "close" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "cancel" })).toBeNull();
-  });
-
-  it("quota dialog: owner on a plan_page deployment gets View plans", async () => {
-    mockFeatures = { byok: true, plan_page: true };
-    setupAtCap();
-    render(<ContextsPage />);
-    await openQuotaDialog();
-
-    expect(screen.getByText("quotaDialogUpgradeHeading")).toBeInTheDocument();
-    expect(screen.getByText("quotaDialogUpgradeBody")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "viewPlans" }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "cancel" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "close" })).toBeNull();
-  });
-
-  it("quota dialog: a non-owner gets the explanation and a Close control only", async () => {
-    mockFeatures = { byok: true, plan_page: true };
-    setupAtCap("admin");
-    render(<ContextsPage />);
-    await openQuotaDialog();
-
-    expect(screen.queryByText("quotaDialogUpgradeHeading")).toBeNull();
-    expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
-    expect(screen.getByRole("button", { name: "close" })).toBeInTheDocument();
+    await findCapNotice();
+    expect(screen.queryByRole("button", { name: CTA })).toBeNull();
   });
 
   // #1645: the upsell reads the cap descriptor's NARROWED canUpgrade — an
   // owner whom no served tier can lift is not sent to the Plan page.
-  it("quota banner: no plan link at the top tier's cap, even for an owner on plan_page (#1645)", async () => {
+  it("quota notice: no plan CTA at the top tier's cap, even for an owner on plan_page (#1645)", async () => {
     mockFeatures = { byok: true, plan_page: true };
     setupAtCap("owner", "promax", 1000);
     render(<ContextsPage />);
 
-    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
-    expect(screen.queryByText("quotaReachedPlansLink")).toBeNull();
+    const notice = await findCapNotice();
+    expect(screen.queryByRole("button", { name: CTA })).toBeNull();
+    expect(notice).not.toHaveTextContent(/quota\.upsell/);
   });
 
-  it("quota dialog: Close only at the top tier's cap, even for an owner on plan_page (#1645)", async () => {
-    mockFeatures = { byok: true, plan_page: true };
-    setupAtCap("owner", "promax", 1000);
-    render(<ContextsPage />);
-    await openQuotaDialog();
-
-    expect(screen.queryByText("quotaDialogUpgradeHeading")).toBeNull();
-    expect(screen.queryByText("quotaDialogUpgradeBody")).toBeNull();
-    expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
-    expect(screen.getByRole("button", { name: "close" })).toBeInTheDocument();
-  });
-
-  it("quota banner and dialog: no upsell while the tier matrix is unresolved (#1645)", async () => {
+  it("quota notice: no upsell while the tier matrix is unresolved (#1645)", async () => {
     mockFeatures = { byok: true, plan_page: true };
     mockTiers = null;
     setupAtCap();
     render(<ContextsPage />);
 
-    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
-    expect(screen.queryByText("quotaReachedPlansLink")).toBeNull();
-    await openQuotaDialog();
-    expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
+    const notice = await findCapNotice();
+    expect(screen.queryByRole("button", { name: CTA })).toBeNull();
+    expect(notice).not.toHaveTextContent(/quota\.upsell/);
   });
 
-  it("quota banner and dialog: a zero cap a served tier raises offers the upgrade (#1645)", async () => {
+  it("quota notice: a zero cap a served tier raises offers the upgrade (#1645)", async () => {
     // An operator tier that excludes contexts (cap 0): basic's cap is above
     // zero, so the Plan page does lift it.
     mockFeatures = { byok: true, plan_page: true };
+    mockTiers = OSS_TIERS.map((tier) =>
+      tier.name === "free" ? { ...tier, max_contexts: 0 } : tier,
+    ) as PlanTierFeature[];
     setupAtCap("owner", "free", 0);
     render(<ContextsPage />);
 
-    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
-    expect(screen.getByText("quotaReachedPlansLink")).toBeInTheDocument();
-    await openQuotaDialog();
-    expect(
-      screen.getByRole("button", { name: "viewPlans" }),
-    ).toBeInTheDocument();
+    const notice = await findCapNotice();
+    expect(notice).toHaveTextContent(/quota\.upsell \{"plan":"M"/);
+    expect(screen.getByRole("button", { name: CTA })).toBeInTheDocument();
   });
 
-  it("quota banner and dialog: a zero cap no served tier raises explains itself with no upsell (#1645)", async () => {
+  it("quota notice: a zero cap no served tier raises explains itself with no upsell (#1645)", async () => {
     mockFeatures = { byok: true, plan_page: true };
     mockTiers = OSS_TIERS.map((tier) => ({
       ...tier,
@@ -724,22 +677,146 @@ describe("ContextsPage quota upsells behind the plan_page gate (#1643)", () => {
     setupAtCap("owner", "free", 0);
     render(<ContextsPage />);
 
-    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
-    expect(screen.queryByText("quotaReachedPlansLink")).toBeNull();
-    await openQuotaDialog();
-    expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
-    expect(screen.getByRole("button", { name: "close" })).toBeInTheDocument();
+    const notice = await findCapNotice();
+    expect(notice).toHaveTextContent(/quota\.description/);
+    expect(notice).not.toHaveTextContent(/quota\.upsell/);
+    expect(screen.queryByRole("button", { name: CTA })).toBeNull();
+  });
+});
+
+// ---------- #1646 Q1: one cap notice, and the create controls it explains ----
+
+describe("ContextsPage context cap: one notice, disabled create controls (#1646)", () => {
+  function setupCap(opts: {
+    cap: number;
+    count: number;
+    plan?: string;
+    role?: Role;
+    canEmbed?: boolean;
+    visible?: number;
+  }) {
+    mockUseAuth.mockReturnValue({
+      user: { current_workspace_id: WORKSPACE_ID },
+      refetchUser: vi.fn(),
+    });
+    mockUseWorkspace.mockReturnValue({
+      currentWorkspace: {
+        id: WORKSPACE_ID,
+        plan_name: opts.plan ?? "pro",
+        current_user_role: opts.role ?? "owner",
+        max_contexts: opts.cap,
+        context_count: opts.count,
+      },
+    });
+    mockGetContexts.mockResolvedValue({
+      contexts: Array.from({ length: opts.visible ?? 0 }, (_, i) => ({
+        id: `c${i}`,
+        name: `ctx-${i}`,
+        memory_count: 0,
+        sleep_mode: "full",
+      })),
+    });
+    mockCheckOpenAIKeyStatus.mockResolvedValue({
+      has_key: opts.canEmbed ?? true,
+      embedding_available: opts.canEmbed ?? true,
+    });
+    mockGetEmbeddingModels.mockResolvedValue({
+      models: [],
+      default_model: "small",
+    });
+  }
+
+  /** Radix opens a menu on a primary-button pointerdown on its trigger. */
+  async function openNewContextMenu() {
+    const trigger = await screen.findByRole("button", { name: /newContext/ });
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+    return screen.findAllByRole("menuitem");
+  }
+
+  const NOTICE_ID = "context-quota-notice";
+
+  it("one notice: the workspace's tier by its label, its cap and its usage — no emoji, no raw plan key", async () => {
+    setupCap({ cap: 20, count: 20 });
+    render(<ContextsPage />);
+
+    const notice = await screen.findByText(/^quota\.title/);
+    const alert = notice.closest('[role="alert"]');
+    expect(alert).toHaveAttribute("id", NOTICE_ID);
+    const description = screen.getByText(/^quota\.description /);
+    expect(description.textContent).toContain('"currentPlan":"L"');
+    expect(description.textContent).toContain('"limit":20');
+    expect(description.textContent).toContain('"current":20');
+    expect(document.body.textContent).not.toContain("⚠️");
+    expect(description.textContent).not.toMatch(/"pro"/);
+    // Exactly one treatment of the cap.
+    expect(screen.getAllByText(/^quota\.title/)).toHaveLength(1);
   });
 
-  it("quota dialog: no CTA while /system/info is unresolved", async () => {
-    mockFeatures = null;
-    setupAtCap();
+  it("the empty state's Create is disabled at the cap and described by the notice; no dialog opens", async () => {
+    setupCap({ cap: 20, count: 20 });
     render(<ContextsPage />);
-    await openQuotaDialog();
 
-    expect(screen.queryByText("quotaDialogUpgradeHeading")).toBeNull();
-    expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
-    expect(screen.getByRole("button", { name: "close" })).toBeInTheDocument();
+    const create = await screen.findByRole("button", { name: /^create$/i });
+    expect(create).toBeDisabled();
+    expect(create).toHaveAttribute("aria-describedby", NOTICE_ID);
+    expect(create).toHaveAccessibleDescription(/quota\.title/);
+    fireEvent.click(create);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("the no-embedding empty state's Create is disabled the same way", async () => {
+    setupCap({ cap: 20, count: 20, canEmbed: false });
+    render(<ContextsPage />);
+
+    await screen.findByText("setupNeededOpenAI");
+    const create = screen.getByRole("button", { name: /^create$/i });
+    expect(create).toBeDisabled();
+    expect(create).toHaveAttribute("aria-describedby", NOTICE_ID);
+    fireEvent.click(create);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("the header menu stays openable at the cap; both create items are disabled and described by the notice", async () => {
+    setupCap({ cap: 20, count: 20, visible: 1 });
+    render(<ContextsPage />);
+
+    const trigger = await screen.findByRole("button", { name: /newContext/ });
+    expect(trigger).not.toBeDisabled();
+    const items = await openNewContextMenu();
+    expect(items).toHaveLength(2);
+    for (const item of items) {
+      expect(item).toHaveAttribute("aria-disabled", "true");
+      expect(item).toHaveAttribute("aria-describedby", NOTICE_ID);
+      fireEvent.click(item);
+    }
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("below the cap: no notice, and the menu items open their dialogs", async () => {
+    setupCap({ cap: 20, count: 3, visible: 1 });
+    render(<ContextsPage />);
+
+    const items = await openNewContextMenu();
+    expect(screen.queryByText(/^quota\.title/)).toBeNull();
+    for (const item of items) {
+      expect(item).not.toHaveAttribute("aria-disabled");
+      expect(item).not.toHaveAttribute("aria-describedby");
+    }
+    fireEvent.click(items[0]);
+    expect(await screen.findByText("quickCreateContext")).toBeInTheDocument();
+  });
+
+  it("below the cap: the empty state's Create opens the advanced dialog", async () => {
+    setupCap({ cap: 20, count: 0 });
+    render(<ContextsPage />);
+
+    const create = await screen.findByRole("button", { name: /^create$/i });
+    expect(create).not.toBeDisabled();
+    expect(create).not.toHaveAttribute("aria-describedby");
+    fireEvent.click(create);
+    expect(await screen.findByText("createDialogTitle")).toBeInTheDocument();
   });
 });
 

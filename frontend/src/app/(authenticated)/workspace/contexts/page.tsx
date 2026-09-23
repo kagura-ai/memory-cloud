@@ -49,16 +49,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -77,6 +67,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { PageHeader } from "@/components/common/PageHeader";
+import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { PageContainer } from "@/components/common/PageContainer";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { cn } from "@/lib/utils";
@@ -116,6 +107,9 @@ import {
 
 // Constants (must match backend validation)
 const CONTEXT_NAME_PATTERN = /^[a-z0-9_-]+$/;
+
+/** The context-cap notice; every create control it disables points here. */
+const CONTEXT_QUOTA_NOTICE_ID = "context-quota-notice";
 
 /**
  * #1644: the context cap's tier label and limit, read from the gate
@@ -222,9 +216,6 @@ export default function ContextsPage() {
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const { toast } = useToast();
 
-  // Quota limit dialog state
-  const [quotaDialogOpen, setQuotaDialogOpen] = useState(false);
-
   // Stats state
   const [contextStats, setContextStats] = useState<
     Record<string, ContextStats>
@@ -267,14 +258,13 @@ export default function ContextsPage() {
     canUpgrade: canUpgrade === true,
     locale,
   });
-  const isQuotaReached = contextQuota.state === "quota" || maxContexts === 0;
-  // #1645: the quota upsells (banner link, dialog CTA) read the descriptor's
-  // NARROWED answer, not the raw Plan-page one: an owner at the top tier's
-  // cap has no served tier that raises it, so the Plan page would be a dead
-  // end. `quotaGate` reads limit 0 as "unknown" and answers "allowed", so a
-  // KNOWN zero cap is lifted through `gateFromFacts` from the counts the page
-  // holds: the same narrowing, which offers the upgrade exactly when a served
-  // tier's cap is above zero.
+  // #1645: the quota upsell reads the descriptor's NARROWED answer, not the
+  // raw Plan-page one: an owner at the top tier's cap has no served tier that
+  // raises it, so the Plan page would be a dead end. `quotaGate` reads limit
+  // 0 as "unknown" and answers "allowed", so a KNOWN zero cap is lifted
+  // through `gateFromFacts` from the counts the page holds: the same
+  // narrowing, which offers the upgrade exactly when a served tier's cap is
+  // above zero.
   const zeroCapGate =
     maxContexts === 0
       ? gateFromFacts(
@@ -283,6 +273,7 @@ export default function ContextsPage() {
             quotaType: "contexts",
             current: usedContexts,
             limit: 0,
+            currentPlan: currentWorkspace?.plan_name || undefined,
           },
           {
             fallbackKey: "contexts",
@@ -292,7 +283,11 @@ export default function ContextsPage() {
           },
         )
       : null;
-  const quotaCanUpgrade = (zeroCapGate ?? contextQuota).canUpgrade;
+  // #1646 (Q1): the ONE descriptor the cap notice renders, and the one every
+  // create control is disabled on — so a disabled control's
+  // `aria-describedby` always points at a notice that is on screen.
+  const contextCapGate = zeroCapGate ?? contextQuota;
+  const isQuotaReached = contextCapGate.state === "quota";
 
   // #1645: may a context be made shared on this tier? One gate for both
   // create dialogs, read from the tier matrix's `shared_contexts` — the same
@@ -599,12 +594,12 @@ export default function ContextsPage() {
                     // added as *guidance* (#181), not an entitlement gate.
                     //
                     // A reached quota must not gate it either. This is the
-                    // dropdown TRIGGER, and the only way to reach the quota
-                    // dialog is a menu item inside it — disabling the trigger
-                    // is what made that dialog dead code in the first place.
-                    // The items below already route to the dialog when the
-                    // quota is reached, so creation stays blocked while the
-                    // explanation stays reachable.
+                    // dropdown TRIGGER: it stays enabled so the two create
+                    // items stay discoverable. At the cap they are disabled
+                    // and point (aria-describedby) at the cap notice below
+                    // the header, which explains why without any interaction
+                    // (#1646 Q1 — it replaced the quota dialog these items
+                    // used to open instead).
                   >
                     <Plus className="h-4 w-4 mr-2" />
                     {t("newContext")}
@@ -613,13 +608,11 @@ export default function ContextsPage() {
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-56">
                   <DropdownMenuItem
-                    onClick={() => {
-                      if (isQuotaReached) {
-                        setQuotaDialogOpen(true);
-                      } else {
-                        setQuickCreateDialogOpen(true);
-                      }
-                    }}
+                    disabled={isQuotaReached}
+                    aria-describedby={
+                      isQuotaReached ? CONTEXT_QUOTA_NOTICE_ID : undefined
+                    }
+                    onSelect={() => setQuickCreateDialogOpen(true)}
                   >
                     <Zap className="h-4 w-4 mr-2 text-amber-500" />
                     <div>
@@ -631,13 +624,11 @@ export default function ContextsPage() {
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
-                    onClick={() => {
-                      if (isQuotaReached) {
-                        setQuotaDialogOpen(true);
-                      } else {
-                        setCreateDialogOpen(true);
-                      }
-                    }}
+                    disabled={isQuotaReached}
+                    aria-describedby={
+                      isQuotaReached ? CONTEXT_QUOTA_NOTICE_ID : undefined
+                    }
+                    onSelect={() => setCreateDialogOpen(true)}
                   >
                     <Settings2 className="h-4 w-4 mr-2 text-blue-500" />
                     <div>
@@ -657,35 +648,22 @@ export default function ContextsPage() {
       {/* Quota Warning (Issue #188) - Below header.
 
           #1488 Phase 4: the GATE was widened in #1487 from "free plan and one
-          context" to "any plan at the cap the server sent", but this banner
+          context" to "any plan at the cap the server sent", but the banner
           kept asserting the old rule verbatim — so a Pro workspace at 20/20
           was told "Free plan allows 1 context. Upgrade to Basic or Pro", which
           is false three ways and is the same misleading-explanation failure
-          #1487 was filed for. State the plan and the cap actually in force. */}
-      {isQuotaReached && (
-        <div className="mb-6 text-sm text-yellow-600 dark:text-yellow-400 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-3">
-          ⚠️{" "}
-          {t("quotaReachedDetail", {
-            plan: currentWorkspace?.plan_name ?? "current",
-            limit: maxContexts ?? 0,
-          })}
-          {/* #1643: the explanation above always renders; only the link to the
-              Plan page is withheld where that page does not exist or this
-              member cannot load it. The separating space moves inside the
-              guard so the banner never ends in a dangling space. */}
-          {quotaCanUpgrade && (
-            <>
-              {" "}
-              <a
-                href="/workspace/settings/plan"
-                className="underline hover:text-yellow-700 dark:hover:text-yellow-300 font-medium"
-              >
-                {t("quotaReachedPlansLink")}
-              </a>
-            </>
-          )}
-        </div>
-      )}
+          #1487 was filed for. State the plan and the cap actually in force.
+
+          #1646 (Q1): the one treatment of the cap. It replaced both the
+          hand-rolled yellow banner (which printed the raw plan key) and the
+          quota dialog the create controls used to open; the notice names the
+          workspace's tier by its label, and offers the Plan page only where
+          the descriptor's narrowed canUpgrade does (#1643 / #1645). */}
+      <FeatureGateNotice
+        gate={contextCapGate}
+        id={CONTEXT_QUOTA_NOTICE_ID}
+        className="mb-6"
+      />
 
       {/* #1487: the missing-key notice used to live ONLY in the
           `contexts.length === 0` empty state, so a workspace that already had
@@ -989,14 +967,14 @@ export default function ContextsPage() {
                       variant="outline"
                       size="sm"
                       className="border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-100 hover:bg-amber-100 dark:hover:bg-amber-800"
-                      // Route to the quota dialog rather than going dead, for
-                      // the same reason as the header trigger: a disabled
-                      // control with no reachable explanation is the bug.
-                      onClick={() =>
-                        isQuotaReached
-                          ? setQuotaDialogOpen(true)
-                          : setQuickCreateDialogOpen(true)
+                      // At the cap: disabled, and described by the cap notice
+                      // above — a disabled control with no reachable
+                      // explanation is the bug, so it always has one (#1646).
+                      disabled={isQuotaReached}
+                      aria-describedby={
+                        isQuotaReached ? CONTEXT_QUOTA_NOTICE_ID : undefined
                       }
+                      onClick={() => setQuickCreateDialogOpen(true)}
                     >
                       <Plus className="h-4 w-4 mr-2" />
                       {t("create")}
@@ -1016,18 +994,18 @@ export default function ContextsPage() {
                   <Button
                     size="sm"
                     className="bg-blue-600 hover:bg-blue-700 text-white"
-                    // Same quota routing as the amber branch above and the
-                    // header control. "No contexts visible" does not mean "no
-                    // contexts exist": the cap counts the workspace's contexts,
-                    // and a member can see zero of them while every slot is
-                    // taken by other people's private ones. Without this the
-                    // page renders the quota banner AND an enabled Create in
-                    // the same view, and the create fails at the server.
-                    onClick={() =>
-                      isQuotaReached
-                        ? setQuotaDialogOpen(true)
-                        : setCreateDialogOpen(true)
+                    // Same cap gate as the amber branch above and the header
+                    // items. "No contexts visible" does not mean "no contexts
+                    // exist": the cap counts the workspace's contexts, and a
+                    // member can see zero of them while every slot is taken
+                    // by other people's private ones. Without this the page
+                    // renders the cap notice AND an enabled Create in the same
+                    // view, and the create fails at the server.
+                    disabled={isQuotaReached}
+                    aria-describedby={
+                      isQuotaReached ? CONTEXT_QUOTA_NOTICE_ID : undefined
                     }
+                    onClick={() => setCreateDialogOpen(true)}
                   >
                     <Plus className="h-4 w-4 mr-2" />
                     {t("create")}
@@ -1411,51 +1389,6 @@ export default function ContextsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      {/* Quota Limit Dialog */}
-      <AlertDialog open={quotaDialogOpen} onOpenChange={setQuotaDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle className="flex items-center gap-2">
-              <AlertTriangle className="h-5 w-5 text-amber-500" />
-              {t("quotaDialogTitle")}
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              {t("quotaDialogDescription")}
-            </AlertDialogDescription>
-            {/* #1643: the documented exception to "the copy always stays".
-                This block's prose IS the CTA — it tells the reader to upgrade
-                and to see the Plan page — so leaving it while withholding the
-                button would still dead-end them. The title and description
-                above explain why creation failed and do stay. */}
-            {quotaCanUpgrade && (
-              <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mt-3">
-                <p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
-                  {t("quotaDialogUpgradeHeading")}
-                </p>
-                <p className="text-sm text-blue-800 dark:text-blue-200">
-                  {t("quotaDialogUpgradeBody")}
-                </p>
-              </div>
-            )}
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            {/* With no action left, "Cancel" reads wrong — there is nothing to
-                cancel, only a notice to dismiss. `common.close` already exists
-                in both locales, so this needs no new key. */}
-            <AlertDialogCancel>
-              {quotaCanUpgrade ? tCommon("cancel") : tCommon("close")}
-            </AlertDialogCancel>
-            {quotaCanUpgrade && (
-              <AlertDialogAction
-                onClick={() => router.push("/workspace/settings/plan")}
-              >
-                {t("viewPlans")}
-              </AlertDialogAction>
-            )}
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </PageContainer>
   );
 }
