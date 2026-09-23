@@ -9,6 +9,7 @@
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import {
+  act,
   render,
   screen,
   waitFor,
@@ -17,6 +18,10 @@ import {
 } from "@testing-library/react";
 
 import WorkspaceMembersPage from "./page";
+import { ApiError } from "@/lib/api/base";
+import { createInvitation } from "@/lib/api/invitations";
+import { updateMemberRole } from "@/lib/api/workspaces";
+import { normalizeGate } from "@/lib/gates/featureGates";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -47,9 +52,15 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockPush, replace: vi.fn() }),
 }));
 
-const stableT = (k: string) => k;
+// Keys pass through as text. The #1644 refusal keys also echo their ICU
+// params so the gate's values are assertable; every other key stays bare,
+// because existing cases match exact text on keys that take params.
+const ECHO_PARAMS = new Set(["invitePlanRequired", "memberSeatsFull"]);
+const stableT = (k: string, params?: Record<string, unknown>) =>
+  params && ECHO_PARAMS.has(k) ? `${k} ${JSON.stringify(params)}` : k;
 vi.mock("next-intl", () => ({
   useTranslations: () => stableT,
+  useLocale: () => "en",
 }));
 
 const mockUseAuth = vi.fn();
@@ -60,8 +71,9 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => mockUseWorkspace(),
 }));
 
+const mockToast = vi.fn();
 vi.mock("@/hooks/use-toast", () => ({
-  useToast: () => ({ toast: vi.fn() }),
+  useToast: () => ({ toast: mockToast }),
 }));
 
 // #1643: useCanUpgrade reads /system/info. Without this mock the real hook
@@ -108,6 +120,9 @@ beforeEach(() => {
   mockGetMemberQuota.mockReset();
   mockGetContexts.mockReset();
   mockPush.mockReset();
+  mockToast.mockReset();
+  vi.mocked(createInvitation).mockReset();
+  vi.mocked(updateMemberRole).mockReset();
   mockFeatures = { plan_page: true };
 });
 
@@ -284,5 +299,241 @@ describe("WorkspaceMembersPage seat-limit upgrade links (#1643)", () => {
     expect(
       screen.queryByRole("button", { name: "upgradeToAddMembers" }),
     ).toBeNull();
+  });
+});
+
+/** An ApiError exactly as lib/api/base.ts would build it from this body. */
+function refusal(
+  status: number,
+  error: string,
+  message: string,
+  details: Record<string, unknown> = {},
+): ApiError {
+  return new ApiError({
+    error,
+    message,
+    status,
+    details,
+    gate: normalizeGate(status, error, details),
+  });
+}
+
+/**
+ * #1644 J-10 — the invitation list and the member quota are admin-only reads.
+ * A role refusal (AUTH-101) is expected and swallowed; any other 403 is no
+ * longer mistaken for one.
+ */
+describe("WorkspaceMembersPage admin-only reads swallow the role gate only (#1644)", () => {
+  function consoleErrorsMatching(
+    spy: ReturnType<typeof vi.spyOn>,
+    text: string,
+  ) {
+    return spy.mock.calls.filter((call: unknown[]) => call[0] === text);
+  }
+
+  it("still swallows an AUTH-101 refusal on both reads", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    setupWithRole("admin");
+    const role = refusal(403, "AUTH-101", "Insufficient permissions");
+    mockListInvitations.mockRejectedValue(role);
+    mockGetMemberQuota.mockRejectedValue(role);
+
+    render(<WorkspaceMembersPage />);
+    await waitFor(() => expect(mockGetMemberQuota).toHaveBeenCalled());
+    await waitFor(() => expect(mockListInvitations).toHaveBeenCalled());
+
+    expect(consoleErrorsMatching(spy, "Failed to load invitations:")).toEqual(
+      [],
+    );
+    expect(consoleErrorsMatching(spy, "Failed to load member quota:")).toEqual(
+      [],
+    );
+    spy.mockRestore();
+  });
+
+  it("no longer swallows a 403 that is not a role refusal", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    setupWithRole("admin");
+    const bare = refusal(403, "HTTP-403", "Forbidden");
+    mockListInvitations.mockRejectedValue(bare);
+    mockGetMemberQuota.mockRejectedValue(bare);
+
+    render(<WorkspaceMembersPage />);
+
+    await waitFor(() =>
+      expect(
+        consoleErrorsMatching(spy, "Failed to load invitations:"),
+      ).toHaveLength(1),
+    );
+    await waitFor(() =>
+      expect(
+        consoleErrorsMatching(spy, "Failed to load member quota:"),
+      ).toHaveLength(1),
+    );
+    spy.mockRestore();
+  });
+});
+
+/** #1644 C6 — the invite refusal is read from err.gate, not server English. */
+describe("WorkspaceMembersPage invite refusal reads err.gate (#1644)", () => {
+  // The page logs every refusal it catches; keep the run output readable.
+  let quiet: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => quiet.mockRestore());
+
+  async function submitAdminInvite() {
+    setupWithRole("owner", "pro");
+    render(<WorkspaceMembersPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /inviteMember/ }),
+    );
+    fireEvent.change(await screen.findByPlaceholderText("emailPlaceholder"), {
+      target: { value: "new@example.com" },
+    });
+    // An admin invite needs no context selection.
+    fireEvent.change(screen.getByDisplayValue("roleMemberDesc"), {
+      target: { value: "admin" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "createInvitation" }));
+    });
+  }
+
+  it("renders the plan refusal in the reader's language with the required tier", async () => {
+    vi.mocked(createInvitation).mockRejectedValue(
+      refusal(403, "FEAT-001", "Feature 'team_invitations' not available.", {
+        gate: "plan",
+        feature: "team_invitations",
+        required_plan: "pro",
+        required_plan_display: "L",
+        current_plan: "basic",
+      }),
+    );
+    await submitAdminInvite();
+
+    expect(
+      await screen.findByText('invitePlanRequired {"plan":"L"}'),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the seat-cap message from err.gate instead of the server's English", async () => {
+    const serverText =
+      "Member limit reached (5 seats). Current members: 4, Pending invitations: 1.";
+    vi.mocked(createInvitation).mockRejectedValue(
+      refusal(429, "QUOTA-001", serverText, {
+        gate: "quota",
+        quota_type: "members",
+        current: 5,
+        limit: 5,
+        required_plan: null,
+        required_plan_display: null,
+        current_plan: "pro",
+      }),
+    );
+    await submitAdminInvite();
+
+    expect(
+      await screen.findByText('memberSeatsFull {"current":5,"limit":5}'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(serverText)).toBeNull();
+  });
+
+  it("does not render another quota with counts as the seat cap", async () => {
+    const serverText = "Daily memory limit reached (100/100).";
+    vi.mocked(createInvitation).mockRejectedValue(
+      refusal(429, "QUOTA-001", serverText, {
+        gate: "quota",
+        quota_type: "memories_per_day",
+        current: 100,
+        limit: 100,
+        required_plan: null,
+        required_plan_display: null,
+        current_plan: "pro",
+      }),
+    );
+    await submitAdminInvite();
+
+    expect(await screen.findByText(serverText)).toBeInTheDocument();
+    expect(screen.queryByText(/memberSeatsFull/)).toBeNull();
+  });
+
+  it("keeps the verbatim fallback for a refusal with no gate", async () => {
+    vi.mocked(createInvitation).mockRejectedValue(
+      refusal(409, "HTTP-409", "An invitation for this email already exists", {
+        detail: "An invitation for this email already exists",
+      }),
+    );
+    await submitAdminInvite();
+
+    expect(
+      await screen.findByText("An invitation for this email already exists"),
+    ).toBeInTheDocument();
+  });
+});
+
+/**
+ * #1644 J-11 — the role-change 403s are raw HTTPExceptions with no semantic
+ * code, so their prose is still matched; a genuine AUTH-101 no longer is.
+ */
+describe("WorkspaceMembersPage role-change refusal (#1644)", () => {
+  // The page logs every refusal it catches; keep the run output readable.
+  let quiet: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => quiet.mockRestore());
+
+  async function changeBobToAdmin() {
+    setupWithRole("owner", "pro");
+    mockListMembers.mockResolvedValue([
+      {
+        user_id: "user-2",
+        user_name: "Bob",
+        user_email: "bob@example.com",
+        role: "member",
+        joined_at: null,
+        allowed_context_ids: null,
+      },
+    ]);
+    render(<WorkspaceMembersPage />);
+    const select = await screen.findByDisplayValue("member");
+    await act(async () => {
+      fireEvent.change(select, { target: { value: "admin" } });
+    });
+    await waitFor(() => expect(mockToast).toHaveBeenCalledTimes(1));
+    return mockToast.mock.calls[0][0] as { description: string };
+  }
+
+  it("still maps the raw 'own role' 403 to its localized copy", async () => {
+    vi.mocked(updateMemberRole).mockRejectedValue(
+      refusal(403, "HTTP-403", "Cannot modify your own role"),
+    );
+
+    expect((await changeBobToAdmin()).description).toBe(
+      "cannotModifyOwnRoleDesc",
+    );
+  });
+
+  it("still maps the raw 'owner can change' 403 to its localized copy", async () => {
+    vi.mocked(updateMemberRole).mockRejectedValue(
+      refusal(403, "HTTP-403", "Only the owner can change the owner's role"),
+    );
+
+    expect((await changeBobToAdmin()).description).toBe(
+      "onlyOwnerCanChangeOwner",
+    );
+  });
+
+  it("does not run an AUTH-101 role refusal through the prose matcher", async () => {
+    // A role refusal whose server text happens to contain the matched words.
+    vi.mocked(updateMemberRole).mockRejectedValue(
+      refusal(403, "AUTH-101", "Only the owner can change workspace roles"),
+    );
+
+    expect((await changeBobToAdmin()).description).toBe(
+      "Only the owner can change workspace roles",
+    );
   });
 });

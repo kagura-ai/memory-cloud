@@ -6,14 +6,21 @@ minimum tier from the registry instead of a hardcoded "Pro plan".
 
 ``update_context`` carries no plan gate of its own (#1583): the REST route is
 the one gate, and the service only acts on a real privacy transition.
+
+#1644 S11: the refusal is a ``FeatureNotAvailableError`` (403 ``FEAT-001``)
+carrying the gate details block, not a ``ValidationError`` (422 ``VAL-001``).
+The REST route already answered 403 ``FEAT-001`` for the identical condition,
+so one condition used to produce two different refusals depending on whether
+the caller came through REST or through MCP / ``workspace_service``.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from config.plan_tiers import get_plan_tier
-from utils.exceptions import ValidationError
+from config.constants import GATE_PLAN
+from config.plan_tiers import get_plan_tier, plan_display_name
+from utils.exceptions import FeatureNotAvailableError
 
 
 class _GateCleared(Exception):
@@ -37,8 +44,8 @@ async def _create_shared(service):
 
     The probe is the first call after the shared-context and embedding-model
     gates, so reaching it (``_GateCleared``) proves the shared gate let the
-    call through; a ``ValidationError`` naming shared contexts is the gate's
-    own refusal. Anything else propagates and fails the test.
+    call through; a ``FeatureNotAvailableError`` is the gate's own refusal
+    (#1644 S11). Anything else propagates and fails the test.
     """
     settings = MagicMock()
     settings.embedding_model_allowlist = ""
@@ -72,12 +79,48 @@ async def test_shared_context_creation_allowed_on_pro_and_xl(plan_name: str) -> 
 async def test_shared_context_creation_refused_below_pro_and_for_unknown_tiers(
     plan_name: str,
 ) -> None:
-    with pytest.raises(ValidationError) as exc_info:
+    with pytest.raises(FeatureNotAvailableError) as exc_info:
         await _create_shared(_service(plan_name))
     message = str(exc_info.value)
-    assert "Shared contexts" in message
     assert get_plan_tier("pro").display_name in message
     assert "Pro plan" not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("plan_name", ["free", "basic", "enterprise"])
+async def test_shared_context_refusal_is_a_403_plan_gate(plan_name: str) -> None:
+    """#1644 S11: 403 ``FEAT-001`` with the full plan-gate details block.
+
+    Before S11 this was a 422 ``VAL-001`` whose only machine-readable content
+    was English prose, while ``POST /contexts`` answered 403 ``FEAT-001`` for
+    the very same condition.
+    """
+    with pytest.raises(FeatureNotAvailableError) as exc_info:
+        await _create_shared(_service(plan_name))
+
+    exc = exc_info.value
+    assert exc.status_code == 403
+    assert exc.error_code == "FEAT-001"
+    assert exc.details["gate"] == GATE_PLAN
+    assert exc.details["feature"] == "shared_contexts"
+    assert exc.details["required_plan"] == "pro"
+    assert exc.details["required_plan_display"] == get_plan_tier("pro").display_name
+    assert exc.details["current_plan"] == plan_name
+
+
+@pytest.mark.asyncio
+async def test_shared_context_refusal_never_names_the_higher_fallback() -> None:
+    """``required_plan_display`` is a tier label or ``None`` — never prose.
+
+    ``required_plan_display_name`` returns the sentence fragment ``"higher"``
+    when no tier carries the feature; the details block must emit ``None``
+    instead, because a client renders this value as a plan name.
+    """
+    with pytest.raises(FeatureNotAvailableError) as exc_info:
+        await _create_shared(_service("free"))
+
+    assert exc_info.value.details["required_plan_display"] != "higher"
+    assert plan_display_name("free") in str(exc_info.value)
 
 
 @pytest.mark.asyncio

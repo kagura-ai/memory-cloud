@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 from api.main import app
 from auth.dependencies import get_user_from_api_key_or_session
 from db.base import get_db
-from utils.exceptions import FeatureNotAvailableError
+from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
 
 _WS = uuid.uuid4()
 _NON_XL = ["free", "basic", "pro"]
@@ -106,6 +106,63 @@ class TestResourceTokenCreate:
         the gate entirely and minted the token."""
         with pytest.raises(FeatureNotAvailableError):
             await self._create(None)  # type: ignore[arg-type]
+
+    async def _create_at_cap(self):
+        from api.routes.resource_tokens import ResourceTokenCreate, create_resource_token
+        from config.plan_tiers import get_plan_tier
+
+        cap = get_plan_tier("promax").max_resource_tokens
+        db = MagicMock()
+        db.commit = AsyncMock()
+        db.refresh = AsyncMock()
+        db.execute = AsyncMock(
+            side_effect=[_result(one=uuid.uuid4()), _result(one="promax"), _result(scalar=cap)]
+        )
+        manager = MagicMock()
+        manager.create_token = AsyncMock()
+        with (
+            patch(
+                "api.routes.resource_tokens.resolve_resource_pk",
+                new=AsyncMock(return_value=uuid.uuid4()),
+            ),
+            pytest.raises(QuotaExceededError) as exc_info,
+        ):
+            await create_resource_token(
+                ResourceTokenCreate(resource_id="products", quota_events_per_hour=1000),
+                ("owner-1", _WS),
+                manager,
+                db,
+            )
+        manager.create_token.assert_not_awaited()
+        return exc_info.value, cap
+
+    @pytest.mark.asyncio
+    async def test_resource_token_cap_keeps_403_and_gains_quota_001(self) -> None:
+        """#1644 S5: the status must NOT move — it is what clients branch on —
+        but the code stops being the non-semantic ``HTTP-403`` placeholder."""
+        exc, cap = await self._create_at_cap()
+
+        assert exc.status_code == 403
+        assert exc.error_code == "QUOTA-001"
+        details = exc.details
+        assert details["gate"] == "quota"
+        assert details["quota_type"] == "resource_tokens"
+        assert (details["current"], details["limit"]) == (cap, cap)
+        assert details["feature"] == "resources"
+        assert details["current_plan"] == "promax"
+        # XL is the top tier for this cap, so nothing raises it.
+        assert details["required_plan"] is None
+
+    @pytest.mark.asyncio
+    async def test_resource_token_cap_message_uses_the_display_name_not_upper(self) -> None:
+        """``plan_name.upper()`` rendered a third tier vocabulary beside the
+        registry keys and the display names."""
+        from config.plan_tiers import get_plan_tier
+
+        exc, _ = await self._create_at_cap()
+
+        assert "PROMAX" not in exc.message
+        assert f"Your {get_plan_tier('promax').display_name} plan" in exc.message
 
 
 class TestResourceTokenQuotaUpdateKeepsServing:
@@ -595,6 +652,61 @@ class TestInvitationGateIsRegistryDriven:
         assert r.status_code == 403
         assert get_plan_tier("pro").display_name in r.text
         assert "Pro plan" not in r.text
+        svc.create_invitation.assert_not_awaited()
+
+    def test_invitation_plan_refusal_is_feat001_not_a_raw_403(self, client, monkeypatch) -> None:
+        """#1644 S1: the status does not move; the non-semantic ``HTTP-403``
+        placeholder is replaced by the documented ``FEAT-001`` envelope."""
+        from config.plan_tiers import get_plan_tier, required_plan_name
+
+        self._arrange(monkeypatch, "basic")
+        r = self._invite(client)
+
+        assert r.status_code == 403
+        body = r.json()
+        assert body["error"] == "FEAT-001"
+        details = body["details"]
+        assert details["gate"] == "plan"
+        assert details["feature"] == "team_invitations"
+        assert details["current_plan"] == "basic"
+        required = required_plan_name("team_invitations")
+        assert details["required_plan"] == required
+        assert details["required_plan_display"] == get_plan_tier(required).display_name
+
+    def test_invitation_seat_cap_is_quota001_with_quota_type_members(
+        self, client, monkeypatch
+    ) -> None:
+        """#1644 S2: the route no longer re-wraps the cap into a bare 429 — the
+        service's own envelope (and its details) reach the client intact."""
+        from config.plan_tiers import quota_gate_details
+
+        svc = self._arrange(monkeypatch, "promax")
+        monkeypatch.setattr(
+            "services.quota_service.QuotaService.check_member_quota",
+            AsyncMock(
+                side_effect=QuotaExceededError(
+                    "Member limit reached (50 seats).",
+                    **quota_gate_details(
+                        "promax",
+                        "members",
+                        current=50,
+                        limit=50,
+                        required_plan=None,
+                        feature="team_invitations",
+                    ),
+                )
+            ),
+        )
+
+        r = self._invite(client)
+
+        assert r.status_code == 429
+        body = r.json()
+        assert body["error"] == "QUOTA-001"
+        details = body["details"]
+        assert details["gate"] == "quota"
+        assert details["quota_type"] == "members"
+        assert (details["current"], details["limit"]) == (50, 50)
         svc.create_invitation.assert_not_awaited()
 
 

@@ -187,7 +187,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     content={
                         "error": "QUOTA-001",
                         "message": str(e),
-                        "details": {"retry_after": 86400},  # Reset in 24 hours
+                        # #1644: the body used to SUBSTITUTE ``retry_after``
+                        # for the exception's own details, so the gate kind
+                        # and the quota type never reached the client. Merge
+                        # instead; ``retry_after`` still wins on the key it
+                        # owns (reset in 24 hours).
+                        "details": {**e.details, "retry_after": 86400},
                     },
                     headers={
                         "Retry-After": "86400",
@@ -279,29 +284,36 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         is_mcp = path.startswith("/api/v1/memory/") or path.startswith("/mcp/")
         is_public = path.startswith("/api/v1/public/") or path.startswith("/api/v1/resources/")
 
+        # ``quota_label`` is the human noun used inside the message f-string.
+        # It is NOT ``details.quota_type`` (#1644): that is the canonical
+        # snake_case key, built from ``mode`` below, and the two were easy to
+        # confuse while they shared a name.
         if is_mcp:
             mode = "mcp"
             daily_limit = plan_tier.mcp_calls_per_day
-            quota_type = "MCP"
+            quota_label = "MCP"
 
         elif is_public:
             mode = "public"
             daily_limit = plan_tier.public_calls_per_day
-            quota_type = "Public API"
+            quota_label = "Public API"
 
             if daily_limit == 0:
+                # No counts: a zero-limit tier has nothing to count (#1644).
                 raise QuotaExceededError(
-                    "Public API is not available on Free plan. Please upgrade to Basic or Pro plan."
+                    "Public API is not available on Free plan. Please upgrade to Basic or Pro plan.",
+                    quota_type="api_public_daily",
                 )
 
         else:
             mode = "rest"
             daily_limit = plan_tier.rest_calls_per_day
-            quota_type = "REST"
+            quota_label = "REST"
 
             if daily_limit == 0:
                 raise QuotaExceededError(
-                    "REST API is not available on Free plan. Please upgrade to Basic or Pro plan."
+                    "REST API is not available on Free plan. Please upgrade to Basic or Pro plan.",
+                    quota_type="api_rest_daily",
                 )
 
         daily_key = f"quota:{scope_key}:{mode}:{today}"
@@ -317,15 +329,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return
 
         if daily_count > daily_limit:
+            # The counts stay out of ``details`` on purpose: this family's
+            # numbers are a rolling per-day counter, and the wire contract
+            # (#1644) keeps ``current`` / ``limit`` for the caps a client can
+            # render as "N of M used".
             raise QuotaExceededError(
-                f"Daily {quota_type} quota exceeded: {daily_count}/{daily_limit}. "
-                f"Resets at midnight UTC."
+                f"Daily {quota_label} quota exceeded: {daily_count}/{daily_limit}. "
+                f"Resets at midnight UTC.",
+                quota_type=f"api_{mode}_daily",
             )
 
         logger.debug(
             "daily_quota_checked",
             user_id=user_id,
-            quota_type=quota_type,
+            quota_type=quota_label,
             count=daily_count,
             limit=daily_limit,
         )

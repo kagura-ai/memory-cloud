@@ -9,7 +9,8 @@
  *   - without the plan feature "Make shared" is inert on a private context
  *     (the upgrade notice explains why), while a legacy shared context can
  *     still be made private;
- *   - a FEAT-001 refusal names the control, not the raw feature key.
+ *   - a FEAT-001 refusal names the control, not the raw feature key, and
+ *     (#1644) the tier the refusal itself names, not a hardcoded one.
  *
  * Select is rendered natively (same idiom as the admin plans page test) so
  * the sleep-mode control can be driven — Radix Select does not respond to
@@ -21,6 +22,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SettingsTabPanel } from "./SettingsTabPanel";
 import { ApiError } from "@/lib/api/base";
+import { normalizeGate } from "@/lib/gates/featureGates";
 import type { Context } from "@/lib/types/context";
 
 // ---------- Mocks ------------------------------------------------------------
@@ -290,13 +292,22 @@ describe("SettingsTabPanel — sharing control without shared_contexts (#1583)",
 // ---------- FEAT-001 toast names the control ---------------------------------
 
 describe("SettingsTabPanel — FEAT-001 refusal names the control (#1583)", () => {
-  function refuse(feature: string) {
+  /** A FEAT-001 exactly as lib/api/base.ts builds it from a #1644 body. */
+  function refuse(feature: string, requiredPlan: string | null = null) {
+    const details = {
+      gate: "plan",
+      feature,
+      required_plan: requiredPlan,
+      required_plan_display: null,
+      current_plan: "basic",
+    };
     mockUpdateContext.mockRejectedValue(
       new ApiError({
         error: "FEAT-001",
         message: `Feature '${feature}' not available on M plan.`,
         status: 403,
-        details: { feature },
+        details,
+        gate: normalizeGate(403, "FEAT-001", details),
       }),
     );
   }
@@ -311,10 +322,10 @@ describe("SettingsTabPanel — FEAT-001 refusal names the control (#1583)", () =
   }
 
   it.each([
-    ["shared_contexts", "sharedRequiresPlan:L"],
-    ["public_contexts", "publicRequiresPlan:XL"],
-  ])("%s → %s", async (feature, expected) => {
-    refuse(feature);
+    ["shared_contexts", "pro", "sharedRequiresPlan:L"],
+    ["public_contexts", "promax", "publicRequiresPlan:XL"],
+  ])("%s (requires %s) → %s", async (feature, requiredPlan, expected) => {
+    refuse(feature, requiredPlan);
     renderPanel(makeContext());
 
     const toast = await saveARename();
@@ -323,8 +334,30 @@ describe("SettingsTabPanel — FEAT-001 refusal names the control (#1583)", () =
     expect(toast.description).toBe(expected);
   });
 
+  it("names the tier the refusal names, not FEATURE_NOTICES' hardcoded one (#1644)", async () => {
+    // A deployment that moved sharing up to the top tier: the old code
+    // still said "L" because the tier came from FEATURE_NOTICES.
+    refuse("shared_contexts", "promax");
+    renderPanel(makeContext());
+
+    const toast = await saveARename();
+
+    expect(toast.description).toBe("sharedRequiresPlan:XL");
+  });
+
+  it("keeps the server text when the refusal names no tier (#1644)", async () => {
+    refuse("shared_contexts", null);
+    renderPanel(makeContext());
+
+    const toast = await saveARename();
+
+    expect(toast.description).toBe(
+      "Feature 'shared_contexts' not available on M plan.",
+    );
+  });
+
   it("an unknown feature falls back to the server text", async () => {
-    refuse("connectors");
+    refuse("connectors", "promax");
     renderPanel(makeContext());
 
     const toast = await saveARename();

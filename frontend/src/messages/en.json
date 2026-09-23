@@ -1296,6 +1296,8 @@
     "seatWarning": "⚠️ {used}/{limit} seats used ({available} remaining)",
     "upgradeToAddMembers": "Upgrade to add more members",
     "memberQuotaExceeded": "Member quota exceeded",
+    "invitePlanRequired": "Team invitations require the {plan} plan.",
+    "memberSeatsFull": "Member limit reached: {current} of {limit} seats are in use, including pending invitations.",
     "inviteContextSelection": "Context Access",
     "inviteContextSelectionDesc": "Select which contexts this member can access",
     "noSharedContexts": "No shared contexts available",
@@ -3988,6 +3990,14 @@
         "title": "Analyses are not yet enabled for this workspace",
         "description": "Memory Analysis is gated to selected workspaces during the v1 rollout. Reach out if you would like access."
       },
+      "ownerOnly": {
+        "title": "Memory Analysis is available to the workspace owner",
+        "description": "Only the owner of this workspace can run analyses and view their results."
+      },
+      "planRequired": {
+        "title": "Memory Analysis requires the {plan} plan",
+        "description": "This workspace's plan does not include Memory Analysis. It is available on the {plan} plan."
+      },
       "loadFailed": "Failed to load analyses — check connection and try again."
     }
   },
@@ -4067,6 +4077,8 @@
       "description": "Existing connectors keep ingesting. Connecting a new chat platform is available on the {plan} plan.",
       "action": "Upgrade to {plan}"
     },
+    "connectorPlanRequired": "Connecting a new chat platform requires the {plan} plan.",
+    "connectorSeatsFull": "Connector limit reached: {current} of {limit} connectors are in use.",
     "contextBound": "Writes to context {id}",
     "contextNotReady": "Setup incomplete — no write-target context",
     "appIdentity": "App identity: {appKey}",

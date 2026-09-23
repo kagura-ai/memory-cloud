@@ -835,7 +835,7 @@ class TestSetupResourceHappyPath:
         async def mock_create_token(self, **kwargs):
             return ("plaintext-token-xyz", mock_token_record)
 
-        async def mock_can_create(self, wsid):
+        async def mock_can_create(self, wsid, raise_on_denied=False):
             return (True, None)
 
         async def mock_get_ctx_by_name(self, wsid, name):

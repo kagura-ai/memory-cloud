@@ -75,7 +75,16 @@ def _exc_to_error_response(exc: Exception) -> list[TextContent]:
     if isinstance(exc, ConflictError):
         return _error_response("conflict", str(exc))
     if isinstance(exc, QuotaExceededError):
-        return _error_response("quota_exceeded", str(exc))
+        # #1644: forward the structured details (``gate``, ``quota_type``,
+        # ``current``/``limit``, the legacy ``requested``) exactly as the
+        # analysis and remember envelopes do, so an MCP client reads the
+        # storage cap the way a REST client does. ``None`` values are dropped
+        # (same convention), which a client reads as an absent field.
+        return _error_response(
+            "quota_exceeded",
+            str(exc),
+            **{k: v for k, v in exc.details.items() if v is not None},
+        )
     if isinstance(exc, ExternalServiceError):
         # R2 5xx / AccessDenied / throttling — reachable from
         # ``confirm_upload`` and ``get_presigned_download``. Surface as a

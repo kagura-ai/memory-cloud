@@ -1542,6 +1542,67 @@ All errors follow this format:
 - `429 Too Many Requests` - Rate limit exceeded
 - `500 Internal Server Error` - Server error
 
+### Gate refusals
+
+A refusal caused by the workspace's **plan**, a **quota**, a rollout **allowlist** or a
+**deployment** switch carries a machine-readable `details` block, so a client never has to
+read the message text or guess from the status code. These refusals use the structured
+envelope — `{"error": ..., "message": ..., "details": {...}}` — enumerated in
+[`api-surface-1.0/error-responses.md`](api-surface-1.0/error-responses.md#gate-refusals-1644).
+
+Feature refusal (`FEAT-001`, HTTP 403):
+
+```json
+{
+  "error": "FEAT-001",
+  "message": "Feature 'team_invitations' not available on M plan. Upgrade to L plan to access this feature.",
+  "details": {
+    "gate": "plan",
+    "feature": "team_invitations",
+    "required_plan": "pro",
+    "required_plan_display": "L",
+    "current_plan": "basic"
+  }
+}
+```
+
+Quota refusal (`QUOTA-001`, HTTP 429 — or 403 on the resource-token and connector-seat caps,
+which have always answered 403):
+
+```json
+{
+  "error": "QUOTA-001",
+  "message": "Context limit reached. Your S plan allows 1 context(s) per workspace. Upgrade to M plan for more contexts.",
+  "details": {
+    "gate": "quota",
+    "quota_type": "contexts",
+    "current": 1,
+    "limit": 1,
+    "required_plan": "basic",
+    "required_plan_display": "M",
+    "current_plan": "free"
+  }
+}
+```
+
+Reading them:
+
+- **`details.gate`** says *why*. `plan` means a higher tier lifts it. `quota` means a cap was
+  reached. `allowlist` means a rollout kill switch and `deployment` means the operator turned
+  the feature off — neither of those can be lifted by any tier, so do not offer an upgrade for
+  them. Role refusals are `AUTH-101` and carry no details at all.
+- **`required_plan`** is the tier **key** to branch on; **`required_plan_display`** is the
+  label to render if you have no tier list of your own. Both may be `null`, which means no
+  tier lifts this refusal — say so rather than inventing an upgrade.
+- **`current` / `limit`** are integers and are absent on the two families that have no integer
+  counts: the BYOK embedding spend caps (`QUOTA-002`, which ship `cap_usd` / `current_usd`)
+  and the daily API quotas. Render a number-free message when they are missing.
+- Pre-existing detail fields (`used_today`, `owned_count`, `max_connectors`, …) are unchanged
+  and still shipped; the canonical names were added beside them.
+- A `QUOTA-001` with no `gate` and no `quota_type` — the 1 MB memory-size limit, for one — is
+  **not** a plan quota: no tier lifts it, so show the message and no upgrade.
+- MCP tools return the same keys as top-level fields of their error envelope.
+
 ---
 
 ## SDKs and Examples

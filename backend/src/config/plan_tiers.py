@@ -7,8 +7,9 @@ Defines quota limits and feature access for each plan tier.
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from config.constants import GATE_PLAN, GATE_QUOTA
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -773,3 +774,106 @@ def feature_denied_message(plan_name: str | None, feature: str) -> str:
         f"Feature '{feature}' not available on {plan_display_name(plan_name)} plan. "
         f"Upgrade to {required_plan_display_name(feature)} plan to access this feature."
     )
+
+
+# ============================================================================
+# Gate details builders (#1644)
+# ============================================================================
+
+
+def lowest_tier_with_limit(attr: str, above: int) -> str | None:
+    """Lowest tier in ``PLAN_ORDER`` whose numeric ``attr`` exceeds ``above``.
+
+    The numeric twin of ``required_plan_name`` (#1644): caps like contexts,
+    members and resource tokens are not registry FEATURES, so the "which tier
+    fixes this?" answer has to be derived from the tier rows.
+
+    Args:
+        attr: ``PlanTier`` field name holding the cap, e.g.
+            ``"max_contexts_per_workspace"``.
+        above: The cap the caller is refusing at. A tier qualifies only when
+            its own value is strictly greater.
+
+    Returns:
+        The tier key, or ``None`` when no tier raises the cap — the refusal
+        then carries no upgrade path, which is the correct answer for an
+        env-driven cap (e.g. ``max_agents_per_workspace``).
+    """
+    for name in PLAN_ORDER:
+        if int(getattr(PLAN_TIERS[name], attr, 0) or 0) > above:
+            return name
+    return None
+
+
+def feature_gate_details(plan_name: str | None, feature: str) -> dict[str, Any]:
+    """The ``details`` block for a ``FEAT-001`` plan refusal (#1644).
+
+    Both halves ship: ``required_plan`` is the registry KEY a client decides
+    with, ``required_plan_display`` the label a non-UI client renders. The
+    display is ``None`` — never the ``"higher"`` prose fallback
+    ``required_plan_display_name`` returns — because ``"higher"`` is a
+    sentence fragment, not a tier label.
+
+    Args:
+        plan_name: The workspace's plan key; ``None`` when there is no row.
+        feature: Registry feature key, e.g. ``"team_invitations"``.
+
+    Returns:
+        ``gate`` / ``feature`` / ``required_plan`` / ``required_plan_display``
+        / ``current_plan``, ready to splat into the exception.
+    """
+    required = required_plan_name(feature)
+    tier = PLAN_TIERS.get(required) if required else None
+    return {
+        "gate": GATE_PLAN,
+        "feature": feature,
+        "required_plan": required,
+        "required_plan_display": tier.display_name if tier else None,
+        "current_plan": plan_name,
+    }
+
+
+def quota_gate_details(
+    plan_name: str | None,
+    quota_type: str,
+    *,
+    current: int,
+    limit: int,
+    required_plan: str | None = None,
+    feature: str | None = None,
+    resets_at: str | None = None,
+) -> dict[str, Any]:
+    """The ``details`` block for a ``QUOTA-001`` refusal (#1644).
+
+    ``current`` / ``limit`` are the canonical count names. They are ADDED
+    beside whatever per-site legacy names the refusal already carried
+    (``used_today``, ``owned_count``, ``max_connectors``, ...); nothing is
+    renamed, so an older client keeps reading what it always read.
+
+    Args:
+        plan_name: The workspace's plan key.
+        quota_type: A member of ``constants.QUOTA_TYPES``.
+        current: Count already used, as an int.
+        limit: The cap that was hit, as an int.
+        required_plan: Tier key that raises the cap, usually from
+            ``lowest_tier_with_limit``. ``None`` when no tier does — the
+            refusal then advertises no upgrade.
+        feature: Registry feature key when the cap belongs to a named
+            feature.
+        resets_at: ISO-8601 instant; time-windowed quotas only.
+
+    Returns:
+        The details mapping, ready to splat into ``QuotaExceededError``.
+    """
+    required_tier = PLAN_TIERS.get(required_plan) if required_plan else None
+    return {
+        "gate": GATE_QUOTA,
+        "quota_type": quota_type,
+        "current": int(current),
+        "limit": int(limit),
+        "required_plan": required_plan,
+        "required_plan_display": required_tier.display_name if required_tier else None,
+        "current_plan": plan_name,
+        "feature": feature,
+        "resets_at": resets_at,
+    }

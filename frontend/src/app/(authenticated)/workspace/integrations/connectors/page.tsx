@@ -78,7 +78,8 @@ import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { planLabelFromEnv } from "@/lib/utils/planLabel";
-import { API_BASE_URL } from "@/lib/api/base";
+import { API_BASE_URL, ApiError } from "@/lib/api/base";
+import { gateFromFacts } from "@/lib/gates/featureGates";
 import { getContexts, type Context } from "@/lib/api/contexts";
 import {
   connectorDisplayName,
@@ -750,7 +751,33 @@ export default function ConnectorsPage() {
       router.replace("/workspace/integrations/connectors");
       await reload();
     } catch (err) {
-      setCreateError(err instanceof Error ? err.message : String(err));
+      // #1644: the plan and seat-cap refusals are read from the normalised
+      // gate and rendered in the reader's language; anything else keeps the
+      // server's own text. The dialog error carries no CTA of its own.
+      const facts = err instanceof ApiError ? err.gate : undefined;
+      const gate = gateFromFacts(facts, {
+        fallbackKey: "connectors",
+        canUpgrade: false,
+        locale,
+      });
+      if (
+        gate?.state === "plan" &&
+        gate.feature === "connectors" &&
+        gate.planLabel
+      ) {
+        setCreateError(t("connectorPlanRequired", { plan: gate.planLabel }));
+      } else if (
+        gate?.state === "quota" &&
+        facts?.quotaType === "connectors" &&
+        gate.current !== undefined &&
+        gate.limit !== undefined
+      ) {
+        setCreateError(
+          t("connectorSeatsFull", { current: gate.current, limit: gate.limit }),
+        );
+      } else {
+        setCreateError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setSubmitting(false);
     }
@@ -769,6 +796,7 @@ export default function ConnectorsPage() {
     locale,
     router,
     reload,
+    t,
   ]);
 
   const handleDelete = useCallback(async () => {

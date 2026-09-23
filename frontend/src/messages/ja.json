@@ -1295,6 +1295,8 @@
     "seatWarning": "⚠️ {used}/{limit} シート使用中（残り{available}）",
     "upgradeToAddMembers": "アップグレードしてメンバーを追加",
     "memberQuotaExceeded": "メンバー上限を超過",
+    "invitePlanRequired": "チームへの招待には {plan} プランが必要です。",
+    "memberSeatsFull": "メンバー上限に達しました（招待中を含め {limit} 席中 {current} 席を使用中）。",
     "inviteContextSelection": "Contextアクセス",
     "inviteContextSelectionDesc": "このメンバーがアクセスできるContextを選択",
     "noSharedContexts": "Shared Contextがありません",
@@ -3988,6 +3990,14 @@
         "title": "この workspace では Analyses はまだ有効化されていません",
         "description": "メモリー分析は v1 ロールアウト中、選定された workspace に限定されています。アクセスをご希望の場合はお問い合わせください。"
       },
+      "ownerOnly": {
+        "title": "メモリー分析はワークスペースのオーナーのみ利用できます",
+        "description": "分析の実行と結果の閲覧は、このワークスペースのオーナーのみが行えます。"
+      },
+      "planRequired": {
+        "title": "メモリー分析には {plan} プランが必要です",
+        "description": "このワークスペースのプランにはメモリー分析が含まれていません。{plan} プランでご利用いただけます。"
+      },
       "loadFailed": "Analyses の読み込みに失敗しました — 接続を確認してください。"
     }
   },
@@ -4067,6 +4077,8 @@
       "description": "既存のコネクタは引き続き取り込みを行います。新しいチャットプラットフォームの接続は {plan} プランで利用できます。",
       "action": "{plan} にアップグレード"
     },
+    "connectorPlanRequired": "新しいチャットプラットフォームの接続には {plan} プランが必要です。",
+    "connectorSeatsFull": "コネクタ上限に達しました（{limit} 件中 {current} 件を使用中）。",
     "contextBound": "コンテキスト {id} に書き込み",
     "contextNotReady": "セットアップ未完了 — 書き込み先コンテキストなし",
     "appIdentity": "アプリ ID: {appKey}",

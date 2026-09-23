@@ -22,7 +22,11 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.resource import ResourceToken, WorkspaceConnector
 from services.resource_lookup import resolve_resource_pk
-from utils.exceptions import FeatureNotAvailableError, MemoryCloudException
+from utils.exceptions import (
+    FeatureNotAvailableError,
+    MemoryCloudException,
+    QuotaExceededError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -286,7 +290,13 @@ async def create_resource_token(
         # Check plan limits and active token count
         from sqlalchemy import func, select
 
-        from config.plan_tiers import get_plan_tier, has_feature
+        from config.plan_tiers import (
+            get_plan_tier,
+            has_feature,
+            lowest_tier_with_limit,
+            plan_display_name,
+            quota_gate_details,
+        )
         from models.auth import Context, Workspace
 
         # SECURITY: Verify resource_id belongs to current workspace
@@ -355,9 +365,28 @@ async def create_resource_token(
         active_count = active_count_result.scalar() or 0
 
         if active_count >= plan.max_resource_tokens:
-            raise HTTPException(
+            # #1644 S5: the cap keeps its 403 — the status is what existing
+            # clients branch on — but answers the documented ``QUOTA-001``
+            # envelope instead of the non-semantic ``HTTP-403`` placeholder.
+            # ``plan_name.upper()`` rendered a third tier vocabulary
+            # ("PROMAX") beside the keys and the display names.
+            raise QuotaExceededError(
+                (
+                    f"Token limit reached. Your {plan_display_name(plan_name)} plan allows "
+                    f"{plan.max_resource_tokens} active tokens. "
+                    "Please revoke unused tokens or upgrade your plan."
+                ),
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Token limit reached. Your {plan_name.upper()} plan allows {plan.max_resource_tokens} active tokens. Please revoke unused tokens or upgrade your plan.",
+                **quota_gate_details(
+                    plan_name,
+                    "resource_tokens",
+                    current=active_count,
+                    limit=plan.max_resource_tokens,
+                    required_plan=lowest_tier_with_limit(
+                        "max_resource_tokens", plan.max_resource_tokens
+                    ),
+                    feature="resources",
+                ),
             )
 
         # Issue #390 Phase 2: resolve authoritative ``resource_pk`` + pass

@@ -31,24 +31,6 @@ interface WorkspaceCreateFormProps {
   onCancel?: () => void;
 }
 
-/**
- * Narrow an ApiError's structured `details` to the workspace-cap quota shape
- * (#680). Keyed off `quota_type` so other QUOTA-001 errors don't match, with
- * runtime number checks so a malformed payload falls through to the verbatim
- * message path instead of rendering `undefined` in the i18n placeholders.
- */
-function isWorkspaceLimitDetails(
-  details: unknown,
-): details is { owned_count: number; cap: number } {
-  if (typeof details !== "object" || details === null) return false;
-  const d = details as Record<string, unknown>;
-  return (
-    d.quota_type === "workspace_limit_reached" &&
-    typeof d.owned_count === "number" &&
-    typeof d.cap === "number"
-  );
-}
-
 export function WorkspaceCreateForm({
   onSuccess,
   onCancel,
@@ -104,21 +86,32 @@ export function WorkspaceCreateForm({
       const errorMessage =
         err instanceof Error ? err.message : t("failedToCreateWorkspace");
 
-      if (err instanceof ApiError && isWorkspaceLimitDetails(err.details)) {
-        // #680: structured quota details carry live owned_count + cap, so we
+      const gate = err instanceof ApiError ? err.gate : undefined;
+      if (
+        gate?.state === "quota" &&
+        gate.quotaType === "workspace_limit_reached" &&
+        gate.current !== undefined &&
+        gate.limit !== undefined
+      ) {
+        // #680 / #1644: the workspace cap's live counts, read from the gate
+        // normalised at the ApiError choke point (an older server's
+        // owned_count / cap are aliased onto current / limit there), so we
         // render a localized message instead of the verbatim English string.
-        // (The string-only branch below remains as a fallback for older
-        // backends / un-migrated quota errors.)
+        // Keyed off the quota type so other quota refusals don't match; a
+        // payload without both counts falls through to the branch below
+        // instead of rendering `undefined` in the i18n placeholders.
         setError(
           t("workspaceLimitReachedDetailed", {
-            owned: err.details.owned_count,
-            limit: err.details.cap,
+            owned: gate.current,
+            limit: gate.limit,
           }),
         );
       } else if (errorMessage.includes("Workspace limit reached")) {
         // Fallback: surface the backend's authoritative message verbatim when
         // structured details are absent. Live ``owned N (cap: M)`` data still
         // beats a cached frontend cap; ja users see English in this path only.
+        // Kept on purpose as the rolling-deploy safety net for a body that
+        // reaches this client un-normalised; #1646's last commit removes it.
         setError(errorMessage);
       } else if (
         errorMessage.includes("validation") ||

@@ -18,7 +18,14 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.plan_tiers import feature_denied_message, get_plan_tier, has_feature
+from config.plan_tiers import (
+    PLAN_TIERS,
+    feature_denied_message,
+    get_plan_tier,
+    has_feature,
+    lowest_tier_with_limit,
+    quota_gate_details,
+)
 from db.redis import get_cache, incrby_counter
 from models.auth import (
     Context,
@@ -47,6 +54,18 @@ def _memories_per_day_key(workspace_id: UUID, today: date) -> str:
 def _next_utc_midnight_iso(today: date) -> str:
     """``resets_at`` for the daily memory quota: tomorrow 00:00Z as ISO-8601."""
     return to_utc_iso(datetime.combine(today + timedelta(days=1), datetime.min.time(), UTC)) or ""
+
+
+def _context_cap_upgrade_tier(max_contexts: int) -> str | None:
+    """Lowest tier whose context cap beats ``max_contexts``, or ``None`` (#1644).
+
+    Lives out here, not inline in ``check_context_creation_allowed``, so that
+    function still resolves the cap ONLY through
+    ``workspace.effective_max_contexts`` — naming the raw tier field inside it
+    is what ``tests/api/test_context_quota_consistency.py`` forbids, because
+    raw addition bypasses the zero-floor clamp.
+    """
+    return lowest_tier_with_limit("max_contexts_per_workspace", max_contexts)
 
 
 class QuotaService:
@@ -236,11 +255,18 @@ class QuotaService:
             if raise_on_exceeded:
                 raise QuotaExceededError(
                     error,
-                    quota_type="memories_per_day",
-                    limit=limit,
+                    **quota_gate_details(
+                        workspace.plan_name,
+                        "memories_per_day",
+                        current=used_today,
+                        limit=limit,
+                        required_plan=lowest_tier_with_limit("memories_per_day", limit),
+                        resets_at=resets_at,
+                    ),
+                    # #1644: ``used_today`` is the legacy name for ``current``
+                    # and stays beside it; ``requested`` is quota-specific.
                     used_today=used_today,
                     requested=count,
-                    resets_at=resets_at,
                 )
             return False, error
 
@@ -506,7 +532,18 @@ class QuotaService:
                 # names) so the client can localize the upsell itself.
                 raise QuotaExceededError(
                     error,
-                    quota_type="workspace_limit_reached",
+                    **quota_gate_details(
+                        summary.tier,
+                        "workspace_limit_reached",
+                        current=workspace_count,
+                        limit=cap,
+                        # The next tier that grants more slots is already
+                        # resolved for the message; it IS the upgrade path.
+                        required_plan=next_tier,
+                    ),
+                    # #1644: ``owned_count`` / ``cap`` are the legacy names of
+                    # ``current`` / ``limit`` and are kept verbatim — an older
+                    # client (WorkspaceCreateForm) reads them.
                     owned_count=workspace_count,
                     cap=cap,
                     tier=summary.tier,
@@ -665,10 +702,20 @@ class QuotaService:
 
         # Check against limit
         if context_count >= max_contexts:
+            # #1644: the upgrade tier comes from the registry, not a literal.
+            # "Upgrade to Basic or Pro plan" sat one line under an
+            # interpolated ``plan.display_name``, so under a display-name
+            # override the same sentence named the same tier two ways. The
+            # sentence is DROPPED entirely when no tier raises the cap, so the
+            # message never promises an upgrade that does not exist.
+            upgrade = _context_cap_upgrade_tier(max_contexts)
             error = (
                 f"Context limit reached. "
-                f"Your {plan.display_name} plan allows {max_contexts} context(s) per workspace. "
-                f"Upgrade to Basic or Pro plan for multiple contexts."
+                f"Your {plan.display_name} plan allows {max_contexts} context(s) per workspace."
+            ) + (
+                f" Upgrade to {PLAN_TIERS[upgrade].display_name} plan for more contexts."
+                if upgrade
+                else ""
             )
             logger.warning(
                 "context_creation_denied",
@@ -679,7 +726,18 @@ class QuotaService:
             )
 
             if raise_on_denied:
-                raise QuotaExceededError(error)
+                # #1644 S3: this cap used to be the one quota refusal with no
+                # ``quota_type`` and no counts at all.
+                raise QuotaExceededError(
+                    error,
+                    **quota_gate_details(
+                        workspace.plan_name,
+                        "contexts",
+                        current=context_count,
+                        limit=max_contexts,
+                        required_plan=upgrade,
+                    ),
+                )
             return False, error
 
         return True, None
@@ -767,7 +825,19 @@ class QuotaService:
             )
 
             if raise_on_exceeded:
-                raise QuotaExceededError(error)
+                raise QuotaExceededError(
+                    error,
+                    **quota_gate_details(
+                        workspace.plan_name,
+                        "members",
+                        current=total_used,
+                        limit=max_members,
+                        required_plan=lowest_tier_with_limit(
+                            "max_members_per_workspace", max_members
+                        ),
+                        feature="team_invitations",
+                    ),
+                )
             return False, error
 
         return True, None

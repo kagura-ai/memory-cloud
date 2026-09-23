@@ -20,7 +20,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.resource_tokens import ResourceTokenManager
-from config.plan_tiers import has_feature
+from config.plan_tiers import has_feature, lowest_tier_with_limit, quota_gate_details
 from models.auth import Workspace
 from models.resource import Resource, ResourceSchema, ResourceToken, WorkspaceConnector
 from services.resource_lookup import resolve_resource_pk, upsert_resource
@@ -573,11 +573,29 @@ class ConnectorProvisioningService:
             raise FeatureNotAvailableError.for_feature(workspace.plan_name, "connectors")
 
     @staticmethod
-    def _raise_seat_cap(max_connectors: int, active_connectors: int) -> None:
+    def _raise_seat_cap(
+        max_connectors: int, active_connectors: int, plan_name: str | None = None
+    ) -> None:
+        """Refuse the provision at the seat cap.
+
+        #1644: the code (``CONNECTOR-001``) and the status (403) are a
+        documented contract with existing clients and do not move; the
+        refusal gains the shared quota details block instead, so a client
+        reads it the same way it reads every other cap.
+        """
         raise MemoryCloudException(
             (f"Connector seat limit reached. Your plan allows {max_connectors} connector(s)."),
             status_code=403,
             error_code="CONNECTOR-001",
+            **quota_gate_details(
+                plan_name,
+                "connectors",
+                current=active_connectors,
+                limit=max_connectors,
+                required_plan=lowest_tier_with_limit("max_connectors", max_connectors),
+                feature="connectors",
+            ),
+            # #1644: the legacy names stay beside the canonical counts.
             max_connectors=max_connectors,
             active_connectors=active_connectors,
         )
@@ -601,10 +619,10 @@ class ConnectorProvisioningService:
         """
         max_connectors = workspace.effective_max_connectors
         if max_connectors <= 0:
-            self._raise_seat_cap(max_connectors, 0)
+            self._raise_seat_cap(max_connectors, 0, workspace.plan_name)
         active_count = await self._count_active_connectors(workspace_id)
         if active_count >= max_connectors:
-            self._raise_seat_cap(max_connectors, active_count)
+            self._raise_seat_cap(max_connectors, active_count, workspace.plan_name)
 
     async def _enforce_connector_seat_cap(self, workspace: Workspace, workspace_id: UUID) -> None:
         max_connectors = workspace.effective_max_connectors
@@ -615,7 +633,7 @@ class ConnectorProvisioningService:
         # (CONNECTOR-001) into a retriable 503 (CONNECTOR-002) for a request that
         # can never succeed — and waste a lock + count round-trip (PR #860 review).
         if max_connectors <= 0:
-            self._raise_seat_cap(max_connectors, 0)
+            self._raise_seat_cap(max_connectors, 0, workspace.plan_name)
 
         # Issue #857: for a positive cap, acquire a per-workspace
         # ``pg_advisory_xact_lock`` before the count read so two concurrent
@@ -629,7 +647,7 @@ class ConnectorProvisioningService:
 
         active_count = await self._count_active_connectors(workspace_id)
         if active_count >= max_connectors:
-            self._raise_seat_cap(max_connectors, active_count)
+            self._raise_seat_cap(max_connectors, active_count, workspace.plan_name)
 
     async def _acquire_connector_seat_lock(self, workspace_id: UUID) -> None:
         """Take the per-workspace advisory lock guarding seat-cap enforcement.

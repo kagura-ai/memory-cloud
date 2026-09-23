@@ -18,7 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import ObjectDeletedError
 
 from auth.workspace_roles import WorkspaceRole
-from config.plan_tiers import has_feature, required_plan_display_name
+from config.plan_tiers import (
+    has_feature,
+    lowest_tier_with_limit,
+    plan_display_name,
+    quota_gate_details,
+)
 from config.settings import get_settings
 from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
 from models.sleep import SleepMode
@@ -136,7 +141,9 @@ class ContextService:
             Created Context instance
 
         Raises:
-            ValidationError: If name invalid, exists, role insufficient, or plan tier insufficient
+            ValidationError: If name invalid, exists, or role insufficient
+            FeatureNotAvailableError: If the workspace plan does not carry
+                ``shared_contexts`` and ``is_private`` is False (#1644 S11)
         """
         # Get workspace for validation
         from models.auth import Workspace, WorkspaceMember
@@ -172,12 +179,16 @@ class ContextService:
         if not is_private:
             # Feature-based (#1548): the tier registry decides, so a new tier
             # is never silently excluded and an unknown tier fails closed.
+            #
+            # #1644 S11: raised as ``FeatureNotAvailableError`` (403
+            # ``FEAT-001``), not ``ValidationError`` (422 ``VAL-001``). The
+            # REST route already answers 403 ``FEAT-001`` for this exact
+            # condition (``api/routes/contexts.py``), so one condition was
+            # producing two different refusals depending on which door the
+            # caller came through — MCP and ``workspace_service`` reach the
+            # service directly.
             if not has_feature(workspace.plan_name, "shared_contexts"):
-                raise ValidationError(
-                    f"Shared contexts require the "
-                    f"{required_plan_display_name('shared_contexts')} plan. "
-                    "Upgrade to share contexts with team members."
-                )
+                raise FeatureNotAvailableError.for_feature(workspace.plan_name, "shared_contexts")
 
         # Determine embedding model: parameter > global setting
         from config.constants import EMBEDDING_MODEL_REGISTRY
@@ -757,10 +768,21 @@ class ContextService:
             # rather than offering a self-serve purchase CTA. Update both
             # the message and the i18n keys when the SKU ships.
             if limit == 0:
+                # #1644 S7: ``sleep_mode`` is enforced NUMERICALLY — it is in
+                # no tier's ``features`` set and has no ``FEATURE_MIN_PLANS``
+                # row — so the tier that lifts the refusal is derived from the
+                # tier rows rather than from the feature registry. Registering
+                # it as a real feature is registry surgery and out of scope.
+                required_plan = lowest_tier_with_limit("sleep_enabled_contexts_limit", 0)
                 raise FeatureNotAvailableError(
                     "Sleep Maintenance is a PRO-tier feature; "
                     "upgrade your plan to enable sleep_mode on contexts.",
                     feature="sleep_mode",
+                    required_plan=required_plan,
+                    required_plan_display=(
+                        plan_display_name(required_plan) if required_plan else None
+                    ),
+                    current_plan=workspace.plan_name,
                 )
             raise QuotaExceededError(
                 (
@@ -769,9 +791,18 @@ class ContextService:
                     f"{limit - addon_bonus} + addon bonus {addon_bonus}). "
                     f"Contact your workspace admin to request a higher cap."
                 ),
-                quota_type="sleep_enabled_contexts",
-                limit=limit,
-                current=current,
+                **quota_gate_details(
+                    workspace.plan_name,
+                    "sleep_enabled_contexts",
+                    current=current,
+                    limit=limit,
+                    # #1644 S8: an addon-only cap. The over-cap path is reached
+                    # only on a tier that already HAS the feature, and the
+                    # headroom is bought as an addon, not as a tier — so there
+                    # is no upgrade to advertise.
+                    required_plan=None,
+                    feature="sleep_mode",
+                ),
                 addon_bonus=addon_bonus,
                 requested=current + 1,
             )

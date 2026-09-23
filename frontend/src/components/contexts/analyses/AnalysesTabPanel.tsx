@@ -14,15 +14,24 @@
  *  - Active in-flight run polling (``useActiveAnalysisPolling``) when a
  *    new run was just started or one was already running on mount.
  *
- * Allowlist 403: the API gate returns 403 when the workspace is not on
- * the allowlist. We render a friendly empty state — flat copy that
- * does not reveal the allowlist exists (CDO advice from gate1).
+ * Refusals (#1644): the read gate answers 403 for a non-owner and for a
+ * workspace outside the rollout allowlist; the write gate also for a plan
+ * that lacks the feature. Each now arrives as a normalised gate on the
+ * ApiError, so the panel tells the three apart — owner-only copy, the
+ * required plan, or the allowlist copy. The allowlist copy stays flat and
+ * does not reveal the allowlist exists (CDO advice from gate1). A 403 that
+ * carries no gate keeps that same allowlist copy, verbatim.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ApiError } from "@/lib/api/base";
+import {
+  gateFromFacts,
+  type FeatureGateFacts,
+  type RefusedGateState,
+} from "@/lib/gates/featureGates";
 import {
   cancelAnalysisRun,
   getActiveAnalysis,
@@ -76,7 +85,15 @@ interface BootstrapState {
   positions: ScatterPosition[];
   history: AnalysisRunRow[];
   error: string | null;
-  notEnabled: boolean;
+  /**
+   * #1644: the refusal that blocks the whole panel, when the server named
+   * one (role / plan / allowlist). Replaces `notEnabled: boolean`, which
+   * mapped every 403 to the allowlist copy — so a non-owner and a plan-gated
+   * owner were both told the feature was "not yet enabled".
+   */
+  gate: FeatureGateFacts | null;
+  /** A 403 with no gate the panel recognises: today's allowlist copy, verbatim. */
+  bare403: boolean;
   loading: boolean;
 }
 
@@ -86,15 +103,41 @@ const EMPTY_BOOTSTRAP: BootstrapState = {
   positions: [],
   history: [],
   error: null,
-  notEnabled: false,
+  gate: null,
+  bare403: false,
   loading: true,
 };
+
+/** The refusals that replace the panel. Both analysis gates raise only these at 403. */
+const PANEL_GATE_STATES: readonly RefusedGateState[] = [
+  "role",
+  "plan",
+  "allowlist",
+];
+
+type PanelRefusal = Pick<BootstrapState, "gate" | "bare403">;
+
+/**
+ * Classify a bootstrap failure that should replace the panel with an empty
+ * state. The normalised gate wins; a 403 without one falls back to the old
+ * allowlist branch. Anything else (a 404, a 5xx, a rate-limit 429) is not a
+ * panel refusal and keeps its own path.
+ */
+function panelRefusal(err: unknown): PanelRefusal | null {
+  if (!(err instanceof ApiError)) return null;
+  if (err.gate && PANEL_GATE_STATES.includes(err.gate.state)) {
+    return { gate: err.gate, bare403: false };
+  }
+  if (err.status === 403) return { gate: null, bare403: true };
+  return null;
+}
 
 export function AnalysesTabPanel({
   contextId,
   contextName,
 }: AnalysesTabPanelProps) {
   const t = useTranslations("analyses");
+  const locale = useLocale();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -152,8 +195,8 @@ export function AnalysesTabPanel({
   );
 
   // Bootstrap: active + clusters + positions + history. Errors fall
-  // into the friendly empty-state path on 403 (allowlist) or
-  // "no run yet" path on 404 from /active.
+  // into the refusal empty states on a role / plan / allowlist gate or a
+  // bare 403, or the "no run yet" path on 404 from /active.
   const bootstrap = useCallback(async () => {
     setState((prev) => ({ ...prev, loading: true, error: null }));
 
@@ -164,16 +207,16 @@ export function AnalysesTabPanel({
 
     // History is independent of active-run resolution — fetch in
     // parallel so the user sees past runs even when the active call
-    // 404s. ``.catch`` swallows non-403 errors directly (no rethrow)
-    // so the early-return notEnabled path doesn't abandon a rejected
-    // promise. 403 is treated as the allowlist signal AND triggers
-    // the same notEnabled state below.
-    let historyAllowlistDenied = false;
+    // 404s. ``.catch`` swallows every error directly (no rethrow) so
+    // the early-return refusal path doesn't abandon a rejected promise.
+    // A refusal here (gate or bare 403) is remembered and triggers the
+    // same empty state below. (A holder object, not a `let`: TypeScript
+    // does not see the assignment inside the callback and would narrow a
+    // `let` to its `null` initialiser.)
+    const historyOutcome: { refusal: PanelRefusal | null } = { refusal: null };
     const historyPromise = listAnalysisRuns(contextId, { limit: 12 }).catch(
       (err) => {
-        if (err instanceof ApiError && err.status === 403) {
-          historyAllowlistDenied = true;
-        }
+        historyOutcome.refusal = panelRefusal(err);
         return { items: [], next_cursor: null };
       },
     );
@@ -182,16 +225,19 @@ export function AnalysesTabPanel({
       try {
         activeRun = await getActiveAnalysis(contextId);
       } catch (err) {
+        const refusal = panelRefusal(err);
         if (err instanceof ApiError && err.status === 404) {
           activeRun = null;
-        } else if (err instanceof ApiError && err.status === 403) {
-          // Even on early notEnabled return, drain the in-flight
-          // history promise so we don't abandon a rejected promise
-          // and surface an unhandled-rejection warning.
+        } else if (refusal) {
+          // Even on early refusal return, drain the in-flight history
+          // promise so we don't abandon a rejected promise and surface
+          // an unhandled-rejection warning. The active call's refusal
+          // wins: both calls run the same read gate, so they cannot
+          // disagree — the history refusal below is defensive only.
           await historyPromise;
           setState({
             ...EMPTY_BOOTSTRAP,
-            notEnabled: true,
+            ...refusal,
             loading: false,
           });
           return;
@@ -221,14 +267,13 @@ export function AnalysesTabPanel({
       // (clusters / positions).
       const inFlight = history.find((r) => r.status === "running") ?? null;
       setActiveRunId(inFlight?.run_id ?? activeRun?.run_id ?? null);
-      if (historyAllowlistDenied && !activeRun) {
-        // Allowlist denied AND no active run — render the friendly
-        // notEnabled empty state. (When activeRun exists from a cached
-        // succeeded run, the panel still shows the run; the history
-        // list is just empty.)
+      if (historyOutcome.refusal && !activeRun) {
+        // History refused AND no active run — render the refusal empty
+        // state. (When activeRun exists from a cached succeeded run, the
+        // panel still shows the run; the history list is just empty.)
         setState({
           ...EMPTY_BOOTSTRAP,
-          notEnabled: true,
+          ...historyOutcome.refusal,
           loading: false,
         });
         return;
@@ -240,14 +285,16 @@ export function AnalysesTabPanel({
         positions,
         history,
         error: null,
-        notEnabled: false,
+        gate: null,
+        bare403: false,
         loading: false,
       });
     } catch (err) {
-      if (err instanceof ApiError && err.status === 403) {
+      const refusal = panelRefusal(err);
+      if (refusal) {
         setState({
           ...EMPTY_BOOTSTRAP,
-          notEnabled: true,
+          ...refusal,
           loading: false,
         });
         return;
@@ -426,7 +473,42 @@ export function AnalysesTabPanel({
     );
   }
 
-  if (state.notEnabled) {
+  // #1644 (C-9 branch order): the descriptor first, then a bare 403.
+  // No branch offers an upgrade here; the gate notice that can is #1646's.
+  if (state.gate) {
+    const gate = gateFromFacts(state.gate, {
+      fallbackKey: "memory_analysis",
+      canUpgrade: false,
+      locale,
+    });
+    if (gate?.state === "role") {
+      return (
+        <EmptyState
+          icon={Lock}
+          title={t("states.ownerOnly.title")}
+          description={t("states.ownerOnly.description")}
+        />
+      );
+    }
+    // A plan refusal that names no tier falls through to the flat copy
+    // below: it is what an older server's allowlist refusal looks like
+    // (FEAT-001 with no `gate`), and "requires the  plan" is not a sentence.
+    if (gate?.state === "plan" && gate.planLabel) {
+      return (
+        <EmptyState
+          icon={Lock}
+          title={t("states.planRequired.title", { plan: gate.planLabel })}
+          description={t("states.planRequired.description", {
+            plan: gate.planLabel,
+          })}
+        />
+      );
+    }
+  }
+
+  if (state.gate || state.bare403) {
+    // Allowlist (and the fallbacks above): plan-neutral, CTA-free, and
+    // silent about the allowlist itself.
     return (
       <EmptyState
         icon={Lock}

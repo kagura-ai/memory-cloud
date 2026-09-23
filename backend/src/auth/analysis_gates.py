@@ -59,6 +59,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # need the membership check (PR #538 / #497 review).
 from auth.analysis_allowlist import check_workspace_in_allowlist  # noqa: F401
 from auth.dependencies import get_user_from_api_key_or_session
+from config.plan_tiers import (
+    feature_gate_details,
+    lowest_tier_with_limit,
+    quota_gate_details,
+)
 from db.base import get_db
 from models.auth import User
 from services.analysis.query_service import day_window_utc
@@ -204,12 +209,25 @@ async def check_memory_analysis_quota(
                 f"Analysis daily quota exceeded: {used_today}/{limit_today} runs today "
                 f"(addon bonus {addon_bonus}). Resets at {resets_at}."
             ),
-            quota_type="memory_analysis",
+            **quota_gate_details(
+                workspace_row.plan_name,
+                "memory_analysis",
+                current=used_today,
+                limit=limit_today,
+                # The effective limit already includes the addon bonus, so the
+                # upgrade offered is the first tier that beats what this
+                # workspace can already run — ``None`` when none does.
+                required_plan=lowest_tier_with_limit("analysis_runs_per_day", limit_today),
+                feature="memory_analysis",
+                resets_at=resets_at,
+            ),
+            # #1644: the canonical ``current`` / ``limit`` above are ADDED
+            # beside these; the legacy names an older client reads are kept
+            # verbatim, none renamed and none removed.
             used_today=used_today,
             limit_today=limit_today,
             addon_bonus=addon_bonus,
             remaining_today=0,
-            resets_at=resets_at,
         )
 
 
@@ -269,8 +287,12 @@ async def require_memory_analysis_access(
     quota = QuotaService(db)
     has_feature, err = await quota.check_feature_access(workspace_id, "memory_analysis")
     if not has_feature:
+        # #1644: the tier that lifts the refusal ships as a KEY beside the
+        # prose. ``current_plan`` is null — this gate never loads the
+        # workspace row, and the wire contract allows the field to be absent.
         raise FeatureNotAvailableError(
-            err or "memory_analysis not available", feature="memory_analysis"
+            err or "memory_analysis not available",
+            **feature_gate_details(None, "memory_analysis"),
         )
 
     # Gate 4: daily quota — read-only, raises 429
@@ -283,9 +305,13 @@ async def require_memory_analysis_access(
 
     # Gate 5: allowlist kill switch
     if not check_workspace_in_allowlist(workspace_id):
-        raise FeatureNotAvailableError(
+        # #1644 S10: the rollout kill switch is NOT a plan refusal. Raised
+        # bare it was wire-identical to one, which is why the analyses panel
+        # showed a plan refusal as "not yet enabled ... reach out".
+        # ``gate: "allowlist"`` is plan-neutral and carries no upgrade path.
+        raise FeatureNotAvailableError.for_rollout(
             "Memory analysis is not yet enabled for this workspace.",
-            feature="memory_analysis",
+            "memory_analysis",
         )
 
     logger.info(
@@ -333,9 +359,13 @@ async def require_memory_analysis_read(
         raise
 
     if not check_workspace_in_allowlist(workspace_id):
-        raise FeatureNotAvailableError(
+        # #1644 S10: the rollout kill switch is NOT a plan refusal. Raised
+        # bare it was wire-identical to one, which is why the analyses panel
+        # showed a plan refusal as "not yet enabled ... reach out".
+        # ``gate: "allowlist"`` is plan-neutral and carries no upgrade path.
+        raise FeatureNotAvailableError.for_rollout(
             "Memory analysis is not yet enabled for this workspace.",
-            feature="memory_analysis",
+            "memory_analysis",
         )
 
     user_timezone = await _get_user_timezone(db, user_id)
@@ -382,8 +412,12 @@ async def check_memory_analysis_access_mcp(
         quota = QuotaService(db)
         has_feature, err = await quota.check_feature_access(workspace_id, "memory_analysis")
         if not has_feature:
+            # #1644: the tier that lifts the refusal ships as a KEY beside the
+            # prose. ``current_plan`` is null — this gate never loads the
+            # workspace row, and the wire contract allows the field to be absent.
             raise FeatureNotAvailableError(
-                err or "memory_analysis not available", feature="memory_analysis"
+                err or "memory_analysis not available",
+                **feature_gate_details(None, "memory_analysis"),
             )
 
         user_timezone = await _get_user_timezone(db, user_id)
@@ -396,9 +430,13 @@ async def check_memory_analysis_access_mcp(
         user_timezone = await _get_user_timezone(db, user_id)
 
     if not check_workspace_in_allowlist(workspace_id):
-        raise FeatureNotAvailableError(
+        # #1644 S10: the rollout kill switch is NOT a plan refusal. Raised
+        # bare it was wire-identical to one, which is why the analyses panel
+        # showed a plan refusal as "not yet enabled ... reach out".
+        # ``gate: "allowlist"`` is plan-neutral and carries no upgrade path.
+        raise FeatureNotAvailableError.for_rollout(
             "Memory analysis is not yet enabled for this workspace.",
-            feature="memory_analysis",
+            "memory_analysis",
         )
 
     return user_timezone

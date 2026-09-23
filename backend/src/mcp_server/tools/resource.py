@@ -22,6 +22,7 @@ from mcp.types import TextContent
 import services.resource_ingest_service as resource_ingest_service
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
+    _context_cap_error_response,
     _error_response,
     _get_workspace_member_role,
     _log_tool_usage,
@@ -32,7 +33,12 @@ from services.resource_quota_service import (
     check_event_quota,
     resolve_workspace_event_quota_per_hour,
 )
-from utils.exceptions import FeatureNotAvailableError, MemoryCloudException, RateLimitError
+from utils.exceptions import (
+    FeatureNotAvailableError,
+    MemoryCloudException,
+    QuotaExceededError,
+    RateLimitError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -696,6 +702,34 @@ class _SetupPreflight(NamedTuple):
     embedding_dimensions: int
 
 
+def _token_cap_error_response(plan_name: str, plan: Any, active_count: int) -> list[TextContent]:
+    """The ``setup_resource`` token-cap envelope (#1644).
+
+    The envelope it always sent (``quota_exceeded``, the message, ``help``)
+    plus the details block the REST ``QUOTA-001`` for the same cap carries
+    (``api/routes/resource_tokens.py``), built by the same registry helper
+    with the same upgrade tier, ``None`` values dropped as on every other MCP
+    quota envelope.
+    """
+    from config.plan_tiers import lowest_tier_with_limit, quota_gate_details
+
+    details = quota_gate_details(
+        plan_name,
+        "resource_tokens",
+        current=active_count,
+        limit=plan.max_resource_tokens,
+        required_plan=lowest_tier_with_limit("max_resource_tokens", plan.max_resource_tokens),
+        feature="resources",
+    )
+    return _error_response(
+        "quota_exceeded",
+        f"Token limit reached. Your {plan_name.upper()} plan allows "
+        f"{plan.max_resource_tokens} active tokens.",
+        help="Revoke unused tokens or upgrade your plan.",
+        **{k: v for k, v in details.items() if v is not None},
+    )
+
+
 async def _setup_resource_preflight(
     db: Any, user_id: str, workspace_id: Any, name: str, resource_id: str
 ) -> tuple[list[TextContent] | None, _SetupPreflight | None]:
@@ -715,9 +749,9 @@ async def _setup_resource_preflight(
     from config.constants import EMBEDDING_MODEL_REGISTRY
     from config.plan_tiers import (
         feature_denied_message,
+        feature_gate_details,
         get_plan_tier,
         has_feature,
-        required_plan_name,
     )
     from config.settings import get_settings
     from models.auth import Context, Workspace
@@ -781,18 +815,27 @@ async def _setup_resource_preflight(
     # positive caps so their existing tokens stay served. The token-count
     # check further down remains the second gate. ``required_plan`` is ``None``
     # when an env override (#1559) dropped the feature from every tier.
+    # #1644: the whole REST ``FEAT-001`` gate block, from the same builder —
+    # ``required_plan`` keeps its key and value (the builder derives it
+    # through ``required_plan_name`` as this call used to).
     if not has_feature(plan_name, "resources"):
         return (
             _error_response(
                 "plan_required",
                 feature_denied_message(plan_name, "resources"),
-                required_plan=required_plan_name("resources"),
+                **feature_gate_details(plan_name, "resources"),
             ),
             None,
         )
 
-    # 5. Check context creation quota
-    can_create, error_msg = await QuotaService(db).check_context_creation_allowed(workspace_id)
+    # 5. Check context creation quota. #1644: the raising form, so the cap
+    # carries the REST 429's details block (see ``_context_cap_error_response``).
+    try:
+        can_create, error_msg = await QuotaService(db).check_context_creation_allowed(
+            workspace_id, raise_on_denied=True
+        )
+    except QuotaExceededError as quota_exc:
+        return _context_cap_error_response(quota_exc), None
     if not can_create:
         return (
             _error_response(
@@ -953,12 +996,7 @@ async def handle_setup_resource(
                     403,
                     workspace_id=workspace_id,
                 )
-                return _error_response(
-                    "quota_exceeded",
-                    f"Token limit reached. Your {plan_name.upper()} plan allows "
-                    f"{plan.max_resource_tokens} active tokens.",
-                    help="Revoke unused tokens or upgrade your plan.",
-                )
+                return _token_cap_error_response(plan_name, plan, active_count)
 
             # 11. Validate and create resource token
             quota_error, quota_events_per_hour = _resolve_event_quota(args)
@@ -1194,15 +1232,14 @@ async def handle_setup_connector(
             # (code + ``required_plan``), so MCP clients see one vocabulary for
             # "upgrade to create this".
             if isinstance(exc, FeatureNotAvailableError):
-                # Non-raising: a raise inside this handler would escape the
-                # tool entirely when an env override (#1559) dropped the
-                # feature from every tier.
-                from config.plan_tiers import required_plan_name
-
+                # #1644: ``required_plan`` (and its display label) now ride on
+                # ``exc.details``, built by the registry at the raise site, so
+                # re-deriving it here would be a duplicate keyword. Still
+                # non-raising: an env override (#1559) that dropped the
+                # feature from every tier yields ``None``, not an exception.
                 return _error_response(
                     "plan_required",
                     exc.message,
-                    required_plan=required_plan_name("connectors"),
                     **exc.details,
                 )
             return _error_response(

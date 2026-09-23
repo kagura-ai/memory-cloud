@@ -61,10 +61,14 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { CONTEXT_TEMPLATES, getTemplate } from "@/lib/templates/usage-guide";
 import { planLabelFromEnv, type PlanTier } from "@/lib/utils/planLabel";
 import { usePlanFeature } from "@/hooks/usePlanFeatures";
+import { gateFromFacts, isGateKey } from "@/lib/gates/featureGates";
 
 // #1583: plan features this form can refuse on, with the notice that names the
 // control and the tier it asks for — shown on the card and, when a save comes
-// back FEAT-001, in the toast instead of the raw feature key.
+// back as a plan refusal, in the toast instead of the raw feature key.
+// #1644: `plan` is read by the pre-check card only. The refusal path takes the
+// tier from the refusal itself (`err.gate`), so a deployment that moved the
+// feature to another tier is named correctly there.
 const FEATURE_NOTICES: Record<
   string,
   { key: "sharedRequiresPlan" | "publicRequiresPlan"; plan: PlanTier }
@@ -252,16 +256,24 @@ export function SettingsTabPanel({
       let description =
         err instanceof Error ? err.message : t("saveFailedDesc");
       if (err instanceof ApiError) {
-        // #1583: a FEAT-001 refusal names the control ("Sharing requires
-        // the L plan"), not the feature key; unknown features keep the
-        // server text.
-        const feature = err.details?.feature;
-        const notice =
-          typeof feature === "string" ? FEATURE_NOTICES[feature] : undefined;
-        if (notice) {
-          description = t(notice.key, {
-            plan: planLabelFromEnv(notice.plan, locale),
+        // #1583: a plan refusal names the control ("Sharing requires the L
+        // plan"), not the feature key; unknown features keep the server
+        // text. #1644: the tier is the one the refusal names, resolved to
+        // this deployment's label — a refusal that names none (no tier has
+        // the feature, or a server predating #1644) keeps the server text.
+        const facts = err.gate;
+        const feature = facts?.state === "plan" ? facts.feature : undefined;
+        const notice = feature ? FEATURE_NOTICES[feature] : undefined;
+        if (notice && isGateKey(feature)) {
+          // A toast carries no CTA, so the raw upgrade answer is moot here.
+          const gate = gateFromFacts(facts, {
+            fallbackKey: feature,
+            canUpgrade: false,
+            locale,
           });
+          if (gate?.planLabel) {
+            description = t(notice.key, { plan: gate.planLabel });
+          }
         }
         // 422s carry {loc,msg,type}[] here (aliased from details.errors at
         // the transport layer); the declared string type covers legacy shapes.
