@@ -19,6 +19,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetConsumedSearchParams } from "@/hooks/useConsumeSearchParams";
 
 import ConnectorsPage from "./page";
+import { ApiError } from "@/lib/api/base";
+import { normalizeGate } from "@/lib/gates/featureGates";
 
 const mockListConnectors = vi.fn();
 const mockListAvailableWorkerApps = vi.fn();
@@ -67,10 +69,16 @@ vi.mock("next/navigation", () => ({
   }),
 }));
 
-vi.mock("next-intl", () => ({
-  useTranslations: () => (key: string) => key,
-  useLocale: () => "en",
-}));
+// Keys pass through as text. The two #1644 refusal keys also echo their ICU
+// params so the gate's values are assertable; every other key stays bare.
+vi.mock("next-intl", () => {
+  const echo = new Set(["connectorPlanRequired", "connectorSeatsFull"]);
+  return {
+    useTranslations: () => (key: string, params?: Record<string, unknown>) =>
+      params && echo.has(key) ? `${key} ${JSON.stringify(params)}` : key,
+    useLocale: () => "en",
+  };
+});
 
 const mockUseWorkspace = vi.fn();
 vi.mock("@/contexts/WorkspaceContext", () => ({
@@ -1590,6 +1598,93 @@ describe("ConnectorsPage RBAC gate", () => {
     ).toBeInTheDocument();
     // The dialog stays open on failure.
     expect(screen.getByText("createTitle")).toBeInTheDocument();
+  });
+
+  // #1644 C7: the plan and seat-cap refusals are read from err.gate.
+  function gateRefusal(
+    status: number,
+    error: string,
+    message: string,
+    details: Record<string, unknown>,
+  ): ApiError {
+    return new ApiError({
+      error,
+      message,
+      status,
+      details,
+      gate: normalizeGate(status, error, details),
+    });
+  }
+
+  async function submitCreate() {
+    setWorkspace("admin");
+    armInstall();
+    mockGetContexts.mockResolvedValue({
+      contexts: [{ id: "ctx-1", name: "existing", display_name: "Existing" }],
+      total: 1,
+    });
+    render(<ConnectorsPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "createConnector" }),
+    );
+  }
+
+  it("renders the connector seat cap from err.gate (#1644)", async () => {
+    const serverText =
+      "Connector seat limit reached. Your plan allows 3 connector(s).";
+    mockCreateConnector.mockRejectedValue(
+      gateRefusal(403, "CONNECTOR-001", serverText, {
+        gate: "quota",
+        quota_type: "connectors",
+        current: 3,
+        limit: 3,
+        required_plan: null,
+        required_plan_display: null,
+        current_plan: "promax",
+        feature: "connectors",
+        max_connectors: 3,
+        active_connectors: 3,
+      }),
+    );
+    await submitCreate();
+
+    expect(
+      await screen.findByText('connectorSeatsFull {"current":3,"limit":3}'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(serverText)).toBeNull();
+  });
+
+  it("renders the seat cap from a server predating #1644 the same way (#1644)", async () => {
+    mockCreateConnector.mockRejectedValue(
+      gateRefusal(
+        403,
+        "CONNECTOR-001",
+        "Connector seat limit reached. Your plan allows 3 connector(s).",
+        { max_connectors: 3, active_connectors: 3 },
+      ),
+    );
+    await submitCreate();
+
+    expect(
+      await screen.findByText('connectorSeatsFull {"current":3,"limit":3}'),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the plan refusal with the required tier's label (#1644)", async () => {
+    mockCreateConnector.mockRejectedValue(
+      gateRefusal(403, "FEAT-001", "Feature 'connectors' not available.", {
+        gate: "plan",
+        feature: "connectors",
+        required_plan: "promax",
+        required_plan_display: "XL",
+        current_plan: "basic",
+      }),
+    );
+    await submitCreate();
+
+    expect(
+      await screen.findByText('connectorPlanRequired {"plan":"XL"}'),
+    ).toBeInTheDocument();
   });
   // ── #1471: memory_link_template is now writable from the UI ──────────
 

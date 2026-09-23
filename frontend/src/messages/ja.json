@@ -4077,6 +4077,8 @@
       "description": "既存のコネクタは引き続き取り込みを行います。新しいチャットプラットフォームの接続は {plan} プランで利用できます。",
       "action": "{plan} にアップグレード"
     },
+    "connectorPlanRequired": "新しいチャットプラットフォームの接続には {plan} プランが必要です。",
+    "connectorSeatsFull": "コネクタ上限に達しました（{limit} 件中 {current} 件を使用中）。",
     "contextBound": "コンテキスト {id} に書き込み",
     "contextNotReady": "セットアップ未完了 — 書き込み先コンテキストなし",
     "appIdentity": "アプリ ID: {appKey}",

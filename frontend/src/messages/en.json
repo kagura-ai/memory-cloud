@@ -4077,6 +4077,8 @@
       "description": "Existing connectors keep ingesting. Connecting a new chat platform is available on the {plan} plan.",
       "action": "Upgrade to {plan}"
     },
+    "connectorPlanRequired": "Connecting a new chat platform requires the {plan} plan.",
+    "connectorSeatsFull": "Connector limit reached: {current} of {limit} connectors are in use.",
     "contextBound": "Writes to context {id}",
     "contextNotReady": "Setup incomplete — no write-target context",
     "appIdentity": "App identity: {appKey}",
