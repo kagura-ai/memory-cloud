@@ -88,6 +88,7 @@ import {
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
+import { useErrorGate } from "@/hooks/useErrorGate";
 import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { ApiError } from "@/lib/api/base";
@@ -136,6 +137,33 @@ function contextLimitArgs(
   });
   if (!gate?.currentPlanLabel || gate.limit === undefined) return null;
   return { plan: gate.currentPlanLabel, limit: gate.limit };
+}
+
+/**
+ * #1646 (Q2): a create dialog's error line. A QUOTA refusal (`err.gate` is a
+ * quota) renders as the gate notice — the same copy, and the same Plan-page
+ * rule, as the page's own cap notice — instead of a sentence; every other
+ * error keeps the string the handler built (`message`). A refusal from a
+ * server that sent no gate details has no `err.gate`, so it stays a string.
+ */
+function CreateErrorNotice({
+  message,
+  refusal,
+}: {
+  message: string | null;
+  refusal: unknown;
+}) {
+  const gate = useErrorGate(refusal, "contexts");
+  if (gate?.state === "quota") {
+    return <FeatureGateNotice gate={gate} className="mb-0" />;
+  }
+  if (!message) return null;
+  return (
+    <Alert variant="destructive">
+      <AlertCircle className="h-4 w-4" />
+      <AlertDescription>{message}</AlertDescription>
+    </Alert>
+  );
 }
 
 export default function ContextsPage() {
@@ -196,12 +224,16 @@ export default function ContextsPage() {
   const [isPrivate, setIsPrivate] = useState(true); // Issue #165: Privacy control
   const [newEmbeddingModel, setNewEmbeddingModel] = useState<string>(""); // Issue #49: empty = default
   const [createError, setCreateError] = useState<string | null>(null);
+  // #1646 (Q2): the refusal behind `createError`, so a quota refusal renders
+  // as the gate notice (CreateErrorNotice). Cleared with every new attempt.
+  const [createRefusal, setCreateRefusal] = useState<unknown>(null);
   const [creating, setCreating] = useState(false);
 
   // Quick Create dialog state (Issue #169)
   const [quickCreateDialogOpen, setQuickCreateDialogOpen] = useState(false);
   const [quickCreateName, setQuickCreateName] = useState("");
   const [quickCreateError, setQuickCreateError] = useState<string | null>(null);
+  const [quickCreateRefusal, setQuickCreateRefusal] = useState<unknown>(null);
   const [quickCreating, setQuickCreating] = useState(false);
 
   // Embedding models (Issue #49)
@@ -380,6 +412,7 @@ export default function ContextsPage() {
 
   // Issue #169: Quick Create - minimal form, just name
   const handleQuickCreate = async () => {
+    setQuickCreateRefusal(null);
     if (!quickCreateName.trim()) {
       setQuickCreateError(t("nameRequired"));
       return;
@@ -425,6 +458,7 @@ export default function ContextsPage() {
       }
 
       setQuickCreateError(errorMessage);
+      setQuickCreateRefusal(err);
     } finally {
       setQuickCreating(false);
     }
@@ -432,6 +466,7 @@ export default function ContextsPage() {
 
   // Advanced Create - full form with all options
   const handleCreateContext = async () => {
+    setCreateRefusal(null);
     if (!newContextName.trim()) {
       setCreateError(t("nameRequired"));
       return;
@@ -464,6 +499,7 @@ export default function ContextsPage() {
       setIsPrivate(true);
       fetchContexts();
     } catch (err: unknown) {
+      setCreateRefusal(err);
       let errorMessage =
         err instanceof Error ? err.message : t("failedToCreate");
 
@@ -878,12 +914,7 @@ export default function ContextsPage() {
               />
             </div>
 
-            {createError && (
-              <Alert variant="destructive">
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{createError}</AlertDescription>
-              </Alert>
-            )}
+            <CreateErrorNotice message={createError} refusal={createRefusal} />
           </div>
           <DialogFooter>
             <Button
@@ -1289,12 +1320,10 @@ export default function ContextsPage() {
               />
             </div>
 
-            {quickCreateError && (
-              <Alert variant="destructive">
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{quickCreateError}</AlertDescription>
-              </Alert>
-            )}
+            <CreateErrorNotice
+              message={quickCreateError}
+              refusal={quickCreateRefusal}
+            />
           </div>
           <DialogFooter>
             <Button
@@ -1303,6 +1332,7 @@ export default function ContextsPage() {
                 setQuickCreateDialogOpen(false);
                 setQuickCreateName("");
                 setQuickCreateError(null);
+                setQuickCreateRefusal(null);
               }}
             >
               {tCommon("cancel")}

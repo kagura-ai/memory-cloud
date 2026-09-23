@@ -17,6 +17,7 @@ import {
   waitFor,
   cleanup,
   fireEvent,
+  within,
 } from "@testing-library/react";
 
 import ContextsPage from "./page";
@@ -869,6 +870,19 @@ describe("ContextsPage create errors read the context cap from err.gate (#1644)"
     });
   }
 
+  /**
+   * #1646 (Q2): a quota refusal renders as the gate notice inside the dialog,
+   * not as a sentence. Under this file's key-echo mock its lines are the
+   * `gate.quota.*` keys followed by their arguments.
+   */
+  async function findRefusalNotice(): Promise<HTMLElement> {
+    const dialog = await screen.findByRole("dialog");
+    const title = await within(dialog).findByText(/^quota\.title /);
+    const notice = title.closest('[role="alert"]');
+    if (!(notice instanceof HTMLElement)) throw new Error("no refusal notice");
+    return notice;
+  }
+
   it("localizes the cap with the CURRENT tier's label and the limit from err.gate", async () => {
     vi.mocked(createContext).mockRejectedValueOnce(
       capRefusal(CURRENT_SERVER_BODY),
@@ -877,10 +891,13 @@ describe("ContextsPage create errors read the context cap from err.gate (#1644)"
 
     // `free` resolves to this deployment's label (S by default); the prose's
     // own "Your S plan" is never parsed.
-    expect(
-      await screen.findByText('contextLimitReached {"plan":"S","limit":1}'),
-    ).toBeInTheDocument();
+    const notice = await findRefusalNotice();
+    expect(notice).toHaveTextContent(/"currentPlan":"S"/);
+    expect(notice).toHaveTextContent(/"limit":1/);
+    expect(notice).toHaveTextContent(/"feature":"features\.contexts\./);
     expect(screen.queryByText(SERVER_MESSAGE)).toBeNull();
+    // The gate notice is the one rendering; the sentence is not shown too.
+    expect(screen.queryByText(/contextLimitReached/)).toBeNull();
   });
 
   it("labels an operator-defined current tier by the matrix's display name (#1645)", async () => {
@@ -901,9 +918,9 @@ describe("ContextsPage create errors read the context cap from err.gate (#1644)"
     );
     await submitAdvancedCreate();
 
-    expect(
-      await screen.findByText('contextLimitReached {"plan":"Team","limit":5}'),
-    ).toBeInTheDocument();
+    const notice = await findRefusalNotice();
+    expect(notice).toHaveTextContent(/"currentPlan":"Team"/);
+    expect(notice).toHaveTextContent(/"limit":5/);
   });
 
   it("does not parse the server prose: a refusal without gate details shows the server text", async () => {
@@ -915,6 +932,7 @@ describe("ContextsPage create errors read the context cap from err.gate (#1644)"
 
     expect(await screen.findByText(SERVER_MESSAGE)).toBeInTheDocument();
     expect(screen.queryByText(/contextLimitReached/)).toBeNull();
+    expect(screen.queryByText(/^quota\.title/)).toBeNull();
   });
 
   it("does not render another quota as the context cap", async () => {
@@ -928,9 +946,12 @@ describe("ContextsPage create errors read the context cap from err.gate (#1644)"
     );
     await submitAdvancedCreate();
 
-    expect(
-      await screen.findByText("REST API daily quota exceeded"),
-    ).toBeInTheDocument();
+    // #1646: a quota refusal is the gate notice for ITS OWN quota — the API
+    // calls limit, with no counts to state — never the context cap.
+    const notice = await findRefusalNotice();
+    expect(notice).toHaveTextContent(/"feature":"features\.api_calls\./);
+    expect(notice).not.toHaveTextContent(/features\.contexts/);
+    expect(notice).toHaveTextContent(/quota\.descriptionNoNumbers/);
     expect(screen.queryByText(/contextLimitReached/)).toBeNull();
   });
 
@@ -953,7 +974,149 @@ describe("ContextsPage create errors read the context cap from err.gate (#1644)"
     );
     await submitAdvancedCreate();
 
-    expect(await screen.findByText(serverText)).toBeInTheDocument();
+    const notice = await findRefusalNotice();
+    expect(notice).toHaveTextContent(/"feature":"features\.memories\./);
+    expect(notice).not.toHaveTextContent(/features\.contexts/);
+    expect(notice).toHaveTextContent(/"limit":100/);
     expect(screen.queryByText(/contextLimitReached/)).toBeNull();
+  });
+});
+
+// ---------- #1646 Q2: the create-error notice --------------------------------
+
+describe("ContextsPage create errors: a quota refusal is the gate notice (#1646)", () => {
+  const CAP_BODY = {
+    gate: "quota",
+    quota_type: "contexts",
+    current: 1,
+    limit: 1,
+    required_plan: "basic",
+    required_plan_display: "M",
+    current_plan: "free",
+  };
+
+  function capRefusal(): ApiError {
+    return new ApiError({
+      error: "QUOTA-001",
+      message: "Context limit reached.",
+      status: 429,
+      details: CAP_BODY,
+      gate: normalizeGate(429, "QUOTA-001", CAP_BODY),
+    });
+  }
+
+  async function submitIn(dialogOpener: "advanced" | "quick") {
+    mockUseAuth.mockReturnValue({
+      user: { current_workspace_id: WORKSPACE_ID },
+      refetchUser: vi.fn(),
+    });
+    mockUseWorkspace.mockReturnValue({
+      currentWorkspace: {
+        id: WORKSPACE_ID,
+        plan_name: "free",
+        current_user_role: "owner",
+      },
+    });
+    mockGetContexts.mockResolvedValue({ contexts: [] });
+    // No embedding → the amber empty state, whose Create opens Quick Create;
+    // otherwise the blue one, whose Create opens the advanced dialog.
+    const canEmbed = dialogOpener === "advanced";
+    mockCheckOpenAIKeyStatus.mockResolvedValue({
+      has_key: canEmbed,
+      embedding_available: canEmbed,
+    });
+    mockGetEmbeddingModels.mockResolvedValue({
+      models: [],
+      default_model: "small",
+    });
+    render(<ContextsPage />);
+    if (!canEmbed) await screen.findByText("setupNeededOpenAI");
+    fireEvent.click(await screen.findByRole("button", { name: /^create$/i }));
+    fireEvent.change(
+      await screen.findByPlaceholderText("contextNamePlaceholder"),
+      { target: { value: "my-context" } },
+    );
+    const dialog = await screen.findByRole("dialog");
+    const submit = within(dialog)
+      .getAllByRole("button")
+      .find((b) => b.textContent === "create");
+    if (!submit) throw new Error("no submit button");
+    await act(async () => {
+      fireEvent.click(submit);
+    });
+    return dialog;
+  }
+
+  it.each(["advanced", "quick"] as const)(
+    "%s dialog: the cap refusal is the gate notice, with the CTA for an owner on plan_page",
+    async (which) => {
+      mockFeatures = { byok: true, plan_page: true };
+      vi.mocked(createContext).mockRejectedValueOnce(capRefusal());
+      const dialog = await submitIn(which);
+
+      const title = await within(dialog).findByText(/^quota\.title /);
+      const notice = title.closest('[role="alert"]') as HTMLElement;
+      // The tier that raises the cap, by its label (basic is M here).
+      expect(notice).toHaveTextContent(/quota\.upsell \{"plan":"M"/);
+      fireEvent.click(
+        within(notice).getByRole("button", { name: /^quota\.action/ }),
+      );
+      expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
+      // The quota refusal is not ALSO rendered as a sentence.
+      expect(within(dialog).queryByText(/contextLimitReached/)).toBeNull();
+      expect(within(dialog).queryByText("Context limit reached.")).toBeNull();
+    },
+  );
+
+  it.each(["advanced", "quick"] as const)(
+    "%s dialog: no CTA where the Plan page is off",
+    async (which) => {
+      vi.mocked(createContext).mockRejectedValueOnce(capRefusal());
+      const dialog = await submitIn(which);
+
+      const title = await within(dialog).findByText(/^quota\.title /);
+      const notice = title.closest('[role="alert"]') as HTMLElement;
+      expect(within(notice).queryByRole("button")).toBeNull();
+      expect(notice).not.toHaveTextContent(/quota\.upsell/);
+    },
+  );
+
+  it.each(["advanced", "quick"] as const)(
+    "%s dialog: a non-gate error keeps the string path",
+    async (which) => {
+      vi.mocked(createContext).mockRejectedValueOnce(
+        new ApiError({
+          error: "CTX-409",
+          message: "Context name already exists",
+          status: 409,
+        }),
+      );
+      const dialog = await submitIn(which);
+
+      expect(await within(dialog).findByText("nameTaken")).toBeInTheDocument();
+      expect(within(dialog).queryByText(/^quota\./)).toBeNull();
+    },
+  );
+
+  it("a retry that fails validation shows the validation error, not the earlier refusal", async () => {
+    vi.mocked(createContext).mockRejectedValueOnce(capRefusal());
+    const dialog = await submitIn("advanced");
+    await within(dialog).findByText(/^quota\.title /);
+
+    fireEvent.change(
+      within(dialog).getByPlaceholderText("contextNamePlaceholder"),
+      {
+        target: { value: "" },
+      },
+    );
+    const submit = within(dialog)
+      .getAllByRole("button")
+      .find((b) => b.textContent === "create");
+    await act(async () => {
+      fireEvent.click(submit!);
+    });
+
+    expect(within(dialog).getByText("nameRequired")).toBeInTheDocument();
+    expect(within(dialog).queryByText(/^quota\.title/)).toBeNull();
   });
 });
