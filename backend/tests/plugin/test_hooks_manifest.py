@@ -434,7 +434,9 @@ def test_setup_skill_ships_as_a_plugin_command() -> None:
         "/mcp/w/<workspace-id>",
         # 4. the OAuth trap, before the change
         "re-run `/mcp`",
-        # 5. verification actually runs the hook
+        # 5. verification through MCP, then the hook itself
+        'get_context_info(context_id="<uuid>")',
+        'load_guardrails(context_id="<uuid>")',
         "kagura_guardrails.py",
         "CLAUDE_PLUGIN_OPTION_SERVER_URL",
         # 6. doctor mode
@@ -462,6 +464,210 @@ def test_setup_skill_redacts_what_claude_mcp_get_echoes() -> None:
     assert "<redacted>" in text
     assert "Never run `claude mcp get` unfiltered" in text
     assert "prints configured headers with their values" in text
+
+
+def _fenced_blocks(text: str) -> list[str]:
+    return re.findall(r"```[a-z]*\n(.*?)```", text, flags=re.DOTALL)
+
+
+def _block_containing(text: str, needle: str) -> str:
+    blocks = [b for b in _fenced_blocks(text) if needle in b]
+    assert len(blocks) == 1, f"expected one code block containing {needle!r}, got {len(blocks)}"
+    return blocks[0]
+
+
+def _setup_core() -> str:
+    """Part A — the harness-neutral core, up to the fenced Claude Code adapter."""
+    text = _setup_skill()
+    return text.split("# Part A — Core (any harness)", 1)[1].split(
+        "<!-- BEGIN claude-code adapter -->"
+    )[0]
+
+
+def test_setup_skill_fences_everything_claude_specific() -> None:
+    """The core must lift into a shared skill for other harnesses unchanged (#1649)."""
+    text = _setup_skill()
+    assert text.count("<!-- BEGIN claude-code adapter -->") == 1
+    assert text.count("<!-- END claude-code adapter -->") == 1
+    assert text.index("<!-- BEGIN claude-code adapter -->") < text.index(
+        "<!-- END claude-code adapter -->"
+    )
+    core = _setup_core()
+    for claude_only in (
+        "claude mcp",
+        "claude plugin",
+        "CLAUDE_PLUGIN_",
+        "kagura_guardrails.py",
+        ".claude.json",
+        "`/plugin`",
+        "$ARGUMENTS",
+    ):
+        assert claude_only not in core, f"{claude_only!r} belongs in the Claude Code adapter"
+
+
+def test_setup_skill_check_mode_triggers_on_natural_language() -> None:
+    mode = _setup_skill().split("## Mode", 1)[1].split("\n## ")[0]
+    assert "--check" in mode
+    for word in ("*check*", "*diagnose*", "*doctor*"):
+        assert word in mode, f"check mode must trigger on the user asking to {word}"
+    assert "create no context" in mode, "check mode must not create a context"
+
+
+def test_setup_skill_verifies_through_mcp_before_the_hook() -> None:
+    """get_context_info + load_guardrails prove the connection in any harness (#1649)."""
+    text = _setup_skill()
+    core = _setup_core()
+    assert 'get_context_info(context_id="<uuid>")' in core
+    assert 'load_guardrails(context_id="<uuid>")' in core
+    assert text.index("### A4. Verify through MCP") < text.index("### B5. Hook check")
+    # Both run orders pass through the MCP check before the hook check.
+    for order in text.split("## Run order", 1)[1].split("## Rules")[0].split("|"):
+        if "B5" in order:
+            assert order.index("A4") < order.index("B5")
+    # The guardrails block's three states are what the report reads.
+    a4 = core.split("### A4.", 1)[1].split("### A5.")[0]
+    for state in ("**absent**", "`null`", "`total_available`", "`tool_triggered_total_available`"):
+        assert state in a4
+    # Works when the hooks' key lives only in the keychain.
+    assert "needs no key in this shell" in a4
+    assert "hook fetch not verified — no API key in this shell" in text
+
+
+def test_setup_skill_offers_create_context_for_an_empty_workspace() -> None:
+    a2 = _setup_core().split("### A2.", 1)[1].split("### A3.")[0]
+    assert "no context" in a2.lower()
+    assert 'create_context(name="<name>")' in a2
+    assert "Never create a context silently" in a2
+    assert "explicit yes" in a2
+    assert "do not offer to create one" in a2, "check mode reports, never creates"
+
+
+def test_setup_skill_hands_login_and_connection_to_the_cli() -> None:
+    """Account creation and the MCP entry are the SDK CLI's job, not the skill's (#1649)."""
+    text = _setup_skill()
+    a1 = _setup_core().split("### A1.", 1)[1].split("### A2.")[0]
+    # Real package names with the minimum version whose CLI has the commands cited.
+    assert 'pip install -U "kagura-memory>=0.31.0"' in a1
+    assert 'uvx --from "kagura-memory>=0.31.0" kagura' in a1
+    assert "npx kagura-memory" in a1 and "0.8.0 or later" in a1
+    assert "kagura auth login --server https://<host>" in a1
+    assert "invite link" in a1, "closed sign-up needs the invite link first"
+    assert "kagura setup claude --profile default" in text
+    # No re-implemented device flow.
+    for reimplemented in ("device_code", "/oauth/", "grant_type"):
+        assert reimplemented not in text
+
+
+def test_setup_skill_recognises_the_stdio_proxy_entry() -> None:
+    """A kagura-mcp entry has no url; its upstream lives in the CLI profile (#1649)."""
+    text = _setup_skill()
+    assert "Command: kagura-mcp" in text
+    assert "kagura auth list --json" in text
+    assert "A CLI-profile entry has no `url` field" in text
+    # ?guardrails=off: the profile cannot carry it, the proxy's --server can.
+    assert "the CLI profile **cannot carry the query**" in text
+    assert '"--server", "https://<host>/mcp?guardrails=off"' in text
+    assert "**never another host**" in text
+    # The credential file is the CLI's; the skill never opens it.
+    assert "Never open or edit `~/.kagura/credentials.json`" in text
+    for secret_printer in ("kagura auth status", "kagura auth token", "kagura doctor"):
+        assert secret_printer in text.split("## Rules", 1)[1].split("\n---\n")[0]
+
+
+def test_setup_skill_mcp_json_reader_handles_the_stdio_form(tmp_path: Path) -> None:
+    """The .mcp.json projection runs on a stdio entry without a url and leaks no value."""
+    block = _block_containing(_setup_skill(), 'd.get("mcpServers")')
+    secret = "sentinel-value-" + "0123456789"
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "kagura-memory": {
+                        "type": "stdio",
+                        "command": "kagura-mcp",
+                        "args": [
+                            "--profile",
+                            "default",
+                            "--server",
+                            "https://<host>/mcp?guardrails=off",
+                        ],
+                        "env": {"SOME_TOKEN": secret},
+                    },
+                    "kagura-bearer": {
+                        "type": "http",
+                        "url": "https://<host>/mcp",
+                        "headers": {"Authorization": "Bearer " + secret},
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = subprocess.run(
+        ["bash", "-c", block], cwd=tmp_path, capture_output=True, text=True, timeout=30, check=True
+    ).stdout
+    assert (
+        "kagura-memory stdio kagura-mcp --profile default --server https://<host>/mcp?guardrails=off"
+        in out
+    )
+    assert "kagura-bearer http https://<host>/mcp bearer" in out
+    assert secret not in out
+
+
+def test_setup_skill_profile_reader_derives_the_mcp_url(tmp_path: Path) -> None:
+    block = _block_containing(_setup_skill(), "kagura auth list --json |")
+    sample = tmp_path / "profiles.json"
+    sample.write_text(
+        json.dumps(
+            [
+                {
+                    "profile": "default",
+                    "default": True,
+                    "user_email": "someone@example.invalid",
+                    "server": "https://<host>",
+                    "refreshable": True,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    script = block.replace("kagura auth list --json", f"cat '{sample}'")
+    out = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=30, check=True
+    ).stdout
+    assert "default default https://<host>/mcp refreshable" in out
+    assert "example.invalid" not in out
+
+
+def test_setup_skill_redaction_covers_headers_and_environment(tmp_path: Path) -> None:
+    """`claude mcp get` echoes header AND env values; the sed must blank both."""
+    line = next(
+        ln
+        for ln in _block_containing(_setup_skill(), "claude mcp get kagura-memory |").splitlines()
+        if ln.startswith("claude mcp get kagura-memory |")
+    )
+    secret = "sentinel-value-" + "0123456789"
+    sample = tmp_path / "get.txt"
+    sample.write_text(
+        "kagura-memory:\n"
+        "  Scope: Project config (shared via .mcp.json)\n"
+        "  Type: stdio\n"
+        "  Command: kagura-mcp\n"
+        "  Args: --profile default\n"
+        "  Headers:\n"
+        f"    Authorization: Bearer {secret}\n"
+        "  Environment:\n"
+        f"    SOME_TOKEN={secret}\n",
+        encoding="utf-8",
+    )
+    script = line.replace("claude mcp get kagura-memory", f"cat '{sample}'", 1)
+    out = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=30, check=True
+    ).stdout
+    assert secret not in out
+    assert "    Authorization: <redacted>" in out
+    assert "    SOME_TOKEN= <redacted>" in out
+    assert "  Command: kagura-mcp" in out and "  Args: --profile default" in out
 
 
 def test_setup_skill_cleans_up_after_verifying() -> None:
