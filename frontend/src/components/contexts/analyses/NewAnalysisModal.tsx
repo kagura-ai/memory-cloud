@@ -47,6 +47,7 @@ import {
 import { InlineSpinner } from "@/components/common/LoadingState";
 import { CheckCircle2 } from "lucide-react";
 import { ApiError } from "@/lib/api/base";
+import type { RefusedGateState } from "@/lib/gates/featureGates";
 import {
   previewAnalysis,
   startAnalysis,
@@ -111,7 +112,10 @@ export function NewAnalysisModal({
   const [preview, setPreview] = useState<AnalysisPreviewResponse | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
-  const [previewErrorCode, setPreviewErrorCode] = useState<string | null>(null);
+  // #1644: which kind of refusal the preview hit, read from the normalised
+  // gate rather than compared as an error code.
+  const [previewGateState, setPreviewGateState] =
+    useState<RefusedGateState | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -133,7 +137,7 @@ export function NewAnalysisModal({
     let cancelled = false;
     setPreviewLoading(true);
     setPreviewError(null);
-    setPreviewErrorCode(null);
+    setPreviewGateState(null);
     const timer = window.setTimeout(async () => {
       try {
         const result = await previewAnalysis(contextId, filters);
@@ -142,23 +146,26 @@ export function NewAnalysisModal({
       } catch (err) {
         if (cancelled) return;
         if (err instanceof ApiError) {
-          setPreviewErrorCode(err.error ?? null);
-          // Use translated message for known error codes; fallback to raw message
-          if (err.error === "QUOTA-001" && err.details) {
-            const d = err.details as Record<string, unknown>;
+          const gate = err.gate;
+          setPreviewGateState(gate?.state ?? null);
+          // #1644: the analysis daily quota has its own copy, fed from the
+          // normalised counts (an older server's used_today / limit_today
+          // are aliased onto them). Any other refusal keeps the server text.
+          if (gate?.state === "quota" && gate.quotaType === "memory_analysis") {
             setPreviewError(
               t("errors.QUOTA-001", {
-                used: String(d.used_today ?? "?"),
-                limit: String(d.limit_today ?? "?"),
-                addon: String(d.addon_bonus ?? 0),
-                resetsAt: String(d.resets_at ?? "?"),
+                used: String(gate.current ?? "?"),
+                limit: String(gate.limit ?? "?"),
+                // Quota-specific extra, not part of the gate descriptor.
+                addon: String(err.details?.addon_bonus ?? 0),
+                resetsAt: String(gate.resetsAt ?? "?"),
               }),
             );
           } else {
             setPreviewError(err.message);
           }
         } else {
-          setPreviewErrorCode(null);
+          setPreviewGateState(null);
           setPreviewError(
             err instanceof Error ? err.message : t("errorPreviewFallback"),
           );
@@ -179,7 +186,7 @@ export function NewAnalysisModal({
       setSubmitting(false);
       setSubmitError(null);
       setPreviewError(null);
-      setPreviewErrorCode(null);
+      setPreviewGateState(null);
     }
   }, [open]);
 
@@ -318,7 +325,7 @@ export function NewAnalysisModal({
           </div>
           {previewError && (
             <p className="mt-2 text-xs text-red-600 dark:text-red-400">
-              {previewErrorCode === "QUOTA-001"
+              {previewGateState === "quota"
                 ? previewError
                 : `${t("errorLoadingPreview")}: ${previewError}`}
             </p>
