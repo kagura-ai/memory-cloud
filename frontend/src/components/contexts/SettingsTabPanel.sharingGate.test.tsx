@@ -583,6 +583,21 @@ describe("SettingsTabPanel — FEAT-001 refusal names the control (#1583)", () =
     });
   });
 
+  it("a feature this client does not know keeps the server text, never the sleep copy", async () => {
+    // Only the server's `sleep_mode` lifts through the sleep_reports
+    // fallback; any other unrecognised feature is not retold as Sleep
+    // Maintenance.
+    refuse("some_future_feature", "promax");
+    renderPanel(makeContext());
+
+    const toast = await saveARename();
+
+    expect(toast.title).toBe("saveFailedTitle");
+    expect(toast.description).toBe(
+      "Feature 'some_future_feature' not available on M plan.",
+    );
+  });
+
   it("an unknown feature falls back to the server text", async () => {
     refuse("connectors", "promax");
     renderPanel(makeContext());

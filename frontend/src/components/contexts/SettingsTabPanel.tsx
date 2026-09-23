@@ -69,6 +69,7 @@ import {
 import {
   gateFromFacts,
   isBlocked,
+  isGateKey,
   type GateKey,
 } from "@/lib/gates/featureGates";
 
@@ -286,12 +287,15 @@ export function SettingsTabPanel({
         // like the card. When neither names a tier the tier-less copy says
         // so — but only once the matrix has answered: before that "no plan
         // includes it" would be a guess, so the server text stays. The
-        // server's `sleep_mode` is not a GateKey; it lifts through the
-        // fallback key. A toast carries no CTA, so the raw upgrade answer is
-        // moot here.
+        // server's `sleep_mode` is not a GateKey; it alone lifts through the
+        // fallback key — any other unknown feature keeps the server text
+        // rather than being retold as Sleep Maintenance. A toast carries no
+        // CTA, so the raw upgrade answer is moot here.
+        const facts = err.gate;
         const gate =
-          err.gate?.state === "plan"
-            ? gateFromFacts(err.gate, {
+          facts?.state === "plan" &&
+          (isGateKey(facts.feature) || facts.feature === "sleep_mode")
+            ? gateFromFacts(facts, {
                 fallbackKey: "sleep_reports",
                 canUpgrade: false,
                 locale,
