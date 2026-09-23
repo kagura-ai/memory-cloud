@@ -5,6 +5,9 @@
  * (and editable / revocable) while the Create button is disabled behind an
  * upsell naming the XL tier; on XL the button is live and the only remaining
  * prerequisite is a context with a resource_id.
+ *
+ * #1643: the upsell's link to the Plan page is withheld wherever that page is
+ * not reachable; the upsell copy itself always renders.
  */
 
 import { render, screen, waitFor } from "@testing-library/react";
@@ -39,6 +42,14 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
 let mockPlanFeature: boolean | null = true;
 vi.mock("@/hooks/usePlanFeatures", () => ({
   usePlanFeature: () => mockPlanFeature,
+}));
+
+// #1643: useCanUpgrade reads /system/info. Without this mock the real hook
+// fires a jsdom fetch, retries three times and leaves a module-level cache
+// that leaks between cases in this file. `null` = still resolving.
+let mockFeatures: Record<string, boolean> | null = { plan_page: true };
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => mockFeatures,
 }));
 
 // #1560: the SERVE caps ("used / max", capacity) come from the owner-only
@@ -101,6 +112,7 @@ beforeEach(() => {
   });
   mockCurrentWorkspace = { plan_name: "promax", current_user_role: "owner" };
   mockPlanFeature = true; // #1560: resources included unless a test says otherwise
+  mockFeatures = { plan_page: true };
 });
 
 const createButton = () => screen.getByRole("button", { name: /createToken/ });
@@ -178,6 +190,44 @@ describe("ResourceTokensTabPanel — XL-only create gate (#1551)", () => {
     expect(createButton()).toBeDisabled();
     expect(screen.queryByText("planGateTitle")).toBeNull();
     expect(screen.queryByText("noResourceIdWarning")).toBeNull();
+  });
+});
+
+describe("ResourceTokensTabPanel — upgrade link gate (#1643)", () => {
+  async function renderGated() {
+    mockCurrentWorkspace = { plan_name: "pro", current_user_role: "owner" };
+    mockPlanFeature = false;
+    mockListResourceTokens.mockResolvedValue({ tokens: [], total: 0 });
+    mockGetContexts.mockResolvedValue({ contexts: [resourceContext] });
+
+    render(<ResourceTokensTabPanel />);
+
+    // The plan-gate copy is the explanation — it renders in every case here.
+    expect(await screen.findByText("planGateTitle")).toBeInTheDocument();
+    expect(screen.getByText("planGateDesc")).toBeInTheDocument();
+  }
+
+  it("owner below XL, plan_page off: the plan-gate copy renders with no upgrade link", async () => {
+    mockFeatures = {};
+    await renderGated();
+
+    expect(screen.queryByRole("link", { name: "upgradePlan" })).toBeNull();
+  });
+
+  it("owner below XL, /system/info pending: no upgrade link", async () => {
+    mockFeatures = null;
+    await renderGated();
+
+    expect(screen.queryByRole("link", { name: "upgradePlan" })).toBeNull();
+  });
+
+  it("owner below XL, plan_page on: the plan-gate copy renders with an upgrade link", async () => {
+    await renderGated();
+
+    expect(screen.getByRole("link", { name: "upgradePlan" })).toHaveAttribute(
+      "href",
+      "/workspace/settings/plan",
+    );
   });
 });
 

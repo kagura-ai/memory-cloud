@@ -228,7 +228,10 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
   );
 
   it("basic with no connectors: empty state offers no Slack install, banner carries the upgrade CTA", async () => {
-    setWorkspace("admin", {}, "basic");
+    // #1643: the upgrade CTA now needs a reachable Plan page — owner role AND
+    // the plan_page deployment flag — so this case states both explicitly.
+    setWorkspace("owner", {}, "basic");
+    mockUseSystemFeatures.mockReturnValue({ plan_page: true });
     mockPlanFeature = false;
 
     render(<ConnectorsPage />);
@@ -242,6 +245,52 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
     expect(
       screen.getByRole("button", { name: "planGate.action" }),
     ).toBeInTheDocument();
+  });
+
+  it("basic + admin: plan-gate banner keeps its copy and drops the upgrade button", async () => {
+    // The Plan page's data call is owner-only, so an admin gets the
+    // explanation without a button that would dead-end (#1643).
+    setWorkspace("admin", {}, "basic");
+    mockUseSystemFeatures.mockReturnValue({ plan_page: true });
+    mockPlanFeature = false;
+
+    render(<ConnectorsPage />);
+
+    // Scoped to the banner: the empty state below renders the same string.
+    const banner = (await screen.findByText("planGate.title")).parentElement!;
+    expect(banner.textContent).toContain("planGate.description");
+    expect(
+      screen.queryByRole("button", { name: "planGate.action" }),
+    ).toBeNull();
+  });
+
+  it("basic + owner, plan_page off: plan-gate banner drops the upgrade button", async () => {
+    setWorkspace("owner", {}, "basic");
+    // beforeEach already defaults to {}; spelled out because it is the point.
+    mockUseSystemFeatures.mockReturnValue({});
+    mockPlanFeature = false;
+
+    render(<ConnectorsPage />);
+
+    // Scoped to the banner: the empty state below renders the same string.
+    const banner = (await screen.findByText("planGate.title")).parentElement!;
+    expect(banner.textContent).toContain("planGate.description");
+    expect(
+      screen.queryByRole("button", { name: "planGate.action" }),
+    ).toBeNull();
+  });
+
+  it("basic + owner, /system/info pending: plan-gate banner drops the upgrade button", async () => {
+    setWorkspace("owner", {}, "basic");
+    mockUseSystemFeatures.mockReturnValue(null);
+    mockPlanFeature = false;
+
+    render(<ConnectorsPage />);
+
+    expect(await screen.findByText("planGate.title")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "planGate.action" }),
+    ).toBeNull();
   });
 
   it("basic + ?slack_install callback: dialog stays closed, upsell shown, no POST, handle stripped", async () => {

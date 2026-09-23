@@ -37,6 +37,7 @@ import { getWorkspacePlan, type WorkspacePlanInfo } from "@/lib/api/workspaces";
 import { ApiError } from "@/lib/api/base";
 import { planLabelFromEnv } from "@/lib/utils/planLabel";
 import { usePlanFeature } from "@/hooks/usePlanFeatures";
+import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { MAX_QUOTA_PER_TOKEN } from "@/config/resource-tokens";
 import { Plus, AlertTriangle, ChevronDown } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
@@ -80,6 +81,11 @@ export function ResourceTokensTabPanel({
   // #1560: the gate is the tier matrix's `resources` boolean (tri-state —
   // `null` while resolving keeps Create disabled without an upsell).
   const canCreateTokens = usePlanFeature("resources");
+  // #1643: the plan-gate copy below always renders; only the link needs a
+  // Plan page this member can actually reach. The `isOwner` guard on that
+  // block is NOT the same rule — it also gates the notice itself and the
+  // sibling resource-id warning, so it stays.
+  const canUpgrade = useCanUpgrade();
   const xlLabel = planLabelFromEnv("promax", locale);
 
   // #1560: the SERVE caps ("used / max", quota capacity) come from
@@ -374,12 +380,14 @@ export function ResourceTokensTabPanel({
                 <p className="text-xs text-purple-700 mt-1 mb-3">
                   {t("planGateDesc", { plan: xlLabel })}
                 </p>
-                <a
-                  href="/workspace/settings/plan"
-                  className="text-xs text-purple-600 hover:text-purple-700 underline font-medium"
-                >
-                  {t("upgradePlan")}
-                </a>
+                {canUpgrade === true && (
+                  <a
+                    href="/workspace/settings/plan"
+                    className="text-xs text-purple-600 hover:text-purple-700 underline font-medium"
+                  >
+                    {t("upgradePlan")}
+                  </a>
+                )}
               </div>
             </div>
           </div>

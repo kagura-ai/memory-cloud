@@ -24,6 +24,7 @@ import {
   TableLoadingState,
 } from "@/components/common/LoadingState";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   listMembers,
@@ -149,6 +150,10 @@ export default function WorkspaceMembersPage() {
 
   // Check if Pro plan or better (team invitations)
   const isProPlan = planAtLeast(currentWorkspace?.plan_name, "pro");
+
+  // #1643: may we point this member at /workspace/settings/plan at all? The
+  // seat-limit copy stays either way; only the upgrade links are withheld.
+  const canUpgrade = useCanUpgrade();
 
   useEffect(() => {
     // Issue #398: skip the four protected fetches for member/viewer — the
@@ -526,13 +531,11 @@ export default function WorkspaceMembersPage() {
   };
 
   const handleInviteClick = () => {
-    // Issue #165 / #1121: team invitations are a Pro feature. Send free
-    // workspaces to the consolidated plan page instead of an inline upgrade
-    // modal (the plan/benefits/upgrade UX now lives in settings > plan).
-    if (!isProPlan) {
-      router.push("/workspace/settings/plan");
-      return;
-    }
+    // #1643: the `!isProPlan` redirect to /workspace/settings/plan that used
+    // to stand here was unreachable — the only caller is the ActionButton
+    // below, whose `disabled` already includes `!isProPlan` and which forwards
+    // `disabled` to a real <button>. The explanation stays: the button keeps
+    // its `proPlanRequired` suffix.
     // Migration 042: Initialize with all shared contexts selected
     const sharedContextIds = contexts
       .filter((c) => !c.is_private)
@@ -1089,12 +1092,22 @@ export default function WorkspaceMembersPage() {
                             : t("seatLimitReached")}
                         </p>
                       </div>
-                      {memberQuota.percentage >= 100 && (
-                        <Link href="/workspace/settings/plan">
-                          <button className="px-3 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700">
+                      {/* #1643: the seat-usage copy above always renders; only
+                          this CTA needs a reachable Plan page. It was a <Link>
+                          wrapping a <button> (an <a> containing a <button>,
+                          invalid interactive nesting) — one <Button asChild>
+                          renders a single anchor with the button styling. */}
+                      {memberQuota.percentage >= 100 && canUpgrade === true && (
+                        <Button
+                          asChild
+                          size="sm"
+                          variant="destructive"
+                          className="text-xs"
+                        >
+                          <Link href="/workspace/settings/plan">
                             {t("upgradeToAddMembers")}
-                          </button>
-                        </Link>
+                          </Link>
+                        </Button>
                       )}
                     </div>
                   </div>
@@ -1114,11 +1127,16 @@ export default function WorkspaceMembersPage() {
                         limit: memberQuota.limit,
                       })}
                     </p>
-                    <Link href="/workspace/settings/plan">
-                      <button className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700">
-                        {t("upgradeToAddMembers")}
-                      </button>
-                    </Link>
+                    {/* #1643: same nesting fix and same guard as the badge
+                        above. With no CTA the panel is explanation-only, which
+                        is the correct shape when there is nowhere to go. */}
+                    {canUpgrade === true && (
+                      <Button asChild variant="destructive">
+                        <Link href="/workspace/settings/plan">
+                          {t("upgradeToAddMembers")}
+                        </Link>
+                      </Button>
+                    )}
                   </div>
                 ) : (
                   <>

@@ -9,6 +9,8 @@
  * - the fetch is held until WorkspaceContext hydrates
  * - errors render via ErrorBanner, not toast
  * - row click navigates to detail page
+ * - #1643: the upsell banner keeps its copy but drops the button when the
+ *   Plan page is not reachable on this deployment
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
@@ -61,6 +63,14 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => ({ currentWorkspace: mockCurrentWorkspace }),
 }));
 
+// #1643: useCanUpgrade reads /system/info. Without this mock the real hook
+// fires a jsdom fetch, retries three times and leaves a module-level cache
+// that leaks between cases in this file. `null` = still resolving.
+let mockFeatures: Record<string, boolean> | null = { plan_page: true };
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => mockFeatures,
+}));
+
 // #1560: the create gate is the tier matrix's `resources` boolean via
 // usePlanFeature (tri-state; `null` = resolving), not a tier-name rank.
 let mockPlanFeature: boolean | null = true;
@@ -97,6 +107,7 @@ beforeEach(() => {
   // #1551: resources are XL-only to create — promax is the "no upsell" tier.
   mockCurrentWorkspace = { plan_name: "promax", current_user_role: "owner" };
   mockPlanFeature = true; // #1560: resources included unless a test says otherwise
+  mockFeatures = { plan_page: true };
 });
 
 afterEach(() => {
@@ -225,6 +236,40 @@ describe("ResourcesListPage", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "planGate.action" }));
     expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
+  });
+
+  it("plan-gate banner keeps its copy and drops the button when plan_page is off", async () => {
+    mockCurrentWorkspace = { plan_name: "free", current_user_role: "owner" };
+    mockPlanFeature = false;
+    mockFeatures = {};
+    mockListResources.mockResolvedValue({ resources: [], total: 0 });
+
+    render(<ResourcesListPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("planGate.title")).toBeInTheDocument();
+    });
+    // The explanation is the point of the banner — it stays.
+    expect(screen.getByText("planGate.description")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "planGate.action" }),
+    ).toBeNull();
+  });
+
+  it("plan-gate banner drops the button while /system/info is pending", async () => {
+    mockCurrentWorkspace = { plan_name: "free", current_user_role: "owner" };
+    mockPlanFeature = false;
+    mockFeatures = null;
+    mockListResources.mockResolvedValue({ resources: [], total: 0 });
+
+    render(<ResourcesListPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("planGate.title")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: "planGate.action" }),
+    ).toBeNull();
   });
 
   it("holds the fetch until WorkspaceContext hydrates", async () => {
