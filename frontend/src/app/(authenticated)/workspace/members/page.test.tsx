@@ -538,6 +538,32 @@ describe("WorkspaceMembersPage invite refusal reads err.gate (#1644)", () => {
     ).toBeInTheDocument();
   });
 
+  it("a plan refusal that names no tier takes the matrix's tier and display name (#1645)", async () => {
+    // A server predating #1644 names no tier; the operator's matrix does —
+    // the first served tier with invitations, by its own display name.
+    mockTiers = [
+      { name: "basic", display_name: "M", team_invitations: false },
+      { name: "team", display_name: "Team", team_invitations: true },
+      { name: "pro", display_name: "L", team_invitations: true },
+    ] as unknown as PlanTierFeature[];
+    const serverText = "Feature 'team_invitations' not available.";
+    vi.mocked(createInvitation).mockRejectedValue(
+      refusal(403, "FEAT-001", serverText, {
+        gate: "plan",
+        feature: "team_invitations",
+        required_plan: null,
+        required_plan_display: null,
+        current_plan: "basic",
+      }),
+    );
+    await submitAdminInvite();
+
+    expect(
+      await screen.findByText('invitePlanRequired {"plan":"Team"}'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(serverText)).toBeNull();
+  });
+
   it("renders the seat-cap message from err.gate instead of the server's English", async () => {
     const serverText =
       "Member limit reached (5 seats). Current members: 4, Pending invitations: 1.";

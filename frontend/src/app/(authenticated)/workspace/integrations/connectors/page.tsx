@@ -74,6 +74,7 @@ import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
+import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
 import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
@@ -217,6 +218,9 @@ export default function ConnectorsPage() {
   // create controls below — `null` while resolving: controls stay disabled
   // and the upsell is only rendered on an explicit `false`.
   const gate = useFeatureGate("connectors");
+  // #1645: the same shared matrix (module cache — no extra fetch), so a
+  // refusal that names no tier gets the pre-check's tier and labels.
+  const tiers = usePlanTierMatrix();
   const canCreate = gate.state === "pending" ? null : gate.state === "allowed";
   // The plan-gate copy names a tier, so it renders only when there is one to
   // name: no served tier having the feature is the tier-less copy #1646 adds.
@@ -765,6 +769,7 @@ export default function ConnectorsPage() {
         fallbackKey: "connectors",
         canUpgrade: false,
         locale,
+        tiers,
       });
       if (
         gate?.state === "plan" &&
@@ -800,6 +805,7 @@ export default function ConnectorsPage() {
     piiRedaction,
     piiFailClosed,
     locale,
+    tiers,
     router,
     reload,
     t,

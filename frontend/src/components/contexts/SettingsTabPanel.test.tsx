@@ -113,6 +113,12 @@ vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ user: { id: "user-1" } }),
 }));
 
+// #1645: save refusals are lifted with the shared tier matrix; this suite
+// asserts no refusal copy, so it stays unresolved.
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanTierMatrix: () => null,
+}));
+
 // ---------- Helpers ----------------------------------------------------------
 
 const CTX_ID = "11111111-1111-1111-1111-111111111111";

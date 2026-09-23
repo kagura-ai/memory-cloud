@@ -89,7 +89,10 @@ import {
   getEmbeddingModels,
   type EmbeddingModel,
 } from "@/lib/api/contexts";
-import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
+import {
+  checkOpenAIKeyStatus,
+  type PlanTierFeature,
+} from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
@@ -119,11 +122,13 @@ const CONTEXT_NAME_PATTERN = /^[a-z0-9_-]+$/;
  * `plan` fills contextLimitReached's "Your {plan} plan allows {limit} …", so
  * it is the workspace's CURRENT tier, not the one that would lift the cap.
  * Null unless both are known: a server predating #1644 sent no details on
- * this refusal, and its own message is shown instead.
+ * this refusal, and its own message is shown instead. `tiers` is the shared
+ * matrix (#1645), so an operator-defined tier reads by its own display name.
  */
 function contextLimitArgs(
   err: unknown,
   locale: string | undefined,
+  tiers: readonly PlanTierFeature[] | null,
 ): { plan: string; limit: number } | null {
   const facts = err instanceof ApiError ? err.gate : undefined;
   if (facts?.state !== "quota" || facts.quotaType !== "contexts") return null;
@@ -132,6 +137,7 @@ function contextLimitArgs(
     fallbackKey: "contexts",
     canUpgrade: false,
     locale,
+    tiers,
   });
   if (!gate?.currentPlanLabel || gate.limit === undefined) return null;
   return { plan: gate.currentPlanLabel, limit: gate.limit };
@@ -261,6 +267,31 @@ export default function ContextsPage() {
     locale,
   });
   const isQuotaReached = contextQuota.state === "quota" || maxContexts === 0;
+  // #1645: the quota upsells (banner link, dialog CTA) read the descriptor's
+  // NARROWED answer, not the raw Plan-page one: an owner at the top tier's
+  // cap has no served tier that raises it, so the Plan page would be a dead
+  // end. `quotaGate` reads limit 0 as "unknown" and answers "allowed", so a
+  // KNOWN zero cap is lifted through `gateFromFacts` from the counts the page
+  // holds: the same narrowing, which offers the upgrade exactly when a served
+  // tier's cap is above zero.
+  const zeroCapGate =
+    maxContexts === 0
+      ? gateFromFacts(
+          {
+            state: "quota",
+            quotaType: "contexts",
+            current: usedContexts,
+            limit: 0,
+          },
+          {
+            fallbackKey: "contexts",
+            canUpgrade: canUpgrade === true,
+            locale,
+            tiers,
+          },
+        )
+      : null;
+  const quotaCanUpgrade = (zeroCapGate ?? contextQuota).canUpgrade;
 
   // #1645: may a context be made shared on this tier? One gate for both
   // create dialogs, read from the tier matrix's `shared_contexts` — the same
@@ -381,7 +412,7 @@ export default function ContextsPage() {
         (err instanceof Error ? err.message : t("failedToCreate"));
 
       // Translate common error messages
-      const limitArgs = contextLimitArgs(err, locale);
+      const limitArgs = contextLimitArgs(err, locale, tiers);
       if (limitArgs) {
         errorMessage = t("contextLimitReached", limitArgs);
       } else if (
@@ -440,7 +471,7 @@ export default function ContextsPage() {
         err instanceof Error ? err.message : t("failedToCreate");
 
       // Translate common error messages (but keep resource_id duplicates as-is)
-      const limitArgs = contextLimitArgs(err, locale);
+      const limitArgs = contextLimitArgs(err, locale, tiers);
       if (errorMessage.includes("already used")) {
         // Resource ID duplicate error - show API message as-is (includes context name)
         setCreateError(errorMessage);
@@ -640,7 +671,7 @@ export default function ContextsPage() {
               Plan page is withheld where that page does not exist or this
               member cannot load it. The separating space moves inside the
               guard so the banner never ends in a dangling space. */}
-          {canUpgrade === true && (
+          {quotaCanUpgrade && (
             <>
               {" "}
               <a
@@ -1597,7 +1628,7 @@ export default function ContextsPage() {
                 and to see the Plan page — so leaving it while withholding the
                 button would still dead-end them. The title and description
                 above explain why creation failed and do stay. */}
-            {canUpgrade === true && (
+            {quotaCanUpgrade && (
               <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mt-3">
                 <p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
                   {t("quotaDialogUpgradeHeading")}
@@ -1613,9 +1644,9 @@ export default function ContextsPage() {
                 cancel, only a notice to dismiss. `common.close` already exists
                 in both locales, so this needs no new key. */}
             <AlertDialogCancel>
-              {canUpgrade === true ? tCommon("cancel") : tCommon("close")}
+              {quotaCanUpgrade ? tCommon("cancel") : tCommon("close")}
             </AlertDialogCancel>
-            {canUpgrade === true && (
+            {quotaCanUpgrade && (
               <AlertDialogAction
                 onClick={() => router.push("/workspace/settings/plan")}
               >

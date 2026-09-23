@@ -54,7 +54,6 @@ import {
 import { apiClient } from "@/lib/api/base";
 import { useToast } from "@/hooks/use-toast";
 import { useSystemFeatures, useSystemInfo } from "@/hooks/useSystemFeatures";
-import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { cn } from "@/styles/design-tokens";
 
@@ -141,8 +140,10 @@ export function SearchSettingsSection({
   const rerank = useFeatureGate("reranking");
   const rerankingDisabledByDeployment = rerank.state === "deployment";
   // #1643: the whole sentence renders either way; only its <link> chunk
-  // becomes a real link, and only where the Plan page is reachable.
-  const canUpgrade = useCanUpgrade();
+  // becomes a real link, and only where the Plan page is reachable. #1645:
+  // the gate's own `canUpgrade`, so a plan gate no served tier lifts (an
+  // operator withheld reranking everywhere) does not link to a dead end.
+  const canUpgrade = rerank.canUpgrade;
   const isDirty = Object.keys(editedConfig).length > 0;
 
   const providerLabel = (provider: string) =>
@@ -546,7 +547,7 @@ export function SearchSettingsSection({
                           page is unreachable — it just is not a link. */}
                       {t.rich("upgradeToBasic", {
                         link: (chunks) =>
-                          canUpgrade === true ? (
+                          canUpgrade ? (
                             <Link
                               href="/workspace/settings/plan"
                               className="underline font-medium"

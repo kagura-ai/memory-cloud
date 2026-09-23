@@ -481,7 +481,8 @@ describe("GATE_KEYS / QUOTA_TYPE_TO_GATE_KEY", () => {
 describe("narrowCanUpgrade", () => {
   it.each<[FeatureGateState, string | undefined, boolean, boolean]>([
     ["plan", "pro", true, true],
-    ["plan", undefined, true, true],
+    // No served tier lifts it: nothing to upgrade to, so no CTA (#1645).
+    ["plan", undefined, true, false],
     ["plan", "pro", false, false],
     ["quota", "basic", true, true],
     ["quota", undefined, true, false],
@@ -732,10 +733,27 @@ describe("gateFromFacts", () => {
       ).toBe(false);
     });
 
-    it("is true for a plan gate even when no tier has the feature", () => {
-      // The copy then names no tier; whether the CTA renders is the
-      // consumer's call on `planLabel`, but the rule itself is flag ∧ owner.
-      expect(gateFromFacts({ state: "plan" }, ctx)?.canUpgrade).toBe(true);
+    it("is false for a plan gate no served tier lifts (#1645)", () => {
+      // The refusal names no tier and there is no matrix to name one: the
+      // Plan page would be a dead end, so no consumer may offer it.
+      expect(gateFromFacts({ state: "plan" }, ctx)?.canUpgrade).toBe(false);
+      // The matrix names none either: an operator withheld it everywhere.
+      const tiers = DEFAULT_TIERS.map((t) => ({ ...t, resources: false }));
+      expect(
+        gateFromFacts(
+          { state: "plan", feature: "resources" },
+          { ...ctx, tiers },
+        )?.canUpgrade,
+      ).toBe(false);
+    });
+
+    it("is true for a plan gate the matrix fallback names a tier for (#1645)", () => {
+      expect(
+        gateFromFacts(
+          { state: "plan", feature: "resources" },
+          { ...ctx, tiers: DEFAULT_TIERS },
+        ),
+      ).toMatchObject({ requiredPlan: "promax", canUpgrade: true });
     });
   });
 });
@@ -1145,6 +1163,8 @@ describe("requiredTierFor / requiredPlan (#1645)", () => {
     expect(gate.state).toBe("plan");
     expect(gate).not.toHaveProperty("requiredPlan");
     expect(gate).not.toHaveProperty("planLabel");
+    // Nothing to upgrade to: no CTA, whatever the raw answer (#1645).
+    expect(gate.canUpgrade).toBe(false);
     expect(requiredTierFor(tiers, (t) => t.resources === true)).toBeNull();
   });
 

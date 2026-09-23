@@ -369,7 +369,8 @@ export interface FeatureGate {
 
   /**
    * May an upgrade CTA be rendered here? Always a definite boolean, computed
-   * in ONE place — `narrowCanUpgrade` below — by every producer. No consumer
+   * in ONE place — `narrowCanUpgrade` below — by every producer. True only on
+   * a plan or quota gate that names the tier lifting it. No consumer
    * re-derives it.
    */
   readonly canUpgrade: boolean;
@@ -524,8 +525,12 @@ export function normalizeGate(
  * enabled on this deployment AND this member is the owner); callers pass it
  * through un-narrowed.
  *
- * - plan  → raw
- * - quota → raw, and only when a higher tier raises the cap
+ * - plan and quota → raw, and only when a served tier lifts the refusal
+ *   (`requiredPlan` present). A plan gate that no served tier lifts — an
+ *   operator withheld the feature from every tier, or the refusal named no
+ *   tier and the matrix could not name one either — has no upgrade to offer,
+ *   exactly like a quota no higher tier raises: the Plan page would be a
+ *   dead end.
  * - every other state → false. Buying a tier does not turn on an operator's
  *   deployment flag, and allowlist copy must stay plan-neutral, so neither
  *   may ever carry an upgrade CTA; nor may a role gate.
@@ -535,8 +540,9 @@ export function narrowCanUpgrade(
   requiredPlan: string | undefined,
   raw: boolean,
 ): boolean {
-  if (state === "plan") return raw;
-  if (state === "quota") return raw && requiredPlan !== undefined;
+  if (state === "plan" || state === "quota") {
+    return raw && requiredPlan !== undefined;
+  }
   return false;
 }
 

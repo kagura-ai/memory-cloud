@@ -22,7 +22,6 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { fetchWorkspaceSleepReports } from "@/lib/api";
@@ -31,9 +30,6 @@ export default function WorkspaceSleepReportsPage() {
   const t = useTranslations("workspace");
   const router = useRouter();
   const { currentWorkspace, currentWorkspaceId, loading } = useWorkspace();
-  // #1643: called here, above every conditional return, because hooks may not
-  // sit below one. The plan-gate copy below renders either way.
-  const canUpgrade = useCanUpgrade();
 
   // Sleep Maintenance needs a tier with `sleep_enabled_contexts_limit > 0`
   // (#1645: read from the tier matrix, not a tier rank — the server's own
@@ -77,12 +73,14 @@ export default function WorkspaceSleepReportsPage() {
         />
         {/* #1643: EmptyState renders its Button only when both actionLabel
             and onAction are set, so withholding them is how "no action" is
-            expressed here. The title and description always render. */}
+            expressed here. The title and description always render.
+            #1645: the gate's own canUpgrade, not the raw Plan-page answer —
+            a gate no served tier lifts offers no upgrade. */}
         <EmptyState
           icon={Moon}
           title={t("sleepReports.planGate.title", planValues)}
           description={t("sleepReports.planGate.description", planValues)}
-          {...(canUpgrade === true
+          {...(gate.canUpgrade
             ? {
                 actionLabel: t("sleepReports.planGate.action"),
                 onAction: () => router.push("/workspace/settings/plan"),

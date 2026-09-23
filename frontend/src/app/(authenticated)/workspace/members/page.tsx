@@ -25,6 +25,7 @@ import {
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
+import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   listMembers,
@@ -155,6 +156,9 @@ export default function WorkspaceMembersPage() {
   // role answered first (a member cannot buy their way to admin), and
   // `pending` while the matrix resolves.
   const invite = useFeatureGate("team_invitations");
+  // #1645: the same shared matrix (module cache — no extra fetch), so a
+  // refusal that names no tier gets the pre-check's tier and labels.
+  const tiers = usePlanTierMatrix();
 
   // #1643: may we point this member at /workspace/settings/plan at all? The
   // seat-limit copy stays either way; only the upgrade links are withheld.
@@ -373,6 +377,7 @@ export default function WorkspaceMembersPage() {
         fallbackKey: "team_invitations",
         canUpgrade: false,
         locale,
+        tiers,
       });
       if (
         gate?.state === "plan" &&

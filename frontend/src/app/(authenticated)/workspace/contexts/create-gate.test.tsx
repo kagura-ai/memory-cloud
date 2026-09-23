@@ -364,6 +364,21 @@ describe("Shared option in the create dialog (#1645)", () => {
     expect(radio).toBeChecked();
   });
 
+  it("no served tier has shared contexts: the upsell copy stays, the CTA does not (#1645)", async () => {
+    // Even for an owner on a plan_page deployment: there is no tier to buy.
+    mockFeatures = { byok: true, plan_page: true };
+    mockTiers = OSS_TIERS.map((t) => ({ ...t, shared_contexts: false }));
+    setup({ plan: "basic", maxContexts: 3, contextCount: 0, role: "owner" });
+    render(<ContextsPage />);
+
+    const radio = await openAdvancedCreate();
+    expect(radio).toBeDisabled();
+    expect(screen.getByText("upgradeToPro")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "upgradeToProCta" }),
+    ).toBeNull();
+  });
+
   it("follows the matrix, not the tier name: an operator gives basic shared contexts", async () => {
     mockTiers = OSS_TIERS.map((t) =>
       t.name === "basic" ? { ...t, shared_contexts: true } : t,

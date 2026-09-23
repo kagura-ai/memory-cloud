@@ -178,6 +178,22 @@ describe("WorkspaceSleepReportsPage plan gate", () => {
     expect(screen.queryByText("sleepReports.planGate.title")).toBeNull();
   });
 
+  it("no served tier has Sleep Maintenance: the copy renders, with no action (#1645)", () => {
+    // An operator withheld it from every tier: the gate names no tier, so
+    // the Plan page cannot lift it and the owner is not sent there.
+    mockTiers = OSS_TIERS.map((t) => ({ ...t, sleep_enabled_contexts_limit: 0 }));
+    setWorkspace("free");
+    render(<WorkspaceSleepReportsPage />);
+
+    expect(screen.getByText("sleepReports.planGate.title")).toBeInTheDocument();
+    expect(
+      screen.getByText("sleepReports.planGate.description"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "sleepReports.planGate.action" }),
+    ).toBeNull();
+  });
+
   it("neither gates nor loads reports while the tier matrix is still resolving (#1645)", () => {
     mockTiers = null;
     setWorkspace("free");
