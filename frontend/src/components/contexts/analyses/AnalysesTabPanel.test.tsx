@@ -8,11 +8,13 @@
  *
  * A refused bootstrap renders one of three empty states — owner-only, the
  * required plan, or the plan-neutral allowlist copy — decided by the
- * normalised gate on the ApiError, never by the bare status.
+ * normalised gate on the ApiError, never by the bare status. #1646: each is
+ * the gate notice's page variant, so the copy is `gate.*` ("role.owner.title",
+ * "plan.title", "allowlist.title" under the echo translator below).
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, cleanup } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 
 // Stable identities: the panel's ``bootstrap`` useCallback depends on ``t``
 // and the URL helpers, so a fresh function per render would re-fire the
@@ -24,11 +26,12 @@ vi.mock("next-intl", () => {
   return { useTranslations: () => t, useLocale: () => "en" };
 });
 
+// `push` is the gate notice's upgrade CTA (#1646).
+const mockRouter = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn() }));
 vi.mock("next/navigation", () => {
-  const router = { replace: vi.fn() };
   const params = new URLSearchParams();
   return {
-    useRouter: () => router,
+    useRouter: () => mockRouter,
     usePathname: () => "/workspace/contexts/ctx-1",
     useSearchParams: () => params,
   };
@@ -37,6 +40,15 @@ vi.mock("next/navigation", () => {
 let mockFeatures: Record<string, boolean> | null = { cost_display: true };
 vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
+}));
+
+// #1646: the upgrade answer (useCanUpgrade) reads the member's role.
+let mockRole = "owner";
+vi.mock("@/contexts/WorkspaceContext", () => ({
+  useWorkspace: () => ({
+    currentWorkspace: { id: "w1", current_user_role: mockRole },
+    loading: false,
+  }),
 }));
 
 const fixtures = vi.hoisted(() => {
@@ -112,6 +124,8 @@ import { AnalysesTabPanel } from "./AnalysesTabPanel";
 
 beforeEach(() => {
   mockFeatures = { cost_display: true };
+  mockRole = "owner";
+  mockRouter.push.mockReset();
 });
 
 afterEach(() => cleanup());
@@ -181,15 +195,18 @@ describe("AnalysesTabPanel — refusal split (#1644)", () => {
     render(<AnalysesTabPanel contextId="ctx-1" contextName="My context" />);
   }
 
+  const PLAN_ACTION = /^plan\.action /;
+
   it("shows the owner-only state for an AUTH-101 role refusal, not 'not yet enabled'", async () => {
     refuseBoth(refusal(403, "AUTH-101", {}));
     renderRefused();
 
+    expect(await screen.findByText(/^role\.owner\.title/)).toBeInTheDocument();
     expect(
-      await screen.findByText("states.ownerOnly.title"),
+      screen.getByText(/^role\.owner\.description .*memory_analysis/),
     ).toBeInTheDocument();
-    expect(screen.queryByText("states.notEnabled.title")).toBeNull();
-    expect(screen.queryByText(/states\.planRequired/)).toBeNull();
+    expect(screen.queryByText(/^allowlist\./)).toBeNull();
+    expect(screen.queryByText(/^plan\./)).toBeNull();
   });
 
   it("names the required plan for a FEAT-001 plan refusal, not 'not yet enabled'", async () => {
@@ -204,17 +221,60 @@ describe("AnalysesTabPanel — refusal split (#1644)", () => {
     );
     renderRefused();
 
+    // The whole feature ("all" scope), the tier the refusal names.
     expect(
-      await screen.findByText('states.planRequired.title {"plan":"L"}'),
+      await screen.findByText(/^plan\.title .*"plan":"L"/),
     ).toBeInTheDocument();
     expect(
-      screen.getByText('states.planRequired.description {"plan":"L"}'),
+      screen.getByText(/^plan\.description .*"plan":"L"/),
     ).toBeInTheDocument();
-    expect(screen.queryByText("states.notEnabled.title")).toBeNull();
-    expect(screen.queryByText("states.ownerOnly.title")).toBeNull();
+    expect(screen.queryByText(/^allowlist\./)).toBeNull();
+    expect(screen.queryByText(/^role\./)).toBeNull();
+    // No Plan page on this deployment: no CTA.
+    expect(screen.queryByRole("button", { name: PLAN_ACTION })).toBeNull();
+  });
+
+  it("a plan refusal offers the upgrade to an owner on a Plan-page deployment (#1646)", async () => {
+    mockFeatures = { cost_display: true, plan_page: true };
+    refuseBoth(
+      refusal(403, "FEAT-001", {
+        gate: "plan",
+        feature: "memory_analysis",
+        required_plan: "pro",
+        required_plan_display: "L",
+        current_plan: "basic",
+      }),
+    );
+    renderRefused();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^plan\.action .*"plan":"L"/ }),
+    );
+    expect(mockRouter.push).toHaveBeenCalledWith("/workspace/settings/plan");
+  });
+
+  it("the plan refusal's CTA is the owner's alone (#1646)", async () => {
+    mockFeatures = { cost_display: true, plan_page: true };
+    mockRole = "admin";
+    refuseBoth(
+      refusal(403, "FEAT-001", {
+        gate: "plan",
+        feature: "memory_analysis",
+        required_plan: "pro",
+        required_plan_display: "L",
+        current_plan: "basic",
+      }),
+    );
+    renderRefused();
+
+    expect(await screen.findByText(/^plan\.title/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: PLAN_ACTION })).toBeNull();
   });
 
   it("keeps the plan-neutral, CTA-free copy for an allowlist refusal", async () => {
+    // #1646: even for an owner on a Plan-page deployment — money does not
+    // lift a rollout gate (A4).
+    mockFeatures = { cost_display: true, plan_page: true };
     // Wire-identical to the plan refusal except for details.gate.
     refuseBoth(
       refusal(403, "FEAT-001", {
@@ -227,14 +287,12 @@ describe("AnalysesTabPanel — refusal split (#1644)", () => {
     );
     renderRefused();
 
-    expect(
-      await screen.findByText("states.notEnabled.title"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText("states.notEnabled.description"),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/states\.planRequired/)).toBeNull();
-    expect(screen.queryByText("states.ownerOnly.title")).toBeNull();
+    expect(await screen.findByText(/^allowlist\.title/)).toBeInTheDocument();
+    expect(screen.getByText(/^allowlist\.description/)).toBeInTheDocument();
+    expect(screen.queryByText(/^plan\./)).toBeNull();
+    expect(screen.queryByText(/^role\./)).toBeNull();
+    // Plan-neutral: no tier is ever interpolated.
+    expect(document.body.textContent).not.toMatch(/"(plan|currentPlan)":/);
     // No upgrade path of any kind.
     expect(screen.queryByRole("button")).toBeNull();
     expect(screen.queryByRole("link")).toBeNull();
@@ -244,20 +302,23 @@ describe("AnalysesTabPanel — refusal split (#1644)", () => {
     refuseBoth(refusal(403, "HTTP-403", { detail: "Forbidden" }));
     renderRefused();
 
-    expect(
-      await screen.findByText("states.notEnabled.title"),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("states.ownerOnly.title")).toBeNull();
+    // #1644's bare-403 branch renders the same gate.allowlist copy (C-9).
+    expect(await screen.findByText(/^allowlist\.title/)).toBeInTheDocument();
+    expect(screen.getByText(/^allowlist\.description/)).toBeInTheDocument();
+    expect(screen.queryByText(/^role\./)).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("degrades an older server's allowlist refusal (FEAT-001, no gate) to the plan-neutral copy", async () => {
+    // An owner on a Plan-page deployment: a guessed tier would be an
+    // upgrade the backend will not honour.
+    mockFeatures = { cost_display: true, plan_page: true };
     refuseBoth(refusal(403, "FEAT-001", { feature: "memory_analysis" }));
     renderRefused();
 
-    expect(
-      await screen.findByText("states.notEnabled.title"),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/states\.planRequired/)).toBeNull();
+    expect(await screen.findByText(/^allowlist\.title/)).toBeInTheDocument();
+    expect(screen.queryByText(/^plan\./)).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("uses the history refusal when there is no active run", async () => {
@@ -269,9 +330,7 @@ describe("AnalysesTabPanel — refusal split (#1644)", () => {
     );
     renderRefused();
 
-    expect(
-      await screen.findByText("states.ownerOnly.title"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/^role\.owner\.title/)).toBeInTheDocument();
   });
 
   it("does not treat a non-403 gate as a panel refusal", async () => {
@@ -287,6 +346,6 @@ describe("AnalysesTabPanel — refusal split (#1644)", () => {
     renderRefused();
 
     expect(await screen.findByText("refused")).toBeInTheDocument();
-    expect(screen.queryByText("states.notEnabled.title")).toBeNull();
+    expect(screen.queryByText(/^allowlist\./)).toBeNull();
   });
 });

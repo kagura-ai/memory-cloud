@@ -111,7 +111,11 @@
     "areYouSure": "本当によろしいですか？",
     "thisActionCannotBeUndone": "この操作は元に戻せません。",
     "saving": "保存中...",
-    "done": "完了"
+    "done": "完了",
+    "comingSoon": {
+      "title": "近日公開",
+      "description": "この機能は現在開発中で、今後のリリースで利用可能になります。"
+    }
   },
   "navigation": {
     "dashboard": "ダッシュボード",
@@ -173,7 +177,9 @@
     "addAnotherAccount": "別のアカウントを追加",
     "addWithGoogle": "Google アカウントを追加",
     "addWithGitHub": "GitHub アカウントを追加",
-    "activeAccount": "使用中のアカウント"
+    "activeAccount": "使用中のアカウント",
+    "comingSoon": "近日公開",
+    "soon": "近日"
   },
   "storage": {
     "list": {
@@ -1087,8 +1093,6 @@
     "memberCount": "このワークスペースには{count}人のメンバーがいます",
     "membersCount": "{count}人のメンバー",
     "inviteMember": "メンバーを招待",
-    "proPlanRequired": "（Proプラン）",
-    "ownerAdminOnly": "（オーナー/管理者のみ）",
     "user": "ユーザー",
     "role": "ロール",
     "lastLogin": "最終ログイン",
@@ -1155,13 +1159,9 @@
     "invitationSuccess": "招待が正常に作成されました！",
     "shareInviteLink": "招待したい人にこのリンクを共有してください：",
     "inviteLinkAddedNote": "招待リンクは下の保留中の招待リストに追加されました。",
-    "proPlanRequiredTitle": "Proプランが必要",
-    "proPlanRequiredDesc": "チーム招待はProプランの機能です。プランをアップグレードしてチームメンバーを招待し、コラボレーションしましょう。",
-    "proPlanBenefits": "Proプランの特典：",
     "benefitTeamInvitations": "チーム招待",
     "benefitSharedContexts": "共有コンテキスト",
     "benefitCollaboration": "コラボレーション機能",
-    "upgradeToPro": "Proにアップグレード",
     "planPage": {
       "title": "プラン",
       "description": "ワークスペースのプランを確認し、請求を管理します。",
@@ -1172,7 +1172,6 @@
       "opening": "請求ページを開いています…",
       "ownerOnly": "プランの変更はワークスペースのオーナーのみ可能です。",
       "unavailable": "この環境ではプラン変更を利用できません。",
-      "featureDisabled": "この環境ではプランページが有効化されていません。",
       "upgradeError": "請求セッションを開始できませんでした。もう一度お試しください。",
       "usageTitle": "利用状況・上限",
       "usageDescription": "現在の利用権限 — このワークスペースが今日運用されている上限です。既存のリソース・コネクタ・公開コンテキストはどのプランでも引き続き動作するため、下の作成可否の比較表より大きい値になることがあります。",
@@ -1291,12 +1290,6 @@
     "seatUsage": "{used}/{limit} シート使用中",
     "seatsAvailable": "{available} シート利用可能",
     "seatLimitReached": "メンバー上限に達しました",
-    "seatLimitReachedDesc": "{plan}プランでは{limit}名までメンバーを追加できます。さらにメンバーを追加するにはアップグレードしてください。",
-    "seatWarning": "⚠️ {used}/{limit} シート使用中（残り{available}）",
-    "upgradeToAddMembers": "アップグレードしてメンバーを追加",
-    "memberQuotaExceeded": "メンバー上限を超過",
-    "invitePlanRequired": "チームへの招待には {plan} プランが必要です。",
-    "memberSeatsFull": "メンバー上限に達しました（招待中を含め {limit} 席中 {current} 席を使用中）。",
     "inviteContextSelection": "Contextアクセス",
     "inviteContextSelectionDesc": "このメンバーがアクセスできるContextを選択",
     "noSharedContexts": "Shared Contextがありません",
@@ -1319,7 +1312,6 @@
     "contextAccessNotApplicable": "制限なし",
     "noContextsAvailable": "利用可能なContextがありません",
     "authentication": "操作",
-    "credentialsSettings": "設定",
     "contextAccessInfo": "このメンバーがアクセスできるContextを選択",
     "selectAll": "すべて選択",
     "deselectAll": "すべて解除",
@@ -1334,8 +1326,6 @@
     "createWorkspace": "ワークスペースを作成",
     "workspaceCreated": "ワークスペースを作成しました",
     "workspaceCreatedDesc": "新しいワークスペースが正常に作成されました。",
-    "workspaceLimitReached": "最大{limit}個のワークスペースまで所有できます。",
-    "workspaceLimitReachedDetailed": "現在 {limit} 個中 {owned} 個のワークスペースを所有しています。1つ手放すか譲渡するか、招待で他のワークスペースに参加できます。",
     "lastUsedWorkspace": "前回使用したワークスペース",
     "openaiKeyOptional": "オプション。後でExternal API Keys設定から追加できます。",
     "cancel": "キャンセル",
@@ -1348,11 +1338,6 @@
     "sleepReports": {
       "title": "Sleep レポート",
       "description": "このワークスペースの Sleep Maintenance 実行履歴を確認します",
-      "planGate": {
-        "title": "Sleep Maintenance はプロ機能です",
-        "description": "プロにアップグレードすると Sleep Maintenance(自動メモリ整理)が有効になり、レポートを閲覧できます。",
-        "action": "プロにアップグレード"
-      },
       "actions": {
         "back": "一覧に戻る"
       },
@@ -1497,13 +1482,7 @@
     "nameTaken": "コンテキスト名は既に存在します",
     "nameRequired": "コンテキスト名は必須です",
     "invalidName": "コンテキスト名は小文字、数字、ハイフン、アンダースコアのみ使用できます",
-    "quotaReached": "プランのコンテキスト上限に達しました",
     "quotaWarning": "無料プランでは1つのコンテキストまで利用できます。",
-    "quotaReachedDetail": "コンテキストの上限に達しました — {plan} プランではこのワークスペースで {limit} 個までです。",
-    "quotaReachedPlansLink": "プランを見る",
-    "upgradePrompt": "BasicまたはProにアップグレード",
-    "upgradeToCreateMore": "して、より多くのコンテキストを作成できます。",
-    "contextLimitReached": "コンテキスト上限に達しました。{plan}プランではワークスペースごとに{limit}個のコンテキストまで利用できます。複数のコンテキストを使用するにはBasicまたはProプランにアップグレードしてください。",
     "failedToCreate": "コンテキストの作成に失敗しました",
     "failedToUpdate": "コンテキストの更新に失敗しました",
     "failedToDelete": "コンテキストの削除に失敗しました",
@@ -1539,21 +1518,9 @@
     "privateAvailableAllPlans": "自分だけがアクセスできます。すべてのプランで利用可能。",
     "onlyYouCanAccess": "自分だけがアクセスできます",
     "adminsCanOnlyCreateShared": "管理者は共有のみ作成可能",
-    "pro": "Pro",
-    "proPlan": "Proプラン",
-    "requiresProPlan": "Proプランが必要です",
     "teamMembersCanAccess": "チームメンバーは役割に基づいてアクセスできます。",
-    "teamMembersCanAccessShort": "チームメンバーがアクセス可能",
     "teamMembersAccess": "チームメンバーは役割に基づいてアクセスできます。",
     "allWorkspaceMembersCanAccess": "すべてのワークスペースメンバーがこのコンテキストにアクセスできます。",
-    "upgradeToProShare": "Proプランにアップグレードしてチームとコンテキストを共有。",
-    "upgradeToPro": "Proプランにアップグレードしてチームコラボレーションを有効化。",
-    "upgradeToProCta": "Proにアップグレード — プランを見る",
-    "quotaDialogTitle": "コンテキスト上限に達しました",
-    "quotaDialogDescription": "現在のプランのコンテキスト上限に達しました。",
-    "quotaDialogUpgradeHeading": "アップグレードしてコンテキストを追加",
-    "quotaDialogUpgradeBody": "上位プランではより多くのコンテキストを利用できます。現在の上限はプランページをご確認ください。",
-    "viewPlans": "プランを見る",
     "changeToPrivateWarning": "プライベートに変更すると、すべてのコンテキストメンバーが削除されます。自分だけがアクセスできるようになります。",
     "changeToSharedWarning": "共有に変更すると、このコンテキストがすべてのワークスペースメンバーに表示されます。",
     "aiClientInstructions": "AIクライアント用指示",
@@ -2009,7 +1976,7 @@
     "otherEndpointsLabel": "その他 ({count})",
     "sleepEnabledContexts": "Sleep 有効コンテキスト",
     "sleepContextsWithAddon": "extra_sleep_contexts アドオンによる +{addon} を含む",
-    "sleepContextsTier": "プラン基本上限 (Sleep メンテナンスは PRO 専用機能)",
+    "sleepContextsTier": "プランの基本上限",
     "ownedWorkspaces": "所有 Workspace",
     "ownedWorkspacesTier": "所有ワークスペース上限（招待 join は無制限）",
     "memoriesCreatedToday": "本日の作成: {count} / {limit}（UTC 0時にリセット）"
@@ -2135,8 +2102,6 @@
     "rerankerConfig": "リランカー設定",
     "rerankerConfigDesc": "検索品質向上のためのリランキングモデルを設定（デプロイメントのデフォルト: {provider} / {model}）",
     "rerankerConfigDescPlain": "検索品質向上のためのリランキングモデルを設定",
-    "rerankerNotAvailableFree": "無料プランではリランキングは利用できません",
-    "upgradeToBasic": "<link>Basicプラン</link>にアップグレードして、AI搭載リランキングで検索品質を向上させましょう。",
     "noRerankerKeys": "リランカーAPIキーが設定されていません",
     "configureRerankerKeys": "リランキングを有効にするには、<link>外部APIキー</link>でVoyage AIまたはCohere APIキーを設定してください。",
     "enableReranking": "リランキングを有効化",
@@ -2772,8 +2737,6 @@
       "title": "コスト集計",
       "description": "全 workspace の LLM・embedding コスト ($) ブレイクダウン",
       "descriptionWorkspace": "この workspace の LLM・embedding コスト ($) ブレイクダウン",
-      "featureDisabled": "この環境ではワークスペースのコストダッシュボードが有効化されていません。",
-      "costDisplayDisabled": "この環境ではコスト表示が有効化されていません。",
       "actions": {
         "refresh": "更新"
       },
@@ -3156,12 +3119,8 @@
       "n1DesignDetail": "同じResource IDに複数のTokens作成可能（システム別、quota別）",
       "n1DesignExample": "例: Shopify用Token + 楽天用Token → 同じ\"products\" Contextに統合",
       "quotaNote": "クォータはトークン別に管理され、ワークスペース全体のクォータとは別です",
-      "quotaHelpFree": "Public contextsはFreeプランでは利用できません",
-      "quotaHelpBasic": "BASICプラン: {min}-{max} events/hour（デフォルト: {default}）",
-      "quotaHelpPro": "PROプラン: {min}-{max} events/hour（デフォルト: {default}）",
       "quotaCapUnknown": "1トークンあたり最大: {maxPerToken} {unit}。プラン全体の容量を読み込めませんでした。上限はサーバー側で適用されます。",
-      "quotaRemaining": "残り: {remaining} {unit}（1トークンあたり最大: {maxPerToken}）",
-      "quotaLimitReached": "クォータ上限に達しました。未使用のトークンを取り消して新規作成してください。"
+      "quotaRemaining": "残り: {remaining} {unit}（1トークンあたり最大: {maxPerToken}）"
     },
     "successDialog": {
       "title": "リソーストークンが正常に作成されました",
@@ -3240,8 +3199,6 @@
     "maxCapacity": "{percentage}% / 最大容量 {max}",
     "noResourceIdWarning": "Resource ID の設定が必要です",
     "noResourceIdWarningDesc": "Resource Token を作成するには、Resource ID が設定された Context が必要です。",
-    "planGateTitle": "新規 Resource Token には {plan} プランが必要です",
-    "planGateDesc": "既存のトークンは引き続き利用できます。新しいトークンの作成は {plan} プランで利用できます。",
     "goToContexts": "Contextページへ →",
     "stepFlow": {
       "step1": "Resource IDを設定",
@@ -3250,9 +3207,6 @@
     },
     "sdkHint": "または",
     "sdkHintSuffix": "でプログラムからデータ取り込み",
-    "proPlanRequired": "上位プランが必要です",
-    "proPlanRequiredDesc": "Resource Tokens機能を利用するには、上位プランへのアップグレードが必要です。",
-    "upgradePlan": "プランをアップグレード →",
     "timeAgo": {
       "justNow": "たった今",
       "minutesAgo": "{minutes}分前",
@@ -3543,7 +3497,6 @@
     "makeShared": "共有にする",
     "makePrivate": "プライベートにする",
     "makeSharedFirst": "パブリックアクセスを有効にするには、まずこのコンテキストを共有にしてください。",
-    "sharedRequiresPlan": "コンテキストの共有には {plan} プランが必要です。すでに共有中のコンテキストは引き続き利用できます。",
     "publicContext": "パブリックコンテキスト",
     "publicContextDesc": "外部システムがPublic REST APIで検索可能",
     "unpublish": "非公開にする",
@@ -3556,7 +3509,6 @@
     "manageResourceTokens": "リソーストークン管理 →",
     "pythonSdk": "Python SDK →",
     "makePublic": "パブリックにする",
-    "publicRequiresPlan": "コンテキストの新規公開には {plan} プランが必要です。すでに公開中のコンテキストは引き続き配信されます。",
     "protectionTitle": "保護と危険ゾーン",
     "contextLocked": "コンテキストがロック済み",
     "contextUnlocked": "コンテキストがロック解除済み",
@@ -3588,7 +3540,6 @@
     "sleepModeSkipConfirm": "Sleep を無効化",
     "sleepQuotaUsage": "Sleep 有効コンテキスト数: {used} / {limit} (アドオン: {addon})",
     "sleepQuotaExceeded": "上限に達しました。Sleep 対象コンテキストの上限引き上げはワークスペース管理者にご相談ください。",
-    "sleepQuotaTierBlocked": "Sleep Maintenance は PRO 限定機能です。プランをアップグレードしてご利用ください。",
     "unsavedChanges": "未保存の変更があります",
     "discard": "破棄",
     "saveChanges": "変更を保存",
@@ -3739,11 +3690,6 @@
         "type": "型",
         "searchable": "検索可能"
       }
-    },
-    "planGate": {
-      "title": "新規リソースには {plan} プランが必要です",
-      "description": "既存のリソースとトークンは引き続き動作します。新規リソースのセットアップ（setup_resource、新規リソーストークン）は {plan} プランで利用できます。",
-      "action": "{plan} にアップグレード"
     }
   },
   "signupBlocked": {
@@ -3959,7 +3905,6 @@
         "embeddingUniform": "embedding が統一されている",
         "loading": "計算中…"
       },
-      "footerHint": "Owner のみ · workspace allowlist で制限",
       "submit": "分析を実行",
       "submitting": "Run を起動中…",
       "errorLoadingPreview": "コスト推定に失敗しました — 接続を確認して再試行してください。",
@@ -3985,18 +3930,6 @@
       "pastRunEmpty": {
         "title": "この run には表示できる結果がありません",
         "description": "選択した run は {status} です — クラスタ・scatter 座標・プロパティ統計を持つのは成功した run のみです。「最新に戻る」で現在の表示に戻れます。"
-      },
-      "notEnabled": {
-        "title": "この workspace では Analyses はまだ有効化されていません",
-        "description": "メモリー分析は v1 ロールアウト中、選定された workspace に限定されています。アクセスをご希望の場合はお問い合わせください。"
-      },
-      "ownerOnly": {
-        "title": "メモリー分析はワークスペースのオーナーのみ利用できます",
-        "description": "分析の実行と結果の閲覧は、このワークスペースのオーナーのみが行えます。"
-      },
-      "planRequired": {
-        "title": "メモリー分析には {plan} プランが必要です",
-        "description": "このワークスペースのプランにはメモリー分析が含まれていません。{plan} プランでご利用いただけます。"
       },
       "loadFailed": "Analyses の読み込みに失敗しました — 接続を確認してください。"
     }
@@ -4072,13 +4005,6 @@
     "description": "外部チャットプラットフォームを接続すると、会話が自動でメモリコンテキストに取り込まれます。",
     "emptyTitle": "コネクタがありません",
     "emptyDesc": "Slack を接続して会話のメモリ取り込みを開始します。",
-    "planGate": {
-      "title": "新規コネクタには {plan} プランが必要です。",
-      "description": "既存のコネクタは引き続き取り込みを行います。新しいチャットプラットフォームの接続は {plan} プランで利用できます。",
-      "action": "{plan} にアップグレード"
-    },
-    "connectorPlanRequired": "新しいチャットプラットフォームの接続には {plan} プランが必要です。",
-    "connectorSeatsFull": "コネクタ上限に達しました（{limit} 件中 {current} 件を使用中）。",
     "contextBound": "コンテキスト {id} に書き込み",
     "contextNotReady": "セットアップ未完了 — 書き込み先コンテキストなし",
     "appIdentity": "アプリ ID: {appKey}",
@@ -4257,5 +4183,172 @@
     "confirmPageInvalidBody": "この確認リンクは無効になりました。アカウントを削除したい場合は、プロフィールからもう一度開始してください。",
     "goToProfile": "プロフィールへ",
     "protectedAccount": "これは保護された初期管理者アカウントのため、削除できません。"
+  },
+  "gate": {
+    "plan": {
+      "title": "{feature} は {plan} プランで利用できます",
+      "description": "{feature} を利用するには {plan} プランにアップグレードしてください。",
+      "newTitle": "新規 {feature} には {plan} プランが必要です",
+      "newDescription": "既存の {feature} は引き続き利用できます。新規 {feature} の作成には {plan} プランが必要です。",
+      "titleNoTier": "{feature} は利用できません",
+      "descriptionNoTier": "この環境では {feature} はどのプランでも利用できません。",
+      "action": "{plan} にアップグレード",
+      "badge": "{plan} プラン",
+      "hint": "{plan} プランが必要です",
+      "hintNoTier": "どのプランでも利用できません"
+    },
+    "quota": {
+      "title": "{feature} の上限に達しました",
+      "description": "{currentPlan} プランでは {feature} の上限は {limit} です（現在 {current}）。",
+      "descriptionNoPlan": "{feature} の上限は {limit} です（現在 {current}）。",
+      "descriptionNoNumbers": "{feature} が上限に達しています。",
+      "upsell": "{plan} プランにすると上限が上がります。",
+      "action": "プランを見る",
+      "badge": "上限に達しました",
+      "hint": "上限に達しました"
+    },
+    "deployment": {
+      "title": "この環境では {feature} は利用できません",
+      "description": "この Kagura Memory Cloud 環境では {feature} が無効化されています。必要な場合は環境の管理者にお問い合わせください。",
+      "badge": "利用不可",
+      "hint": "この環境では利用できません"
+    },
+    "role": {
+      "owner": {
+        "title": "ワークスペースのオーナーのみが実行できます",
+        "description": "{feature} の管理はワークスペースのオーナーに限定されています。",
+        "badge": "オーナーのみ",
+        "hint": "オーナーのみ"
+      },
+      "admin": {
+        "title": "ワークスペースのオーナーまたは管理者のみが実行できます",
+        "description": "{feature} の管理はワークスペースのオーナーと管理者に限定されています。",
+        "badge": "オーナー/管理者のみ",
+        "hint": "オーナー/管理者のみ"
+      }
+    },
+    "allowlist": {
+      "title": "このワークスペースでは {feature} はまだ有効化されていません",
+      "description": "{feature} は段階的に提供しています。ご利用をご希望の場合はお問い合わせください。",
+      "badge": "未有効化",
+      "hint": "このワークスペースでは未有効化"
+    },
+    "features": {
+      "resources": {
+        "label": "リソース",
+        "plural": "リソース",
+        "singular": "リソース"
+      },
+      "connectors": {
+        "label": "コネクタ",
+        "plural": "コネクタ",
+        "singular": "コネクタ"
+      },
+      "public_contexts": {
+        "label": "公開コンテキスト",
+        "plural": "公開コンテキスト",
+        "singular": "公開コンテキスト"
+      },
+      "shared_contexts": {
+        "label": "共有コンテキスト",
+        "plural": "共有コンテキスト",
+        "singular": "共有コンテキスト"
+      },
+      "team_invitations": {
+        "label": "チーム招待",
+        "plural": "チーム招待",
+        "singular": "チーム招待"
+      },
+      "reranking": {
+        "label": "リランキング",
+        "plural": "リランキング",
+        "singular": "リランキング"
+      },
+      "sleep_reports": {
+        "label": "Sleep Maintenance",
+        "plural": "Sleep Maintenance",
+        "singular": "Sleep Maintenance"
+      },
+      "memory_analysis": {
+        "label": "メモリー分析",
+        "plural": "メモリー分析",
+        "singular": "メモリー分析"
+      },
+      "managed_llm": {
+        "label": "マネージドLLMでの分析",
+        "plural": "マネージドLLMでの分析",
+        "singular": "マネージドLLMでの分析"
+      },
+      "managed_embeddings": {
+        "label": "マネージド埋め込み",
+        "plural": "マネージド埋め込み",
+        "singular": "マネージド埋め込み"
+      },
+      "secret_store": {
+        "label": "シークレットストア",
+        "plural": "シークレットストア",
+        "singular": "シークレットストア"
+      },
+      "plan_page": {
+        "label": "プランページ",
+        "plural": "プランページ",
+        "singular": "プランページ"
+      },
+      "byok": {
+        "label": "外部APIキー",
+        "plural": "外部APIキー",
+        "singular": "外部APIキー"
+      },
+      "cost_dashboard": {
+        "label": "コストダッシュボード",
+        "plural": "コストダッシュボード",
+        "singular": "コストダッシュボード"
+      },
+      "contexts": {
+        "label": "コンテキスト",
+        "plural": "コンテキスト",
+        "singular": "コンテキスト"
+      },
+      "members": {
+        "label": "メンバー",
+        "plural": "メンバー",
+        "singular": "メンバー"
+      },
+      "workspaces": {
+        "label": "ワークスペース",
+        "plural": "ワークスペース",
+        "singular": "ワークスペース"
+      },
+      "resource_tokens": {
+        "label": "リソーストークン",
+        "plural": "リソーストークン",
+        "singular": "リソーストークン"
+      },
+      "storage": {
+        "label": "ストレージ",
+        "plural": "ストレージ",
+        "singular": "ストレージ"
+      },
+      "memories": {
+        "label": "メモリー",
+        "plural": "メモリー",
+        "singular": "メモリー"
+      },
+      "agents": {
+        "label": "エージェント",
+        "plural": "エージェント",
+        "singular": "エージェント"
+      },
+      "embedding_spend": {
+        "label": "埋め込み使用額",
+        "plural": "埋め込み使用額",
+        "singular": "埋め込み使用額"
+      },
+      "api_calls": {
+        "label": "API呼び出し",
+        "plural": "API呼び出し",
+        "singular": "API呼び出し"
+      }
+    }
   }
 }

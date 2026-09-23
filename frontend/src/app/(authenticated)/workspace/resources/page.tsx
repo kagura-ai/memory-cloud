@@ -18,10 +18,9 @@ import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { TableLoadingState } from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
+import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { EmptyState } from "@/components/ui/empty-state";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import {
   Table,
   TableBody,
@@ -33,7 +32,6 @@ import {
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import { listResources, type ResourceListItem } from "@/lib/api/resources";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 
 export default function ResourcesListPage() {
@@ -59,11 +57,9 @@ export default function ResourcesListPage() {
   // decides whether the "new resources need XL" banner is shown.
   // #1560: read from the tier matrix's `resources` boolean. #1645: through
   // the gate descriptor — `pending` while it resolves (no banner), and the
-  // required tier named from the matrix, not a hardcoded one.
+  // required tier named from the matrix, not a hardcoded one. #1646: the
+  // descriptor's own `canUpgrade` decides the CTA (#1643's rule, one place).
   const gate = useFeatureGate("resources");
-  // #1643: the banner's title and description always render; only the button
-  // needs a Plan page this member can actually reach.
-  const canUpgrade = useCanUpgrade();
 
   const fetchResources = useCallback(async () => {
     try {
@@ -105,28 +101,9 @@ export default function ResourcesListPage() {
     <PageContainer>
       <PageHeader title={t("list.title")} description={t("list.description")} />
 
-      {/* #1645: this copy names a tier, so it needs one — when no served tier
-          has the feature (an operator stripped it everywhere) there is none to
-          name, and the tier-less copy is #1646's. */}
-      {gate.state === "plan" && gate.planLabel !== undefined && (
-        <Alert className="mb-4">
-          <AlertTitle>
-            {t("planGate.title", { plan: gate.planLabel })}
-          </AlertTitle>
-          <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
-            <span>{t("planGate.description", { plan: gate.planLabel })}</span>
-            {canUpgrade === true && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => router.push("/workspace/settings/plan")}
-              >
-                {t("planGate.action", { plan: gate.planLabel })}
-              </Button>
-            )}
-          </AlertDescription>
-        </Alert>
-      )}
+      {/* #1646: scope "create" — existing resources keep serving (#1551), so
+          the notice promises exactly that. Pending/allowed render nothing. */}
+      <FeatureGateNotice gate={gate} scope="create" />
 
       {error && <ErrorBanner error={error} />}
 

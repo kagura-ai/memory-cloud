@@ -340,10 +340,10 @@ export function NewAnalysisModal({
           </Alert>
         )}
 
+        {/* #1646 (A2): no footer hint — "gated by workspace allowlist" told
+            the reader nothing to act on and named the mechanism the
+            allowlist copy keeps silent (A4). */}
         <DialogFooter>
-          <p className="mr-auto text-xs text-gray-500 dark:text-gray-400">
-            {t("footerHint")}
-          </p>
           <Button variant="outline" onClick={onClose} disabled={submitting}>
             {tActions("cancel")}
           </Button>

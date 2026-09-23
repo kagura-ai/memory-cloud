@@ -474,9 +474,7 @@ describe("ResourceDetailPage", () => {
       expect(screen.getByText("EC Products")).toBeInTheDocument();
     });
     expect(mockListResources).toHaveBeenCalledTimes(1);
-    expect(
-      screen.queryByText("resources.planGate.title"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/^gate\./)).not.toBeInTheDocument();
   });
 
   it("holds the fetch until WorkspaceContext hydrates", async () => {

@@ -6,6 +6,11 @@
  * list loads; loading resolves before gating (no admin-UI flash); a missing
  * workspace shows the "no workspace selected" banner rather than the role
  * banner.
+ *
+ * #1646: every refusal on the page — the create banner, the callback toast,
+ * the empty-state copy, the create-dialog error and the manual-bind toast —
+ * renders the gate.* copy. Under the key-echo mock the text is the relative
+ * gate key ("plan.newTitle"); `gateCalls` records the values each got.
  */
 import {
   cleanup,
@@ -20,7 +25,8 @@ import { resetConsumedSearchParams } from "@/hooks/useConsumeSearchParams";
 
 import ConnectorsPage from "./page";
 import { ApiError } from "@/lib/api/base";
-import { normalizeGate } from "@/lib/gates/featureGates";
+import { canUpgradeFrom } from "@/hooks/useCanUpgrade";
+import { normalizeGate, type FeatureGate } from "@/lib/gates/featureGates";
 import type { PlanTierFeature } from "@/lib/api/workspaces";
 
 const mockListConnectors = vi.fn();
@@ -62,24 +68,27 @@ vi.mock("@/lib/api/contexts", () => ({
 }));
 
 const mockRouterReplace = vi.fn();
+const mockRouterPush = vi.fn();
 const mockSearchParamsGet = vi.fn<(key: string) => string | null>();
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: mockRouterReplace }),
+  useRouter: () => ({ push: mockRouterPush, replace: mockRouterReplace }),
   useSearchParams: () => ({
     get: (key: string) => mockSearchParamsGet(key),
   }),
 }));
 
-// Keys pass through as text. The two #1644 refusal keys also echo their ICU
-// params so the gate's values are assertable; every other key stays bare.
-vi.mock("next-intl", () => {
-  const echo = new Set(["connectorPlanRequired", "connectorSeatsFull"]);
-  return {
-    useTranslations: () => (key: string, params?: Record<string, unknown>) =>
-      params && echo.has(key) ? `${key} ${JSON.stringify(params)}` : key,
-    useLocale: () => "en",
-  };
-});
+// Keys pass through as text. #1646: every gate-namespace call is recorded
+// with its ICU values, so a test can see which tier / counts a notice was
+// given without changing what any message renders.
+const gateCalls: Array<[string, Record<string, unknown> | undefined]> = [];
+vi.mock("next-intl", () => ({
+  useTranslations:
+    (ns?: string) => (key: string, params?: Record<string, unknown>) => {
+      if (ns === "gate") gateCalls.push([key, params]);
+      return key;
+    },
+  useLocale: () => "en",
+}));
 
 const mockUseWorkspace = vi.fn();
 vi.mock("@/contexts/WorkspaceContext", () => ({
@@ -107,19 +116,35 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
 // against the API answer, not a tier name. #1645: read through
 // useFeatureGate; the tri-state maps onto its descriptor.
 let mockPlanFeature: boolean | null = true;
-const MOCK_GATES = {
-  null: { state: "pending", feature: "connectors", canUpgrade: false },
-  true: { state: "allowed", feature: "connectors", canUpgrade: false },
-  false: {
+// A test that needs a descriptor the tri-state cannot express sets this.
+let mockGate: FeatureGate | null = null;
+function mockConnectorsGate(): FeatureGate {
+  if (mockGate) return mockGate;
+  if (mockPlanFeature === null) {
+    return { state: "pending", feature: "connectors", canUpgrade: false };
+  }
+  if (mockPlanFeature) {
+    return { state: "allowed", feature: "connectors", canUpgrade: false };
+  }
+  // #1646: the notice reads the descriptor's own canUpgrade. The real hook
+  // derives it with the pure canUpgradeFrom from /system/info and the role;
+  // the same rule over the same mocks keeps the #1643 cases below meaningful.
+  const ws = mockUseWorkspace();
+  return {
     state: "plan",
     feature: "connectors",
     requiredPlan: "promax",
     planLabel: "XL",
-    canUpgrade: false,
-  },
-} as const;
+    canUpgrade:
+      canUpgradeFrom(
+        mockUseSystemFeatures(),
+        ws?.loading === true,
+        ws?.currentWorkspace?.current_user_role,
+      ) === true,
+  };
+}
 vi.mock("@/hooks/useFeatureGate", () => ({
-  useFeatureGate: () => MOCK_GATES[`${mockPlanFeature}`],
+  useFeatureGate: () => mockConnectorsGate(),
 }));
 
 // #1645: a create refusal is lifted with the shared tier matrix. `null`
@@ -173,6 +198,8 @@ function setWorkspace(
 
 beforeEach(() => {
   mockTiers = null;
+  mockGate = null;
+  gateCalls.length = 0;
   // #1532: the hook remembers consumed params across remounts (module-level);
   // forget them so one case's URL params cannot suppress the next case's toast.
   resetConsumedSearchParams();
@@ -247,7 +274,12 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
         await screen.findByText("Sales Slack / T0123ABC"),
       ).toBeInTheDocument();
       // Upsell names the XL tier (i18n mock drops params → key text).
-      expect(screen.getByText("planGate.title")).toBeInTheDocument();
+      // #1646: the create-scope copy — existing connectors keep working.
+      expect(screen.getByText("plan.newTitle")).toBeInTheDocument();
+      expect(gateCalls).toContainEqual([
+        "plan.newTitle",
+        { plan: "XL", feature: "features.connectors.plural" },
+      ]);
       // Create controls: provider CTA disabled, manual-bind form hidden.
       expect(
         screen.getByRole("button", { name: /connectProvider/ }),
@@ -271,9 +303,58 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
     const ctas = screen.getAllByRole("button", { name: /connectProvider/ });
     expect(ctas).toHaveLength(1);
     expect(ctas[0]).toBeDisabled();
+    // #1646 P4: the empty state is still the empty-list state; only its
+    // description is the gate's create-scope copy.
+    expect(screen.getAllByText("plan.newDescription")).toHaveLength(2);
+    expect(screen.queryByText("emptyDesc")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "plan.action" }));
+    expect(mockRouterPush).toHaveBeenCalledWith("/workspace/settings/plan");
+  });
+
+  it("the banner is the gate notice: a real title, not a bold span (#1646 P2)", async () => {
+    setWorkspace("admin", {}, "basic");
+    mockPlanFeature = false;
+
+    render(<ConnectorsPage />);
+
+    const title = await screen.findByText("plan.newTitle");
+    // AlertTitle (h5) inside the upsell Alert — the #1643-era markup put the
+    // title in a <span className="font-medium"> inside the description.
+    expect(title.tagName).toBe("H5");
+    expect(title.closest('[role="alert"]')?.className).toContain(
+      "bg-purple-50",
+    );
+  });
+
+  it("no served tier has connectors: tier-less copy, no CTA, no {plan} (#1646)", async () => {
+    setWorkspace("owner", {}, "basic");
+    mockUseSystemFeatures.mockReturnValue({ plan_page: true });
+    mockGate = { state: "plan", feature: "connectors", canUpgrade: false };
+    mockSearchParamsGet.mockImplementation((key: string) =>
+      key === "slack_install" ? "handle-stale" : null,
+    );
+
+    render(<ConnectorsPage />);
+
+    expect(await screen.findByText("plan.titleNoTier")).toBeInTheDocument();
+    // Banner and empty state both say so; neither offers an upgrade. The
+    // banner renders at once, the empty state only after the list loads.
+    await waitFor(() =>
+      expect(screen.getAllByText("plan.descriptionNoTier")).toHaveLength(2),
+    );
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
+    // The callback toast says the same (before #1646 it said nothing).
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "plan.titleNoTier",
+        description: "plan.descriptionNoTier",
+      }),
+    );
     expect(
-      screen.getByRole("button", { name: "planGate.action" }),
-    ).toBeInTheDocument();
+      gateCalls.filter(
+        ([, values]) => values !== undefined && "plan" in values,
+      ),
+    ).toEqual([]);
   });
 
   it("basic + admin: plan-gate banner keeps its copy and drops the upgrade button", async () => {
@@ -286,11 +367,9 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
     render(<ConnectorsPage />);
 
     // Scoped to the banner: the empty state below renders the same string.
-    const banner = (await screen.findByText("planGate.title")).parentElement!;
-    expect(banner.textContent).toContain("planGate.description");
-    expect(
-      screen.queryByRole("button", { name: "planGate.action" }),
-    ).toBeNull();
+    const banner = (await screen.findByText("plan.newTitle")).parentElement!;
+    expect(banner.textContent).toContain("plan.newDescription");
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
   });
 
   it("basic + owner, plan_page off: plan-gate banner drops the upgrade button", async () => {
@@ -302,11 +381,9 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
     render(<ConnectorsPage />);
 
     // Scoped to the banner: the empty state below renders the same string.
-    const banner = (await screen.findByText("planGate.title")).parentElement!;
-    expect(banner.textContent).toContain("planGate.description");
-    expect(
-      screen.queryByRole("button", { name: "planGate.action" }),
-    ).toBeNull();
+    const banner = (await screen.findByText("plan.newTitle")).parentElement!;
+    expect(banner.textContent).toContain("plan.newDescription");
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
   });
 
   it("basic + owner, /system/info pending: plan-gate banner drops the upgrade button", async () => {
@@ -316,10 +393,8 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
 
     render(<ConnectorsPage />);
 
-    expect(await screen.findByText("planGate.title")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "planGate.action" }),
-    ).toBeNull();
+    expect(await screen.findByText("plan.newTitle")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
   });
 
   it("basic + ?slack_install callback: dialog stays closed, upsell shown, no POST, handle stripped", async () => {
@@ -331,7 +406,7 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
 
     render(<ConnectorsPage />);
 
-    expect(await screen.findByText("planGate.title")).toBeInTheDocument();
+    expect(await screen.findByText("plan.newTitle")).toBeInTheDocument();
     // The callback never reaches the pending-install lookup or the dialog.
     await waitFor(() =>
       expect(mockRouterReplace).toHaveBeenCalledWith(
@@ -344,9 +419,12 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
     ).not.toBeInTheDocument();
     expect(mockCreateConnector).not.toHaveBeenCalled();
     // Upsell is surfaced as a toast too (the callback landed on this page).
-    expect(mockToast).toHaveBeenCalledWith(
-      expect.objectContaining({ title: "planGate.title" }),
-    );
+    // #1646 P3: featureGateToast — the banner's create-scope copy, no
+    // destructive variant for a plan gate, and no action.
+    expect(mockToast).toHaveBeenCalledWith({
+      title: "plan.newTitle",
+      description: "plan.newDescription",
+    });
   });
 
   it("promax + ?slack_install callback: create dialog opens as before", async () => {
@@ -369,7 +447,7 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
     render(<ConnectorsPage />);
 
     expect(await screen.findByText("connectProvider")).toBeInTheDocument();
-    expect(screen.queryByText("planGate.title")).not.toBeInTheDocument();
+    expect(screen.queryByText("plan.newTitle")).not.toBeInTheDocument();
     // Picker CTA and the empty-state action are both live on XL.
     for (const cta of screen.getAllByRole("button", {
       name: /connectProvider/,
@@ -386,7 +464,7 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
     render(<ConnectorsPage />);
 
     expect(await screen.findByText("connectProvider")).toBeInTheDocument();
-    expect(screen.queryByText("planGate.title")).not.toBeInTheDocument();
+    expect(screen.queryByText("plan.newTitle")).not.toBeInTheDocument();
     for (const cta of screen.getAllByRole("button", {
       name: /connectProvider/,
     })) {
@@ -406,7 +484,7 @@ describe("ConnectorsPage XL-only create gate (#1551)", () => {
     expect(await screen.findByText("emptyTitle")).toBeInTheDocument();
     // Neither the upsell banner nor the upsell toast may appear while the
     // matrix is unresolved, and the empty state keeps its neutral copy.
-    expect(screen.queryByText("planGate.title")).not.toBeInTheDocument();
+    expect(screen.queryByText("plan.newTitle")).not.toBeInTheDocument();
     expect(screen.getByText("emptyDesc")).toBeInTheDocument();
     expect(mockToast).not.toHaveBeenCalled();
     // Create controls stay withheld until the answer is known.
@@ -1621,7 +1699,9 @@ describe("ConnectorsPage RBAC gate", () => {
     expect(screen.getByText("createTitle")).toBeInTheDocument();
   });
 
-  // #1644 C7: the plan and seat-cap refusals are read from err.gate.
+  // #1644 C7: the plan and seat-cap refusals are read from err.gate. #1646:
+  // any gate renders in the dialog as the inline FeatureGateNotice
+  // (useErrorGate), in the gate.* copy; a non-gate error keeps its text.
   function gateRefusal(
     status: number,
     error: string,
@@ -1637,8 +1717,8 @@ describe("ConnectorsPage RBAC gate", () => {
     });
   }
 
-  async function submitCreate() {
-    setWorkspace("admin");
+  async function submitCreate(role = "admin") {
+    setWorkspace(role);
     armInstall();
     mockGetContexts.mockResolvedValue({
       contexts: [{ id: "ctx-1", name: "existing", display_name: "Existing" }],
@@ -1669,10 +1749,19 @@ describe("ConnectorsPage RBAC gate", () => {
     );
     await submitCreate();
 
-    expect(
-      await screen.findByText('connectorSeatsFull {"current":3,"limit":3}'),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("quota.title")).toBeInTheDocument();
+    expect(screen.getByText("quota.description")).toBeInTheDocument();
+    expect(gateCalls).toContainEqual([
+      "quota.description",
+      expect.objectContaining({
+        current: 3,
+        limit: 3,
+        feature: "features.connectors.singular",
+      }),
+    ]);
     expect(screen.queryByText(serverText)).toBeNull();
+    // The dialog stays open with the notice in it.
+    expect(screen.getByText("createTitle")).toBeInTheDocument();
   });
 
   it("renders the seat cap from a server predating #1644 the same way (#1644)", async () => {
@@ -1686,9 +1775,13 @@ describe("ConnectorsPage RBAC gate", () => {
     );
     await submitCreate();
 
-    expect(
-      await screen.findByText('connectorSeatsFull {"current":3,"limit":3}'),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("quota.title")).toBeInTheDocument();
+    // No current_plan on the legacy wire: the tier-less quota sentence.
+    expect(screen.getByText("quota.descriptionNoPlan")).toBeInTheDocument();
+    expect(gateCalls).toContainEqual([
+      "quota.descriptionNoPlan",
+      expect.objectContaining({ current: 3, limit: 3 }),
+    ]);
   });
 
   it("renders the plan refusal with the required tier's label (#1644)", async () => {
@@ -1703,9 +1796,62 @@ describe("ConnectorsPage RBAC gate", () => {
     );
     await submitCreate();
 
+    expect(await screen.findByText("plan.newTitle")).toBeInTheDocument();
+    expect(gateCalls).toContainEqual([
+      "plan.newDescription",
+      expect.objectContaining({
+        plan: "XL",
+        feature: "features.connectors.plural",
+      }),
+    ]);
+    // An admin cannot reach the Plan page: no CTA inside the dialog.
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
+  });
+
+  it("an owner with a Plan page gets the upgrade CTA on a plan refusal (#1646)", async () => {
+    mockUseSystemFeatures.mockReturnValue({ plan_page: true });
+    mockCreateConnector.mockRejectedValue(
+      gateRefusal(403, "FEAT-001", "Feature 'connectors' not available.", {
+        gate: "plan",
+        feature: "connectors",
+        required_plan: "promax",
+        required_plan_display: "XL",
+        current_plan: "basic",
+      }),
+    );
+    await submitCreate("owner");
+
+    fireEvent.click(await screen.findByRole("button", { name: "plan.action" }));
+    expect(mockRouterPush).toHaveBeenCalledWith("/workspace/settings/plan");
+  });
+
+  it("a refusal does not follow into the next install's dialog (#1646)", async () => {
+    mockCreateConnector.mockRejectedValue(
+      gateRefusal(403, "FEAT-001", "Feature 'connectors' not available.", {
+        gate: "plan",
+        feature: "connectors",
+        required_plan: "promax",
+        required_plan_display: "XL",
+        current_plan: "basic",
+      }),
+    );
+    await submitCreate();
+    expect(await screen.findByText("plan.newTitle")).toBeInTheDocument();
+
+    // Cancel, and a second OAuth callback lands on the same page: the dialog
+    // reopens for the new install, without the first one's refusal.
+    mockSearchParamsGet.mockImplementation((key: string) =>
+      key === "slack_install" ? "handle-2" : null,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "cancel" }));
+
+    await waitFor(() =>
+      expect(mockGetSlackPendingInstall).toHaveBeenCalledWith("handle-2"),
+    );
     expect(
-      await screen.findByText('connectorPlanRequired {"plan":"XL"}'),
-    ).toBeInTheDocument();
+      await screen.findByRole("button", { name: "createConnector" }),
+    ).toBeEnabled();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
   });
 
   it("a plan refusal that names no tier takes the matrix's tier and display name (#1645)", async () => {
@@ -1726,13 +1872,20 @@ describe("ConnectorsPage RBAC gate", () => {
     );
     await submitCreate();
 
-    expect(
-      await screen.findByText('connectorPlanRequired {"plan":"Enterprise"}'),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("plan.newTitle")).toBeInTheDocument();
+    expect(gateCalls).toContainEqual([
+      "plan.newTitle",
+      expect.objectContaining({
+        plan: "Enterprise",
+        feature: "features.connectors.plural",
+      }),
+    ]);
     expect(screen.queryByText(serverText)).toBeNull();
   });
 
   it("does not render another quota with counts as the connector seat cap (#1644)", async () => {
+    // #1646: it renders as the quota it is — the memory limit — never as
+    // the connector cap, and never as the server's English.
     const serverText = "Daily memory limit reached (100/100).";
     mockCreateConnector.mockRejectedValue(
       gateRefusal(429, "QUOTA-001", serverText, {
@@ -1747,8 +1900,119 @@ describe("ConnectorsPage RBAC gate", () => {
     );
     await submitCreate();
 
-    expect(await screen.findByText(serverText)).toBeInTheDocument();
-    expect(screen.queryByText(/connectorSeatsFull/)).toBeNull();
+    expect(await screen.findByText("quota.title")).toBeInTheDocument();
+    expect(gateCalls).toContainEqual([
+      "quota.title",
+      expect.objectContaining({ feature: "features.memories.singular" }),
+    ]);
+    expect(
+      gateCalls.some(
+        ([, values]) => values?.feature === "features.connectors.singular",
+      ),
+    ).toBe(false);
+    expect(screen.queryByText(serverText)).toBeNull();
+  });
+
+  // ── #1646 (addendum to #1644): the manual-bind create path ───────────
+
+  async function submitManualBind() {
+    setWorkspace("admin");
+    mockListAvailableWorkerApps.mockResolvedValue([
+      { platform: "slack", app_key: "sales", display_name: "Sales Slack App" },
+    ]);
+    render(<ConnectorsPage />);
+    await screen.findByText("manualBindTitle");
+    fireEvent.change(screen.getByLabelText("manualTeamId"), {
+      target: { value: "T01" },
+    });
+    fireEvent.change(screen.getByLabelText("manualBotToken"), {
+      target: { value: "xoxb-install-token" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "manualBind" }));
+  }
+
+  it("manual bind: the connector seat cap is a gate toast, not the server's English (#1646)", async () => {
+    const serverText =
+      "Connector seat limit reached. Your plan allows 3 connector(s).";
+    mockCreateConnector.mockRejectedValue(
+      gateRefusal(403, "CONNECTOR-001", serverText, {
+        gate: "quota",
+        quota_type: "connectors",
+        current: 3,
+        limit: 3,
+        required_plan: null,
+        required_plan_display: null,
+        current_plan: "promax",
+        feature: "connectors",
+      }),
+    );
+
+    await submitManualBind();
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "quota.title",
+        description: "quota.description",
+        variant: "destructive",
+      }),
+    );
+    expect(gateCalls).toContainEqual([
+      "quota.description",
+      expect.objectContaining({ current: 3, limit: 3 }),
+    ]);
+    expect(screen.queryByText(serverText)).toBeNull();
+  });
+
+  it("manual bind: a plan refusal toasts the create-scope plan copy with the matrix's tier (#1646)", async () => {
+    mockTiers = [
+      { name: "basic", display_name: "M", connectors: false },
+      { name: "enterprise", display_name: "Enterprise", connectors: true },
+    ] as unknown as PlanTierFeature[];
+    mockCreateConnector.mockRejectedValue(
+      gateRefusal(403, "FEAT-001", "Feature 'connectors' not available.", {
+        gate: "plan",
+        feature: "connectors",
+        required_plan: null,
+        required_plan_display: null,
+        current_plan: "basic",
+      }),
+    );
+
+    await submitManualBind();
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "plan.newTitle",
+        description: "plan.newDescription",
+      }),
+    );
+    expect(gateCalls).toContainEqual([
+      "plan.newTitle",
+      expect.objectContaining({
+        plan: "Enterprise",
+        feature: "features.connectors.plural",
+      }),
+    ]);
+    expect(
+      screen.queryByText("Feature 'connectors' not available."),
+    ).toBeNull();
+  });
+
+  it("manual bind: a non-gate error keeps the server's text in the form (#1646)", async () => {
+    mockCreateConnector.mockRejectedValue(
+      new ApiError({
+        error: "VAL-001",
+        message: "bot token rejected by Slack",
+        status: 400,
+      }),
+    );
+
+    await submitManualBind();
+
+    expect(
+      await screen.findByText("bot token rejected by Slack"),
+    ).toBeInTheDocument();
+    expect(mockToast).not.toHaveBeenCalled();
   });
 
   // ── #1471: memory_link_template is now writable from the UI ──────────

@@ -11,9 +11,11 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useErrorGate } from "@/hooks/useErrorGate";
 import { useToast } from "@/hooks/use-toast";
 import { createWorkspace, Workspace } from "@/lib/api/workspaces";
 import { ApiError } from "@/lib/api/base";
+import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import {
   Card,
   CardHeader,
@@ -45,6 +47,10 @@ export function WorkspaceCreateForm({
   const [description, setDescription] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // #1646 Q6: the workspace-cap refusal, lifted to a gate descriptor and
+  // rendered by the notice above the form instead of a per-page string.
+  const [capRefusal, setCapRefusal] = useState<unknown>(null);
+  const capGate = useErrorGate(capRefusal, "workspaces");
 
   // Issue #675 (epic #674) sub-A: there is no pre-submit cap fetch or
   // hard-block UI on this form. The over-cap path surfaces the backend's
@@ -59,6 +65,7 @@ export function WorkspaceCreateForm({
     e.preventDefault();
     setLoading(true);
     setError(null);
+    setCapRefusal(null);
 
     try {
       const workspace = await createWorkspace({
@@ -89,30 +96,16 @@ export function WorkspaceCreateForm({
       const gate = err instanceof ApiError ? err.gate : undefined;
       if (
         gate?.state === "quota" &&
-        gate.quotaType === "workspace_limit_reached" &&
-        gate.current !== undefined &&
-        gate.limit !== undefined
+        gate.quotaType === "workspace_limit_reached"
       ) {
         // #680 / #1644: the workspace cap's live counts, read from the gate
         // normalised at the ApiError choke point (an older server's
-        // owned_count / cap are aliased onto current / limit there), so we
-        // render a localized message instead of the verbatim English string.
-        // Keyed off the quota type so other quota refusals don't match; a
-        // payload without both counts falls through to the branch below
-        // instead of rendering `undefined` in the i18n placeholders.
-        setError(
-          t("workspaceLimitReachedDetailed", {
-            owned: gate.current,
-            limit: gate.limit,
-          }),
-        );
-      } else if (errorMessage.includes("Workspace limit reached")) {
-        // Fallback: surface the backend's authoritative message verbatim when
-        // structured details are absent. Live ``owned N (cap: M)`` data still
-        // beats a cached frontend cap; ja users see English in this path only.
-        // Kept on purpose as the rolling-deploy safety net for a body that
-        // reaches this client un-normalised; #1646's last commit removes it.
-        setError(errorMessage);
+        // owned_count / cap are aliased onto current / limit there).
+        // #1646 Q6: the gate notice renders it in the reader's language —
+        // with the counts when the payload carries both, and the count-free
+        // quota sentence when it does not. Keyed off the quota type so other
+        // quota refusals don't match.
+        setCapRefusal(err);
       } else if (
         errorMessage.includes("validation") ||
         errorMessage.includes("Invalid")
@@ -150,6 +143,7 @@ export function WorkspaceCreateForm({
           </div>
         </CardHeader>
         <CardContent>
+          {capGate && <FeatureGateNotice gate={capGate} />}
           <form onSubmit={handleSubmit} className="space-y-6">
             {error && (
               <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg text-red-700 dark:text-red-400">

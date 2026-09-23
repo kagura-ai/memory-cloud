@@ -25,6 +25,11 @@ import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import {
+  FeatureGateNotice,
+  featureGateText,
+  featureGateToast,
+} from "@/components/common/FeatureGateNotice";
+import {
   InlineSpinner,
   TableLoadingState,
 } from "@/components/common/LoadingState";
@@ -73,6 +78,7 @@ import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useCanUpgrade } from "@/hooks/useCanUpgrade";
+import { useErrorGate } from "@/hooks/useErrorGate";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
 import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
@@ -192,6 +198,9 @@ function toResourceId(seed: string): string {
 export default function ConnectorsPage() {
   const t = useTranslations("connectors");
   const tCommon = useTranslations("common");
+  // #1646: every refusal on this page — banner, toasts, the empty state and
+  // the create errors — reads the one gate.* namespace.
+  const tGate = useTranslations("gate");
   const locale = useLocale();
   const { toast } = useToast();
   const { isCopied, copyToTarget } = useCopyFeedback();
@@ -216,18 +225,17 @@ export default function ConnectorsPage() {
   // name. #1645: read through the gate descriptor, which also names the
   // required tier from the matrix. `canCreate` is its tri-state view for the
   // create controls below — `null` while resolving: controls stay disabled
-  // and the upsell is only rendered on an explicit `false`.
+  // and the upsell is only rendered on an explicit `false`. #1646: the
+  // notice, toast and empty-state copy render the descriptor itself, so a
+  // plan no tier lifts gets the tier-less copy rather than none.
   const gate = useFeatureGate("connectors");
   // #1645: the same shared matrix (module cache — no extra fetch), so a
   // refusal that names no tier gets the pre-check's tier and labels.
   const tiers = usePlanTierMatrix();
   const canCreate = gate.state === "pending" ? null : gate.state === "allowed";
-  // The plan-gate copy names a tier, so it renders only when there is one to
-  // name: no served tier having the feature is the tier-less copy #1646 adds.
-  const planLabel = gate.state === "plan" ? gate.planLabel : undefined;
-  // #1643: the plan-gate copy always renders; only the button needs a Plan
-  // page this member can actually reach.
-  const canUpgrade = useCanUpgrade();
+  // The RAW upgrade answer for a refusal lifted inside a `catch` (hooks cannot
+  // run there) — the same input useErrorGate passes; gateFromFacts narrows it.
+  const canUpgrade = useCanUpgrade() === true;
 
   // #1426: managed (hosted SaaS) mode. When true the shared worker/bridge
   // provides the pre-compile LLM and only OAuth is offered, so hide the BYO
@@ -283,6 +291,10 @@ export default function ConnectorsPage() {
   const [selectedContextId, setSelectedContextId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  // #1646: a create refusal that carries a gate (plan, the connector seat
+  // cap, any quota) — rendered in the dialog as the inline notice.
+  const [createRefusal, setCreateRefusal] = useState<ApiError | null>(null);
+  const createGate = useErrorGate(createRefusal, "connectors");
 
   // #890: PII guardrail config for the create form. Defaults scrub on by
   // default so an admin who touches nothing still ships a safe config.
@@ -410,20 +422,17 @@ export default function ConnectorsPage() {
     if (!installHandle) return;
     if (!allowed) return;
     // #1560: hold the handle while the plan gate is still resolving (or the
-    // tier matrix is unavailable — the hook stays `null` on a persistent
+    // tier matrix is unavailable — the gate stays `pending` on a persistent
     // fetch failure) — neither open the form nor strip the one-time handle
     // until the answer is actually known.
-    if (canCreate === null) return;
+    if (gate.state === "pending") return;
     // #1551: below XL the create form must never open — a stale or crafted
     // callback would otherwise show an enabled form that only fails at the
     // backend 403. Surface the upsell and strip the one-time handle instead.
+    // #1646: the toast is the banner's own copy (featureGateToast).
     if (!canCreate) {
-      if (planLabel !== undefined) {
-        toast({
-          title: t("planGate.title", { plan: planLabel }),
-          description: t("planGate.description", { plan: planLabel }),
-        });
-      }
+      const toastArgs = featureGateToast(gate, tGate, "create");
+      if (toastArgs) toast(toastArgs);
       router.replace("/workspace/integrations/connectors");
       return;
     }
@@ -717,6 +726,7 @@ export default function ConnectorsPage() {
   const closeCreateDialog = useCallback(() => {
     setPending(null);
     setCreateError(null);
+    setCreateRefusal(null);
     // Drop the one-time handle from the URL so a refresh doesn't re-trigger.
     router.replace("/workspace/integrations/connectors");
   }, [router]);
@@ -728,6 +738,7 @@ export default function ConnectorsPage() {
     if (!canCreate) return;
     setSubmitting(true);
     setCreateError(null);
+    setCreateRefusal(null);
     try {
       // #890: build a valid pii_guardrail_config. When disabled, send an
       // empty detectors list (backend only requires non-empty when enabled);
@@ -761,31 +772,12 @@ export default function ConnectorsPage() {
       router.replace("/workspace/integrations/connectors");
       await reload();
     } catch (err) {
-      // #1644: the plan and seat-cap refusals are read from the normalised
-      // gate and rendered in the reader's language; anything else keeps the
-      // server's own text. The dialog error carries no CTA of its own.
-      const facts = err instanceof ApiError ? err.gate : undefined;
-      const gate = gateFromFacts(facts, {
-        fallbackKey: "connectors",
-        canUpgrade: false,
-        locale,
-        tiers,
-      });
-      if (
-        gate?.state === "plan" &&
-        gate.feature === "connectors" &&
-        gate.planLabel
-      ) {
-        setCreateError(t("connectorPlanRequired", { plan: gate.planLabel }));
-      } else if (
-        gate?.state === "quota" &&
-        facts?.quotaType === "connectors" &&
-        gate.current !== undefined &&
-        gate.limit !== undefined
-      ) {
-        setCreateError(
-          t("connectorSeatsFull", { current: gate.current, limit: gate.limit }),
-        );
+      // #1644: a refusal is read from the normalised gate and rendered in the
+      // reader's language; anything else keeps the server's own text. #1646:
+      // any gate (not just the plan and connector seat-cap pair) renders as
+      // the inline notice through useErrorGate, like every create error.
+      if (err instanceof ApiError && err.gate) {
+        setCreateRefusal(err);
       } else {
         setCreateError(err instanceof Error ? err.message : String(err));
       }
@@ -805,10 +797,8 @@ export default function ConnectorsPage() {
     piiRedaction,
     piiFailClosed,
     locale,
-    tiers,
     router,
     reload,
-    t,
   ]);
 
   const handleDelete = useCallback(async () => {
@@ -921,19 +911,43 @@ export default function ConnectorsPage() {
         setCreated(result);
         await reload();
       } catch (err) {
-        setManualError(err instanceof Error ? err.message : String(err));
+        // #1646 (addendum to #1644): a gate refusal — the connector seat cap
+        // above all — is told in the reader's language with the gate copy
+        // the banner uses, not the server's English; anything else keeps the
+        // server's own text in the form.
+        const refusal =
+          err instanceof ApiError
+            ? gateFromFacts(err.gate, {
+                fallbackKey: "connectors",
+                canUpgrade,
+                locale,
+                tiers,
+              })
+            : null;
+        const toastArgs = refusal
+          ? featureGateToast(refusal, tGate, "create")
+          : null;
+        if (toastArgs) {
+          toast(toastArgs);
+        } else {
+          setManualError(err instanceof Error ? err.message : String(err));
+        }
       } finally {
         setManualSubmitting(false);
       }
     },
     [
       availableApps,
+      canUpgrade,
       locale,
       manualAppKey,
       manualBotToken,
       manualTeamId,
       reload,
       t,
+      tGate,
+      tiers,
+      toast,
     ],
   );
 
@@ -1065,27 +1079,9 @@ export default function ConnectorsPage() {
     <PageContainer>
       <PageHeader title={t("title")} description={t("description")} />
 
-      {planLabel !== undefined && (
-        <Alert className="mb-4">
-          <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
-            <span>
-              <span className="font-medium">
-                {t("planGate.title", { plan: planLabel })}
-              </span>{" "}
-              {t("planGate.description", { plan: planLabel })}
-            </span>
-            {canUpgrade === true && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => router.push("/workspace/settings/plan")}
-              >
-                {t("planGate.action", { plan: planLabel })}
-              </Button>
-            )}
-          </AlertDescription>
-        </Alert>
-      )}
+      {/* #1646: scope "create" — existing connectors keep ingesting (#1551).
+          Pending and allowed render nothing. */}
+      <FeatureGateNotice gate={gate} scope="create" />
 
       {/* #1389: provider picker rendered from the CONNECTOR_PROVIDERS
           descriptor — Slack live, Discord/Teams disabled coming-soon — so
@@ -1207,13 +1203,14 @@ export default function ConnectorsPage() {
       ) : connectors.length === 0 ? (
         // #1551: below XL the banner above already carries the upgrade CTA —
         // the empty state must not offer a Slack install that would 403.
+        // #1646: it is still the empty-list state, not a second notice; only
+        // its description borrows the gate copy.
         <EmptyState
           icon={Plug}
           title={t("emptyTitle")}
           description={
-            planLabel !== undefined
-              ? t("planGate.description", { plan: planLabel })
-              : t("emptyDesc")
+            featureGateText(gate, tGate, "create")?.description ??
+            t("emptyDesc")
           }
           actionLabel={
             canCreate ? t("connectProvider", { name: "Slack" }) : undefined
@@ -1745,6 +1742,13 @@ export default function ConnectorsPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            {createGate && (
+              <FeatureGateNotice
+                gate={createGate}
+                scope="create"
+                className="mb-0"
+              />
+            )}
             {createError && (
               <Alert variant="destructive">
                 <AlertDescription>{createError}</AlertDescription>

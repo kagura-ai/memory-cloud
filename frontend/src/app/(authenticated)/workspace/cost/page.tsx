@@ -23,7 +23,7 @@
 
 import { useCallback } from "react";
 import { useTranslations } from "next-intl";
-import { FeatureDisabledNotice } from "@/components/common/FeatureDisabledNotice";
+import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
@@ -33,7 +33,8 @@ import {
   type CostDashboardFetchParams,
 } from "@/components/cost/CostDashboard";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { useFeatureGate } from "@/hooks/useFeatureGate";
+import { isBlocked } from "@/lib/gates/featureGates";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { fetchWorkspaceCostAggregation } from "@/lib/api";
 
@@ -43,7 +44,12 @@ export default function WorkspaceCostPage() {
   const { currentWorkspace, currentWorkspaceId, loading } = useWorkspace();
   // Issue #1167: gated behind the backend ENABLE_BYOK flag (like the plan
   // page #1145) — the workspace cost API returns 404 when BYOK is off.
-  const systemFeatures = useSystemFeatures();
+  // Issue #1571: and behind ENABLE_COST_DISPLAY (a flat-price hosted
+  // deployment hides money from workspace users — the API 404s, the nav
+  // entry is hidden). #1646 D1/D2: both flags are the one `cost_dashboard`
+  // gate — `pending` until /system/info resolves, `deployment` when either
+  // is off (fail closed).
+  const gate = useFeatureGate("cost_dashboard");
 
   const allowed = hasWorkspaceRole(
     currentWorkspace?.current_user_role,
@@ -62,28 +68,16 @@ export default function WorkspaceCostPage() {
     [currentWorkspaceId],
   );
 
-  // Issue #1167: wait for the feature flags, then render a "not available"
-  // notice when byok is off (the sidebar entry is hidden too, so this only
-  // fires on direct navigation).
-  if (systemFeatures === null) {
+  // Wait for the feature flags, then render the deployment notice when the
+  // dashboard is off here (the sidebar entry is hidden too, so this only
+  // fires on direct navigation). One notice for both flags (C-19); a
+  // deployment gate never carries an upgrade CTA.
+  if (gate.state === "pending") {
     return <SpinnerLoading size="lg" message={tCommon("loading")} />;
   }
-  if (!systemFeatures.byok) {
+  if (isBlocked(gate)) {
     return (
-      <FeatureDisabledNotice
-        title={t("title")}
-        message={t("featureDisabled")}
-      />
-    );
-  }
-  // Issue #1571: a flat-price hosted deployment hides money from workspace
-  // users (ENABLE_COST_DISPLAY=false — the API 404s, the nav entry is hidden).
-  if (!systemFeatures.cost_display) {
-    return (
-      <FeatureDisabledNotice
-        title={t("title")}
-        message={t("costDisplayDisabled")}
-      />
+      <FeatureGateNotice variant="page" gate={gate} pageTitle={t("title")} />
     );
   }
 

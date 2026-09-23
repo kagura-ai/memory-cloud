@@ -175,6 +175,13 @@ beforeEach(() => {
 
 afterEach(() => cleanup());
 
+/**
+ * #1646 (Q1): the cap's one notice — the `gate.quota.*` keys, echoed with
+ * their arguments by this file's mock.
+ */
+const CAP_NOTICE = /^quota\.title:/;
+const CAP_DETAIL = /^quota\.description:/;
+
 /** The header create control, which is the one the report was about. */
 async function newContextButton() {
   return await screen.findByRole("button", { name: /newContext/i });
@@ -221,10 +228,10 @@ describe("New Context control", () => {
   });
 
   it("stays CLICKABLE at the cap, so the quota explanation is reachable", async () => {
-    // The trigger must not be disabled: the only route to the quota dialog is
-    // a menu item inside this dropdown, so disabling the trigger is what made
-    // that dialog dead code. Creation is still blocked — by the item handlers,
-    // which open the dialog instead of the create form.
+    // The trigger must not be disabled: it keeps the two create items
+    // discoverable. Creation is still blocked — the items are disabled at the
+    // cap and point at the cap notice, which is on screen with no
+    // interaction at all (#1646 Q1; it replaced the quota dialog).
     setup({ plan: "pro", maxContexts: 20, contextCount: 20, hasKey: true });
     render(<ContextsPage />);
     await waitFor(async () =>
@@ -237,14 +244,14 @@ describe("New Context control", () => {
     // is the whole of #1487.
     setup({ plan: "pro", maxContexts: 20, contextCount: 20, hasKey: true });
     render(<ContextsPage />);
-    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
+    expect(await screen.findByText(CAP_NOTICE)).toBeInTheDocument();
   });
 
   it("does not warn about the cap when there is room", async () => {
     setup({ plan: "pro", maxContexts: 20, contextCount: 3, hasKey: true });
     render(<ContextsPage />);
     await waitFor(async () => expect(await newContextButton()).toBeTruthy());
-    expect(screen.queryByText(/quotaReachedDetail/)).not.toBeInTheDocument();
+    expect(screen.queryByText(CAP_NOTICE)).not.toBeInTheDocument();
   });
 
   it("is enabled for a free workspace whose cap was raised by config", async () => {
@@ -270,7 +277,7 @@ describe("New Context control", () => {
     render(<ContextsPage />);
     // Seeing 1 of 20 must still register as "at the cap" — otherwise the UI
     // promises a create the server rejects.
-    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
+    expect(await screen.findByText(CAP_NOTICE)).toBeInTheDocument();
   });
 
   it("a cap of 0 (a tier that excludes contexts) still blocks, as before (#1645)", async () => {
@@ -279,7 +286,9 @@ describe("New Context control", () => {
     // nothing a user sees.
     setup({ plan: "free", maxContexts: 0, contextCount: 0, hasKey: true });
     render(<ContextsPage />);
-    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
+    expect(await screen.findByText(CAP_NOTICE)).toBeInTheDocument();
+    // …and the empty state's Create with it.
+    expect(screen.getByRole("button", { name: "create" })).toBeDisabled();
   });
 
   it("does not block when the server did not send a cap", async () => {
@@ -299,24 +308,33 @@ describe("New Context control", () => {
     setup({ plan: "pro", maxContexts: 20, contextCount: 20, hasKey: true });
     render(<ContextsPage />);
 
-    const banner = await screen.findByText(/quotaReachedDetail/);
-    expect(banner.textContent).toContain('"plan":"pro"');
-    expect(banner.textContent).toContain('"limit":20');
+    // #1646: by the tier's resolved label (pro is L on this deployment),
+    // never the raw plan key the old banner interpolated.
+    const notice = await screen.findByText(CAP_DETAIL);
+    expect(notice.textContent).toContain('"currentPlan":"L"');
+    expect(notice.textContent).toContain('"limit":20');
+    expect(notice.textContent).not.toContain('"pro"');
   });
 
   it("states a basic workspace's own cap too", async () => {
     setup({ plan: "basic", maxContexts: 3, contextCount: 3, hasKey: true });
     render(<ContextsPage />);
 
-    const banner = await screen.findByText(/quotaReachedDetail/);
-    expect(banner.textContent).toContain('"plan":"basic"');
-    expect(banner.textContent).toContain('"limit":3');
+    const notice = await screen.findByText(CAP_DETAIL);
+    expect(notice.textContent).toContain('"currentPlan":"M"');
+    expect(notice.textContent).toContain('"limit":3');
   });
 });
 
 // #1645: one gate — the tier matrix's `shared_contexts` — decides the shared
 // option in both create dialogs, instead of 12 literal / ordinal reads of the
-// plan name.
+// plan name. #1646: ContextPrivacyChoice renders it with the gate.* copy, so
+// the badge is `plan.badge`, the line under the option `plan.description` and
+// the CTA `plan.action` (this file's mock echoes the key and its arguments).
+const BADGE = /^plan\.badge/;
+const REFUSAL = /^plan\.description:/;
+const CTA = /^plan\.action/;
+
 describe("Shared option in the create dialog (#1645)", () => {
   async function openAdvancedCreate() {
     // An empty workspace offers the Advanced create dialog directly.
@@ -338,9 +356,9 @@ describe("Shared option in the create dialog (#1645)", () => {
 
     const radio = await openAdvancedCreate();
     expect(radio).toBeDisabled();
-    expect(screen.queryByText("upgradeToPro")).toBeNull();
+    expect(screen.queryByText(REFUSAL)).toBeNull();
     expect(screen.queryByText("teamMembersAccess")).toBeNull();
-    expect(screen.queryByText("proPlan")).toBeNull();
+    expect(screen.queryByText(BADGE)).toBeNull();
   });
 
   it("a tier without shared contexts: inert radio, badge and upsell copy", async () => {
@@ -349,8 +367,12 @@ describe("Shared option in the create dialog (#1645)", () => {
 
     const radio = await openAdvancedCreate();
     expect(radio).toBeDisabled();
-    expect(screen.getByText("upgradeToPro")).toBeInTheDocument();
-    expect(screen.getByText("proPlan")).toBeInTheDocument();
+    expect(screen.getByText(REFUSAL)).toBeInTheDocument();
+    expect(screen.getByText(BADGE)).toBeInTheDocument();
+    // The tier that lifts it, by its resolved label; the radio is described
+    // by the refusal.
+    expect(screen.getByText(BADGE).textContent).toContain('"plan":"L"');
+    expect(radio).toHaveAccessibleDescription(REFUSAL);
   });
 
   it("a tier with shared contexts: the radio works", async () => {
@@ -364,7 +386,7 @@ describe("Shared option in the create dialog (#1645)", () => {
     expect(radio).toBeChecked();
   });
 
-  it("no served tier has shared contexts: the upsell copy stays, the CTA does not (#1645)", async () => {
+  it("no served tier has shared contexts: the explanation stays, the CTA does not (#1645)", async () => {
     // Even for an owner on a plan_page deployment: there is no tier to buy.
     mockFeatures = { byok: true, plan_page: true };
     mockTiers = OSS_TIERS.map((t) => ({ ...t, shared_contexts: false }));
@@ -373,10 +395,10 @@ describe("Shared option in the create dialog (#1645)", () => {
 
     const radio = await openAdvancedCreate();
     expect(radio).toBeDisabled();
-    expect(screen.getByText("upgradeToPro")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "upgradeToProCta" }),
-    ).toBeNull();
+    // No tier to name: the no-tier sentence, and no badge.
+    expect(screen.getByText(/^plan\.descriptionNoTier/)).toBeInTheDocument();
+    expect(screen.queryByText(BADGE)).toBeNull();
+    expect(screen.queryByRole("button", { name: CTA })).toBeNull();
   });
 
   it("follows the matrix, not the tier name: an operator gives basic shared contexts", async () => {
@@ -388,7 +410,70 @@ describe("Shared option in the create dialog (#1645)", () => {
 
     const radio = await openAdvancedCreate();
     expect(radio).not.toBeDisabled();
-    expect(screen.queryByText("proPlan")).toBeNull();
+    expect(screen.queryByText(BADGE)).toBeNull();
+  });
+});
+
+// #1646: both create dialogs render ONE ContextPrivacyChoice — the shared
+// option's refusal is the same gate copy in each; only the private option's
+// helper line is the dialog's own.
+describe("Privacy choice in both create dialogs (#1646)", () => {
+  function sharedRadio() {
+    return document.querySelector(
+      'input[type="radio"][value="shared"]',
+    ) as HTMLInputElement;
+  }
+
+  it("the advanced dialog: the gate's refusal and CTA, and its own private helper", async () => {
+    mockFeatures = { byok: true, plan_page: true };
+    setup({ plan: "basic", maxContexts: 3, contextCount: 0 });
+    render(<ContextsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "create" }));
+    expect(await screen.findByText("createDialogTitle")).toBeInTheDocument();
+
+    expect(sharedRadio()).toBeDisabled();
+    expect(screen.getByText(REFUSAL)).toBeInTheDocument();
+    expect(screen.getByText(BADGE)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: CTA })).toBeInTheDocument();
+    expect(screen.getByText("privateAvailableAllPlans")).toBeInTheDocument();
+    expect(screen.queryByText("onlyYouCanAccess")).toBeNull();
+  });
+
+  it("the quick dialog: the same refusal and CTA, and its own private helper", async () => {
+    mockFeatures = { byok: true, plan_page: true };
+    // No embedding: the amber empty state's Create opens Quick Create.
+    setup({ plan: "basic", maxContexts: 3, contextCount: 0, hasKey: false });
+    render(<ContextsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "create" }));
+    expect(await screen.findByText("quickCreateContext")).toBeInTheDocument();
+
+    expect(sharedRadio()).toBeDisabled();
+    expect(screen.getByText(REFUSAL)).toBeInTheDocument();
+    expect(screen.getByText(BADGE)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: CTA })).toBeInTheDocument();
+    expect(screen.getByText("onlyYouCanAccess")).toBeInTheDocument();
+    expect(screen.queryByText("privateAvailableAllPlans")).toBeNull();
+  });
+
+  it("the quick dialog: an admin's private option is inert with the quick helper", async () => {
+    setup({
+      plan: "pro",
+      maxContexts: 20,
+      contextCount: 0,
+      hasKey: false,
+      role: "admin",
+    });
+    render(<ContextsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "create" }));
+    expect(await screen.findByText("quickCreateContext")).toBeInTheDocument();
+
+    const priv = document.querySelector(
+      'input[type="radio"][value="private"]',
+    ) as HTMLInputElement;
+    expect(priv).toBeDisabled();
+    expect(screen.getByText("adminsCanOnlyCreateShared")).toBeInTheDocument();
+    // Admins create shared contexts: the dialog pre-selects Shared.
+    expect(sharedRadio()).toBeChecked();
   });
 });
 
@@ -435,12 +520,12 @@ describe("Shared option in the create dialog — the whole truth table (#1645)",
       expect(radio.disabled).toBe(!entitled);
       // Helper text and badge agree with the radio; pending says nothing.
       expect(screen.queryByText("teamMembersAccess") !== null).toBe(entitled);
-      expect(screen.queryByText("upgradeToPro") !== null).toBe(refused);
-      expect(screen.queryByText("proPlan") !== null).toBe(refused);
+      expect(screen.queryByText(REFUSAL) !== null).toBe(refused);
+      expect(screen.queryByText(BADGE) !== null).toBe(refused);
       // The CTA: a refusal, the owner, and a Plan page known to be on.
-      expect(
-        screen.queryByRole("button", { name: "upgradeToProCta" }) !== null,
-      ).toBe(refused && role === "owner" && i === "plan_page on");
+      expect(screen.queryByRole("button", { name: CTA }) !== null).toBe(
+        refused && role === "owner" && i === "plan_page on",
+      );
     },
   );
 });

@@ -12,12 +12,22 @@
  *   - a FEAT-001 refusal names the control, not the raw feature key, and
  *     (#1644) the tier the refusal itself names, not a hardcoded one.
  *
+ * #1646: the notice is FeatureGateNotice (inline, scope "create") and the
+ * refusal toast is featureGateToast — both read `gate.*`, so under this
+ * key-as-text translator they render e.g. "plan.newTitle:L".
+ *
  * Select is rendered natively (same idiom as the admin plans page test) so
  * the sleep-mode control can be driven — Radix Select does not respond to
  * fireEvent in happy-dom.
  */
 
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SettingsTabPanel } from "./SettingsTabPanel";
@@ -44,6 +54,12 @@ vi.mock("@/lib/api/workspaces", () => ({
 const mockToast = vi.fn();
 vi.mock("@/hooks/use-toast", () => ({
   useToast: () => ({ toast: mockToast }),
+}));
+
+// #1646: FeatureGateNotice's upgrade CTA navigates with the app router.
+const mockPush = vi.fn();
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mockPush }),
 }));
 
 // Key-as-text translator; `plan` is folded in so the label is assertable.
@@ -77,12 +93,14 @@ const REQUIRED: Record<string, [string, string]> = {
 // A test that moves a feature to another tier (or off every tier: `null`)
 // names it here; the matrix, not this form, decides the tier.
 let mockRequired: Record<string, [string, string] | null> = {};
+// #1646: what the hook's `canUpgrade` says for a plan gate that names a tier.
+let mockCanUpgrade = false;
 const gateCache = new Map<string, unknown>();
 function gateFor(feature: string) {
   const value = mockPlanFeatures[feature] ?? null;
   const required =
     feature in mockRequired ? mockRequired[feature] : REQUIRED[feature];
-  const cacheKey = `${feature}:${value}:${required}`;
+  const cacheKey = `${feature}:${value}:${required}:${mockCanUpgrade}`;
   if (!gateCache.has(cacheKey)) {
     const [requiredPlan, planLabel] = required ?? [undefined, undefined];
     gateCache.set(
@@ -96,7 +114,7 @@ function gateFor(feature: string) {
               feature,
               requiredPlan,
               planLabel,
-              canUpgrade: false,
+              canUpgrade: mockCanUpgrade && required !== null,
             },
     );
   }
@@ -218,6 +236,7 @@ beforeEach(() => {
   // M plan: neither sharing nor public access.
   mockPlanFeatures = { shared_contexts: false, public_contexts: false };
   mockRequired = {};
+  mockCanUpgrade = false;
 });
 
 // ---------- Payload holds only touched fields --------------------------------
@@ -249,7 +268,8 @@ describe("SettingsTabPanel — sharing control without shared_contexts (#1583)",
 
     const makeShared = screen.getByRole("button", { name: "makeShared" });
     expect(makeShared).toBeDisabled();
-    const notice = screen.getByText("sharedRequiresPlan:L");
+    const notice = screen.getByText("plan.newTitle:L");
+    expect(screen.getByText("plan.newDescription:L")).toBeInTheDocument();
     expect(makeShared.getAttribute("aria-describedby")).toBe(
       notice.closest("[id]")?.id,
     );
@@ -277,20 +297,49 @@ describe("SettingsTabPanel — sharing control without shared_contexts (#1583)",
     mockRequired = { shared_contexts: ["basic", "M"] };
     renderPanel(makeContext({ is_private: true }));
 
-    expect(screen.getByText("sharedRequiresPlan:M")).toBeInTheDocument();
-    expect(screen.queryByText("sharedRequiresPlan:L")).toBeNull();
+    expect(screen.getByText("plan.newTitle:M")).toBeInTheDocument();
+    expect(screen.queryByText("plan.newTitle:L")).toBeNull();
   });
 
   it("no served tier has sharing: the control stays inert, with no tier to name (#1645)", () => {
     mockRequired = { shared_contexts: null };
+    mockCanUpgrade = true;
     renderPanel(makeContext({ is_private: true }));
 
     const makeShared = screen.getByRole("button", { name: "makeShared" });
     expect(makeShared).toBeDisabled();
-    expect(screen.queryByText(/sharedRequiresPlan/)).toBeNull();
-    // No dangling reference to a notice that is not there.
-    expect(makeShared.getAttribute("aria-describedby")).toBeNull();
+    // #1646: the tier-less copy explains it; no tier is named, nothing is
+    // offered, and the control points at the notice that is there.
+    const notice = screen.getByText("plan.titleNoTier");
+    expect(screen.getByText("plan.descriptionNoTier")).toBeInTheDocument();
+    expect(screen.queryByText(/^plan\.newTitle/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /plan\.action/ })).toBeNull();
+    expect(makeShared.getAttribute("aria-describedby")).toBe(
+      notice.closest("[id]")?.id,
+    );
     expect(screen.queryByText("makeSharedFirst")).toBeNull();
+  });
+
+  it("the sharing notice keeps the id the control points at (#1646)", () => {
+    renderPanel(makeContext({ is_private: true }));
+
+    const makeShared = screen.getByRole("button", { name: "makeShared" });
+    const id = makeShared.getAttribute("aria-describedby");
+    expect(id).toBe("context-sharing-upgrade-notice");
+    expect(document.getElementById(id as string)).toContainElement(
+      screen.getByText("plan.newTitle:L"),
+    );
+  });
+
+  it("the sharing notice offers the upgrade only where the gate allows it (#1646)", () => {
+    renderPanel(makeContext({ is_private: true }));
+    expect(screen.queryByRole("button", { name: /plan\.action/ })).toBeNull();
+    cleanup();
+
+    mockCanUpgrade = true;
+    renderPanel(makeContext({ is_private: true }));
+    fireEvent.click(screen.getByRole("button", { name: "plan.action:L" }));
+    expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
   });
 
   it("pending matrix: the control waits, without an upsell", () => {
@@ -298,7 +347,7 @@ describe("SettingsTabPanel — sharing control without shared_contexts (#1583)",
     renderPanel(makeContext({ is_private: true }));
 
     expect(screen.getByRole("button", { name: "makeShared" })).toBeDisabled();
-    expect(screen.queryByText(/sharedRequiresPlan/)).toBeNull();
+    expect(screen.queryByText(/^plan\./)).toBeNull();
     expect(screen.getByText("makeSharedFirst")).toBeInTheDocument();
   });
 
@@ -306,7 +355,7 @@ describe("SettingsTabPanel — sharing control without shared_contexts (#1583)",
     mockPlanFeatures = { shared_contexts: true, public_contexts: false };
     renderPanel(makeContext({ is_private: true }));
 
-    expect(screen.queryByText(/sharedRequiresPlan/)).toBeNull();
+    expect(screen.queryByText(/^plan\./)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "makeShared" }));
     fireEvent.click(await screen.findByRole("button", { name: /saveChanges/ }));
 
@@ -330,7 +379,8 @@ describe("SettingsTabPanel — sharing control without shared_contexts (#1583)",
   it("legacy shared context: can still be made private", async () => {
     renderPanel(makeContext({ is_private: false }));
 
-    expect(screen.queryByText(/sharedRequiresPlan/)).toBeNull();
+    // The sharing notice (L); the public one (XL) is not about this control.
+    expect(screen.queryByText("plan.newTitle:L")).toBeNull();
     await makePrivateAndConfirm();
     fireEvent.click(await screen.findByRole("button", { name: /saveChanges/ }));
 
@@ -347,7 +397,7 @@ describe("SettingsTabPanel — sharing control without shared_contexts (#1583)",
     await makePrivateAndConfirm();
     const undo = await screen.findByRole("button", { name: "makeShared" });
     expect(undo).not.toBeDisabled();
-    expect(screen.queryByText(/sharedRequiresPlan/)).toBeNull();
+    expect(screen.queryByText("plan.newTitle:L")).toBeNull();
 
     fireEvent.click(undo);
     expect(
@@ -379,27 +429,42 @@ describe("SettingsTabPanel — FEAT-001 refusal names the control (#1583)", () =
     );
   }
 
+  type ToastArgs = {
+    title: string;
+    description: string;
+    variant?: string;
+    duration?: number;
+  };
+
   async function saveARename() {
     fireEvent.change(screen.getByDisplayValue("Demo Context"), {
       target: { value: "Renamed" },
     });
     fireEvent.click(await screen.findByRole("button", { name: /saveChanges/ }));
     await waitFor(() => expect(mockToast).toHaveBeenCalledTimes(1));
-    return mockToast.mock.calls[0][0] as { title: string; description: string };
+    return mockToast.mock.calls[0][0] as ToastArgs;
   }
 
+  // #1646: the toast is featureGateToast's — the card notice's own copy, at
+  // the same "create" scope (existing shared / public contexts keep working).
   it.each([
-    ["shared_contexts", "pro", "sharedRequiresPlan:L"],
-    ["public_contexts", "promax", "publicRequiresPlan:XL"],
-  ])("%s (requires %s) → %s", async (feature, requiredPlan, expected) => {
-    refuse(feature, requiredPlan);
-    renderPanel(makeContext());
+    ["shared_contexts", "pro", "L"],
+    ["public_contexts", "promax", "XL"],
+  ])(
+    "%s (requires %s) → the gate copy naming %s",
+    async (feature, requiredPlan, label) => {
+      refuse(feature, requiredPlan);
+      renderPanel(makeContext());
 
-    const toast = await saveARename();
+      const toast = await saveARename();
 
-    expect(toast.title).toBe("saveFailedTitle");
-    expect(toast.description).toBe(expected);
-  });
+      expect(toast).toEqual({
+        title: `plan.newTitle:${label}`,
+        description: `plan.newDescription:${label}`,
+        duration: 6000,
+      });
+    },
+  );
 
   it("names the tier the refusal names, not FEATURE_NOTICES' hardcoded one (#1644)", async () => {
     // A deployment that moved sharing up to the top tier: the old code
@@ -409,15 +474,77 @@ describe("SettingsTabPanel — FEAT-001 refusal names the control (#1583)", () =
 
     const toast = await saveARename();
 
-    expect(toast.description).toBe("sharedRequiresPlan:XL");
+    expect(toast.description).toBe("plan.newDescription:XL");
+  });
+
+  it("the sleep refusal (the server's sleep_mode) reads as the sleep_reports gate (#1646)", async () => {
+    // Exactly what context_service raises on a tier with no Sleep
+    // Maintenance: FEAT-001 under the server's own feature name.
+    const details = {
+      feature: "sleep_mode",
+      required_plan: "pro",
+      required_plan_display: "PRO",
+      current_plan: "basic",
+    };
+    mockUpdateContext.mockRejectedValue(
+      new ApiError({
+        error: "FEAT-001",
+        message: "Sleep Maintenance is a PRO-tier feature; upgrade your plan.",
+        status: 403,
+        details,
+        gate: normalizeGate(403, "FEAT-001", details),
+      }),
+    );
+    renderPanel(makeContext());
+
+    await changeSleepModeAndSave("full");
+    await waitFor(() => expect(mockToast).toHaveBeenCalledTimes(1));
+
+    // The whole feature, not "new ...": scope "all". The tier is the
+    // deployment's label, never the server's "PRO".
+    expect(mockToast.mock.calls[0][0]).toEqual({
+      title: "plan.title:L",
+      description: "plan.description:L",
+      duration: 6000,
+    });
+  });
+
+  it("the sleep cap (a quota refusal) keeps the server's own sentence (P-27)", async () => {
+    const details = {
+      gate: "quota",
+      quota_type: "sleep_enabled_contexts",
+      feature: "sleep_mode",
+      current: 3,
+      limit: 3,
+      required_plan: null,
+    };
+    const message =
+      "Sleep-enabled contexts quota exceeded: 4/3 in use. Contact your workspace admin to request a higher cap.";
+    mockUpdateContext.mockRejectedValue(
+      new ApiError({
+        error: "QUOTA-001",
+        message,
+        status: 429,
+        details,
+        gate: normalizeGate(429, "QUOTA-001", details),
+      }),
+    );
+    renderPanel(makeContext());
+
+    const toast = await saveARename();
+
+    expect(toast.title).toBe("saveFailedTitle");
+    expect(toast.description).toBe(message);
   });
 
   it("keeps the server text when the refusal names no tier (#1644)", async () => {
+    // The matrix has not answered: "no plan includes it" would be a guess.
     refuse("shared_contexts", null);
     renderPanel(makeContext());
 
     const toast = await saveARename();
 
+    expect(toast.title).toBe("saveFailedTitle");
     expect(toast.description).toBe(
       "Feature 'shared_contexts' not available on M plan.",
     );
@@ -435,10 +562,12 @@ describe("SettingsTabPanel — FEAT-001 refusal names the control (#1583)", () =
 
     const toast = await saveARename();
 
-    expect(toast.description).toBe("sharedRequiresPlan:Team");
+    expect(toast.description).toBe("plan.newDescription:Team");
   });
 
-  it("keeps the server text when no served tier has the feature either (#1645)", async () => {
+  it("no served tier has the feature either: the tier-less copy (#1645, #1646)", async () => {
+    // The matrix has answered and no row has sharing: say so, naming no
+    // tier, instead of the server's untranslated sentence.
     mockTiers = [
       { name: "basic", display_name: "M", shared_contexts: false },
     ] as unknown as PlanTierFeature[];
@@ -447,8 +576,25 @@ describe("SettingsTabPanel — FEAT-001 refusal names the control (#1583)", () =
 
     const toast = await saveARename();
 
+    expect(toast).toEqual({
+      title: "plan.titleNoTier",
+      description: "plan.descriptionNoTier",
+      duration: 6000,
+    });
+  });
+
+  it("a feature this client does not know keeps the server text, never the sleep copy", async () => {
+    // Only the server's `sleep_mode` lifts through the sleep_reports
+    // fallback; any other unrecognised feature is not retold as Sleep
+    // Maintenance.
+    refuse("some_future_feature", "promax");
+    renderPanel(makeContext());
+
+    const toast = await saveARename();
+
+    expect(toast.title).toBe("saveFailedTitle");
     expect(toast.description).toBe(
-      "Feature 'shared_contexts' not available on M plan.",
+      "Feature 'some_future_feature' not available on M plan.",
     );
   });
 
@@ -458,6 +604,7 @@ describe("SettingsTabPanel — FEAT-001 refusal names the control (#1583)", () =
 
     const toast = await saveARename();
 
+    expect(toast.title).toBe("saveFailedTitle");
     expect(toast.description).toBe(
       "Feature 'connectors' not available on M plan.",
     );

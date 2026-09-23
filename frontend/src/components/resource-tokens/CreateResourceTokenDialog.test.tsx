@@ -5,9 +5,12 @@
  * `GET /workspaces/{id}/plan` via the owning panel) instead of a per-tier
  * table keyed by plan name. `null` = unknown: only the per-token ceiling
  * binds client-side and the hint says so.
+ *
+ * #1646 Q5: a used-up capacity is the gate's quota `control` hint (the
+ * relative gate key under the key-echo mock), not a hand-coloured span.
  */
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CreateResourceTokenDialog } from "./CreateResourceTokenDialog";
@@ -25,6 +28,10 @@ vi.mock("@/lib/utils/clipboard", () => ({
 }));
 vi.mock("next-intl", () => ({
   useTranslations: () => (key: string) => key,
+}));
+// FeatureGateNotice routes its CTA through the app router.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn() }),
 }));
 
 const activeToken = (id: number, quota: number) => ({
@@ -71,6 +78,14 @@ const quotaInput = () =>
 const submitForm = () =>
   fireEvent.submit(quotaInput().closest("form") as HTMLFormElement);
 
+// A resource context to pick, so Create is not disabled for lack of one.
+const withResourceContext = () =>
+  mockGetContexts.mockResolvedValue({
+    contexts: [{ id: "ctx-1", name: "products", resource_id: "products" }],
+  });
+const createButton = () =>
+  screen.getByRole("button", { name: "createDialog.create" });
+
 beforeEach(() => {
   mockGetContexts.mockReset();
   mockGetContexts.mockResolvedValue({ contexts: [] });
@@ -89,13 +104,45 @@ describe("CreateResourceTokenDialog — quota bounds from the plan API (#1560)",
     expect(screen.getByText("createDialog.quotaRemaining")).toBeInTheDocument();
   });
 
-  it("says the plan is exhausted when the remaining capacity is zero", () => {
+  it("says the plan is exhausted when the remaining capacity is zero", async () => {
+    withResourceContext();
     renderDialog(20000, [activeToken(1, 10000), activeToken(2, 10000)]);
+    // The resource picker has loaded, so only the capacity can disable Create.
+    await screen.findByRole("combobox");
 
     expect(quotaInput().value).toBe("0");
-    expect(
-      screen.getByText("createDialog.quotaLimitReached"),
-    ).toBeInTheDocument();
+    // #1646 Q5: the gate's quota hint, hint only — no badge repeating it.
+    const hint = screen.getByText("quota.hint");
+    expect(screen.queryByText("quota.badge")).toBeNull();
+    expect(screen.queryByText("createDialog.quotaRemaining")).toBeNull();
+    // The hint describes the quota field and the disabled Create button.
+    expect(hint.id).not.toBe("");
+    expect(quotaInput()).toHaveAttribute("aria-describedby", hint.id);
+    expect(createButton()).toHaveAttribute("aria-describedby", hint.id);
+    expect(createButton()).toBeDisabled();
+    // No tier can be named for an events/hour capacity: no upgrade CTA.
+    expect(screen.queryByRole("button", { name: "quota.action" })).toBeNull();
+  });
+
+  it("does not block while there is capacity left (#1646)", async () => {
+    withResourceContext();
+    renderDialog(20000, [activeToken(1, 10000), activeToken(2, 9999)]);
+
+    // Enabled once the resource context has loaded: capacity is not a block.
+    await waitFor(() => expect(createButton()).toBeEnabled());
+    expect(createButton()).not.toHaveAttribute("aria-describedby");
+    expect(screen.queryByText("quota.hint")).toBeNull();
+    expect(screen.getByText("createDialog.quotaRemaining")).toBeInTheDocument();
+    expect(quotaInput()).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("an unknown or zero capacity never reads as the limit reached (#1646)", () => {
+    const { unmount } = renderDialog(null, [activeToken(1, 10000)]);
+    expect(screen.queryByText("quota.hint")).toBeNull();
+    unmount();
+
+    renderDialog(0);
+    expect(screen.queryByText("quota.hint")).toBeNull();
   });
 
   it("falls back to the per-token ceiling and says the plan total is unknown (null)", () => {

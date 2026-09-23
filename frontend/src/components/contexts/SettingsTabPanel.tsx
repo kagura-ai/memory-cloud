@@ -61,24 +61,32 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { CONTEXT_TEMPLATES, getTemplate } from "@/lib/templates/usage-guide";
 import { useFeatureGates } from "@/hooks/useFeatureGate";
 import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
-import { gateFromFacts, isGateKey } from "@/lib/gates/featureGates";
+import {
+  FeatureGateNotice,
+  featureGateToast,
+  type FeatureGateScope,
+} from "@/components/common/FeatureGateNotice";
+import {
+  gateFromFacts,
+  isBlocked,
+  isGateKey,
+  type GateKey,
+} from "@/lib/gates/featureGates";
 
-// #1583: plan features this form can refuse on, with the notice that names the
-// control — shown on the card and, when a save comes back as a plan refusal,
-// in the toast instead of the raw feature key. #1645: the tier the notice
-// names is never kept here — the card takes it from the gate (the tier
-// matrix), the refusal path from the refusal itself (`err.gate`, #1644), so a
-// deployment that moved the feature to another tier is named correctly on
-// both.
-const FEATURE_NOTICES: Record<
-  string,
-  { key: "sharedRequiresPlan" | "publicRequiresPlan" }
-> = {
-  shared_contexts: { key: "sharedRequiresPlan" },
-  public_contexts: { key: "publicRequiresPlan" },
+// #1583: the plan features this form can refuse on. #1646: each with the
+// scope of its gate copy, read by the card's notice AND by the toast a
+// refused save shows, so the two say the same thing. Sharing and publishing
+// gate only the transition INTO shared / public — a context that already is
+// keeps working — hence "create"; Sleep Maintenance is the feature as a whole.
+// A plan refusal naming any other feature keeps the server text.
+const REFUSAL_SCOPE: Readonly<Partial<Record<GateKey, FeatureGateScope>>> = {
+  shared_contexts: "create",
+  public_contexts: "create",
+  sleep_reports: "all",
 };
 
 const SHARING_NOTICE_ID = "context-sharing-upgrade-notice";
+const SLEEP_GATE_HINT_ID = "context-sleep-gate-hint";
 
 interface SettingsTabPanelProps {
   contextId: string;
@@ -96,6 +104,7 @@ export function SettingsTabPanel({
   const { toast } = useToast();
   const t = useTranslations("contextSettings");
   const tCommon = useTranslations("common");
+  const tGate = useTranslations("gate");
   const locale = useLocale();
   // #1645: every gate this form reads, from one set of subscriptions.
   // #1551: making a context public is XL-only. A context that is already
@@ -114,12 +123,6 @@ export function SettingsTabPanel({
   // #1645: the same shared matrix (module cache — no extra fetch), so a save
   // refusal that names no tier gets the pre-check's tier and labels.
   const tiers = usePlanTierMatrix();
-  // The notices name a tier, so they need one: when no served tier has the
-  // feature there is none to name (that tier-less copy is #1646's).
-  const publicPlanLabel =
-    gates.public_contexts.state === "plan"
-      ? gates.public_contexts.planLabel
-      : undefined;
 
   // #1583: the stored privacy flags, normalised the way the form state is
   // seeded — an older response omits them, and diffing the raw `undefined`
@@ -129,11 +132,10 @@ export function SettingsTabPanel({
   // Only the transition is gated: going back to a stored "shared" is free.
   const sharingLocked =
     storedIsPrivate && gates.shared_contexts.state !== "allowed";
-  const sharingNeedsUpgrade =
-    storedIsPrivate && gates.shared_contexts.state === "plan";
-  const sharingNoticeLabel = sharingNeedsUpgrade
-    ? gates.shared_contexts.planLabel
-    : undefined;
+  // #1646: the refusal the card's notice explains — including the tier-less
+  // one, when no served tier has sharing. Pending locks the control but
+  // explains nothing yet (the notice renders nothing for it).
+  const sharingRefused = storedIsPrivate && isBlocked(gates.shared_contexts);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -276,26 +278,40 @@ export function SettingsTabPanel({
       let description =
         err instanceof Error ? err.message : t("saveFailedDesc");
       if (err instanceof ApiError) {
-        // #1583: a plan refusal names the control ("Sharing requires the L
-        // plan"), not the feature key; unknown features keep the server
-        // text. #1644: the tier is the one the refusal names, resolved to
-        // this deployment's label. #1645: a refusal that names none (a server
-        // predating #1644) takes the matrix's tier, as the pre-check does;
-        // when no served tier has the feature either, the server text stays.
+        // #1583: a plan refusal on one of this form's gates names the
+        // control, not the feature key; other features keep the server text.
+        // #1644: the tier is the one the refusal names, resolved to this
+        // deployment's label. #1645: a refusal that names none (a server
+        // predating #1644) takes the matrix's tier, as the pre-check does.
+        // #1646: told with the gate notice's own copy, so the toast reads
+        // like the card. When neither names a tier the tier-less copy says
+        // so — but only once the matrix has answered: before that "no plan
+        // includes it" would be a guess, so the server text stays. The
+        // server's `sleep_mode` is not a GateKey; it alone lifts through the
+        // fallback key — any other unknown feature keeps the server text
+        // rather than being retold as Sleep Maintenance. A toast carries no
+        // CTA, so the raw upgrade answer is moot here.
         const facts = err.gate;
-        const feature = facts?.state === "plan" ? facts.feature : undefined;
-        const notice = feature ? FEATURE_NOTICES[feature] : undefined;
-        if (notice && isGateKey(feature)) {
-          // A toast carries no CTA, so the raw upgrade answer is moot here.
-          const gate = gateFromFacts(facts, {
-            fallbackKey: feature,
-            canUpgrade: false,
-            locale,
-            tiers,
-          });
-          if (gate?.planLabel) {
-            description = t(notice.key, { plan: gate.planLabel });
-          }
+        const gate =
+          facts?.state === "plan" &&
+          (isGateKey(facts.feature) || facts.feature === "sleep_mode")
+            ? gateFromFacts(facts, {
+                fallbackKey: "sleep_reports",
+                canUpgrade: false,
+                locale,
+                tiers,
+              })
+            : null;
+        const scope = gate ? REFUSAL_SCOPE[gate.feature] : undefined;
+        const gateToast =
+          gate &&
+          scope !== undefined &&
+          (gate.planLabel !== undefined || tiers !== null)
+            ? featureGateToast(gate, tGate, scope)
+            : null;
+        if (gateToast) {
+          toast({ ...gateToast, duration: 6000 });
+          return;
         }
         // 422s carry {loc,msg,type}[] here (aliased from details.errors at
         // the transport layer); the declared string type covers legacy shapes.
@@ -403,8 +419,10 @@ export function SettingsTabPanel({
     sleepQuota !== null &&
     context.sleep_mode === "skip" &&
     (sleepTierBlocked || sleepQuota.used >= sleepQuota.limit);
-  // Only the cap-reached half is a quota (its copy is untouched, P-27). A zero
-  // cap is the tier half, whose copy waits for the gate: pending names nothing.
+  // #1646: the tier half is told by the gate's control hint (and the Select
+  // points at it). Pending names nothing, so it has no hint.
+  const sleepGateHint = wouldExceedSleepQuota && sleepTierBlocked;
+  // Only the cap-reached half is a quota (its copy is untouched, P-27).
   const sleepCapReached =
     sleepQuota !== null &&
     sleepQuota.limit > 0 &&
@@ -631,9 +649,7 @@ export function SettingsTabPanel({
                 // waits too, without the upsell.
                 disabled={sharingLocked}
                 aria-describedby={
-                  sharingNoticeLabel !== undefined
-                    ? SHARING_NOTICE_ID
-                    : undefined
+                  sharingRefused ? SHARING_NOTICE_ID : undefined
                 }
                 onClick={() => handlePrivacyToggle(!isPrivate)}
               >
@@ -641,19 +657,19 @@ export function SettingsTabPanel({
               </Button>
             </div>
 
-            {sharingNoticeLabel !== undefined && (
-              <Alert id={SHARING_NOTICE_ID}>
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>
-                  {t("sharedRequiresPlan", { plan: sharingNoticeLabel })}
-                </AlertDescription>
-              </Alert>
+            {sharingRefused && (
+              <FeatureGateNotice
+                gate={gates.shared_contexts}
+                scope={REFUSAL_SCOPE.shared_contexts}
+                id={SHARING_NOTICE_ID}
+                className="mb-0"
+              />
             )}
 
             {isOwner &&
               (isPrivate ? (
                 // "Make it Shared first" would point at a disabled button.
-                sharingNeedsUpgrade ? null : (
+                sharingRefused ? null : (
                   <Alert>
                     <AlertCircle className="h-4 w-4" />
                     <AlertDescription>{t("makeSharedFirst")}</AlertDescription>
@@ -734,14 +750,12 @@ export function SettingsTabPanel({
                   )}
                 </div>
               ) : gates.public_contexts.state !== "allowed" ? (
-                publicPlanLabel === undefined ? null : (
-                  <Alert>
-                    <AlertCircle className="h-4 w-4" />
-                    <AlertDescription>
-                      {t("publicRequiresPlan", { plan: publicPlanLabel })}
-                    </AlertDescription>
-                  </Alert>
-                )
+                // Pending renders nothing: neither the control nor an upsell.
+                <FeatureGateNotice
+                  gate={gates.public_contexts}
+                  scope={REFUSAL_SCOPE.public_contexts}
+                  className="mb-0"
+                />
               ) : (
                 <div className="space-y-3">
                   <div className="space-y-2">
@@ -795,7 +809,11 @@ export function SettingsTabPanel({
               <div className="space-y-2">
                 <Label>{t("sleepModeLabel")}</Label>
                 <Select value={sleepMode} onValueChange={handleSleepModeChange}>
-                  <SelectTrigger>
+                  <SelectTrigger
+                    aria-describedby={
+                      sleepGateHint ? SLEEP_GATE_HINT_ID : undefined
+                    }
+                  >
                     <SelectValue placeholder={t("sleepModePlaceholder")} />
                   </SelectTrigger>
                   <SelectContent>
@@ -820,14 +838,21 @@ export function SettingsTabPanel({
                     })}
                   </p>
                 )}
-                {wouldExceedSleepQuota &&
-                  (sleepTierBlocked || sleepCapReached) && (
+                {sleepGateHint ? (
+                  <FeatureGateNotice
+                    variant="control"
+                    gate={gates.sleep_reports}
+                    showBadge={false}
+                    id={SLEEP_GATE_HINT_ID}
+                  />
+                ) : (
+                  wouldExceedSleepQuota &&
+                  sleepCapReached && (
                     <p className="text-xs text-destructive">
-                      {sleepTierBlocked
-                        ? t("sleepQuotaTierBlocked")
-                        : t("sleepQuotaExceeded")}
+                      {t("sleepQuotaExceeded")}
                     </p>
-                  )}
+                  )
+                )}
                 <p className="text-sm text-muted-foreground">
                   {
                     {
