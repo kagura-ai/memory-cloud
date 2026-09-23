@@ -110,11 +110,11 @@ The plugin ships Claude Code hooks that deliver **tool guardrails** — memories
 - `PostToolUse` / `PostToolUseFailure` deliver `on: "result"` guardrails next to a tool's output or error. A `remember` / `update_memory` / `forget` call refreshes the cache in the background, so a guardrail written mid-session takes effect in the same session.
 - Each guardrail is delivered once per session and agent, at most 3 lines per call and 10 `inform` lines per session-agent. A `block` is a one-time speed bump, not enforcement: Claude Code permission deny rules remain the enforcement tool.
 
-**Setup** — Claude Code asks for these when the plugin is enabled (`/plugin` → kagura-memory → configure later); the values live in your user settings and keychain, never in the repository:
+**Setup** — `/kagura-memory:setup` walks the whole thing: it names the MCP entry actually in effect, derives `server_url` from it, and finishes by running the hook once so you see a number instead of silence (`/kagura-memory:setup --check` is the read-only doctor). To do it by hand, Claude Code asks for these when the plugin is enabled (`/plugin` → kagura-memory → configure later); the values live in your user settings and keychain, never in the repository:
 
 | Option | Value |
 |---|---|
-| `server_url` | the MCP endpoint from `.mcp.json`, e.g. `https://<your-domain>/mcp/w/<workspace-id>` |
+| `server_url` | the MCP endpoint from `.mcp.json` — the whole URL, ending in `/mcp` or `/mcp/w/<workspace-id>`, e.g. `https://<your-domain>/mcp/w/<workspace-id>`. Never the site root: the hook POSTs to it verbatim, and a root answers `http 405` |
 | `api_key` | a user API key (`kagura_...`); stored as a sensitive value |
 | `context_id` | the UUID of the context whose guardrails apply (`list_contexts`); one context for all projects in v1 |
 | `max_action` | `block` (default) or `inform` — `inform` never denies, it only adds context |
@@ -126,6 +126,8 @@ claude plugin install kagura-memory@kagura-memory-cloud --config server_url=http
 ```
 
 With the hooks on, the hooks are the guardrail lane for this client: put `?guardrails=off` on the **`.mcp.json` URL** (`https://<your-domain>/mcp/w/<workspace-id>?guardrails=off`, or `&guardrails=off` when the URL already has a query, such as `?profile=core`) so the server does not also send a guardrail digest; the plugin's `server_url` stays the plain endpoint. The hook only sees `server_url`, so it warns once at session start if that URL carries a different `guardrails=` value.
+
+**Changing that URL on an OAuth entry disconnects the server.** Claude Code stores OAuth tokens per endpoint, so an entry you signed into with `/mcp` has no token for the new URL: every Kagura tool disappears until you re-run `/mcp` and authenticate again. Add `guardrails=off` in the same sitting as the sign-in, or skip it — the duplicate digest is wasteful, not harmful. A Bearer-key entry is unaffected.
 
 **Checking it works** — after the first session, `ls "$HOME/.claude/plugins/data/"kagura-memory-*/guardrails/` shows `<context_id>.json`. New, changed or removed guardrails are shown to you (not to Claude) as a one-line notice at session start, tagged `(by another member)` when someone else wrote them. A half-finished configuration prints one notice naming the missing field; with nothing configured the hooks are silent. `claude -p` sessions run the hooks too; a deny costs one model turn, so leave headroom in `--max-turns`.
 
@@ -144,6 +146,7 @@ With the hooks on, the hooks are the guardrail lane for this client: put `?guard
 | `recall` | Search past knowledge |
 | `remember` | Save new knowledge |
 | `guide` | This guide |
+| `setup` | Configure and verify the MCP connection and the guardrail hooks (`--check` for a read-only doctor run) |
 | `smoke-test` | Verify all MCP tools work |
 
 ### 7. Install in another project / machine

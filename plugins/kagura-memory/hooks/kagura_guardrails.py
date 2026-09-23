@@ -86,6 +86,15 @@ GUARDRAILS_PARAM_WARNING = (
     "this URL also requests the server digest (guardrails=<context>); "
     "set guardrails=off in that query with the plugin hooks"
 )
+# 404 / 405 answer a POST that reached the host but not the MCP endpoint - the site root
+# is the usual mistake, and "server unreachable" would send the user looking at the network.
+ENDPOINT_STAGES = ("http 404", "http 405")
+ENDPOINT_WARNING = (
+    "server_url must be the MCP endpoint, e.g. https://<host>/mcp or "
+    "https://<host>/mcp/w/<workspace-id>, not the site root"
+)
+ENDPOINT_FETCH_REASON = "no guardrails fetched"
+UNREACHABLE_REASON = "server unreachable"
 
 TOOL_EVENTS = {"PreToolUse": "pre", "PostToolUse": "result", "PostToolUseFailure": "result"}
 KNOWN_ON = ("pre", "result")
@@ -1183,13 +1192,50 @@ def _diff_messages(old: LoadedCache | None, new: dict[str, Any]) -> list[str]:
     return [", ".join(counts) + " — " + "; ".join(names)]
 
 
-def _touch(path: str) -> None:
+def _touch(path: str, stage: str = "") -> None:
+    """(Re)start the negative-cache marker; it carries the failure stage when that is one
+    the fallback words differently (``ENDPOINT_STAGES``), else nothing - the generic case."""
+    tag = stage.encode("ascii") if stage in ENDPOINT_STAGES else b""
+    # The marker is written, not only touched: O_NOFOLLOW + a regular-file check keep the
+    # truncation off whatever a symlink or FIFO in its place points at (O_NONBLOCK: no hang).
+    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
-        os.close(fd)
-        os.utime(path, None)
+        fd = os.open(path, flags, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return
+            os.ftruncate(fd, 0)
+            if tag:
+                os.write(fd, tag)
+            if os.utime in os.supports_fd:
+                os.utime(fd, None)
+            else:
+                os.utime(path, None)
+        finally:
+            os.close(fd)
     except OSError:
         pass  # the negative-cache marker is an optimisation; without it we simply retry sooner
+
+
+def _marker_stage(path: str) -> str:
+    """The stage a marker recorded, or ``""`` (generic) - also for a marker written by an
+    earlier version, which is empty. Only a value in ``ENDPOINT_STAGES`` is ever returned."""
+    # O_NONBLOCK: a FIFO in its place must not hang the hook; the fstat below then refuses it.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ""
+        raw = os.read(fd, 32)
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+    stage = raw.decode("ascii", "replace").strip()
+    return stage if stage in ENDPOINT_STAGES else ""
 
 
 def _file_age(path: str, now_ts: float) -> float | None:
@@ -1253,10 +1299,11 @@ def handle_session_start(adapter: Any, event: dict[str, Any], env: Any, stdout: 
             source_desc = "fetched"
         else:
             _debug(stage)
-            _touch(fail_marker)
-            cache, source_desc = _fallback_cache(config, old, messages)
+            _touch(fail_marker, stage)
+            cache, source_desc = _fallback_cache(config, old, messages, stage)
     elif need_fetch:
-        cache, source_desc = _fallback_cache(config, old, messages)
+        # Negative cache: no request, but the failure keeps the wording it had when recorded.
+        cache, source_desc = _fallback_cache(config, old, messages, _marker_stage(fail_marker))
     else:
         cache = old
         source_desc = f"cached {format_age(old.age_seconds if old else 0.0)}"
@@ -1295,18 +1342,23 @@ def handle_session_start(adapter: Any, event: dict[str, Any], env: Any, stdout: 
 
 
 def _fallback_cache(
-    config: Config, old: LoadedCache | None, messages: list[str]
+    config: Config, old: LoadedCache | None, messages: list[str], stage: str = ""
 ) -> tuple[LoadedCache | None, str]:
+    if stage in ENDPOINT_STAGES:
+        messages.append(ENDPOINT_WARNING)
+        reason = ENDPOINT_FETCH_REASON
+    else:
+        reason = UNREACHABLE_REASON
     if old is not None and old.age_seconds <= FALLBACK_MAX_AGE_S:
         age = format_age(old.age_seconds)
-        messages.append(f"server unreachable, using cache from {age}")
+        messages.append(f"{reason}, using cache from {age}")
         return old, f"cached {age}"
     if os.path.exists(config.cache_path):
         try:
             os.replace(config.cache_path, config.cache_path + ".stale")
         except OSError:
             pass  # the rename is bookkeeping; the too-old cache is not used either way
-    messages.append("server unreachable and no usable cache")
+    messages.append(f"{reason} and no usable cache")
     return None, ""
 
 

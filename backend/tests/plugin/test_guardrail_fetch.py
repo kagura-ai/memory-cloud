@@ -13,6 +13,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -346,6 +347,132 @@ def test_server_down_with_fresh_and_stale_cache(plugin_env: PluginEnv, run_hook:
     assert not plugin_env.cache_path.exists()
     assert (plugin_env.guardrails_dir / f"{CONTEXT_ID}.json.stale").exists()
     assert run_hook(bash_pre("ps"), env=_env(plugin_env, url)).stdout == ""
+
+
+# A POST that reaches the host but not the MCP endpoint answers 404 / 405 — the site root
+# is the usual mistake (#1649). "server unreachable" would send the user to the network.
+@pytest.mark.parametrize("status", [404, 405])
+def test_wrong_endpoint_names_server_url_instead_of_the_network(
+    plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer, status: int
+) -> None:
+    stub_server.status = status
+    stub_server.raw_body = b"<html>nope</html>"
+    result = _start(plugin_env, run_hook, stub_server.url)
+    message = result.json["systemMessage"]
+    assert "server_url must be the MCP endpoint" in message
+    assert "https://<host>/mcp" in message
+    assert "/mcp/w/<workspace-id>" in message
+    assert "not the site root" in message
+    assert "server unreachable" not in message
+    assert "no guardrails fetched and no usable cache" in message
+    assert result.json.get("hookSpecificOutput") is None
+    assert stub_server.url.split("/")[2] not in result.stdout
+
+
+def test_wrong_endpoint_still_falls_back_to_a_usable_cache(
+    plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer
+) -> None:
+    stub_server.status = 405
+    stub_server.raw_body = b"<html>nope</html>"
+    plugin_env.write_cache(STANDARD, fetched_at=datetime.now(UTC) - timedelta(hours=1))
+    result = _start(plugin_env, run_hook, stub_server.url)
+    message = result.json["systemMessage"]
+    assert "server_url must be the MCP endpoint" in message
+    assert "no guardrails fetched, using cache from 1h" in message
+    assert "3 tool guardrails active" in result.specific["additionalContext"]
+    assert plugin_env.cache_path.exists()
+
+
+# The second session inside FAIL_MARKER_S takes the negative-cache branch and sends no
+# request; the endpoint guidance must survive it, carried by the marker (#1649).
+@pytest.mark.parametrize("status", [404, 405])
+def test_wrong_endpoint_guidance_survives_the_negative_cache(
+    plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer, status: int
+) -> None:
+    stub_server.status = status
+    stub_server.raw_body = b"<html>nope</html>"
+    marker = plugin_env.guardrails_dir / f"{CONTEXT_ID}.fetch-failed"
+    first = _start(plugin_env, run_hook, stub_server.url)
+    assert "server_url must be the MCP endpoint" in first.json["systemMessage"]
+    requests_after_first = len(stub_server.requests)
+    assert marker.exists()
+    assert oct(marker.stat().st_mode & 0o777) == "0o600"
+
+    second = _start(plugin_env, run_hook, stub_server.url)
+    assert len(stub_server.requests) == requests_after_first, "negative cache: no request"
+    message = second.json["systemMessage"]
+    assert "server_url must be the MCP endpoint" in message
+    assert "no guardrails fetched and no usable cache" in message
+    assert "server unreachable" not in message
+    assert oct(marker.stat().st_mode & 0o777) == "0o600"
+
+
+def test_old_format_empty_marker_reads_as_the_generic_failure(
+    plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer
+) -> None:
+    # A marker written by the previous version is empty: it must still block the fetch
+    # and read as the generic "server unreachable" case.
+    marker = plugin_env.guardrails_dir / f"{CONTEXT_ID}.fetch-failed"
+    marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    marker.write_text("")
+    os.chmod(marker, 0o600)
+    result = _start(plugin_env, run_hook, stub_server.url)
+    assert stub_server.requests == []
+    assert result.json == {
+        "systemMessage": "kagura-memory guardrails: server unreachable and no usable cache"
+    }
+
+
+def test_generic_failure_clears_a_recorded_endpoint_stage(
+    plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer
+) -> None:
+    marker = plugin_env.guardrails_dir / f"{CONTEXT_ID}.fetch-failed"
+    stub_server.status = 404
+    stub_server.raw_body = b"<html>nope</html>"
+    _start(plugin_env, run_hook, stub_server.url)
+    assert marker.read_bytes() == b"http 404"
+    old = time.time() - 120
+    os.utime(marker, (old, old))  # expired: the next session fetches again
+    stub_server.status = 401
+    stub_server.raw_body = b'{"error":"unauthorized"}'
+    _start(plugin_env, run_hook, stub_server.url)
+    assert marker.read_bytes() == b""
+    assert oct(marker.stat().st_mode & 0o777) == "0o600"
+    result = _start(plugin_env, run_hook, stub_server.url)
+    assert "server unreachable and no usable cache" in result.json["systemMessage"]
+    assert "server_url must be the MCP endpoint" not in result.json["systemMessage"]
+
+
+@pytest.mark.parametrize("status", [404, 401])
+def test_marker_write_never_follows_a_symlink(
+    plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer, tmp_path: Path, status: int
+) -> None:
+    # The marker now carries content, so writing it truncates: a symlink in its place must
+    # not turn that into a truncation (or a stage write) of whatever the link points at.
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"keep me")
+    marker = plugin_env.guardrails_dir / f"{CONTEXT_ID}.fetch-failed"
+    marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    old = time.time() - 120
+    os.symlink(victim, marker)
+    os.utime(victim, (old, old))  # the link's target is stale: the session fetches
+    stub_server.status = status
+    stub_server.raw_body = b"<html>nope</html>"
+    result = _start(plugin_env, run_hook, stub_server.url)
+    assert result.json is not None and "systemMessage" in result.json  # still fails open
+    assert victim.read_bytes() == b"keep me"
+    assert marker.is_symlink()
+
+
+def test_other_http_errors_keep_the_unreachable_wording(
+    plugin_env: PluginEnv, run_hook: RunHook, stub_server: StubServer
+) -> None:
+    stub_server.status = 401
+    stub_server.raw_body = b'{"error":"unauthorized"}'
+    result = _start(plugin_env, run_hook, stub_server.url)
+    assert result.json == {
+        "systemMessage": "kagura-memory guardrails: server unreachable and no usable cache"
+    }
 
 
 @pytest.mark.parametrize(
