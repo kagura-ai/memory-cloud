@@ -17,6 +17,19 @@ const alertVariants = cva(
         // destructive token (non-text, not contrast-checked).
         destructive:
           "border-destructive/50 text-red-800 dark:border-destructive dark:text-red-300 [&>svg]:text-red-600 dark:[&>svg]:text-red-400",
+        // #1646: the plan-gate (upsell) treatment. Purple is the tier colour
+        // PlanBadge already uses, and the colour of the hand-rolled gate
+        // notices this variant replaces — which were light-only and unreadable
+        // on a dark background. Same rule as `destructive`: the colours are
+        // chosen as TEXT, in both modes (purple-900 on purple-50 in light,
+        // purple-100 on purple-950 in dark).
+        upsell:
+          "border-purple-300/70 bg-purple-50 text-purple-900 dark:border-purple-800 dark:bg-purple-950/40 dark:text-purple-100 [&>svg]:text-purple-600 dark:[&>svg]:text-purple-300",
+        // #1646: the quota treatment, replacing the hand-rolled yellow / red
+        // limit-reached notices. Amber text on an amber wash, dark tokens
+        // included for the same reason as `upsell`.
+        warning:
+          "border-amber-300/70 bg-amber-50 text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-100 [&>svg]:text-amber-600 dark:[&>svg]:text-amber-300",
       },
     },
     defaultVariants: {
