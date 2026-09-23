@@ -155,6 +155,7 @@ beforeEach(() => {
   mockPush.mockReset();
   mockReplace.mockReset();
   mockFeatures = { byok: true };
+  mockTiers = OSS_TIERS;
 });
 
 afterEach(() => {
@@ -546,7 +547,11 @@ describe("ContextsPage current marker (#561)", () => {
  */
 describe("ContextsPage quota upsells behind the plan_page gate (#1643)", () => {
   /** At the cap with nothing visible: banner shown AND the empty state renders. */
-  function setupAtCap(role: Role = "owner") {
+  function setupAtCap(
+    role: Role = "owner",
+    plan = "pro",
+    cap = 20,
+  ) {
     mockUseAuth.mockReturnValue({
       user: { current_workspace_id: WORKSPACE_ID },
       refetchUser: vi.fn(),
@@ -554,10 +559,10 @@ describe("ContextsPage quota upsells behind the plan_page gate (#1643)", () => {
     mockUseWorkspace.mockReturnValue({
       currentWorkspace: {
         id: WORKSPACE_ID,
-        plan_name: "pro",
+        plan_name: plan,
         current_user_role: role,
-        max_contexts: 20,
-        context_count: 20,
+        max_contexts: cap,
+        context_count: cap,
       },
     });
     mockGetContexts.mockResolvedValue({ contexts: [] });
@@ -662,6 +667,52 @@ describe("ContextsPage quota upsells behind the plan_page gate (#1643)", () => {
     expect(screen.queryByText("quotaDialogUpgradeHeading")).toBeNull();
     expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
     expect(screen.getByRole("button", { name: "close" })).toBeInTheDocument();
+  });
+
+  // #1645: the upsell reads the cap descriptor's NARROWED canUpgrade — an
+  // owner whom no served tier can lift is not sent to the Plan page.
+  it("quota banner: no plan link at the top tier's cap, even for an owner on plan_page (#1645)", async () => {
+    mockFeatures = { byok: true, plan_page: true };
+    setupAtCap("owner", "promax", 1000);
+    render(<ContextsPage />);
+
+    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
+    expect(screen.queryByText("quotaReachedPlansLink")).toBeNull();
+  });
+
+  it("quota dialog: Close only at the top tier's cap, even for an owner on plan_page (#1645)", async () => {
+    mockFeatures = { byok: true, plan_page: true };
+    setupAtCap("owner", "promax", 1000);
+    render(<ContextsPage />);
+    await openQuotaDialog();
+
+    expect(screen.queryByText("quotaDialogUpgradeHeading")).toBeNull();
+    expect(screen.queryByText("quotaDialogUpgradeBody")).toBeNull();
+    expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
+    expect(screen.getByRole("button", { name: "close" })).toBeInTheDocument();
+  });
+
+  it("quota banner and dialog: no upsell while the tier matrix is unresolved (#1645)", async () => {
+    mockFeatures = { byok: true, plan_page: true };
+    mockTiers = null;
+    setupAtCap();
+    render(<ContextsPage />);
+
+    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
+    expect(screen.queryByText("quotaReachedPlansLink")).toBeNull();
+    await openQuotaDialog();
+    expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
+  });
+
+  it("quota banner: a zero cap explains itself with no plan link (#1645)", async () => {
+    // The descriptor does not express a zero cap (it answers "allowed"), so
+    // it offers no upgrade; the page's own block and explanation stay.
+    mockFeatures = { byok: true, plan_page: true };
+    setupAtCap("owner", "free", 0);
+    render(<ContextsPage />);
+
+    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
+    expect(screen.queryByText("quotaReachedPlansLink")).toBeNull();
   });
 
   it("quota dialog: no CTA while /system/info is unresolved", async () => {

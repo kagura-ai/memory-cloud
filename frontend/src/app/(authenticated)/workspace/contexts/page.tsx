@@ -261,6 +261,12 @@ export default function ContextsPage() {
     locale,
   });
   const isQuotaReached = contextQuota.state === "quota" || maxContexts === 0;
+  // #1645: the quota upsells (banner link, dialog CTA) read the descriptor's
+  // NARROWED answer, not the raw Plan-page one: an owner at the top tier's
+  // cap has no served tier that raises it, so the Plan page would be a dead
+  // end. A zero cap is not a quota the descriptor expresses (it answers
+  // "allowed"), so it offers no upgrade either — the explanation still shows.
+  const quotaCanUpgrade = contextQuota.canUpgrade;
 
   // #1645: may a context be made shared on this tier? One gate for both
   // create dialogs, read from the tier matrix's `shared_contexts` — the same
@@ -640,7 +646,7 @@ export default function ContextsPage() {
               Plan page is withheld where that page does not exist or this
               member cannot load it. The separating space moves inside the
               guard so the banner never ends in a dangling space. */}
-          {canUpgrade === true && (
+          {quotaCanUpgrade && (
             <>
               {" "}
               <a
@@ -1597,7 +1603,7 @@ export default function ContextsPage() {
                 and to see the Plan page — so leaving it while withholding the
                 button would still dead-end them. The title and description
                 above explain why creation failed and do stay. */}
-            {canUpgrade === true && (
+            {quotaCanUpgrade && (
               <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mt-3">
                 <p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
                   {t("quotaDialogUpgradeHeading")}
@@ -1613,9 +1619,9 @@ export default function ContextsPage() {
                 cancel, only a notice to dismiss. `common.close` already exists
                 in both locales, so this needs no new key. */}
             <AlertDialogCancel>
-              {canUpgrade === true ? tCommon("cancel") : tCommon("close")}
+              {quotaCanUpgrade ? tCommon("cancel") : tCommon("close")}
             </AlertDialogCancel>
-            {canUpgrade === true && (
+            {quotaCanUpgrade && (
               <AlertDialogAction
                 onClick={() => router.push("/workspace/settings/plan")}
               >
