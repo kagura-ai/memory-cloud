@@ -441,6 +441,79 @@ describe("PlanFeatureMatrix and deployment flags (#1654)", () => {
   });
 });
 
+// #1654: every cell of {tier matrix} x {/system/info} for the two rows that
+// carry a deployment flag. The rule: a flagged row is never shown as a tier
+// benefit unless its flag has RESOLVED on by that flag's polarity, and
+// nothing is listed while either input is still unresolved (no row shown and
+// then withdrawn). Every unflagged row is untouched.
+describe("PlanFeatureMatrix — every matrix x /system/info cell (#1654)", () => {
+  const MATRIX = {
+    pending: () => new Promise<never>(() => {}),
+    resolved: () => Promise.resolve(TIERS),
+    failed: () => Promise.reject(new Error("tiers down")),
+  } as const;
+  const INFO: Record<string, Record<string, boolean> | null> = {
+    pending: null,
+    "both on": { reranking: true, managed_llm: true },
+    "both off": { reranking: false, managed_llm: false },
+    "reranking off only": { reranking: false, managed_llm: true },
+    "managed_llm off only": { reranking: true, managed_llm: false },
+    "older backend (no flags)": { plan_page: true },
+    "failed ({})": {},
+  };
+  const CELLS = (Object.keys(MATRIX) as (keyof typeof MATRIX)[]).flatMap((m) =>
+    Object.keys(INFO).map((i) => [m, i] as const),
+  );
+  // The ✓ count each flagged row shows when it is listed (the matrix as served).
+  const TICKS = {
+    "planMatrix.row_reranking": TIERS.filter((t) => t.reranking).length,
+    "planMatrix.row_managedLlm": TIERS.filter((t) => t.managed_llm).length,
+  };
+
+  it.each(CELLS)("matrix %s, /system/info %s", async (m, i) => {
+    mockGetMatrix.mockImplementation(MATRIX[m]);
+    mockFeatures = INFO[i];
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    if (m === "failed") {
+      expect(screen.getByText("loadError")).toBeInTheDocument();
+      expect(screen.queryByText("planMatrix.row_contexts")).toBeNull();
+      return;
+    }
+    const features = INFO[i];
+    if (m === "pending" || features === null) {
+      // Nothing listed yet — and so no benefit that may be withdrawn.
+      expect(screen.queryByText("planMatrix.row_contexts")).toBeNull();
+      expect(screen.queryByText("planMatrix.row_reranking")).toBeNull();
+      expect(screen.queryByText("planMatrix.row_managedLlm")).toBeNull();
+      return;
+    }
+
+    const shown = {
+      // default-ON (#1580): hidden only on an explicit false
+      "planMatrix.row_reranking": features.reranking !== false,
+      // default-OFF: listed only on an explicit true
+      "planMatrix.row_managedLlm": features.managed_llm === true,
+    };
+    for (const [label, listed] of Object.entries(shown)) {
+      if (!listed) {
+        expect(screen.queryByText(label)).toBeNull();
+      } else {
+        expect(rowOf(label).getAllByText("✓").length).toBe(
+          TICKS[label as keyof typeof TICKS],
+        );
+      }
+    }
+    // The unflagged rows are the matrix as served, in every resolved cell.
+    const listedRows = screen.getAllByRole("row").length - 1; // minus header
+    expect(listedRows).toBe(20 + Object.values(shown).filter(Boolean).length);
+  });
+});
+
 // #1645: against the REAL shared cache — a fresh module graph per case, the
 // API call the only stand-in.
 describe("PlanFeatureMatrix on the shared matrix cache (#1645)", () => {
