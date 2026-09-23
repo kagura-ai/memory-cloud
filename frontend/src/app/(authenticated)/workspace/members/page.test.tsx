@@ -235,8 +235,9 @@ describe("WorkspaceMembersPage invite gate", () => {
     },
   );
   it("invite stays disabled with no plan suffix while the matrix resolves (#1645)", async () => {
-    // Before, planAtLeast(undefined, "pro") was false, so every tenant —
-    // entitled ones included — saw "(Pro Plan)" until the plan was known.
+    // Before, the ordinal pro-or-better check was false for an unknown plan,
+    // so every tenant — entitled ones included — saw "(Pro Plan)" until the
+    // plan was known.
     mockTiers = null;
     setupWithRole("owner", "pro");
     render(<WorkspaceMembersPage />);

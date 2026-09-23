@@ -329,8 +329,9 @@ describe("Shared option in the create dialog (#1645)", () => {
   }
 
   it("the shared radio and its helper text agree while the plan is unresolved", async () => {
-    // Before: the literal compare left the radio ENABLED while
-    // planAtLeast(undefined, "pro") already printed the upsell.
+    // Before: the literal compare left the radio ENABLED while the ordinal
+    // pro-or-better check, false for an unknown plan, already printed the
+    // upsell.
     mockTiers = null;
     setup({ plan: "pro", maxContexts: 20, contextCount: 0 });
     render(<ContextsPage />);
