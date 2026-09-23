@@ -18,6 +18,7 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { SleepModeBadge } from "@/components/contexts/SleepModeBadge";
 import { CurrentContextBadge } from "@/components/contexts/CurrentContextBadge";
+import { ContextPrivacyChoice } from "@/components/contexts/ContextPrivacyChoice";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import {
   Plus,
@@ -296,7 +297,8 @@ export default function ContextsPage() {
   // #1645: may a context be made shared on this tier? One gate for both
   // create dialogs, read from the tier matrix's `shared_contexts` — the same
   // answer context settings gets. `pending` (still resolving) keeps the
-  // option inert and silent: no upsell before the answer is known.
+  // option inert and silent: no upsell before the answer is known. #1646:
+  // ContextPrivacyChoice renders it, once, for both dialogs.
   const shared = useFeatureGate("shared_contexts");
 
   const fetchContexts = useCallback(async () => {
@@ -889,114 +891,13 @@ export default function ContextsPage() {
                 {t("privacy")}{" "}
                 <span className="text-red-500">{t("required")}</span>
               </label>
-              <div className="space-y-2">
-                {/* Private Option */}
-                <label
-                  className={`flex items-start gap-3 p-3 border-2 rounded cursor-pointer ${
-                    isPrivate
-                      ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20"
-                      : "border-gray-200 dark:border-gray-700"
-                  } ${
-                    currentWorkspace?.current_user_role === "admin"
-                      ? "opacity-60"
-                      : ""
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    value="private"
-                    checked={isPrivate}
-                    onChange={() => {
-                      if (currentWorkspace?.current_user_role !== "admin") {
-                        setIsPrivate(true);
-                      }
-                    }}
-                    disabled={currentWorkspace?.current_user_role === "admin"}
-                    className="mt-1"
-                  />
-                  <div className="flex-1">
-                    <div className="font-medium text-sm flex items-center gap-2">
-                      🔒 {t("privateOption")}
-                      {currentWorkspace?.current_user_role === "admin" && (
-                        <Badge
-                          variant="outline"
-                          className="ml-1 text-xs bg-gray-100 text-gray-700"
-                        >
-                          {t("ownerOnly")}
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                      {currentWorkspace?.current_user_role === "admin"
-                        ? t("onlyOwnersCanCreatePrivate")
-                        : t("privateAvailableAllPlans")}
-                    </div>
-                  </div>
-                </label>
-
-                {/* Shared Option */}
-                <label
-                  className={`flex items-start gap-3 p-3 border-2 rounded ${
-                    !isPrivate
-                      ? "border-purple-500 bg-purple-50 dark:bg-purple-900/20"
-                      : "border-gray-200 dark:border-gray-700"
-                  } ${
-                    shared.state !== "allowed"
-                      ? "opacity-60 cursor-not-allowed"
-                      : "cursor-pointer"
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    value="shared"
-                    checked={!isPrivate}
-                    onChange={() => {
-                      // Issue #270: only a tier with shared contexts can create
-                      // one (#1645: the tier matrix says which).
-                      if (shared.state === "allowed") {
-                        setIsPrivate(false);
-                      }
-                    }}
-                    disabled={shared.state !== "allowed"}
-                    className="mt-1"
-                  />
-                  <div className="flex-1">
-                    <div className="font-medium text-sm flex items-center gap-2">
-                      👥 {t("sharedOption")}
-                      {shared.state === "plan" && (
-                        <Badge
-                          variant="outline"
-                          className="ml-1 text-xs bg-purple-100 text-purple-700"
-                        >
-                          {t("proPlan")}
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                      {shared.state === "allowed"
-                        ? t("teamMembersAccess")
-                        : shared.state === "plan"
-                          ? t("upgradeToPro")
-                          : null}
-                    </div>
-                  </div>
-                </label>
-                {/* #1643: the Pro badge and the explanation above stay for
-                    every workspace whose tier lacks shared contexts; only this
-                    CTA needs a reachable Plan page (#1645: the gate's own
-                    canUpgrade, the same rule). */}
-                {shared.state === "plan" && shared.canUpgrade && (
-                  <Button
-                    type="button"
-                    variant="link"
-                    size="sm"
-                    className="h-auto p-0 text-xs text-purple-700 dark:text-purple-300"
-                    onClick={() => router.push("/workspace/settings/plan")}
-                  >
-                    {t("upgradeToProCta")}
-                  </Button>
-                )}
-              </div>
+              <ContextPrivacyChoice
+                isPrivate={isPrivate}
+                onChange={setIsPrivate}
+                isAdmin={currentWorkspace?.current_user_role === "admin"}
+                shared={shared}
+                dialog="advanced"
+              />
             </div>
 
             {createError && (
@@ -1401,114 +1302,13 @@ export default function ContextsPage() {
               <label className={cn(typography.bodySmall, "font-medium")}>
                 {t("privacy")}
               </label>
-              <div className="space-y-2">
-                {/* Private Option */}
-                <label
-                  className={`flex items-start gap-3 p-3 border-2 rounded cursor-pointer ${
-                    isPrivate
-                      ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20"
-                      : "border-gray-200 dark:border-gray-700"
-                  } ${
-                    currentWorkspace?.current_user_role === "admin"
-                      ? "opacity-60"
-                      : ""
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    value="private"
-                    checked={isPrivate}
-                    onChange={() => {
-                      if (currentWorkspace?.current_user_role !== "admin") {
-                        setIsPrivate(true);
-                      }
-                    }}
-                    disabled={currentWorkspace?.current_user_role === "admin"}
-                    className="mt-1"
-                  />
-                  <div className="flex-1">
-                    <div className="font-medium text-sm flex items-center gap-2">
-                      🔒 {t("privateOption")}
-                      {currentWorkspace?.current_user_role === "admin" && (
-                        <Badge
-                          variant="outline"
-                          className="ml-1 text-xs bg-gray-100 text-gray-700"
-                        >
-                          {t("ownerOnly")}
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                      {currentWorkspace?.current_user_role === "admin"
-                        ? t("adminsCanOnlyCreateShared")
-                        : t("onlyYouCanAccess")}
-                    </div>
-                  </div>
-                </label>
-
-                {/* Shared Option */}
-                <label
-                  className={`flex items-start gap-3 p-3 border-2 rounded ${
-                    !isPrivate
-                      ? "border-purple-500 bg-purple-50 dark:bg-purple-900/20"
-                      : "border-gray-200 dark:border-gray-700"
-                  } ${
-                    shared.state !== "allowed"
-                      ? "opacity-60 cursor-not-allowed"
-                      : "cursor-pointer"
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    value="shared"
-                    checked={!isPrivate}
-                    onChange={() => {
-                      // Issue #270: only a tier with shared contexts can create
-                      // one (#1645: the tier matrix says which).
-                      if (shared.state === "allowed") {
-                        setIsPrivate(false);
-                      }
-                    }}
-                    disabled={shared.state !== "allowed"}
-                    className="mt-1"
-                  />
-                  <div className="flex-1">
-                    <div className="font-medium text-sm flex items-center gap-2">
-                      👥 {t("sharedOption")}
-                      {shared.state === "plan" && (
-                        <Badge
-                          variant="outline"
-                          className="ml-1 text-xs bg-purple-100 text-purple-700"
-                        >
-                          {t("pro")}
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                      {shared.state === "allowed"
-                        ? t("teamMembersCanAccessShort")
-                        : shared.state === "plan"
-                          ? t("requiresProPlan")
-                          : null}
-                    </div>
-                  </div>
-                </label>
-                {/* #1643: the Pro badge and the explanation above stay for
-                    every workspace whose tier lacks shared contexts; only this
-                    CTA needs a reachable Plan page (#1645: the gate's own
-                    canUpgrade, the same rule). */}
-                {shared.state === "plan" && shared.canUpgrade && (
-                  <Button
-                    type="button"
-                    variant="link"
-                    size="sm"
-                    className="h-auto p-0 text-xs text-purple-700 dark:text-purple-300"
-                    onClick={() => router.push("/workspace/settings/plan")}
-                  >
-                    {t("upgradeToProCta")}
-                  </Button>
-                )}
-              </div>
+              <ContextPrivacyChoice
+                isPrivate={isPrivate}
+                onChange={setIsPrivate}
+                isAdmin={currentWorkspace?.current_user_role === "admin"}
+                shared={shared}
+                dialog="quick"
+              />
             </div>
 
             {quickCreateError && (
