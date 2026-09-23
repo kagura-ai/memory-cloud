@@ -716,9 +716,10 @@ _LIST_CONTEXTS_SUMMARY_PREVIEW_LENGTH = 300
 # stays right under ``?profile=core``, whose tools/list leaves out
 # create_context, without passing the URL query into the handler. Worded for a
 # member with no access as well as for an owner of an empty workspace.
-# create_context defaults to is_private=true, which only an
-# owner may create (ContextService.create_context), so an admin is told to pass
-# is_private=false.
+# create_context defaults to is_private=true, which only an owner may create
+# (ContextService.create_context), so an admin is told to pass
+# is_private=false. A failed access lookup gets no hint (see
+# handle_list_contexts).
 _EMPTY_CONTEXTS_HINT = (
     "No contexts are visible to you yet. A workspace owner can create one with "
     'create_context(name="my-project"); an admin must add is_private=false. '
@@ -803,13 +804,22 @@ async def handle_list_contexts(
     start_time = time.time()
     async for db in get_db():
         try:
-            from services.context_service import ContextService
+            from services.context_service import ContextListingFailedError, ContextService
 
             context_service = ContextService(db)
-            contexts = await execute_with_timeout(
-                context_service.list_contexts(user_id),
-                operation_name="list_contexts",
-            )
+            # #1658: a failed access lookup (not a member of the current
+            # workspace, a database error) still answers the empty success it
+            # always has, but it is not an empty account, so it gets no hint.
+            lookup_failed = False
+            try:
+                contexts = await execute_with_timeout(
+                    context_service.list_contexts(user_id, raise_on_lookup_error=True),
+                    operation_name="list_contexts",
+                )
+            except ContextListingFailedError as e:
+                logger.warning("list_contexts_lookup_failed: %s", str(e))
+                contexts = []
+                lookup_failed = True
 
             from datetime import UTC, datetime
 
@@ -922,7 +932,7 @@ async def handle_list_contexts(
             # #1658: counted before name_contains, so an empty filter match on a
             # non-empty list gets no hint.
             hint = None
-            if visible_count == 0:
+            if visible_count == 0 and not lookup_failed:
                 hint = _EMPTY_CONTEXTS_HINT if workspace_id else _NO_WORKSPACE_HINT
 
             await _log_tool_usage(db, user_id, "list_contexts", start_time, 200, None, workspace_id)

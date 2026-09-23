@@ -35,7 +35,7 @@ import pytest
 from mcp_server.tools._arg_coercion import coerce_mcp_arguments
 from mcp_server.tools._definitions import get_tool_definitions
 from mcp_server.tools.context import handle_list_contexts
-from services.context_service import ContextService
+from services.context_service import ContextListingFailedError, ContextService
 
 SLIM_KEYS = {"id", "name", "is_private", "is_locked", "last_used_at"}
 DETAIL_KEYS = SLIM_KEYS | {"summary", "embedding_model"}
@@ -346,7 +346,7 @@ async def test_filter_runs_after_the_permission_scoped_listing():
 
     payload = await _payload(harness, {"name_contains": "team", "include_stats": True})
 
-    harness.service.list_contexts.assert_awaited_once_with("u1")
+    harness.service.list_contexts.assert_awaited_once_with("u1", raise_on_lookup_error=True)
     assert {c["id"] for c in payload["contexts"]} <= {str(c.id) for c in visible}
 
     # include_stats only pays for the contexts that survived the filter.
@@ -587,6 +587,58 @@ async def test_no_workspace_hint_does_not_suggest_create_context():
     assert "create_context(" not in hint
     assert "create_context cannot run yet" in hint
     assert "web UI" in hint
+
+
+@pytest.mark.asyncio
+async def test_failed_access_lookup_is_not_an_empty_account():
+    """A permission or database failure inside the access lookup keeps the empty
+    success it has always answered, but carries no hint — the caller is not
+    told to create a context when the listing simply failed."""
+    harness = _Harness([], workspace_count=3)
+    harness.service.list_contexts = AsyncMock(
+        side_effect=ContextListingFailedError("not a member of workspace")
+    )
+
+    payload = await _payload(harness, {}, workspace_id="ws-1")
+
+    assert payload["status"] == "success"
+    assert payload["contexts"] == []
+    assert "hint" not in payload
+
+
+@pytest.mark.asyncio
+async def test_other_listing_failures_keep_their_error_envelope():
+    """Only the lookup failure the service used to swallow is caught; anything
+    else (a timeout, a failed workspace lookup) is still an error response."""
+    harness = _Harness([])
+    harness.service.list_contexts = AsyncMock(side_effect=RuntimeError("db down"))
+
+    payload = await _payload(harness, {}, workspace_id="ws-1")
+
+    assert payload["status"] == "error"
+    assert "hint" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strict", [False, True])
+async def test_service_lookup_failure_is_empty_by_default_and_raises_on_request(strict):
+    """ContextService.list_contexts keeps its empty-list fallback for every other
+    caller (the REST route); MCP asks for the failure to be raised."""
+    service = ContextService(AsyncMock())
+    perm = MagicMock()
+    perm.get_accessible_contexts = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with (
+        patch.object(
+            ContextService, "_get_user_current_workspace_id", AsyncMock(return_value=uuid4())
+        ),
+        patch("services.permission_service.PermissionService", return_value=perm),
+    ):
+        if strict:
+            with pytest.raises(ContextListingFailedError):
+                await service.list_contexts("u1", raise_on_lookup_error=True)
+        else:
+            assert await service.list_contexts("u1") == []
 
 
 @pytest.mark.asyncio

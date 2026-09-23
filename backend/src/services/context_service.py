@@ -58,6 +58,15 @@ EXPORT_MAX_MEMORIES = 50_000
 TagSortMode = Literal["count", "recent", "alpha"]
 
 
+class ContextListingFailedError(Exception):
+    """The permission-scoped context lookup failed (#1658).
+
+    Raised by ``ContextService.list_contexts(..., raise_on_lookup_error=True)``
+    only, so a caller can tell "the lookup failed" from "nothing is visible"
+    without changing the empty-list fallback every other caller relies on.
+    """
+
+
 class ContextService:
     """Service for managing user contexts.
 
@@ -315,7 +324,9 @@ class ContextService:
         )
         return list(result.scalars().all())
 
-    async def list_contexts(self, user_id: str) -> list[Context]:
+    async def list_contexts(
+        self, user_id: str, *, raise_on_lookup_error: bool = False
+    ) -> list[Context]:
         """List all contexts accessible to user (via workspace membership).
 
         Issue #115 Phase B: Lists contexts from user's current workspace.
@@ -323,6 +334,11 @@ class ContextService:
 
         Args:
             user_id: User ID
+            raise_on_lookup_error: A failed access lookup (not a member of the
+                current workspace, a database error) is an empty list by
+                default; True raises ``ContextListingFailedError`` instead, so
+                MCP ``list_contexts`` does not read it as an empty account
+                (#1658).
 
         Returns:
             List of Context instances
@@ -338,7 +354,9 @@ class ContextService:
         perm_service = PermissionService(self.db)
         try:
             return await perm_service.get_accessible_contexts(user_id, workspace_id)
-        except Exception:
+        except Exception as e:
+            if raise_on_lookup_error:
+                raise ContextListingFailedError(str(e)) from e
             return []
 
     async def get_context(self, user_id: str, context_id: UUID) -> Context:
