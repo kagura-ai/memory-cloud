@@ -41,7 +41,8 @@ create no context, install nothing, run no login and ask for no credential. Anyt
 - **Commands that echo a secret are redacted or not run here.** The Claude Code one is in B1. Of the
   Kagura CLI, `kagura auth status` and `kagura doctor` print a token or key *preview*, and
   `kagura auth token` prints the raw token: the user runs those in their own terminal, never you.
-  `kagura auth list --json` carries no secret and is the one to read.
+  `kagura auth list --json` carries no secret and is the one to read — only through B1's
+  projection, since it also holds the account's e-mail address.
 - **Never open or edit `~/.kagura/credentials.json`.** It holds the CLI's refresh tokens; the CLI
   owns it. Change it only through `kagura auth …` commands the user runs.
 - Ask before every write, name the exact file, and show the before/after of the one value changing.
@@ -70,11 +71,15 @@ credential profile, and writes the client's MCP entry. The user runs these in th
    command must stay on the `PATH` of whatever starts the client — a `pip install` (or
    `uv tool install "kagura-memory>=0.31.0"`) does that, a one-off `uvx` run does not.
 
+   An older `kagura` already on the `PATH` shadows the new one: `kagura --version` must say
+   0.31.0 or later (it prints no secret). Below that, `kagura auth list --json` does not exist —
+   upgrade before going on.
+
    The TypeScript package `kagura-memory` (npm, **0.8.0 or later**; `npx kagura-memory …`) ships a
    mirroring bin named `kagura-memory`, not `kagura`. It signs in the same way
-   (`kagura-memory auth login`, whose `--server` takes the MCP URL `https://<host>/mcp`), but it has
-   no `kagura-mcp`: its `setup claude` refuses `--profile` and writes only the static API-key entry.
-   For the refreshing entry, use the Python package.
+   (`kagura-memory auth login`, whose `--server` takes the MCP URL `https://<host>/mcp`), but it
+   ships no `kagura-mcp` proxy, so it cannot write the refreshing entry. For that, use the Python
+   package.
 
 2. **Sign in** — `kagura auth login --server https://<host>`
 
@@ -88,8 +93,9 @@ credential profile, and writes the client's MCP entry. The user runs these in th
 
 3. **Connect the client** — the harness's own setup command. Claude Code: B1, "No Kagura entry".
 
-Then restart the client so it loads the new entry, and run this skill again. Do not re-implement
-the login, write a credential, or call the server with a token yourself.
+Then **stop**: the Kagura MCP tools the next steps call are not loaded until the client restarts
+with the new entry. Ask the user to restart it and run this skill again. Do not re-implement the
+login, write a credential, or call the server with a token yourself.
 
 ### A2. Choose the context
 
@@ -100,6 +106,10 @@ list_contexts()
 Pick the context whose guardrails should apply — the one matching this project, or the single one if
 there is only one — and confirm the name with the user. Never ask for a pasted UUID; you have the id
 from `list_contexts`. One context serves all projects in v1.
+
+If the Kagura tools are not loaded in this session (the entry needs a sign-in, approval or restart),
+`list_contexts` cannot run: report it as A4's last paragraph says, and in setup mode stop after
+naming that step — the context cannot be chosen without the tools.
 
 **No context at all** — a brand-new account has a workspace and no context. Say so, and offer to
 create one:
@@ -217,12 +227,13 @@ is why editing the wrong file appears to do nothing:
 To read a `.mcp.json` without touching header or environment values:
 
 ```bash
-python3 -c 'import json,sys
+python3 -c 'import json,os,sys
 d=json.load(open(sys.argv[1]))
 for n,s in (d.get("mcpServers") or {}).items():
-    hdr="bearer" if (s.get("headers") or {}).get("Authorization") else "no-header"
-    if s.get("command")=="kagura-mcp":
-        print(n, s.get("type"), "kagura-mcp", " ".join(s.get("args") or []), hdr)
+    hdr="bearer" if any(k.lower()=="authorization" for k in (s.get("headers") or {})) else "no-header"
+    cmd=[str(c) for c in [s.get("command") or ""]+list(s.get("args") or [])]
+    if any(os.path.basename(c)=="kagura-mcp" for c in cmd):
+        print(n, s.get("type"), " ".join(cmd), hdr)
     else:
         print(n, s.get("type"), s.get("url") or s.get("command"), hdr)' .mcp.json
 ```
@@ -233,7 +244,7 @@ for n,s in (d.get("mcpServers") or {}).items():
 |---|---|---|---|
 | **OAuth (Claude Code)** | `Type: http` (or `url`), no `Authorization` header; `Needs authentication`, or `Connected` after `/mcp` sign-in | Claude Code's own OAuth token, stored per endpoint | the entry's `URL` |
 | **Bearer key** | `Type: http` (or `url`), an `Authorization` header | a static API key in the entry | the entry's `URL` |
-| **CLI profile** | `Type: stdio`, `Command: kagura-mcp` — what `kagura setup claude --profile <name>` writes | the CLI's refreshing OAuth profile; the entry holds **no secret** | **not in the MCP config** — see below |
+| **CLI profile** | `Type: stdio`, `Command: kagura-mcp` — what `kagura setup claude --profile <name>` writes; also an absolute path ending in `kagura-mcp`, or a launcher (`uvx …`) whose `Args` run it | the CLI's refreshing OAuth profile; the entry holds **no secret** | **not in the MCP config** — see below |
 
 **The upstream URL of a CLI-profile entry.** `kagura-mcp` forwards to, in order:
 
@@ -241,7 +252,8 @@ for n,s in (d.get("mcpServers") or {}).items():
 2. Otherwise the profile's MCP URL. The profile is `--profile <name>` in `Args`, or the CLI's
    default profile when there is none.
 
-Read the profiles without opening the credential file:
+Read the profiles without opening the credential file — after `kagura --version` shows 0.31.0 or
+later (A1); an older CLI has no `auth list --json`, and the pipe below then fails on empty input:
 
 ```bash
 kagura auth list --json | python3 -c 'import json,sys
@@ -287,8 +299,9 @@ kagura setup claude --profile default   # the profile A1 signed in: default unle
 It writes the CLI-profile entry into this project's `.mcp.json` (plus `.kagura.json` and the hooks
 above), lets the user pick or create the context, and verifies the connection. Pass `--profile`:
 without it the command takes the legacy path, which bakes an API key into `.mcp.json` and
-`.kagura.json`. Claude Code asks to approve a new project `.mcp.json` server at the next start;
-after that, run this skill again. The user may instead keep Claude Code's own OAuth:
+`.kagura.json`. The TypeScript bin's `kagura-memory setup claude` has only that legacy path — it
+refuses `--profile` — so this step needs the Python package. Claude Code asks to approve a new
+project `.mcp.json` server at the next start; after that, run this skill again. The user may instead keep Claude Code's own OAuth:
 `claude mcp add --transport http kagura-memory https://<host>/mcp -s user`, then `/mcp` → sign in.
 
 In check mode, a missing entry is the finding: report it and name A1.
@@ -370,9 +383,14 @@ entry's `args`, after `--profile <name>`:
 
 - The `--server` value is the profile's own MCP URL from B1 plus the query — **never another host**:
   the proxy sends the profile's token to whatever `--server` names.
+- If the project's `.mcp.json` is tracked (`git ls-files --error-unmatch .mcp.json` succeeds), a
+  `--server` there reaches every teammate who uses the file, and sends *their* profile's token to
+  this host. Say so, and offer a `local`-scope entry instead (the `claude mcp add … -s local` form
+  below): it shadows the project entry for this user only — report it as the intended shadow.
 - Entry in a `.mcp.json` file → change **only** that entry's `args` array in place. Entry in
   `~/.claude.json` → `claude mcp remove kagura-memory -s <scope>`, then
-  `claude mcp add kagura-memory -s <scope> -- kagura-mcp --profile <name> --server "<url>"`.
+  `claude mcp add kagura-memory -s <scope> -- kagura-mcp --profile <name> --server "<url>"`
+  (for a new `local` entry beside a tracked `.mcp.json`, only the `add`, with `-s local`).
 - No re-authentication: the proxy owns the token, so the entry reconnects on the next start (or
   `/mcp` → reconnect) with the same sign-in.
 - The pin has two costs; name them. If the profile later points at another server, `--server` still

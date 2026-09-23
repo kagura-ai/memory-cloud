@@ -501,6 +501,8 @@ def test_setup_skill_fences_everything_claude_specific() -> None:
         ".claude.json",
         "`/plugin`",
         "$ARGUMENTS",
+        "setup claude",
+        ".mcp.json",
     ):
         assert claude_only not in core, f"{claude_only!r} belongs in the Claude Code adapter"
 
@@ -552,6 +554,9 @@ def test_setup_skill_hands_login_and_connection_to_the_cli() -> None:
     assert "npx kagura-memory" in a1 and "0.8.0 or later" in a1
     assert "kagura auth login --server https://<host>" in a1
     assert "invite link" in a1, "closed sign-up needs the invite link first"
+    # An older kagura on PATH has no `auth list --json`; the version is checked first.
+    assert "`kagura --version`" in a1 and "0.31.0 or later" in a1
+    assert "**stop**" in a1, "without the new entry the MCP tools the next steps call are absent"
     assert "kagura setup claude --profile default" in text
     # No re-implemented device flow.
     for reimplemented in ("device_code", "/oauth/", "grant_type"):
@@ -568,6 +573,7 @@ def test_setup_skill_recognises_the_stdio_proxy_entry() -> None:
     assert "the CLI profile **cannot carry the query**" in text
     assert '"--server", "https://<host>/mcp?guardrails=off"' in text
     assert "**never another host**" in text
+    assert "git ls-files --error-unmatch .mcp.json" in text, "a tracked --server reaches teammates"
     # The credential file is the CLI's; the skill never opens it.
     assert "Never open or edit `~/.kagura/credentials.json`" in text
     for secret_printer in ("kagura auth status", "kagura auth token", "kagura doctor"):
@@ -611,6 +617,43 @@ def test_setup_skill_mcp_json_reader_handles_the_stdio_form(tmp_path: Path) -> N
         in out
     )
     assert "kagura-bearer http https://<host>/mcp bearer" in out
+    assert secret not in out
+
+
+def test_setup_skill_mcp_json_reader_finds_a_proxy_by_path_or_launcher(tmp_path: Path) -> None:
+    """kagura-mcp by absolute path or behind uvx is still the CLI-profile form."""
+    block = _block_containing(_setup_skill(), 'd.get("mcpServers")')
+    secret = "sentinel-value-" + "0123456789"
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "by-path": {
+                        "type": "stdio",
+                        "command": "/opt/tools/bin/kagura-mcp",
+                        "args": ["--profile", "work"],
+                    },
+                    "by-uvx": {
+                        "type": "stdio",
+                        "command": "uvx",
+                        "args": ["--from", "kagura-memory", "kagura-mcp"],
+                    },
+                    "lower-header": {
+                        "type": "http",
+                        "url": "https://<host>/mcp",
+                        "headers": {"authorization": "Bearer " + secret},
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = subprocess.run(
+        ["bash", "-c", block], cwd=tmp_path, capture_output=True, text=True, timeout=30, check=True
+    ).stdout
+    assert "by-path stdio /opt/tools/bin/kagura-mcp --profile work no-header" in out
+    assert "by-uvx stdio uvx --from kagura-memory kagura-mcp no-header" in out
+    assert "lower-header http https://<host>/mcp bearer" in out
     assert secret not in out
 
 
@@ -689,6 +732,7 @@ def test_docs_warn_that_changing_an_oauth_url_needs_reauthentication() -> None:
     assert "requires re-authentication" in text
     assert "OAuth tokens per endpoint" in text
     assert "?guardrails=off" in text
+    assert "the CLI profile cannot carry the query" in text
 
 
 def test_troubleshooting_covers_the_claude_hooks_silence() -> None:
@@ -697,6 +741,9 @@ def test_troubleshooting_covers_the_claude_hooks_silence() -> None:
     assert "server_url must be the MCP endpoint" in section
     assert "claude mcp get kagura-memory" in section
     assert "/kagura-memory:setup --check" in section
+    # The pasted sed must blank environment values as well as headers, like the skill's.
+    assert "[A-Za-z0-9_-]+)([:=])" in section
+    assert "kagura-mcp" in section, "the CLI-profile entry has no URL of its own"
 
 
 def test_hook_names_the_endpoint_on_404_and_405() -> None:
