@@ -43,7 +43,7 @@ from models.api_base import TZAwareBaseModel
 from models.auth import OAuth2Client, OAuth2DeviceCode, OAuth2Token, User, generate_user_code
 from models.schemas import TokenIntrospectionResponse
 from utils.datetime import to_utc_iso, utcnow
-from utils.exceptions import AuthenticationError, AuthorizationError
+from utils.exceptions import AuthenticationError, AuthorizationError, RedisError
 from utils.logger import get_logger
 from utils.oauth_errors import rfc6749_error_response
 from utils.oauth_messages import get_oauth_messages
@@ -98,6 +98,11 @@ router = APIRouter(prefix="/oauth", tags=["oauth2-server"])
 # users routinely land on /device unauthenticated; the cap is to bound log spam
 # from device-code spraying attempts, not to throttle real users.
 _DEVICE_UNAUTH_AUDIT_RATE_LIMIT = 30
+
+# Counter window for the per-IP limits on /device/authorize and /device/verify
+# (#1656). The limits themselves are settings; a 429 tells the caller to retry
+# after one window.
+_DEVICE_FLOW_RATE_WINDOW_SECONDS = 60
 
 
 # ============================================================================
@@ -1868,14 +1873,77 @@ async def oauth_token(request: Request):
 # ============================================================================
 
 
-@router.post("/device/authorize", response_model=DeviceAuthorizationResponse)
-async def device_authorize(body: DeviceAuthorizationRequest) -> DeviceAuthorizationResponse:
+async def _device_flow_rate_limited(request: Request, endpoint: str, limit: int) -> bool:
+    """Count one request against the caller's per-IP budget for ``endpoint``.
+
+    Keys on ``request.client.host`` like the DCR and ``/device/audit-unauth``
+    limits, with a ``_DEVICE_FLOW_RATE_WINDOW_SECONDS`` window (#1656). A Redis
+    failure lets the request through with one warning: an outage must not
+    block device sign-in.
+
+    Args:
+        request: The incoming request (source of the client address).
+        endpoint: Counter namespace, e.g. ``"device_authorize"``.
+        limit: Requests allowed per window.
+
+    Returns:
+        True when this request is over the limit and must be refused.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        count = await increment_counter(
+            f"{endpoint}:{client_ip}", ttl=_DEVICE_FLOW_RATE_WINDOW_SECONDS
+        )
+    except RedisError as e:
+        logger.warning(
+            "device_flow_rate_limit_unavailable",
+            endpoint=endpoint,
+            ip=client_ip,
+            error=str(e),
+        )
+        return False
+
+    if count <= limit:
+        return False
+    logger.warning(
+        "device_flow_rate_limited",
+        endpoint=endpoint,
+        ip=client_ip,
+        count=count,
+    )
+    return True
+
+
+@router.post(
+    "/device/authorize",
+    response_model=DeviceAuthorizationResponse,
+    responses={429: {"description": "Too many device authorization requests from this address"}},
+)
+async def device_authorize(
+    request: Request, body: DeviceAuthorizationRequest
+) -> DeviceAuthorizationResponse | JSONResponse:
     """Device Authorization endpoint (RFC 8628 Section 3.1).
 
     Called by CLI clients to obtain a device_code + user_code pair.
     No authentication required — this is a public endpoint.
+
+    Limited per client address to ``oauth_device_authorize_rate_limit_per_minute``
+    requests per minute (#1656). Over the limit it returns 429 in the RFC 6749
+    §5.2 error shape (RFC 8628 §3.2) with ``Retry-After``, before any row is
+    written.
     """
     settings = get_settings()
+    if await _device_flow_rate_limited(
+        request, "device_authorize", settings.oauth_device_authorize_rate_limit_per_minute
+    ):
+        response = rfc6749_error_response(
+            error="invalid_request",
+            description="Too many device authorization requests. Please try again later.",
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+        response.headers["Retry-After"] = str(_DEVICE_FLOW_RATE_WINDOW_SECONDS)
+        return response
+
     db_session = get_sync_session()
 
     try:
@@ -1934,14 +2002,31 @@ async def device_authorize(body: DeviceAuthorizationRequest) -> DeviceAuthorizat
         db_session.close()
 
 
-@router.post("/device/verify", response_model=DeviceVerifyResponse)
-async def device_verify(body: DeviceVerifyRequest) -> DeviceVerifyResponse:
+@router.post(
+    "/device/verify",
+    response_model=DeviceVerifyResponse,
+    responses={429: {"description": "Too many user code lookups from this address"}},
+)
+async def device_verify(request: Request, body: DeviceVerifyRequest) -> DeviceVerifyResponse:
     """Look up a pending device authorization by user_code.
 
     Returns enough information for the browser consent screen to render
     (client_name, scope). No authentication required — possession of the
     user_code is the bearer token for this lookup.
+
+    Limited per client address to ``oauth_device_verify_rate_limit_per_minute``
+    requests per minute, found or not (RFC 8628 §5.1, #1656). Over the limit it
+    returns 429 with ``Retry-After`` before the lookup runs.
     """
+    if await _device_flow_rate_limited(
+        request, "device_verify", get_settings().oauth_device_verify_rate_limit_per_minute
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many attempts. Please try again later.",
+            headers={"Retry-After": str(_DEVICE_FLOW_RATE_WINDOW_SECONDS)},
+        )
+
     db_session = get_sync_session()
 
     try:
