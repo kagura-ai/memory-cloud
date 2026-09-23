@@ -130,7 +130,8 @@ def test_every_known_feature_declares_a_mode() -> None:
     assert not missing, (
         f"Feature(s) {', '.join(missing)} have no FEATURE_ENFORCEMENT row. Add one in "
         "config/plan_tiers.py saying what the feature does at runtime: 'enforced' (a "
-        "check refuses), 'degrades' (the request still succeeds) or 'advertised' (no "
+        "check refuses), 'conditional' (a check refuses only where a deployment setting "
+        "turns it on), 'degrades' (the request still succeeds) or 'advertised' (no "
         "runtime check at all)."
     )
     assert not extra, (
@@ -154,8 +155,9 @@ def test_declared_mode_matches_the_call_sites(
         assert not sites, (
             f"'{feature}' is declared ADVERTISED (no runtime check) but is checked at: "
             f"{', '.join(sites)}. Either the gate is new — change the row in "
-            "config/plan_tiers.py to ENFORCED or DEGRADES, and make sure the web UI "
-            "gates accordingly — or the check is a leftover and should be removed."
+            "config/plan_tiers.py to ENFORCED, CONDITIONAL or DEGRADES, and make sure "
+            "the web UI gates accordingly — or the check is a leftover and should be "
+            "removed."
         )
     else:
         assert sites, (
@@ -193,6 +195,25 @@ def test_known_unenforced_entries_stay_visible() -> None:
     assert feature_enforcement("reranking") is FeatureEnforcement.DEGRADES
 
 
+def test_managed_embeddings_is_conditional_not_enforced() -> None:
+    """The gate exists but is off by default, so it must not read as ENFORCED.
+
+    ``services/embedding_service.platform_fallback_allowed`` returns ``True``
+    for every tier unless ``EMBEDDING_PLATFORM_FALLBACK_REQUIRES_MANAGED_PLAN``
+    is set, and that setting defaults to ``False``. A client that hard-gates
+    every ``enforced`` feature would therefore refuse managed embeddings in a
+    deployment where the backend embeds happily — the exact kind of invented
+    gate #1648 exists to prevent. If the default ever flips, change the mode to
+    ENFORCED here and in ``docs/deployment.md`` in the same change.
+    """
+    from config.settings import Settings
+
+    assert Settings.model_fields["embedding_platform_fallback_requires_managed_plan"].default is (
+        False
+    ), "the default flipped — managed_embeddings may now be ENFORCED; update the row"
+    assert feature_enforcement("managed_embeddings") is FeatureEnforcement.CONDITIONAL
+
+
 def test_unknown_feature_reads_as_advertised() -> None:
     """Fail-soft: a name the registry does not know must not look like a gate."""
     assert feature_enforcement("not_a_feature") is FeatureEnforcement.ADVERTISED
@@ -202,5 +223,5 @@ def test_modes_serialize_as_plain_sorted_strings() -> None:
     modes = feature_enforcement_modes()
     assert list(modes) == sorted(modes)
     assert set(modes) == set(FEATURE_ENFORCEMENT)
-    assert set(modes.values()) <= {"enforced", "degrades", "advertised"}
+    assert set(modes.values()) <= {"enforced", "conditional", "degrades", "advertised"}
     assert all(isinstance(value, str) and type(value) is str for value in modes.values())

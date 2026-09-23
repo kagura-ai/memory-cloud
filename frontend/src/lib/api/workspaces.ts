@@ -443,8 +443,9 @@ export interface PlanTierFeature {
   connectors: boolean;
   public_contexts: boolean;
   // #1648: what each feature name actually does at runtime — "enforced" (the
-  // backend refuses), "degrades" (the request still succeeds with less) or
-  // "advertised" (no runtime check at all; listed for the plan pages only).
+  // backend refuses), "conditional" (it refuses only where a deployment
+  // setting turns the check on), "degrades" (the request still succeeds with
+  // less) or "advertised" (no runtime check at all; plan pages only).
   // Tier-independent: the same map rides on every row, so a control can look
   // up a feature THIS tier does not have. Optional — an API predating #1648
   // omits it, and a caller must then treat the mode as unknown rather than
@@ -455,10 +456,14 @@ export interface PlanTierFeature {
 /**
  * How a plan feature behaves at runtime (#1648). A feature appearing in the
  * plan registry is NOT by itself evidence of a gate: only `"enforced"` has a
- * backend refusal behind it, so only `"enforced"` may be hard-disabled in the
- * UI. `"degrades"` and `"advertised"` features keep working on every tier.
+ * backend refusal behind it on every deployment, so only `"enforced"` may be
+ * hard-disabled in the UI. `"conditional"` refuses only where a deployment
+ * setting turns the check on (it is off by default), and `"degrades"` /
+ * `"advertised"` features keep working on every tier — gating any of those
+ * three would refuse what this deployment actually allows.
  */
-export type FeatureEnforcementMode = "enforced" | "degrades" | "advertised";
+export type FeatureEnforcementMode =
+  "enforced" | "conditional" | "degrades" | "advertised";
 
 /** Curated per-tier feature matrix (upgrade order, free → promax) for the Plan page (#1138). */
 export async function getPlanTierMatrix(): Promise<PlanTierFeature[]> {

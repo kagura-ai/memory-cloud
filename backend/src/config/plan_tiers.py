@@ -359,7 +359,13 @@ class FeatureEnforcement(StrEnum):
 
     Members:
         ENFORCED: A runtime check REFUSES the request on a tier without the
-            feature (``FEAT-001`` / ``plan_required`` / a raised error).
+            feature (``FEAT-001`` / ``plan_required`` / a raised error), on
+            every deployment. This is the only mode a client may hard-disable
+            a control on.
+        CONDITIONAL: A runtime check refuses, but only where a deployment
+            setting turns it on; with that setting at its default the tier
+            without the feature is served anyway. A client must NOT hard-gate
+            on this mode — it would refuse what this deployment allows.
         DEGRADES: A runtime check exists but the request still SUCCEEDS with
             reduced behaviour; nothing is refused.
         ADVERTISED: No runtime check at all. The entry exists so the plan
@@ -367,6 +373,7 @@ class FeatureEnforcement(StrEnum):
     """
 
     ENFORCED = "enforced"
+    CONDITIONAL = "conditional"
     DEGRADES = "degrades"
     ADVERTISED = "advertised"
 
@@ -429,10 +436,11 @@ FEATURE_ENFORCEMENT: dict[str, FeatureGate] = {
         "auth/analysis_gates.py refuses the analysis run with 403 (#496).",
     ),
     "managed_embeddings": FeatureGate(
-        FeatureEnforcement.ENFORCED,
-        "services/embedding_service.py refuses the platform-key fallback (#1030) — but "
-        "only where EMBEDDING_PLATFORM_FALLBACK_REQUIRES_MANAGED_PLAN is on (default "
-        "off), so a default deployment embeds on the platform key regardless of tier.",
+        FeatureEnforcement.CONDITIONAL,
+        "services/embedding_service.py refuses the platform-key fallback (#1030), but "
+        "only where EMBEDDING_PLATFORM_FALLBACK_REQUIRES_MANAGED_PLAN is on — it "
+        "defaults to off (platform_fallback_allowed returns True for every tier), so a "
+        "default deployment embeds on the platform key regardless of tier.",
     ),
     "managed_llm": FeatureGate(
         FeatureEnforcement.ENFORCED,
@@ -723,7 +731,8 @@ def feature_enforcement_modes() -> dict[str, str]:
     override the way ``FEATURE_MIN_PLANS`` does.
 
     Returns:
-        ``{feature: "enforced" | "degrades" | "advertised"}``, key-sorted.
+        ``{feature: "enforced" | "conditional" | "degrades" | "advertised"}``,
+        key-sorted.
     """
     return {name: gate.mode.value for name, gate in sorted(FEATURE_ENFORCEMENT.items())}
 

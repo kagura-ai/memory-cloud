@@ -218,6 +218,8 @@ def test_feature_enforcement_modes_ride_on_every_row(client: TestClient) -> None
     assert modes["oauth"] == "advertised"
     assert modes["secret_store"] == "advertised"
     assert modes["reranking"] == "degrades"
+    # The gate exists but is off by default, so a client must not hard-gate it.
+    assert modes["managed_embeddings"] == "conditional"
     for feature in ("team_invitations", "shared_contexts", "resources", "connectors"):
         assert modes[feature] == "enforced", feature
 

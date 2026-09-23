@@ -142,9 +142,11 @@ class PlanTierFeature(BaseModel):
     connectors: bool
     public_contexts: bool
     # Issue #1648: what each feature name actually DOES at runtime —
-    # ``"enforced"`` (a check refuses the request), ``"degrades"`` (the request
-    # succeeds with reduced behaviour) or ``"advertised"`` (no runtime check at
-    # all; the row exists so the plan pages can list it). Tier-INDEPENDENT: the
+    # ``"enforced"`` (a check refuses the request), ``"conditional"`` (a check
+    # refuses only where a deployment setting turns it on), ``"degrades"`` (the
+    # request succeeds with reduced behaviour) or ``"advertised"`` (no runtime
+    # check at all; the row exists so the plan pages can list it).
+    # Tier-INDEPENDENT: the
     # same map rides on every row because a client gating a control needs the
     # mode of a feature this tier does *not* have. Additive — a client that
     # ignores the field behaves exactly as before.
@@ -319,8 +321,9 @@ def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
         public_contexts=has_public,
         # #1648: the same tier-independent map on every row — see the field's
         # comment. A UI may hard-disable a control only for an ``enforced``
-        # feature; ``degrades`` and ``advertised`` rows have no refusal behind
-        # them, so disabling on those invents a gate the backend does not have.
+        # feature; ``conditional``, ``degrades`` and ``advertised`` rows have
+        # no refusal behind them on a default deployment, so disabling on those
+        # invents a gate the backend does not have.
         feature_enforcement=feature_enforcement_modes(),
     )
 
