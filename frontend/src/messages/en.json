@@ -4265,12 +4265,12 @@
   },
   "gate": {
     "plan": {
-      "title": "{feature} is available on the {plan} plan",
+      "title": "The {plan} plan includes {feature}",
       "description": "Upgrade to the {plan} plan to use {feature}.",
       "newTitle": "New {feature} require the {plan} plan",
       "newDescription": "Existing {feature} keep working. Creating new {feature} is available on the {plan} plan.",
-      "titleNoTier": "{feature} is not available",
-      "descriptionNoTier": "{feature} is not available on any plan on this deployment.",
+      "titleNoTier": "No plan includes {feature}",
+      "descriptionNoTier": "No plan on this deployment includes {feature}.",
       "action": "Upgrade to {plan}",
       "badge": "{plan} plan",
       "hint": "Requires the {plan} plan",
@@ -4278,17 +4278,17 @@
     },
     "quota": {
       "title": "You've reached the {feature} limit",
-      "description": "Your {currentPlan} plan's {feature} limit in this workspace is {limit}, and {current} {current, plural, one {is} other {are}} in use.",
-      "descriptionNoPlan": "This workspace's {feature} limit is {limit}, and {current} {current, plural, one {is} other {are}} in use.",
-      "descriptionNoNumbers": "This workspace has reached its {feature} limit.",
+      "description": "Your {currentPlan} plan's {feature} limit is {limit}, and current usage is {current}.",
+      "descriptionNoPlan": "The {feature} limit is {limit}, and current usage is {current}.",
+      "descriptionNoNumbers": "Usage has reached the {feature} limit.",
       "upsell": "The {plan} plan raises this limit.",
       "action": "View plans",
       "badge": "Limit reached",
       "hint": "Limit reached"
     },
     "deployment": {
-      "title": "{feature} is not available on this deployment",
-      "description": "This Kagura Memory Cloud deployment has {feature} turned off. Ask the administrator of this deployment if you need it.",
+      "title": "This deployment does not offer {feature}",
+      "description": "This Kagura Memory Cloud deployment has {feature} turned off. Ask the administrator of this deployment if you need access.",
       "badge": "Not available",
       "hint": "Not available on this deployment"
     },
@@ -4307,8 +4307,8 @@
       }
     },
     "allowlist": {
-      "title": "{feature} is not yet enabled for this workspace",
-      "description": "{feature} is being rolled out gradually. Reach out if you would like access.",
+      "title": "This workspace does not have access to {feature} yet",
+      "description": "Access to {feature} is being rolled out gradually. Reach out if you would like early access.",
       "badge": "Not enabled",
       "hint": "Not enabled for this workspace"
     },

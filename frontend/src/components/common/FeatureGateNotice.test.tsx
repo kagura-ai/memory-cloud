@@ -45,6 +45,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 type Messages = Record<string, unknown>;
+type GateKeyOf = FeatureGate["feature"];
 const CATALOGUES = { en, ja } as const;
 type Locale = keyof typeof CATALOGUES;
 const LOCALES: readonly Locale[] = ["en", "ja"];
@@ -196,8 +197,8 @@ const withTier = gateOf({
 });
 const NO_TIER_TEXT: Readonly<Record<Locale, FeatureGateText>> = {
   en: {
-    title: "Resources is not available",
-    description: "Resources is not available on any plan on this deployment.",
+    title: "No plan includes resources",
+    description: "No plan on this deployment includes resources.",
     action: null,
     badge: null,
     hint: "Not available on any plan",
@@ -228,7 +229,7 @@ const BRANCHES: readonly Branch[] = [
     gate: withTier,
     expected: {
       en: {
-        title: "Resources is available on the XL plan",
+        title: "The XL plan includes resources",
         description: "Upgrade to the XL plan to use resources.",
         action: "Upgrade to XL",
         badge: "XL plan",
@@ -260,7 +261,7 @@ const BRANCHES: readonly Branch[] = [
       ja: {
         title: "新規 リソース には XL プランが必要です",
         description:
-          "既存の リソース は引き続き利用できます。新規 リソース の作成は XL プランで利用できます。",
+          "既存の リソース は引き続き利用できます。新規 リソース の作成には XL プランが必要です。",
         action: "XL にアップグレード",
         badge: "XL プラン",
         hint: "XL プランが必要です",
@@ -284,7 +285,7 @@ const BRANCHES: readonly Branch[] = [
       en: {
         title: "You've reached the context limit",
         description:
-          "Your S plan's context limit in this workspace is 1, and 1 is in use. The M plan raises this limit.",
+          "Your S plan's context limit is 1, and current usage is 1. The M plan raises this limit.",
         action: "View plans",
         badge: "Limit reached",
         hint: "Limit reached",
@@ -292,7 +293,7 @@ const BRANCHES: readonly Branch[] = [
       ja: {
         title: "コンテキスト の上限に達しました",
         description:
-          "S プランではこのワークスペースで コンテキスト は 1 件までです（現在 1 件）。M プランにすると上限が上がります。",
+          "S プランでは コンテキスト の上限は 1 です（現在 1）。M プランにすると上限が上がります。",
         action: "プランを見る",
         badge: "上限に達しました",
         hint: "上限に達しました",
@@ -315,16 +316,14 @@ const BRANCHES: readonly Branch[] = [
     expected: {
       en: {
         title: "You've reached the member limit",
-        description:
-          "Your S plan's member limit in this workspace is 3, and 3 are in use.",
+        description: "Your S plan's member limit is 3, and current usage is 3.",
         action: null,
         badge: "Limit reached",
         hint: "Limit reached",
       },
       ja: {
         title: "メンバー の上限に達しました",
-        description:
-          "S プランではこのワークスペースで メンバー は 3 件までです（現在 3 件）。",
+        description: "S プランでは メンバー の上限は 3 です（現在 3）。",
         action: null,
         badge: "上限に達しました",
         hint: "上限に達しました",
@@ -349,15 +348,14 @@ const BRANCHES: readonly Branch[] = [
       en: {
         title: "You've reached the storage limit",
         description:
-          "Your S plan's storage limit in this workspace is 10, and 10 are in use.",
+          "Your S plan's storage limit is 10, and current usage is 10.",
         action: "View plans",
         badge: "Limit reached",
         hint: "Limit reached",
       },
       ja: {
         title: "ストレージ の上限に達しました",
-        description:
-          "S プランではこのワークスペースで ストレージ は 10 件までです（現在 10 件）。",
+        description: "S プランでは ストレージ の上限は 10 です（現在 10）。",
         action: "プランを見る",
         badge: "上限に達しました",
         hint: "上限に達しました",
@@ -375,15 +373,14 @@ const BRANCHES: readonly Branch[] = [
     expected: {
       en: {
         title: "You've reached the agent limit",
-        description: "This workspace's agent limit is 5, and 5 are in use.",
+        description: "The agent limit is 5, and current usage is 5.",
         action: null,
         badge: "Limit reached",
         hint: "Limit reached",
       },
       ja: {
         title: "エージェント の上限に達しました",
-        description:
-          "このワークスペースで エージェント は 5 件までです（現在 5 件）。",
+        description: "エージェント の上限は 5 です（現在 5）。",
         action: null,
         badge: "上限に達しました",
         hint: "上限に達しました",
@@ -401,15 +398,14 @@ const BRANCHES: readonly Branch[] = [
     expected: {
       en: {
         title: "You've reached the embedding spend limit",
-        description: "This workspace has reached its embedding spend limit.",
+        description: "Usage has reached the embedding spend limit.",
         action: null,
         badge: "Limit reached",
         hint: "Limit reached",
       },
       ja: {
         title: "埋め込み使用額 の上限に達しました",
-        description:
-          "このワークスペースは 埋め込み使用額 の上限に達しています。",
+        description: "埋め込み使用額 が上限に達しています。",
         action: null,
         badge: "上限に達しました",
         hint: "上限に達しました",
@@ -425,9 +421,9 @@ const BRANCHES: readonly Branch[] = [
     }),
     expected: {
       en: {
-        title: "The cost dashboard is not available on this deployment",
+        title: "This deployment does not offer the cost dashboard",
         description:
-          "This Kagura Memory Cloud deployment has the cost dashboard turned off. Ask the administrator of this deployment if you need it.",
+          "This Kagura Memory Cloud deployment has the cost dashboard turned off. Ask the administrator of this deployment if you need access.",
         action: null,
         badge: "Not available",
         hint: "Not available on this deployment",
@@ -525,9 +521,9 @@ const BRANCHES: readonly Branch[] = [
     }),
     expected: {
       en: {
-        title: "Memory Analysis is not yet enabled for this workspace",
+        title: "This workspace does not have access to Memory Analysis yet",
         description:
-          "Memory Analysis is being rolled out gradually. Reach out if you would like access.",
+          "Access to Memory Analysis is being rolled out gradually. Reach out if you would like early access.",
         action: null,
         badge: "Not enabled",
         hint: "Not enabled for this workspace",
@@ -535,7 +531,7 @@ const BRANCHES: readonly Branch[] = [
       ja: {
         title: "このワークスペースでは メモリー分析 はまだ有効化されていません",
         description:
-          "メモリー分析 は段階的に提供を拡大しています。ご利用をご希望の場合はお問い合わせください。",
+          "メモリー分析 は段階的に提供しています。ご利用をご希望の場合はお問い合わせください。",
         action: null,
         badge: "未有効化",
         hint: "このワークスペースでは未有効化",
@@ -674,11 +670,11 @@ describe("FeatureGateNotice hard rules", () => {
   it("defaults to scope all — the create-only 'existing ones keep working' copy is opt-in", () => {
     renderIn("en", <FeatureGateNotice gate={withTier} />);
     expect(
-      screen.getByText("Resources is available on the XL plan"),
+      screen.getByText("The XL plan includes resources"),
     ).toBeInTheDocument();
     expect(screen.queryByText(/keep working/)).not.toBeInTheDocument();
     expect(featureGateToast(withTier, gateT("en"))?.title).toBe(
-      "Resources is available on the XL plan",
+      "The XL plan includes resources",
     );
   });
 
@@ -736,51 +732,135 @@ describe("FeatureGateNotice hard rules", () => {
   });
 });
 
-// ── English count agreement ─────────────────────────────────────────────────
+// ── English grammar at any noun and any count ──────────────────────────────
 //
-// `{feature}` arrives as one pre-chosen string, so ICU cannot inflect it: a
-// noun next to `{limit}` would read "includes 1 contexts". The quota copy
-// keeps the noun away from the numbers ("context limit … is 1") and agrees
-// the verb through `{current, plural, …}`.
+// `{feature}` arrives as one pre-chosen string, so ICU cannot inflect it and
+// nothing can make a verb agree with it: "Connectors is available", "1
+// contexts". So no English message makes `{feature}` the subject of a verb
+// or puts it beside a number — the noun is always an object ("The L plan
+// includes connectors") or a modifier ("the context limit"), and the counts
+// are read as usage, which suits a stock cap (contexts) and a daily one (API
+// calls) alike.
 
-describe("quota copy agrees with its counts (en)", () => {
-  const withPlan = (current: number, limit: number) =>
+describe("English copy reads grammatically for every noun and count", () => {
+  const withPlan = (feature: GateKeyOf, current: number, limit: number) =>
     gateOf({
       state: "quota",
-      feature: "contexts",
+      feature,
       currentPlan: "free",
       currentPlanLabel: "S",
       current,
       limit,
     });
-  const noPlan = (current: number, limit: number) =>
-    gateOf({ state: "quota", feature: "contexts", current, limit });
+  const noPlan = (feature: GateKeyOf, current: number, limit: number) =>
+    gateOf({ state: "quota", feature, current, limit });
 
   it.each([
     [
+      "description, 0 of 1",
+      withPlan("contexts", 0, 1),
+      "Your S plan's context limit is 1, and current usage is 0.",
+    ],
+    [
       "description, 1 of 1",
-      withPlan(1, 1),
-      "Your S plan's context limit in this workspace is 1, and 1 is in use.",
+      withPlan("contexts", 1, 1),
+      "Your S plan's context limit is 1, and current usage is 1.",
     ],
     [
       "description, 2 of 5",
-      withPlan(2, 5),
-      "Your S plan's context limit in this workspace is 5, and 2 are in use.",
+      withPlan("contexts", 2, 5),
+      "Your S plan's context limit is 5, and current usage is 2.",
     ],
     [
       "descriptionNoPlan, 1 of 1",
-      noPlan(1, 1),
-      "This workspace's context limit is 1, and 1 is in use.",
+      noPlan("contexts", 1, 1),
+      "The context limit is 1, and current usage is 1.",
     ],
     [
       "descriptionNoPlan, 2 of 5",
-      noPlan(2, 5),
-      "This workspace's context limit is 5, and 2 are in use.",
+      noPlan("contexts", 2, 5),
+      "The context limit is 5, and current usage is 2.",
     ],
-  ])("%s", (_name, gate, expected) => {
+    [
+      // The workspace cap is not a per-workspace quota: no "this workspace's
+      // workspace limit".
+      "descriptionNoPlan, the workspace cap",
+      noPlan("workspaces", 1, 1),
+      "The workspace limit is 1, and current usage is 1.",
+    ],
+    [
+      // A daily cap is not "in use".
+      "description, a daily cap",
+      withPlan("api_calls", 2, 5),
+      "Your S plan's API call limit is 5, and current usage is 2.",
+    ],
+  ])("quota %s", (_name, gate, expected) => {
     const text = featureGateText(gate, gateT("en"));
-    expect(text?.title).toBe("You've reached the context limit");
     expect(text?.description).toBe(expected);
+  });
+
+  it.each([
+    ["contexts", "You've reached the context limit"],
+    ["workspaces", "You've reached the workspace limit"],
+    ["api_calls", "You've reached the API call limit"],
+  ] as const)("quota title for %s", (feature, expected) => {
+    expect(featureGateText(noPlan(feature, 1, 1), gateT("en"))?.title).toBe(
+      expected,
+    );
+  });
+
+  it("a plural noun and a singleton read the same way in every refusal", () => {
+    const t = gateT("en");
+    const connectors = (state: RefusedGateState, planLabel?: string) =>
+      featureGateText(gateOf({ state, feature: "connectors", planLabel }), t);
+    expect(connectors("plan", "XL")?.title).toBe(
+      "The XL plan includes connectors",
+    );
+    expect(connectors("plan")?.title).toBe("No plan includes connectors");
+    expect(connectors("plan")?.description).toBe(
+      "No plan on this deployment includes connectors.",
+    );
+    expect(connectors("deployment")?.title).toBe(
+      "This deployment does not offer connectors",
+    );
+    expect(connectors("deployment")?.description).toBe(
+      "This Kagura Memory Cloud deployment has connectors turned off. Ask the administrator of this deployment if you need access.",
+    );
+    expect(connectors("allowlist")?.title).toBe(
+      "This workspace does not have access to connectors yet",
+    );
+    expect(connectors("allowlist")?.description).toBe(
+      "Access to connectors is being rolled out gradually. Reach out if you would like early access.",
+    );
+    expect(
+      featureGateText(
+        gateOf({ state: "deployment", feature: "secret_store" }),
+        t,
+      )?.title,
+    ).toBe("This deployment does not offer the secret store");
+  });
+
+  // A gerund subject ("Managing {feature} is …") agrees with the gerund, so
+  // only a sentence that STARTS with {feature} is caught.
+  it("never starts a sentence with {feature} as its subject or puts it beside a number", () => {
+    const leavesOf = (
+      node: unknown,
+      path: string[] = [],
+    ): [string, string][] =>
+      typeof node === "string"
+        ? [[path.join("."), node]]
+        : Object.entries(node as Messages).flatMap(([k, v]) =>
+            leavesOf(v, [...path, k]),
+          );
+    const { features: _features, ...messages } = CATALOGUES.en.gate;
+    const offending = leavesOf(messages).filter(
+      ([, message]) =>
+        /(^|[.!?] )\{feature\} (is|are|has|have|was|were)\b/.test(message) ||
+        /\{(limit|current)\} \{feature\}/.test(message),
+    );
+    expect(offending).toEqual([]);
+    // The Title-cased label only reads as a sentence subject.
+    expect(Object.values(GATE_NOUN_FORM)).not.toContain("label");
   });
 });
 
@@ -806,7 +886,7 @@ describe("FeatureGateNotice variants", () => {
     expect(
       screen.getByRole("heading", {
         level: 3,
-        name: "The cost dashboard is not available on this deployment",
+        name: "This deployment does not offer the cost dashboard",
       }),
     ).toBeInTheDocument();
   });
@@ -827,7 +907,7 @@ describe("FeatureGateNotice variants", () => {
     expect(
       screen.getByRole("heading", {
         level: 3,
-        name: "The cost dashboard is not available on this deployment",
+        name: "This deployment does not offer the cost dashboard",
       }),
     ).toBeInTheDocument();
   });
@@ -867,7 +947,7 @@ describe("FeatureGateNotice variants", () => {
       <FeatureGateNotice variant="page" gate={deployment} id="cost-notice" />,
     );
     expect(document.getElementById("cost-notice")).toHaveTextContent(
-      "The cost dashboard is not available on this deployment",
+      "This deployment does not offer the cost dashboard",
     );
   });
 

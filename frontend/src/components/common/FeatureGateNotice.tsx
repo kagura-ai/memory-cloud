@@ -123,27 +123,30 @@ export type GateMessageKey =
 
 /**
  * Which `gate.features.<key>` sub-key a message interpolates as `{feature}`:
- * `label` is Title-cased and starts a sentence ("Resources is available…"),
- * `plural` is lowercase mid-sentence ("New resources require…"), `singular`
- * is lowercase and modifies a noun ("the context limit"). `null` means the
- * message takes no `{feature}` at all. A property of the MESSAGE, declared
- * once here — never chosen at a call site. The test keeps it in step with
- * the catalogues.
+ * `plural` is lowercase mid-sentence ("The L plan includes resources"),
+ * `singular` is lowercase and modifies a noun ("the context limit"). `null`
+ * means the message takes no `{feature}` at all. A property of the MESSAGE,
+ * declared once here — never chosen at a call site. The test keeps it in
+ * step with the catalogues.
  *
- * The quota messages take `singular`: `{feature}` is one pre-chosen string
- * ICU cannot inflect, so a noun beside `{limit}` would read "includes 1
- * contexts". They keep the noun off the numbers ("context limit … is 1") and
- * agree the verb through `{current, plural, …}` instead.
+ * `{feature}` is one pre-chosen string ICU cannot inflect, so no English
+ * message makes it the subject of a verb or puts it beside a number: the
+ * Title-cased `label` as a subject reads "Connectors is available", and a
+ * noun beside `{limit}` reads "includes 1 contexts". No message takes
+ * `label` for that reason; it stays in the catalogue as the product term the
+ * parity test checks the nouns against. The quota messages take `singular`
+ * and keep the noun off the numbers ("context limit is 1, and current usage
+ * is 1").
  */
 export const GATE_NOUN_FORM: Readonly<
   Record<GateMessageKey, "label" | "plural" | "singular" | null>
 > = {
-  "plan.title": "label",
+  "plan.title": "plural",
   "plan.description": "plural",
   "plan.newTitle": "plural",
   "plan.newDescription": "plural",
-  "plan.titleNoTier": "label",
-  "plan.descriptionNoTier": "label",
+  "plan.titleNoTier": "plural",
+  "plan.descriptionNoTier": "plural",
   "plan.action": null,
   "plan.badge": null,
   "plan.hint": null,
@@ -156,7 +159,7 @@ export const GATE_NOUN_FORM: Readonly<
   "quota.action": null,
   "quota.badge": null,
   "quota.hint": null,
-  "deployment.title": "label",
+  "deployment.title": "plural",
   "deployment.description": "plural",
   "deployment.badge": null,
   "deployment.hint": null,
@@ -168,8 +171,8 @@ export const GATE_NOUN_FORM: Readonly<
   "role.admin.description": "plural",
   "role.admin.badge": null,
   "role.admin.hint": null,
-  "allowlist.title": "label",
-  "allowlist.description": "label",
+  "allowlist.title": "plural",
+  "allowlist.description": "plural",
   "allowlist.badge": null,
   "allowlist.hint": null,
 };

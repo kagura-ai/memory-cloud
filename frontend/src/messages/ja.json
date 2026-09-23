@@ -4268,7 +4268,7 @@
       "title": "{feature} は {plan} プランで利用できます",
       "description": "{feature} を利用するには {plan} プランにアップグレードしてください。",
       "newTitle": "新規 {feature} には {plan} プランが必要です",
-      "newDescription": "既存の {feature} は引き続き利用できます。新規 {feature} の作成は {plan} プランで利用できます。",
+      "newDescription": "既存の {feature} は引き続き利用できます。新規 {feature} の作成には {plan} プランが必要です。",
       "titleNoTier": "{feature} は利用できません",
       "descriptionNoTier": "この環境では {feature} はどのプランでも利用できません。",
       "action": "{plan} にアップグレード",
@@ -4278,9 +4278,9 @@
     },
     "quota": {
       "title": "{feature} の上限に達しました",
-      "description": "{currentPlan} プランではこのワークスペースで {feature} は {limit} 件までです（現在 {current} 件）。",
-      "descriptionNoPlan": "このワークスペースで {feature} は {limit} 件までです（現在 {current} 件）。",
-      "descriptionNoNumbers": "このワークスペースは {feature} の上限に達しています。",
+      "description": "{currentPlan} プランでは {feature} の上限は {limit} です（現在 {current}）。",
+      "descriptionNoPlan": "{feature} の上限は {limit} です（現在 {current}）。",
+      "descriptionNoNumbers": "{feature} が上限に達しています。",
       "upsell": "{plan} プランにすると上限が上がります。",
       "action": "プランを見る",
       "badge": "上限に達しました",
@@ -4308,7 +4308,7 @@
     },
     "allowlist": {
       "title": "このワークスペースでは {feature} はまだ有効化されていません",
-      "description": "{feature} は段階的に提供を拡大しています。ご利用をご希望の場合はお問い合わせください。",
+      "description": "{feature} は段階的に提供しています。ご利用をご希望の場合はお問い合わせください。",
       "badge": "未有効化",
       "hint": "このワークスペースでは未有効化"
     },
