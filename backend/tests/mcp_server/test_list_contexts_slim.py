@@ -516,14 +516,13 @@ def test_stringified_flags_are_coerced_before_validation():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("workspace_id", [None, "ws-1"])
-async def test_no_visible_context_adds_a_hint_naming_create_context(workspace_id):
+async def test_no_visible_context_adds_a_hint_naming_create_context():
     """A new account (or a member with no access) sees an empty list; the hint
     says to create a context and what to do when create_context is not in the
     client's tool list (``?profile=core`` leaves it out)."""
     harness = _Harness([], workspace_count=0)
 
-    payload = await _payload(harness, {}, workspace_id=workspace_id)
+    payload = await _payload(harness, {}, workspace_id="ws-1")
 
     assert payload["status"] == "success"
     assert payload["contexts"] == []
@@ -575,6 +574,19 @@ async def test_create_context_default_is_private_is_owner_only():
         await ContextService(db).create_context(
             workspace_id=workspace.id, name="my-project", created_by="u1"
         )
+
+
+@pytest.mark.asyncio
+async def test_no_workspace_hint_does_not_suggest_create_context():
+    """Without a workspace create_context refuses with workspace_required, so the
+    hint must not tell the caller to call it."""
+    payload = await _payload(_Harness([]), {}, workspace_id=None)
+
+    hint = payload["hint"]
+    assert "no current workspace" in hint
+    assert "create_context(" not in hint
+    assert "create_context cannot run yet" in hint
+    assert "web UI" in hint
 
 
 @pytest.mark.asyncio

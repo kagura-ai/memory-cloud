@@ -726,6 +726,14 @@ _EMPTY_CONTEXTS_HINT = (
     "create_context is not in your tool list (for example under ?profile=core), "
     "create the context in the web UI, or reconnect without ?profile=core."
 )
+# Without a workspace create_context refuses with ``workspace_required``, so
+# this variant never suggests calling it. The workspace is resolved on every
+# request, so the next list_contexts call sees a newly selected one.
+_NO_WORKSPACE_HINT = (
+    "No contexts are visible to you and you have no current workspace, so "
+    "create_context cannot run yet. Create or select a workspace in the web UI, "
+    "then call list_contexts again."
+)
 
 
 def _validate_list_contexts_args(args: dict[str, Any]) -> list[TextContent] | None:
@@ -915,7 +923,7 @@ async def handle_list_contexts(
             # non-empty list gets no hint.
             hint = None
             if visible_count == 0:
-                hint = _EMPTY_CONTEXTS_HINT
+                hint = _EMPTY_CONTEXTS_HINT if workspace_id else _NO_WORKSPACE_HINT
 
             await _log_tool_usage(db, user_id, "list_contexts", start_time, 200, None, workspace_id)
 
