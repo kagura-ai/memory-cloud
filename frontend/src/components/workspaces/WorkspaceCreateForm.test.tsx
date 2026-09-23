@@ -3,8 +3,8 @@
  *
  * The cap is read from the gate normalised on the ApiError (`err.gate`), so a
  * current server and one predating #1644 (legacy `owned_count` / `cap`) both
- * render the localized notice. The verbatim-English branch survives as the
- * rolling-deploy safety net for a body with no structured details at all.
+ * render the localized notice. A body with no structured details at all is
+ * an ordinary create failure: no notice, the generic error line.
  *
  * #1646 Q6: the cap renders through FeatureGateNotice (`gate.quota.*`) above
  * the form, lifted by `useErrorGate(err, "workspaces")`.
@@ -135,7 +135,9 @@ describe("WorkspaceCreateForm — workspace cap (#1644)", () => {
     expect(notice).toHaveTextContent("quota.title");
     expect(notice).toHaveTextContent(/quota\.description \{/);
     expect(notice).toHaveTextContent(COUNTS);
-    expect(notice).toHaveTextContent('"feature":"features.workspaces.singular"');
+    expect(notice).toHaveTextContent(
+      '"feature":"features.workspaces.singular"',
+    );
     expect(screen.queryByText(SERVER_MESSAGE)).toBeNull();
   });
 
@@ -172,13 +174,17 @@ describe("WorkspaceCreateForm — workspace cap (#1644)", () => {
     expect(screen.queryByText(SERVER_MESSAGE)).toBeNull();
   });
 
-  it("keeps the verbatim-English safety net when there are no structured details", async () => {
+  it("treats a refusal with no structured details as an ordinary create failure", async () => {
     mockCreateWorkspace.mockRejectedValue(
       new ApiError({ message: SERVER_MESSAGE, status: 429, details: {} }),
     );
     await submit();
 
-    expect(await screen.findByText(SERVER_MESSAGE)).toBeInTheDocument();
+    // No gate, so no notice: the generic line, which still carries the
+    // server's text.
+    expect(
+      await screen.findByText(`failedToCreateWorkspace: ${SERVER_MESSAGE}`),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
@@ -238,17 +244,22 @@ describe("WorkspaceCreateForm — the cap notice (#1646 Q6)", () => {
   it.each([
     ["an admin", "admin", { plan_page: true }],
     ["an owner with the Plan page off", "owner", {}],
-  ] as const)("%s: the notice stays, with no upsell and no CTA", async (_l, role, info) => {
-    mockRole = role;
-    mockFeatures = { ...info };
-    mockCreateWorkspace.mockRejectedValue(refusal(CURRENT_SERVER));
-    await submit();
+  ] as const)(
+    "%s: the notice stays, with no upsell and no CTA",
+    async (_l, role, info) => {
+      mockRole = role;
+      mockFeatures = { ...info };
+      mockCreateWorkspace.mockRejectedValue(refusal(CURRENT_SERVER));
+      await submit();
 
-    const notice = await findCapNotice();
-    expect(notice).toHaveTextContent("quota.title");
-    expect(notice.textContent).not.toContain("quota.upsell");
-    expect(screen.queryByRole("button", { name: /^quota\.action/ })).toBeNull();
-  });
+      const notice = await findCapNotice();
+      expect(notice).toHaveTextContent("quota.title");
+      expect(notice.textContent).not.toContain("quota.upsell");
+      expect(
+        screen.queryByRole("button", { name: /^quota\.action/ }),
+      ).toBeNull();
+    },
+  );
 
   it("a cap refusal without counts renders the count-free sentence, not the server English", async () => {
     mockCreateWorkspace.mockRejectedValue(

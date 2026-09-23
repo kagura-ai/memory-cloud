@@ -1483,7 +1483,6 @@
     "nameRequired": "Context name is required",
     "invalidName": "Context name must be lowercase alphanumeric with hyphens or underscores",
     "quotaWarning": "Free plan allows 1 context.",
-    "contextLimitReached": "Context limit reached. Your {plan} plan allows {limit} context(s) per workspace. Upgrade to Basic or Pro plan for multiple contexts.",
     "failedToCreate": "Failed to create context",
     "failedToUpdate": "Failed to update context",
     "failedToDelete": "Failed to delete context",

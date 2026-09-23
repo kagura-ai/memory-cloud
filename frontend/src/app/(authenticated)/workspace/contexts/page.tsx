@@ -81,10 +81,7 @@ import {
   getEmbeddingModels,
   type EmbeddingModel,
 } from "@/lib/api/contexts";
-import {
-  checkOpenAIKeyStatus,
-  type PlanTierFeature,
-} from "@/lib/api/workspaces";
+import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
@@ -111,33 +108,6 @@ const CONTEXT_NAME_PATTERN = /^[a-z0-9_-]+$/;
 
 /** The context-cap notice; every create control it disables points here. */
 const CONTEXT_QUOTA_NOTICE_ID = "context-quota-notice";
-
-/**
- * #1644: the context cap's tier label and limit, read from the gate
- * normalised on the ApiError — no regex over the server's English prose.
- * `plan` fills contextLimitReached's "Your {plan} plan allows {limit} …", so
- * it is the workspace's CURRENT tier, not the one that would lift the cap.
- * Null unless both are known: a server predating #1644 sent no details on
- * this refusal, and its own message is shown instead. `tiers` is the shared
- * matrix (#1645), so an operator-defined tier reads by its own display name.
- */
-function contextLimitArgs(
-  err: unknown,
-  locale: string | undefined,
-  tiers: readonly PlanTierFeature[] | null,
-): { plan: string; limit: number } | null {
-  const facts = err instanceof ApiError ? err.gate : undefined;
-  if (facts?.state !== "quota" || facts.quotaType !== "contexts") return null;
-  // An error message carries no CTA, so the raw upgrade answer is moot.
-  const gate = gateFromFacts(facts, {
-    fallbackKey: "contexts",
-    canUpgrade: false,
-    locale,
-    tiers,
-  });
-  if (!gate?.currentPlanLabel || gate.limit === undefined) return null;
-  return { plan: gate.currentPlanLabel, limit: gate.limit };
-}
 
 /**
  * #1646 (Q2): a create dialog's error line. A QUOTA refusal (`err.gate` is a
@@ -441,11 +411,9 @@ export default function ContextsPage() {
         apiError?.details?.detail ||
         (err instanceof Error ? err.message : t("failedToCreate"));
 
-      // Translate common error messages
-      const limitArgs = contextLimitArgs(err, locale, tiers);
-      if (limitArgs) {
-        errorMessage = t("contextLimitReached", limitArgs);
-      } else if (
+      // Translate common error messages. A quota refusal needs none: it
+      // renders as the gate notice (CreateErrorNotice), not as this string.
+      if (
         errorMessage.includes("already exists") ||
         errorMessage.includes("name taken")
       ) {
@@ -503,13 +471,12 @@ export default function ContextsPage() {
       let errorMessage =
         err instanceof Error ? err.message : t("failedToCreate");
 
-      // Translate common error messages (but keep resource_id duplicates as-is)
-      const limitArgs = contextLimitArgs(err, locale, tiers);
+      // Translate common error messages (but keep resource_id duplicates
+      // as-is). A quota refusal needs none: it renders as the gate notice
+      // (CreateErrorNotice), not as this string.
       if (errorMessage.includes("already used")) {
         // Resource ID duplicate error - show API message as-is (includes context name)
         setCreateError(errorMessage);
-      } else if (limitArgs) {
-        setCreateError(t("contextLimitReached", limitArgs));
       } else if (
         errorMessage.includes("already exists") ||
         errorMessage.includes("name taken")

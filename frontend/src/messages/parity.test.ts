@@ -150,6 +150,7 @@ const SUPERSEDED_GATE_KEYS: readonly string[] = [
   "contexts.teamMembersCanAccessShort",
   "contexts.quotaReachedDetail",
   "contexts.quotaReachedPlansLink",
+  "contexts.contextLimitReached",
   "contexts.viewPlans",
   "contexts.quotaDialogTitle",
   "contexts.quotaDialogDescription",

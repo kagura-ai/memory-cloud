@@ -106,13 +106,6 @@ export function WorkspaceCreateForm({
         // quota sentence when it does not. Keyed off the quota type so other
         // quota refusals don't match.
         setCapRefusal(err);
-      } else if (errorMessage.includes("Workspace limit reached")) {
-        // Fallback: surface the backend's authoritative message verbatim when
-        // structured details are absent. Live ``owned N (cap: M)`` data still
-        // beats a cached frontend cap; ja users see English in this path only.
-        // Kept on purpose as the rolling-deploy safety net for a body that
-        // reaches this client un-normalised; #1646's last commit removes it.
-        setError(errorMessage);
       } else if (
         errorMessage.includes("validation") ||
         errorMessage.includes("Invalid")

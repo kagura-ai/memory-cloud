@@ -896,8 +896,10 @@ describe("ContextsPage create errors read the context cap from err.gate (#1644)"
     expect(notice).toHaveTextContent(/"limit":1/);
     expect(notice).toHaveTextContent(/"feature":"features\.contexts\./);
     expect(screen.queryByText(SERVER_MESSAGE)).toBeNull();
-    // The gate notice is the one rendering; the sentence is not shown too.
-    expect(screen.queryByText(/contextLimitReached/)).toBeNull();
+    // The gate notice is the one rendering; no sentence is shown beside it.
+    expect(within(screen.getByRole("dialog")).getAllByRole("alert")).toEqual([
+      notice,
+    ]);
   });
 
   it("labels an operator-defined current tier by the matrix's display name (#1645)", async () => {
@@ -931,7 +933,6 @@ describe("ContextsPage create errors read the context cap from err.gate (#1644)"
     await submitAdvancedCreate();
 
     expect(await screen.findByText(SERVER_MESSAGE)).toBeInTheDocument();
-    expect(screen.queryByText(/contextLimitReached/)).toBeNull();
     expect(screen.queryByText(/^quota\.title/)).toBeNull();
   });
 
@@ -952,7 +953,9 @@ describe("ContextsPage create errors read the context cap from err.gate (#1644)"
     expect(notice).toHaveTextContent(/"feature":"features\.api_calls\./);
     expect(notice).not.toHaveTextContent(/features\.contexts/);
     expect(notice).toHaveTextContent(/quota\.descriptionNoNumbers/);
-    expect(screen.queryByText(/contextLimitReached/)).toBeNull();
+    expect(within(screen.getByRole("dialog")).getAllByRole("alert")).toEqual([
+      notice,
+    ]);
   });
 
   it("does not render another quota that carries a plan and a limit as the context cap", async () => {
@@ -978,7 +981,9 @@ describe("ContextsPage create errors read the context cap from err.gate (#1644)"
     expect(notice).toHaveTextContent(/"feature":"features\.memories\./);
     expect(notice).not.toHaveTextContent(/features\.contexts/);
     expect(notice).toHaveTextContent(/"limit":100/);
-    expect(screen.queryByText(/contextLimitReached/)).toBeNull();
+    expect(within(screen.getByRole("dialog")).getAllByRole("alert")).toEqual([
+      notice,
+    ]);
   });
 });
 
@@ -1063,7 +1068,7 @@ describe("ContextsPage create errors: a quota refusal is the gate notice (#1646)
       );
       expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
       // The quota refusal is not ALSO rendered as a sentence.
-      expect(within(dialog).queryByText(/contextLimitReached/)).toBeNull();
+      expect(within(dialog).getAllByRole("alert")).toEqual([notice]);
       expect(within(dialog).queryByText("Context limit reached.")).toBeNull();
     },
   );
