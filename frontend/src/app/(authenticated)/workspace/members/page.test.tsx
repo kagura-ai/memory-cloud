@@ -53,10 +53,14 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockPush, replace: vi.fn() }),
 }));
 
-// Keys pass through as text. The #1644 refusal keys also echo their ICU
+// Keys pass through as text. The gate descriptions also echo their ICU
 // params so the gate's values are assertable; every other key stays bare,
 // because existing cases match exact text on keys that take params.
-const ECHO_PARAMS = new Set(["invitePlanRequired", "memberSeatsFull"]);
+const ECHO_PARAMS = new Set([
+  "plan.description",
+  "quota.description",
+  "quota.upsell",
+]);
 const stableT = (k: string, params?: Record<string, unknown>) =>
   params && ECHO_PARAMS.has(k) ? `${k} ${JSON.stringify(params)}` : k;
 vi.mock("next-intl", () => ({
@@ -88,11 +92,13 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
 // #1645: the invite gate reads the shared tier matrix (`null` = still
 // resolving). Default: the OSS matrix, so `plan_name` decides exactly as the
 // tier's row does.
+// `max_members` is the seat cap's column (#1646 Q3): the first tier above
+// the workspace's limit is the one the seat notice names.
 const OSS_TIERS = [
-  { name: "free", display_name: "S", team_invitations: false },
-  { name: "basic", display_name: "M", team_invitations: false },
-  { name: "pro", display_name: "L", team_invitations: true },
-  { name: "promax", display_name: "XL", team_invitations: true },
+  { name: "free", display_name: "S", team_invitations: false, max_members: 1 },
+  { name: "basic", display_name: "M", team_invitations: false, max_members: 3 },
+  { name: "pro", display_name: "L", team_invitations: true, max_members: 5 },
+  { name: "promax", display_name: "XL", team_invitations: true, max_members: 20 },
 ] as unknown as PlanTierFeature[];
 let mockTiers: PlanTierFeature[] | null = OSS_TIERS;
 vi.mock("@/hooks/usePlanFeatures", () => ({
@@ -424,9 +430,9 @@ describe("WorkspaceMembersPage invite gate — the whole truth table (#1645)", (
  * #1643 — the seat-limit surfaces inside the invite dialog.
  *
  * Both used to render a <Link> wrapping a <button> (an <a> containing a
- * <button>, invalid interactive nesting). They are now a single <Button
- * asChild><Link>, and they only render where the Plan page is reachable; the
- * seat-limit copy stays either way.
+ * <button>, invalid interactive nesting), and only rendered where the Plan
+ * page is reachable; the seat-limit copy stayed either way. #1646 Q3 replaces
+ * both with the gate notice: one CTA, a real button, under the same rule.
  */
 describe("WorkspaceMembersPage seat-limit upgrade links (#1643)", () => {
   const AT_LIMIT_QUOTA = {
@@ -449,7 +455,7 @@ describe("WorkspaceMembersPage seat-limit upgrade links (#1643)", () => {
     fireEvent.click(invite);
     // The seat-limit copy is the explanation — it renders in every case here.
     await waitFor(() =>
-      expect(screen.getAllByText("seatLimitReached").length).toBeGreaterThan(0),
+      expect(screen.getByText("quota.title")).toBeInTheDocument(),
     );
   }
 
@@ -457,48 +463,120 @@ describe("WorkspaceMembersPage seat-limit upgrade links (#1643)", () => {
     mockFeatures = {};
     await openInviteDialogAtLimit();
 
-    expect(screen.getByText("seatLimitReachedDesc")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("link", { name: "upgradeToAddMembers" }),
-    ).toBeNull();
-    expect(
-      screen.queryByRole("button", { name: "upgradeToAddMembers" }),
-    ).toBeNull();
+    expect(screen.getByText(/^quota\.description /)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "quota.action" })).toBeNull();
+    expect(screen.queryByRole("link")).toBeNull();
   });
 
   it("seat limit reached, admin: the limit copy renders with no upgrade link", async () => {
     await openInviteDialogAtLimit("admin");
 
-    expect(screen.getByText("seatLimitReachedDesc")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("link", { name: "upgradeToAddMembers" }),
-    ).toBeNull();
+    expect(screen.getByText(/^quota\.description /)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "quota.action" })).toBeNull();
   });
 
   it("seat limit reached, /system/info pending: no upgrade link", async () => {
     mockFeatures = null;
     await openInviteDialogAtLimit();
 
-    expect(
-      screen.queryByRole("link", { name: "upgradeToAddMembers" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "quota.action" })).toBeNull();
   });
 
-  it("seat limit reached, owner on a plan_page deployment: anchors, not nested buttons", async () => {
+  it("seat limit reached, owner on a plan_page deployment: one CTA to the Plan page, no nested anchor", async () => {
     await openInviteDialogAtLimit();
 
-    // One for the seat badge, one for the at-limit panel — both plain anchors.
-    const links = screen.getAllByRole("link", { name: "upgradeToAddMembers" });
-    expect(links).toHaveLength(2);
-    for (const link of links) {
-      expect(link).toHaveAttribute("href", "/workspace/settings/plan");
-      // The invalid <a><button> nesting is gone: no button inside the anchor,
-      // and no standalone button carrying the same label.
-      expect(link.querySelector("button")).toBeNull();
-    }
-    expect(
-      screen.queryByRole("button", { name: "upgradeToAddMembers" }),
-    ).toBeNull();
+    // The two old <Link>s (seat badge + at-limit panel) are one notice CTA.
+    const ctas = screen.getAllByRole("button", { name: "quota.action" });
+    expect(ctas).toHaveLength(1);
+    expect(screen.queryByRole("link")).toBeNull();
+    fireEvent.click(ctas[0]);
+    expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
+  });
+});
+
+/**
+ * #1646 Q3/Q4 — the seat cap is a gate notice; below it the seat count is
+ * one plain line.
+ */
+describe("WorkspaceMembersPage seat cap notice (#1646 Q3/Q4)", () => {
+  function quota(used: number, limit: number) {
+    return {
+      current_members: used,
+      pending_invitations: 0,
+      total_used: used,
+      limit,
+      available: Math.max(0, limit - used),
+      percentage: limit > 0 ? (used / limit) * 100 : 0,
+      can_invite: used < limit,
+    };
+  }
+
+  async function openDialog(q: ReturnType<typeof quota>, role: Role = "owner") {
+    setupWithRole(role, "pro");
+    mockGetMemberQuota.mockResolvedValue(q);
+    render(<WorkspaceMembersPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /inviteMember/ }),
+    );
+    await screen.findByText("inviteTeamMember");
+  }
+
+  it.each([
+    ["well below the cap", 1],
+    ["at 80% (the old warning band)", 4],
+  ] as const)(
+    "%s: one muted seat line, no emoji, no notice, and the form",
+    async (_label, used) => {
+      await openDialog(quota(used, 5));
+
+      const line = await screen.findByText(/^seatUsage/);
+      expect(line).toHaveTextContent("seatUsage · seatsAvailable");
+      expect(line).toHaveClass("text-muted-foreground");
+      expect(line.textContent).not.toMatch(/[❌⚠ℹ]/u);
+      expect(screen.queryByText("quota.title")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByPlaceholderText("emailPlaceholder")).toBeInTheDocument();
+    },
+  );
+
+  it("at the cap: the notice replaces the seat line and the form", async () => {
+    await openDialog(quota(5, 5));
+
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent("quota.title");
+    expect(screen.queryByText(/^seatUsage/)).toBeNull();
+    expect(screen.queryByPlaceholderText("emailPlaceholder")).toBeNull();
+    expect(screen.queryByText("seatLimitReachedDesc")).toBeNull();
+  });
+
+  it("at the cap: the counts and the tier labels come from the descriptor, never the raw plan_name", async () => {
+    await openDialog(quota(5, 5));
+
+    const notice = await screen.findByRole("alert");
+    // Vocabulary 3 is gone: no `plan_name.toUpperCase() || "PRO"`.
+    expect(notice.textContent).not.toMatch(/PRO/);
+    expect(notice).toHaveTextContent('"currentPlan":"L"');
+    expect(notice).toHaveTextContent('"current":5,"limit":5');
+    // The tier that raises the cap, from the matrix's `max_members`.
+    expect(notice).toHaveTextContent('quota.upsell {"plan":"XL"');
+    expect(notice).toHaveTextContent('"feature":"features.members.singular"');
+  });
+
+  it("at the cap with no served tier above it: no upsell sentence, no CTA", async () => {
+    mockTiers = OSS_TIERS.map((t) => ({ ...t, max_members: 5 }));
+    await openDialog(quota(5, 5));
+
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent("quota.title");
+    expect(notice.textContent).not.toContain("quota.upsell");
+    expect(screen.queryByRole("button", { name: "quota.action" })).toBeNull();
+  });
+
+  it("an unknown cap (limit 0) never blocks: the form stays", async () => {
+    await openDialog(quota(0, 0));
+
+    expect(screen.queryByText("quota.title")).toBeNull();
+    expect(screen.getByPlaceholderText("emailPlaceholder")).toBeInTheDocument();
   });
 });
 
@@ -574,7 +652,10 @@ describe("WorkspaceMembersPage admin-only reads swallow the role gate only (#164
   });
 });
 
-/** #1644 C6 — the invite refusal is read from err.gate, not server English. */
+/**
+ * #1644 C6 — the invite refusal is read from err.gate, not server English.
+ * #1646: rendered by the gate notice, not by the interim per-page keys.
+ */
 describe("WorkspaceMembersPage invite refusal reads err.gate (#1644)", () => {
   // The page logs every refusal it catches; keep the run output readable.
   let quiet: ReturnType<typeof vi.spyOn>;
@@ -613,9 +694,12 @@ describe("WorkspaceMembersPage invite refusal reads err.gate (#1644)", () => {
     );
     await submitAdminInvite();
 
-    expect(
-      await screen.findByText('invitePlanRequired {"plan":"L"}'),
-    ).toBeInTheDocument();
+    // #1646: the gate notice, with the refusal's tier.
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent("plan.title");
+    expect(notice).toHaveTextContent(/plan\.description \{"plan":"L"/);
+    // The dialog's refusal carries no CTA of its own.
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
   });
 
   it("a plan refusal that names no tier takes the matrix's tier and display name (#1645)", async () => {
@@ -638,9 +722,9 @@ describe("WorkspaceMembersPage invite refusal reads err.gate (#1644)", () => {
     );
     await submitAdminInvite();
 
-    expect(
-      await screen.findByText('invitePlanRequired {"plan":"Team"}'),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /plan\.description \{"plan":"Team"/,
+    );
     expect(screen.queryByText(serverText)).toBeNull();
   });
 
@@ -660,10 +744,12 @@ describe("WorkspaceMembersPage invite refusal reads err.gate (#1644)", () => {
     );
     await submitAdminInvite();
 
-    expect(
-      await screen.findByText('memberSeatsFull {"current":5,"limit":5}'),
-    ).toBeInTheDocument();
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveTextContent("quota.title");
+    expect(notice).toHaveTextContent('"current":5,"limit":5');
+    expect(notice).toHaveTextContent('"feature":"features.members.singular"');
     expect(screen.queryByText(serverText)).toBeNull();
+    expect(screen.queryByRole("button", { name: "quota.action" })).toBeNull();
   });
 
   it("does not render another quota with counts as the seat cap", async () => {
@@ -682,7 +768,7 @@ describe("WorkspaceMembersPage invite refusal reads err.gate (#1644)", () => {
     await submitAdminInvite();
 
     expect(await screen.findByText(serverText)).toBeInTheDocument();
-    expect(screen.queryByText(/memberSeatsFull/)).toBeNull();
+    expect(screen.queryByText("quota.title")).toBeNull();
   });
 
   it("keeps the verbatim fallback for a refusal with no gate", async () => {
@@ -696,6 +782,30 @@ describe("WorkspaceMembersPage invite refusal reads err.gate (#1644)", () => {
     expect(
       await screen.findByText("An invitation for this email already exists"),
     ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("a new attempt clears the last refusal notice", async () => {
+    vi.mocked(createInvitation).mockRejectedValueOnce(
+      refusal(429, "QUOTA-001", "Member limit reached (5 seats).", {
+        gate: "quota",
+        quota_type: "members",
+        current: 5,
+        limit: 5,
+        current_plan: "pro",
+      }),
+    );
+    await submitAdminInvite();
+    expect(await screen.findByRole("alert")).toHaveTextContent("quota.title");
+
+    fireEvent.change(screen.getByPlaceholderText("emailPlaceholder"), {
+      target: { value: "" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "createInvitation" }));
+    });
+    expect(screen.getByText("emailRequiredError")).toBeInTheDocument();
+    expect(screen.queryByText("quota.title")).toBeNull();
   });
 });
 

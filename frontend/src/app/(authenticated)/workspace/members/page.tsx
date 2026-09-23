@@ -38,7 +38,12 @@ import {
 } from "@/lib/api/workspaces";
 import { getContexts, Context } from "@/lib/api/contexts";
 import { ApiError } from "@/lib/api/base";
-import { gateFromFacts, isBlocked } from "@/lib/gates/featureGates";
+import {
+  gateFromFacts,
+  isBlocked,
+  quotaGate,
+  type FeatureGate,
+} from "@/lib/gates/featureGates";
 import {
   listInvitations,
   createInvitation,
@@ -60,7 +65,6 @@ import {
   ChevronDown,
   ChevronUp,
 } from "lucide-react";
-import Link from "next/link";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -116,6 +120,8 @@ export default function WorkspaceMembersPage() {
   const [createdInviteUrl, setCreatedInviteUrl] = useState<string | null>(null);
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
   const [inviteError, setInviteError] = useState<string | null>(null); // Issue #217
+  // #1646: a plan or seat-cap refusal of the create call, as a gate notice.
+  const [inviteGate, setInviteGate] = useState<FeatureGate | null>(null);
   const [inviteLoading, setInviteLoading] = useState(false); // Issue #217
 
   // Issue #217: Delete member confirmation dialog
@@ -167,6 +173,20 @@ export default function WorkspaceMembersPage() {
   // #1643: may we point this member at /workspace/settings/plan at all? The
   // seat-limit copy stays either way; only the upgrade links are withheld.
   const canUpgrade = useCanUpgrade();
+
+  // #1646 Q3: the seat cap as a gate descriptor, from the counts the page
+  // already holds. Before the quota loads the limit reads 0, which never
+  // blocks — the create call stays authoritative. The tier that raises the
+  // cap comes from the shared matrix; none named, no upgrade offered.
+  const seatGate = quotaGate({
+    key: "members",
+    current: memberQuota?.total_used ?? 0,
+    limit: memberQuota?.limit ?? 0,
+    planName: currentWorkspace?.plan_name,
+    tiers,
+    canUpgrade: canUpgrade === true,
+    locale,
+  });
 
   useEffect(() => {
     // Issue #398: skip the four protected fetches for member/viewer — the
@@ -334,6 +354,8 @@ export default function WorkspaceMembersPage() {
 
   const handleCreateInvitation = async () => {
     if (!currentWorkspaceId) return;
+    // A new attempt replaces the last refusal, as a new error string does.
+    setInviteGate(null);
 
     // Validate email is required
     if (!inviteEmail.trim()) {
@@ -377,6 +399,7 @@ export default function WorkspaceMembersPage() {
       // #1644: the plan and seat-cap refusals are read from the normalised
       // gate and rendered in the reader's language; anything else keeps the
       // server's own text. The dialog carries no CTA of its own here.
+      // #1646: rendered by the gate notice (`gate.*`), not by per-page keys.
       const gate = gateFromFacts(apiErr?.gate, {
         fallbackKey: "team_invitations",
         canUpgrade: false,
@@ -384,20 +407,15 @@ export default function WorkspaceMembersPage() {
         tiers,
       });
       if (
-        gate?.state === "plan" &&
-        gate.feature === "team_invitations" &&
-        gate.planLabel
+        (gate?.state === "plan" &&
+          gate.feature === "team_invitations" &&
+          gate.planLabel) ||
+        (gate?.state === "quota" &&
+          apiErr?.gate?.quotaType === "members" &&
+          gate.current !== undefined &&
+          gate.limit !== undefined)
       ) {
-        setInviteError(t("invitePlanRequired", { plan: gate.planLabel }));
-      } else if (
-        gate?.state === "quota" &&
-        apiErr?.gate?.quotaType === "members" &&
-        gate.current !== undefined &&
-        gate.limit !== undefined
-      ) {
-        setInviteError(
-          t("memberSeatsFull", { current: gate.current, limit: gate.limit }),
-        );
+        setInviteGate(gate);
       } else {
         const errorMsg =
           apiErr?.details?.detail ||
@@ -434,6 +452,7 @@ export default function WorkspaceMembersPage() {
     setInviteRole("member");
     setInviteExpiry(30);
     setInviteError(null); // Issue #217: Clear error on close
+    setInviteGate(null);
   };
 
   // Issue #217: Open delete invitation confirmation dialog
@@ -1122,86 +1141,28 @@ export default function WorkspaceMembersPage() {
             {!createdInviteUrl ? (
               // Step 1: Create invitation form
               <div className="space-y-4">
-                {/* Issue #229: Seat usage badge */}
-                {memberQuota && (
-                  <div
-                    className={`p-3 rounded-lg border ${
-                      memberQuota.percentage >= 100
-                        ? "bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800"
-                        : memberQuota.percentage >= 80
-                          ? "bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800"
-                          : "bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium">
-                          {memberQuota.percentage >= 100
-                            ? "❌"
-                            : memberQuota.percentage >= 80
-                              ? "⚠️"
-                              : "ℹ️"}{" "}
-                          {t("seatUsage", {
-                            used: memberQuota.total_used,
-                            limit: memberQuota.limit,
-                          })}
-                        </p>
-                        <p className="text-xs mt-1">
-                          {memberQuota.available > 0
-                            ? t("seatsAvailable", {
-                                available: memberQuota.available,
-                              })
-                            : t("seatLimitReached")}
-                        </p>
-                      </div>
-                      {/* #1643: the seat-usage copy above always renders; only
-                          this CTA needs a reachable Plan page. It was a <Link>
-                          wrapping a <button> (an <a> containing a <button>,
-                          invalid interactive nesting) — one <Button asChild>
-                          renders a single anchor with the button styling. */}
-                      {memberQuota.percentage >= 100 && canUpgrade === true && (
-                        <Button
-                          asChild
-                          size="sm"
-                          variant="destructive"
-                          className="text-xs"
-                        >
-                          <Link href="/workspace/settings/plan">
-                            {t("upgradeToAddMembers")}
-                          </Link>
-                        </Button>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {memberQuota && memberQuota.percentage >= 100 ? (
-                  // At limit - show upgrade prompt instead of form
-                  <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4 text-center">
-                    <AlertTriangle className="w-12 h-12 text-red-600 mx-auto mb-3" />
-                    <h4 className="text-lg font-semibold text-red-900 dark:text-red-100 mb-2">
-                      {t("seatLimitReached")}
-                    </h4>
-                    <p className="text-sm text-red-800 dark:text-red-200 mb-4">
-                      {t("seatLimitReachedDesc", {
-                        plan:
-                          currentWorkspace?.plan_name?.toUpperCase() || "PRO",
-                        limit: memberQuota.limit,
-                      })}
-                    </p>
-                    {/* #1643: same nesting fix and same guard as the badge
-                        above. With no CTA the panel is explanation-only, which
-                        is the correct shape when there is nowhere to go. */}
-                    {canUpgrade === true && (
-                      <Button asChild variant="destructive">
-                        <Link href="/workspace/settings/plan">
-                          {t("upgradeToAddMembers")}
-                        </Link>
-                      </Button>
-                    )}
-                  </div>
+                {/* #1646 Q3/Q4: at the seat cap the gate notice replaces the
+                    form — the descriptor's own tier labels and counts, a CTA
+                    only where the member may upgrade. Below the cap the seat
+                    count is a plain line, not a gate. */}
+                {isBlocked(seatGate) ? (
+                  <FeatureGateNotice gate={seatGate} />
                 ) : (
                   <>
+                    {memberQuota && (
+                      <p className="text-sm text-muted-foreground">
+                        {t("seatUsage", {
+                          used: memberQuota.total_used,
+                          limit: memberQuota.limit,
+                        })}{" "}
+                        ·{" "}
+                        {memberQuota.available > 0
+                          ? t("seatsAvailable", {
+                              available: memberQuota.available,
+                            })
+                          : t("seatLimitReached")}
+                      </p>
+                    )}
                     <div>
                       <label className="block text-sm font-medium mb-1 text-gray-700 dark:text-gray-300">
                         {t("emailRequired")}{" "}
@@ -1366,6 +1327,9 @@ export default function WorkspaceMembersPage() {
                         )}
                       </div>
                     )}
+
+                    {/* #1646: a gate refusal of the create call */}
+                    {inviteGate && <FeatureGateNotice gate={inviteGate} />}
 
                     {/* Issue #217: Error display */}
                     {inviteError && (
