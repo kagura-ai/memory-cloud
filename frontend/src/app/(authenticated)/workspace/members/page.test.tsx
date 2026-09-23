@@ -440,6 +440,25 @@ describe("WorkspaceMembersPage invite refusal reads err.gate (#1644)", () => {
     expect(screen.queryByText(serverText)).toBeNull();
   });
 
+  it("does not render another quota with counts as the seat cap", async () => {
+    const serverText = "Daily memory limit reached (100/100).";
+    vi.mocked(createInvitation).mockRejectedValue(
+      refusal(429, "QUOTA-001", serverText, {
+        gate: "quota",
+        quota_type: "memories_per_day",
+        current: 100,
+        limit: 100,
+        required_plan: null,
+        required_plan_display: null,
+        current_plan: "pro",
+      }),
+    );
+    await submitAdminInvite();
+
+    expect(await screen.findByText(serverText)).toBeInTheDocument();
+    expect(screen.queryByText(/memberSeatsFull/)).toBeNull();
+  });
+
   it("keeps the verbatim fallback for a refusal with no gate", async () => {
     vi.mocked(createInvitation).mockRejectedValue(
       refusal(409, "HTTP-409", "An invitation for this email already exists", {

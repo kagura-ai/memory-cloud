@@ -1686,6 +1686,26 @@ describe("ConnectorsPage RBAC gate", () => {
       await screen.findByText('connectorPlanRequired {"plan":"XL"}'),
     ).toBeInTheDocument();
   });
+
+  it("does not render another quota with counts as the connector seat cap (#1644)", async () => {
+    const serverText = "Daily memory limit reached (100/100).";
+    mockCreateConnector.mockRejectedValue(
+      gateRefusal(429, "QUOTA-001", serverText, {
+        gate: "quota",
+        quota_type: "memories_per_day",
+        current: 100,
+        limit: 100,
+        required_plan: null,
+        required_plan_display: null,
+        current_plan: "basic",
+      }),
+    );
+    await submitCreate();
+
+    expect(await screen.findByText(serverText)).toBeInTheDocument();
+    expect(screen.queryByText(/connectorSeatsFull/)).toBeNull();
+  });
+
   // ── #1471: memory_link_template is now writable from the UI ──────────
 
   function connectorWithRuntime(runtime: Record<string, unknown>) {

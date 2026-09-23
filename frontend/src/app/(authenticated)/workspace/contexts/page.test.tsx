@@ -747,4 +747,27 @@ describe("ContextsPage create errors read the context cap from err.gate (#1644)"
     ).toBeInTheDocument();
     expect(screen.queryByText(/contextLimitReached/)).toBeNull();
   });
+
+  it("does not render another quota that carries a plan and a limit as the context cap", async () => {
+    const serverText = "Daily memory limit reached (100/100).";
+    const details = {
+      ...CURRENT_SERVER_BODY,
+      quota_type: "memories_per_day",
+      current: 100,
+      limit: 100,
+    };
+    vi.mocked(createContext).mockRejectedValueOnce(
+      new ApiError({
+        error: "QUOTA-001",
+        message: serverText,
+        status: 429,
+        details,
+        gate: normalizeGate(429, "QUOTA-001", details),
+      }),
+    );
+    await submitAdvancedCreate();
+
+    expect(await screen.findByText(serverText)).toBeInTheDocument();
+    expect(screen.queryByText(/contextLimitReached/)).toBeNull();
+  });
 });
