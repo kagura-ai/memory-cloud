@@ -8,6 +8,8 @@
  * precedence the two failure directions depend on.
  */
 
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { WorkspaceRole } from "@/lib/auth/rbac";
@@ -1497,6 +1499,56 @@ describe("GATE_SPECS key space (#1645)", () => {
     ).toBe("allowed");
     expect(resolveGate(input("byok", { features: failed })).state).toBe(
       "deployment",
+    );
+  });
+});
+
+describe("no gate decision outside the descriptor (#1645)", () => {
+  /**
+   * The acceptance grep, as a test: a tier rank (`planAtLeast(`) or a literal
+   * plan-name compare (`plan_name === "free"`) deciding what a user may do
+   * belongs in GATE_SPECS / useFeatureGate now. Read as source so it also
+   * catches the NEXT page that reaches for a tier name. Comments are
+   * stripped first — history notes may quote the old rule.
+   *
+   * The allowlist is the genuinely ordinal / non-decision set: the system-
+   * admin users table picks a Badge VARIANT by tier rank, and planLabel.ts
+   * defines the helpers.
+   */
+  const ALLOWED = new Set([
+    "src/app/(authenticated)/admin/users/[userId]/page.tsx",
+    "src/lib/utils/planLabel.ts",
+  ]);
+  const DECISION = [/planAtLeast\(/, /plan_name\s*[!=]==?\s*["'`]/];
+
+  const stripComments = (src: string) =>
+    src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`])\/\/.*$/gm, "$1");
+
+  it("finds none in src outside the allowlist", () => {
+    const root = join(process.cwd(), "src");
+    const offenders = (readdirSync(root, { recursive: true }) as string[])
+      .map((rel) => `src/${rel.split("\\").join("/")}`)
+      .filter((rel) => /\.(ts|tsx)$/.test(rel) && !/\.test\.tsx?$/.test(rel))
+      .filter((rel) => !ALLOWED.has(rel))
+      .filter((rel) => {
+        const src = stripComments(
+          readFileSync(join(process.cwd(), rel), "utf8"),
+        );
+        return DECISION.some((re) => re.test(src));
+      });
+    expect(offenders).toEqual([]);
+  });
+
+  it("would catch one (the scan is not vacuous)", () => {
+    const sample = stripComments(
+      'const x = planAtLeast(p, "pro");\n// plan_name === "free"\n',
+    );
+    expect(DECISION[0].test(sample)).toBe(true);
+    expect(
+      DECISION[1].test(stripComments('if (ws.plan_name === "free") {}')),
+    ).toBe(true);
+    expect(DECISION[1].test(stripComments('// plan_name === "free"'))).toBe(
+      false,
     );
   });
 });
