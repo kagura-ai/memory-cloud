@@ -316,7 +316,12 @@ def plan_at_least(plan_name: str | None, minimum: str) -> bool:
     return plan_rank(plan_name) >= plan_rank(minimum)
 
 
-# Feature to minimum plan mapping
+# Feature to minimum plan mapping.
+#
+# A row here is NOT by itself evidence of a runtime gate: it says which tier
+# the feature belongs to, not that anything refuses a tier without it. What
+# each entry actually does at runtime is declared in ``FEATURE_ENFORCEMENT``
+# below (#1648) — read the two together.
 FEATURE_MIN_PLANS: dict[str, str] = {
     "api_keys": "free",
     "reranking": "basic",
@@ -338,6 +343,120 @@ FEATURE_MIN_PLANS: dict[str, str] = {
 KNOWN_FEATURES: frozenset[str] = frozenset(FEATURE_MIN_PLANS).union(
     *(tier.features for tier in PLAN_TIERS.values())
 )
+
+# ============================================================================
+# Feature enforcement modes (#1648)
+# ============================================================================
+
+
+class FeatureEnforcement(StrEnum):
+    """How a ``FEATURE_MIN_PLANS`` entry behaves at RUNTIME (#1648).
+
+    ``FEATURE_MIN_PLANS`` above says which tier a feature belongs to. It says
+    nothing about whether anything checks — three entries were display-only
+    when this enum was added. The mode makes that explicit so a reader (and the
+    web UI, which receives it on the tier matrix) can tell a gate from a label.
+
+    Members:
+        ENFORCED: A runtime check REFUSES the request on a tier without the
+            feature (``FEAT-001`` / ``plan_required`` / a raised error), on
+            every deployment. This is the only mode a client may hard-disable
+            a control on.
+        CONDITIONAL: A runtime check refuses, but only where a deployment
+            setting turns it on; with that setting at its default the tier
+            without the feature is served anyway. A client must NOT hard-gate
+            on this mode — it would refuse what this deployment allows.
+        DEGRADES: A runtime check exists but the request still SUCCEEDS with
+            reduced behaviour; nothing is refused.
+        ADVERTISED: No runtime check at all. The entry exists so the plan
+            pages can list the feature; every tier behaves the same.
+    """
+
+    ENFORCED = "enforced"
+    CONDITIONAL = "conditional"
+    DEGRADES = "degrades"
+    ADVERTISED = "advertised"
+
+
+@dataclass(frozen=True)
+class FeatureGate:
+    """One feature's enforcement mode plus the human reason for it (#1648).
+
+    Attributes:
+        mode: The ``FeatureEnforcement`` member.
+        note: Where the gate lives (or why there is none), for the reader who
+            is deciding whether a UI may hard-disable a control.
+    """
+
+    mode: FeatureEnforcement
+    note: str
+
+
+# What each FEATURE_MIN_PLANS entry actually does at runtime (#1648).
+#
+# Keep in lock-step with FEATURE_MIN_PLANS / KNOWN_FEATURES: every known
+# feature needs a row here, and ``tests/config/test_feature_enforcement.py``
+# scans ``backend/src`` to fail when a declared mode and the call sites drift
+# apart. Changing a mode is a DOCUMENTATION change — add or remove the gate
+# in the same PR, never the label alone.
+FEATURE_ENFORCEMENT: dict[str, FeatureGate] = {
+    "api_keys": FeatureGate(
+        FeatureEnforcement.ADVERTISED,
+        "No gate: every tier may create API keys. Listed for the plan pages only.",
+    ),
+    "oauth": FeatureGate(
+        FeatureEnforcement.ADVERTISED,
+        "No gate: OAuth login/clients work on every tier. Listed for the plan pages only.",
+    ),
+    "secret_store": FeatureGate(
+        FeatureEnforcement.ADVERTISED,
+        "No gate, and an invariant every tier must keep (#1128) — the row can never be false.",
+    ),
+    "reranking": FeatureGate(
+        FeatureEnforcement.DEGRADES,
+        "services/search_service.py checks with raise_on_denied=False: recall still "
+        "returns results, just unreranked, and logs reranking_disabled_by_plan_tier.",
+    ),
+    "team_invitations": FeatureGate(
+        FeatureEnforcement.ENFORCED,
+        "api/routes/invitations.py refuses to create an invitation (#165).",
+    ),
+    "shared_contexts": FeatureGate(
+        FeatureEnforcement.ENFORCED,
+        "services/context_service.py and api/routes/contexts.py refuse a non-private "
+        "visibility (#165).",
+    ),
+    "public_contexts": FeatureGate(
+        FeatureEnforcement.ENFORCED,
+        "api/routes/contexts.py, api/routes/member_credentials.py and the set_public "
+        "MCP tool refuse to publish a context or mint a bound public key (#1551).",
+    ),
+    "memory_analysis": FeatureGate(
+        FeatureEnforcement.ENFORCED,
+        "auth/analysis_gates.py refuses the analysis run with 403 (#496).",
+    ),
+    "managed_embeddings": FeatureGate(
+        FeatureEnforcement.CONDITIONAL,
+        "services/embedding_service.py refuses the platform-key fallback (#1030), but "
+        "only where EMBEDDING_PLATFORM_FALLBACK_REQUIRES_MANAGED_PLAN is on — it "
+        "defaults to off (platform_fallback_allowed returns True for every tier), so a "
+        "default deployment embeds on the platform key regardless of tier.",
+    ),
+    "managed_llm": FeatureGate(
+        FeatureEnforcement.ENFORCED,
+        "services/analysis/llm_lane.py raises VAL-001 when neither BYOK nor this "
+        "feature resolves a lane (#1569).",
+    ),
+    "resources": FeatureGate(
+        FeatureEnforcement.ENFORCED,
+        "api/routes/resource_tokens.py and the setup_resource MCP tool refuse "
+        "provisioning (#1551).",
+    ),
+    "connectors": FeatureGate(
+        FeatureEnforcement.ENFORCED,
+        "services/connector_provisioning.py refuses setup_connector (#1551).",
+    ),
+}
 
 
 def _parse_features_override(plan_name: str, raw: str) -> frozenset[str]:
@@ -587,6 +706,35 @@ def has_feature(plan_name: str, feature: str) -> bool:
         return feature in plan.features
     except ValueError:
         return False
+
+
+def feature_enforcement(feature: str) -> FeatureEnforcement:
+    """Runtime enforcement mode of ``feature`` (#1648).
+
+    Args:
+        feature: Feature name.
+
+    Returns:
+        The declared ``FeatureEnforcement``. An unknown name reads as
+        ``ADVERTISED`` — the fail-soft answer, because a caller that cannot
+        prove a gate exists must not hard-disable a control over it.
+    """
+    gate = FEATURE_ENFORCEMENT.get(feature)
+    return gate.mode if gate else FeatureEnforcement.ADVERTISED
+
+
+def feature_enforcement_modes() -> dict[str, str]:
+    """Every known feature's enforcement mode as plain strings (#1648).
+
+    The shape the plan endpoints put on the wire. Tier-independent: the mode
+    is a property of the CODE, so it does not follow a ``PLAN_<KEY>_FEATURES``
+    override the way ``FEATURE_MIN_PLANS`` does.
+
+    Returns:
+        ``{feature: "enforced" | "conditional" | "degrades" | "advertised"}``,
+        key-sorted.
+    """
+    return {name: gate.mode.value for name, gate in sorted(FEATURE_ENFORCEMENT.items())}
 
 
 def required_plan_display_name(feature: str) -> str:

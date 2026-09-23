@@ -23,7 +23,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import SessionUser
-from config.plan_tiers import PLAN_ORDER, PLAN_TIERS, PlanTier, get_plan_tier, plan_rank
+from config.plan_tiers import (
+    PLAN_ORDER,
+    PLAN_TIERS,
+    PlanTier,
+    feature_enforcement_modes,
+    get_plan_tier,
+    plan_rank,
+)
 from db.base import get_db
 from models.auth import (
     Context,
@@ -134,6 +141,16 @@ class PlanTierFeature(BaseModel):
     resources: bool
     connectors: bool
     public_contexts: bool
+    # Issue #1648: what each feature name actually DOES at runtime —
+    # ``"enforced"`` (a check refuses the request), ``"conditional"`` (a check
+    # refuses only where a deployment setting turns it on), ``"degrades"`` (the
+    # request succeeds with reduced behaviour) or ``"advertised"`` (no runtime
+    # check at all; the row exists so the plan pages can list it).
+    # Tier-INDEPENDENT: the
+    # same map rides on every row because a client gating a control needs the
+    # mode of a feature this tier does *not* have. Additive — a client that
+    # ignores the field behaves exactly as before.
+    feature_enforcement: dict[str, str]
 
 
 # ============================================================================
@@ -302,6 +319,12 @@ def _plan_tier_feature(tier: PlanTier) -> PlanTierFeature:
         resources=has_resources,
         connectors=has_connectors,
         public_contexts=has_public,
+        # #1648: the same tier-independent map on every row — see the field's
+        # comment. A UI may hard-disable a control only for an ``enforced``
+        # feature; ``conditional``, ``degrades`` and ``advertised`` rows have
+        # no refusal behind them on a default deployment, so disabling on those
+        # invents a gate the backend does not have.
+        feature_enforcement=feature_enforcement_modes(),
     )
 
 
@@ -315,6 +338,10 @@ async def get_plan_tier_matrix(
     omitted by design — pricing lives in www / the payment service. Returns the
     tiers in upgrade order (free → basic → pro). Public reference data; accessible
     by any authenticated session user (the Plan page itself is owner-gated).
+
+    Each row also carries ``feature_enforcement`` (#1648): the registry's
+    per-feature runtime mode, so a client can tell a real gate from a plan-page
+    label instead of assuming every feature name is enforced.
 
     Path note: the ``/workspaces/plans/...`` two-segment shape (mirroring
     ``/workspaces/plans/available``) is deliberate — a one-segment
