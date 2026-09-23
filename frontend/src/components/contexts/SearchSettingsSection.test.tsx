@@ -421,6 +421,31 @@ describe("SearchSettingsSection free-tier upgrade CTA (#1643)", () => {
       screen.queryByRole("link", { name: "upgradeToBasic" }),
     ).not.toBeInTheDocument();
   });
+
+  it("free tier, owner on a plan_page deployment, no served tier has reranking: no plan link", async () => {
+    // #1645: an operator withheld reranking from every tier, so the gate
+    // names no tier and the Plan page cannot lift it — the notice stays, the
+    // link does not.
+    mockTiers = OSS_TIERS.map((tier) => ({
+      ...tier,
+      reranking: false,
+    })) as PlanTierFeature[];
+    mockFeatures = { byok: true, plan_page: true };
+    mockInfo = {
+      features: { byok: true, plan_page: true },
+      search_defaults: VOYAGE_DEFAULTS,
+    };
+    setFree("owner");
+    render(<SearchSettingsSection contextId="ctx-1" />);
+
+    expect(
+      await screen.findByText("rerankerNotAvailableFree"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("upgradeToBasic")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "upgradeToBasic" }),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("SearchSettingsSection reads the reranking gate (#1645)", () => {
