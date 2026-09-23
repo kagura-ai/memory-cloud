@@ -355,11 +355,14 @@ On the MCP surface a gate refusal arrives as the in-band tool error (§4). The m
 one forward the same keys the REST `details` carries — `gate`, `feature`, `required_plan`,
 `required_plan_display`, `current_plan`, and on a quota `quota_type` / `current` / `limit` /
 `resets_at` — as top-level envelope fields: `feature_not_available` and `quota_exceeded` from
-the analysis tools, `plan_required` from `create_context` and `setup_connector` (whose seat cap
-keeps its `CONNECTOR-001` code), `quota_exceeded` from `remember`, `init_file_upload` and
-`register_agent`. The `quota_exceeded` envelopes omit `null` values, which a client reads the
-same as `null`. `test_gate_error_contract.py`
-lists which refusals reach an MCP mapper and why the rest do not.
+the analysis tools; `plan_required` from `create_context`, `update_context` (`is_public`),
+`setup_resource` and `setup_connector` (whose seat cap keeps its `CONNECTOR-001` code);
+`quota_exceeded` from `remember`, `init_file_upload`, `register_agent`, and the context and
+token caps of `create_context` / `setup_resource`. Every envelope keeps the `error` code and
+the fields it carried before (`required_plan`, `help`, the legacy counts); the gate keys are
+added beside them. The `quota_exceeded` envelopes omit `null` values, which a client reads the
+same as `null`. `test_gate_error_contract.py` lists which refusals reach an MCP tool and why the
+rest do not.
 
 ### `quota_type` vocabulary (frozen)
 
