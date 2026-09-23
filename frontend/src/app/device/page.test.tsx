@@ -229,6 +229,68 @@ describe("DevicePage", () => {
     });
   });
 
+  it("shows the rate-limit message, not invalidCode, on a 429 from verify (#1656)", async () => {
+    mockVerifyDeviceCode.mockRejectedValue(
+      new ApiError({
+        message: "Too many attempts. Please try again later.",
+        status: 429,
+      }),
+    );
+    render(<DevicePage />);
+
+    const input = screen.getByLabelText("device.codeLabel");
+    fireEvent.change(input, { target: { value: "ABCD1234" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(screen.getByText("device.rateLimited")).toBeDefined();
+    });
+    expect(screen.queryByText("device.invalidCode")).toBeNull();
+  });
+
+  it("shows the rate-limit message when the race re-verify gets a 429 (#1656)", async () => {
+    mockVerifyDeviceCode
+      .mockResolvedValueOnce({
+        user_code: "ABCD1234",
+        client_name: "Test CLI",
+        scope: "memory:read",
+        expires_at: "2026-01-01T00:00:00Z",
+        is_authorized: false,
+        is_expired: false,
+      })
+      .mockRejectedValueOnce(
+        new ApiError({
+          message: "Too many attempts. Please try again later.",
+          status: 429,
+        }),
+      );
+    mockConfirmDevice.mockRejectedValue(
+      new ApiError({
+        message: "This code has already been processed",
+        status: 409,
+      }),
+    );
+    render(<DevicePage />);
+
+    const input = screen.getByLabelText("device.codeLabel");
+    fireEvent.change(input, { target: { value: "ABCD1234" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(screen.getByText("device.approve")).toBeDefined();
+    });
+    fireEvent.click(screen.getByText("device.approve"));
+
+    // The error phase with device info renders the banner in both the code
+    // input block and the consent-retry block, so match all of them.
+    await waitFor(() => {
+      expect(screen.getAllByText("device.rateLimited").length).toBeGreaterThan(0);
+    });
+    expect(
+      screen.queryByText("This code has already been processed"),
+    ).toBeNull();
+  });
+
   it("auto-verifies from URL user_code param", async () => {
     mockSearchParams.set("user_code", "URL12345");
     mockVerifyDeviceCode.mockResolvedValue({

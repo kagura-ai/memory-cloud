@@ -3951,6 +3951,7 @@
     "verify": "Verify",
     "verifying": "Verifying...",
     "invalidCode": "The code you entered is invalid or has expired. Check your CLI and try again.",
+    "rateLimited": "Too many attempts. Wait a minute, then try again.",
     "alreadyAuthorized": "This device has already been authorized.",
     "alreadyDenied": "This device request has already been denied.",
     "expired": "This authorization request has expired. Start a new one from your CLI.",

@@ -96,6 +96,7 @@ async def lifespan(app: FastAPI):
         get_scheduler,
         schedule_bm25_drift_tasks,
         schedule_credentials_tasks,
+        schedule_device_code_tasks,
         schedule_embedding_tasks,
         schedule_erasure_tasks,
         schedule_file_tasks,
@@ -111,6 +112,7 @@ async def lifespan(app: FastAPI):
     schedule_neural_tasks(scheduler)
     schedule_mcp_tasks(scheduler)
     schedule_credentials_tasks(scheduler)
+    schedule_device_code_tasks(scheduler)
     schedule_embedding_tasks(scheduler)
     schedule_resource_indexer_jobs(scheduler)
     schedule_sleep_tasks(scheduler)

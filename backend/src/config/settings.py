@@ -108,6 +108,42 @@ class Settings(BaseSettings):
         default=5,
         description="Minimum polling interval in seconds for device code grant",
     )
+    # #1656: per-client-address request limits on the two unauthenticated
+    # device-flow endpoints. Counted in Redis per one-minute window; a Redis
+    # outage lets the request through. The address is ``request.client.host``:
+    # behind a reverse proxy it is the caller's address only when uvicorn
+    # trusts the proxy's forwarded headers (``--forwarded-allow-ips`` /
+    # ``FORWARDED_ALLOW_IPS``); otherwise every caller shares the proxy's budget.
+    oauth_device_authorize_rate_limit_per_minute: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            "Requests per minute per client address to POST "
+            "/api/v1/oauth/device/authorize (#1656). Over the limit: 429 "
+            "invalid_request with Retry-After. Fail-open on a Redis outage. The "
+            "address is request.client.host — behind a reverse proxy, set "
+            "FORWARDED_ALLOW_IPS so it is the caller's, not the proxy's."
+        ),
+    )
+    oauth_device_verify_rate_limit_per_minute: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Requests per minute per client address to POST "
+            "/api/v1/oauth/device/verify, found or not (#1656). Over the limit: "
+            "429 with Retry-After. Fail-open on a Redis outage. The address is "
+            "request.client.host — behind a reverse proxy, set "
+            "FORWARDED_ALLOW_IPS so it is the caller's, not the proxy's."
+        ),
+    )
+    oauth_device_code_retention_seconds: int = Field(
+        default=3600,
+        ge=0,
+        description=(
+            "How long an expired device code row is kept before the hourly "
+            "cleanup job deletes it (#1656). 0 deletes rows as soon as they expire."
+        ),
+    )
 
     # OAuth2 - Google
     google_client_id: str = Field(default="", description="Google OAuth2 Client ID")

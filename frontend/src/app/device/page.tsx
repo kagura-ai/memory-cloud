@@ -55,6 +55,14 @@ const SCOPE_LABEL_MAP: Record<string, string> = {
   offline_access: "device.scopeOffline",
 };
 
+/**
+ * `/device/verify` is limited per client address (#1656). A 429 is not a bad
+ * code, so it gets its own "try again later" message instead of invalidCode.
+ */
+function isRateLimited(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 429;
+}
+
 /** Grid + blur-orb gradient background, shared with /login (Issue #633). */
 function PageBackground() {
   return (
@@ -158,8 +166,10 @@ function DevicePageInner() {
         setDeviceInfo(info);
         setPhase("consent");
       }
-    } catch {
-      setError(t("device.invalidCode"));
+    } catch (err) {
+      setError(
+        isRateLimited(err) ? t("device.rateLimited") : t("device.invalidCode"),
+      );
       setPhase("error");
     } finally {
       submittingRef.current = false;
@@ -187,8 +197,10 @@ function DevicePageInner() {
         try {
           const info = await verifyDeviceCode(deviceInfo.user_code);
           setPhase(info.is_authorized ? "success" : "denied");
-        } catch {
-          setError(detail);
+        } catch (verifyErr) {
+          setError(
+            isRateLimited(verifyErr) ? t("device.rateLimited") : detail,
+          );
           setPhase("error");
         }
       } else {
