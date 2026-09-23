@@ -184,7 +184,8 @@ class OAuth2ClientCreateRequest(BaseModel):
 class DynamicClientRegistrationRequest(BaseModel):
     """Dynamic Client Registration (DCR) request for MCP clients.
 
-    Simplified schema for ChatGPT/Claude/Cursor OAuth registration.
+    Simplified schema for MCP client OAuth registration (ChatGPT, Claude,
+    Cursor, and loopback-only native clients such as Codex CLI).
     MCP clients use this for automatic registration.
     """
 
@@ -575,19 +576,46 @@ _PROVIDER_HOSTNAMES: dict[str, tuple[str, ...]] = {
 }
 
 # For loopback URIs only — the hostname is uninformative, so substring-match
-# the (NFKC-normalized, lowercased) ``client_name`` against the provider
-# names. Derived from ``_PROVIDER_HOSTNAMES`` so adding a provider only
-# requires editing one mapping. Stored as ``tuple`` (not ``frozenset``) so
-# iteration order is deterministic — when a ``client_name`` contains more
-# than one provider keyword (e.g. "Claude Cursor"), the first match in
-# ``_PROVIDER_HOSTNAMES`` insertion order wins, which is reproducible across
-# processes (frozenset iteration depends on hash randomization).
+# the (NFKC-normalized, lowercased) ``client_name`` against these keywords.
+# Kept separate from ``_PROVIDER_HOSTNAMES`` (issue #1657): some native MCP
+# clients (Codex CLI, Hermes Agent, OpenClaw) only ever register with a
+# loopback redirect and have no hostname of their own, so they belong here
+# and nowhere else — a non-loopback redirect can never resolve to them.
+# Stored as an ordered ``tuple`` (not ``frozenset``) so iteration order is
+# deterministic — when a ``client_name`` contains more than one keyword
+# (e.g. "Claude Cursor", "Claude Codex"), the first match wins, which is
+# reproducible across processes (frozenset iteration depends on hash
+# randomization). The pre-#1657 keywords stay first so a name that matched
+# before keeps its provider.
 #
 # ``client_name`` is a user-supplied trust signal: this is intentionally a
 # soft check, paired with the existing rate limit (5/min/IP) and the
 # ``token_endpoint_auth_method="none"`` + PKCE defaults — see issue #513
-# Security note for the threat model.
-_LOOPBACK_PROVIDER_KEYWORDS: tuple[str, ...] = tuple(_PROVIDER_HOSTNAMES)
+# Security note for the threat model. Adding a keyword adds no trust.
+_LOOPBACK_PROVIDER_KEYWORDS: tuple[str, ...] = (
+    "chatgpt",
+    "claude",
+    "cursor",
+    "codex",
+    "hermes",
+    "openclaw",
+)
+
+# Human-readable names of the loopback clients, in keyword order, for the
+# registration rejection message.
+_LOOPBACK_CLIENT_LABELS: tuple[str, ...] = (
+    "ChatGPT",
+    "Claude",
+    "Cursor",
+    "Codex",
+    "Hermes Agent",
+    "OpenClaw",
+)
+
+# Every provider value DCR may store in ``oauth_clients.provider``: the
+# hostname providers plus the loopback-only ones. Order follows
+# ``_LOOPBACK_PROVIDER_KEYWORDS`` (a superset of ``_PROVIDER_HOSTNAMES``).
+_DCR_ALLOWED_PROVIDERS: tuple[str, ...] = _LOOPBACK_PROVIDER_KEYWORDS
 
 
 def _normalize_client_name(client_name: str) -> str:
@@ -607,15 +635,20 @@ def _normalize_client_name(client_name: str) -> str:
 def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
     """Detect the DCR provider from ``redirect_uri`` (+ ``client_name`` for loopback).
 
-    Returns one of ``"chatgpt"``, ``"claude"``, ``"cursor"``, or ``"custom"``.
-    The caller rejects ``"custom"`` with an RFC 6749 §5.2 error response.
+    Returns one of ``"chatgpt"``, ``"claude"``, ``"cursor"``, ``"codex"``,
+    ``"hermes"``, ``"openclaw"``, or ``"custom"``. The caller rejects
+    ``"custom"`` with an RFC 6749 §5.2 error response.
 
     Strategy:
         1. RFC 8252 loopback redirects (``http://localhost`` / ``127.0.0.1`` /
            ``[::1]``) → fall back to ``client_name`` keyword match (NFKC
-           normalized, case-insensitive substring).
+           normalized, case-insensitive substring) against
+           ``_LOOPBACK_PROVIDER_KEYWORDS``, first match wins. This is the
+           only path that yields ``codex`` / ``hermes`` / ``openclaw``
+           (Codex CLI, Hermes Agent, OpenClaw — issue #1657).
         2. Otherwise → match the parsed hostname (case-insensitive) against
-           ``_PROVIDER_HOSTNAMES`` as exact host or single-suffix subdomain.
+           ``_PROVIDER_HOSTNAMES`` (``chatgpt`` / ``claude`` / ``cursor``)
+           as exact host or single-suffix subdomain.
 
     Spec:
         RFC 8252 §7.3 — Loopback Interface Redirection.
@@ -681,11 +714,13 @@ async def dynamic_client_registration(
 ) -> OAuth2ClientWithSecretResponse | JSONResponse:
     """Dynamic Client Registration (DCR) for MCP clients.
 
-    Public endpoint for ChatGPT/Claude/Cursor to register themselves automatically.
+    Public endpoint for MCP clients to register themselves automatically.
     No authentication required - this follows MCP specification for DCR.
 
     Security controls:
-    - Provider whitelist (chatgpt, claude, cursor only)
+    - Provider whitelist: chatgpt, claude, cursor by redirect hostname; for
+      RFC 8252 loopback redirects, a ``client_name`` naming ChatGPT, Claude,
+      Cursor, Codex, Hermes Agent or OpenClaw (issue #1657)
     - IP-based rate limiting (5 registrations per minute per IP)
     - Redirect URI pattern validation
     - Automatic token_endpoint_auth_method="none" (public clients)
@@ -739,8 +774,7 @@ async def dynamic_client_registration(
     redirect_uri = data.redirect_uris[0] if data.redirect_uris else ""
     detected_provider = detect_dcr_provider(redirect_uri, data.client_name)
 
-    ALLOWED_PROVIDERS = ("chatgpt", "claude", "cursor")
-    if detected_provider not in ALLOWED_PROVIDERS:
+    if detected_provider not in _DCR_ALLOWED_PROVIDERS:
         logger.warning(
             "dcr_provider_rejected",
             ip=client_ip,
@@ -751,10 +785,10 @@ async def dynamic_client_registration(
             error="invalid_client_metadata",
             description=(
                 "Dynamic client registration is only allowed for: "
-                f"{', '.join(ALLOWED_PROVIDERS)}. "
+                f"{', '.join(_DCR_ALLOWED_PROVIDERS)}. "
                 "Native CLIs (RFC 8252) must use http://localhost, "
                 "http://127.0.0.1, or http://[::1] with a recognized "
-                "client_name (Claude / Cursor / ChatGPT)."
+                f"client_name ({' / '.join(_LOOPBACK_CLIENT_LABELS)})."
             ),
         )
 

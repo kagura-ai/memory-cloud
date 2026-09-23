@@ -177,7 +177,7 @@ Semver-locked discovery-referenced endpoints:
 
 | Path | Method | Purpose |
 |---|---|---|
-| `/register` | POST | DCR (RFC 7591). Public, no auth. Provider whitelist (`chatgpt`/`claude`/`cursor` via redirect-URI/client-name detection incl. RFC 8252 loopback), 5 req/min/IP rate limit. Always forces `token_endpoint_auth_method="none"`; never returns `client_secret` (#689) |
+| `/register` | POST | DCR (RFC 7591). Public, no auth. Provider whitelist: `chatgpt`/`claude`/`cursor` by redirect-URI hostname; for RFC 8252 loopback redirects (`http://localhost`, `http://127.0.0.1`, `http://[::1]`), a `client_name` naming ChatGPT, Claude, Cursor, Codex, Hermes Agent or OpenClaw (stored as `codex`/`hermes`/`openclaw` for the last three, loopback only, #1657), 5 req/min/IP rate limit. Always forces `token_endpoint_auth_method="none"`; never returns `client_secret` (#689) |
 | `/authorize` | GET | Authorization endpoint (consent page, HTML) |
 | `/authorize` | POST | Consent decision submit |
 | `/token` (canonical, schema-visible), `/token/` (hidden alias) | POST | Token endpoint (Authlib). Grants registered: `authorization_code` (PKCE S256, 10-min single-use codes), `refresh_token` (rotation), `urn:ietf:params:oauth:grant-type:device_code` (RFC 8628, #536) |
