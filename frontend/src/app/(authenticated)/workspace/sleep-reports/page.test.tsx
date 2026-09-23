@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, cleanup } from "@testing-library/react";
 
 import WorkspaceSleepReportsPage from "./page";
+import type { PlanTierFeature } from "@/lib/api/workspaces";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -24,6 +25,7 @@ vi.mock("next/navigation", () => ({
 const stableT = (k: string) => k;
 vi.mock("next-intl", () => ({
   useTranslations: () => stableT,
+  useLocale: () => "en",
 }));
 
 let mockWorkspaceState: {
@@ -43,6 +45,20 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
 }));
 
+// #1645: the gate reads the shared tier matrix (`null` = still resolving).
+// Default: the OSS matrix, so `plan_name` decides exactly as the tier's row
+// does (Sleep Maintenance: `sleep_enabled_contexts_limit > 0`).
+const OSS_TIERS = [
+  { name: "free", display_name: "S", sleep_enabled_contexts_limit: 0 },
+  { name: "basic", display_name: "M", sleep_enabled_contexts_limit: 0 },
+  { name: "pro", display_name: "L", sleep_enabled_contexts_limit: 3 },
+  { name: "promax", display_name: "XL", sleep_enabled_contexts_limit: 15 },
+] as unknown as PlanTierFeature[];
+let mockTiers: PlanTierFeature[] | null = OSS_TIERS;
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanTierMatrix: () => mockTiers,
+}));
+
 vi.mock("@/lib/api", () => ({
   fetchWorkspaceSleepReports: vi.fn(),
 }));
@@ -50,7 +66,9 @@ vi.mock("@/lib/api", () => ({
 // The list self-fetches and is covered by its own tests; stub it to a marker
 // so this suite stays focused on the gate.
 vi.mock("@/components/sleep-reports/SleepReportsList", () => ({
-  SleepReportsList: () => <div data-testid="sleep-reports-list" />,
+  SleepReportsList: ({ ready }: { ready?: boolean }) => (
+    <div data-testid="sleep-reports-list" data-ready={String(ready)} />
+  ),
 }));
 
 // ---------- Helpers ----------------------------------------------------------
@@ -66,6 +84,7 @@ function setWorkspace(plan_name: string, current_user_role = "owner") {
 beforeEach(() => {
   mockPush.mockReset();
   mockFeatures = { plan_page: true };
+  mockTiers = OSS_TIERS;
 });
 
 afterEach(() => {
@@ -145,5 +164,47 @@ describe("WorkspaceSleepReportsPage plan gate", () => {
     render(<WorkspaceSleepReportsPage />);
     expect(screen.queryByText("sleepReports.planGate.title")).toBeNull();
     expect(mockPush).not.toHaveBeenCalled();
+  });
+
+  it("a tier with sleep_enabled_contexts_limit > 0 is not plan-gated even below pro (#1645)", () => {
+    // An operator gives basic a sleep cap: the matrix, not the tier rank,
+    // decides — the same predicate as the server's own gate.
+    mockTiers = OSS_TIERS.map((t) =>
+      t.name === "basic" ? { ...t, sleep_enabled_contexts_limit: 1 } : t,
+    );
+    setWorkspace("basic");
+    render(<WorkspaceSleepReportsPage />);
+    expect(screen.getByTestId("sleep-reports-list")).toBeInTheDocument();
+    expect(screen.queryByText("sleepReports.planGate.title")).toBeNull();
+  });
+
+  it("neither gates nor loads reports while the tier matrix is still resolving (#1645)", () => {
+    mockTiers = null;
+    setWorkspace("free");
+    render(<WorkspaceSleepReportsPage />);
+    expect(screen.queryByText("sleepReports.planGate.title")).toBeNull();
+    // The list holds its skeleton: no reports before the plan answer.
+    expect(screen.getByTestId("sleep-reports-list")).toHaveAttribute(
+      "data-ready",
+      "false",
+    );
+  });
+
+  it("an entitled tier loads the list once the gate answers (#1645)", () => {
+    setWorkspace("pro");
+    render(<WorkspaceSleepReportsPage />);
+    expect(screen.getByTestId("sleep-reports-list")).toHaveAttribute(
+      "data-ready",
+      "true",
+    );
+  });
+
+  it("role before plan: a member on a low tier gets the role refusal, not the upsell (#1645)", () => {
+    setWorkspace("free", "member");
+    render(<WorkspaceSleepReportsPage />);
+    expect(
+      screen.getByText("sleepReports.errors.forbiddenWorkspace"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("sleepReports.planGate.title")).toBeNull();
   });
 });
