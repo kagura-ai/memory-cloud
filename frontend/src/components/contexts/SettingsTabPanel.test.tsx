@@ -76,7 +76,7 @@ let mockPlanFeature: boolean | null = true;
 // #1645: whether the workspace's tier has Sleep Maintenance at all — the
 // `sleep_reports` plan gate. Set with the usage fixture below, because the
 // tier limit and the usage payload's limit are one predicate (zero floor).
-let mockTierHasSleep = true;
+let mockTierHasSleep: boolean | null = true;
 const gateCache = new Map<string, Record<string, unknown>>();
 function planGate(
   feature: string,
@@ -398,6 +398,78 @@ describe("SettingsTabPanel — wouldExceedSleepQuota derivation", () => {
     await screen.findByText(/sleepQuotaUsage:3\/3/);
     expect(screen.queryByText("sleepQuotaExceeded")).not.toBeInTheDocument();
     expect(screen.queryByText("sleepQuotaTierBlocked")).not.toBeInTheDocument();
+  });
+});
+
+// #1645: the `sleep_reports` plan gate answers from the tier matrix, the
+// usage payload from the server. While the matrix is still resolving (or its
+// fetch keeps failing) the gate is pending, and a pending gate must not unlock
+// a control the server's own usage figure already closes.
+describe("SettingsTabPanel — sleep options while the sleep gate is pending (#1645)", () => {
+  async function openSleepSelect() {
+    // The sleep select is the one showing the context's current mode.
+    await screen.findByText("sleepModeTitle");
+    const trigger = screen
+      .getAllByRole("combobox")
+      .find((el) => el.textContent?.includes("sleepModeSkip"));
+    if (!trigger) throw new Error("sleep mode select not found");
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+    fireEvent.click(trigger);
+    return screen.findByRole("option", { name: "sleepModeFull" });
+  }
+
+  it("a tier without sleep: full and edges_only stay disabled, with no tier claim yet", async () => {
+    setQuotaResponse(0, 0);
+    mockTierHasSleep = null; // the matrix has not answered
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({ sleep_mode: "skip" })}
+        onContextUpdated={noop}
+      />,
+    );
+
+    await screen.findByText(/sleepQuotaUsage:0\/0/);
+    const full = await openSleepSelect();
+    expect(full).toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.getByRole("option", { name: "sleepModeEdgesOnly" }),
+    ).toHaveAttribute("aria-disabled", "true");
+    // Pending names no tier: the tier copy waits for the matrix, and the
+    // cap copy would be wrong (there is no cap to raise on this tier).
+    expect(screen.queryByText("sleepQuotaTierBlocked")).toBeNull();
+    expect(screen.queryByText("sleepQuotaExceeded")).toBeNull();
+  });
+
+  it("the cap reached on an entitled tier still says so while the gate is pending", async () => {
+    setQuotaResponse(3, 3);
+    mockTierHasSleep = null;
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({ sleep_mode: "skip" })}
+        onContextUpdated={noop}
+      />,
+    );
+
+    await screen.findByText("sleepQuotaExceeded");
+    expect(screen.queryByText("sleepQuotaTierBlocked")).toBeNull();
+  });
+
+  it("headroom on an entitled tier: the options stay enabled while the gate is pending", async () => {
+    setQuotaResponse(1, 3);
+    mockTierHasSleep = null;
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({ sleep_mode: "skip" })}
+        onContextUpdated={noop}
+      />,
+    );
+
+    await screen.findByText(/sleepQuotaUsage:1\/3/);
+    const full = await openSleepSelect();
+    expect(full).not.toHaveAttribute("aria-disabled", "true");
   });
 });
 

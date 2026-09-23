@@ -389,13 +389,20 @@ export function SettingsTabPanel({
   // #1645: a tier with no Sleep Maintenance at all is the `sleep_reports`
   // PLAN gate (the matrix's `sleep_enabled_contexts_limit > 0` and this
   // payload's `limit > 0` are one predicate through the server's zero floor).
-  // Only the cap-reached half below is a quota, and it is untouched.
+  // The tier claim below reads the gate; the options keep the payload's own
+  // "no headroom" answer too, so a gate still pending on the matrix (or on a
+  // matrix outage) never unlocks what the server's figure already closes.
   const sleepTierBlocked = gates.sleep_reports.state === "plan";
   const wouldExceedSleepQuota =
     sleepQuota !== null &&
     context.sleep_mode === "skip" &&
-    (sleepTierBlocked ||
-      (sleepQuota.limit > 0 && sleepQuota.used >= sleepQuota.limit));
+    (sleepTierBlocked || sleepQuota.used >= sleepQuota.limit);
+  // Only the cap-reached half is a quota (its copy is untouched, P-27). A zero
+  // cap is the tier half, whose copy waits for the gate: pending names nothing.
+  const sleepCapReached =
+    sleepQuota !== null &&
+    sleepQuota.limit > 0 &&
+    sleepQuota.used >= sleepQuota.limit;
 
   // Reset dirty flag when context prop changes (after save/discard)
   useEffect(() => {
@@ -807,13 +814,14 @@ export function SettingsTabPanel({
                     })}
                   </p>
                 )}
-                {wouldExceedSleepQuota && (
-                  <p className="text-xs text-destructive">
-                    {sleepTierBlocked
-                      ? t("sleepQuotaTierBlocked")
-                      : t("sleepQuotaExceeded")}
-                  </p>
-                )}
+                {wouldExceedSleepQuota &&
+                  (sleepTierBlocked || sleepCapReached) && (
+                    <p className="text-xs text-destructive">
+                      {sleepTierBlocked
+                        ? t("sleepQuotaTierBlocked")
+                        : t("sleepQuotaExceeded")}
+                    </p>
+                  )}
                 <p className="text-sm text-muted-foreground">
                   {
                     {
