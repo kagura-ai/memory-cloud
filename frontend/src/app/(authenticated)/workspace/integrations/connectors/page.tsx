@@ -77,6 +77,8 @@ import { useToast } from "@/hooks/use-toast";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { useCanUpgrade } from "@/hooks/useCanUpgrade";
+import { useErrorGate } from "@/hooks/useErrorGate";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
 import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
@@ -196,8 +198,8 @@ function toResourceId(seed: string): string {
 export default function ConnectorsPage() {
   const t = useTranslations("connectors");
   const tCommon = useTranslations("common");
-  // #1646: the create gate's banner, toast and empty-state copy read the one
-  // gate.* namespace.
+  // #1646: every refusal on this page — banner, toasts, the empty state and
+  // the create errors — reads the one gate.* namespace.
   const tGate = useTranslations("gate");
   const locale = useLocale();
   const { toast } = useToast();
@@ -231,6 +233,9 @@ export default function ConnectorsPage() {
   // refusal that names no tier gets the pre-check's tier and labels.
   const tiers = usePlanTierMatrix();
   const canCreate = gate.state === "pending" ? null : gate.state === "allowed";
+  // The RAW upgrade answer for a refusal lifted inside a `catch` (hooks cannot
+  // run there) — the same input useErrorGate passes; gateFromFacts narrows it.
+  const canUpgrade = useCanUpgrade() === true;
 
   // #1426: managed (hosted SaaS) mode. When true the shared worker/bridge
   // provides the pre-compile LLM and only OAuth is offered, so hide the BYO
@@ -286,6 +291,10 @@ export default function ConnectorsPage() {
   const [selectedContextId, setSelectedContextId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  // #1646: a create refusal that carries a gate (plan, the connector seat
+  // cap, any quota) — rendered in the dialog as the inline notice.
+  const [createRefusal, setCreateRefusal] = useState<ApiError | null>(null);
+  const createGate = useErrorGate(createRefusal, "connectors");
 
   // #890: PII guardrail config for the create form. Defaults scrub on by
   // default so an admin who touches nothing still ships a safe config.
@@ -717,6 +726,7 @@ export default function ConnectorsPage() {
   const closeCreateDialog = useCallback(() => {
     setPending(null);
     setCreateError(null);
+    setCreateRefusal(null);
     // Drop the one-time handle from the URL so a refresh doesn't re-trigger.
     router.replace("/workspace/integrations/connectors");
   }, [router]);
@@ -728,6 +738,7 @@ export default function ConnectorsPage() {
     if (!canCreate) return;
     setSubmitting(true);
     setCreateError(null);
+    setCreateRefusal(null);
     try {
       // #890: build a valid pii_guardrail_config. When disabled, send an
       // empty detectors list (backend only requires non-empty when enabled);
@@ -761,31 +772,12 @@ export default function ConnectorsPage() {
       router.replace("/workspace/integrations/connectors");
       await reload();
     } catch (err) {
-      // #1644: the plan and seat-cap refusals are read from the normalised
-      // gate and rendered in the reader's language; anything else keeps the
-      // server's own text. The dialog error carries no CTA of its own.
-      const facts = err instanceof ApiError ? err.gate : undefined;
-      const gate = gateFromFacts(facts, {
-        fallbackKey: "connectors",
-        canUpgrade: false,
-        locale,
-        tiers,
-      });
-      if (
-        gate?.state === "plan" &&
-        gate.feature === "connectors" &&
-        gate.planLabel
-      ) {
-        setCreateError(t("connectorPlanRequired", { plan: gate.planLabel }));
-      } else if (
-        gate?.state === "quota" &&
-        facts?.quotaType === "connectors" &&
-        gate.current !== undefined &&
-        gate.limit !== undefined
-      ) {
-        setCreateError(
-          t("connectorSeatsFull", { current: gate.current, limit: gate.limit }),
-        );
+      // #1644: a refusal is read from the normalised gate and rendered in the
+      // reader's language; anything else keeps the server's own text. #1646:
+      // any gate (not just the plan and connector seat-cap pair) renders as
+      // the inline notice through useErrorGate, like every create error.
+      if (err instanceof ApiError && err.gate) {
+        setCreateRefusal(err);
       } else {
         setCreateError(err instanceof Error ? err.message : String(err));
       }
@@ -805,10 +797,8 @@ export default function ConnectorsPage() {
     piiRedaction,
     piiFailClosed,
     locale,
-    tiers,
     router,
     reload,
-    t,
   ]);
 
   const handleDelete = useCallback(async () => {
@@ -921,19 +911,43 @@ export default function ConnectorsPage() {
         setCreated(result);
         await reload();
       } catch (err) {
-        setManualError(err instanceof Error ? err.message : String(err));
+        // #1646 (addendum to #1644): a gate refusal — the connector seat cap
+        // above all — is told in the reader's language with the gate copy
+        // the banner uses, not the server's English; anything else keeps the
+        // server's own text in the form.
+        const refusal =
+          err instanceof ApiError
+            ? gateFromFacts(err.gate, {
+                fallbackKey: "connectors",
+                canUpgrade,
+                locale,
+                tiers,
+              })
+            : null;
+        const toastArgs = refusal
+          ? featureGateToast(refusal, tGate, "create")
+          : null;
+        if (toastArgs) {
+          toast(toastArgs);
+        } else {
+          setManualError(err instanceof Error ? err.message : String(err));
+        }
       } finally {
         setManualSubmitting(false);
       }
     },
     [
       availableApps,
+      canUpgrade,
       locale,
       manualAppKey,
       manualBotToken,
       manualTeamId,
       reload,
       t,
+      tGate,
+      tiers,
+      toast,
     ],
   );
 
@@ -1728,6 +1742,13 @@ export default function ConnectorsPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            {createGate && (
+              <FeatureGateNotice
+                gate={createGate}
+                scope="create"
+                className="mb-0"
+              />
+            )}
             {createError && (
               <Alert variant="destructive">
                 <AlertDescription>{createError}</AlertDescription>

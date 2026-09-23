@@ -7,8 +7,9 @@
  * workspace shows the "no workspace selected" banner rather than the role
  * banner.
  *
- * #1646: the create gate's banner, callback toast and empty-state copy
- * render the gate.* copy. Under the key-echo mock the text is the relative
+ * #1646: every refusal on the page — the create banner, the callback toast,
+ * the empty-state copy, the create-dialog error and the manual-bind toast —
+ * renders the gate.* copy. Under the key-echo mock the text is the relative
  * gate key ("plan.newTitle"); `gateCalls` records the values each got.
  */
 import {
@@ -76,24 +77,18 @@ vi.mock("next/navigation", () => ({
   }),
 }));
 
-// Keys pass through as text. The two #1644 refusal keys also echo their ICU
-// params so the gate's values are assertable; every other key stays bare.
-// #1646: every gate-namespace call is recorded with its ICU values, so a test
-// can see which tier a notice was given without changing what it renders.
+// Keys pass through as text. #1646: every gate-namespace call is recorded
+// with its ICU values, so a test can see which tier / counts a notice was
+// given without changing what any message renders.
 const gateCalls: Array<[string, Record<string, unknown> | undefined]> = [];
-vi.mock("next-intl", () => {
-  const echo = new Set(["connectorPlanRequired", "connectorSeatsFull"]);
-  return {
-    useTranslations:
-      (ns?: string) => (key: string, params?: Record<string, unknown>) => {
-        if (ns === "gate") gateCalls.push([key, params]);
-        return params && echo.has(key)
-          ? `${key} ${JSON.stringify(params)}`
-          : key;
-      },
-    useLocale: () => "en",
-  };
-});
+vi.mock("next-intl", () => ({
+  useTranslations:
+    (ns?: string) => (key: string, params?: Record<string, unknown>) => {
+      if (ns === "gate") gateCalls.push([key, params]);
+      return key;
+    },
+  useLocale: () => "en",
+}));
 
 const mockUseWorkspace = vi.fn();
 vi.mock("@/contexts/WorkspaceContext", () => ({
@@ -1699,7 +1694,9 @@ describe("ConnectorsPage RBAC gate", () => {
     expect(screen.getByText("createTitle")).toBeInTheDocument();
   });
 
-  // #1644 C7: the plan and seat-cap refusals are read from err.gate.
+  // #1644 C7: the plan and seat-cap refusals are read from err.gate. #1646:
+  // any gate renders in the dialog as the inline FeatureGateNotice
+  // (useErrorGate), in the gate.* copy; a non-gate error keeps its text.
   function gateRefusal(
     status: number,
     error: string,
@@ -1715,8 +1712,8 @@ describe("ConnectorsPage RBAC gate", () => {
     });
   }
 
-  async function submitCreate() {
-    setWorkspace("admin");
+  async function submitCreate(role = "admin") {
+    setWorkspace(role);
     armInstall();
     mockGetContexts.mockResolvedValue({
       contexts: [{ id: "ctx-1", name: "existing", display_name: "Existing" }],
@@ -1747,10 +1744,19 @@ describe("ConnectorsPage RBAC gate", () => {
     );
     await submitCreate();
 
-    expect(
-      await screen.findByText('connectorSeatsFull {"current":3,"limit":3}'),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("quota.title")).toBeInTheDocument();
+    expect(screen.getByText("quota.description")).toBeInTheDocument();
+    expect(gateCalls).toContainEqual([
+      "quota.description",
+      expect.objectContaining({
+        current: 3,
+        limit: 3,
+        feature: "features.connectors.singular",
+      }),
+    ]);
     expect(screen.queryByText(serverText)).toBeNull();
+    // The dialog stays open with the notice in it.
+    expect(screen.getByText("createTitle")).toBeInTheDocument();
   });
 
   it("renders the seat cap from a server predating #1644 the same way (#1644)", async () => {
@@ -1764,9 +1770,13 @@ describe("ConnectorsPage RBAC gate", () => {
     );
     await submitCreate();
 
-    expect(
-      await screen.findByText('connectorSeatsFull {"current":3,"limit":3}'),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("quota.title")).toBeInTheDocument();
+    // No current_plan on the legacy wire: the tier-less quota sentence.
+    expect(screen.getByText("quota.descriptionNoPlan")).toBeInTheDocument();
+    expect(gateCalls).toContainEqual([
+      "quota.descriptionNoPlan",
+      expect.objectContaining({ current: 3, limit: 3 }),
+    ]);
   });
 
   it("renders the plan refusal with the required tier's label (#1644)", async () => {
@@ -1781,9 +1791,62 @@ describe("ConnectorsPage RBAC gate", () => {
     );
     await submitCreate();
 
+    expect(await screen.findByText("plan.newTitle")).toBeInTheDocument();
+    expect(gateCalls).toContainEqual([
+      "plan.newDescription",
+      expect.objectContaining({
+        plan: "XL",
+        feature: "features.connectors.plural",
+      }),
+    ]);
+    // An admin cannot reach the Plan page: no CTA inside the dialog.
+    expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
+  });
+
+  it("an owner with a Plan page gets the upgrade CTA on a plan refusal (#1646)", async () => {
+    mockUseSystemFeatures.mockReturnValue({ plan_page: true });
+    mockCreateConnector.mockRejectedValue(
+      gateRefusal(403, "FEAT-001", "Feature 'connectors' not available.", {
+        gate: "plan",
+        feature: "connectors",
+        required_plan: "promax",
+        required_plan_display: "XL",
+        current_plan: "basic",
+      }),
+    );
+    await submitCreate("owner");
+
+    fireEvent.click(await screen.findByRole("button", { name: "plan.action" }));
+    expect(mockRouterPush).toHaveBeenCalledWith("/workspace/settings/plan");
+  });
+
+  it("a refusal does not follow into the next install's dialog (#1646)", async () => {
+    mockCreateConnector.mockRejectedValue(
+      gateRefusal(403, "FEAT-001", "Feature 'connectors' not available.", {
+        gate: "plan",
+        feature: "connectors",
+        required_plan: "promax",
+        required_plan_display: "XL",
+        current_plan: "basic",
+      }),
+    );
+    await submitCreate();
+    expect(await screen.findByText("plan.newTitle")).toBeInTheDocument();
+
+    // Cancel, and a second OAuth callback lands on the same page: the dialog
+    // reopens for the new install, without the first one's refusal.
+    mockSearchParamsGet.mockImplementation((key: string) =>
+      key === "slack_install" ? "handle-2" : null,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "cancel" }));
+
+    await waitFor(() =>
+      expect(mockGetSlackPendingInstall).toHaveBeenCalledWith("handle-2"),
+    );
     expect(
-      await screen.findByText('connectorPlanRequired {"plan":"XL"}'),
-    ).toBeInTheDocument();
+      await screen.findByRole("button", { name: "createConnector" }),
+    ).toBeEnabled();
+    expect(screen.queryByText("plan.newTitle")).toBeNull();
   });
 
   it("a plan refusal that names no tier takes the matrix's tier and display name (#1645)", async () => {
@@ -1804,13 +1867,20 @@ describe("ConnectorsPage RBAC gate", () => {
     );
     await submitCreate();
 
-    expect(
-      await screen.findByText('connectorPlanRequired {"plan":"Enterprise"}'),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("plan.newTitle")).toBeInTheDocument();
+    expect(gateCalls).toContainEqual([
+      "plan.newTitle",
+      expect.objectContaining({
+        plan: "Enterprise",
+        feature: "features.connectors.plural",
+      }),
+    ]);
     expect(screen.queryByText(serverText)).toBeNull();
   });
 
   it("does not render another quota with counts as the connector seat cap (#1644)", async () => {
+    // #1646: it renders as the quota it is — the memory limit — never as
+    // the connector cap, and never as the server's English.
     const serverText = "Daily memory limit reached (100/100).";
     mockCreateConnector.mockRejectedValue(
       gateRefusal(429, "QUOTA-001", serverText, {
@@ -1825,8 +1895,119 @@ describe("ConnectorsPage RBAC gate", () => {
     );
     await submitCreate();
 
-    expect(await screen.findByText(serverText)).toBeInTheDocument();
-    expect(screen.queryByText(/connectorSeatsFull/)).toBeNull();
+    expect(await screen.findByText("quota.title")).toBeInTheDocument();
+    expect(gateCalls).toContainEqual([
+      "quota.title",
+      expect.objectContaining({ feature: "features.memories.singular" }),
+    ]);
+    expect(
+      gateCalls.some(
+        ([, values]) => values?.feature === "features.connectors.singular",
+      ),
+    ).toBe(false);
+    expect(screen.queryByText(serverText)).toBeNull();
+  });
+
+  // ── #1646 (addendum to #1644): the manual-bind create path ───────────
+
+  async function submitManualBind() {
+    setWorkspace("admin");
+    mockListAvailableWorkerApps.mockResolvedValue([
+      { platform: "slack", app_key: "sales", display_name: "Sales Slack App" },
+    ]);
+    render(<ConnectorsPage />);
+    await screen.findByText("manualBindTitle");
+    fireEvent.change(screen.getByLabelText("manualTeamId"), {
+      target: { value: "T01" },
+    });
+    fireEvent.change(screen.getByLabelText("manualBotToken"), {
+      target: { value: "xoxb-install-token" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "manualBind" }));
+  }
+
+  it("manual bind: the connector seat cap is a gate toast, not the server's English (#1646)", async () => {
+    const serverText =
+      "Connector seat limit reached. Your plan allows 3 connector(s).";
+    mockCreateConnector.mockRejectedValue(
+      gateRefusal(403, "CONNECTOR-001", serverText, {
+        gate: "quota",
+        quota_type: "connectors",
+        current: 3,
+        limit: 3,
+        required_plan: null,
+        required_plan_display: null,
+        current_plan: "promax",
+        feature: "connectors",
+      }),
+    );
+
+    await submitManualBind();
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "quota.title",
+        description: "quota.description",
+        variant: "destructive",
+      }),
+    );
+    expect(gateCalls).toContainEqual([
+      "quota.description",
+      expect.objectContaining({ current: 3, limit: 3 }),
+    ]);
+    expect(screen.queryByText(serverText)).toBeNull();
+  });
+
+  it("manual bind: a plan refusal toasts the create-scope plan copy with the matrix's tier (#1646)", async () => {
+    mockTiers = [
+      { name: "basic", display_name: "M", connectors: false },
+      { name: "enterprise", display_name: "Enterprise", connectors: true },
+    ] as unknown as PlanTierFeature[];
+    mockCreateConnector.mockRejectedValue(
+      gateRefusal(403, "FEAT-001", "Feature 'connectors' not available.", {
+        gate: "plan",
+        feature: "connectors",
+        required_plan: null,
+        required_plan_display: null,
+        current_plan: "basic",
+      }),
+    );
+
+    await submitManualBind();
+
+    await waitFor(() =>
+      expect(mockToast).toHaveBeenCalledWith({
+        title: "plan.newTitle",
+        description: "plan.newDescription",
+      }),
+    );
+    expect(gateCalls).toContainEqual([
+      "plan.newTitle",
+      expect.objectContaining({
+        plan: "Enterprise",
+        feature: "features.connectors.plural",
+      }),
+    ]);
+    expect(
+      screen.queryByText("Feature 'connectors' not available."),
+    ).toBeNull();
+  });
+
+  it("manual bind: a non-gate error keeps the server's text in the form (#1646)", async () => {
+    mockCreateConnector.mockRejectedValue(
+      new ApiError({
+        error: "VAL-001",
+        message: "bot token rejected by Slack",
+        status: 400,
+      }),
+    );
+
+    await submitManualBind();
+
+    expect(
+      await screen.findByText("bot token rejected by Slack"),
+    ).toBeInTheDocument();
+    expect(mockToast).not.toHaveBeenCalled();
   });
 
   // ── #1471: memory_link_template is now writable from the UI ──────────
