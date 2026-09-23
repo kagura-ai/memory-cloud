@@ -35,6 +35,7 @@ import pytest
 from mcp_server.tools._arg_coercion import coerce_mcp_arguments
 from mcp_server.tools._definitions import get_tool_definitions
 from mcp_server.tools.context import handle_list_contexts
+from services.context_service import ContextListingFailedError, ContextService
 
 SLIM_KEYS = {"id", "name", "is_private", "is_locked", "last_used_at"}
 DETAIL_KEYS = SLIM_KEYS | {"summary", "embedding_model"}
@@ -345,7 +346,7 @@ async def test_filter_runs_after_the_permission_scoped_listing():
 
     payload = await _payload(harness, {"name_contains": "team", "include_stats": True})
 
-    harness.service.list_contexts.assert_awaited_once_with("u1")
+    harness.service.list_contexts.assert_awaited_once_with("u1", raise_on_lookup_error=True)
     assert {c["id"] for c in payload["contexts"]} <= {str(c.id) for c in visible}
 
     # include_stats only pays for the contexts that survived the filter.
@@ -507,3 +508,164 @@ def test_stringified_flags_are_coerced_before_validation():
     )
 
     assert coerced == {"include_summary": True, "include_details": False}
+
+
+# ============================================================================
+# #1658: empty-account hint
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_no_visible_context_adds_a_hint_naming_create_context():
+    """A new account (or a member with no access) sees an empty list; the hint
+    says to create a context and what to do when create_context is not in the
+    client's tool list (``?profile=core`` leaves it out)."""
+    harness = _Harness([], workspace_count=0)
+
+    payload = await _payload(harness, {}, workspace_id="ws-1")
+
+    assert payload["status"] == "success"
+    assert payload["contexts"] == []
+    hint = payload["hint"]
+    assert hint.startswith("No contexts are visible to you yet.")
+    assert "create_context(" in hint
+    # Owner/admin only (create_context refuses members), so a member is told
+    # to ask for a context or for access instead.
+    assert "owner or admin" in hint
+    assert "give you access" in hint
+    # The way forward when tools/list has no create_context.
+    assert "create_context is not in your tool list" in hint
+    assert "web UI" in hint
+    assert "without ?profile=core" in hint
+
+
+@pytest.mark.asyncio
+async def test_hint_tells_an_admin_to_pass_is_private_false():
+    """create_context defaults to is_private=true and only an owner may create a
+    private context, so the bare call the hint shows fails for an admin; the
+    hint names the argument an admin needs."""
+    payload = await _payload(_Harness([]), {}, workspace_id="ws-1")
+
+    assert "owner can create one with create_context(" in payload["hint"]
+    assert "an admin must add is_private=false" in payload["hint"]
+
+
+@pytest.mark.asyncio
+async def test_create_context_default_is_private_is_owner_only():
+    """Pins the rule the admin half of the hint relies on: an admin calling
+    create_context with the default is_private is refused by the service."""
+    from auth.workspace_roles import WorkspaceRole
+    from utils.exceptions import ValidationError
+
+    workspace = SimpleNamespace(id=uuid4(), plan_name="pro")
+    member = SimpleNamespace(role=WorkspaceRole.ADMIN)
+    results = iter([workspace, member])
+
+    db = AsyncMock()
+
+    async def execute(*_a, **_k):
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = next(results, member)
+        return result
+
+    db.execute = AsyncMock(side_effect=execute)
+
+    with pytest.raises(ValidationError, match="Only workspace owners can create private"):
+        await ContextService(db).create_context(
+            workspace_id=workspace.id, name="my-project", created_by="u1"
+        )
+
+
+@pytest.mark.asyncio
+async def test_no_workspace_hint_does_not_suggest_create_context():
+    """Without a workspace create_context refuses with workspace_required, so the
+    hint must not tell the caller to call it."""
+    payload = await _payload(_Harness([]), {}, workspace_id=None)
+
+    hint = payload["hint"]
+    assert "no current workspace" in hint
+    assert "create_context(" not in hint
+    assert "create_context cannot run yet" in hint
+    assert "web UI" in hint
+
+
+@pytest.mark.asyncio
+async def test_failed_access_lookup_is_not_an_empty_account():
+    """A permission or database failure inside the access lookup keeps the empty
+    success it has always answered, but carries no hint — the caller is not
+    told to create a context when the listing simply failed."""
+    harness = _Harness([], workspace_count=3)
+    harness.service.list_contexts = AsyncMock(
+        side_effect=ContextListingFailedError("not a member of workspace")
+    )
+
+    payload = await _payload(harness, {}, workspace_id="ws-1")
+
+    assert payload["status"] == "success"
+    assert payload["contexts"] == []
+    assert "hint" not in payload
+
+
+@pytest.mark.asyncio
+async def test_other_listing_failures_keep_their_error_envelope():
+    """Only the lookup failure the service used to swallow is caught; anything
+    else (a timeout, a failed workspace lookup) is still an error response."""
+    harness = _Harness([])
+    harness.service.list_contexts = AsyncMock(side_effect=RuntimeError("db down"))
+
+    payload = await _payload(harness, {}, workspace_id="ws-1")
+
+    assert payload["status"] == "error"
+    assert "hint" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("strict", [False, True])
+async def test_service_lookup_failure_is_empty_by_default_and_raises_on_request(strict):
+    """ContextService.list_contexts keeps its empty-list fallback for every other
+    caller (the REST route); MCP asks for the failure to be raised."""
+    service = ContextService(AsyncMock())
+    perm = MagicMock()
+    perm.get_accessible_contexts = AsyncMock(side_effect=RuntimeError("boom"))
+
+    with (
+        patch.object(
+            ContextService, "_get_user_current_workspace_id", AsyncMock(return_value=uuid4())
+        ),
+        patch("services.permission_service.PermissionService", return_value=perm),
+    ):
+        if strict:
+            with pytest.raises(ContextListingFailedError):
+                await service.list_contexts("u1", raise_on_lookup_error=True)
+        else:
+            assert await service.list_contexts("u1") == []
+
+
+@pytest.mark.asyncio
+async def test_member_with_no_access_gets_the_hint_even_when_the_workspace_has_contexts():
+    """``count`` is workspace-wide quota usage; the hint follows what the caller
+    can see, so a member without access to any of 3 contexts still gets it."""
+    harness = _Harness([], workspace_count=3)
+
+    payload = await _payload(harness, {}, workspace_id="ws-1")
+
+    assert payload["count"] == 3
+    assert "hint" in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", [{}, {"name_contains": "no-such-context"}])
+async def test_no_hint_when_the_caller_can_see_a_context(args):
+    """Visible contexts, or a name_contains that matches none of them, keep
+    the pre-#1658 envelope — an empty filter match is not an empty account."""
+    harness = _Harness([_context("a")], workspace_count=1)
+
+    payload = await _payload(harness, args, workspace_id="ws-1")
+
+    assert "hint" not in payload
+    assert set(payload) == {"status", "contexts", "count", "total", "limit", "can_create"}
+
+
+def test_list_contexts_description_mentions_the_hint():
+    (tool,) = [t for t in get_tool_definitions() if t["name"] == "list_contexts"]
+    assert "hint" in tool["description"]
