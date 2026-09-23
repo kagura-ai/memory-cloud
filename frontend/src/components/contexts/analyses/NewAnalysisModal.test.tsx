@@ -9,6 +9,8 @@
  * The daily analysis quota is read from the normalised gate on the ApiError
  * (``err.gate``), so a current server and one predating #1644 render the
  * same localized sentence.
+ *
+ * #1646 (A2): the footer no longer reveals the rollout allowlist.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -71,6 +73,20 @@ describe("NewAnalysisModal — estimated cost gate (#1571)", () => {
     expect(await screen.findByText("12")).toBeInTheDocument();
     expect(screen.queryByText("preflight.estimatedCost")).toBeNull();
     expect(screen.queryByText(/\$/)).toBeNull();
+  });
+});
+
+describe("NewAnalysisModal — the footer keeps the allowlist silent (#1646)", () => {
+  it("renders no footer hint, so nothing names the rollout allowlist", async () => {
+    renderModal(false);
+    // Let the preview land so the whole modal is on screen.
+    expect(await screen.findByText("12")).toBeInTheDocument();
+
+    expect(screen.queryByText("footerHint")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/allowlist/i);
+    // The footer keeps its two actions.
+    expect(screen.getByRole("button", { name: "cancel" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "submit" })).toBeInTheDocument();
   });
 });
 
