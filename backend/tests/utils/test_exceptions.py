@@ -2,6 +2,7 @@
 
 import pytest
 
+from config.constants import GATE_ALLOWLIST, GATE_DEPLOYMENT, GATE_PLAN, GATE_QUOTA
 from config.plan_tiers import feature_denied_message, get_plan_tier
 from utils.exceptions import (
     AdminProtectionError,
@@ -16,6 +17,7 @@ from utils.exceptions import (
     ConflictError,
     DatabaseConnectionError,
     DatabaseError,
+    EmbeddingSpendCapExceeded,
     ExternalServiceError,
     FeatureNotAvailableError,
     InternalError,
@@ -214,6 +216,38 @@ class TestRateLimitErrors:
         exc = QuotaExceededError()
         assert exc.status_code == 429
 
+    def test_quota_exceeded_stamps_the_quota_gate(self):
+        """#1644: every cap is machine-readable as a quota, not just a 429."""
+        exc = QuotaExceededError("Context limit reached.", "contexts")
+        assert exc.details["gate"] == GATE_QUOTA
+        assert exc.details["quota_type"] == "contexts"
+
+    def test_quota_exceeded_keeps_a_caller_supplied_gate(self):
+        """``quota_gate_details`` already carries ``gate``; splatting it must not
+        raise a duplicate-kwarg TypeError."""
+        exc = QuotaExceededError("x", "contexts", gate=GATE_QUOTA, current=1, limit=1)
+        assert exc.details["gate"] == GATE_QUOTA
+        assert (exc.details["current"], exc.details["limit"]) == (1, 1)
+
+    def test_quota_exceeded_accepts_a_403_status_for_the_two_legacy_cap_sites(self):
+        """#1644 S5: resource tokens and connector seats have always answered
+        403; the details block must not move their status."""
+        exc = QuotaExceededError("Token limit reached.", "resource_tokens", status_code=403)
+        assert exc.status_code == 403
+        assert exc.error_code == "QUOTA-001"
+        assert exc.details["gate"] == GATE_QUOTA
+
+    def test_embedding_spend_cap_keeps_quota_002_and_gains_the_gate(self):
+        """#1644 J-6: the cap is a quota, but its numbers are USD floats, so it
+        carries no ``current`` / ``limit`` counts."""
+        exc = EmbeddingSpendCapExceeded(period="daily", cap_usd=0.5, current_usd=0.9)
+        assert exc.error_code == "QUOTA-002"
+        assert exc.status_code == 429
+        assert exc.details["gate"] == GATE_QUOTA
+        assert exc.details["quota_type"] == "embedding_spend_daily"
+        assert "current" not in exc.details
+        assert "limit" not in exc.details
+
     def test_feature_not_available(self):
         exc = FeatureNotAvailableError(feature="reranking")
         assert exc.status_code == 403
@@ -235,6 +269,53 @@ class TestRateLimitErrors:
         # #1583: the current plan reads as its display name, like the required one.
         assert f"on {get_plan_tier('free').display_name} plan" in exc.message
         assert exc.details["feature"] == "resources"
+
+    def test_feature_not_available_defaults_to_the_plan_gate(self):
+        """#1644: the five pre-existing raisers keep meaning "your tier lacks it"."""
+        exc = FeatureNotAvailableError(feature="reranking")
+        assert exc.details["gate"] == GATE_PLAN
+
+    def test_feature_not_available_for_feature_carries_both_halves_of_the_tier(self):
+        """#1644: the KEY a client decides with and the LABEL a CLI renders."""
+        exc = FeatureNotAvailableError.for_feature("basic", "team_invitations")
+        assert exc.details["gate"] == GATE_PLAN
+        assert exc.details["feature"] == "team_invitations"
+        assert exc.details["current_plan"] == "basic"
+        required = exc.details["required_plan"]
+        assert required is not None
+        assert exc.details["required_plan_display"] == get_plan_tier(required).display_name
+
+    def test_feature_not_available_for_rollout_is_plan_neutral(self):
+        """#1644 S10: an allowlist refusal must never read as an upsell."""
+        exc = FeatureNotAvailableError.for_rollout(
+            "Memory analysis is not yet enabled for this workspace.", "memory_analysis"
+        )
+        assert exc.status_code == 403
+        assert exc.error_code == "FEAT-001"
+        assert exc.details["gate"] == GATE_ALLOWLIST
+        assert exc.details["feature"] == "memory_analysis"
+        assert "required_plan" not in exc.details
+        assert "required_plan_display" not in exc.details
+
+    def test_feature_not_available_for_deployment_is_plan_neutral(self):
+        exc = FeatureNotAvailableError.for_deployment(
+            "Managed analysis is not configured on this deployment.", "managed_llm"
+        )
+        assert exc.status_code == 403
+        assert exc.details["gate"] == GATE_DEPLOYMENT
+        assert exc.details["feature"] == "managed_llm"
+        assert "required_plan" not in exc.details
+
+    def test_feature_not_available_gates_are_the_frozen_vocabulary(self):
+        from config.constants import GATE_KINDS
+
+        for exc in (
+            FeatureNotAvailableError(feature="reranking"),
+            FeatureNotAvailableError.for_feature("free", "connectors"),
+            FeatureNotAvailableError.for_rollout("not yet", "memory_analysis"),
+            FeatureNotAvailableError.for_deployment("off here", "managed_llm"),
+        ):
+            assert exc.details["gate"] in GATE_KINDS
 
 
 class TestDatabaseErrors:

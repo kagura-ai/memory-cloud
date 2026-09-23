@@ -7,6 +7,8 @@ Based on: kagura-ai/src/kagura/exceptions.py
 
 from typing import Any
 
+from config.constants import GATE_ALLOWLIST, GATE_DEPLOYMENT, GATE_PLAN, GATE_QUOTA
+
 
 class MemoryCloudException(Exception):
     """Base exception for all Kagura Memory Cloud errors.
@@ -628,17 +630,33 @@ class RateLimitError(MemoryCloudException):
 
 
 class QuotaExceededError(MemoryCloudException):
-    """Quota exceeded (429)."""
+    """Quota exceeded (429 by default).
+
+    Every instance stamps ``details.gate = "quota"`` (#1644) so a client can
+    tell a cap from a plan refusal without matching on prose. Callers add the
+    canonical ``current`` / ``limit`` counts through
+    ``config.plan_tiers.quota_gate_details``; the per-site legacy count names
+    stay beside them, never replaced.
+
+    ``status_code`` exists only so the two caps that have always answered 403
+    (resource tokens, connector seats) can carry the details block without
+    their status moving under existing clients. New caps use 429.
+    """
 
     def __init__(
         self,
         message: str = "Quota exceeded",
         quota_type: str | None = None,
+        *,
+        status_code: int = 429,
         **details: Any,
     ) -> None:
+        # ``setdefault``: a caller that already splatted ``quota_gate_details``
+        # supplies its own ``gate`` and must not hit a duplicate kwarg.
+        details.setdefault("gate", GATE_QUOTA)
         super().__init__(
             message,
-            status_code=429,
+            status_code=status_code,
             error_code="QUOTA-001",
             quota_type=quota_type,
             **details,
@@ -687,12 +705,35 @@ class EmbeddingSpendCapExceeded(QuotaExceededError):
 
 
 class FeatureNotAvailableError(MemoryCloudException):
-    """Feature not available on current plan tier (403)."""
+    """Feature not available (403).
+
+    ``details.gate`` (#1644) says WHY: ``"plan"`` (the workspace's tier does
+    not include it), ``"allowlist"`` (a rollout kill switch — plan-neutral,
+    never an upsell) or ``"deployment"`` (the operator turned it off here).
+    The three used to be wire-identical, which is why the analyses panel
+    rendered a plan refusal as "not yet enabled … reach out".
+
+    The default stays ``"plan"`` so the five pre-#1644 raisers keep their
+    meaning; a non-plan refusal is built through ``for_rollout`` /
+    ``for_deployment`` rather than by passing ``gate`` by hand.
+    """
 
     def __init__(
-        self, message: str = "Feature not available on current plan", feature: str | None = None
+        self,
+        message: str = "Feature not available on current plan",
+        feature: str | None = None,
+        *,
+        gate: str = GATE_PLAN,
+        **details: Any,
     ) -> None:
-        super().__init__(message, status_code=403, error_code="FEAT-001", feature=feature)
+        super().__init__(
+            message,
+            status_code=403,
+            error_code="FEAT-001",
+            feature=feature,
+            gate=gate,
+            **details,
+        )
 
     @classmethod
     def for_feature(cls, plan_name: str | None, feature: str) -> "FeatureNotAvailableError":
@@ -713,9 +754,46 @@ class FeatureNotAvailableError(MemoryCloudException):
         # Local import: ``config.plan_tiers`` applies settings overrides at
         # import time and this module is imported everywhere, so keep it off
         # the module import path.
-        from config.plan_tiers import feature_denied_message
+        from config.plan_tiers import feature_denied_message, feature_gate_details
 
-        return cls(feature_denied_message(plan_name, feature), feature=feature)
+        # ``feature_gate_details`` already carries ``feature`` and ``gate``,
+        # so neither may also be passed positionally (duplicate kwarg).
+        return cls(
+            feature_denied_message(plan_name, feature),
+            **feature_gate_details(plan_name, feature),
+        )
+
+    @classmethod
+    def for_rollout(cls, message: str, feature: str) -> "FeatureNotAvailableError":
+        """Allowlist / kill-switch refusal: plan-NEUTRAL, no upgrade path (#1644).
+
+        The workspace's tier is not the reason, so the refusal deliberately
+        carries no ``required_plan`` and the copy for this gate is CTA-free.
+
+        Args:
+            message: The refusal text, which must not name a tier.
+            feature: Registry feature key, e.g. ``"memory_analysis"``.
+
+        Returns:
+            The exception, ready to ``raise``.
+        """
+        return cls(message, feature=feature, gate=GATE_ALLOWLIST)
+
+    @classmethod
+    def for_deployment(cls, message: str, feature: str) -> "FeatureNotAvailableError":
+        """Operator turned the feature off on this deployment (#1644).
+
+        Plan-neutral and CTA-free like ``for_rollout``: no tier the caller
+        could buy turns it back on.
+
+        Args:
+            message: The refusal text, which must not name a tier.
+            feature: Registry feature key, e.g. ``"managed_llm"``.
+
+        Returns:
+            The exception, ready to ``raise``.
+        """
+        return cls(message, feature=feature, gate=GATE_DEPLOYMENT)
 
 
 # Database Errors (5xx)
