@@ -270,9 +270,28 @@ export default function ContextsPage() {
   // #1645: the quota upsells (banner link, dialog CTA) read the descriptor's
   // NARROWED answer, not the raw Plan-page one: an owner at the top tier's
   // cap has no served tier that raises it, so the Plan page would be a dead
-  // end. A zero cap is not a quota the descriptor expresses (it answers
-  // "allowed"), so it offers no upgrade either — the explanation still shows.
-  const quotaCanUpgrade = contextQuota.canUpgrade;
+  // end. `quotaGate` reads limit 0 as "unknown" and answers "allowed", so a
+  // KNOWN zero cap is lifted through `gateFromFacts` from the counts the page
+  // holds: the same narrowing, which offers the upgrade exactly when a served
+  // tier's cap is above zero.
+  const zeroCapGate =
+    maxContexts === 0
+      ? gateFromFacts(
+          {
+            state: "quota",
+            quotaType: "contexts",
+            current: usedContexts,
+            limit: 0,
+          },
+          {
+            fallbackKey: "contexts",
+            canUpgrade: canUpgrade === true,
+            locale,
+            tiers,
+          },
+        )
+      : null;
+  const quotaCanUpgrade = (zeroCapGate ?? contextQuota).canUpgrade;
 
   // #1645: may a context be made shared on this tier? One gate for both
   // create dialogs, read from the tier matrix's `shared_contexts` — the same

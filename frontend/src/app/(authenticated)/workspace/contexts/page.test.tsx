@@ -547,11 +547,7 @@ describe("ContextsPage current marker (#561)", () => {
  */
 describe("ContextsPage quota upsells behind the plan_page gate (#1643)", () => {
   /** At the cap with nothing visible: banner shown AND the empty state renders. */
-  function setupAtCap(
-    role: Role = "owner",
-    plan = "pro",
-    cap = 20,
-  ) {
+  function setupAtCap(role: Role = "owner", plan = "pro", cap = 20) {
     mockUseAuth.mockReturnValue({
       user: { current_workspace_id: WORKSPACE_ID },
       refetchUser: vi.fn(),
@@ -704,15 +700,35 @@ describe("ContextsPage quota upsells behind the plan_page gate (#1643)", () => {
     expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
   });
 
-  it("quota banner: a zero cap explains itself with no plan link (#1645)", async () => {
-    // The descriptor does not express a zero cap (it answers "allowed"), so
-    // it offers no upgrade; the page's own block and explanation stay.
+  it("quota banner and dialog: a zero cap a served tier raises offers the upgrade (#1645)", async () => {
+    // An operator tier that excludes contexts (cap 0): basic's cap is above
+    // zero, so the Plan page does lift it.
     mockFeatures = { byok: true, plan_page: true };
     setupAtCap("owner", "free", 0);
     render(<ContextsPage />);
 
     expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
+    expect(screen.getByText("quotaReachedPlansLink")).toBeInTheDocument();
+    await openQuotaDialog();
+    expect(
+      screen.getByRole("button", { name: "viewPlans" }),
+    ).toBeInTheDocument();
+  });
+
+  it("quota banner and dialog: a zero cap no served tier raises explains itself with no upsell (#1645)", async () => {
+    mockFeatures = { byok: true, plan_page: true };
+    mockTiers = OSS_TIERS.map((tier) => ({
+      ...tier,
+      max_contexts: 0,
+    })) as PlanTierFeature[];
+    setupAtCap("owner", "free", 0);
+    render(<ContextsPage />);
+
+    expect(await screen.findByText(/quotaReachedDetail/)).toBeInTheDocument();
     expect(screen.queryByText("quotaReachedPlansLink")).toBeNull();
+    await openQuotaDialog();
+    expect(screen.queryByRole("button", { name: "viewPlans" })).toBeNull();
+    expect(screen.getByRole("button", { name: "close" })).toBeInTheDocument();
   });
 
   it("quota dialog: no CTA while /system/info is unresolved", async () => {
