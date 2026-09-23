@@ -84,6 +84,7 @@ DOCS_TOUCHED = [
     "docs/mcp-clients.md",
     "docs/mcp-tools.md",
     "docs/getting-started.md",
+    "docs/troubleshooting.md",
     "README.md",
 ]
 
@@ -473,6 +474,14 @@ def test_docs_warn_that_changing_an_oauth_url_needs_reauthentication() -> None:
     assert "requires re-authentication" in text
     assert "OAuth tokens per endpoint" in text
     assert "?guardrails=off" in text
+
+
+def test_troubleshooting_covers_the_claude_hooks_silence() -> None:
+    text = (REPO_ROOT / "docs" / "troubleshooting.md").read_text(encoding="utf-8")
+    section = text.split("## Claude Code — kagura-memory hooks never run")[1].split("\n## ")[0]
+    assert "server_url must be the MCP endpoint" in section
+    assert "claude mcp get kagura-memory" in section
+    assert "/kagura-memory:setup --check" in section
 
 
 def test_hook_names_the_endpoint_on_404_and_405() -> None:

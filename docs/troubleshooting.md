@@ -51,6 +51,19 @@ The plugin is installed, but no guardrail ever reaches the model and `/hooks` sh
 5. **Legacy marketplace.** If `/hooks` lists idle hooks whose commands mention `${CLAUDE_PLUGIN_ROOT}`, Codex loaded the repository root through `.claude-plugin/marketplace.json`; install from `.agents/plugins/marketplace.json` instead.
 6. **`server unreachable` at session start.** A cache up to 24 hours old is still used; an older cache is renamed `.stale` and the hooks stay quiet until the server answers again.
 
+## Claude Code — kagura-memory hooks never run
+
+`/kagura-memory:setup --check` answers all of this in one pass: it names the MCP entry in effect, probes the endpoint without credentials, and runs the hook once. By hand:
+
+1. **`server_url` is not the MCP endpoint.** The hook POSTs `tools/call load_guardrails` to `server_url` exactly as given, so it must end in `/mcp` or `/mcp/w/<workspace-id>`; the site root answers `http 405`. The session-start notice then reads `server_url must be the MCP endpoint, e.g. https://<host>/mcp or https://<host>/mcp/w/<workspace-id>, not the site root` — the plugin option is wrong, not the network.
+2. **The MCP entry you edited is not the one in effect.** A `local`-scope entry (`~/.claude.json` → `projects[…].mcpServers`) silently shadows a `project` one of the same name. `claude mcp get kagura-memory` prints the winner's scope and URL; `claude mcp list` flags conflicting scopes.
+3. **Two plugin installs.** A claude.ai-synced install next to a marketplace install makes Claude Code pick one and warn. `claude plugin details kagura-memory@<marketplace>` shows which one lists `Hooks (4)`; uninstall the other.
+4. **Nothing configured.** With none of `server_url`, `api_key`, `context_id` set the hooks are silent by design; a half-finished configuration prints one notice naming the field. The hooks authenticate with a Bearer API key only — an OAuth MCP entry still needs `api_key`.
+5. **Not a new session yet.** The fetch happens at `SessionStart`: start a new session, or `/clear`. `ls "$HOME/.claude/plugins/data/"kagura-memory-*/guardrails/` shows `<context_id>.json` once a fetch has succeeded.
+6. **`server unreachable` at session start.** A cache up to 24 hours old is still used; an older cache is renamed `.stale` and the hooks stay quiet until the server answers again.
+
+Changing the MCP URL of an entry authenticated with **OAuth** (for example to add `?guardrails=off`) disconnects it: tokens are stored per endpoint, so every Kagura tool disappears until you re-run `/mcp` and sign in again.
+
 ## WSL2 + Claude Code — MCP OAuth callback fails (default NAT networking)
 
 **This is a WSL networking issue, not a Kagura Memory Cloud server bug.** The server-side OAuth path is healthy — the resolved server-side cousin of this report was [#689 / PR #692](https://github.com/kagura-ai/memory-cloud/pull/692) (DCR no longer issues a `client_secret` for public `auth_method="none"` clients), deployed 2026-05-17. The remaining problem is purely the WSL2 NAT network isolation between the WSL listener and the Windows browser.
