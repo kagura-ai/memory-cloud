@@ -27,7 +27,11 @@ import {
   type GateMessageKey,
 } from "@/components/common/FeatureGateNotice";
 import { WorkspaceRole } from "@/lib/auth/rbac";
-import { GATE_KEYS, type RefusedGateState } from "@/lib/gates/featureGates";
+import {
+  GATE_KEYS,
+  type GateKey,
+  type RefusedGateState,
+} from "@/lib/gates/featureGates";
 import { DEFAULT_PLAN_LABELS } from "@/lib/utils/planLabel";
 
 import en from "./en.json";
@@ -243,6 +247,29 @@ function icuArgs(message: string): string[] {
   return names;
 }
 
+/**
+ * The catalogue key holding the product's own name for a gated feature: the
+ * page title or nav entry of the surface the gate sits on. Features without
+ * one exact-match term elsewhere in the catalogue are not listed.
+ */
+const PRODUCT_TERM: Readonly<Partial<Record<GateKey, string>>> = {
+  resources: "sidebar.resources",
+  connectors: "sidebar.connectors",
+  shared_contexts: "workspace.planMatrix.row_sharedContexts",
+  team_invitations: "workspace.planMatrix.row_teamInvitations",
+  reranking: "searchSettings.reranking",
+  memory_analysis: "analyses.header.title",
+  managed_llm: "workspace.planMatrix.row_managedLlm",
+  managed_embeddings: "workspace.planMatrix.row_managedEmbeddings",
+  byok: "externalKeys.title",
+  contexts: "contexts.title",
+  members: "sidebar.members",
+  resource_tokens: "resourceTokens.title",
+  storage: "sidebar.storage",
+  memories: "memories.title",
+  api_calls: "workspace.apiCalls",
+};
+
 /** The refusal subtrees (`role` has no direct leaves). */
 const REFUSAL_SUBTREES = [
   "plan",
@@ -419,6 +446,28 @@ describe.each(CATALOGUES)("%s gate.* contract", (locale, messages) => {
       }
     }
   });
+
+  // 8, widened: a gate names the feature the way the product already does —
+  // the page or nav entry the gate sits on — not in a word of its own. ja has
+  // no case, so every form must equal the term; en compares the sentence-case
+  // label case-insensitively ("Resource tokens" = "Resource Tokens").
+  it.each(Object.entries(PRODUCT_TERM))(
+    "gate.features.%s names the feature as %s does",
+    (feature, termKey) => {
+      const term = messageAt(messages, termKey);
+      expect(typeof term, termKey).toBe("string");
+      const nouns = messages.gate.features[feature as GateKey];
+      if (locale === "ja") {
+        expect([nouns.label, nouns.plural, nouns.singular]).toEqual([
+          term,
+          term,
+          term,
+        ]);
+      } else {
+        expect(nouns.label.toLowerCase()).toBe((term as string).toLowerCase());
+      }
+    },
+  );
 
   // 9
   it("formats every key set gateMessageKeys can return with exactly the arguments its branch has", () => {

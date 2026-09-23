@@ -4339,9 +4339,9 @@
         "singular": "チーム招待"
       },
       "reranking": {
-        "label": "検索リランキング",
-        "plural": "検索リランキング",
-        "singular": "検索リランキング"
+        "label": "リランキング",
+        "plural": "リランキング",
+        "singular": "リランキング"
       },
       "sleep_reports": {
         "label": "Sleep Maintenance",
@@ -4354,9 +4354,9 @@
         "singular": "メモリー分析"
       },
       "managed_llm": {
-        "label": "マネージド LLM レーン",
-        "plural": "マネージド LLM レーン",
-        "singular": "マネージド LLM レーン"
+        "label": "マネージドLLMでの分析",
+        "plural": "マネージドLLMでの分析",
+        "singular": "マネージドLLMでの分析"
       },
       "managed_embeddings": {
         "label": "マネージド埋め込み",
@@ -4374,9 +4374,9 @@
         "singular": "プランページ"
       },
       "byok": {
-        "label": "外部 API キー",
-        "plural": "外部 API キー",
-        "singular": "外部 API キー"
+        "label": "外部APIキー",
+        "plural": "外部APIキー",
+        "singular": "外部APIキー"
       },
       "cost_dashboard": {
         "label": "コストダッシュボード",
@@ -4389,9 +4389,9 @@
         "singular": "コンテキスト"
       },
       "members": {
-        "label": "チームメンバー",
-        "plural": "チームメンバー",
-        "singular": "チームメンバー"
+        "label": "メンバー",
+        "plural": "メンバー",
+        "singular": "メンバー"
       },
       "workspaces": {
         "label": "ワークスペース",
@@ -4399,9 +4399,9 @@
         "singular": "ワークスペース"
       },
       "resource_tokens": {
-        "label": "Resource Token",
-        "plural": "Resource Token",
-        "singular": "Resource Token"
+        "label": "リソーストークン",
+        "plural": "リソーストークン",
+        "singular": "リソーストークン"
       },
       "storage": {
         "label": "ストレージ",
@@ -4419,14 +4419,14 @@
         "singular": "エージェント"
       },
       "embedding_spend": {
-        "label": "埋め込みコスト",
-        "plural": "埋め込みコスト",
-        "singular": "埋め込みコスト"
+        "label": "埋め込み使用額",
+        "plural": "埋め込み使用額",
+        "singular": "埋め込み使用額"
       },
       "api_calls": {
-        "label": "API 呼び出し",
-        "plural": "API 呼び出し",
-        "singular": "API 呼び出し"
+        "label": "API呼び出し",
+        "plural": "API呼び出し",
+        "singular": "API呼び出し"
       }
     }
   }

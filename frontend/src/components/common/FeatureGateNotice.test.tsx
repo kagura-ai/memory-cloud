@@ -314,17 +314,17 @@ const BRANCHES: readonly Branch[] = [
     }),
     expected: {
       en: {
-        title: "You've reached the team member limit",
+        title: "You've reached the member limit",
         description:
-          "Your S plan's team member limit in this workspace is 3, and 3 are in use.",
+          "Your S plan's member limit in this workspace is 3, and 3 are in use.",
         action: null,
         badge: "Limit reached",
         hint: "Limit reached",
       },
       ja: {
-        title: "チームメンバー の上限に達しました",
+        title: "メンバー の上限に達しました",
         description:
-          "S プランではこのワークスペースで チームメンバー は 3 件までです（現在 3 件）。",
+          "S プランではこのワークスペースで メンバー は 3 件までです（現在 3 件）。",
         action: null,
         badge: "上限に達しました",
         hint: "上限に達しました",
@@ -407,9 +407,9 @@ const BRANCHES: readonly Branch[] = [
         hint: "Limit reached",
       },
       ja: {
-        title: "埋め込みコスト の上限に達しました",
+        title: "埋め込み使用額 の上限に達しました",
         description:
-          "このワークスペースは 埋め込みコスト の上限に達しています。",
+          "このワークスペースは 埋め込み使用額 の上限に達しています。",
         action: null,
         badge: "上限に達しました",
         hint: "上限に達しました",
@@ -501,7 +501,7 @@ const BRANCHES: readonly Branch[] = [
     expected: {
       en: {
         title: "Only the workspace owner can do this",
-        description: "Managing team members is limited to the workspace owner.",
+        description: "Managing members is limited to the workspace owner.",
         action: null,
         badge: "Owner only",
         hint: "Owner only",
@@ -509,7 +509,7 @@ const BRANCHES: readonly Branch[] = [
       ja: {
         title: "ワークスペースのオーナーのみが実行できます",
         description:
-          "チームメンバー の管理はワークスペースのオーナーに限定されています。",
+          "メンバー の管理はワークスペースのオーナーに限定されています。",
         action: null,
         badge: "オーナーのみ",
         hint: "オーナーのみ",
