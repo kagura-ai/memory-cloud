@@ -5,6 +5,8 @@
  * Handles authentication, error handling, and response parsing.
  */
 
+import { normalizeGate, type FeatureGateFacts } from "@/lib/gates/featureGates";
+
 export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
@@ -17,18 +19,28 @@ export class ApiError extends Error {
   readonly error?: string; // Error code from backend (e.g., "RES-001", "AUTH-001")
   readonly status: number;
   readonly details?: ApiErrorDetails;
+  /**
+   * #1644: the plan / quota / deployment / role / allowlist refusal this
+   * error carries, normalised once here so no page re-parses `details` or
+   * matches server prose. `undefined` when the error is not a gate refusal —
+   * including every bare 403/429 with no semantic code. Carries no
+   * `canUpgrade` (that needs React context): `useErrorGate` lifts it.
+   */
+  readonly gate?: FeatureGateFacts;
 
   constructor(init: {
     error?: string;
     message: string;
     status: number;
     details?: unknown;
+    gate?: FeatureGateFacts;
   }) {
     super(init.message);
     this.name = "ApiError";
     this.error = init.error;
     this.status = init.status;
     this.details = init.details as ApiErrorDetails | undefined;
+    this.gate = init.gate;
   }
 }
 
@@ -128,11 +140,24 @@ export class ApiClient {
           details = { ...details, detail: errorDetails.message };
         }
 
+        // #1644: the third and last normalisation at this choke point. It runs
+        // after both #992 aliases so it sees the already-aliased `details`, and
+        // it derives the gate from `details.gate` or, for an older server, the
+        // semantic error code — never from the status alone.
+        const gate = normalizeGate(
+          response.status,
+          typeof errorCode === "string" ? errorCode : undefined,
+          details && typeof details === "object" && !Array.isArray(details)
+            ? (details as Record<string, unknown>)
+            : undefined,
+        );
+
         throw new ApiError({
           error: errorCode,
           message: errorMessage,
           status: response.status,
           details,
+          gate,
         });
       }
 
