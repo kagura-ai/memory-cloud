@@ -27,6 +27,7 @@ timezone branches are covered for real.
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -41,6 +42,8 @@ from auth.analysis_gates import (
     require_memory_analysis_access,
     require_memory_analysis_read,
 )
+from config.constants import GATE_ALLOWLIST, GATE_PLAN, GATE_QUOTA
+from config.plan_tiers import get_plan_tier, required_plan_name
 from services.analysis.query_service import day_window_utc
 from utils.exceptions import (
     AuthorizationError,
@@ -331,6 +334,44 @@ class TestCheckMemoryAnalysisQuota:
         # resets_at is an ISO string for the caller's next midnight.
         assert isinstance(err.details["resets_at"], str)
         assert err.details["addon_bonus"] == 0
+
+    async def test_quota_refusal_carries_current_and_limit_beside_used_today(
+        self, db_session, pro_workspace, pricing, context_in
+    ):
+        """#1644 S9: canonical counts are ADDED, the legacy names stay."""
+        ctx = await context_in(pro_workspace.id)
+        day_start, _ = day_window_utc("UTC")
+        for _ in range(3):
+            await _make_run(
+                db_session,
+                workspace_id=pro_workspace.id,
+                context_id=ctx,
+                pricing_row=pricing,
+                status="succeeded",
+                started_at=day_start + timedelta(hours=2),
+            )
+
+        with pytest.raises(QuotaExceededError) as exc:
+            await check_memory_analysis_quota(
+                db_session, workspace_id=pro_workspace.id, user_timezone="UTC"
+            )
+        details = exc.value.details
+        assert details["gate"] == GATE_QUOTA
+        assert details["quota_type"] == "memory_analysis"
+        assert details["feature"] == "memory_analysis"
+        assert (details["current"], details["limit"]) == (3, 3)
+        assert isinstance(details["current"], int)
+        assert isinstance(details["limit"], int)
+        # The legacy names an older client reads are untouched.
+        assert details["used_today"] == 3
+        assert details["limit_today"] == 3
+        assert details["remaining_today"] == 0
+        assert details["addon_bonus"] == 0
+        assert details["current_plan"] == pro_workspace.plan_name
+        # The upgrade is derived from the tier rows, not a literal: the PRO cap
+        # is beaten only by XL.
+        assert details["required_plan"] == "promax"
+        assert details["required_plan_display"] == get_plan_tier("promax").display_name
 
     async def test_cancelled_rows_count_toward_quota(
         self, db_session, pro_workspace, pricing, context_in
@@ -896,3 +937,127 @@ class TestQuotaAdvisoryLock:
         )
         assert after > before, "quota gate did not acquire the advisory xact lock"
         await db_session.rollback()
+
+
+# ---------------------------------------------------------------------------
+# The gate CONTRACT (#1644): why a refusal happened, machine-readably.
+# ---------------------------------------------------------------------------
+
+
+def _user_dict(workspace_id: UUID) -> dict:
+    return {"user_id": "test_user", "current_workspace_id": workspace_id}
+
+
+class TestGateKindOnAnalysisRefusals:
+    """#1644 S10: the allowlist kill switch and a plan refusal are both
+    ``FEAT-001`` at 403 and used to be wire-identical. ``details.gate`` is
+    what tells them apart — and it is why the analyses panel could render a
+    plan refusal as "not yet enabled ... reach out".
+
+    Mocked rather than DB-backed: the raises are what is under test, not the
+    counting underneath them (``tests/api/test_analyses_quota_precedence.py``
+    owns the same mock shape for the ordering).
+    """
+
+    @staticmethod
+    def _gate_chain(*, feature_granted: bool, allowlisted: bool):
+        perm_mock = MagicMock()
+        perm_mock.check_workspace_owner = AsyncMock(return_value=None)
+        feature_check = AsyncMock(
+            return_value=(
+                (True, None)
+                if feature_granted
+                else (False, "Feature 'memory_analysis' not available on M plan.")
+            )
+        )
+        return (
+            perm_mock,
+            feature_check,
+            patch(
+                "auth.analysis_gates.check_workspace_in_allowlist",
+                MagicMock(return_value=allowlisted),
+            ),
+        )
+
+    async def _run_access_gate(self, *, feature_granted: bool, allowlisted: bool):
+        perm_mock, feature_check, allowlist_patch = self._gate_chain(
+            feature_granted=feature_granted, allowlisted=allowlisted
+        )
+        with (
+            patch("services.permission_service.PermissionService", return_value=perm_mock),
+            patch("services.quota_service.QuotaService") as quota_cls,
+            allowlist_patch,
+            patch("auth.analysis_gates.check_memory_analysis_quota", AsyncMock()),
+            patch("auth.analysis_gates._get_user_timezone", AsyncMock(return_value="UTC")),
+        ):
+            quota_cls.return_value.check_feature_access = feature_check
+            await require_memory_analysis_access(user=_user_dict(uuid4()), db=AsyncMock())
+
+    @pytest.mark.asyncio
+    async def test_allowlist_refusal_is_gate_allowlist_not_plan(self):
+        """The headline fix: a rollout refusal must not read as an upsell."""
+        with pytest.raises(FeatureNotAvailableError) as exc:
+            await self._run_access_gate(feature_granted=True, allowlisted=False)
+
+        details = exc.value.details
+        assert exc.value.status_code == 403
+        assert exc.value.error_code == "FEAT-001"
+        assert details["gate"] == GATE_ALLOWLIST
+        assert details["feature"] == "memory_analysis"
+        # Plan-NEUTRAL: nothing here may be read as "buy a higher tier".
+        assert details.get("required_plan") is None
+        assert details.get("required_plan_display") is None
+
+    @pytest.mark.asyncio
+    async def test_plan_refusal_is_gate_plan_with_required_plan(self):
+        """The same status and the same code — a different gate."""
+        with pytest.raises(FeatureNotAvailableError) as exc:
+            await self._run_access_gate(feature_granted=False, allowlisted=True)
+
+        details = exc.value.details
+        assert exc.value.status_code == 403
+        assert exc.value.error_code == "FEAT-001"
+        assert details["gate"] == GATE_PLAN
+        assert details["feature"] == "memory_analysis"
+        required = required_plan_name("memory_analysis")
+        assert details["required_plan"] == required
+        assert details["required_plan_display"] == get_plan_tier(required).display_name
+
+    @pytest.mark.asyncio
+    async def test_read_gate_allowlist_refusal_is_also_plan_neutral(self):
+        """``require_memory_analysis_read`` skips the plan gate entirely, so its
+        only ``FEAT-001`` is the kill switch."""
+        perm_mock = MagicMock()
+        perm_mock.check_workspace_owner = AsyncMock(return_value=None)
+        with (
+            patch("services.permission_service.PermissionService", return_value=perm_mock),
+            patch(
+                "auth.analysis_gates.check_workspace_in_allowlist",
+                MagicMock(return_value=False),
+            ),
+            patch("auth.analysis_gates._get_user_timezone", AsyncMock(return_value="UTC")),
+            pytest.raises(FeatureNotAvailableError) as exc,
+        ):
+            await require_memory_analysis_read(user=_user_dict(uuid4()), db=AsyncMock())
+
+        assert exc.value.details["gate"] == GATE_ALLOWLIST
+
+    @pytest.mark.asyncio
+    async def test_mcp_gate_allowlist_refusal_matches_the_rest_gate(self):
+        """MCP and REST must not disagree about WHY (#332 lesson)."""
+        with (
+            patch(
+                "auth.analysis_gates.check_workspace_in_allowlist",
+                MagicMock(return_value=False),
+            ),
+            patch("auth.analysis_gates._get_user_timezone", AsyncMock(return_value="UTC")),
+            patch("services.permission_service.PermissionService") as perm_cls,
+            pytest.raises(FeatureNotAvailableError) as exc,
+        ):
+            perm_cls.return_value.check_workspace_owner = AsyncMock(return_value=None)
+            await check_memory_analysis_access_mcp(
+                AsyncMock(), user_id="test_user", workspace_id=uuid4(), require_quota=False
+            )
+
+        assert exc.value.details["gate"] == GATE_ALLOWLIST
+        assert exc.value.details["feature"] == "memory_analysis"
