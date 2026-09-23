@@ -65,9 +65,45 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
 }));
 
 // Tri-state per feature (`null` = the tier matrix is still resolving).
+// #1645: read through useFeatureGates; each tri-state maps onto a descriptor
+// naming the tier the default matrix gives the feature.
 let mockPlanFeatures: Record<string, boolean | null> = {};
-vi.mock("@/hooks/usePlanFeatures", () => ({
-  usePlanFeature: (feature: string) => mockPlanFeatures[feature] ?? null,
+const REQUIRED: Record<string, [string, string]> = {
+  shared_contexts: ["pro", "L"],
+  public_contexts: ["promax", "XL"],
+  sleep_reports: ["pro", "L"],
+};
+// A test that moves a feature to another tier (or off every tier: `null`)
+// names it here; the matrix, not this form, decides the tier.
+let mockRequired: Record<string, [string, string] | null> = {};
+const gateCache = new Map<string, unknown>();
+function gateFor(feature: string) {
+  const value = mockPlanFeatures[feature] ?? null;
+  const required =
+    feature in mockRequired ? mockRequired[feature] : REQUIRED[feature];
+  const cacheKey = `${feature}:${value}:${required}`;
+  if (!gateCache.has(cacheKey)) {
+    const [requiredPlan, planLabel] = required ?? [undefined, undefined];
+    gateCache.set(
+      cacheKey,
+      value === null
+        ? { state: "pending", feature, canUpgrade: false }
+        : value
+          ? { state: "allowed", feature, canUpgrade: false }
+          : {
+              state: "plan",
+              feature,
+              requiredPlan,
+              planLabel,
+              canUpgrade: false,
+            },
+    );
+  }
+  return gateCache.get(cacheKey);
+}
+vi.mock("@/hooks/useFeatureGate", () => ({
+  useFeatureGates: (keys: string[]) =>
+    Object.fromEntries(keys.map((key) => [key, gateFor(key)])),
 }));
 
 vi.mock("@/contexts/AuthContext", () => ({
@@ -172,6 +208,7 @@ beforeEach(() => {
   });
   // M plan: neither sharing nor public access.
   mockPlanFeatures = { shared_contexts: false, public_contexts: false };
+  mockRequired = {};
 });
 
 // ---------- Payload holds only touched fields --------------------------------
@@ -224,6 +261,27 @@ describe("SettingsTabPanel — sharing control without shared_contexts (#1583)",
     expect(mockUpdateContext).toHaveBeenCalledWith(CTX_ID, {
       sleep_mode: "edges_only",
     });
+  });
+
+  it("the notice names the tier the matrix names, not a hardcoded one (#1645)", () => {
+    // An operator moved shared_contexts down to basic (M).
+    mockRequired = { shared_contexts: ["basic", "M"] };
+    renderPanel(makeContext({ is_private: true }));
+
+    expect(screen.getByText("sharedRequiresPlan:M")).toBeInTheDocument();
+    expect(screen.queryByText("sharedRequiresPlan:L")).toBeNull();
+  });
+
+  it("no served tier has sharing: the control stays inert, with no tier to name (#1645)", () => {
+    mockRequired = { shared_contexts: null };
+    renderPanel(makeContext({ is_private: true }));
+
+    const makeShared = screen.getByRole("button", { name: "makeShared" });
+    expect(makeShared).toBeDisabled();
+    expect(screen.queryByText(/sharedRequiresPlan/)).toBeNull();
+    // No dangling reference to a notice that is not there.
+    expect(makeShared.getAttribute("aria-describedby")).toBeNull();
+    expect(screen.queryByText("makeSharedFirst")).toBeNull();
   });
 
   it("pending matrix: the control waits, without an upsell", () => {

@@ -68,12 +68,45 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
 }));
 
 // #1560: the Make Public gate is the tier matrix's `public_contexts` boolean
-// via usePlanFeature (tri-state; `null` = resolving), not a tier-name rank.
-// One answer for every feature: the `shared_contexts` gate (#1583) has its
-// own per-feature mock in SettingsTabPanel.sharingGate.test.tsx.
+// (tri-state; `null` = resolving), not a tier-name rank. One answer for every
+// plan feature: the `shared_contexts` gate (#1583) has its own per-feature
+// mock in SettingsTabPanel.sharingGate.test.tsx. #1645: read through
+// useFeatureGates; the tri-state maps onto its descriptors.
 let mockPlanFeature: boolean | null = true;
-vi.mock("@/hooks/usePlanFeatures", () => ({
-  usePlanFeature: () => mockPlanFeature,
+// #1645: whether the workspace's tier has Sleep Maintenance at all — the
+// `sleep_reports` plan gate. Set with the usage fixture below, because the
+// tier limit and the usage payload's limit are one predicate (zero floor).
+let mockTierHasSleep = true;
+const gateCache = new Map<string, Record<string, unknown>>();
+function planGate(
+  feature: string,
+  value: boolean | null,
+  requiredPlan: string,
+  planLabel: string,
+) {
+  if (value === null) return { state: "pending", feature, canUpgrade: false };
+  if (value) return { state: "allowed", feature, canUpgrade: false };
+  return { state: "plan", feature, requiredPlan, planLabel, canUpgrade: false };
+}
+function mockGates() {
+  // Stable per answer, like the real hook's memo.
+  const cacheKey = `${mockPlanFeature}:${mockTierHasSleep}`;
+  if (!gateCache.has(cacheKey)) {
+    gateCache.set(cacheKey, {
+      public_contexts: planGate(
+        "public_contexts",
+        mockPlanFeature,
+        "promax",
+        "XL",
+      ),
+      shared_contexts: planGate("shared_contexts", mockPlanFeature, "pro", "L"),
+      sleep_reports: planGate("sleep_reports", mockTierHasSleep, "pro", "L"),
+    });
+  }
+  return gateCache.get(cacheKey);
+}
+vi.mock("@/hooks/useFeatureGate", () => ({
+  useFeatureGates: () => mockGates(),
 }));
 
 vi.mock("@/contexts/AuthContext", () => ({
@@ -162,6 +195,7 @@ function setQuotaResponse(
   mockGetWorkspaceUsageCurrent.mockResolvedValue(
     buildQuotaResponse(used, limit, addon_bonus, remaining),
   );
+  mockTierHasSleep = limit > 0;
 }
 
 const noop = () => {};
