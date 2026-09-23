@@ -719,6 +719,218 @@ def test_setup_skill_cleans_up_after_verifying() -> None:
     assert 'rm -rf "$KAGURA_SETUP_DATA"' in text
 
 
+# Values the skill reads from configuration (.mcp.json is repository-controlled) must never be
+# spliced into command text: they pass B0's check and are read back from its files (#1649).
+PROJECT_PLACEHOLDERS = (
+    "<server_url>",
+    "<mcp_url>",
+    "<context_id>",
+    "<context uuid>",
+    "<uuid>",
+    "<profile>",
+    "<url>",
+    "<new url>",
+    "<endpoint>",
+    "<name>",
+)
+# Placeholders a shell command may still carry, with where each value comes from: the machine's own
+# mktemp path, the user's own plugin install record, a file the user names - and the literal
+# ``<redacted>`` B1's sed writes in place of a header value.
+QUOTABLE_PLACEHOLDERS = ("<values dir>", "<plugin root>", "<the file the user named>", "<redacted>")
+# Unquoted words chosen from a fixed set or typed by the user in their own terminal.
+BARE_PLACEHOLDERS = ("<scope>", "<host>", "<your key>", "<marketplace>")
+SHELL_WORDS = (
+    "claude",
+    "curl",
+    "kagura",
+    "python3",
+    "printf",
+    "uvx",
+    "pip",
+    "git",
+    "rm",
+    "ls",
+    "mktemp",
+    "|",
+    "CLAUDE_PLUGIN_",
+    "KAGURA_SETUP_DATA=",
+)
+
+
+def _shell_lines(text: str) -> list[str]:
+    """Every line of shell the skill runs or hands the user: bash blocks, shell-looking lines of
+    an unlabelled block, and inline code spans that start with a command."""
+    lines: list[str] = []
+    for label, body in re.findall(r"```([a-z]*)\n(.*?)```", text, flags=re.DOTALL):
+        if label == "bash":
+            lines.extend(body.splitlines())
+        elif label == "":
+            lines.extend(ln for ln in body.splitlines() if ln.strip().startswith(SHELL_WORDS))
+    for span in re.findall(r"`([^`\n]+)`", text):
+        if span.strip().startswith(SHELL_WORDS):
+            lines.append(span)
+    return lines
+
+
+def _quoted_segments(line: str) -> list[str]:
+    return [m.group(2) for m in re.finditer(r"""(["'])(.*?)\1""", line)]
+
+
+def test_setup_skill_never_splices_a_project_value_into_a_command() -> None:
+    lines = _shell_lines(_setup_skill())
+    assert any("CLAUDE_PLUGIN_OPTION_SERVER_URL" in ln for ln in lines), "the scan saw B5b"
+    assert any(ln.lstrip().startswith("curl") for ln in lines), "the scan saw B5a"
+    for line in lines:
+        for placeholder in re.findall(r"<[a-z][a-z_ ]*>", line):
+            assert placeholder not in PROJECT_PLACEHOLDERS, (
+                f"{placeholder} spliced into a command: {line.strip()!r}"
+            )
+            assert placeholder in QUOTABLE_PLACEHOLDERS + BARE_PLACEHOLDERS, (
+                f"unknown placeholder {placeholder} in a command: {line.strip()!r}"
+            )
+        for segment in _quoted_segments(line):
+            for placeholder in re.findall(r"<[a-z][a-z_ ]*>", segment):
+                assert placeholder in QUOTABLE_PLACEHOLDERS, (
+                    f"{placeholder} inside quotes in a command: {line.strip()!r}"
+                )
+
+
+def test_setup_skill_checks_values_before_the_first_command_that_uses_them() -> None:
+    text = _setup_skill()
+    check = _block_containing(text, "KAGURA_VALUE_CHECK")
+    b0 = text.index("### B0. Check every value before a command uses it")
+    first_use = text.index('"$(cat "<values dir>/')
+    assert b0 < text.index(check) < first_use
+    assert text.index("### B0.") < text.index("### B1.")
+    # B1 routes the URL, profile and entry name through the check before its first command
+    # that uses one (the shadowed-entry removal).
+    b1 = text.split("### B1.", 1)[1].split("### B2.")[0]
+    assert b1.index("run B0's check") < b1.index('claude mcp remove "$(cat "<values dir>/')
+    # The stop rule: say it is malformed, never echo it into a command.
+    b0_text = text.split("### B0.", 1)[1].split("### B1.")[0]
+    assert "stop" in b0_text and "looks malformed" in b0_text
+    assert "without printing the value, putting it into any command" in b0_text
+    assert "file-writing tool" in b0_text, "values reach the files without a shell"
+    # Every field a command reads has a pattern in the check.
+    used = set(re.findall(r'"\$\(cat "<values dir>/([a-z_]+)"\)"', text))
+    assert used == {"server_url", "context_id", "entry_name", "new_mcp_url", "profile"}
+    for field in used:
+        assert f'"{field}":' in check, f"no pattern for {field}"
+    # The rule is stated for every harness, above Part A.
+    rules = text.split("## Rules", 1)[1].split("\n---\n")[0]
+    assert "never command text" in rules
+
+
+def _run_value_check(tmp_path: Path, values: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    block = _block_containing(_setup_skill(), "KAGURA_VALUE_CHECK")
+    # Undo the list-item indentation of the fenced block.
+    script = "\n".join(ln[3:] if ln.startswith("   ") else ln for ln in block.splitlines())
+    values_dir = tmp_path / "values"
+    values_dir.mkdir()
+    for field, value in values.items():
+        (values_dir / field).write_text(value, encoding="utf-8")
+    workdir = tmp_path / "cwd"
+    workdir.mkdir()
+    script = script.replace('"<values dir>"', f"'{values_dir}'")
+    return subprocess.run(
+        ["bash", "-c", script], cwd=workdir, capture_output=True, text=True, timeout=30
+    )
+
+
+HOSTILE_URLS = [
+    "https://mcp.example.com/mcp'",
+    "https://mcp.example.com/mcp'; touch x; '",
+    "https://mcp.example.com/mcp$(touch x)",
+    "https://mcp.example.com/mcp`touch x`",
+    "https://mcp.example.com/mcp;touch x",
+    "https://mcp.example.com/mcp|touch x",
+    "https://mcp.example.com/mcp&",
+    "https://mcp.example.com/mcp&touch=x",
+    "https://mcp.example.com/mcp?guardrails=off&",
+    "https://mcp.example.com/mcp?guardrails=off&&touch=x",
+    "https://mcp.example.com/mcp\ntouch x",
+    "https://mcp.example.com/mcp\n\n",
+    "https://mcp.example.com/m cp",
+    "https://mcp.example.com /mcp",
+    'https://mcp.example.com/mcp"',
+    "https://mcp.example.com/mcp#frag",
+    "https://user@mcp.example.com/mcp",
+    "ftp://mcp.example.com/mcp",
+    "https:///mcp",
+    "",
+]
+
+
+@pytest.mark.parametrize("value", HOSTILE_URLS)
+@pytest.mark.parametrize("field", ["mcp_url", "server_url", "new_mcp_url"])
+def test_setup_skill_value_check_rejects_shell_syntax(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    result = _run_value_check(tmp_path, {field: value})
+    assert result.returncode == 1
+    assert result.stdout.strip() == f"malformed: {field}"
+    assert not (tmp_path / "cwd" / "x").exists()
+    assert "touch" not in result.stdout + result.stderr, "the value is never echoed"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://mcp.example.com/mcp",
+        "https://mcp.example.com/mcp/w/00000000-0000-0000-0000-000000000000",
+        "http://localhost:8080/mcp/w/00000000-0000-0000-0000-000000000000?guardrails=off",
+        "http://[::1]:8080/mcp",
+        "http://127.0.0.1:8080/mcp?profile=core&guardrails=off",
+        "https://mcp.example.com/mcp\n",
+    ],
+)
+def test_setup_skill_value_check_accepts_mcp_urls(tmp_path: Path, value: str) -> None:
+    result = _run_value_check(
+        tmp_path, {"mcp_url": value, "server_url": value, "new_mcp_url": value}
+    )
+    assert (result.returncode, result.stdout.strip()) == (0, "ok"), result.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "ok"),
+    [
+        ("context_id", "00000000-0000-0000-0000-000000000000", True),
+        ("context_id", "00000000-0000-0000-0000-000000000000;touch x", False),
+        ("context_id", "not-a-uuid", False),
+        ("profile", "default", True),
+        ("profile", "work_2", True),
+        ("profile", "default $(touch x)", False),
+        ("profile", "default'", False),
+        ("entry_name", "kagura-memory", True),
+        ("entry_name", "kagura-memory;touch x", False),
+    ],
+)
+def test_setup_skill_value_check_covers_ids_and_names(
+    tmp_path: Path, field: str, value: str, ok: bool
+) -> None:
+    result = _run_value_check(tmp_path, {field: value})
+    expected = (0, "ok") if ok else (1, f"malformed: {field}")
+    assert (result.returncode, result.stdout.strip()) == expected
+    assert not (tmp_path / "cwd" / "x").exists()
+
+
+def test_setup_skill_check_mode_skips_context_checks_without_a_context() -> None:
+    """list_contexts empty in check mode: A4 and the hook run need an id (#1649)."""
+    text = _setup_skill()
+    a2 = _setup_core().split("### A2.", 1)[1].split("### A3.")[0]
+    check_mode = a2.split("In check mode", 1)[1]
+    assert "verification not possible until a context exists" in check_mode
+    assert "skip every check that" in check_mode and "needs a context id" in check_mode
+    for skipped in ("A4", "`get_context_info`", "`load_guardrails`", "B5b"):
+        assert skipped in check_mode
+    assert "setup mode" in check_mode and "`create_context`" in check_mode, "the next step"
+    assert "go on" not in check_mode
+    a4 = _setup_core().split("### A4.", 1)[1].split("### A5.")[0]
+    assert "with no context yet, skip it" in a4
+    run_order = text.split("## Run order", 1)[1].split("## Rules")[0]
+    assert "no context: A4 and B5b are skipped" in run_order
+
+
 def test_setup_skill_is_listed_where_the_other_skills_are() -> None:
     guide = (REPO_ROOT / "claude-skills" / "guide.md").read_text(encoding="utf-8")
     assert "| `setup` |" in guide, "guide.md's skill table must list setup"

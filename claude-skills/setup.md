@@ -20,14 +20,18 @@ the plugin commands and the hook dry run live there and nowhere else. Codex CLI 
 **or** when the user asks in their own words to *check*, *diagnose* or *doctor* the setup ("is my
 Kagura setup OK?", "diagnose the hooks") — only Claude Code passes arguments to a skill, so the
 request's wording counts as much as a flag. In check mode change no file, write no configuration,
-create no context, install nothing, run no login and ask for no credential. Anything else is
-**setup mode**.
+create no context, install nothing, run no login and ask for no credential. The temporary
+directories the checks make and remove (B0, B5b) are not configuration and are allowed. Anything
+else is **setup mode**.
 
 ## Run order
 
 | Setup mode (Claude Code) | Check mode (Claude Code) |
 |---|---|
-| B1 detect → A1 account and connection → A2 context → B2 `userConfig` → A3 lane (B3 applies it) → B4 restart → A4 verify through MCP → B5 hook check → A5 report | B1 detect → A2 context, read only → A4 verify through MCP → B5 hook check → A5 report |
+| B1 detect → A1 account and connection → A2 context → B2 `userConfig` → A3 lane (B3 applies it) → B4 restart → A4 verify through MCP → B5 hook check → A5 report | B1 detect → A2 context, read only → A4 verify through MCP → B5 hook check → A5 report (no context: A4 and B5b are skipped, A2) |
+
+B0, the value check, is not a step of its own: every step that puts a URL, a context id, a profile
+name or an entry name into a command runs it first, in both modes.
 
 ## Rules
 
@@ -46,6 +50,11 @@ create no context, install nothing, run no login and ask for no credential. Anyt
 - **Never open or edit `~/.kagura/credentials.json`.** It holds the CLI's refresh tokens; the CLI
   owns it. Change it only through `kagura auth …` commands the user runs.
 - Ask before every write, name the exact file, and show the before/after of the one value changing.
+- **Values read from configuration are data, never command text.** An MCP URL, `server_url`, a
+  context id, a profile name or an MCP entry name can come from a file any repository ships, so it
+  may carry shell syntax. None of them is ever spliced into a command — quoted or not. Each one
+  passes the harness adapter's value check first (Claude Code: B0), which stops the run on anything
+  malformed, and a command then reads it from the check's file, never from its own text.
 
 ---
 
@@ -121,7 +130,12 @@ create one:
 3. Take `context_id` from the result. Only a workspace owner or admin can create one; on a
    permission error, say so and stop — someone with that role creates it.
 
-In check mode, report `no context yet` and go on; do not offer to create one.
+In check mode, do not offer to create one. Report
+`no context yet — verification not possible until a context exists` and **skip every check that
+needs a context id**: A4 (`get_context_info` and `load_guardrails`) and the hook run (Claude Code:
+B5b). Checks that need no context — the entry, the lane, the endpoint probe — still run. Name the
+next step: run this skill in setup mode, which offers `create_context` (a workspace owner or admin
+creates it), then check again.
 
 ### A3. Pick the guardrail lane
 
@@ -141,7 +155,8 @@ where the change needs a re-authentication.
 This proves the connection and the context in any harness, with whatever credential the MCP entry
 uses — an OAuth sign-in, a CLI profile or a Bearer key. It needs no key in this shell, so it works
 even when the hooks' API key lives only in the harness's keychain. It reads, never writes, so it
-runs in check mode too.
+runs in check mode too. It needs the context id from A2: with no context yet, skip it and report as
+A2 says.
 
 ```
 get_context_info(context_id="<uuid>")
@@ -177,6 +192,7 @@ Code: B7 has the full block).
 
 ```
   context      <name> (<uuid>)                      — or: no context yet
+  MCP          — or: verification not possible until a context exists
   Lane         hooks — guardrails=off on the MCP URL — yes
   MCP          get_context_info: guardrails absent (hooks lane) — load_guardrails: 7 tool guardrails, 2 pinned
 ```
@@ -194,6 +210,73 @@ changed.
 Everything below is specific to Claude Code: its MCP configuration, its plugin system and the
 plugin's hook script. Another harness replaces this part and keeps Part A.
 
+### B0. Check every value before a command uses it
+
+B1 reads the MCP URL from `.mcp.json` — a file any repository can ship — or from `~/.claude.json`,
+and later steps put that URL, the `server_url` derived from it, the context id, the CLI profile name
+and the MCP entry name into commands. A value such as `https://x/mcp'; curl …` or one holding `$(…)`,
+a backtick, `;`, `|`, `&` or a newline would run as a command the moment it is spliced into one — so
+**no such value is ever spliced into a command's text**, quoted or not. Instead:
+
+1. Once per run, make a values directory. `mktemp` prints its path; `<values dir>` below is that
+   path — a name this machine chose, never a value from the project:
+
+   ```bash
+   mktemp -d
+   ```
+
+2. Write each value **verbatim** into its own file there with the file-writing tool — never through
+   a shell command (`echo`, `printf`, a here-document), which would parse it first. One file per
+   field, named `mcp_url`, `server_url`, `new_mcp_url`, `context_id`, `profile` or `entry_name`.
+   Do not repair, trim or re-quote a value.
+
+3. Run the check. It reads the files — no value is on its command line — and prints only field
+   names:
+
+   ```bash
+   python3 -I -S - "<values dir>" <<'KAGURA_VALUE_CHECK'
+   import os, re, sys
+   URL = (r"https?://(?:[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:.]+\])"
+          r"(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~%/-]*)?"
+          r"(?:\?[A-Za-z0-9._~%-]+=[A-Za-z0-9._~%-]*(?:&[A-Za-z0-9._~%-]+=[A-Za-z0-9._~%-]*)*)?")
+   NAME = r"[A-Za-z0-9_-]{1,64}"
+   UUID = r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+   PATTERNS = {"mcp_url": URL, "server_url": URL, "new_mcp_url": URL,
+               "context_id": UUID, "profile": NAME, "entry_name": NAME}
+   bad = []
+   for field, pattern in PATTERNS.items():
+       path = os.path.join(sys.argv[1], field)
+       if not os.path.isfile(path):
+           continue
+       with open(path, encoding="utf-8", errors="replace") as fh:
+           value = fh.read(4097)
+       if value.endswith("\n"):
+           value = value[:-1]
+       if len(value) > 4096 or not re.fullmatch(pattern, value, re.ASCII):
+           bad.append(field)
+   print("malformed: " + " ".join(bad) if bad else "ok")
+   sys.exit(1 if bad else 0)
+   KAGURA_VALUE_CHECK
+   ```
+
+   A URL is `http` or `https`; a host of letters, digits, dots and hyphens, or a bracketed IPv6
+   literal (`[::1]`); an optional port; a path of letters, digits and `._~%/-`; and an optional query
+   of `key=value` pairs of the same characters — `&` only between two pairs. No quote, `$`, backtick,
+   `;`, `|`, space, newline, `@` or fragment passes. A context id is a UUID; a profile or entry name
+   is letters, digits, `-` and `_`.
+
+4. **`malformed: <fields>` → stop.** Tell the user which value looks malformed and where it came
+   from — for example *"the MCP URL in `.mcp.json` looks malformed: it holds characters an MCP URL
+   never has; check that file"* — without printing the value, putting it into any command, or trying
+   an edited copy. Continue only after `ok`, and run the check again after every file you write.
+
+5. A command reads a checked value from its file: `"$(cat "<values dir>/server_url")"`, or an
+   environment variable set that way. Inside double quotes the substitution is one word and is never
+   parsed again.
+
+When the run is over — after the user ran any line from B2 that reads the directory — remove it:
+`rm -rf "<values dir>"`.
+
 ### B1. Detect the effective MCP entry
 
 ```bash
@@ -205,7 +288,7 @@ claude mcp get kagura-memory | sed -E 's/^(    [A-Za-z0-9_-]+)([:=]).*/\1\2 <red
 
 `claude mcp list` prints every configured server with its URL (or command) and health, and — when
 one name is defined in more than one scope — an `MCP config diagnostics` block with a
-`[Conflicting scopes]` warning. `claude mcp get <name>` prints only the entry that **wins**:
+`[Conflicting scopes]` warning. `claude mcp get kagura-memory` prints only the entry that **wins**:
 `Scope`, `Status`, `Type`, then `URL` for an http entry or `Command` / `Args` for a stdio entry, plus
 `Headers:`, `Environment:` and `OAuth:` blocks when the entry has them.
 
@@ -244,7 +327,7 @@ for n,s in (d.get("mcpServers") or {}).items():
 |---|---|---|---|
 | **OAuth (Claude Code)** | `Type: http` (or `url`), no `Authorization` header; `Needs authentication`, or `Connected` after `/mcp` sign-in | Claude Code's own OAuth token, stored per endpoint | the entry's `URL` |
 | **Bearer key** | `Type: http` (or `url`), an `Authorization` header | a static API key in the entry | the entry's `URL` |
-| **CLI profile** | `Type: stdio`, `Command: kagura-mcp` — what `kagura setup claude --profile <name>` writes; also an absolute path ending in `kagura-mcp`, or a launcher (`uvx …`) whose `Args` run it | the CLI's refreshing OAuth profile; the entry holds **no secret** | **not in the MCP config** — see below |
+| **CLI profile** | `Type: stdio`, `Command: kagura-mcp` — what `kagura setup claude --profile …` writes; also an absolute path ending in `kagura-mcp`, or a launcher (`uvx …`) whose `Args` run it | the CLI's refreshing OAuth profile; the entry holds **no secret** | **not in the MCP config** — see below |
 
 **The upstream URL of a CLI-profile entry.** `kagura-mcp` forwards to, in order:
 
@@ -269,6 +352,10 @@ a new `kagura auth login`. A CLI-profile entry that `claude mcp list` shows as f
 `kagura` is not on this shell's `PATH`, report `CLI profile — upstream URL unknown (kagura not on
 PATH)` and ask the user to run `kagura auth list` where Claude Code starts; do not guess the URL.
 
+Before any command uses the URL, the profile name or the entry name, write them into the values
+directory as `mcp_url`, `profile` and `entry_name` and run B0's check. Reporting them needs no
+command; acting on them does.
+
 Report, as a block:
 
 - **Effective entry** — name, the file it comes from, the scope.
@@ -277,7 +364,8 @@ Report, as a block:
   (`--server`, or the profile). The path (`/mcp`, or `/mcp/w/<workspace-id>`) and each query
   parameter separately (`profile`, `guardrails`).
 - **Shadowed entries** — every other scope defining the same name, with its file and URL. Fix:
-  `claude mcp remove <name> -s <scope>` on the one that should not be there. OAuth tokens are stored
+  `claude mcp remove "$(cat "<values dir>/entry_name")" -s <scope>` on the one that should not be
+  there (`<scope>` is `local`, `project` or `user`). OAuth tokens are stored
   per endpoint, so two OAuth entries with different URLs cannot share a sign-in.
 - **Duplicate plugin installs** — `claude plugin list` and look for two `kagura-memory` rows, e.g. a
   claude.ai-synced install next to a marketplace install; Claude Code picks one and warns. Which one
@@ -322,7 +410,9 @@ Derive it from B1 — never invent it, never ask the user to:
 - Drop the query, except that `guardrails=off` may stay. A `guardrails=<context-id>` left in
   `server_url` makes the hook print a warning at every session start.
 
-Then show the values to enter — three of them, and where the fourth comes from:
+Write the derived endpoint to `<values dir>/server_url` and the context id to
+`<values dir>/context_id`, and run B0's check. Only after `ok`, show the values to enter — three of
+them, and where the fourth comes from:
 
 | Option | Value |
 |---|---|
@@ -341,7 +431,7 @@ Applying it:
   passes through the conversation:
 
   ```
-  claude plugin install kagura-memory@kagura-memory-cloud --config server_url=<endpoint> --config context_id=<uuid> --config max_action=block --config api_key=<your key>
+  claude plugin install kagura-memory@kagura-memory-cloud --config "server_url=$(cat "<values dir>/server_url")" --config "context_id=$(cat "<values dir>/context_id")" --config max_action=block --config api_key=<your key>
   ```
 
 - **Already installed** — `/plugin` → kagura-memory → Configure, and paste the four values. Claude
@@ -363,10 +453,11 @@ URL already has a query, such as `?profile=core`). How depends on the form.
 - Entry in a `.mcp.json` file (project root or `~/.claude/.mcp.json`) → change **only** the `url`
   string in place. Do not touch `headers` and do not rewrite the file.
 - Entry in `~/.claude.json` (`local` / `user` scope) → do not hand-edit that file; it holds the whole
-  client state. For an OAuth entry, `claude mcp remove <name> -s <scope>` then
-  `claude mcp add --transport http <name> "<new url>" -s <scope>`. For a Bearer entry, print both
-  commands and let the **user** run the `add` with its `--header`, so the key stays out of this
-  conversation.
+  client state. Write the new URL to `<values dir>/new_mcp_url` and run B0's check. For an OAuth
+  entry, `claude mcp remove "$(cat "<values dir>/entry_name")" -s <scope>` then
+  `claude mcp add --transport http "$(cat "<values dir>/entry_name")" "$(cat "<values dir>/new_mcp_url")" -s <scope>`.
+  For a Bearer entry, print both commands and let the **user** run the `add` with its `--header`,
+  so the key stays out of this conversation.
 
 Afterwards: `/mcp` → the entry → authenticate, then B1's redacted `claude mcp get` to confirm
 `Connected`.
@@ -387,9 +478,11 @@ entry's `args`, after `--profile <name>`:
   `--server` there reaches every teammate who uses the file, and sends *their* profile's token to
   this host. Say so, and offer a `local`-scope entry instead (the `claude mcp add … -s local` form
   below): it shadows the project entry for this user only — report it as the intended shadow.
+- Write the new `--server` value to `<values dir>/new_mcp_url` and run B0's check first; write it
+  nowhere until that says `ok`.
 - Entry in a `.mcp.json` file → change **only** that entry's `args` array in place. Entry in
   `~/.claude.json` → `claude mcp remove kagura-memory -s <scope>`, then
-  `claude mcp add kagura-memory -s <scope> -- kagura-mcp --profile <name> --server "<url>"`
+  `claude mcp add kagura-memory -s <scope> -- kagura-mcp --profile "$(cat "<values dir>/profile")" --server "$(cat "<values dir>/new_mcp_url")"`
   (for a new `local` entry beside a tracked `.mcp.json`, only the `add`, with `-s local`).
 - No re-authentication: the proxy owns the token, so the entry reconnects on the next start (or
   `/mcp` → reconnect) with the same sign-in.
@@ -413,11 +506,14 @@ A4 already proved the connection and the context. This proves the **hook's own**
 
 #### B5a. Endpoint probe — no credentials
 
+`server_url` is derived as B2 says — in check mode too — written to `<values dir>/server_url` and
+passed through B0's check; the probe reads it from there.
+
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' -m 10 -X POST \
   -H 'Content-Type: application/json' -H 'Accept: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"load_guardrails","arguments":{}}}' \
-  '<server_url>'
+  "$(cat "<values dir>/server_url")"
 ```
 
 Sends no key and no context id. Read the status:
@@ -449,7 +545,8 @@ d=json.load(open(os.path.expanduser("~/.claude/plugins/installed_plugins.json"))
 
 (It only supplies the version in the User-Agent — a root that cannot be found is not fatal.) Then:
 
-`$KAGURA_SETUP_API_KEY` below is whatever already holds the key on this machine — an exported
+`server_url` and the context id (A2's, written to `<values dir>/context_id`) come from the values
+directory, checked by B0 — never typed into the command. `$KAGURA_SETUP_API_KEY` below is whatever already holds the key on this machine — an exported
 variable, or `"$(cat "<the file the user named>")"`. Substitute the expansion, never the key.
 
 ```bash
@@ -457,8 +554,8 @@ KAGURA_SETUP_DATA="$(mktemp -d)"
 printf '%s' '{"hook_event_name":"SessionStart","source":"startup","session_id":"kagura-setup-check"}' \
 | CLAUDE_PLUGIN_ROOT="<plugin root>" \
   CLAUDE_PLUGIN_DATA="$KAGURA_SETUP_DATA" \
-  CLAUDE_PLUGIN_OPTION_SERVER_URL="<server_url>" \
-  CLAUDE_PLUGIN_OPTION_CONTEXT_ID="<context uuid>" \
+  CLAUDE_PLUGIN_OPTION_SERVER_URL="$(cat "<values dir>/server_url")" \
+  CLAUDE_PLUGIN_OPTION_CONTEXT_ID="$(cat "<values dir>/context_id")" \
   CLAUDE_PLUGIN_OPTION_API_KEY="$KAGURA_SETUP_API_KEY" \
   python3 -I -S "<plugin root>/plugins/kagura-memory/hooks/kagura_guardrails.py" --client claude
 ```
@@ -485,8 +582,8 @@ call shows whether anything matches it. No network:
 printf '%s' '{"hook_event_name":"PreToolUse","session_id":"kagura-setup-check","tool_name":"Bash","tool_input":{"command":"git push --force"},"tool_use_id":"toolu_setup"}' \
 | CLAUDE_PLUGIN_ROOT="<plugin root>" \
   CLAUDE_PLUGIN_DATA="$KAGURA_SETUP_DATA" \
-  CLAUDE_PLUGIN_OPTION_SERVER_URL="<server_url>" \
-  CLAUDE_PLUGIN_OPTION_CONTEXT_ID="<context uuid>" \
+  CLAUDE_PLUGIN_OPTION_SERVER_URL="$(cat "<values dir>/server_url")" \
+  CLAUDE_PLUGIN_OPTION_CONTEXT_ID="$(cat "<values dir>/context_id")" \
   CLAUDE_PLUGIN_OPTION_API_KEY="$KAGURA_SETUP_API_KEY" \
   python3 -I -S "<plugin root>/plugins/kagura-memory/hooks/kagura_guardrails.py" --client claude
 ```
@@ -498,6 +595,8 @@ Empty output means no guardrail matched that call — not a failure.
 ```bash
 rm -rf "$KAGURA_SETUP_DATA"
 ```
+
+(The values directory stays until the end of the run — B0 removes it.)
 
 It held a fetched guardrail cache. Never point this check at the plugin's real data directory.
 
