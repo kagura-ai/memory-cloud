@@ -29,6 +29,10 @@ import { INVITE_HANDOFF_TEST_IDS as T } from "@/components/auth/invite-handoff.t
  * compare it without printing it.
  */
 
+// Page URLs here carry the invite token, and the project-wide
+// `retain-on-failure` trace would keep them in the artifacts CI uploads.
+test.use({ trace: "off" });
+
 const DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
 
 interface GateConfig {
