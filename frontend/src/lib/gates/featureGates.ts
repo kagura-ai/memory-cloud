@@ -770,6 +770,29 @@ function isFlagOff(features: SystemFeatures, flag: GateFlag): boolean {
   return flag.whenAbsent ? value === false : value !== true;
 }
 
+/**
+ * The deployment half of a gate on its own: has this deployment switched
+ * `key` off? `true` once `/system/info` has resolved (the failed-closed `{}`
+ * included) and one of the spec's flags is off by its own polarity; `false`
+ * when none is, or the spec has no flags; `null` while `/system/info` is
+ * still in flight for a spec that has flags — a flag cannot resolve off
+ * before it has resolved.
+ *
+ * Step 1 of `resolveGate` is exactly this. Exported for surfaces that
+ * DESCRIBE a feature rather than gate a member's use of it — the Plan page's
+ * tier comparison (#1654), where "which tier has it" is the whole table and
+ * only the deployment half is the question.
+ */
+export function deploymentFlagOff(
+  key: GateKey,
+  features: SystemFeatures | null,
+): boolean | null {
+  const flags = (GATE_SPECS[key] as GateSpec).flags ?? [];
+  if (flags.length === 0) return false;
+  if (features === null) return null;
+  return flags.some((flag) => isFlagOff(features, flag));
+}
+
 function quotaDescriptor(args: {
   key: GateKey;
   current: number;
@@ -894,15 +917,13 @@ export function resolveGate(input: {
 }): FeatureGate {
   const { key, tiers, features } = input;
   const spec: GateSpec = GATE_SPECS[key];
-  const flags = spec.flags ?? [];
+  const deploymentOff = deploymentFlagOff(key, features);
 
   // 1. deployment — only once /system/info has resolved.
-  if (features !== null && flags.some((flag) => isFlagOff(features, flag))) {
-    return bareGate("deployment", key);
-  }
+  if (deploymentOff === true) return bareGate("deployment", key);
 
   // 2. pending — never an upsell while an input is unresolved.
-  if (flags.length > 0 && features === null) return bareGate("pending", key);
+  if (deploymentOff === null) return bareGate("pending", key);
   if (spec.matrix && tiers === null) return bareGate("pending", key);
   if ((spec.matrix || spec.role) && !input.workspaceResolved) {
     return bareGate("pending", key);

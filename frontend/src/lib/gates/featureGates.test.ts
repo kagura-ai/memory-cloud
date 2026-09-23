@@ -29,6 +29,7 @@ import {
   isGateKey,
   narrowCanUpgrade,
   normalizeGate,
+  deploymentFlagOff,
   quotaGate,
   requiredTierFor,
   resolveGate,
@@ -1501,6 +1502,45 @@ describe("GATE_SPECS key space (#1645)", () => {
     expect(resolveGate(input("byok", { features: failed })).state).toBe(
       "deployment",
     );
+  });
+});
+
+describe("deploymentFlagOff — the deployment half alone (#1654)", () => {
+  it("is null while /system/info is in flight, for a spec with flags", () => {
+    expect(deploymentFlagOff("reranking", null)).toBeNull();
+    expect(deploymentFlagOff("managed_llm", null)).toBeNull();
+  });
+
+  it("is false for a spec with no flags, resolved or not", () => {
+    expect(deploymentFlagOff("shared_contexts", null)).toBe(false);
+    expect(deploymentFlagOff("shared_contexts", {})).toBe(false);
+  });
+
+  it("reads each flag by its own polarity", () => {
+    // default-on (#1580): only an explicit false
+    expect(deploymentFlagOff("reranking", {})).toBe(false);
+    expect(deploymentFlagOff("reranking", { reranking: true })).toBe(false);
+    expect(deploymentFlagOff("reranking", { reranking: false })).toBe(true);
+    // default-off: anything but true
+    expect(deploymentFlagOff("managed_llm", {})).toBe(true);
+    expect(deploymentFlagOff("managed_llm", { managed_llm: true })).toBe(false);
+  });
+
+  it("agrees with resolveGate's deployment step for every key", () => {
+    const samples: (SystemFeatures | null)[] = [
+      null,
+      {},
+      { reranking: false, managed_llm: true, plan_page: true, byok: true },
+      { reranking: true, managed_llm: false, cost_display: true },
+    ];
+    for (const key of GATE_KEYS) {
+      for (const features of samples) {
+        const off = deploymentFlagOff(key, features);
+        const gate = resolveGate(input(key, { features }));
+        expect(gate.state === "deployment").toBe(off === true);
+        if (off === null) expect(gate.state).toBe("pending");
+      }
+    }
   });
 });
 
