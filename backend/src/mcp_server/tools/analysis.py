@@ -170,10 +170,16 @@ def _gate_error_response(exc: Exception) -> list[TextContent]:
             status_code=exc.status_code,
         )
     if isinstance(exc, FeatureNotAvailableError):
+        # #1644: forward the whole gate block (``gate``, ``required_plan``,
+        # ``required_plan_display``, ``current_plan``), not just ``feature``.
+        # Forwarding ``feature`` alone left a plan refusal and a rollout
+        # (allowlist) refusal wire-identical on MCP — the exact ambiguity the
+        # gate annotation exists to remove on REST. ``feature`` keeps the
+        # ``memory_analysis`` default it always had when the key is absent.
         return _error_response(
             "feature_not_available",
             exc.message,
-            feature=exc.details.get("feature", "memory_analysis"),
+            **{"feature": "memory_analysis", **exc.details},
         )
     if isinstance(exc, QuotaExceededError):
         # Issue #496 Copilot review fix: forward the structured detail

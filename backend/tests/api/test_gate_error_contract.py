@@ -1095,3 +1095,250 @@ class TestLimitsThatAreNotGatesCarryNoGate:
         # feeds this exact body to ``normalizeGate`` and asserts it yields no
         # gate — the QUOTA-001 code fallback needs a frozen ``quota_type``.
         assert details == {"quota_type": None}
+
+
+# ---------------------------------------------------------------------------
+# The MCP envelope carries the same gate as the REST body
+# ---------------------------------------------------------------------------
+
+# The keys a client decides with. Every one the REST body carries must reach
+# the MCP envelope with the same value; the quota mappers drop ``None``
+# values by long-standing convention, which reads identically to a client.
+GATE_DETAIL_KEYS = (
+    "gate",
+    "feature",
+    "quota_type",
+    "current",
+    "limit",
+    "required_plan",
+    "required_plan_display",
+    "current_plan",
+    "resets_at",
+)
+
+
+def _mcp_payload(result) -> dict:
+    assert len(result) == 1
+    return json.loads(result[0].text)
+
+
+async def _mcp_analysis(exc: MemoryCloudException) -> dict:
+    from mcp_server.tools.analysis import _gate_error_response
+
+    return _mcp_payload(_gate_error_response(exc))
+
+
+async def _mcp_files(exc: MemoryCloudException) -> dict:
+    from mcp_server.tools.files import _exc_to_error_response
+
+    return _mcp_payload(_exc_to_error_response(exc))
+
+
+def _db_yielding() -> tuple[object, MagicMock]:
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    db.commit = AsyncMock()
+
+    async def get_db():
+        yield db
+
+    return get_db, db
+
+
+async def _mcp_create_context(exc: MemoryCloudException) -> dict:
+    from mcp_server.tools.context import handle_create_context
+
+    get_db, _ = _db_yielding()
+    service = MagicMock(create_context=AsyncMock(side_effect=exc))
+    with (
+        patch("db.base.get_db", new=get_db),
+        patch(
+            "mcp_server.tools.context._get_workspace_member_role",
+            new=AsyncMock(return_value="owner"),
+        ),
+        patch(
+            "services.quota_service.QuotaService.check_context_creation_allowed",
+            new=AsyncMock(return_value=(True, None)),
+        ),
+        patch("services.context_service.ContextService", return_value=service),
+        patch("mcp_server.tools.context._log_tool_usage", new_callable=AsyncMock),
+    ):
+        return _mcp_payload(
+            await handle_create_context(
+                args={"name": "team-ctx", "is_private": False},
+                user_id="u",
+                workspace_id=uuid4(),
+            )
+        )
+
+
+async def _mcp_setup_connector(exc: MemoryCloudException) -> dict:
+    from mcp_server.tools.resource import handle_setup_connector
+
+    get_db, _ = _db_yielding()
+    service = MagicMock(provision_connector=AsyncMock(side_effect=exc))
+    with (
+        patch("db.base.get_db", new=get_db),
+        patch(
+            "mcp_server.tools.resource._check_owner_admin_role",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "services.connector_provisioning.ConnectorProvisioningService",
+            return_value=service,
+        ),
+        patch("mcp_server.tools.resource._log_tool_usage", new_callable=AsyncMock),
+    ):
+        return _mcp_payload(
+            await handle_setup_connector(
+                {"connector_type": "slack", "resource_id": "slack-team"},
+                "u",
+                uuid4(),
+            )
+        )
+
+
+async def _mcp_remember(exc: MemoryCloudException) -> dict:
+    from mcp_server.tools.memory import handle_remember
+
+    get_db, _ = _db_yielding()
+    context = MagicMock()
+    context.id = uuid4()
+    service = MagicMock(remember=AsyncMock(side_effect=exc))
+    with (
+        patch("db.base.get_db", new=get_db),
+        patch(
+            "mcp_server.tools.memory._check_viewer_permission",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("mcp_server.tools.memory._resolve_context", new=AsyncMock(return_value=context)),
+        patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()),
+        patch("services.memory_service.MemoryService", new=MagicMock(return_value=service)),
+    ):
+        return _mcp_payload(
+            await handle_remember(
+                {
+                    "context_id": str(uuid4()),
+                    "summary": "a summary long enough",
+                    "content": "c",
+                    "type": "note",
+                },
+                "u",
+                uuid4(),
+            )
+        )
+
+
+async def _mcp_register_agent(exc: MemoryCloudException) -> dict:
+    from mcp_server.tools.agent_registry import handle_register_agent
+
+    get_db, _ = _db_yielding()
+    service = MagicMock(create_agent=AsyncMock(side_effect=exc))
+    with (
+        patch("db.base.get_db", new=get_db),
+        patch(
+            "mcp_server.tools.resource._check_owner_admin_role",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("services.agent_registry_service.AgentRegistryService", return_value=service),
+    ):
+        return _mcp_payload(await handle_register_agent({"name": "ci-bot"}, "u", uuid4()))
+
+
+# Each refusal whose exception reaches an MCP tool, and the tool's mapper.
+MCP_ROUTES = {
+    "plan/memory_analysis-mcp": _mcp_analysis,
+    "allowlist/memory_analysis-mcp": _mcp_analysis,
+    "quota/memory_analysis": _mcp_analysis,
+    "plan/managed_llm": _mcp_analysis,
+    "deployment/managed_llm": _mcp_analysis,
+    "plan/shared_contexts-service": _mcp_create_context,
+    "plan/connectors": _mcp_setup_connector,
+    "quota/connectors": _mcp_setup_connector,
+    "quota/memories_per_day": _mcp_remember,
+    "quota/storage_bytes": _mcp_files,
+    "quota/agents": _mcp_register_agent,
+}
+
+# Every other refusal, and why no MCP exception mapper sees it. A new refusal
+# must land in exactly one of the two tables
+# (``test_every_refusal_is_routed_or_excused``).
+NOT_ON_MCP = {
+    "plan/team_invitations": "REST route only; no MCP tool invites members",
+    "plan/shared_contexts-rest": "the REST route's own pre-check",
+    "plan/public_contexts": (
+        "REST route only; MCP update_context builds its own plan_required envelope"
+    ),
+    "plan/public_contexts-api-key": "REST route only",
+    "plan/resources": "REST route only; MCP setup_resource builds its own envelope",
+    "plan/any-feature-via-quota-service": "no caller uses the raising form",
+    "plan/memory_analysis": "REST dependency; MCP goes through the _mcp variant",
+    "allowlist/memory_analysis-start": "REST dependency; MCP goes through the _mcp variant",
+    "allowlist/memory_analysis-read": "REST dependency; MCP goes through the _mcp variant",
+    "plan/sleep_mode": "REST only; MCP update_context has no sleep_mode field",
+    "quota/sleep_enabled_contexts": "REST only; MCP update_context has no sleep_mode field",
+    "quota/contexts": ("MCP calls the non-raising form and builds its own quota_exceeded envelope"),
+    "quota/members": "REST only (invitation create and accept)",
+    "quota/workspace_limit_reached": "REST route only; no MCP tool creates workspaces",
+    "quota/resource_tokens": "REST route only; MCP setup_resource builds its own envelope",
+    "plan/managed_embeddings": (
+        "no MCP handler maps it; it reaches the dispatcher catch-all, whose "
+        "{error: str(e)} shape is frozen"
+    ),
+    "quota/embedding_spend_daily": "no MCP handler maps it (dispatcher catch-all)",
+    "quota/embedding_spend_monthly": "no MCP handler maps it (dispatcher catch-all)",
+    "quota/api_public_daily": "HTTP middleware; not an MCP path",
+    "quota/api_rest_daily": "HTTP middleware; not an MCP path",
+    "quota/api_mcp_daily": (
+        "HTTP middleware: the /mcp request is refused with the REST body itself"
+    ),
+}
+
+_MCP_REFUSALS = [r for r in REFUSALS if r.id in MCP_ROUTES]
+
+
+class TestTheMcpEnvelopeCarriesTheSameGate:
+    """REST and MCP are two doors to the same refusal.
+
+    A plan refusal and a rollout refusal used to be wire-identical over MCP
+    after they had been told apart on REST: the analysis mapper forwarded
+    ``feature`` and nothing else. Every gate key the REST body carries must
+    reach the MCP envelope unchanged.
+    """
+
+    def test_every_refusal_is_routed_or_excused(self) -> None:
+        ids = {r.id for r in REFUSALS}
+        assert set(MCP_ROUTES).isdisjoint(NOT_ON_MCP)
+        assert set(MCP_ROUTES) | set(NOT_ON_MCP) == ids, (
+            f"unrouted: {sorted(ids - set(MCP_ROUTES) - set(NOT_ON_MCP))}; "
+            f"stale: {sorted((set(MCP_ROUTES) | set(NOT_ON_MCP)) - ids)}"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("refusal", _MCP_REFUSALS, ids=_ids(_MCP_REFUSALS))
+    async def test_mcp_envelope_carries_the_rest_gate_details(self, refusal: Refusal) -> None:
+        rest = await _rest_details(refusal.exc)
+        mcp = await MCP_ROUTES[refusal.id](refusal.exc)
+
+        assert mcp["status"] == "error"
+        assert mcp.get("gate") == rest["gate"]
+        for key in GATE_DETAIL_KEYS:
+            if key not in rest:
+                continue
+            if rest[key] is None:
+                assert mcp.get(key) is None, f"{refusal.id}: {key} is {mcp.get(key)!r} on MCP"
+            else:
+                assert mcp.get(key) == rest[key], (
+                    f"{refusal.id}: {key} is {rest[key]!r} on REST but {mcp.get(key)!r} on MCP"
+                )
+
+    @pytest.mark.asyncio
+    async def test_plan_and_rollout_refusals_differ_on_mcp(self) -> None:
+        """The headline: the two analysis refusals no longer read the same."""
+        by_id = {r.id: r for r in REFUSALS}
+        plan = await _mcp_analysis(by_id["plan/memory_analysis-mcp"].exc)
+        rollout = await _mcp_analysis(by_id["allowlist/memory_analysis-mcp"].exc)
+
+        assert (plan["gate"], rollout["gate"]) == (GATE_PLAN, GATE_ALLOWLIST)
+        assert plan["required_plan"] is not None
+        assert rollout.get("required_plan") is None

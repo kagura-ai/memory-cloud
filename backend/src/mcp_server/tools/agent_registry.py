@@ -103,7 +103,14 @@ async def handle_register_agent(
         except ConflictError as e:
             return _error_response("agent_name_conflict", e.message)
         except QuotaExceededError as e:
-            return _error_response("quota_exceeded", e.message)
+            # #1644: forward the structured details (``gate``, ``quota_type``)
+            # the REST 429 carries, same convention as the other MCP quota
+            # envelopes (``None`` values dropped).
+            return _error_response(
+                "quota_exceeded",
+                e.message,
+                **{k: v for k, v in e.details.items() if v is not None},
+            )
 
         add_agent_audit_row(
             db,
