@@ -1093,8 +1093,6 @@
     "memberCount": "{count} member in this workspace",
     "membersCount": "{count} members",
     "inviteMember": "Invite Member",
-    "proPlanRequired": "(Pro Plan)",
-    "ownerAdminOnly": "(Owner/Admin only)",
     "user": "User",
     "role": "Role",
     "lastLogin": "Last Login",
@@ -1162,7 +1160,6 @@
     "shareInviteLink": "Share this link with the person you want to invite:",
     "inviteLinkAddedNote": "The invitation link has been added to the Pending Invitations list below.",
     "proPlanRequiredTitle": "Pro Plan Required",
-    "proPlanRequiredDesc": "Team invitations are a Pro plan feature. Upgrade your plan to invite team members and collaborate.",
     "proPlanBenefits": "Pro Plan Benefits:",
     "benefitTeamInvitations": "Team invitations",
     "benefitSharedContexts": "Shared contexts",
@@ -1178,7 +1175,6 @@
       "opening": "Opening billing…",
       "ownerOnly": "Only the workspace owner can change the plan.",
       "unavailable": "Plan changes are not available on this deployment.",
-      "featureDisabled": "The Plan page is not enabled on this deployment.",
       "upgradeError": "Could not start the billing session. Please try again.",
       "usageTitle": "Usage & limits",
       "usageDescription": "Your current entitlements — the limits this workspace runs under today. Resources, connectors and public contexts that already exist keep serving on any plan, so these can exceed the create matrix below.",
@@ -1297,12 +1293,8 @@
     "seatUsage": "{used}/{limit} seats used",
     "seatsAvailable": "{available} seats available",
     "seatLimitReached": "Member limit reached",
-    "seatLimitReachedDesc": "Your {plan} plan allows {limit} members. Please upgrade to add more team members.",
     "seatWarning": "⚠️ {used}/{limit} seats used ({available} remaining)",
-    "upgradeToAddMembers": "Upgrade to add more members",
     "memberQuotaExceeded": "Member quota exceeded",
-    "invitePlanRequired": "Team invitations require the {plan} plan.",
-    "memberSeatsFull": "Member limit reached: {current} of {limit} seats are in use, including pending invitations.",
     "inviteContextSelection": "Context Access",
     "inviteContextSelectionDesc": "Select which contexts this member can access",
     "noSharedContexts": "No shared contexts available",
@@ -1340,7 +1332,6 @@
     "workspaceCreated": "Workspace created",
     "workspaceCreatedDesc": "Your new workspace has been created successfully.",
     "workspaceLimitReached": "You can own maximum {limit} workspaces.",
-    "workspaceLimitReachedDetailed": "You currently own {owned} of {limit} workspaces. Leave or transfer one, or join others via invite.",
     "lastUsedWorkspace": "Last used workspace",
     "openaiKeyOptional": "Optional. You can add this later in External API Keys settings.",
     "cancel": "Cancel",
@@ -1353,11 +1344,6 @@
     "sleepReports": {
       "title": "Sleep Reports",
       "description": "View Sleep Maintenance execution history for this workspace",
-      "planGate": {
-        "title": "Sleep Maintenance is a Pro feature",
-        "description": "Upgrade to Pro to enable Sleep Maintenance — automatic memory consolidation — and view its reports.",
-        "action": "Upgrade to Pro"
-      },
       "actions": {
         "back": "Back to List"
       },
@@ -1504,8 +1490,6 @@
     "invalidName": "Context name must be lowercase alphanumeric with hyphens or underscores",
     "quotaReached": "Context quota reached for your plan",
     "quotaWarning": "Free plan allows 1 context.",
-    "quotaReachedDetail": "Context limit reached — your {plan} plan allows {limit} contexts in this workspace.",
-    "quotaReachedPlansLink": "View plans",
     "upgradePrompt": "Upgrade to Basic or Pro",
     "upgradeToCreateMore": "to create more contexts.",
     "contextLimitReached": "Context limit reached. Your {plan} plan allows {limit} context(s) per workspace. Upgrade to Basic or Pro plan for multiple contexts.",
@@ -1544,21 +1528,10 @@
     "privateAvailableAllPlans": "Only you can access this context. Available on all plans.",
     "onlyYouCanAccess": "Only you can access",
     "adminsCanOnlyCreateShared": "Admins can only create shared",
-    "pro": "Pro",
-    "proPlan": "Pro Plan",
-    "requiresProPlan": "Requires Pro plan",
     "teamMembersCanAccess": "Team members can access based on their roles.",
-    "teamMembersCanAccessShort": "Team members can access",
     "teamMembersAccess": "Team members can access based on their roles.",
     "allWorkspaceMembersCanAccess": "All workspace members can access this context.",
     "upgradeToProShare": "Upgrade to Pro plan to share contexts with your team.",
-    "upgradeToPro": "Upgrade to Pro plan to enable team collaboration.",
-    "upgradeToProCta": "Upgrade to Pro — view plans",
-    "quotaDialogTitle": "Context limit reached",
-    "quotaDialogDescription": "You've reached your current plan's context limit.",
-    "quotaDialogUpgradeHeading": "Upgrade to create more contexts",
-    "quotaDialogUpgradeBody": "Higher plans include more contexts. See the Plan page for current limits.",
-    "viewPlans": "View plans",
     "changeToPrivateWarning": "Changing to Private will remove all context members. Only you will have access.",
     "changeToSharedWarning": "Changing to Shared will make this context visible to all workspace members.",
     "aiClientInstructions": "AI Client Instructions",
@@ -2140,8 +2113,6 @@
     "rerankerConfig": "Reranker Configuration",
     "rerankerConfigDesc": "Configure reranking model for improved search quality (deployment default: {provider} / {model})",
     "rerankerConfigDescPlain": "Configure reranking model for improved search quality",
-    "rerankerNotAvailableFree": "Reranking not available on Free plan",
-    "upgradeToBasic": "Upgrade to <link>Basic plan</link> to enable AI-powered reranking for improved search quality.",
     "noRerankerKeys": "No reranker API keys configured",
     "configureRerankerKeys": "Please configure a Voyage AI or Cohere API key in <link>External API Keys</link> to enable reranking.",
     "enableReranking": "Enable Reranking",
@@ -2777,8 +2748,6 @@
       "title": "Cost Aggregation",
       "description": "LLM and embedding cost ($) breakdown across all workspaces",
       "descriptionWorkspace": "LLM and embedding cost ($) breakdown for this workspace",
-      "featureDisabled": "The workspace cost dashboard is not enabled on this deployment.",
-      "costDisplayDisabled": "Cost display is not enabled on this deployment.",
       "actions": {
         "refresh": "Refresh"
       },
@@ -3161,12 +3130,8 @@
       "n1DesignDetail": "Multiple Tokens can be created for the same Resource ID (by system, by quota)",
       "n1DesignExample": "Example: Shopify Token + Rakuten Token → Integrated into same \"products\" Context",
       "quotaNote": "Quotas are managed per token, separate from workspace-wide quotas",
-      "quotaHelpFree": "Public contexts are not available on Free plan",
-      "quotaHelpBasic": "BASIC plan: {min}-{max} events/hour (Default: {default})",
-      "quotaHelpPro": "PRO plan: {min}-{max} events/hour (Default: {default})",
       "quotaCapUnknown": "Max per token: {maxPerToken} {unit}. The plan's total capacity could not be loaded — the server enforces it.",
-      "quotaRemaining": "Remaining: {remaining} {unit} (Max per token: {maxPerToken})",
-      "quotaLimitReached": "Quota limit reached. Revoke unused tokens to create new ones."
+      "quotaRemaining": "Remaining: {remaining} {unit} (Max per token: {maxPerToken})"
     },
     "successDialog": {
       "title": "Resource Token Created Successfully",
@@ -3245,8 +3210,6 @@
     "maxCapacity": "{percentage}% of {max} max capacity",
     "noResourceIdWarning": "Resource ID Required",
     "noResourceIdWarningDesc": "To create Resource Tokens, you need a Context with a Resource ID configured.",
-    "planGateTitle": "New Resource Tokens require the {plan} plan",
-    "planGateDesc": "Tokens you already have keep working. Creating a new token is available on the {plan} plan.",
     "goToContexts": "Go to Contexts →",
     "stepFlow": {
       "step1": "Set Resource ID",
@@ -3255,9 +3218,6 @@
     },
     "sdkHint": "Or use the",
     "sdkHintSuffix": "for programmatic resource ingestion",
-    "proPlanRequired": "Higher Tier Plan Required",
-    "proPlanRequiredDesc": "Resource Tokens feature requires a higher tier plan.",
-    "upgradePlan": "Upgrade Plan →",
     "timeAgo": {
       "justNow": "Just now",
       "minutesAgo": "{minutes} minute(s) ago",
@@ -3548,7 +3508,6 @@
     "makeShared": "Make Shared",
     "makePrivate": "Make Private",
     "makeSharedFirst": "Make this context Shared first to enable Public access.",
-    "sharedRequiresPlan": "Sharing a context requires the {plan} plan. Contexts that are already shared keep working.",
     "publicContext": "Public Context",
     "publicContextDesc": "External systems can search via Public REST API",
     "unpublish": "Unpublish",
@@ -3561,7 +3520,6 @@
     "manageResourceTokens": "Manage Resource Tokens →",
     "pythonSdk": "Python SDK →",
     "makePublic": "Make Public",
-    "publicRequiresPlan": "Making a context public requires the {plan} plan. Contexts that are already public keep serving.",
     "protectionTitle": "Protection & Danger Zone",
     "contextLocked": "Context Locked",
     "contextUnlocked": "Context Unlocked",
@@ -3593,7 +3551,6 @@
     "sleepModeSkipConfirm": "Disable Sleep",
     "sleepQuotaUsage": "Sleep-enabled contexts: {used} / {limit} (addon: {addon})",
     "sleepQuotaExceeded": "Quota reached — contact your workspace admin to request a higher Sleep Maintenance cap.",
-    "sleepQuotaTierBlocked": "Sleep Maintenance is a PRO-tier feature — upgrade your plan to enable it on this context.",
     "unsavedChanges": "You have unsaved changes",
     "discard": "Discard",
     "saveChanges": "Save Changes",
@@ -3744,11 +3701,6 @@
         "type": "Type",
         "searchable": "searchable"
       }
-    },
-    "planGate": {
-      "title": "New resources require the {plan} plan",
-      "description": "Existing resources and their tokens keep working. Setting up a new resource (setup_resource, new resource tokens) is available on the {plan} plan.",
-      "action": "Upgrade to {plan}"
     }
   },
   "signupBlocked": {
@@ -3964,7 +3916,6 @@
         "embeddingUniform": "embedding uniform",
         "loading": "Calculating…"
       },
-      "footerHint": "Owner only · gated by workspace allowlist",
       "submit": "Run analysis",
       "submitting": "Starting run…",
       "errorLoadingPreview": "Could not estimate cost — check connection and try again.",
@@ -3990,18 +3941,6 @@
       "pastRunEmpty": {
         "title": "This run has no results to show",
         "description": "The selected run is {status} — only succeeded runs have clusters, scatter positions, and property stats. Use \"Back to latest\" to return to the current view."
-      },
-      "notEnabled": {
-        "title": "Analyses are not yet enabled for this workspace",
-        "description": "Memory Analysis is gated to selected workspaces during the v1 rollout. Reach out if you would like access."
-      },
-      "ownerOnly": {
-        "title": "Memory Analysis is available to the workspace owner",
-        "description": "Only the owner of this workspace can run analyses and view their results."
-      },
-      "planRequired": {
-        "title": "Memory Analysis requires the {plan} plan",
-        "description": "This workspace's plan does not include Memory Analysis. It is available on the {plan} plan."
       },
       "loadFailed": "Failed to load analyses — check connection and try again."
     }
@@ -4077,13 +4016,6 @@
     "description": "Connect external chat platforms so conversations are automatically ingested into a memory context.",
     "emptyTitle": "No connectors yet",
     "emptyDesc": "Connect Slack to start ingesting conversations into a memory context.",
-    "planGate": {
-      "title": "New connectors require the {plan} plan.",
-      "description": "Existing connectors keep ingesting. Connecting a new chat platform is available on the {plan} plan.",
-      "action": "Upgrade to {plan}"
-    },
-    "connectorPlanRequired": "Connecting a new chat platform requires the {plan} plan.",
-    "connectorSeatsFull": "Connector limit reached: {current} of {limit} connectors are in use.",
     "contextBound": "Writes to context {id}",
     "contextNotReady": "Setup incomplete — no write-target context",
     "appIdentity": "App identity: {appKey}",

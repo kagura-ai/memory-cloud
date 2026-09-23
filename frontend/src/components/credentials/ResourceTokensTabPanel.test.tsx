@@ -243,7 +243,6 @@ describe("ResourceTokensTabPanel — upgrade link gate (#1643)", () => {
     await renderGated();
 
     expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
-    expect(screen.queryByRole("link", { name: "upgradePlan" })).toBeNull();
   });
 
   it("owner below XL, /system/info pending: no upgrade CTA", async () => {
@@ -258,8 +257,6 @@ describe("ResourceTokensTabPanel — upgrade link gate (#1643)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "plan.action" }));
     expect(mockPush).toHaveBeenCalledWith("/workspace/settings/plan");
-    // The old bare <a> is gone.
-    expect(screen.queryByRole("link", { name: "upgradePlan" })).toBeNull();
   });
 });
 
@@ -280,7 +277,6 @@ describe("ResourceTokensTabPanel — FeatureGateNotice (#1646 P5)", () => {
     expect(notice!.className).not.toMatch(/border-2/);
     // scope "create": the create-scoped copy, not the whole-feature copy.
     expect(screen.queryByText("plan.title")).toBeNull();
-    expect(screen.queryByText("planGateTitle")).toBeNull();
   });
 
   it("no served tier has resources: the tier-less copy, no CTA", async () => {

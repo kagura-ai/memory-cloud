@@ -546,7 +546,6 @@ describe("WorkspaceMembersPage seat cap notice (#1646 Q3/Q4)", () => {
     expect(notice).toHaveTextContent("quota.title");
     expect(screen.queryByText(/^seatUsage/)).toBeNull();
     expect(screen.queryByPlaceholderText("emailPlaceholder")).toBeNull();
-    expect(screen.queryByText("seatLimitReachedDesc")).toBeNull();
   });
 
   it("at the cap: the counts and the tier labels come from the descriptor, never the raw plan_name", async () => {
