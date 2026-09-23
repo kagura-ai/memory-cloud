@@ -549,9 +549,12 @@ list_tags(context_id="...", min_count=5)      # only frequently used tags
 list_tags(context_id="...", prefix="auth")    # autocomplete: tags starting with "auth"
 list_tags(context_id="...", sort="recent")    # most recently used first
 list_tags(context_id="...", sort="alpha")     # alphabetical, case-folded
+list_tags(context_id="...", with_tags=["python", "backend"])  # tags that co-occur with both
 ```
 
 An empty context returns `tags: []` and `total: 0`, not an error. Soft-deleted memories are excluded and the workspace boundary is honoured for shared contexts. `prefix` escapes `%` and `_`, so it cannot be used as a wildcard probe.
+
+`with_tags` drills down the same way as the Web UI tag cloud and `GET /api/v1/contexts/{id}/tags?with_tags=`: only memories carrying **all** of the given tags (exact match, surrounding whitespace trimmed) are counted, and the given tags themselves are left out of the result, so the list answers "what else is tagged alongside these". Counts are over that subset. It takes at most 50 tags of at most 200 characters each; more returns `invalid_argument`. An empty list is no filter.
 
 ### Edges
 

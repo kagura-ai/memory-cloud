@@ -284,6 +284,9 @@ class ContextTagsResponse(BaseModel):
     """
 
     context_id: UUID = Field(..., description="Context UUID")
+    context_name: str | None = Field(
+        None, description="Context name (#1669; same value as MCP list_tags)."
+    )
     tags: list[RelatedTagItem] = Field(
         ..., description="Aggregated tag info, sorted per the `sort` parameter."
     )
@@ -856,7 +859,12 @@ async def list_context_tags(
         )
         for row in result["rows"]
     ]
-    return ContextTagsResponse(context_id=context_id, tags=tags, total=len(tags))
+    return ContextTagsResponse(
+        context_id=context_id,
+        context_name=result.get("context_name"),
+        tags=tags,
+        total=len(tags),
+    )
 
 
 @router.put("/{context_id}", response_model=ContextResponse)

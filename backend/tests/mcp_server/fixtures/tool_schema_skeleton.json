@@ -632,6 +632,14 @@
         },
         "prefix": {
           "type": "string"
+        },
+        "with_tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "maxItems": 50
         }
       },
       "additionalProperties": false

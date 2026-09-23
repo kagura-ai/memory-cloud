@@ -55,6 +55,8 @@ class TestListContextTagsRoute:
         )
 
         assert response.context_id == context_id
+        # #1669: the service's context_name is carried through, not dropped.
+        assert response.context_name == "kagura-dev"
         assert response.total == 2
         assert [t.tag for t in response.tags] == ["python", "fastapi"]
         assert response.tags[0].count == 5
@@ -152,3 +154,14 @@ class TestListContextTagsRoute:
             q="deploy",
             with_tags=["python", "backend"],
         )
+
+
+class TestContextTagsResponseModel:
+    """#1669: ``context_name`` is additive — optional, so older payloads still validate."""
+
+    def test_context_name_optional(self):
+        from api.routes.contexts import ContextTagsResponse
+
+        resp = ContextTagsResponse(context_id=uuid4(), tags=[], total=0)
+        assert resp.context_name is None
+        assert "context_name" in resp.model_dump()

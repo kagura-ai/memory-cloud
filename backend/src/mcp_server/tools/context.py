@@ -1209,6 +1209,19 @@ async def handle_list_tags(
 
     sort = args.get("sort", "count")
 
+    # #1669: multi-tag AND drill-down, same as REST ``?with_tags=``. Only the
+    # shape is checked here; the service trims, drops blanks and enforces the
+    # 50-tag / 200-char caps (ValidationError → invalid_argument below), so the
+    # MCP and REST paths share one set of rules.
+    with_tags = args.get("with_tags")
+    if with_tags is None:
+        with_tags = []
+    if type(with_tags) is not list or any(type(t) is not str for t in with_tags):
+        return _error_response(
+            "invalid_argument",
+            "with_tags must be an array of strings.",
+        )
+
     async for db in get_db():
         try:
             from services.context_service import ContextService
@@ -1222,6 +1235,7 @@ async def handle_list_tags(
                     min_count=min_count,
                     sort=sort,
                     prefix=prefix,
+                    with_tags=with_tags,
                 ),
                 operation_name="list_tags",
             )

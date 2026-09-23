@@ -595,3 +595,34 @@ class TestAggregateTagsWithTags:
         by_tag = {r["tag"] for r in rows}
         assert by_tag == {"python", "api", "db"}
         assert "backend" not in by_tag  # self-excluded despite the whitespace
+
+    async def test_mcp_list_tags_with_tags_filters(self, db_session, now):
+        """#1669: MCP ``list_tags(with_tags=...)`` drills down end to end.
+
+        Before #1669 the handler dropped ``with_tags`` and returned the whole
+        cloud; this runs the real handler over the seeded rows.
+        """
+        import json
+        from unittest.mock import AsyncMock, patch
+
+        from mcp_server.tools.context import handle_list_tags
+
+        user_id, ctx = await self._seed_cooccurrence(db_session, now)
+
+        async def _get_db():
+            yield db_session
+
+        with (
+            patch("db.base.get_db", _get_db),
+            patch("mcp_server.tools.context._log_tool_usage", AsyncMock()),
+        ):
+            result = await handle_list_tags(
+                {"context_id": str(ctx.id), "with_tags": ["python", "backend"]},
+                user_id,
+                ctx.workspace_id,
+            )
+
+        payload = json.loads(result[0].text)
+        assert payload["status"] == "success"
+        assert payload["context_name"] == ctx.name
+        assert {t["tag"]: t["count"] for t in payload["tags"]} == {"api": 1, "db": 1}

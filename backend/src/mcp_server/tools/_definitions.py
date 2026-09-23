@@ -737,7 +737,7 @@ Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], c
             "readOnly": True,
             "description": """List a context's tag vocabulary with usage counts and recency. Call it BEFORE remember() and BEFORE recall(filters={'tags': [...]}) so you reuse the stored spellings: tag filters match exactly, and drift (troubleshoot / troubleshooting / trouble-shoot) silently breaks them.
 
-Examples: list_tags(context_id=..., prefix='auth') for autocomplete; sort='recent' for what is in use now; min_count=5 to hide one-offs.
+Examples: list_tags(context_id=..., prefix='auth') for autocomplete; sort='recent' for what is in use now; min_count=5 to hide one-offs; with_tags=['python'] for the tags that co-occur with python.
 
 Returns: {status, context_id, context_name, tags: [{tag, count, last_used_at}], total}. An empty context returns tags=[] and total=0, not an error. Soft-deleted memories are not counted.""",
             "inputSchema": {
@@ -765,6 +765,12 @@ Returns: {status, context_id, context_name, tags: [{tag, count, last_used_at}], 
                     "prefix": {
                         "type": "string",
                         "description": "Case-insensitive prefix filter (autocomplete). % and _ are matched literally — not a wildcard.",
+                    },
+                    "with_tags": {
+                        "type": "array",
+                        "items": {"type": "string", "maxLength": 200},
+                        "maxItems": 50,
+                        "description": "Drill-down: count only memories carrying ALL of these tags (exact match, trimmed) and leave these tags out of the result, so it lists the tags that co-occur with them. Default: no filter.",
                     },
                 },
             },

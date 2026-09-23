@@ -33,6 +33,8 @@ export interface ContextTagItem {
 
 export interface ContextTagsResponse {
   context_id: string;
+  /** Context name (#1669); optional so older servers still type-check. */
+  context_name?: string | null;
   tags: ContextTagItem[];
   total: number;
 }
