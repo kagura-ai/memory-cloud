@@ -1245,42 +1245,211 @@ async def _mcp_register_agent(exc: MemoryCloudException) -> dict:
         return _mcp_payload(await handle_register_agent({"name": "ci-bot"}, "u", uuid4()))
 
 
-# Each refusal whose exception reaches an MCP tool, and the tool's mapper.
-MCP_ROUTES = {
-    "plan/memory_analysis-mcp": _mcp_analysis,
-    "allowlist/memory_analysis-mcp": _mcp_analysis,
-    "quota/memory_analysis": _mcp_analysis,
-    "plan/managed_llm": _mcp_analysis,
-    "deployment/managed_llm": _mcp_analysis,
-    "plan/shared_contexts-service": _mcp_create_context,
-    "plan/connectors": _mcp_setup_connector,
-    "quota/connectors": _mcp_setup_connector,
-    "quota/memories_per_day": _mcp_remember,
-    "quota/storage_bytes": _mcp_files,
-    "quota/agents": _mcp_register_agent,
+def _context_cap(exc: MemoryCloudException):
+    """``check_context_creation_allowed`` refusing the way the real one does.
+
+    It raises ``exc`` only in its raising form and answers ``(False, prose)``
+    otherwise — so a handler that calls the non-raising form gets the prose
+    and no details, exactly as in production.
+    """
+
+    async def check(*_args: object, raise_on_denied: bool = False, **_kwargs: object):
+        if raise_on_denied:
+            raise exc
+        return False, exc.message
+
+    return check
+
+
+async def _mcp_create_context_cap(exc: MemoryCloudException) -> dict:
+    """``create_context`` refused by the context cap it checks itself."""
+    from mcp_server.tools.context import handle_create_context
+
+    get_db, _ = _db_yielding()
+    with (
+        patch("db.base.get_db", new=get_db),
+        patch(
+            "mcp_server.tools.context._get_workspace_member_role",
+            new=AsyncMock(return_value="owner"),
+        ),
+        patch(
+            "services.quota_service.QuotaService.check_context_creation_allowed",
+            new=_context_cap(exc),
+        ),
+        patch("mcp_server.tools.context._log_tool_usage", new_callable=AsyncMock),
+    ):
+        return _mcp_payload(
+            await handle_create_context(
+                args={"name": "team-ctx"},
+                user_id="u",
+                workspace_id=uuid4(),
+            )
+        )
+
+
+def _plan_with(feature: str) -> str:
+    from config.plan_tiers import has_feature
+
+    return next(name for name in PLAN_TIERS if has_feature(name, feature))
+
+
+async def _setup_resource_preflight_payload(plan_name: str, cap: object) -> dict:
+    """Drive ``setup_resource``'s gates up to the plan and context-cap checks."""
+    from mcp_server.tools.resource import _setup_resource_preflight
+
+    db = _execute_returning(_workspace_result(None), _workspace_result(plan_name))
+    with (
+        patch(
+            "mcp_server.tools.resource._check_owner_admin_role",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "services.context_service.ContextService.get_context_by_name_for_workspace",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("services.quota_service.QuotaService.check_context_creation_allowed", new=cap),
+    ):
+        error, _ = await _setup_resource_preflight(db, "u", uuid4(), "res-ctx", "res-1")
+    assert error is not None, "the preflight did not refuse"
+    return _mcp_payload(error)
+
+
+async def _mcp_setup_resource_plan(exc: MemoryCloudException) -> dict:
+    """``setup_resource`` refused by the ``resources`` feature gate."""
+    return await _setup_resource_preflight_payload(
+        exc.details["current_plan"], AsyncMock(return_value=(True, None))
+    )
+
+
+async def _mcp_setup_resource_context_cap(exc: MemoryCloudException) -> dict:
+    """``setup_resource`` refused by the context cap, on a tier with resources."""
+    return await _setup_resource_preflight_payload(_plan_with("resources"), _context_cap(exc))
+
+
+async def _mcp_setup_resource_token_cap(exc: MemoryCloudException) -> dict:
+    """``setup_resource``'s token cap, from the facts the handler holds.
+
+    The envelope is built (not raised) from the plan and the active count, so
+    this feeds the helper the same facts the REST refusal was built from and
+    checks it derives the same block — upgrade tier included.
+    """
+    from mcp_server.tools.resource import _token_cap_error_response
+
+    details = exc.details
+    plan = SimpleNamespace(max_resource_tokens=details["limit"])
+    return _mcp_payload(
+        _token_cap_error_response(details["current_plan"], plan, details["current"])
+    )
+
+
+async def _mcp_public_flag(exc: MemoryCloudException) -> dict:
+    """``update_context(is_public=True)`` refused by the ``public_contexts`` gate."""
+    from mcp_server.tools.context import _apply_public_flag
+
+    db = MagicMock()
+    db.get = AsyncMock(return_value=SimpleNamespace(plan_name=exc.details["current_plan"]))
+    context = SimpleNamespace(is_public=False, workspace_id=uuid4(), resource_id=None)
+    error = await _apply_public_flag(db, context, True)
+    assert error is not None, "the public flag was not refused"
+    return _mcp_payload(error)
+
+
+@dataclass(frozen=True)
+class McpRoute:
+    """One MCP door to a refusal.
+
+    Attributes:
+        driver: Produces the MCP payload for the refusal's exception through
+            the real handler or mapper.
+        error: The envelope's ``error`` code. Pinned: an MCP client branches
+            on it exactly as a REST client branches on ``VAL-001``.
+        legacy: Keys this envelope carried before #1644 (read off
+            ``origin/main``). The gate block is ADDED beside them, never
+            instead of them — the MCP half of ``TestBackCompat``.
+    """
+
+    driver: object
+    error: str
+    legacy: frozenset[str] = frozenset()
+
+
+_FEAT = "feature_not_available"
+_QUOTA = "quota_exceeded"
+_PLAN_REQUIRED = "plan_required"
+
+# Each refusal that reaches an MCP tool, and every door it reaches it through.
+MCP_ROUTES: dict[str, tuple[McpRoute, ...]] = {
+    "plan/memory_analysis-mcp": (McpRoute(_mcp_analysis, _FEAT, frozenset({"feature"})),),
+    "allowlist/memory_analysis-mcp": (McpRoute(_mcp_analysis, _FEAT, frozenset({"feature"})),),
+    "quota/memory_analysis": (
+        McpRoute(
+            _mcp_analysis,
+            _QUOTA,
+            frozenset(
+                {
+                    "quota_type",
+                    "used_today",
+                    "limit_today",
+                    "addon_bonus",
+                    "remaining_today",
+                    "resets_at",
+                }
+            ),
+        ),
+    ),
+    "plan/managed_llm": (McpRoute(_mcp_analysis, "validation_error", frozenset({"field"})),),
+    "deployment/managed_llm": (McpRoute(_mcp_analysis, "validation_error", frozenset({"field"})),),
+    # Was ``validation_error`` before #1644 S11 moved the refusal to FEAT-001
+    # (decisions §6 item 10) — the one deliberate MCP code change.
+    "plan/shared_contexts-service": (McpRoute(_mcp_create_context, _PLAN_REQUIRED),),
+    "plan/public_contexts": (
+        McpRoute(_mcp_public_flag, _PLAN_REQUIRED, frozenset({"required_plan"})),
+    ),
+    "plan/resources": (
+        McpRoute(_mcp_setup_resource_plan, _PLAN_REQUIRED, frozenset({"required_plan"})),
+    ),
+    "plan/connectors": (
+        McpRoute(_mcp_setup_connector, _PLAN_REQUIRED, frozenset({"required_plan", "feature"})),
+    ),
+    "quota/connectors": (
+        McpRoute(
+            _mcp_setup_connector,
+            "CONNECTOR-001",
+            frozenset({"max_connectors", "active_connectors"}),
+        ),
+    ),
+    "quota/contexts": (
+        McpRoute(_mcp_create_context_cap, _QUOTA, frozenset({"help"})),
+        McpRoute(_mcp_setup_resource_context_cap, _QUOTA, frozenset({"help"})),
+    ),
+    "quota/resource_tokens": (
+        McpRoute(_mcp_setup_resource_token_cap, _QUOTA, frozenset({"help"})),
+    ),
+    "quota/memories_per_day": (
+        McpRoute(
+            _mcp_remember,
+            _QUOTA,
+            frozenset({"quota_type", "limit", "used_today", "requested", "resets_at"}),
+        ),
+    ),
+    "quota/storage_bytes": (McpRoute(_mcp_files, _QUOTA),),
+    "quota/agents": (McpRoute(_mcp_register_agent, _QUOTA),),
 }
 
-# Every other refusal, and why no MCP exception mapper sees it. A new refusal
-# must land in exactly one of the two tables
-# (``test_every_refusal_is_routed_or_excused``).
+# Every other refusal, and why no MCP tool sees it. A new refusal must land
+# in exactly one of the two tables (``test_every_refusal_is_routed_or_excused``).
 NOT_ON_MCP = {
     "plan/team_invitations": "REST route only; no MCP tool invites members",
     "plan/shared_contexts-rest": "the REST route's own pre-check",
-    "plan/public_contexts": (
-        "REST route only; MCP update_context builds its own plan_required envelope"
-    ),
     "plan/public_contexts-api-key": "REST route only",
-    "plan/resources": "REST route only; MCP setup_resource builds its own envelope",
     "plan/any-feature-via-quota-service": "no caller uses the raising form",
     "plan/memory_analysis": "REST dependency; MCP goes through the _mcp variant",
     "allowlist/memory_analysis-start": "REST dependency; MCP goes through the _mcp variant",
     "allowlist/memory_analysis-read": "REST dependency; MCP goes through the _mcp variant",
     "plan/sleep_mode": "REST only; MCP update_context has no sleep_mode field",
     "quota/sleep_enabled_contexts": "REST only; MCP update_context has no sleep_mode field",
-    "quota/contexts": ("MCP calls the non-raising form and builds its own quota_exceeded envelope"),
     "quota/members": "REST only (invitation create and accept)",
     "quota/workspace_limit_reached": "REST route only; no MCP tool creates workspaces",
-    "quota/resource_tokens": "REST route only; MCP setup_resource builds its own envelope",
     "plan/managed_embeddings": (
         "no MCP handler maps it; it reaches the dispatcher catch-all, whose "
         "{error: str(e)} shape is frozen"
@@ -1294,7 +1463,11 @@ NOT_ON_MCP = {
     ),
 }
 
-_MCP_REFUSALS = [r for r in REFUSALS if r.id in MCP_ROUTES]
+_MCP_CASES = [
+    pytest.param(refusal, route, id=f"{refusal.id}-{route.driver.__name__}")
+    for refusal in REFUSALS
+    for route in MCP_ROUTES.get(refusal.id, ())
+]
 
 
 class TestTheMcpEnvelopeCarriesTheSameGate:
@@ -1315,10 +1488,12 @@ class TestTheMcpEnvelopeCarriesTheSameGate:
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("refusal", _MCP_REFUSALS, ids=_ids(_MCP_REFUSALS))
-    async def test_mcp_envelope_carries_the_rest_gate_details(self, refusal: Refusal) -> None:
+    @pytest.mark.parametrize(("refusal", "route"), _MCP_CASES)
+    async def test_mcp_envelope_carries_the_rest_gate_details(
+        self, refusal: Refusal, route: McpRoute
+    ) -> None:
         rest = await _rest_details(refusal.exc)
-        mcp = await MCP_ROUTES[refusal.id](refusal.exc)
+        mcp = await route.driver(refusal.exc)
 
         assert mcp["status"] == "error"
         assert mcp.get("gate") == rest["gate"]
@@ -1333,6 +1508,21 @@ class TestTheMcpEnvelopeCarriesTheSameGate:
                 )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(("refusal", "route"), _MCP_CASES)
+    async def test_mcp_envelope_keeps_its_code_and_pre_1644_keys(
+        self, refusal: Refusal, route: McpRoute
+    ) -> None:
+        """The MCP half of ``TestBackCompat``: the gate block is added, and
+        nothing an MCP client read before — the ``error`` code, ``message``,
+        the per-envelope keys — is renamed or dropped."""
+        mcp = await route.driver(refusal.exc)
+
+        assert mcp["error"] == route.error
+        assert isinstance(mcp.get("message"), str) and mcp["message"]
+        missing = route.legacy - set(mcp)
+        assert not missing, f"{refusal.id}: MCP envelope lost {sorted(missing)}"
+
+    @pytest.mark.asyncio
     async def test_plan_and_rollout_refusals_differ_on_mcp(self) -> None:
         """The headline: the two analysis refusals no longer read the same."""
         by_id = {r.id: r for r in REFUSALS}
@@ -1342,3 +1532,17 @@ class TestTheMcpEnvelopeCarriesTheSameGate:
         assert (plan["gate"], rollout["gate"]) == (GATE_PLAN, GATE_ALLOWLIST)
         assert plan["required_plan"] is not None
         assert rollout.get("required_plan") is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("driver", _NON_GATE_CASES)
+    @pytest.mark.parametrize("door", [_mcp_remember, _mcp_create_context_cap, _mcp_files])
+    async def test_mcp_adds_no_gate_to_a_limit_that_is_not_one(self, driver, door) -> None:
+        """The MCP quota envelopes forward ``exc.details``; they must not
+        invent a ``gate`` the REST body does not carry. ``remember`` is the
+        tool the size guard and the memory caps actually reach; the other two
+        doors pin the same forwarding in the other mappers."""
+        mcp = await door(await driver())
+
+        assert mcp["error"] == "quota_exceeded"
+        assert "gate" not in mcp
+        assert "quota_type" not in mcp

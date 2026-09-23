@@ -225,6 +225,28 @@ def _error_response(error: str, message: str | None = None, **extra: Any) -> Too
     return ToolErrorContent([TextContent(type="text", text=_dumps(payload))])
 
 
+def _context_cap_error_response(exc: Any) -> ToolErrorContent:
+    """The ``quota_exceeded`` envelope for the context cap (#1644).
+
+    ``create_context`` and ``setup_resource`` both refuse on
+    ``QuotaService.check_context_creation_allowed``. They keep the envelope
+    they always sent (``quota_exceeded`` + the message + ``help``) and add the
+    structured details the REST 429 carries (``gate``, ``quota_type``,
+    ``current`` / ``limit``, ``required_plan``), ``None`` values dropped — the
+    convention of every other MCP quota envelope. An untyped refusal (the
+    "workspace not found" anomaly) carries no ``gate``, so nothing is added.
+
+    Args:
+        exc: The ``QuotaExceededError`` the raising form produced.
+    """
+    return _error_response(
+        "quota_exceeded",
+        exc.message,
+        help="Delete unused contexts or upgrade your plan.",
+        **{k: v for k, v in exc.details.items() if v is not None},
+    )
+
+
 def _context_response_fields(context: Any) -> dict[str, Any]:
     """Extract common context fields for tool responses.
 

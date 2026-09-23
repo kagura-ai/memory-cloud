@@ -13,6 +13,7 @@ from mcp.types import TextContent
 
 from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
 from mcp_server.tools._helpers import (
+    _context_cap_error_response,
     _context_response_fields,
     _ContextNotFoundError,
     _dumps,
@@ -23,7 +24,7 @@ from mcp_server.tools._helpers import (
     _resolve_context_id,
     execute_with_timeout,
 )
-from utils.exceptions import FeatureNotAvailableError
+from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
 
 logger = logging.getLogger(__name__)
 
@@ -337,9 +338,17 @@ async def handle_create_context(
                     required_role="owner or admin",
                 )
 
-            # Check context creation quota
+            # Check context creation quota. #1644: the raising form, so the cap
+            # reaches the MCP envelope with the same details block (``gate``,
+            # ``quota_type``, ``current`` / ``limit``, ``required_plan``) the
+            # REST 429 carries — the non-raising form returns prose only.
             quota_service = QuotaService(db)
-            can_create, error_msg = await quota_service.check_context_creation_allowed(workspace_id)
+            try:
+                can_create, error_msg = await quota_service.check_context_creation_allowed(
+                    workspace_id, raise_on_denied=True
+                )
+            except QuotaExceededError as quota_exc:
+                return _context_cap_error_response(quota_exc)
             if not can_create:
                 return _error_response(
                     "quota_exceeded",
@@ -467,8 +476,8 @@ async def _apply_public_flag(db: Any, context: Any, is_public: Any) -> list[Text
         # public context on L is never re-gated here (block-new-only).
         from config.plan_tiers import (
             feature_denied_message,
+            feature_gate_details,
             has_feature,
-            required_plan_name,
         )
         from models.auth import Workspace
 
@@ -476,12 +485,17 @@ async def _apply_public_flag(db: Any, context: Any, is_public: Any) -> list[Text
         # Fail closed: no workspace row → no plan → no feature.
         plan_name = ws.plan_name if ws else None
         if not has_feature(plan_name or "", "public_contexts"):
+            # #1644: the same gate block the REST ``FEAT-001`` carries
+            # (``gate`` / ``feature`` / ``required_plan`` /
+            # ``required_plan_display`` / ``current_plan``), built by the same
+            # registry helper. ``required_plan`` keeps its key and value — the
+            # builder derives it through ``required_plan_name`` too — and is
             # ``None`` when an env override (#1559) dropped the feature from
-            # every tier — the refusal must not raise into the catch-all.
+            # every tier, so the refusal still never raises into the catch-all.
             return _error_response(
                 "plan_required",
                 feature_denied_message(plan_name, "public_contexts"),
-                required_plan=required_plan_name("public_contexts"),
+                **feature_gate_details(plan_name, "public_contexts"),
             )
     if not is_public and context.is_public and context.resource_id:
         return _error_response(
