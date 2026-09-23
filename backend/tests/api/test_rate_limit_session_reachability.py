@@ -1,21 +1,18 @@
-"""Can the plan-gated rate-limit refusal fire for cookie-session traffic? (#1648)
+"""Middleware ordering contract for ``RateLimitMiddleware`` (#1648).
 
-**Verified answer: no.** ``RateLimitMiddleware`` is registered AFTER
-``SessionMiddlewareWrapper`` in ``api/main.py``, which in Starlette means it
-runs OUTSIDE it — so it executes before the session middleware has read the
-``kagura_session`` cookie and set ``request.state.user_id``. The limiter's step
-3 ("skip for unauthenticated users") therefore always sees ``user_id`` unset
-and returns early: no per-minute check, no daily-quota check, and no
-``QUOTA-001`` refusal, for web-UI traffic or for anything else that
-authenticates below the middleware layer (API keys and OAuth bearer tokens are
-resolved in FastAPI dependencies, i.e. even further in).
+``RateLimitMiddleware`` is registered after ``SessionMiddlewareWrapper`` in
+``api/main.py``, which in Starlette means it runs outside it. The session
+middleware is the only place in ``backend/src`` that assigns
+``request.state.user_id``, so the limiter's "skip for unauthenticated requests"
+branch is the one that applies under the current ordering.
 
-The refusal itself is intact when a caller hands the middleware a request that
-already carries ``user_id`` — the last test pins that — so the dead part is the
-*path to* it, not the code. This module does not change the middleware order or
-the refusal; both are behaviour changes that need their own decision. It exists
-so the claim is a test result instead of a code reading, and so a future reorder
-that makes the refusal reachable fails loudly here first.
+These tests pin that ordering, pin the single writer of ``request.state.user_id``
+and pin that the refusal itself still behaves correctly when it is handed a
+request that already carries a ``user_id``. Nothing here changes the ordering or
+the refusal; both are behaviour changes that need their own decision. The point
+is that a future reorder has to come past a failing assertion and a deliberate
+re-read of the refusal wording, rather than silently changing what the stack
+enforces.
 """
 
 from __future__ import annotations
