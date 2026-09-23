@@ -21,6 +21,7 @@ import WorkspaceMembersPage from "./page";
 import { ApiError } from "@/lib/api/base";
 import { createInvitation } from "@/lib/api/invitations";
 import { updateMemberRole } from "@/lib/api/workspaces";
+import type { PlanTierFeature } from "@/lib/api/workspaces";
 import { normalizeGate } from "@/lib/gates/featureGates";
 
 // ---------- Mocks ------------------------------------------------------------
@@ -84,6 +85,20 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
 }));
 
+// #1645: the invite gate reads the shared tier matrix (`null` = still
+// resolving). Default: the OSS matrix, so `plan_name` decides exactly as the
+// tier's row does.
+const OSS_TIERS = [
+  { name: "free", display_name: "S", team_invitations: false },
+  { name: "basic", display_name: "M", team_invitations: false },
+  { name: "pro", display_name: "L", team_invitations: true },
+  { name: "promax", display_name: "XL", team_invitations: true },
+] as unknown as PlanTierFeature[];
+let mockTiers: PlanTierFeature[] | null = OSS_TIERS;
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanTierMatrix: () => mockTiers,
+}));
+
 // ---------- Helpers ----------------------------------------------------------
 
 type Role = "owner" | "admin" | "member" | "viewer";
@@ -124,6 +139,7 @@ beforeEach(() => {
   vi.mocked(createInvitation).mockReset();
   vi.mocked(updateMemberRole).mockReset();
   mockFeatures = { plan_page: true };
+  mockTiers = OSS_TIERS;
 });
 
 afterEach(() => {
@@ -216,6 +232,110 @@ describe("WorkspaceMembersPage invite gate", () => {
       });
       expect(invite).toBeDisabled();
       expect(invite).toHaveTextContent("proPlanRequired");
+    },
+  );
+  it("invite stays disabled with no plan suffix while the matrix resolves (#1645)", async () => {
+    // Before, the ordinal pro-or-better check was false for an unknown plan,
+    // so every tenant — entitled ones included — saw "(Pro Plan)" until the
+    // plan was known.
+    mockTiers = null;
+    setupWithRole("owner", "pro");
+    render(<WorkspaceMembersPage />);
+    const invite = await screen.findByRole("button", {
+      name: /inviteMember/,
+    });
+    expect(invite).toBeDisabled();
+    expect(invite).not.toHaveTextContent("proPlanRequired");
+    expect(invite).not.toHaveTextContent("ownerAdminOnly");
+  });
+
+  it("team_invitations from the matrix, not the tier rank (#1645)", async () => {
+    // An operator gives basic team invitations and takes them from promax.
+    mockTiers = OSS_TIERS.map((t) => ({
+      ...t,
+      team_invitations: t.name === "basic",
+    }));
+    setupWithRole("owner", "basic");
+    const { unmount } = render(<WorkspaceMembersPage />);
+    expect(
+      await screen.findByRole("button", { name: /inviteMember/ }),
+    ).not.toBeDisabled();
+    unmount();
+
+    setupWithRole("owner", "promax");
+    render(<WorkspaceMembersPage />);
+    const invite = await screen.findByRole("button", {
+      name: /inviteMember/,
+    });
+    expect(invite).toBeDisabled();
+    expect(invite).toHaveTextContent("proPlanRequired");
+  });
+
+  it("an admin passes the admin-minimum role half, so the plan half speaks (#1645)", async () => {
+    // team_invitations is admin-minimum in GATE_SPECS: an admin on a tier
+    // without invitations is told about the plan, not about the role.
+    // (Members and viewers never reach this control: the page redirects
+    // them, #398; role-before-plan itself is pinned in featureGates.test.)
+    setupWithRole("admin", "free");
+    render(<WorkspaceMembersPage />);
+    const invite = await screen.findByRole("button", {
+      name: /inviteMember/,
+    });
+    expect(invite).toBeDisabled();
+    expect(invite).toHaveTextContent("proPlanRequired");
+    expect(invite).not.toHaveTextContent("ownerAdminOnly");
+  });
+});
+
+// #1645: the invite control over every cell of {tier matrix} x
+// {/system/info} x {role, tier}. A failed matrix reads as `null`, exactly like
+// a pending one (the hook suite pins that). The invite gate has no deployment
+// flag, so /system/info must change nothing here. Members and viewers never
+// reach the control (the page redirects them, #398); their role-before-plan
+// cells are pinned on the hook in useFeatureGate.test.tsx.
+describe("WorkspaceMembersPage invite gate — the whole truth table (#1645)", () => {
+  const MATRIX: Record<string, PlanTierFeature[] | null> = {
+    "pending-or-failed": null,
+    resolved: OSS_TIERS,
+  };
+  const INFO: Record<string, Record<string, boolean> | null> = {
+    pending: null,
+    "plan_page on": { plan_page: true },
+    "plan_page off": { plan_page: false },
+    "failed ({})": {},
+  };
+  const CELLS = Object.keys(MATRIX).flatMap((m) =>
+    Object.keys(INFO).flatMap((i) =>
+      (["admin", "owner"] as const).flatMap((role) =>
+        (["free", "pro"] as const).map((plan) => [m, i, role, plan] as const),
+      ),
+    ),
+  );
+
+  it.each(CELLS)(
+    "matrix %s, /system/info %s, %s on %s",
+    async (m, i, role, plan) => {
+      mockTiers = MATRIX[m];
+      mockFeatures = INFO[i];
+      setupWithRole(role, plan);
+      render(<WorkspaceMembersPage />);
+      const invite = await screen.findByRole("button", {
+        name: /inviteMember/,
+      });
+
+      const known = m === "resolved";
+      // Usable only once the matrix says this tier invites.
+      if (known && plan === "pro") {
+        expect(invite).not.toBeDisabled();
+      } else {
+        expect(invite).toBeDisabled();
+      }
+      // An admin passes the role half; the plan half speaks only once the
+      // matrix has answered — never a "(Pro Plan)" while it is pending.
+      expect(invite.textContent).not.toContain("ownerAdminOnly");
+      expect(invite.textContent?.includes("proPlanRequired")).toBe(
+        known && plan === "free",
+      );
     },
   );
 });
@@ -416,6 +536,32 @@ describe("WorkspaceMembersPage invite refusal reads err.gate (#1644)", () => {
     expect(
       await screen.findByText('invitePlanRequired {"plan":"L"}'),
     ).toBeInTheDocument();
+  });
+
+  it("a plan refusal that names no tier takes the matrix's tier and display name (#1645)", async () => {
+    // A server predating #1644 names no tier; the operator's matrix does —
+    // the first served tier with invitations, by its own display name.
+    mockTiers = [
+      { name: "basic", display_name: "M", team_invitations: false },
+      { name: "team", display_name: "Team", team_invitations: true },
+      { name: "pro", display_name: "L", team_invitations: true },
+    ] as unknown as PlanTierFeature[];
+    const serverText = "Feature 'team_invitations' not available.";
+    vi.mocked(createInvitation).mockRejectedValue(
+      refusal(403, "FEAT-001", serverText, {
+        gate: "plan",
+        feature: "team_invitations",
+        required_plan: null,
+        required_plan_display: null,
+        current_plan: "basic",
+      }),
+    );
+    await submitAdminInvite();
+
+    expect(
+      await screen.findByText('invitePlanRequired {"plan":"Team"}'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(serverText)).toBeNull();
   });
 
   it("renders the seat-cap message from err.gate instead of the server's English", async () => {

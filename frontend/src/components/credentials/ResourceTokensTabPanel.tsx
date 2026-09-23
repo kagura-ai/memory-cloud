@@ -11,7 +11,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useLocale, useTranslations } from "next-intl";
+import { useTranslations } from "next-intl";
 import { Section } from "@/components/common/Section";
 import {
   InlineSpinner,
@@ -35,8 +35,7 @@ import {
 import { getContexts } from "@/lib/api/contexts";
 import { getWorkspacePlan, type WorkspacePlanInfo } from "@/lib/api/workspaces";
 import { ApiError } from "@/lib/api/base";
-import { planLabelFromEnv } from "@/lib/utils/planLabel";
-import { usePlanFeature } from "@/hooks/usePlanFeatures";
+import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { useCanUpgrade } from "@/hooks/useCanUpgrade";
 import { MAX_QUOTA_PER_TOKEN } from "@/config/resource-tokens";
 import { Plus, AlertTriangle, ChevronDown } from "lucide-react";
@@ -75,18 +74,22 @@ export function ResourceTokensTabPanel({
   const tCommon = useTranslations("common");
   const { currentWorkspaceId, currentWorkspace } = useWorkspace();
   const { toast } = useToast();
-  const locale = useLocale();
   // #1551: new tokens are XL-only ("may create"); tokens that already exist
   // on M/L stay listed, editable and revocable against the tier's own cap.
-  // #1560: the gate is the tier matrix's `resources` boolean (tri-state —
-  // `null` while resolving keeps Create disabled without an upsell).
-  const canCreateTokens = usePlanFeature("resources");
+  // #1560: the gate is the tier matrix's `resources` boolean. #1645: read
+  // through the gate descriptor — `pending` while resolving keeps Create
+  // disabled without an upsell, and the required tier comes from the matrix.
+  const resourcesGate = useFeatureGate("resources");
+  const canCreateTokens = resourcesGate.state === "allowed";
+  // The plan-gate copy names a tier, so it renders only when there is one to
+  // name: no served tier having the feature is the tier-less copy #1646 adds.
+  const planGateLabel =
+    resourcesGate.state === "plan" ? resourcesGate.planLabel : undefined;
   // #1643: the plan-gate copy below always renders; only the link needs a
   // Plan page this member can actually reach. The `isOwner` guard on that
   // block is NOT the same rule — it also gates the notice itself and the
   // sibling resource-id warning, so it stays.
   const canUpgrade = useCanUpgrade();
-  const xlLabel = planLabelFromEnv("promax", locale);
 
   // #1560: the SERVE caps ("used / max", quota capacity) come from
   // `GET /workspaces/{id}/plan` instead of a hand-mirrored table. That
@@ -369,16 +372,16 @@ export function ResourceTokensTabPanel({
 
         {/* Prerequisites Warning — plan gate (#1551) first, then resource-id.
             Existing tokens stay listed below either way (block-new-only). */}
-        {isOwner && canCreateTokens === false && (
+        {isOwner && planGateLabel !== undefined && (
           <div className="rounded-lg border-2 border-purple-200 bg-purple-50 p-4 mb-6">
             <div className="flex items-start gap-3">
               <AlertTriangle className="h-5 w-5 text-purple-600 flex-shrink-0 mt-0.5" />
               <div className="flex-1">
                 <p className="text-sm font-medium text-purple-900">
-                  {t("planGateTitle", { plan: xlLabel })}
+                  {t("planGateTitle", { plan: planGateLabel })}
                 </p>
                 <p className="text-xs text-purple-700 mt-1 mb-3">
-                  {t("planGateDesc", { plan: xlLabel })}
+                  {t("planGateDesc", { plan: planGateLabel })}
                 </p>
                 {canUpgrade === true && (
                   <a

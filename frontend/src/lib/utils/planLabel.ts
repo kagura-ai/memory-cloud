@@ -148,3 +148,23 @@ export function planLabelFromEnv(
     promax: process.env.NEXT_PUBLIC_PLAN_PROMAX_DISPLAY_NAME,
   });
 }
+
+/**
+ * Display label for a tier row, canonical or not (#1645).
+ *
+ * The four canonical OSS tiers go through the env-overridable resolution
+ * above (S / M / L / XL by default). A tier the client's `PlanTier` union has
+ * never heard of — `/plans/tiers` serves operator-defined tiers too — falls
+ * back to the `displayName` the caller holds (the matrix row's own
+ * `display_name`, or the server's `required_plan_display`), then to the raw
+ * key. The same precedence the Plan page already applies to its own tier.
+ */
+export function planLabelForTier(
+  name: string,
+  displayName: string | undefined,
+  locale: string | undefined,
+): string {
+  return isPlanTier(name)
+    ? planLabelFromEnv(name, locale)
+    : (displayName ?? name);
+}

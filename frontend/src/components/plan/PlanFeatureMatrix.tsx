@@ -5,15 +5,27 @@
  *
  * Per-tier capability comparison (free / basic / pro / promax) for the owner
  * Plan page.
- * Source of truth = backend `GET /api/v1/workspaces/plan-tiers` (curated from
- * `config/plan_tiers.py`, env-overridable). **No price column** — pricing lives
- * on the payment side (#1141 / #1096); this surface is feature limits only.
+ * Source of truth = backend `GET /api/v1/workspaces/plans/tiers` (curated from
+ * `config/plan_tiers.py`, env-overridable), read through the shared module
+ * cache every gate uses (#1645) — one fetch, with its retry, instead of a
+ * private one. **No price column** — pricing lives on the payment side
+ * (#1141 / #1096); this surface is feature limits only.
  *
  * Numeric `0` renders as ✗ ("not available on this tier"); booleans render
  * ✓ / ✗. The caller's current tier column is highlighted.
+ *
+ * #1654: the matrix says which TIER has a feature; it does not know whether
+ * THIS DEPLOYMENT provides it. A row whose feature the deployment has
+ * switched off (its `GATE_SPECS` flag, by that flag's own polarity — the
+ * reranker is off only on an explicit `reranking: false`) is no benefit of
+ * any tier here, so it is not listed. Hidden rather than marked: saying "not
+ * available on this deployment" in a cell needs copy that does not exist yet
+ * (the `gate.deployment.*` namespace is #1646's), and ✗ alone would read as
+ * "not on this tier" — a plan answer to a deployment question. Deployment
+ * copy never carries a CTA either way. The table waits for `/system/info`
+ * rather than list a row it may have to withdraw.
  */
 
-import { useEffect, useState } from "react";
 import { useTranslations } from "next-intl";
 import {
   Table,
@@ -26,12 +38,17 @@ import {
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { TableLoadingState } from "@/components/common/LoadingState";
 import { useLocale } from "@/i18n";
+import { usePlanTierMatrixState } from "@/hooks/usePlanFeatures";
+import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import {
-  PLAN_TIER_ORDER,
-  planLabelFromEnv,
-  type PlanTier,
-} from "@/lib/utils/planLabel";
-import { getPlanTierMatrix, type PlanTierFeature } from "@/lib/api/workspaces";
+  GATE_KEYS,
+  GATE_SPECS,
+  deploymentFlagOff,
+  type GateKey,
+  type GateSpec,
+} from "@/lib/gates/featureGates";
+import { planLabelForTier } from "@/lib/utils/planLabel";
+import type { PlanTierFeature } from "@/lib/api/workspaces";
 
 type RowKind = "number" | "bytes" | "bool";
 
@@ -88,7 +105,19 @@ const ROWS: MatrixRow[] = [
   { key: "publicFeatures", field: "public_contexts", kind: "bool" },
 ];
 
-const TIER_KEYS = new Set<string>(PLAN_TIER_ORDER);
+/**
+ * #1654: the gate each row describes — the `GATE_SPECS` entry whose matrix
+ * test reads the row's column. Derived rather than listed, so every row whose
+ * feature carries a deployment flag (today `reranking` and `managed_llm`)
+ * follows the same rule, and a flag added to a spec later needs no change
+ * here.
+ */
+const GATE_BY_FIELD: ReadonlyMap<keyof PlanTierFeature, GateKey> = new Map(
+  GATE_KEYS.flatMap((key): [keyof PlanTierFeature, GateKey][] => {
+    const field = (GATE_SPECS[key] as GateSpec).matrix?.field;
+    return field ? [[field, key]] : [];
+  }),
+);
 
 // GiB/MiB storage, matching the admin plan-tiers convention. The shared
 // `formatBytes` util renders MB/GB, which diverges from the GiB convention
@@ -111,29 +140,25 @@ export function PlanFeatureMatrix({
   currentTier?: string | null;
 }) {
   const t = useTranslations("workspace");
+  const tTiers = useTranslations("admin.plans.tiersTable");
   const { locale } = useLocale();
-  const [tiers, setTiers] = useState<PlanTierFeature[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // #1645: the shared matrix cache. Unlike the gates, which read a failure
+  // as pending, this surface owns an error UI, so it reads the failure too.
+  const { tiers, failed } = usePlanTierMatrixState();
+  // #1654: `null` while /system/info is in flight (a test double may hand
+  // back `undefined`; that is unresolved too).
+  const features = useSystemFeatures() ?? null;
+  // true = switched off here; null = its flag has not resolved yet.
+  const offOnDeployment = (row: MatrixRow): boolean | null => {
+    const key = GATE_BY_FIELD.get(row.field);
+    return key ? deploymentFlagOff(key, features) : false;
+  };
 
-  useEffect(() => {
-    let alive = true;
-    getPlanTierMatrix()
-      .then((data) => {
-        if (alive) setTiers(data);
-      })
-      .catch((e) => {
-        if (alive) setError(e instanceof Error ? e.message : String(e));
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
-
-  if (error) return <ErrorBanner error={error} />;
-  if (!tiers) return <TableLoadingState rows={6} />;
-
-  const tierLabel = (name: string, display: string) =>
-    TIER_KEYS.has(name) ? planLabelFromEnv(name as PlanTier, locale) : display;
+  if (failed) return <ErrorBanner error={tTiers("loadError")} />;
+  if (!tiers || ROWS.some((row) => offOnDeployment(row) === null)) {
+    return <TableLoadingState rows={6} />;
+  }
+  const rows = ROWS.filter((row) => offOnDeployment(row) !== true);
 
   const no = (
     <span
@@ -178,7 +203,7 @@ export function PlanFeatureMatrix({
                   tier.name === currentTier ? "font-bold text-primary" : ""
                 }`}
               >
-                {tierLabel(tier.name, tier.display_name)}
+                {planLabelForTier(tier.name, tier.display_name, locale)}
                 {tier.name === currentTier && (
                   <span className="ml-1 text-xs font-normal text-gray-500">
                     ({t("planMatrix.current")})
@@ -189,7 +214,7 @@ export function PlanFeatureMatrix({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {ROWS.map((row) => (
+          {rows.map((row) => (
             <TableRow key={row.key}>
               <TableCell className="text-sm font-medium">
                 <span className="inline-flex items-center gap-2">

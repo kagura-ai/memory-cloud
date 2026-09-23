@@ -59,22 +59,23 @@ import type { Context } from "@/lib/types/context";
 import { useAuth } from "@/contexts/AuthContext";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { CONTEXT_TEMPLATES, getTemplate } from "@/lib/templates/usage-guide";
-import { planLabelFromEnv, type PlanTier } from "@/lib/utils/planLabel";
-import { usePlanFeature } from "@/hooks/usePlanFeatures";
+import { useFeatureGates } from "@/hooks/useFeatureGate";
+import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
 import { gateFromFacts, isGateKey } from "@/lib/gates/featureGates";
 
 // #1583: plan features this form can refuse on, with the notice that names the
-// control and the tier it asks for — shown on the card and, when a save comes
-// back as a plan refusal, in the toast instead of the raw feature key.
-// #1644: `plan` is read by the pre-check card only. The refusal path takes the
-// tier from the refusal itself (`err.gate`), so a deployment that moved the
-// feature to another tier is named correctly there.
+// control — shown on the card and, when a save comes back as a plan refusal,
+// in the toast instead of the raw feature key. #1645: the tier the notice
+// names is never kept here — the card takes it from the gate (the tier
+// matrix), the refusal path from the refusal itself (`err.gate`, #1644), so a
+// deployment that moved the feature to another tier is named correctly on
+// both.
 const FEATURE_NOTICES: Record<
   string,
-  { key: "sharedRequiresPlan" | "publicRequiresPlan"; plan: PlanTier }
+  { key: "sharedRequiresPlan" | "publicRequiresPlan" }
 > = {
-  shared_contexts: { key: "sharedRequiresPlan", plan: "pro" },
-  public_contexts: { key: "publicRequiresPlan", plan: "promax" },
+  shared_contexts: { key: "sharedRequiresPlan" },
+  public_contexts: { key: "publicRequiresPlan" },
 };
 
 const SHARING_NOTICE_ID = "context-sharing-upgrade-notice";
@@ -96,15 +97,29 @@ export function SettingsTabPanel({
   const t = useTranslations("contextSettings");
   const tCommon = useTranslations("common");
   const locale = useLocale();
+  // #1645: every gate this form reads, from one set of subscriptions.
   // #1551: making a context public is XL-only. A context that is already
   // public keeps serving (and can still be unpublished) on any tier — only
   // the transition INTO public is gated here.
-  // #1560: gate = tier matrix `public_contexts` boolean; `null` while it
+  // #1560: gate = tier matrix `public_contexts` boolean; `pending` while it
   // resolves (the Make Public control is withheld, no upsell yet).
-  const canMakePublic = usePlanFeature("public_contexts");
-  // #1583: same tri-state for private → shared. A context that is already
-  // shared stays editable (and can be made private) on any tier.
-  const canShare = usePlanFeature("shared_contexts");
+  // #1583: the same for private → shared (`shared_contexts`). A context that
+  // is already shared stays editable (and can be made private) on any tier.
+  // The sleep gate is below, with the sleep quota.
+  const gates = useFeatureGates([
+    "public_contexts",
+    "shared_contexts",
+    "sleep_reports",
+  ]);
+  // #1645: the same shared matrix (module cache — no extra fetch), so a save
+  // refusal that names no tier gets the pre-check's tier and labels.
+  const tiers = usePlanTierMatrix();
+  // The notices name a tier, so they need one: when no served tier has the
+  // feature there is none to name (that tier-less copy is #1646's).
+  const publicPlanLabel =
+    gates.public_contexts.state === "plan"
+      ? gates.public_contexts.planLabel
+      : undefined;
 
   // #1583: the stored privacy flags, normalised the way the form state is
   // seeded — an older response omits them, and diffing the raw `undefined`
@@ -112,8 +127,13 @@ export function SettingsTabPanel({
   const storedIsPrivate = context.is_private ?? true;
   const storedIsPublic = context.is_public ?? false;
   // Only the transition is gated: going back to a stored "shared" is free.
-  const sharingLocked = storedIsPrivate && canShare !== true;
-  const sharingNeedsUpgrade = storedIsPrivate && canShare === false;
+  const sharingLocked =
+    storedIsPrivate && gates.shared_contexts.state !== "allowed";
+  const sharingNeedsUpgrade =
+    storedIsPrivate && gates.shared_contexts.state === "plan";
+  const sharingNoticeLabel = sharingNeedsUpgrade
+    ? gates.shared_contexts.planLabel
+    : undefined;
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -259,8 +279,9 @@ export function SettingsTabPanel({
         // #1583: a plan refusal names the control ("Sharing requires the L
         // plan"), not the feature key; unknown features keep the server
         // text. #1644: the tier is the one the refusal names, resolved to
-        // this deployment's label — a refusal that names none (no tier has
-        // the feature, or a server predating #1644) keeps the server text.
+        // this deployment's label. #1645: a refusal that names none (a server
+        // predating #1644) takes the matrix's tier, as the pre-check does;
+        // when no served tier has the feature either, the server text stays.
         const facts = err.gate;
         const feature = facts?.state === "plan" ? facts.feature : undefined;
         const notice = feature ? FEATURE_NOTICES[feature] : undefined;
@@ -270,6 +291,7 @@ export function SettingsTabPanel({
             fallbackKey: feature,
             canUpgrade: false,
             locale,
+            tiers,
           });
           if (gate?.planLabel) {
             description = t(notice.key, { plan: gate.planLabel });
@@ -370,9 +392,22 @@ export function SettingsTabPanel({
   // count, so we only block when the *current* mode is "skip" and there is
   // no headroom left. Lateral non-skip → non-skip and reductions are always
   // allowed by the backend, so we don't disable options for those cases.
+  // #1645: a tier with no Sleep Maintenance at all is the `sleep_reports`
+  // PLAN gate (the matrix's `sleep_enabled_contexts_limit > 0` and this
+  // payload's `limit > 0` are one predicate through the server's zero floor).
+  // The tier claim below reads the gate; the options keep the payload's own
+  // "no headroom" answer too, so a gate still pending on the matrix (or on a
+  // matrix outage) never unlocks what the server's figure already closes.
+  const sleepTierBlocked = gates.sleep_reports.state === "plan";
   const wouldExceedSleepQuota =
     sleepQuota !== null &&
     context.sleep_mode === "skip" &&
+    (sleepTierBlocked || sleepQuota.used >= sleepQuota.limit);
+  // Only the cap-reached half is a quota (its copy is untouched, P-27). A zero
+  // cap is the tier half, whose copy waits for the gate: pending names nothing.
+  const sleepCapReached =
+    sleepQuota !== null &&
+    sleepQuota.limit > 0 &&
     sleepQuota.used >= sleepQuota.limit;
 
   // Reset dirty flag when context prop changes (after save/discard)
@@ -596,7 +631,9 @@ export function SettingsTabPanel({
                 // waits too, without the upsell.
                 disabled={sharingLocked}
                 aria-describedby={
-                  sharingNeedsUpgrade ? SHARING_NOTICE_ID : undefined
+                  sharingNoticeLabel !== undefined
+                    ? SHARING_NOTICE_ID
+                    : undefined
                 }
                 onClick={() => handlePrivacyToggle(!isPrivate)}
               >
@@ -604,16 +641,11 @@ export function SettingsTabPanel({
               </Button>
             </div>
 
-            {sharingNeedsUpgrade && (
+            {sharingNoticeLabel !== undefined && (
               <Alert id={SHARING_NOTICE_ID}>
                 <AlertCircle className="h-4 w-4" />
                 <AlertDescription>
-                  {t("sharedRequiresPlan", {
-                    plan: planLabelFromEnv(
-                      FEATURE_NOTICES.shared_contexts.plan,
-                      locale,
-                    ),
-                  })}
+                  {t("sharedRequiresPlan", { plan: sharingNoticeLabel })}
                 </AlertDescription>
               </Alert>
             )}
@@ -701,15 +733,15 @@ export function SettingsTabPanel({
                     </Alert>
                   )}
                 </div>
-              ) : canMakePublic === null ? null : canMakePublic === false ? (
-                <Alert>
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertDescription>
-                    {t("publicRequiresPlan", {
-                      plan: planLabelFromEnv("promax", locale),
-                    })}
-                  </AlertDescription>
-                </Alert>
+              ) : gates.public_contexts.state !== "allowed" ? (
+                publicPlanLabel === undefined ? null : (
+                  <Alert>
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>
+                      {t("publicRequiresPlan", { plan: publicPlanLabel })}
+                    </AlertDescription>
+                  </Alert>
+                )
               ) : (
                 <div className="space-y-3">
                   <div className="space-y-2">
@@ -788,13 +820,14 @@ export function SettingsTabPanel({
                     })}
                   </p>
                 )}
-                {wouldExceedSleepQuota && (
-                  <p className="text-xs text-destructive">
-                    {sleepQuota && sleepQuota.limit === 0
-                      ? t("sleepQuotaTierBlocked")
-                      : t("sleepQuotaExceeded")}
-                  </p>
-                )}
+                {wouldExceedSleepQuota &&
+                  (sleepTierBlocked || sleepCapReached) && (
+                    <p className="text-xs text-destructive">
+                      {sleepTierBlocked
+                        ? t("sleepQuotaTierBlocked")
+                        : t("sleepQuotaExceeded")}
+                    </p>
+                  )}
                 <p className="text-sm text-muted-foreground">
                   {
                     {

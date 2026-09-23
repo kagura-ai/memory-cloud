@@ -53,9 +53,8 @@ import {
 } from "@/lib/api/external-keys";
 import { apiClient } from "@/lib/api/base";
 import { useToast } from "@/hooks/use-toast";
-import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useSystemFeatures, useSystemInfo } from "@/hooks/useSystemFeatures";
-import { useCanUpgrade } from "@/hooks/useCanUpgrade";
+import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { cn } from "@/styles/design-tokens";
 
 interface TelemetryServiceStatus {
@@ -120,7 +119,6 @@ export function SearchSettingsSection({
   const [externalKeysLoaded, setExternalKeysLoaded] = useState(false);
   const [selfHostedAvailable, setSelfHostedAvailable] = useState(false);
   const { toast } = useToast();
-  const { currentWorkspace } = useWorkspace();
   // Issue #1167: with BYOK off no new key can be added, so the "configure
   // reranker keys" CTA would point at a page without an Add button — skip the
   // key probe and the CTA. (The list route itself still answers for the owner;
@@ -132,15 +130,20 @@ export function SearchSettingsSection({
   // `search_defaults` is absent on older backends) — render the plain copy then.
   const systemInfo = useSystemInfo();
   const searchDefaults = systemInfo?.search_defaults ?? null;
-  // #1580: only an explicit false hides the reranker card — loading and older
-  // backends (no flag) keep it. Hidden, not greyed out: a deployment that does
-  // not offer reranking has nothing for a workspace owner to configure.
-  const rerankingDisabledByDeployment = systemFeatures?.reranking === false;
-
-  const isFree = currentWorkspace?.plan_name === "free";
+  // #1645: one gate for the reranker — the tier matrix's `reranking` and the
+  // deployment's `reranking` flag. The flag keeps #1580's polarity (in
+  // GATE_SPECS, `whenAbsent: true`): only an explicit false hides the card —
+  // loading and older backends (no flag) keep it. Hidden, not greyed out: a
+  // deployment that does not offer reranking has nothing for a workspace
+  // owner to configure. `pending` keeps the controls inert and the upsell
+  // unsaid until both the matrix and /system/info have answered.
+  const rerank = useFeatureGate("reranking");
+  const rerankingDisabledByDeployment = rerank.state === "deployment";
   // #1643: the whole sentence renders either way; only its <link> chunk
-  // becomes a real link, and only where the Plan page is reachable.
-  const canUpgrade = useCanUpgrade();
+  // becomes a real link, and only where the Plan page is reachable. #1645:
+  // the gate's own `canUpgrade`, so a plan gate no served tier lifts (an
+  // operator withheld reranking everywhere) does not link to a dead end.
+  const canUpgrade = rerank.canUpgrade;
   const isDirty = Object.keys(editedConfig).length > 0;
 
   const providerLabel = (provider: string) =>
@@ -328,7 +331,8 @@ export function SearchSettingsSection({
   const keylessDefault =
     searchDefaults?.reranker_provider === "self_hosted" && selfHostedAvailable;
   const showConfigureKeysCta = byokEnabled && !keylessDefault;
-  const controlsDisabled = isFree || !hasAnyRerankerAvailable;
+  const controlsDisabled =
+    rerank.state !== "allowed" || !hasAnyRerankerAvailable;
 
   const currentProvider = getCurrentValue("reranker_provider");
   const currentModel = getCurrentValue("reranker_model");
@@ -526,7 +530,7 @@ export function SearchSettingsSection({
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              {isFree && (
+              {rerank.state === "plan" && (
                 <Alert>
                   <Lock className="h-4 w-4" />
                   <AlertDescription>
@@ -543,7 +547,7 @@ export function SearchSettingsSection({
                           page is unreachable — it just is not a link. */}
                       {t.rich("upgradeToBasic", {
                         link: (chunks) =>
-                          canUpgrade === true ? (
+                          canUpgrade ? (
                             <Link
                               href="/workspace/settings/plan"
                               className="underline font-medium"
@@ -562,7 +566,7 @@ export function SearchSettingsSection({
               {/* #1167: only offer the configure-keys CTA when BYOK is on —
                   with BYOK off the external-keys page cannot add a key, so
                   show the headline without a dangling link. */}
-              {!isFree && !hasAnyRerankerAvailable && (
+              {rerank.state === "allowed" && !hasAnyRerankerAvailable && (
                 <Alert>
                   <AlertCircle className="h-4 w-4" />
                   <AlertDescription>

@@ -21,6 +21,7 @@ import { resetConsumedSearchParams } from "@/hooks/useConsumeSearchParams";
 import ConnectorsPage from "./page";
 import { ApiError } from "@/lib/api/base";
 import { normalizeGate } from "@/lib/gates/featureGates";
+import type { PlanTierFeature } from "@/lib/api/workspaces";
 
 const mockListConnectors = vi.fn();
 const mockListAvailableWorkerApps = vi.fn();
@@ -101,12 +102,31 @@ vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockUseSystemFeatures(),
 }));
 
-// #1560: the create gate is the tier matrix's `connectors` boolean, read via
-// usePlanFeature — tri-state (`null` = still resolving). The hook is mocked
-// so the page is exercised against the API answer, not a tier name.
+// #1560: the create gate is the tier matrix's `connectors` boolean — tri-state
+// (`null` = still resolving). The hook is mocked so the page is exercised
+// against the API answer, not a tier name. #1645: read through
+// useFeatureGate; the tri-state maps onto its descriptor.
 let mockPlanFeature: boolean | null = true;
+const MOCK_GATES = {
+  null: { state: "pending", feature: "connectors", canUpgrade: false },
+  true: { state: "allowed", feature: "connectors", canUpgrade: false },
+  false: {
+    state: "plan",
+    feature: "connectors",
+    requiredPlan: "promax",
+    planLabel: "XL",
+    canUpgrade: false,
+  },
+} as const;
+vi.mock("@/hooks/useFeatureGate", () => ({
+  useFeatureGate: () => MOCK_GATES[`${mockPlanFeature}`],
+}));
+
+// #1645: a create refusal is lifted with the shared tier matrix. `null`
+// (still resolving) by default, so a refusal is read from its own facts.
+let mockTiers: PlanTierFeature[] | null = null;
 vi.mock("@/hooks/usePlanFeatures", () => ({
-  usePlanFeature: () => mockPlanFeature,
+  usePlanTierMatrix: () => mockTiers,
 }));
 
 // #1399: the fold/label tests differ only by llm_config_present, so build the
@@ -152,6 +172,7 @@ function setWorkspace(
 }
 
 beforeEach(() => {
+  mockTiers = null;
   // #1532: the hook remembers consumed params across remounts (module-level);
   // forget them so one case's URL params cannot suppress the next case's toast.
   resetConsumedSearchParams();
@@ -1685,6 +1706,30 @@ describe("ConnectorsPage RBAC gate", () => {
     expect(
       await screen.findByText('connectorPlanRequired {"plan":"XL"}'),
     ).toBeInTheDocument();
+  });
+
+  it("a plan refusal that names no tier takes the matrix's tier and display name (#1645)", async () => {
+    // A server predating #1644 names no tier; the operator's matrix does.
+    mockTiers = [
+      { name: "basic", display_name: "M", connectors: false },
+      { name: "enterprise", display_name: "Enterprise", connectors: true },
+    ] as unknown as PlanTierFeature[];
+    const serverText = "Feature 'connectors' not available.";
+    mockCreateConnector.mockRejectedValue(
+      gateRefusal(403, "FEAT-001", serverText, {
+        gate: "plan",
+        feature: "connectors",
+        required_plan: null,
+        required_plan_display: null,
+        current_plan: "basic",
+      }),
+    );
+    await submitCreate();
+
+    expect(
+      await screen.findByText('connectorPlanRequired {"plan":"Enterprise"}'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(serverText)).toBeNull();
   });
 
   it("does not render another quota with counts as the connector seat cap (#1644)", async () => {

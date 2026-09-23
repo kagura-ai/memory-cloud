@@ -6,7 +6,8 @@
  * requirement that NO price is rendered (pricing lives on the payment side).
  */
 
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { useEffect, useState } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import { PlanFeatureMatrix } from "./PlanFeatureMatrix";
@@ -16,17 +17,49 @@ vi.mock("next-intl", () => ({
   useTranslations: (_ns: string) => stableTranslator,
 }));
 vi.mock("@/i18n", () => ({ useLocale: () => ({ locale: "en" }) }));
-// Keep the real PLAN_TIER_ORDER (drives TIER_KEYS); echo the tier as its label.
-vi.mock("@/lib/utils/planLabel", async () => ({
-  ...(await vi.importActual<typeof import("@/lib/utils/planLabel")>(
+// Keep the real PLAN_TIER_ORDER; echo a canonical tier as its label (#1645:
+// through planLabelForTier, which the table now calls for every column).
+vi.mock("@/lib/utils/planLabel", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/utils/planLabel")>(
     "@/lib/utils/planLabel",
-  )),
-  planLabelFromEnv: (tier: string) => tier,
+  );
+  return {
+    ...actual,
+    planLabelFromEnv: (tier: string) => tier,
+    planLabelForTier: (name: string, displayName: string | undefined) =>
+      actual.isPlanTier(name) ? name : (displayName ?? name),
+  };
+});
+
+// #1645: the table reads the shared matrix cache (usePlanTierMatrixState)
+// instead of fetching on its own. The stand-in serves that hook's contract
+// from `mockGetMatrix`, so each case still sets its payload the same way.
+const mockGetMatrix = vi.fn();
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanTierMatrixState: () => {
+    const [state, setState] = useState<{
+      tiers: unknown[] | null;
+      failed: boolean;
+    }>({ tiers: null, failed: false });
+    useEffect(() => {
+      Promise.resolve(mockGetMatrix()).then(
+        (tiers) => setState({ tiers, failed: false }),
+        () => setState({ tiers: null, failed: true }),
+      );
+    }, []);
+    return state;
+  },
 }));
 
-const mockGetMatrix = vi.fn();
-vi.mock("@/lib/api/workspaces", () => ({
-  getPlanTierMatrix: () => mockGetMatrix(),
+// #1654: the deployment flags the table consults. Default: a deployment that
+// provides both flag-bearing features, i.e. the table exactly as the matrix
+// serves it. `null` = /system/info still in flight.
+let mockFeatures: Record<string, boolean> | null = {
+  reranking: true,
+  managed_llm: true,
+};
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemFeatures: () => mockFeatures,
 }));
 
 const TIERS = [
@@ -145,6 +178,7 @@ const TIERS = [
 beforeEach(() => {
   vi.clearAllMocks();
   mockGetMatrix.mockResolvedValue(TIERS);
+  mockFeatures = { reranking: true, managed_llm: true };
 });
 
 const rowOf = (label: string) =>
@@ -327,5 +361,210 @@ describe("PlanFeatureMatrix (#1138)", () => {
     expect(
       rowOf("planMatrix.row_memories").queryByText("planMatrix.beta"),
     ).toBeNull();
+  });
+});
+
+describe("PlanFeatureMatrix and deployment flags (#1654)", () => {
+  const rowLabels = () =>
+    screen
+      .getAllByRole("row")
+      .map((tr) => tr.querySelector("td")?.textContent ?? "")
+      .filter(Boolean);
+
+  it("reranking off on this deployment: no tier shows it as a benefit", async () => {
+    mockFeatures = { reranking: false, managed_llm: true };
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await screen.findByText("planMatrix.row_connectors");
+
+    expect(screen.queryByText("planMatrix.row_reranking")).toBeNull();
+    // Only that row: the rest of the table is the matrix as served.
+    expect(rowLabels()).not.toContain("planMatrix.row_reranking");
+    expect(rowOf("planMatrix.row_managedLlm").getAllByText("✓").length).toBe(2);
+  });
+
+  it("reranking on: the table is unchanged", async () => {
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await screen.findByText("planMatrix.row_reranking");
+
+    const reranking = rowOf("planMatrix.row_reranking");
+    expect(reranking.getAllByText("✓").length).toBe(3);
+    expect(reranking.getAllByText("✗").length).toBe(1);
+    expect(rowLabels()).toHaveLength(22); // every row the matrix defines
+  });
+
+  it("an older backend with no reranking flag keeps the row (#1580 polarity)", async () => {
+    mockFeatures = { managed_llm: true };
+    render(<PlanFeatureMatrix currentTier="basic" />);
+
+    expect(
+      await screen.findByText("planMatrix.row_reranking"),
+    ).toBeInTheDocument();
+  });
+
+  it("/system/info pending: the table waits instead of listing a row it may withdraw", async () => {
+    mockFeatures = null;
+    const { rerender } = render(<PlanFeatureMatrix currentTier="basic" />);
+    await waitFor(() => expect(mockGetMatrix).toHaveBeenCalled());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // Matrix loaded, flags not: no row at all — never a ✓ for reranking
+    // that a moment later disappears.
+    expect(screen.queryByText("planMatrix.row_contexts")).toBeNull();
+    expect(screen.queryByText("planMatrix.row_reranking")).toBeNull();
+
+    mockFeatures = { reranking: false, managed_llm: true };
+    rerender(<PlanFeatureMatrix currentTier="basic" />);
+    expect(
+      await screen.findByText("planMatrix.row_contexts"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("planMatrix.row_reranking")).toBeNull();
+  });
+
+  it("is generic: the managed LLM row follows its own default-off flag", async () => {
+    // managed_llm is on /system/info as "the deployment has a managed LLM
+    // provider"; without one, no tier gets analysis on it.
+    mockFeatures = { reranking: true, managed_llm: false };
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await screen.findByText("planMatrix.row_reranking");
+
+    expect(screen.queryByText("planMatrix.row_managedLlm")).toBeNull();
+    expect(rowLabels()).toHaveLength(21);
+  });
+
+  it("a failed /system/info ({}) hides default-off rows and keeps the default-on reranker", async () => {
+    mockFeatures = {};
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await screen.findByText("planMatrix.row_reranking");
+
+    expect(screen.queryByText("planMatrix.row_managedLlm")).toBeNull();
+  });
+});
+
+// #1654: every cell of {tier matrix} x {/system/info} for the two rows that
+// carry a deployment flag. The rule: a flagged row is never shown as a tier
+// benefit unless its flag has RESOLVED on by that flag's polarity, and
+// nothing is listed while either input is still unresolved (no row shown and
+// then withdrawn). Every unflagged row is untouched.
+describe("PlanFeatureMatrix — every matrix x /system/info cell (#1654)", () => {
+  const MATRIX = {
+    pending: () => new Promise<never>(() => {}),
+    resolved: () => Promise.resolve(TIERS),
+    failed: () => Promise.reject(new Error("tiers down")),
+  } as const;
+  const INFO: Record<string, Record<string, boolean> | null> = {
+    pending: null,
+    "both on": { reranking: true, managed_llm: true },
+    "both off": { reranking: false, managed_llm: false },
+    "reranking off only": { reranking: false, managed_llm: true },
+    "managed_llm off only": { reranking: true, managed_llm: false },
+    "older backend (no flags)": { plan_page: true },
+    "failed ({})": {},
+  };
+  const CELLS = (Object.keys(MATRIX) as (keyof typeof MATRIX)[]).flatMap((m) =>
+    Object.keys(INFO).map((i) => [m, i] as const),
+  );
+  // The ✓ count each flagged row shows when it is listed (the matrix as served).
+  const TICKS = {
+    "planMatrix.row_reranking": TIERS.filter((t) => t.reranking).length,
+    "planMatrix.row_managedLlm": TIERS.filter((t) => t.managed_llm).length,
+  };
+
+  it.each(CELLS)("matrix %s, /system/info %s", async (m, i) => {
+    mockGetMatrix.mockImplementation(MATRIX[m]);
+    mockFeatures = INFO[i];
+    render(<PlanFeatureMatrix currentTier="basic" />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    if (m === "failed") {
+      expect(screen.getByText("loadError")).toBeInTheDocument();
+      expect(screen.queryByText("planMatrix.row_contexts")).toBeNull();
+      return;
+    }
+    const features = INFO[i];
+    if (m === "pending" || features === null) {
+      // Nothing listed yet — and so no benefit that may be withdrawn.
+      expect(screen.queryByText("planMatrix.row_contexts")).toBeNull();
+      expect(screen.queryByText("planMatrix.row_reranking")).toBeNull();
+      expect(screen.queryByText("planMatrix.row_managedLlm")).toBeNull();
+      return;
+    }
+
+    const shown = {
+      // default-ON (#1580): hidden only on an explicit false
+      "planMatrix.row_reranking": features.reranking !== false,
+      // default-OFF: listed only on an explicit true
+      "planMatrix.row_managedLlm": features.managed_llm === true,
+    };
+    for (const [label, listed] of Object.entries(shown)) {
+      if (!listed) {
+        expect(screen.queryByText(label)).toBeNull();
+      } else {
+        expect(rowOf(label).getAllByText("✓").length).toBe(
+          TICKS[label as keyof typeof TICKS],
+        );
+      }
+    }
+    // The unflagged rows are the matrix as served, in every resolved cell.
+    const listedRows = screen.getAllByRole("row").length - 1; // minus header
+    expect(listedRows).toBe(20 + Object.values(shown).filter(Boolean).length);
+  });
+});
+
+// #1645: against the REAL shared cache — a fresh module graph per case, the
+// API call the only stand-in.
+describe("PlanFeatureMatrix on the shared matrix cache (#1645)", () => {
+  async function loadReal(getPlanTierMatrix: () => Promise<unknown>) {
+    vi.resetModules();
+    vi.doUnmock("@/hooks/usePlanFeatures");
+    vi.doMock("@/lib/api/workspaces", () => ({ getPlanTierMatrix }));
+    const hooks = await import("@/hooks/usePlanFeatures");
+    const { PlanFeatureMatrix: Table } = await import("./PlanFeatureMatrix");
+    return { hooks, Table };
+  }
+
+  it("reads the shared cache instead of issuing its own fetch", async () => {
+    const getPlanTierMatrix = vi.fn().mockResolvedValue(TIERS);
+    const { hooks, Table } = await loadReal(getPlanTierMatrix);
+    // A gate elsewhere on the page (the Sidebar, say) reads the same matrix.
+    function Gate() {
+      return (
+        <span>{hooks.usePlanTierMatrix() ? "gate:ready" : "gate:pending"}</span>
+      );
+    }
+
+    render(
+      <>
+        <Gate />
+        <Table currentTier="basic" />
+      </>,
+    );
+    await screen.findByText("planMatrix.row_connectors");
+    expect(screen.getByText("gate:ready")).toBeInTheDocument();
+    expect(getPlanTierMatrix).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders an error banner when the retried fetch fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const getPlanTierMatrix = vi
+        .fn()
+        .mockRejectedValue(new Error("upstream said no"));
+      const { Table } = await loadReal(getPlanTierMatrix);
+
+      render(<Table currentTier="basic" />);
+      // It inherits the shared hook's three attempts (500 ms / 1000 ms back-off).
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(getPlanTierMatrix).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(0);
+      // A translated message, never the transport's raw text.
+      expect(screen.getByText("loadError")).toBeInTheDocument();
+      expect(screen.queryByText(/upstream said no/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

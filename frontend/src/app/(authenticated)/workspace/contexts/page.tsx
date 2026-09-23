@@ -19,7 +19,6 @@ import { useMemoryContext } from "@/contexts/MemoryContextContext";
 import { SleepModeBadge } from "@/components/contexts/SleepModeBadge";
 import { CurrentContextBadge } from "@/components/contexts/CurrentContextBadge";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
-import { planAtLeast } from "@/lib/utils/planLabel";
 import {
   Plus,
   FolderOpen,
@@ -90,12 +89,17 @@ import {
   getEmbeddingModels,
   type EmbeddingModel,
 } from "@/lib/api/contexts";
-import { checkOpenAIKeyStatus } from "@/lib/api/workspaces";
+import {
+  checkOpenAIKeyStatus,
+  type PlanTierFeature,
+} from "@/lib/api/workspaces";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useCanUpgrade } from "@/hooks/useCanUpgrade";
+import { useFeatureGate } from "@/hooks/useFeatureGate";
+import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { ApiError } from "@/lib/api/base";
-import { gateFromFacts } from "@/lib/gates/featureGates";
+import { gateFromFacts, quotaGate } from "@/lib/gates/featureGates";
 import type { Context, ContextStats } from "@/lib/types/context";
 import { CONTEXT_TEMPLATES, getTemplate } from "@/lib/templates/usage-guide";
 import { createExternalAPIKey } from "@/lib/api/external-keys";
@@ -118,11 +122,13 @@ const CONTEXT_NAME_PATTERN = /^[a-z0-9_-]+$/;
  * `plan` fills contextLimitReached's "Your {plan} plan allows {limit} …", so
  * it is the workspace's CURRENT tier, not the one that would lift the cap.
  * Null unless both are known: a server predating #1644 sent no details on
- * this refusal, and its own message is shown instead.
+ * this refusal, and its own message is shown instead. `tiers` is the shared
+ * matrix (#1645), so an operator-defined tier reads by its own display name.
  */
 function contextLimitArgs(
   err: unknown,
   locale: string | undefined,
+  tiers: readonly PlanTierFeature[] | null,
 ): { plan: string; limit: number } | null {
   const facts = err instanceof ApiError ? err.gate : undefined;
   if (facts?.state !== "quota" || facts.quotaType !== "contexts") return null;
@@ -131,6 +137,7 @@ function contextLimitArgs(
     fallbackKey: "contexts",
     canUpgrade: false,
     locale,
+    tiers,
   });
   if (!gate?.currentPlanLabel || gate.limit === undefined) return null;
   return { plan: gate.currentPlanLabel, limit: gate.limit };
@@ -179,8 +186,6 @@ export default function ContextsPage() {
     contexts.length,
     currentWorkspace?.context_count ?? 0,
   );
-  const isQuotaReached =
-    maxContexts !== undefined && usedContexts >= maxContexts;
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [hasOpenAIKey, setHasOpenAIKey] = useState<boolean | null>(null); // Issue #165: API key check
@@ -245,6 +250,54 @@ export default function ContextsPage() {
   // explanatory copy around every upsell stays either way — only the
   // actionable element is withheld.
   const canUpgrade = useCanUpgrade();
+
+  // #1645: the context cap as a gate descriptor — WRAPPED, not replaced: the
+  // count logic above does not move. An unknown cap (`maxContexts` undefined,
+  // an older API) is limit 0, which never blocks. A cap of 0 — a tier that
+  // excludes contexts altogether (the server's zero floor) — is not a quota
+  // the descriptor expresses, so it keeps blocking here exactly as before.
+  const tiers = usePlanTierMatrix();
+  const contextQuota = quotaGate({
+    key: "contexts",
+    current: usedContexts,
+    limit: maxContexts ?? 0,
+    planName: currentWorkspace?.plan_name,
+    tiers,
+    canUpgrade: canUpgrade === true,
+    locale,
+  });
+  const isQuotaReached = contextQuota.state === "quota" || maxContexts === 0;
+  // #1645: the quota upsells (banner link, dialog CTA) read the descriptor's
+  // NARROWED answer, not the raw Plan-page one: an owner at the top tier's
+  // cap has no served tier that raises it, so the Plan page would be a dead
+  // end. `quotaGate` reads limit 0 as "unknown" and answers "allowed", so a
+  // KNOWN zero cap is lifted through `gateFromFacts` from the counts the page
+  // holds: the same narrowing, which offers the upgrade exactly when a served
+  // tier's cap is above zero.
+  const zeroCapGate =
+    maxContexts === 0
+      ? gateFromFacts(
+          {
+            state: "quota",
+            quotaType: "contexts",
+            current: usedContexts,
+            limit: 0,
+          },
+          {
+            fallbackKey: "contexts",
+            canUpgrade: canUpgrade === true,
+            locale,
+            tiers,
+          },
+        )
+      : null;
+  const quotaCanUpgrade = (zeroCapGate ?? contextQuota).canUpgrade;
+
+  // #1645: may a context be made shared on this tier? One gate for both
+  // create dialogs, read from the tier matrix's `shared_contexts` — the same
+  // answer context settings gets. `pending` (still resolving) keeps the
+  // option inert and silent: no upsell before the answer is known.
+  const shared = useFeatureGate("shared_contexts");
 
   const fetchContexts = useCallback(async () => {
     try {
@@ -359,7 +412,7 @@ export default function ContextsPage() {
         (err instanceof Error ? err.message : t("failedToCreate"));
 
       // Translate common error messages
-      const limitArgs = contextLimitArgs(err, locale);
+      const limitArgs = contextLimitArgs(err, locale, tiers);
       if (limitArgs) {
         errorMessage = t("contextLimitReached", limitArgs);
       } else if (
@@ -418,7 +471,7 @@ export default function ContextsPage() {
         err instanceof Error ? err.message : t("failedToCreate");
 
       // Translate common error messages (but keep resource_id duplicates as-is)
-      const limitArgs = contextLimitArgs(err, locale);
+      const limitArgs = contextLimitArgs(err, locale, tiers);
       if (errorMessage.includes("already used")) {
         // Resource ID duplicate error - show API message as-is (includes context name)
         setCreateError(errorMessage);
@@ -618,7 +671,7 @@ export default function ContextsPage() {
               Plan page is withheld where that page does not exist or this
               member cannot load it. The separating space moves inside the
               guard so the banner never ends in a dangling space. */}
-          {canUpgrade === true && (
+          {quotaCanUpgrade && (
             <>
               {" "}
               <a
@@ -888,8 +941,7 @@ export default function ContextsPage() {
                       ? "border-purple-500 bg-purple-50 dark:bg-purple-900/20"
                       : "border-gray-200 dark:border-gray-700"
                   } ${
-                    currentWorkspace?.plan_name === "free" ||
-                    currentWorkspace?.plan_name === "basic"
+                    shared.state !== "allowed"
                       ? "opacity-60 cursor-not-allowed"
                       : "cursor-pointer"
                   }`}
@@ -899,22 +951,19 @@ export default function ContextsPage() {
                     value="shared"
                     checked={!isPrivate}
                     onChange={() => {
-                      // Issue #270: Only Pro plan (or better) can create shared contexts
-                      if (planAtLeast(currentWorkspace?.plan_name, "pro")) {
+                      // Issue #270: only a tier with shared contexts can create
+                      // one (#1645: the tier matrix says which).
+                      if (shared.state === "allowed") {
                         setIsPrivate(false);
                       }
                     }}
-                    disabled={
-                      currentWorkspace?.plan_name === "free" ||
-                      currentWorkspace?.plan_name === "basic"
-                    }
+                    disabled={shared.state !== "allowed"}
                     className="mt-1"
                   />
                   <div className="flex-1">
                     <div className="font-medium text-sm flex items-center gap-2">
                       👥 {t("sharedOption")}
-                      {(currentWorkspace?.plan_name === "free" ||
-                        currentWorkspace?.plan_name === "basic") && (
+                      {shared.state === "plan" && (
                         <Badge
                           variant="outline"
                           className="ml-1 text-xs bg-purple-100 text-purple-700"
@@ -924,28 +973,29 @@ export default function ContextsPage() {
                       )}
                     </div>
                     <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                      {planAtLeast(currentWorkspace?.plan_name, "pro")
+                      {shared.state === "allowed"
                         ? t("teamMembersAccess")
-                        : t("upgradeToPro")}
+                        : shared.state === "plan"
+                          ? t("upgradeToPro")
+                          : null}
                     </div>
                   </div>
                 </label>
                 {/* #1643: the Pro badge and the explanation above stay for
-                    every free/basic workspace; only this CTA needs a reachable
-                    Plan page. */}
-                {(currentWorkspace?.plan_name === "free" ||
-                  currentWorkspace?.plan_name === "basic") &&
-                  canUpgrade === true && (
-                    <Button
-                      type="button"
-                      variant="link"
-                      size="sm"
-                      className="h-auto p-0 text-xs text-purple-700 dark:text-purple-300"
-                      onClick={() => router.push("/workspace/settings/plan")}
-                    >
-                      {t("upgradeToProCta")}
-                    </Button>
-                  )}
+                    every workspace whose tier lacks shared contexts; only this
+                    CTA needs a reachable Plan page (#1645: the gate's own
+                    canUpgrade, the same rule). */}
+                {shared.state === "plan" && shared.canUpgrade && (
+                  <Button
+                    type="button"
+                    variant="link"
+                    size="sm"
+                    className="h-auto p-0 text-xs text-purple-700 dark:text-purple-300"
+                    onClick={() => router.push("/workspace/settings/plan")}
+                  >
+                    {t("upgradeToProCta")}
+                  </Button>
+                )}
               </div>
             </div>
 
@@ -1403,8 +1453,7 @@ export default function ContextsPage() {
                       ? "border-purple-500 bg-purple-50 dark:bg-purple-900/20"
                       : "border-gray-200 dark:border-gray-700"
                   } ${
-                    currentWorkspace?.plan_name === "free" ||
-                    currentWorkspace?.plan_name === "basic"
+                    shared.state !== "allowed"
                       ? "opacity-60 cursor-not-allowed"
                       : "cursor-pointer"
                   }`}
@@ -1414,22 +1463,19 @@ export default function ContextsPage() {
                     value="shared"
                     checked={!isPrivate}
                     onChange={() => {
-                      // Issue #270: Only Pro plan (or better) can create shared contexts
-                      if (planAtLeast(currentWorkspace?.plan_name, "pro")) {
+                      // Issue #270: only a tier with shared contexts can create
+                      // one (#1645: the tier matrix says which).
+                      if (shared.state === "allowed") {
                         setIsPrivate(false);
                       }
                     }}
-                    disabled={
-                      currentWorkspace?.plan_name === "free" ||
-                      currentWorkspace?.plan_name === "basic"
-                    }
+                    disabled={shared.state !== "allowed"}
                     className="mt-1"
                   />
                   <div className="flex-1">
                     <div className="font-medium text-sm flex items-center gap-2">
                       👥 {t("sharedOption")}
-                      {(currentWorkspace?.plan_name === "free" ||
-                        currentWorkspace?.plan_name === "basic") && (
+                      {shared.state === "plan" && (
                         <Badge
                           variant="outline"
                           className="ml-1 text-xs bg-purple-100 text-purple-700"
@@ -1439,28 +1485,29 @@ export default function ContextsPage() {
                       )}
                     </div>
                     <div className="text-xs text-gray-600 dark:text-gray-400 mt-1">
-                      {planAtLeast(currentWorkspace?.plan_name, "pro")
+                      {shared.state === "allowed"
                         ? t("teamMembersCanAccessShort")
-                        : t("requiresProPlan")}
+                        : shared.state === "plan"
+                          ? t("requiresProPlan")
+                          : null}
                     </div>
                   </div>
                 </label>
                 {/* #1643: the Pro badge and the explanation above stay for
-                    every free/basic workspace; only this CTA needs a reachable
-                    Plan page. */}
-                {(currentWorkspace?.plan_name === "free" ||
-                  currentWorkspace?.plan_name === "basic") &&
-                  canUpgrade === true && (
-                    <Button
-                      type="button"
-                      variant="link"
-                      size="sm"
-                      className="h-auto p-0 text-xs text-purple-700 dark:text-purple-300"
-                      onClick={() => router.push("/workspace/settings/plan")}
-                    >
-                      {t("upgradeToProCta")}
-                    </Button>
-                  )}
+                    every workspace whose tier lacks shared contexts; only this
+                    CTA needs a reachable Plan page (#1645: the gate's own
+                    canUpgrade, the same rule). */}
+                {shared.state === "plan" && shared.canUpgrade && (
+                  <Button
+                    type="button"
+                    variant="link"
+                    size="sm"
+                    className="h-auto p-0 text-xs text-purple-700 dark:text-purple-300"
+                    onClick={() => router.push("/workspace/settings/plan")}
+                  >
+                    {t("upgradeToProCta")}
+                  </Button>
+                )}
               </div>
             </div>
 
@@ -1581,7 +1628,7 @@ export default function ContextsPage() {
                 and to see the Plan page — so leaving it while withholding the
                 button would still dead-end them. The title and description
                 above explain why creation failed and do stay. */}
-            {canUpgrade === true && (
+            {quotaCanUpgrade && (
               <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mt-3">
                 <p className="text-sm text-blue-900 dark:text-blue-100 font-medium mb-1">
                   {t("quotaDialogUpgradeHeading")}
@@ -1597,9 +1644,9 @@ export default function ContextsPage() {
                 cancel, only a notice to dismiss. `common.close` already exists
                 in both locales, so this needs no new key. */}
             <AlertDialogCancel>
-              {canUpgrade === true ? tCommon("cancel") : tCommon("close")}
+              {quotaCanUpgrade ? tCommon("cancel") : tCommon("close")}
             </AlertDialogCancel>
-            {canUpgrade === true && (
+            {quotaCanUpgrade && (
               <AlertDialogAction
                 onClick={() => router.push("/workspace/settings/plan")}
               >

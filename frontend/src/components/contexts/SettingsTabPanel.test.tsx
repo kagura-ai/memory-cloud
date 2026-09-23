@@ -68,16 +68,55 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
 }));
 
 // #1560: the Make Public gate is the tier matrix's `public_contexts` boolean
-// via usePlanFeature (tri-state; `null` = resolving), not a tier-name rank.
-// One answer for every feature: the `shared_contexts` gate (#1583) has its
-// own per-feature mock in SettingsTabPanel.sharingGate.test.tsx.
+// (tri-state; `null` = resolving), not a tier-name rank. One answer for every
+// plan feature: the `shared_contexts` gate (#1583) has its own per-feature
+// mock in SettingsTabPanel.sharingGate.test.tsx. #1645: read through
+// useFeatureGates; the tri-state maps onto its descriptors.
 let mockPlanFeature: boolean | null = true;
-vi.mock("@/hooks/usePlanFeatures", () => ({
-  usePlanFeature: () => mockPlanFeature,
+// #1645: whether the workspace's tier has Sleep Maintenance at all — the
+// `sleep_reports` plan gate. Set with the usage fixture below, because the
+// tier limit and the usage payload's limit are one predicate (zero floor).
+let mockTierHasSleep: boolean | null = true;
+const gateCache = new Map<string, Record<string, unknown>>();
+function planGate(
+  feature: string,
+  value: boolean | null,
+  requiredPlan: string,
+  planLabel: string,
+) {
+  if (value === null) return { state: "pending", feature, canUpgrade: false };
+  if (value) return { state: "allowed", feature, canUpgrade: false };
+  return { state: "plan", feature, requiredPlan, planLabel, canUpgrade: false };
+}
+function mockGates() {
+  // Stable per answer, like the real hook's memo.
+  const cacheKey = `${mockPlanFeature}:${mockTierHasSleep}`;
+  if (!gateCache.has(cacheKey)) {
+    gateCache.set(cacheKey, {
+      public_contexts: planGate(
+        "public_contexts",
+        mockPlanFeature,
+        "promax",
+        "XL",
+      ),
+      shared_contexts: planGate("shared_contexts", mockPlanFeature, "pro", "L"),
+      sleep_reports: planGate("sleep_reports", mockTierHasSleep, "pro", "L"),
+    });
+  }
+  return gateCache.get(cacheKey);
+}
+vi.mock("@/hooks/useFeatureGate", () => ({
+  useFeatureGates: () => mockGates(),
 }));
 
 vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ user: { id: "user-1" } }),
+}));
+
+// #1645: save refusals are lifted with the shared tier matrix; this suite
+// asserts no refusal copy, so it stays unresolved.
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanTierMatrix: () => null,
 }));
 
 // ---------- Helpers ----------------------------------------------------------
@@ -162,6 +201,7 @@ function setQuotaResponse(
   mockGetWorkspaceUsageCurrent.mockResolvedValue(
     buildQuotaResponse(used, limit, addon_bonus, remaining),
   );
+  mockTierHasSleep = limit > 0;
 }
 
 const noop = () => {};
@@ -364,6 +404,78 @@ describe("SettingsTabPanel — wouldExceedSleepQuota derivation", () => {
     await screen.findByText(/sleepQuotaUsage:3\/3/);
     expect(screen.queryByText("sleepQuotaExceeded")).not.toBeInTheDocument();
     expect(screen.queryByText("sleepQuotaTierBlocked")).not.toBeInTheDocument();
+  });
+});
+
+// #1645: the `sleep_reports` plan gate answers from the tier matrix, the
+// usage payload from the server. While the matrix is still resolving (or its
+// fetch keeps failing) the gate is pending, and a pending gate must not unlock
+// a control the server's own usage figure already closes.
+describe("SettingsTabPanel — sleep options while the sleep gate is pending (#1645)", () => {
+  async function openSleepSelect() {
+    // The sleep select is the one showing the context's current mode.
+    await screen.findByText("sleepModeTitle");
+    const trigger = screen
+      .getAllByRole("combobox")
+      .find((el) => el.textContent?.includes("sleepModeSkip"));
+    if (!trigger) throw new Error("sleep mode select not found");
+    fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+    fireEvent.click(trigger);
+    return screen.findByRole("option", { name: "sleepModeFull" });
+  }
+
+  it("a tier without sleep: full and edges_only stay disabled, with no tier claim yet", async () => {
+    setQuotaResponse(0, 0);
+    mockTierHasSleep = null; // the matrix has not answered
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({ sleep_mode: "skip" })}
+        onContextUpdated={noop}
+      />,
+    );
+
+    await screen.findByText(/sleepQuotaUsage:0\/0/);
+    const full = await openSleepSelect();
+    expect(full).toHaveAttribute("aria-disabled", "true");
+    expect(
+      screen.getByRole("option", { name: "sleepModeEdgesOnly" }),
+    ).toHaveAttribute("aria-disabled", "true");
+    // Pending names no tier: the tier copy waits for the matrix, and the
+    // cap copy would be wrong (there is no cap to raise on this tier).
+    expect(screen.queryByText("sleepQuotaTierBlocked")).toBeNull();
+    expect(screen.queryByText("sleepQuotaExceeded")).toBeNull();
+  });
+
+  it("the cap reached on an entitled tier still says so while the gate is pending", async () => {
+    setQuotaResponse(3, 3);
+    mockTierHasSleep = null;
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({ sleep_mode: "skip" })}
+        onContextUpdated={noop}
+      />,
+    );
+
+    await screen.findByText("sleepQuotaExceeded");
+    expect(screen.queryByText("sleepQuotaTierBlocked")).toBeNull();
+  });
+
+  it("headroom on an entitled tier: the options stay enabled while the gate is pending", async () => {
+    setQuotaResponse(1, 3);
+    mockTierHasSleep = null;
+    render(
+      <SettingsTabPanel
+        contextId={CTX_ID}
+        context={makeContext({ sleep_mode: "skip" })}
+        onContextUpdated={noop}
+      />,
+    );
+
+    await screen.findByText(/sleepQuotaUsage:1\/3/);
+    const full = await openSleepSelect();
+    expect(full).not.toHaveAttribute("aria-disabled", "true");
   });
 });
 

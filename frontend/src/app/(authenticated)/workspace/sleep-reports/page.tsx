@@ -22,25 +22,23 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
-import { useCanUpgrade } from "@/hooks/useCanUpgrade";
+import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
-import { planAtLeast } from "@/lib/utils/planLabel";
 import { fetchWorkspaceSleepReports } from "@/lib/api";
 
 export default function WorkspaceSleepReportsPage() {
   const t = useTranslations("workspace");
   const router = useRouter();
   const { currentWorkspace, currentWorkspaceId, loading } = useWorkspace();
-  // #1643: called here, above every conditional return, because hooks may not
-  // sit below one. The plan-gate copy below renders either way.
-  const canUpgrade = useCanUpgrade();
 
-  // Sleep Maintenance is Pro-or-better (sleep_enabled_contexts_limit = 0 on
-  // free/basic). Mirror the resources page: keep the sidebar entry, gate the
-  // page with an upgrade CTA that routes to the Plan page (#1137).
-  const planName = currentWorkspace?.plan_name;
-  const isProGated =
-    !loading && planName !== undefined && !planAtLeast(planName, "pro");
+  // Sleep Maintenance needs a tier with `sleep_enabled_contexts_limit > 0`
+  // (#1645: read from the tier matrix, not a tier rank — the server's own
+  // gate through its zero floor). Mirror the resources page: keep the sidebar
+  // entry, gate the page with an upgrade CTA that routes to the Plan page
+  // (#1137). Pending — workspace or matrix still resolving — never gates.
+  // The gate is admin-minimum and answers the role first, so a member on a
+  // low tier falls through to the role branch below, never the upsell.
+  const gate = useFeatureGate("sleep_reports");
 
   const allowed = hasWorkspaceRole(
     currentWorkspace?.current_user_role,
@@ -62,7 +60,11 @@ export default function WorkspaceSleepReportsPage() {
     );
   }
 
-  if (isProGated) {
+  if (gate.state === "plan") {
+    // The tier the matrix names, ready for copy that names one (#1646); none
+    // when no served tier has Sleep Maintenance.
+    const planValues =
+      gate.planLabel !== undefined ? { plan: gate.planLabel } : undefined;
     return (
       <PageContainer>
         <PageHeader
@@ -71,12 +73,14 @@ export default function WorkspaceSleepReportsPage() {
         />
         {/* #1643: EmptyState renders its Button only when both actionLabel
             and onAction are set, so withholding them is how "no action" is
-            expressed here. The title and description always render. */}
+            expressed here. The title and description always render.
+            #1645: the gate's own canUpgrade, not the raw Plan-page answer —
+            a gate no served tier lifts offers no upgrade. */}
         <EmptyState
           icon={Moon}
-          title={t("sleepReports.planGate.title")}
-          description={t("sleepReports.planGate.description")}
-          {...(canUpgrade === true
+          title={t("sleepReports.planGate.title", planValues)}
+          description={t("sleepReports.planGate.description", planValues)}
+          {...(gate.canUpgrade
             ? {
                 actionLabel: t("sleepReports.planGate.action"),
                 onAction: () => router.push("/workspace/settings/plan"),
@@ -103,7 +107,9 @@ export default function WorkspaceSleepReportsPage() {
       fetchData={fetchData}
       detailHrefPrefix="/workspace/sleep-reports"
       translationNamespace="admin.sleepReports"
-      ready={!!currentWorkspaceId && allowed}
+      // #1645: not before the plan answer is known either — a pending gate
+      // shows the list's skeleton, never gated reports or a refused fetch.
+      ready={!!currentWorkspaceId && allowed && gate.state === "allowed"}
     />
   );
 }

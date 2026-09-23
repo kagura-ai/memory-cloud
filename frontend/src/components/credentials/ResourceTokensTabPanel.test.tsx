@@ -37,11 +37,23 @@ vi.mock("@/contexts/WorkspaceContext", () => ({
   }),
 }));
 
-// #1560: the create gate is the tier matrix's `resources` boolean via
-// usePlanFeature (tri-state; `null` = resolving), not a tier-name rank.
+// #1560: the create gate is the tier matrix's `resources` boolean, not a
+// tier-name rank. #1645: read through useFeatureGate; the tri-state below maps
+// onto its descriptor (`null` = resolving = "pending").
 let mockPlanFeature: boolean | null = true;
-vi.mock("@/hooks/usePlanFeatures", () => ({
-  usePlanFeature: () => mockPlanFeature,
+const MOCK_GATES = {
+  null: { state: "pending", feature: "resources", canUpgrade: false },
+  true: { state: "allowed", feature: "resources", canUpgrade: false },
+  false: {
+    state: "plan",
+    feature: "resources",
+    requiredPlan: "promax",
+    planLabel: "XL",
+    canUpgrade: false,
+  },
+} as const;
+vi.mock("@/hooks/useFeatureGate", () => ({
+  useFeatureGate: () => MOCK_GATES[`${mockPlanFeature}`],
 }));
 
 // #1643: useCanUpgrade reads /system/info. Without this mock the real hook

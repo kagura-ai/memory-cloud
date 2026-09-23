@@ -6,6 +6,7 @@ import {
   isPlanTier,
   parsePlanDisplayNames,
   planAtLeast,
+  planLabelForTier,
   planLabelFromEnv,
   planRank,
   resolvePlanLabel,
@@ -151,6 +152,28 @@ describe("planLabelFromEnv", () => {
       ja: { pro: "PRO-2" },
     });
     expect(planLabelFromEnv("pro", "ja")).toBe("PRO-2");
+  });
+});
+
+describe("planLabelForTier (#1645)", () => {
+  afterEach(() => {
+    delete process.env.NEXT_PUBLIC_PLAN_PROMAX_DISPLAY_NAME;
+  });
+
+  it("resolves a canonical tier through the env label, never the row's display_name", () => {
+    expect(planLabelForTier("promax", "Pro Max (server)", "en")).toBe("XL");
+    process.env.NEXT_PUBLIC_PLAN_PROMAX_DISPLAY_NAME = "Scale";
+    expect(planLabelForTier("promax", "Pro Max (server)", "ja")).toBe("Scale");
+  });
+
+  it("falls back to the given display name for an operator-defined tier", () => {
+    expect(planLabelForTier("enterprise", "Enterprise", "en")).toBe(
+      "Enterprise",
+    );
+  });
+
+  it("falls back to the raw key when there is no display name", () => {
+    expect(planLabelForTier("enterprise", undefined, "en")).toBe("enterprise");
   });
 });
 

@@ -33,7 +33,10 @@ const MAX_ATTEMPTS = 3;
 const RETRY_BASE_MS = 500;
 
 // Persistent failure → fail closed: every gated feature reads as disabled and
-// no deployment default is known.
+// no deployment default is known. This is the OPPOSITE direction to the tier
+// matrix (`usePlanFeatures` stays pending on failure), on purpose; the
+// `resolveGate` docblock in `lib/gates/featureGates.ts` documents both
+// directions, and how a gate composes them, in one place.
 const FAILED_INFO: SystemInfo = {
   name: "",
   version: "",

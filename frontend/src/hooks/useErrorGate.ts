@@ -15,6 +15,10 @@
  * the one place the rule lives: allowlist, deployment and role gates never
  * carry an upgrade CTA, and neither does a quota gate no higher tier lifts.
  *
+ * The shared tier matrix is passed through (#1645), so a refusal's tier label
+ * resolves the same way the pre-check's does, and a refusal from a server
+ * that named no tier gets the same matrix scan.
+ *
  * The `instanceof ApiError` check lives here, not in `lib/gates`, because
  * `lib/api/base.ts` imports `normalizeGate` from `lib/gates/featureGates.ts`;
  * the reverse import would be a cycle.
@@ -28,6 +32,7 @@ import { useLocale } from "next-intl";
 
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { canUpgradeFrom } from "@/hooks/useCanUpgrade";
+import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { ApiError } from "@/lib/api/base";
 import {
@@ -45,6 +50,7 @@ export function useErrorGate(
   const features = useSystemFeatures();
   const { currentWorkspace, loading } = useWorkspace();
   const locale = useLocale();
+  const tiers = usePlanTierMatrix();
 
   if (!(err instanceof ApiError)) return null;
 
@@ -54,5 +60,10 @@ export function useErrorGate(
       loading === true,
       currentWorkspace?.current_user_role,
     ) === true;
-  return gateFromFacts(err.gate, { fallbackKey, canUpgrade: raw, locale });
+  return gateFromFacts(err.gate, {
+    fallbackKey,
+    canUpgrade: raw,
+    locale,
+    tiers,
+  });
 }

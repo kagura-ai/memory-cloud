@@ -27,6 +27,7 @@ import {
   cleanup,
   fireEvent,
 } from "@testing-library/react";
+import type { PlanTierFeature } from "@/lib/api/workspaces";
 
 vi.mock("next-intl", () => ({
   // Identity translator that appends interpolation values as
@@ -48,6 +49,7 @@ vi.mock("next-intl", () => ({
     t.rich = (k, values) => (values?.link ? values.link(k) : k);
     return t;
   },
+  useLocale: () => "en",
 }));
 
 const mockToast = vi.fn();
@@ -73,6 +75,20 @@ let mockInfo: MockInfo | null = null;
 vi.mock("@/hooks/useSystemFeatures", () => ({
   useSystemFeatures: () => mockFeatures,
   useSystemInfo: () => mockInfo,
+}));
+
+// #1645: the reranker gate reads the shared tier matrix (`null` = still
+// resolving). Default: the OSS matrix, so `plan_name` decides exactly as the
+// tier's row does (reranking from M up).
+const OSS_TIERS = [
+  { name: "free", display_name: "S", reranking: false },
+  { name: "basic", display_name: "M", reranking: true },
+  { name: "pro", display_name: "L", reranking: true },
+  { name: "promax", display_name: "XL", reranking: true },
+] as unknown as PlanTierFeature[];
+let mockTiers: PlanTierFeature[] | null = OSS_TIERS;
+vi.mock("@/hooks/usePlanFeatures", () => ({
+  usePlanTierMatrix: () => mockTiers,
 }));
 
 const mockGetConfig = vi.fn();
@@ -111,6 +127,7 @@ const SELF_HOSTED_DEFAULTS = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockTiers = OSS_TIERS;
   mockFeatures = { byok: true };
   mockInfo = { features: { byok: true }, search_defaults: VOYAGE_DEFAULTS };
   mockUseWorkspace.mockReturnValue({
@@ -395,11 +412,171 @@ describe("SearchSettingsSection free-tier upgrade CTA (#1643)", () => {
     setFree("owner");
     render(<SearchSettingsSection contextId="ctx-1" />);
 
-    expect(
-      await screen.findByText("rerankerNotAvailableFree"),
-    ).toBeInTheDocument();
+    // #1645: the reranker gate also reads the deployment's `reranking` flag,
+    // so while /system/info is in flight the gate is pending: the card stays
+    // (#1580), its controls wait, and nothing is upsold — link included.
+    expect(await screen.findByText("rerankerConfig")).toBeInTheDocument();
+    expect(screen.queryByText("rerankerNotAvailableFree")).toBeNull();
     expect(
       screen.queryByRole("link", { name: "upgradeToBasic" }),
     ).not.toBeInTheDocument();
   });
+
+  it("free tier, owner on a plan_page deployment, no served tier has reranking: no plan link", async () => {
+    // #1645: an operator withheld reranking from every tier, so the gate
+    // names no tier and the Plan page cannot lift it — the notice stays, the
+    // link does not.
+    mockTiers = OSS_TIERS.map((tier) => ({
+      ...tier,
+      reranking: false,
+    })) as PlanTierFeature[];
+    mockFeatures = { byok: true, plan_page: true };
+    mockInfo = {
+      features: { byok: true, plan_page: true },
+      search_defaults: VOYAGE_DEFAULTS,
+    };
+    setFree("owner");
+    render(<SearchSettingsSection contextId="ctx-1" />);
+
+    expect(
+      await screen.findByText("rerankerNotAvailableFree"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("upgradeToBasic")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "upgradeToBasic" }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("SearchSettingsSection reads the reranking gate (#1645)", () => {
+  beforeEach(() => {
+    // BYOK off: no key probe, so a provider is never "unavailable" and the
+    // controls' only remaining input is the gate itself.
+    mockFeatures = { byok: false };
+    mockInfo = { features: { byok: false }, search_defaults: VOYAGE_DEFAULTS };
+  });
+
+  it("reranker controls are inert while the matrix resolves", async () => {
+    mockTiers = null;
+    render(<SearchSettingsSection contextId="ctx-1" />);
+
+    expect(await screen.findByRole("switch")).toBeDisabled();
+    // Pending is not a refusal: no free-tier notice either.
+    expect(screen.queryByText("rerankerNotAvailableFree")).toBeNull();
+  });
+
+  it("the reranker controls work once the matrix says this tier has it", async () => {
+    render(<SearchSettingsSection contextId="ctx-1" />);
+
+    expect(await screen.findByRole("switch")).not.toBeDisabled();
+  });
+
+  it("a tier without reranking: inert controls and the free-tier notice", async () => {
+    mockUseWorkspace.mockReturnValue({
+      currentWorkspace: { id: "ws-1", plan_name: "free" },
+    });
+    render(<SearchSettingsSection contextId="ctx-1" />);
+
+    expect(await screen.findByRole("switch")).toBeDisabled();
+    expect(screen.getByText("rerankerNotAvailableFree")).toBeInTheDocument();
+  });
+
+  it("follows the matrix, not the tier name: an operator gives free reranking", async () => {
+    mockTiers = OSS_TIERS.map((t) =>
+      t.name === "free" ? { ...t, reranking: true } : t,
+    );
+    mockUseWorkspace.mockReturnValue({
+      currentWorkspace: { id: "ws-1", plan_name: "free" },
+    });
+    render(<SearchSettingsSection contextId="ctx-1" />);
+
+    expect(await screen.findByRole("switch")).not.toBeDisabled();
+    expect(screen.queryByText("rerankerNotAvailableFree")).toBeNull();
+  });
+
+  it("an explicit reranking: false hides the card whatever the matrix says", async () => {
+    mockTiers = null;
+    mockFeatures = { byok: true, reranking: false };
+    mockInfo = {
+      features: { byok: true, reranking: false },
+      search_defaults: VOYAGE_DEFAULTS,
+    };
+    render(<SearchSettingsSection contextId="ctx-1" />);
+
+    // The config card still renders; the reranker card does not.
+    await waitFor(() => expect(mockGetConfig).toHaveBeenCalled());
+    expect(screen.queryByText("rerankerConfig")).toBeNull();
+  });
+});
+
+// #1645: the reranker card over every cell of {tier matrix} x {/system/info}
+// x {role, tier}. A failed matrix reads as `null`, like a pending one (the
+// hook suite pins that); a failed /system/info is the fail-closed `{}`, where
+// the default-ON reranking flag still passes (#1580). BYOK is off in every
+// cell, so the gate is the controls' only input.
+describe("SearchSettingsSection reranker — the whole gate truth table (#1645)", () => {
+  const MATRIX: Record<string, PlanTierFeature[] | null> = {
+    "pending-or-failed": null,
+    resolved: OSS_TIERS,
+  };
+  const INFO: Record<string, Record<string, boolean> | null> = {
+    pending: null,
+    "on, plan_page on": { byok: false, reranking: true, plan_page: true },
+    "reranking false": { byok: false, reranking: false, plan_page: true },
+    "older backend (no flag), plan_page off": { byok: false },
+    "failed ({})": {},
+  };
+  const CELLS = Object.keys(MATRIX).flatMap((m) =>
+    Object.keys(INFO).flatMap((i) =>
+      (["member", "admin", "owner"] as const).flatMap((role) =>
+        (["free", "basic"] as const).map((plan) => [m, i, role, plan] as const),
+      ),
+    ),
+  );
+
+  it.each(CELLS)(
+    "matrix %s, /system/info %s, %s on %s",
+    async (m, i, role, plan) => {
+      mockTiers = MATRIX[m];
+      mockFeatures = INFO[i];
+      mockInfo =
+        INFO[i] === null
+          ? null
+          : { features: INFO[i]!, search_defaults: VOYAGE_DEFAULTS };
+      mockUseWorkspace.mockReturnValue({
+        currentWorkspace: {
+          id: "ws-1",
+          plan_name: plan,
+          current_user_role: role,
+        },
+        currentWorkspaceId: "ws-1",
+        loading: false,
+      });
+      render(<SearchSettingsSection contextId="ctx-1" />);
+      await waitFor(() => expect(mockGetConfig).toHaveBeenCalled());
+
+      if (i === "reranking false") {
+        // Only an explicit false hides the card — whatever the matrix says.
+        expect(screen.queryByText("rerankerConfig")).toBeNull();
+        expect(screen.queryByText("rerankerNotAvailableFree")).toBeNull();
+        return;
+      }
+
+      const toggle = await screen.findByRole("switch");
+      const known = m === "resolved" && i !== "pending";
+      const refused = known && plan === "free";
+
+      expect(toggle.hasAttribute("disabled")).toBe(
+        !(known && plan === "basic"),
+      );
+      // The notice only once both inputs have answered and the tier lacks it.
+      expect(screen.queryByText("rerankerNotAvailableFree") !== null).toBe(
+        refused,
+      );
+      // Its link: the owner, on a deployment whose Plan page is known on.
+      expect(
+        screen.queryByRole("link", { name: "upgradeToBasic" }) !== null,
+      ).toBe(refused && role === "owner" && i === "on, plan_page on");
+    },
+  );
 });

@@ -1,19 +1,35 @@
 /**
- * The gate descriptor (#1641 epic; this half is #1644).
+ * The gate descriptor (#1641 epic: #1644 + #1645).
  *
- * One vocabulary for "why can't I use this?". #1644 ships the wire half —
- * the types, the `GateKey` vocabulary, `normalizeGate` (called once, at the
- * `ApiError` choke point in `lib/api/base.ts`), `narrowCanUpgrade` and
- * `gateFromFacts`. #1645 extends this same module in place with the tier
- * matrix pre-check (`GATE_SPECS`, `resolveGate`, `quotaGate`).
+ * One vocabulary for "why can't I use this?". #1644 shipped the wire half —
+ * the types, `normalizeGate` (called once, at the `ApiError` choke point in
+ * `lib/api/base.ts`), `narrowCanUpgrade` and `gateFromFacts`. #1645 extends
+ * this same module in place with the pre-check half: `GATE_SPECS` (whose keys
+ * ARE the `GateKey` vocabulary), `resolveGate` against the tier matrix and
+ * `/system/info`, `quotaGate` for page-local counts, and the matrix-aware
+ * widening of `gateFromFacts`. The React bindings are `hooks/useFeatureGate.ts`
+ * (pre-check) and `hooks/useErrorGate.ts` (refusal).
  *
  * Pure on purpose: no React, and NEVER an import from `@/lib/api/base` — not
  * even `import type { ApiError }`. `base.ts` imports `normalizeGate` from
- * here, so the reverse import would be a cycle. The `instanceof ApiError`
- * check lives in the React binding, `hooks/useErrorGate.ts`.
+ * here, so the reverse import would be a cycle. For the same reason the
+ * matrix hook module is imported for its TYPES only. The `instanceof
+ * ApiError` check lives in the React binding, `hooks/useErrorGate.ts`.
  */
 
-import { isPlanTier, planLabelFromEnv } from "@/lib/utils/planLabel";
+import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
+import { planLabelForTier } from "@/lib/utils/planLabel";
+import type { SystemFeatures } from "@/lib/api/system";
+import type { PlanTierFeature } from "@/lib/api/workspaces";
+import type { PlanFeature } from "@/hooks/usePlanFeatures";
+import type { WorkspaceObjectKind } from "@/hooks/useWorkspaceObjectPresence";
+
+/** Compile-time assertions (no runtime cost). */
+type Equal<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+    ? true
+    : false;
+type Expect<T extends true> = T;
 
 // ── States ──────────────────────────────────────────────────────────────────
 
@@ -57,45 +73,184 @@ export function isBlocked(g: { state: FeatureGateState }): boolean {
   return g.state !== "pending" && g.state !== "allowed";
 }
 
-// ── The GateKey vocabulary ──────────────────────────────────────────────────
+// ── GATE_SPECS and the GateKey vocabulary ───────────────────────────────────
+
+/** A `/system/info` feature flag a gate depends on. */
+export interface GateFlag {
+  readonly key: string;
+  /**
+   * What an ABSENT flag means. The polarity is NOT uniform across flags:
+   * `false` = default-off, the Sidebar's rule (anything but `true` hides);
+   * `true` = default-on, #1580's rule for the reranker card (hidden only on
+   * an explicit `=== false`, so a backend predating the flag keeps it).
+   */
+  readonly whenAbsent: boolean;
+}
 
 /**
- * Every feature a gate can name: the descriptor's `feature`, the future
- * `gate.features.<key>` i18n noun, and (from #1645) the `GATE_SPECS` key.
- * snake_case throughout — the server's own spelling, so the wire's
- * `details.feature` needs no translation table.
- *
- * #1644 ships the runtime array and the type; #1645 replaces the array with
- * `keyof typeof GATE_SPECS` and asserts the two are equal, so they can never
- * drift.
+ * The numeric tier-row columns (`-?` + `NonNullable` keep the optional
+ * `memories_per_day?` in). Used for quota caps, and — pinned to two of them
+ * by `NumericGateField` — for the two plan gates a positive limit answers.
  */
-export const GATE_KEYS = [
-  "resources",
-  "connectors",
-  "public_contexts",
-  "shared_contexts",
-  "team_invitations",
-  "reranking",
-  "sleep_reports",
-  "memory_analysis",
-  "managed_llm",
-  "managed_embeddings",
-  "secret_store",
-  "plan_page",
-  "byok",
-  "cost_dashboard",
-  "contexts",
-  "members",
-  "workspaces",
-  "resource_tokens",
-  "storage",
-  "memories",
-  "agents",
-  "embedding_spend",
-  "api_calls",
-] as const;
+type NumericPlanTierKey = {
+  [K in keyof PlanTierFeature]-?: NonNullable<PlanTierFeature[K]> extends number
+    ? K
+    : never;
+}[keyof PlanTierFeature];
 
-export type GateKey = (typeof GATE_KEYS)[number];
+/**
+ * The numeric columns a PLAN gate may test with `kind: "positive"`. Pinned to
+ * the two `GATE_SPECS` uses, so an unrelated cap (`max_contexts`,
+ * `memory_limit`, …) cannot be wired as a plan gate by accident.
+ */
+export type NumericGateField = Extract<
+  NumericPlanTierKey,
+  "sleep_enabled_contexts_limit" | "analysis_runs_per_day"
+>;
+export type MatrixGateField = PlanFeature | NumericGateField;
+type _NumericGateFieldsExist = Expect<
+  Equal<
+    NumericGateField,
+    "sleep_enabled_contexts_limit" | "analysis_runs_per_day"
+  >
+>;
+
+/**
+ * The matrix test, typed so a boolean column cannot be paired with
+ * "positive" or a numeric one with "boolean":
+ *   "boolean":  tier[field] === true
+ *   "positive": (tier[field] ?? 0) > 0
+ */
+export type MatrixGateTest =
+  | { readonly field: PlanFeature; readonly kind: "boolean" }
+  | { readonly field: NumericGateField; readonly kind: "positive" };
+
+/** Where a gate's answer comes from. Every field is optional. */
+export interface GateSpec {
+  /** Tier-matrix source (`/plans/tiers`, the workspace's own row). */
+  readonly matrix?: MatrixGateTest;
+  /** `/system/info` flags. Every one must pass, each by its own polarity. */
+  readonly flags?: readonly GateFlag[];
+  /**
+   * Minimum workspace role. Owner or Admin only — no gate notice is rendered
+   * for a member-minimum gate (the Sidebar's Member entries are nav filters).
+   */
+  readonly role?: WorkspaceRole.Owner | WorkspaceRole.Admin;
+  /**
+   * What the UI does when the matrix test fails. "refuse" (the default) =
+   * block. "degrade" = `allowed` + `degraded: true`: the control stays usable
+   * and the server quietly does less.
+   *
+   * A deliberate LOCAL override, not a mirror of the server: since #1648
+   * every `/plans/tiers` row serves `feature_enforcement`
+   * (`FeatureEnforcementMode` in `lib/api/workspaces.ts`), and nothing here
+   * reads it. Where the two disagree, that served map is the machine-readable
+   * record of the divergence.
+   */
+  readonly enforcement?: "refuse" | "degrade";
+  /**
+   * "Gates block NEW, existing objects keep working" (#1551 / #1616).
+   * Consumed by the Sidebar's nav filter only — never by `resolveGate`, which
+   * would otherwise stop the pages showing their upsell for new objects.
+   */
+  readonly existingObjects?: WorkspaceObjectKind;
+}
+
+/**
+ * Every gate, keyed by the one vocabulary of the whole epic: these keys are
+ * the descriptor's `feature`, the `gate.features.<key>` i18n nouns (#1646)
+ * and the pre-check spec keys. snake_case throughout — the server's own
+ * spelling (`FEATURE_MIN_PLANS`), so the wire's `details.feature` needs no
+ * translation table.
+ *
+ * `sleep_reports` and the quota keys are not server registry features
+ * (`KNOWN_FEATURES`); they share the key space so every notice takes one
+ * vocabulary. A test pins the matrix-bearing subset to the server's names.
+ */
+export const GATE_SPECS = {
+  // ── plan create-gates already on the matrix (#1551 / #1560 / #1583) ──
+  resources: {
+    matrix: { field: "resources", kind: "boolean" },
+    existingObjects: "resources",
+  },
+  connectors: {
+    matrix: { field: "connectors", kind: "boolean" },
+    existingObjects: "connectors",
+  },
+  public_contexts: { matrix: { field: "public_contexts", kind: "boolean" } },
+  shared_contexts: { matrix: { field: "shared_contexts", kind: "boolean" } },
+
+  // ── widened in #1645 ──
+  team_invitations: {
+    matrix: { field: "team_invitations", kind: "boolean" },
+    role: WorkspaceRole.Admin,
+  },
+  reranking: {
+    matrix: { field: "reranking", kind: "boolean" },
+    // #1580 polarity: only an explicit `false` turns the reranker off.
+    flags: [{ key: "reranking", whenAbsent: true }],
+    // P-7 (open product decision): the UI hard-blocks the lowest tier, which
+    // is today's behaviour. The server only degrades — #1648 has shipped the
+    // mechanism, and `/plans/tiers` now serves `feature_enforcement.reranking
+    // === "degrades"`, which is the machine-readable record of this
+    // divergence. Flipping to "degrade" is this one line, once decided.
+    enforcement: "refuse",
+  },
+  // `sleep_enabled_contexts_limit > 0` is the server's own sleep gate: the
+  // zero floor makes the effective limit positive exactly when the tier's is.
+  sleep_reports: {
+    matrix: { field: "sleep_enabled_contexts_limit", kind: "positive" },
+    role: WorkspaceRole.Admin,
+  },
+  memory_analysis: {
+    matrix: { field: "analysis_runs_per_day", kind: "positive" },
+    role: WorkspaceRole.Owner,
+  },
+  managed_llm: {
+    matrix: { field: "managed_llm", kind: "boolean" },
+    flags: [{ key: "managed_llm", whenAbsent: false }],
+  },
+  managed_embeddings: {
+    matrix: { field: "managed_embeddings", kind: "boolean" },
+  },
+  secret_store: { matrix: { field: "secret_store", kind: "boolean" } },
+
+  // ── deployment-only gates (no plan dimension) ──
+  plan_page: {
+    flags: [{ key: "plan_page", whenAbsent: false }],
+    role: WorkspaceRole.Owner,
+  },
+  byok: {
+    flags: [{ key: "byok", whenAbsent: false }],
+    existingObjects: "externalKeys",
+  },
+  cost_dashboard: {
+    flags: [
+      { key: "byok", whenAbsent: false },
+      { key: "cost_display", whenAbsent: false },
+    ],
+  },
+
+  // ── quota-only keys: no pre-check source; quotaGate / the wire only ──
+  contexts: {},
+  members: {},
+  workspaces: {},
+  resource_tokens: {},
+  storage: {},
+  memories: {},
+  agents: {},
+  embedding_spend: {},
+  api_calls: {},
+} as const satisfies Record<string, GateSpec>;
+
+export type GateKey = keyof typeof GATE_SPECS;
+
+/** The runtime list of every `GateKey`, in `GATE_SPECS` order. */
+export const GATE_KEYS = Object.keys(GATE_SPECS) as readonly GateKey[];
+// The runtime list and the spec keys can never drift apart.
+type _KeysMatch = Expect<
+  Equal<(typeof GATE_KEYS)[number], keyof typeof GATE_SPECS>
+>;
 
 export function isGateKey(v: unknown): v is GateKey {
   return typeof v === "string" && (GATE_KEYS as readonly string[]).includes(v);
@@ -150,7 +305,7 @@ export interface FeatureGateFacts {
   readonly quotaType?: string;
   /** Registry plan key that lifts the refusal. */
   readonly requiredPlan?: string;
-  /** The server's `required_plan_display`. FALLBACK LABEL ONLY — see `planLabelFor`. */
+  /** The server's `required_plan_display`. FALLBACK LABEL ONLY — see `resolvedPlanLabel`. */
   readonly requiredPlanLabel?: string;
   /** The workspace's plan key, when the server reported it. */
   readonly currentPlan?: string;
@@ -165,26 +320,26 @@ export interface FeatureGateFacts {
 // ── The UI descriptor ───────────────────────────────────────────────────────
 
 /**
- * The single answer to "why can't I use this?", whatever asked the question.
- * In #1644 the only producer is `gateFromFacts` (a refusal the server just
- * sent); #1645 adds the pre-check producers.
+ * The single answer to "why can't I use this?", whatever asked the question:
+ * a pre-check against the tier matrix (`resolveGate`), a page-local quota
+ * (`quotaGate`) or a refusal the server just sent (`gateFromFacts`).
  *
  * Field presence is enforced by tests, not by the type: one flat interface
  * with optional fields, not a seven-arm discriminated union — the union would
  * force every producer to build seven literals and every `planLabel` read to
  * be narrowed first, for a shape whose consumer switches on `state` once.
- *
- * `requiredRole` is not here yet: the wire never carries it (the server
- * strips AUTH-101 details), and #1645 adds it together with the `GATE_SPECS`
- * role it is read from.
  */
 export interface FeatureGate {
   readonly state: FeatureGateState;
 
-  /** Always present. The i18n noun key (and, from #1645, the GATE_SPECS key). */
+  /** Always present. The i18n noun key and the GATE_SPECS key. */
   readonly feature: GateKey;
 
-  /** Registry key of the tier that lifts a "plan" gate or raises a "quota" cap. */
+  /**
+   * Registry key of the tier that lifts a "plan" gate or raises a "quota"
+   * cap. Absent on a "plan" gate exactly when NO served tier has the feature
+   * (an operator override can strip it everywhere): never guessed.
+   */
   readonly requiredPlan?: string;
   /** Resolved label for `requiredPlan`. Present exactly when requiredPlan is. */
   readonly planLabel?: string;
@@ -205,15 +360,25 @@ export interface FeatureGate {
   readonly resetsAt?: string;
 
   /**
+   * Minimum workspace role. Only ever set when state === "role", from
+   * `GATE_SPECS[feature].role` — on the pre-check path and on a wire role
+   * gate alike (the wire never carries it: AUTH-101 details are stripped
+   * server-side). Absent when the key's spec names no role.
+   */
+  readonly requiredRole?: WorkspaceRole.Owner | WorkspaceRole.Admin;
+
+  /**
    * May an upgrade CTA be rendered here? Always a definite boolean, computed
-   * in ONE place — `narrowCanUpgrade` below — by every producer. No consumer
+   * in ONE place — `narrowCanUpgrade` below — by every producer. True only on
+   * a plan or quota gate that names the tier lifting it. No consumer
    * re-derives it.
    */
   readonly canUpgrade: boolean;
 
   /**
-   * #1648 hook: the server DEGRADES rather than refusing. True only together
-   * with state === "allowed". No #1644 producer sets it.
+   * The server DEGRADES rather than refusing (#1648). True only together
+   * with state === "allowed", from a spec with `enforcement: "degrade"`; the
+   * control stays usable. No spec is in degrade mode today (P-7).
    */
   readonly degraded?: boolean;
 }
@@ -360,8 +525,12 @@ export function normalizeGate(
  * enabled on this deployment AND this member is the owner); callers pass it
  * through un-narrowed.
  *
- * - plan  → raw
- * - quota → raw, and only when a higher tier raises the cap
+ * - plan and quota → raw, and only when a served tier lifts the refusal
+ *   (`requiredPlan` present). A plan gate that no served tier lifts — an
+ *   operator withheld the feature from every tier, or the refusal named no
+ *   tier and the matrix could not name one either — has no upgrade to offer,
+ *   exactly like a quota no higher tier raises: the Plan page would be a
+ *   dead end.
  * - every other state → false. Buying a tier does not turn on an operator's
  *   deployment flag, and allowlist copy must stay plan-neutral, so neither
  *   may ever carry an upgrade CTA; nor may a role gate.
@@ -371,29 +540,129 @@ export function narrowCanUpgrade(
   requiredPlan: string | undefined,
   raw: boolean,
 ): boolean {
-  if (state === "plan") return raw;
-  if (state === "quota") return raw && requiredPlan !== undefined;
+  if (state === "plan" || state === "quota") {
+    return raw && requiredPlan !== undefined;
+  }
   return false;
 }
 
-// ── Producer C: lift a refusal to the UI descriptor ─────────────────────────
+// ── Labels and the matrix scan ──────────────────────────────────────────────
 
 /**
- * Display label for a tier. The four canonical OSS tiers go through the
- * env-overridable resolution (`NEXT_PUBLIC_PLAN_DISPLAY_NAMES`, default
- * S / M / L / XL); an operator-defined tier falls back to the server's
- * `required_plan_display`, then to the raw key. #1645 inserts the tier
- * matrix's own `display_name` between the two.
+ * The display label for a tier key, in one place for all three producers:
+ *   1. a canonical OSS tier → the env-overridable label (`planLabelFromEnv`);
+ *   2. else the matrix row's own `display_name`, when the matrix is loaded;
+ *   3. else `serverLabel` (the refusal's `required_plan_display`);
+ *   4. else the raw key.
+ * `serverLabel` is undefined for the two pre-check producers, and for any
+ * `currentPlan` (the wire ships no label for it).
  */
-function planLabelFor(
+export function resolvedPlanLabel(
   name: string,
+  tiers: readonly PlanTierFeature[] | null | undefined,
   serverLabel: string | undefined,
   locale: string | undefined,
 ): string {
-  return isPlanTier(name)
-    ? planLabelFromEnv(name, locale)
-    : (serverLabel ?? name);
+  const matrixDisplayName = tiers?.find((t) => t.name === name)?.display_name;
+  return planLabelForTier(name, matrixDisplayName ?? serverLabel, locale);
 }
+
+/**
+ * The first served tier that passes `test`, or `null` when none does.
+ *
+ * Uses the array AS SERVED (the server's `PLAN_ORDER`, lowest first), not the
+ * client's `PLAN_TIER_ORDER`: that is what lets a `PLAN_<KEY>_FEATURES`
+ * operator override — or a tier the client has never heard of — flow through
+ * with no frontend change. `null` mirrors the server's `required_plan: null`.
+ */
+export function requiredTierFor(
+  tiers: readonly PlanTierFeature[],
+  test: (tier: PlanTierFeature) => boolean,
+): PlanTierFeature | null {
+  return tiers.find(test) ?? null;
+}
+
+function matrixPredicate(
+  test: MatrixGateTest,
+): (tier: PlanTierFeature) => boolean {
+  if (test.kind === "boolean") {
+    const { field } = test;
+    // `=== true`: a column an older API omits fails closed.
+    return (tier) => tier[field] === true;
+  }
+  const { field } = test;
+  return (tier) => (tier[field] ?? 0) > 0;
+}
+
+/**
+ * The matrix column holding each quota's cap, for "which tier raises it?".
+ * Exactly the caps the server itself derives an upgrade tier for
+ * (`lowest_tier_with_limit`, #1644). `storage` and `agents` are absent on
+ * purpose — neither has an upgrade path (P-6) — so a quota gate on them
+ * never carries `requiredPlan`, and therefore never a CTA.
+ */
+const QUOTA_CAP_FIELDS: Partial<Record<GateKey, NumericPlanTierKey>> = {
+  contexts: "max_contexts",
+  members: "max_members",
+  resource_tokens: "max_resource_tokens",
+  connectors: "max_connectors",
+  memories: "memories_per_day",
+  memory_analysis: "analysis_runs_per_day",
+  sleep_reports: "sleep_enabled_contexts_limit",
+};
+
+/** The lowest served tier whose cap for `key` is above `limit`. */
+function tierRaisingCap(
+  key: GateKey,
+  limit: number,
+  tiers: readonly PlanTierFeature[] | null | undefined,
+): string | undefined {
+  const field = hasOwn(QUOTA_CAP_FIELDS, key)
+    ? QUOTA_CAP_FIELDS[key]
+    : undefined;
+  if (!field || !tiers) return undefined;
+  return requiredTierFor(tiers, (t) => (t[field] ?? 0) > limit)?.name;
+}
+
+/** The lowest served tier whose row passes `key`'s plan test. */
+function tierWithFeature(
+  key: GateKey,
+  tiers: readonly PlanTierFeature[] | null | undefined,
+): string | undefined {
+  const spec: GateSpec = GATE_SPECS[key];
+  if (!spec.matrix || !tiers) return undefined;
+  return requiredTierFor(tiers, matrixPredicate(spec.matrix))?.name;
+}
+
+/** `requiredPlan` / `currentPlan` and their resolved labels, when known. */
+function tierFields(
+  requiredPlan: string | undefined,
+  currentPlan: string | undefined,
+  tiers: readonly PlanTierFeature[] | null | undefined,
+  serverLabel: string | undefined,
+  locale: string | undefined,
+): Pick<
+  FeatureGate,
+  "requiredPlan" | "planLabel" | "currentPlan" | "currentPlanLabel"
+> {
+  return {
+    ...(requiredPlan !== undefined && {
+      requiredPlan,
+      planLabel: resolvedPlanLabel(requiredPlan, tiers, serverLabel, locale),
+    }),
+    ...(currentPlan !== undefined && {
+      currentPlan,
+      currentPlanLabel: resolvedPlanLabel(
+        currentPlan,
+        tiers,
+        undefined,
+        locale,
+      ),
+    }),
+  };
+}
+
+// ── Producer C: lift a refusal to the UI descriptor ─────────────────────────
 
 /**
  * `facts.feature` if it is a `GateKey`; else the quota-type map; else the
@@ -420,7 +689,15 @@ function resolveGateKey(
  * `ctx.canUpgrade` is the RAW `canUpgradeFrom(...) === true`; it is narrowed
  * here by `narrowCanUpgrade`, so no caller re-derives it. Field presence
  * follows the state: plan / required tier only on plan and quota gates,
- * counts only on quota gates, nothing but the feature on the rest.
+ * counts only on quota gates, `requiredRole` only on role gates, nothing but
+ * the feature on the rest.
+ *
+ * With `ctx.tiers` (#1645) the matrix is consulted too: tier labels resolve
+ * through `resolvedPlanLabel` (the refusal's own `required_plan_display` is
+ * the fallback), and a refusal that names no tier — a server predating #1644
+ * — gets the same matrix scan the pre-check uses, so both paths name the
+ * same tier. A role gate takes its minimum role from `GATE_SPECS`, since the
+ * wire never carries one.
  */
 export function gateFromFacts(
   facts: FeatureGateFacts | undefined,
@@ -430,30 +707,38 @@ export function gateFromFacts(
     /** Raw: `canUpgradeFrom(...) === true`. Narrowed inside. */
     canUpgrade: boolean;
     locale: string | undefined;
+    /** The shared tier matrix, when the caller holds it. */
+    tiers?: readonly PlanTierFeature[] | null;
   },
 ): FeatureGate | null {
   if (!facts) return null;
 
   const { state } = facts;
-  const tiered = state === "plan" || state === "quota";
-  const requiredPlan = tiered ? facts.requiredPlan : undefined;
-  const currentPlan = tiered ? facts.currentPlan : undefined;
+  const feature = resolveGateKey(facts, ctx.fallbackKey);
+  const tiers = ctx.tiers ?? null;
+  const spec: GateSpec = GATE_SPECS[feature];
+
+  let requiredPlan: string | undefined;
+  if (state === "plan") {
+    requiredPlan = facts.requiredPlan ?? tierWithFeature(feature, tiers);
+  } else if (state === "quota") {
+    requiredPlan =
+      facts.requiredPlan ??
+      (facts.limit !== undefined
+        ? tierRaisingCap(feature, facts.limit, tiers)
+        : undefined);
+  }
+  const currentPlan =
+    state === "plan" || state === "quota" ? facts.currentPlan : undefined;
+  // The server's label belongs to the server's tier, not to a matrix guess.
+  const serverLabel =
+    facts.requiredPlan !== undefined ? facts.requiredPlanLabel : undefined;
+  const requiredRole = state === "role" ? spec.role : undefined;
 
   return {
     state,
-    feature: resolveGateKey(facts, ctx.fallbackKey),
-    ...(requiredPlan !== undefined && {
-      requiredPlan,
-      planLabel: planLabelFor(
-        requiredPlan,
-        facts.requiredPlanLabel,
-        ctx.locale,
-      ),
-    }),
-    ...(currentPlan !== undefined && {
-      currentPlan,
-      currentPlanLabel: planLabelFor(currentPlan, undefined, ctx.locale),
-    }),
+    feature,
+    ...tierFields(requiredPlan, currentPlan, tiers, serverLabel, ctx.locale),
     ...(state === "quota" &&
       facts.current !== undefined && {
         current: facts.current,
@@ -466,6 +751,270 @@ export function gateFromFacts(
       facts.resetsAt !== undefined && {
         resetsAt: facts.resetsAt,
       }),
+    ...(requiredRole !== undefined && { requiredRole }),
     canUpgrade: narrowCanUpgrade(state, requiredPlan, ctx.canUpgrade),
   };
+}
+
+// ── Producer A: the pre-check ───────────────────────────────────────────────
+
+/** A descriptor that carries nothing but its state and feature. */
+function bareGate(
+  state: "pending" | "allowed" | "deployment",
+  feature: GateKey,
+): FeatureGate {
+  return { state, feature, canUpgrade: false };
+}
+
+/**
+ * Is `flag` resolved OFF? Each flag by its own polarity: a default-on flag
+ * (`whenAbsent: true`) is off only on an explicit `false`; a default-off flag
+ * is off on anything but `true`.
+ */
+function isFlagOff(features: SystemFeatures, flag: GateFlag): boolean {
+  const value = features[flag.key];
+  return flag.whenAbsent ? value === false : value !== true;
+}
+
+/**
+ * The deployment half of a gate on its own: has this deployment switched
+ * `key` off? `true` once `/system/info` has resolved (the failed-closed `{}`
+ * included) and one of the spec's flags is off by its own polarity; `false`
+ * when none is, or the spec has no flags; `null` while `/system/info` is
+ * still in flight for a spec that has flags — a flag cannot resolve off
+ * before it has resolved.
+ *
+ * Step 1 of `resolveGate` is exactly this. Exported for surfaces that
+ * DESCRIBE a feature rather than gate a member's use of it — the Plan page's
+ * tier comparison (#1654), where "which tier has it" is the whole table and
+ * only the deployment half is the question.
+ */
+export function deploymentFlagOff(
+  key: GateKey,
+  features: SystemFeatures | null,
+): boolean | null {
+  const flags = (GATE_SPECS[key] as GateSpec).flags ?? [];
+  if (flags.length === 0) return false;
+  if (features === null) return null;
+  return flags.some((flag) => isFlagOff(features, flag));
+}
+
+function quotaDescriptor(args: {
+  key: GateKey;
+  current: number;
+  limit: number;
+  planName: string | null | undefined;
+  tiers: readonly PlanTierFeature[] | null;
+  canUpgrade: boolean;
+  locale: string | undefined;
+}): FeatureGate {
+  const requiredPlan = tierRaisingCap(args.key, args.limit, args.tiers);
+  return {
+    state: "quota",
+    feature: args.key,
+    ...tierFields(
+      requiredPlan,
+      args.planName || undefined,
+      args.tiers,
+      undefined,
+      args.locale,
+    ),
+    current: args.current,
+    limit: args.limit,
+    canUpgrade: narrowCanUpgrade("quota", requiredPlan, args.canUpgrade),
+  };
+}
+
+/**
+ * Answer a gate before the user tries — from the tier matrix, `/system/info`
+ * and the member's role. Pure; `useFeatureGate` feeds it resolved inputs.
+ *
+ * ── The two failure directions, documented once, here ──
+ *
+ * The two inputs fail in OPPOSITE directions, deliberately, and nothing may
+ * "unify" them:
+ *
+ * - A tier-matrix transport failure stays PENDING. `usePlanTierMatrix`
+ *   answers `null` both while fetching and after its three attempts (the
+ *   failure is not cached, so a later mount retries). A matrix gate is then
+ *   `pending` — never `plan`, never a `requiredPlan` guess — because a
+ *   pending gate must never flash an upsell at an entitled tenant.
+ * - A `/system/info` transport failure falls CLOSED. After its three
+ *   attempts `useSystemFeatures` resolves `{}`, so every flag reads absent.
+ *   That is right for both of its consumers: a withheld CTA costs a click,
+ *   a dead-ending CTA costs trust, and a deployment notice is definitive.
+ *
+ * The one precedence ruling that keeps both intact: once `/system/info` has
+ * RESOLVED — the failed-closed `{}` included — a flag that is off outranks a
+ * still-pending matrix, so the user gets the CTA-free "not available on this
+ * deployment" answer instead of an endless spinner. While `/system/info` is
+ * itself in flight (`features === null`) no flag has resolved, so the gate is
+ * `pending`, never `deployment`. A spec with no `flags` therefore never
+ * reaches `deployment`, and every plan gate keeps exactly the pending
+ * semantics above. Flag polarity is per flag (`GateFlag.whenAbsent`): the
+ * reranker is default-ON (#1580), every other flag default-OFF. Caveat, not
+ * changed here: a failed `/system/info` and a backend that never had the
+ * flag are indistinguishable — both read absent.
+ *
+ * `workspaceResolved` is `currentWorkspace !== null` — byte-identical to
+ * `usePlanFeatures` — and deliberately NOT `!loading`: a user with no
+ * workspace has `loading === false` and no workspace forever. `!loading`
+ * would fail the matrix test closed on an undefined plan and upsell someone
+ * with nothing to upgrade; this way they stay `pending`.
+ *
+ * ── Precedence (fixed order, first hit wins) ──
+ *
+ *   1. deployment — `features` resolved and some spec flag is off
+ *   2. pending    — a required input is unresolved: `features` (spec has
+ *                   flags), the matrix (spec has one), the workspace (spec
+ *                   has a matrix or a role)
+ *   3. role       — `spec.role` set and the member's role is below it. Above
+ *                   plan: a member cannot buy their way to owner, so an
+ *                   upsell to them would be a lie.
+ *   4. plan       — the workspace's row fails the matrix test (an unknown
+ *                   plan fails closed); "degrade" specs answer `allowed` +
+ *                   `degraded` instead. `requiredPlan` is the first served
+ *                   tier that passes, absent when none does.
+ *   5. quota      — `quota` supplied, `limit > 0` and `current >= limit`
+ *   6. allowed
+ *
+ * The server checks owner → feature → quota → allowlist
+ * (`backend/src/auth/analysis_gates.py`). There is NO allowlist step and NO
+ * `allowlisted` input: nothing in the client can supply one — allowlist
+ * membership is consulted only inside the server gate — so the client meets
+ * "allowlist" only on the wire, through `gateFromFacts`. When a surface can
+ * supply it, the step goes BELOW role, matching the server's order.
+ *
+ * ── The pending truth table (tested row by row) ──
+ *
+ *   #   tiers  workspace             features        spec flags       result
+ *   1   null   any                   any             none             pending
+ *   2   array  unresolved            any             none             pending
+ *   3   array  resolved, test true   any             none             allowed
+ *   4   array  resolved, test false  any             none             plan
+ *   5   any    any                   null            some             pending
+ *   6   any    any                   {} (failed)     whenAbsent:false deployment
+ *   7   any    any                   {} (failed)     whenAbsent:true  rows 1-4
+ *   8   any    any                   flag === false  either polarity  deployment
+ *   9   null   any                   flag === true   some             pending
+ *   10  array  resolved, test false  flag === true   some             plan
+ *   11  array  resolved, test true   flag === true   some             allowed
+ *   12  array  none (not loading)    any             any              pending
+ *
+ * `canUpgrade` is the raw `canUpgradeFrom(...) === true`, narrowed here by
+ * `narrowCanUpgrade` like every producer: a deployment, role, pending or
+ * allowed gate never offers an upgrade. `GateSpec.existingObjects` is never
+ * read here (it is the Sidebar's rule, not a gate answer).
+ */
+export function resolveGate(input: {
+  key: GateKey;
+  /** null = unresolved OR failed (indistinguishable, by design). */
+  tiers: readonly PlanTierFeature[] | null;
+  planName: string | null | undefined;
+  /** `currentWorkspace !== null`. NOT `!loading`. */
+  workspaceResolved: boolean;
+  /** null = unresolved; `{}` = failed closed. */
+  features: SystemFeatures | null;
+  role: string | null | undefined;
+  /** Raw: `canUpgradeFrom(...) === true`. Narrowed inside. */
+  canUpgrade: boolean;
+  locale: string | undefined;
+  quota?: { current: number; limit: number };
+}): FeatureGate {
+  const { key, tiers, features } = input;
+  const spec: GateSpec = GATE_SPECS[key];
+  const deploymentOff = deploymentFlagOff(key, features);
+
+  // 1. deployment — only once /system/info has resolved.
+  if (deploymentOff === true) return bareGate("deployment", key);
+
+  // 2. pending — never an upsell while an input is unresolved.
+  if (deploymentOff === null) return bareGate("pending", key);
+  if (spec.matrix && tiers === null) return bareGate("pending", key);
+  if ((spec.matrix || spec.role) && !input.workspaceResolved) {
+    return bareGate("pending", key);
+  }
+
+  // 3. role
+  if (spec.role && !hasWorkspaceRole(input.role, spec.role)) {
+    return {
+      state: "role",
+      feature: key,
+      requiredRole: spec.role,
+      canUpgrade: false,
+    };
+  }
+
+  // 4. plan
+  if (spec.matrix && tiers !== null) {
+    const test = matrixPredicate(spec.matrix);
+    const row = tiers.find((t) => t.name === input.planName);
+    if (!row || !test(row)) {
+      if (spec.enforcement === "degrade") {
+        return {
+          state: "allowed",
+          feature: key,
+          canUpgrade: false,
+          degraded: true,
+        };
+      }
+      const requiredPlan = requiredTierFor(tiers, test)?.name;
+      return {
+        state: "plan",
+        feature: key,
+        ...tierFields(
+          requiredPlan,
+          input.planName || undefined,
+          tiers,
+          undefined,
+          input.locale,
+        ),
+        canUpgrade: narrowCanUpgrade("plan", requiredPlan, input.canUpgrade),
+      };
+    }
+  }
+
+  // 5. quota — only once the feature itself is allowed.
+  const { quota } = input;
+  if (quota && quota.limit > 0 && quota.current >= quota.limit) {
+    return quotaDescriptor({
+      key,
+      current: quota.current,
+      limit: quota.limit,
+      planName: input.planName,
+      tiers,
+      canUpgrade: input.canUpgrade,
+      locale: input.locale,
+    });
+  }
+
+  // 6. allowed
+  return bareGate("allowed", key);
+}
+
+// ── Producer B: page-local quota numbers ────────────────────────────────────
+
+/**
+ * A quota gate from counts the page already holds — no server round trip.
+ *
+ * `limit` 0 never blocks: callers pass 0 for an unknown cap, and "unknown"
+ * must not block (the create call stays authoritative). `requiredPlan` is
+ * the first served tier whose cap for `key` exceeds `limit`, absent when
+ * none does or the matrix is unresolved — which is what keeps the storage
+ * and agents caps, and a still-loading matrix, from offering an upgrade.
+ */
+export function quotaGate(args: {
+  key: GateKey;
+  current: number;
+  limit: number;
+  planName: string | null | undefined;
+  tiers: readonly PlanTierFeature[] | null;
+  /** Raw: `canUpgradeFrom(...) === true`. Narrowed inside. */
+  canUpgrade: boolean;
+  locale: string | undefined;
+}): FeatureGate {
+  if (!(args.limit > 0 && args.current >= args.limit)) {
+    return bareGate("allowed", args.key);
+  }
+  return quotaDescriptor(args);
 }
