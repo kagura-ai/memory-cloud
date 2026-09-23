@@ -504,8 +504,8 @@ Both ways below share these mechanics:
   `~/.claude.json` → `claude mcp remove kagura-memory -s <scope>`, then the `claude mcp add` line
   given below (for a new `local` entry beside a tracked `.mcp.json`, only the `add`, with
   `-s local`). The `add` rebuilds the args from scratch, so it must carry the entry's existing
-  `--tool-profile` over — the value B1 wrote to `<values dir>/tool_profile`; leave that pair out
-  only when the entry has none.
+  `--tool-profile` over — the value B1 wrote to `<values dir>/tool_profile`. When the entry has
+  none, that file does not exist: leave the pair out rather than pass an empty value.
 - No re-authentication: the proxy owns the token, so the entry reconnects on the next start (or
   `/mcp` → reconnect) with the same sign-in.
 - Never edit `~/.kagura/credentials.json` to change the URL.
@@ -523,13 +523,17 @@ user to run it where Claude Code starts). Add two items to the entry's `args`, a
   replace that value with `off` in place — never add a second `--guardrails`, and never a
   `--server` for this: the flag replaces the `guardrails` in the `--server` query, so the URL
   would keep the id.
-- The `~/.claude.json` rebuild (keep a `--server` the entry already has: write its value unchanged
-  to `<values dir>/new_mcp_url`, run B0's check, and add `--server "$(cat "<values dir>/new_mcp_url")"`
-  to the line):
+- The `~/.claude.json` rebuild:
 
   ```bash
-  claude mcp add kagura-memory -s <scope> -- kagura-mcp --profile "$(cat "<values dir>/profile")" --guardrails off --tool-profile "$(cat "<values dir>/tool_profile")"
+  claude mcp add kagura-memory -s <scope> -- kagura-mcp --profile "$(cat "<values dir>/profile")" --guardrails off
   ```
+
+  Append to that line, only for what the entry already has — never an empty value:
+  - `--tool-profile "$(cat "<values dir>/tool_profile")"` when B1 wrote `<values dir>/tool_profile`
+    (the entry has a `--tool-profile`);
+  - `--server "$(cat "<values dir>/new_mcp_url")"` when the entry has a `--server`: write its value
+    unchanged to `<values dir>/new_mcp_url` and run B0's check first.
 
 - For a `project` or `user` entry, say that `kagura setup claude --profile "$(cat "<values dir>/profile")" --guardrails off`
   writes the same entry, less any `--server` — run in the project directory; add `--scope user`

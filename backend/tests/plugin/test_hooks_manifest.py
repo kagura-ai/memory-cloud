@@ -624,7 +624,11 @@ def test_setup_skill_offers_the_guardrails_flag_before_the_server_pin() -> None:
     ]
     assert len(rebuild) == 2, "one rebuild line per way"
     assert rebuild and all("--guardrails off" in ln or "--server" in ln for ln in rebuild)
-    assert any('--tool-profile "$(cat "<values dir>/tool_profile")"' in ln for ln in rebuild)
+    # ...but only when the entry has one: the rebuild line itself never reads a file that may
+    # not exist, and the --tool-profile pair is appended conditionally.
+    assert not any("tool_profile" in ln for ln in rebuild)
+    assert '`--tool-profile "$(cat "<values dir>/tool_profile")"` when B1 wrote' in cli
+    assert "never an empty value" in cli
 
 
 def test_setup_skill_reports_the_computed_upstream() -> None:
