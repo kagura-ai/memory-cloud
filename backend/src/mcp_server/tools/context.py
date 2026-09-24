@@ -12,12 +12,14 @@ from uuid import UUID
 from mcp.types import TextContent
 
 from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
+from mcp_server.tools._errors import _tool_exception_response
 from mcp_server.tools._helpers import (
     _context_cap_error_response,
     _context_response_fields,
     _ContextNotFoundError,
     _dumps,
     _error_response,
+    _format_validation_error,
     _get_workspace_member_role,
     _log_tool_usage,
     _resolve_context_for_read,
@@ -211,8 +213,8 @@ async def handle_get_context_info(
                 current_context_id,
                 workspace_id,
             )
-            logger.error(f"get_context_info_failed: {e}", exc_info=True)
-            return _error_response(str(e), "Failed to retrieve context info. Please try again.")
+            # #1684: the ``error`` code used to be ``str(e)`` itself.
+            return _tool_exception_response("get_context_info", e)
 
     # Safety: should never reach here (get_db always yields)
     return _error_response("internal_error", "Database session unavailable")
@@ -432,16 +434,22 @@ async def handle_create_context(
             return _error_response("plan_required", e.message, **e.details)
         except Exception as e:
             await db.rollback()
-            error_str = str(e)
             # Surface validation errors clearly
-            if "already exists" in error_str or "ValidationError" in type(e).__name__:
+            if "ValidationError" in type(e).__name__:
                 return _error_response(
                     "validation_error",
-                    error_str,
+                    _format_validation_error(e),
                     help="Check the context name and try again.",
                 )
-            logger.error(f"create_context_failed: {e}", exc_info=True)
-            return _error_response("create_context_error", error_str)
+            if "already exists" in str(e):
+                # A unique-constraint race past the service's own name check:
+                # the driver's text (SQL, parameters) is never echoed (#1684).
+                return _error_response(
+                    "validation_error",
+                    "A context with this name already exists in this workspace.",
+                    help="Check the context name and try again.",
+                )
+            return _tool_exception_response("create_context", e, error="create_context_error")
 
     # Safety: should never reach here (get_db always yields)
     return _error_response("internal_error", "Database session unavailable")
@@ -696,8 +704,7 @@ async def handle_update_context(
             )
         except Exception as e:
             await db.rollback()
-            logger.error(f"update_context_failed: {e}", exc_info=True)
-            return _error_response("update_context_error", str(e))
+            return _tool_exception_response("update_context", e, error="update_context_error")
 
     # Safety: should never reach here (get_db always yields)
     return _error_response("internal_error", "Database session unavailable")
@@ -952,8 +959,8 @@ async def handle_list_contexts(
             ]
         except Exception as e:
             await db.rollback()
-            logger.error(f"list_contexts_failed: {e}", exc_info=True)
-            return _error_response(str(e))
+            # #1684: this used to be ``{"error": str(e)}``.
+            return _tool_exception_response("list_contexts", e)
 
     # Safety: should never reach here (get_db always yields)
     return _error_response("internal_error", "Database session unavailable")
@@ -1029,8 +1036,7 @@ async def handle_delete_context(
                 args.get("context_id"),
                 workspace_id,
             )
-            logger.error("delete_context_failed", exc_info=True)
-            return _error_response("delete_context_error", str(e))
+            return _tool_exception_response("delete_context", e, error="delete_context_error")
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -1141,8 +1147,7 @@ async def handle_merge_contexts(
                 source_raw,
                 workspace_id,
             )
-            logger.error("merge_contexts_failed", exc_info=True)
-            return _error_response("merge_contexts_error", str(e))
+            return _tool_exception_response("merge_contexts", e, error="merge_contexts_error")
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -1315,7 +1320,6 @@ async def handle_list_tags(
                 context_id,
                 workspace_id,
             )
-            logger.error(f"list_tags_failed: {e}", exc_info=True)
-            return _error_response("list_tags_error", str(e))
+            return _tool_exception_response("list_tags", e, error="list_tags_error")
 
     return _error_response("internal_error", "Database session unavailable")

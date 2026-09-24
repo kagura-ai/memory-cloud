@@ -3,8 +3,9 @@
 Unexpected exceptions inside the analysis MCP handlers used to place
 ``str(e)`` — which can carry SQL / driver / BYOK-key internals — directly
 into the error envelope returned to the caller. These tests pin the
-hardened behavior: the envelope message is a fixed generic string and the
-sensitive marker planted in the raised exception never reaches the caller.
+hardened behavior: the envelope carries the shared #1684 server-failure
+fields (fixed message, ``cause``, ``correlation_id``) and the sensitive
+marker planted in the raised exception never reaches the caller.
 """
 
 from __future__ import annotations
@@ -15,10 +16,7 @@ from uuid import uuid4
 
 import pytest
 
-from mcp_server.tools.analysis import (
-    _GENERIC_ANALYSIS_ERROR,
-    handle_get_analysis,
-)
+from mcp_server.tools.analysis import handle_get_analysis
 
 # A marker string standing in for the kind of raw driver/SQL/credential
 # detail an unexpected exception can carry. It must never surface in the
@@ -74,7 +72,9 @@ async def test_unexpected_service_error_envelope_is_generic(db_mock):
     body = _envelope(result)
     assert body["status"] == "error"
     assert body["error"] == "get_analysis_error"
-    assert body["message"] == _GENERIC_ANALYSIS_ERROR
+    assert body["cause"] == "internal_error"
+    assert body["message"] == "get_analysis failed because of an unexpected server error."
+    assert body["correlation_id"]
     # The raw exception detail (and its sensitive fragments) must be absent.
     serialized = json.dumps(body)
     assert "SUPERSECRET" not in serialized
@@ -104,5 +104,6 @@ async def test_gate_unexpected_error_envelope_is_generic(db_mock):
     body = _envelope(result)
     assert body["status"] == "error"
     assert body["error"] == "internal_error"
-    assert body["message"] == _GENERIC_ANALYSIS_ERROR
+    assert body["message"] == "get_analysis failed because of an unexpected server error."
+    assert body["correlation_id"]
     assert "SUPERSECRET" not in json.dumps(body)

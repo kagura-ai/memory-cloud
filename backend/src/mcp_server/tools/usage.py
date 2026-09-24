@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any
 from uuid import UUID
 
 from mcp.types import TextContent
 
+from mcp_server.tools._errors import _tool_exception_response
 from mcp_server.tools._helpers import _error_response, _log_tool_usage, _success_response
-
-logger = logging.getLogger(__name__)
 
 
 async def handle_get_usage(
@@ -98,8 +96,7 @@ async def handle_get_usage(
 
         except Exception as e:
             await db.rollback()
-            logger.error(f"get_usage_failed: {e}", exc_info=True)
             await _log_tool_usage(db, user_id, "get_usage", start_time, 500, None, workspace_id)
-            return _error_response("get_usage_error", str(e))
+            return _tool_exception_response("get_usage", e, error="get_usage_error")
 
     return _error_response("internal_error", "Failed to acquire database session")

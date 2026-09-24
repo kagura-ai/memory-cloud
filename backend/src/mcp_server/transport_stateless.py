@@ -13,7 +13,6 @@ multi round-trip input requests, resources and prompts — capabilities stay
 ``{"tools": {}}``.
 """
 
-import asyncio
 import base64
 import binascii
 import logging
@@ -247,26 +246,17 @@ async def _call_tool(
             workspace_id=workspace_id,
         )
     except Exception as e:
-        error_type = type(e).__name__
-        logger.error(f"MCP tools/call failed (stateless): {error_type}: {e}", exc_info=True)
+        # #1684: message and ``data`` come from the shared error vocabulary
+        # (stable code, help, correlation_id, retry advice); it logs the
+        # exception and never returns an unexpected exception's text or
+        # type. Standard JSON-RPC codes only: the legacy handler's -32001 /
+        # -32002 sit in -32000..-32019, which 2026-07-28 marks as a legacy
+        # sub-range new implementations SHOULD NOT use.
+        from mcp_server.tools._errors import describe_tool_exception
 
-        # Standard JSON-RPC codes only. The legacy handler's -32001 / -32002
-        # sit in -32000..-32019, which 2026-07-28 marks as a legacy sub-range
-        # new implementations SHOULD NOT use.
-        data: dict[str, Any] = {"exception_type": error_type}
-        if isinstance(e, ValueError):
-            code, message = -32602, str(e)
-            data["details"] = str(e)[:500]
-        elif isinstance(e, PermissionError):
-            code, message = -32603, str(e)
-            data["details"] = str(e)[:500]
-        elif isinstance(e, asyncio.TimeoutError):
-            code, message = -32603, "Tool execution timeout"
-        else:
-            # The exception text stays in the log line above: it can carry
-            # driver / DSN / path detail a client has no business seeing.
-            code, message = -32603, "Internal error"
-        await _send_error(send, 200, request_id, code, message, data)
+        failure = describe_tool_exception(tool_name, e)
+        code = -32602 if isinstance(e, ValueError) else -32603
+        await _send_error(send, 200, request_id, code, failure.message, failure.jsonrpc_data())
         return
 
     await _send_result(send, request_id, _complete(_tool_call_result(result)))

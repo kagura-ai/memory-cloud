@@ -27,17 +27,15 @@ sequential integer ``key_id`` cannot be used as an existence oracle.
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any
 from uuid import UUID
 
 from mcp.types import TextContent
 
+from mcp_server.tools._errors import _tool_exception_response
 from mcp_server.tools._helpers import _error_response, _log_tool_usage, _success_response
 from utils.datetime import to_utc_iso
-
-logger = logging.getLogger(__name__)
 
 
 def _binding_dict(api_key: Any, display_name: str | None, name: str | None) -> dict[str, Any]:
@@ -88,13 +86,12 @@ async def handle_list_my_bindings(
             return _success_response(bindings=bindings, count=len(bindings))
         except Exception as e:
             await db.rollback()
-            logger.error(f"list_my_bindings_failed: {e}", exc_info=True)
             await _log_tool_usage(
                 db, user_id, "list_my_bindings", start_time, 500, None, workspace_id
             )
-            # Generic caller-facing message — the full exception (which may carry
-            # DB schema / internal detail) stays in the server-side log only.
-            return _error_response("list_my_bindings_error", "An internal error occurred.")
+            # The full exception (which may carry DB schema / internal detail)
+            # stays in the server-side log only (#1684 vocabulary).
+            return _tool_exception_response("list_my_bindings", e, error="list_my_bindings_error")
 
     return _error_response("internal_error", "Failed to acquire database session")
 
@@ -184,11 +181,10 @@ async def handle_describe_binding(
             return _success_response(binding=binding, **extra)
         except Exception as e:
             await db.rollback()
-            logger.error(f"describe_binding_failed: {e}", exc_info=True)
             await _log_tool_usage(
                 db, user_id, "describe_binding", start_time, 500, None, workspace_id
             )
-            # Generic caller-facing message — full exception stays in the log only.
-            return _error_response("describe_binding_error", "An internal error occurred.")
+            # The full exception stays in the server-side log only (#1684).
+            return _tool_exception_response("describe_binding", e, error="describe_binding_error")
 
     return _error_response("internal_error", "Failed to acquire database session")

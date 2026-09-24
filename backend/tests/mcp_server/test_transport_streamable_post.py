@@ -426,22 +426,26 @@ async def test_handler_exception_caught_by_dispatch_is_flagged(monkeypatch):
 
     result = send.body["result"]
     assert result["isError"] is True
-    assert json.loads(result["content"][0]["text"]) == {
-        "status": "error",
-        "error": "no access to context",
-    }
+    envelope = json.loads(result["content"][0]["text"])
+    # #1684: a stable code + help, not ``{"error": str(e)}``.
+    assert envelope["error"] == "permission_denied"
+    assert envelope["help"]
+    assert "no access to context" not in result["content"][0]["text"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("exc", "code"),
+    ("exc", "code", "error_code"),
     [
-        (ValueError("bad arg"), -32602),
-        (PermissionError("nope"), -32002),
-        (RuntimeError("x"), -32603),
+        (ValueError("bad arg"), -32602, "validation_error"),
+        (PermissionError("nope"), -32002, "permission_denied"),
+        (TimeoutError(), -32001, "timeout"),
+        (RuntimeError("x"), -32603, "internal_error"),
     ],
 )
-async def test_tools_call_failure_maps_to_a_jsonrpc_error(monkeypatch, exc, code):
+async def test_tools_call_failure_maps_to_a_jsonrpc_error(monkeypatch, exc, code, error_code):
+    """The numeric codes are unchanged; ``message`` / ``data`` come from the
+    #1684 vocabulary instead of the exception's text and type."""
     import mcp_server.tools as tools_mod
 
     async def boom(**_kwargs):
@@ -449,13 +453,66 @@ async def test_tools_call_failure_maps_to_a_jsonrpc_error(monkeypatch, exc, code
 
     monkeypatch.setattr(tools_mod, "execute_tool_call", boom)
     send = await _post(
-        {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "recall"}}
+        {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "list_contexts"}}
     )
 
     assert send.status == 200
     assert send.body["id"] == 6
     assert send.body["error"]["code"] == code
-    assert send.body["error"]["data"]["exception_type"] == type(exc).__name__
+    data = send.body["error"]["data"]
+    assert data["error"] == error_code
+    assert data["help"]
+    assert "exception_type" not in data
+    assert "details" not in data
+
+
+@pytest.mark.asyncio
+async def test_tools_call_failure_keeps_exception_detail_in_the_log(monkeypatch, caplog):
+    """#1684: the legacy fallback used to return ``Internal error: <str(e)>`` and
+    ``data.details``. A DSN / path now reaches the log only, joined to the
+    response by ``correlation_id``."""
+    import mcp_server.tools as tools_mod
+
+    exc = RuntimeError("postgresql://user:hunter2@db/prod at /srv/app/secret.py")
+
+    async def boom(**_kwargs):
+        raise exc
+
+    monkeypatch.setattr(tools_mod, "execute_tool_call", boom)
+    with caplog.at_level("ERROR", logger="mcp_server.tools._errors"):
+        send = await _post(
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {"name": "remember"},
+            }
+        )
+
+    wire = json.dumps(send.body)
+    assert "hunter2" not in wire
+    assert "/srv/app" not in wire
+    error = send.body["error"]
+    assert error["code"] == -32603
+    assert error["message"] == "remember failed because of an unexpected server error."
+    assert error["data"]["retryable"] is False  # a write with an unknown outcome
+    assert error["data"]["outcome"] == "unknown"
+    record = next(r for r in caplog.records if r.name == "mcp_server.tools._errors")
+    assert record.exc_info is not None and record.exc_info[1] is exc
+    assert error["data"]["correlation_id"] in record.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_tools_call_failure_without_params_still_answers():
+    """A body whose ``params`` is not an object fails before the tool name is
+    known; the fallback still answers with the vocabulary, as a write."""
+    send = await _post({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": [1]})
+
+    error = send.body["error"]
+    assert error["code"] == -32603
+    assert error["message"] == "The tool call failed because of an unexpected server error."
+    assert error["data"]["error"] == "internal_error"
+    assert error["data"]["retryable"] is False
 
 
 # ------------------------------- id-less malformed envelopes (Copilot review)

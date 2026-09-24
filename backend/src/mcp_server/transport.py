@@ -656,6 +656,7 @@ async def handle_streamable_http_post(
     elif method == "tools/call":
         logger.info(f"MCP tools/call (Streamable HTTP): session={session.session_id}")
 
+        tool_name = None
         try:
             # Extract tool parameters
             params = body.get("params", {})
@@ -679,36 +680,31 @@ async def handle_streamable_http_post(
             return
 
         except Exception as e:
-            # Issue #163: Improved error response with custom error codes
-            error_type = type(e).__name__
-            logger.error(f"MCP tools/call failed: {error_type}: {e}", exc_info=True)
+            # #1684: ``execute_tool_call`` turns handler exceptions into tool
+            # results, so this only sees failures in the plumbing around it.
+            # The numeric codes are unchanged (Issue #163: -32001 / -32002 are
+            # custom); message and ``data`` come from the shared error
+            # vocabulary, which logs the exception with a correlation_id and
+            # never returns an unexpected exception's text or type.
+            from mcp_server.tools._errors import describe_tool_exception
 
-            # Determine appropriate JSON-RPC error code
-            # Standard codes: https://www.jsonrpc.workspace/specification#error_object
-            # Custom codes: -32001 to -32099 (reserved for implementation)
+            failure = describe_tool_exception(tool_name, e)
             if isinstance(e, asyncio.TimeoutError):
                 error_code = -32001  # Custom: Tool execution timeout
-                error_message = "Tool execution timeout"
             elif isinstance(e, PermissionError):
                 error_code = -32002  # Custom: Permission denied
-                error_message = str(e)
             elif isinstance(e, ValueError):
                 error_code = -32602  # Standard: Invalid params
-                error_message = str(e)
             else:
                 error_code = -32603  # Standard: Internal error
-                error_message = f"Internal error: {str(e)}"
 
             error_response = {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "error": {
                     "code": error_code,
-                    "message": error_message,
-                    "data": {
-                        "exception_type": error_type,
-                        "details": str(e)[:500],  # Truncate for safety
-                    },
+                    "message": failure.message,
+                    "data": failure.jsonrpc_data(),
                 },
             }
             error_body = json.dumps(error_response).encode()

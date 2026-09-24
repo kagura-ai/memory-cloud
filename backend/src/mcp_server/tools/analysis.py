@@ -33,6 +33,7 @@ from uuid import UUID
 from fastapi import HTTPException
 from mcp.types import TextContent
 
+from mcp_server.tools._errors import _tool_exception_response
 from mcp_server.tools._helpers import (
     _error_response,
     _log_tool_usage,
@@ -49,12 +50,6 @@ from utils.exceptions import (
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-# Generic caller-facing message for unexpected errors (#1247). The real
-# detail is logged server-side as ``error_type`` + traceback; the raw
-# exception string — which can carry SQL / driver / BYOK-key internals —
-# is NEVER placed in the MCP error envelope returned to the client.
-_GENERIC_ANALYSIS_ERROR = "An internal error occurred while processing the analysis request."
 
 # Strong-ref set for ``asyncio.create_task`` — without this the task
 # can be GC'd before the loop schedules it. Mirrors the REST-side
@@ -149,13 +144,14 @@ async def _verify_context_in_workspace_mcp(
     return None
 
 
-def _gate_error_response(exc: Exception) -> list[TextContent]:
+def _gate_error_response(exc: Exception, tool_name: str) -> list[TextContent]:
     """Map an analysis_gates / orchestrator exception to an MCP error envelope.
 
     Keeps gate logic identical between REST (raises) and MCP (envelope)
     by converting at exactly one place. The REST handler relies on
     FastAPI's global ``MemoryCloudException`` handler — this function
-    is the MCP equivalent.
+    is the MCP equivalent. ``tool_name`` drives the retry advice of the
+    unexpected-error fallback (#1684).
     """
     if isinstance(exc, (AuthorizationError, NotFoundException)):
         return _error_response(
@@ -206,10 +202,9 @@ def _gate_error_response(exc: Exception) -> list[TextContent]:
             exc.message,
             **{k: v for k, v in exc.details.items() if v is not None},
         )
-    # Unexpected — log the real detail server-side, return a generic
-    # message so no SQL/driver internals leak into the MCP envelope (#1247).
-    logger.error("analysis_mcp_unexpected_error", error_type=type(exc).__name__, exc_info=True)
-    return _error_response("internal_error", _GENERIC_ANALYSIS_ERROR)
+    # Unexpected — the shared vocabulary logs the real detail server-side
+    # under a correlation_id and returns no SQL/driver internals (#1247, #1684).
+    return _tool_exception_response(tool_name, exc)
 
 
 def _serialize_run_row(row: Any) -> dict[str, Any]:
@@ -310,7 +305,7 @@ async def handle_analyze_context(
                     require_quota=True,
                 )
             except Exception as gate_exc:
-                return _gate_error_response(gate_exc)
+                return _gate_error_response(gate_exc, "analyze_context")
 
             if dry_run:
                 # Preview path — same memory count semantics as REST /preview
@@ -335,7 +330,7 @@ async def handle_analyze_context(
                 try:
                     assert_run_size_within_cap(memory_count, redact_count=is_enforce)
                 except ValidationError as cap_exc:
-                    return _gate_error_response(cap_exc)
+                    return _gate_error_response(cap_exc, "analyze_context")
                 # #1366: the count an enforce agent SEES (and the
                 # estimate derived from it) is binding-subtracted so
                 # neither reports denied-row volume. Non-agent/shadow
@@ -405,7 +400,7 @@ async def handle_analyze_context(
             try:
                 assert_run_size_within_cap(memory_count, redact_count=agent_scope_is_enforce())
             except ValidationError as cap_exc:
-                return _gate_error_response(cap_exc)
+                return _gate_error_response(cap_exc, "analyze_context")
 
             params = AnalysisParams(
                 from_dt=None,
@@ -434,7 +429,7 @@ async def handle_analyze_context(
                 )
             except (ConflictError, ValidationError) as orch_exc:
                 await db.rollback()
-                return _gate_error_response(orch_exc)
+                return _gate_error_response(orch_exc, "analyze_context")
 
             await db.commit()
             # Strong-ref + done callback so the task is not GC'd before
@@ -466,11 +461,10 @@ async def handle_analyze_context(
 
         except Exception as e:
             await db.rollback()
-            logger.error("analyze_context_failed", error_type=type(e).__name__, exc_info=True)
             await _log_tool_usage(
                 db, user_id, "analyze_context", start_time, 500, workspace_id=workspace_id
             )
-            return _error_response("analyze_context_error", _GENERIC_ANALYSIS_ERROR)
+            return _tool_exception_response("analyze_context", e, error="analyze_context_error")
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -507,7 +501,7 @@ async def handle_get_analysis(
                     require_quota=False,  # Read path — quota gate skipped.
                 )
             except Exception as gate_exc:
-                return _gate_error_response(gate_exc)
+                return _gate_error_response(gate_exc, "get_analysis")
 
             from services.analysis import query_service
 
@@ -543,11 +537,10 @@ async def handle_get_analysis(
             return _success_response(**_serialize_run_row(row))
 
         except Exception as e:
-            logger.error("get_analysis_failed", error_type=type(e).__name__, exc_info=True)
             await _log_tool_usage(
                 db, user_id, "get_analysis", start_time, 500, workspace_id=workspace_id
             )
-            return _error_response("get_analysis_error", _GENERIC_ANALYSIS_ERROR)
+            return _tool_exception_response("get_analysis", e, error="get_analysis_error")
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -593,7 +586,7 @@ async def handle_list_analyses(
                     require_quota=False,
                 )
             except Exception as gate_exc:
-                return _gate_error_response(gate_exc)
+                return _gate_error_response(gate_exc, "list_analyses")
 
             from services.analysis import query_service
 
@@ -613,11 +606,10 @@ async def handle_list_analyses(
             )
 
         except Exception as e:
-            logger.error("list_analyses_failed", error_type=type(e).__name__, exc_info=True)
             await _log_tool_usage(
                 db, user_id, "list_analyses", start_time, 500, workspace_id=workspace_id
             )
-            return _error_response("list_analyses_error", _GENERIC_ANALYSIS_ERROR)
+            return _tool_exception_response("list_analyses", e, error="list_analyses_error")
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -660,7 +652,7 @@ async def handle_get_active_analysis(
                     require_quota=False,
                 )
             except Exception as gate_exc:
-                return _gate_error_response(gate_exc)
+                return _gate_error_response(gate_exc, "get_active_analysis")
 
             from services.analysis import query_service
 
@@ -692,7 +684,6 @@ async def handle_get_active_analysis(
             return _success_response(**_serialize_run_row(row))
 
         except Exception as e:
-            logger.error("get_active_analysis_failed", error_type=type(e).__name__, exc_info=True)
             await _log_tool_usage(
                 db,
                 user_id,
@@ -701,7 +692,9 @@ async def handle_get_active_analysis(
                 500,
                 workspace_id=workspace_id,
             )
-            return _error_response("get_active_analysis_error", _GENERIC_ANALYSIS_ERROR)
+            return _tool_exception_response(
+                "get_active_analysis", e, error="get_active_analysis_error"
+            )
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -757,7 +750,7 @@ async def handle_get_cluster(
                     require_quota=False,
                 )
             except Exception as gate_exc:
-                return _gate_error_response(gate_exc)
+                return _gate_error_response(gate_exc, "get_cluster")
 
             # #1281 item 5: run_id-addressed handler — an agent-bound credential
             # must be contained to its bound contexts even here. Resolve the
@@ -816,10 +809,9 @@ async def handle_get_cluster(
             return _success_response(**cluster)
 
         except Exception as e:
-            logger.error("get_cluster_failed", error_type=type(e).__name__, exc_info=True)
             await _log_tool_usage(
                 db, user_id, "get_cluster", start_time, 500, workspace_id=workspace_id
             )
-            return _error_response("get_cluster_error", _GENERIC_ANALYSIS_ERROR)
+            return _tool_exception_response("get_cluster", e, error="get_cluster_error")
 
     return _error_response("internal_error", "Database session unavailable")

@@ -3,21 +3,19 @@
 Extracted from tools.py for modularity (Issue #7).
 """
 
-import logging
 import time
 from typing import Any
 from uuid import UUID
 
 from mcp.types import TextContent
 
+from mcp_server.tools._errors import _tool_exception_response
 from mcp_server.tools._helpers import (
     _dumps,
     _error_response,
     _format_validation_error,
     _log_tool_usage,
 )
-
-logger = logging.getLogger(__name__)
 
 
 async def handle_update_search_config(
@@ -43,6 +41,7 @@ async def handle_update_search_config(
             )
             from services.permission_service import PermissionService
             from services.reranker_service import default_reranker_model_for
+            from utils.exceptions import AuthorizationError, NotFoundException
 
             # Parse context_id
             try:
@@ -57,7 +56,10 @@ async def handle_update_search_config(
             perm_service = PermissionService(db)
             try:
                 await perm_service.check_context_write(user_id, ctx_uuid)
-            except Exception as perm_err:
+            except (AuthorizationError, NotFoundException) as perm_err:
+                # The two designed denials only (#1684): a database failure
+                # here reaches the catch-all below instead of being reported
+                # as permission_denied with the driver's text.
                 return _error_response("permission_denied", str(perm_err))
 
             repo = ContextSearchConfigRepository(db)
@@ -151,8 +153,9 @@ async def handle_update_search_config(
             ]
         except Exception as e:
             await db.rollback()
-            logger.error(f"update_search_config_failed: {e}", exc_info=True)
-            return _error_response("update_search_config_error", str(e))
+            return _tool_exception_response(
+                "update_search_config", e, error="update_search_config_error"
+            )
 
     # Safety: should never reach here (get_db always yields)
     return _error_response("internal_error", "Database session unavailable")
