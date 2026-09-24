@@ -14,8 +14,10 @@ way:
 * **Skeleton** — trimming is a text-only change. Every definition with its
   ``description`` strings removed must equal the committed snapshot, which was
   generated from the registry *before* any text was touched. Names, types,
-  ``required``, enums, bounds, ``additionalProperties``, ``readOnly`` flags,
-  titles and annotations are therefore pinned, in order.
+  ``required``, enums, bounds, ``additionalProperties`` and ``readOnly`` flags
+  are therefore pinned, in order. The ``title`` and ``annotations`` of #1683
+  are left out too: they come from one table, ``TOOL_ANNOTATIONS``, which
+  ``test_tool_annotations`` pins.
 
 A deliberate schema change (a new tool or parameter) regenerates the snapshot::
 
@@ -92,8 +94,18 @@ def _strip_descriptions(node: Any) -> Any:
     return node
 
 
+# Attached at the exit from ``TOOL_ANNOTATIONS`` and pinned by
+# ``test_tool_annotations``; a copy here would be a second place to update.
+_NOT_IN_SKELETON = frozenset({"title", "annotations"})
+
+
 def _skeleton() -> list[dict]:
-    return [_strip_descriptions(tool) for tool in get_tool_definitions()]
+    return [
+        _strip_descriptions(
+            {key: value for key, value in tool.items() if key not in _NOT_IN_SKELETON}
+        )
+        for tool in get_tool_definitions()
+    ]
 
 
 def _assert_within(size: int, budget: int, what: str) -> None:
