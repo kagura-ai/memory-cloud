@@ -423,7 +423,7 @@ A failed call is a tool result with `isError: true` whose text block is one JSON
 {"status": "error", "error": "<code>", "message": "<what happened>", "help": "<what to do next>"}
 ```
 
-Branch on `error`; it is stable. `message` is written for people and may change. `help` is the next action, written for the calling model.
+Branch on `error`; it is stable. `message` is written for people and may change. `help` is the next action, written for the calling model. The envelopes described below always carry `help`; many older argument-validation envelopes (`invalid_argument`, `missing_fields`, …) carry only `error` and `message`, and the message names the argument. The instructions that `get_context_info` and `get_agent_bootstrap` return include a short version of this section, so a calling model has it from the start of a session.
 
 **Refusals.** The request was understood and refused. Repeating the same call fails the same way.
 
@@ -441,26 +441,29 @@ Branch on `error`; it is stable. `message` is written for people and may change.
 
 | Field | Meaning |
 |-------|---------|
-| `cause` | `timeout` (the tool did not finish within its time limit), `service_unavailable` (the database, search index or model provider could not be reached) or `internal_error` (anything else) |
+| `cause` | `timeout` (the tool did not finish within its time limit), `service_unavailable` (the database, search index, file storage or model provider could not be reached) or `internal_error` (anything else) |
 | `correlation_id` | Identifies the failure in the server log: the request's W3C trace id when the client sent `traceparent`, otherwise a random id. Quote it when reporting a problem |
-| `retryable` | `true` only for read-only tools: repeating the call is safe |
-| `retry_after_seconds` | Suggested wait (5) before retrying a read after a `timeout` or `service_unavailable` |
-| `outcome` | `"unknown"` on tools that change data: the change may or may not have been applied |
+| `retryable` | `true` when repeating the call is safe: read-only tools, and the few writes listed below |
+| `retry_after_seconds` | Suggested wait (5) before retrying a `retryable` call after a `timeout` or `service_unavailable` |
+| `outcome` | `"unknown"` on tools that change data and are not safe to repeat: the change may or may not have been applied |
 
 Where no tool-specific code exists, `error` equals `cause`. Tools that already had their own failure code keep it — `get_usage_error`, `secret_put_error`, `merge_contexts_error`, `list_tags_error`, `get_analysis_error` and the other `<tool>_error` codes — and `cause` carries the category.
 
-Read-only tools are the ones whose `tools/list` definition sets `annotations.readOnlyHint` (or the older top-level `readOnly`) to `true`. A write is never marked `retryable`: its `help` names the read that shows whether the change took effect (`recall` after `remember`, `reference` after `forget`, `list_contexts` after `create_context`, `list_edges` after `create_edge`, …). Check it before calling again, so the change is not applied twice.
+Read-only tools are the ones whose `tools/list` definition sets `annotations.readOnlyHint` (or the older top-level `readOnly`) to `true`. Three writes are also safe to repeat and are marked `retryable`: `recall` and `get_agent_bootstrap`, whose only writes are the ranking updates any repeated query makes, and `secret_register_pubkey`, which refuses a key that is already registered. Any other write is never marked `retryable`: its `help` names the read that shows whether the change took effect (`recall` after `remember`, `reference` after `forget`, `list_contexts` after `create_context`, `list_edges` after `create_edge`, `list_resource_tokens` after `setup_connector`, …). Check it before calling again, so the change is not applied twice. `feedback` is append-only and has no read: calling it again may record the rating twice.
 
-A server-failure envelope never contains exception text, exception types, stack traces, connection strings, file paths or driver messages; the server log keeps them under the `correlation_id`. A refusal's `message` is the sentence the service wrote for the caller.
+A server-failure envelope never contains exception text, exception types, stack traces, connection strings, file paths, storage keys or driver messages; the server log keeps them under the `correlation_id`. A refusal's `message` is the sentence the service wrote for the caller. `rollback_sleep_run` keeps going when one recorded action cannot be undone; its `partial_rollback` result lists each such action as `Action <id> (<type>) failed: <cause> (correlation_id <id>)` and carries the `correlation_id`.
 
-A failure outside tool execution — the transport itself — is a JSON-RPC error instead of a result. Its numeric code is unchanged (`-32001` timeout and `-32002` permission on session-based connections, otherwise `-32602` / `-32603`), `error.message` is the same fixed sentence and `error.data` carries `error`, `help` and, for server failures, `cause`, `correlation_id` and the retry fields.
+A failure outside tool execution — the transport itself — is a JSON-RPC error instead of a result. `error.message` is the same fixed sentence and `error.data` carries `error`, `help` and, for server failures, `cause`, `correlation_id` and the retry fields. The numeric code follows `data`: on session-based connections `-32001` for a `timeout`, `-32002` for `permission_denied`, `-32602` for `validation_error` and `-32603` otherwise; on stateless connections `-32602` for `validation_error` and `-32603` otherwise.
 
 ### Migration from the earlier error shapes
 
 - An unexpected failure caught by the dispatcher used to return `{"status": "error", "error": "<exception text>"}` with no `message`. It now returns `timeout`, `service_unavailable` or `internal_error` with the fields above. A service-side refusal that reached the dispatcher (a bad argument, a missing record, a permission, quota or conflict refusal) now returns the matching code from the refusal table with its original message. A client that displayed `error` should display `message`; a client that matched on exception text should branch on `error` or `cause`.
 - `get_context_info` used to put the exception text in `error`, and `list_contexts` returned it with no `message`. Both now use the codes above.
 - The `<tool>_error` codes are unchanged. Their `message` is now a fixed sentence instead of the exception text or "An internal error occurred.", with `cause`, `correlation_id` and the retry fields added. A refusal they carry (for example `merge_contexts_error` for two identical contexts) keeps its message.
-- The transport-level JSON-RPC error's `data` is no longer `{exception_type, details}`, and `message` no longer includes the exception text.
+- `init_file_upload`, `complete_file_upload` and `get_file_download_url` still report a storage failure as `service_unavailable`. The message is now the fixed sentence instead of the storage error text, and the server-failure fields are added.
+- `analyze_context`, `get_analysis`, `list_analyses`, `get_active_analysis`, `get_cluster`, `list_my_bindings`, `describe_binding`, `get_agent_bootstrap` and the `secret_*` tools have always answered an unexpected failure with a fixed message. A `ValueError` that reaches their catch-all is still treated as a server failure, not echoed as a refusal.
+- `rollback_sleep_run`'s `rollback_summary.errors` entries for a failed action no longer contain the exception text (see above).
+- The transport-level JSON-RPC error's `data` is no longer `{exception_type, details}`, and `message` no longer includes the exception text. On session-based connections a `ValueError` subclass (for example a JSON decode error) now gets `-32603` instead of `-32602`, an `httpx` timeout `-32001` instead of `-32603`, and a permission or validation refusal raised as a service exception `-32002` or `-32602` instead of `-32603`.
 - A [tool guardrail](#tool-guardrails) with `on: "result"` whose `match` targeted the raw exception text of one of these tools no longer matches. Match the `error` code instead.
 
 ## Usage notes

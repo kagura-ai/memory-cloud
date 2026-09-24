@@ -87,8 +87,8 @@ This is the MCP *tool execution error* mechanism: the model gets the envelope an
 
 **Unexpected failures (#1684).** The dispatch catch-alls in `execute_tool_call`, the per-tool `except Exception` arms and the transport fallbacks share one vocabulary, `backend/src/mcp_server/tools/_errors.py`:
 
-- a *refusal* (`MemoryCloudException` below 500, a plain `ValueError`, a `PermissionError`) keeps its message under a stable code (`validation_error`, `permission_denied`, `not_found`, `conflict`, `quota_exceeded`, `rate_limit_exceeded`, `feature_not_available`) plus `help`; `AuthorizationError` / `AdminProtectionError` never forward `details`;
-- anything else is a *server failure*: `error` is the tool's legacy `<tool>_error` code or else the `cause`; the envelope adds `cause` (`timeout` / `service_unavailable` / `internal_error`), `help`, `correlation_id` (the request's W3C trace id when set, else random), `retryable` (true only for read-only tools), `retry_after_seconds` (reads, transient causes) and `outcome: "unknown"` (writes). The exception text, type and traceback are logged under the `correlation_id` and never returned.
+- a *refusal* (`MemoryCloudException` below 500, a plain `ValueError`, a `PermissionError`) keeps its message under a stable code (`validation_error`, `permission_denied`, `not_found`, `conflict`, `quota_exceeded`, `rate_limit_exceeded`, `feature_not_available`) plus `help`; `AuthorizationError` / `AdminProtectionError` never forward `details`, and a `PermissionError`'s text is never returned. A builtin `ValueError` / `PermissionError` refusal is logged with its text and traceback. The handlers whose catch-all always returned a fixed message (analysis, `api_keys`, `agent_bootstrap`, `secrets`; #1247) pass `echo_value_error=False`, so a plain `ValueError` there is a server failure;
+- anything else is a *server failure*: `error` is the tool's legacy `<tool>_error` code or else the `cause`; the envelope adds `cause` (`timeout` / `service_unavailable` / `internal_error`), `help`, `correlation_id` (the request's W3C trace id when set, else random), `retryable` (true for read-only tools and the repeat-safe writes `recall`, `get_agent_bootstrap` and `secret_register_pubkey`), `retry_after_seconds` (retryable calls, transient causes) and `outcome: "unknown"` (other writes). The exception text, type and traceback are logged (structured `mcp_tool_failed` event) under the `correlation_id` and never returned.
 
 Before #1684 the dispatch catch-alls returned `{"status": "error", "error": "<str(e)>"}` with no `message`. Caller-facing contract and migration notes: `docs/mcp-tools.md` › Errors.
 
@@ -111,10 +111,12 @@ Exceptions that escape `execute_tool_call` in `tools/call` map to a JSON-RPC err
 
 | JSON-RPC code | Trigger | Site |
 |---|---|---|
-| `-32001` | `asyncio.TimeoutError` — tool execution timeout (custom) | `transport.py:246` |
-| `-32002` | `PermissionError` — permission denied (custom) | `transport.py:249` |
-| `-32602` | `ValueError` — invalid params (standard) | `transport.py:252` |
-| `-32603` | anything else — internal error (standard) | `transport.py:255` |
+| `-32001` | `cause: timeout` — tool execution timeout (custom) | `handle_streamable_http_post` — `tools/call` fallback |
+| `-32002` | `data.error: permission_denied` (`PermissionError`, 401/403 `MemoryCloudException`) — permission denied (custom) | same |
+| `-32602` | `data.error: validation_error` (a plain `ValueError`, or a 4xx `MemoryCloudException` with no more specific code) — invalid params (standard) | same |
+| `-32603` | anything else — internal error (standard) | same |
+
+Since #1684 the code is derived from the classification in `data`, not the Python type, so the two never disagree: a `ValueError` subclass (a server failure) gets `-32603`, an `httpx` timeout `-32001`.
 
 Requests whose `method` the transport does not implement (anything other than `initialize` / `tools/list` / `tools/call` / `ping` / `server/discover`, e.g. `resources/list`) get a standard `-32601` **Method not found**, also HTTP 200 (the terminal branch of `handle_streamable_http_post`, #1541). Before #1541 this path dereferenced a `session.transport` attribute that no longer existed and was an unconditional HTTP 500.
 
@@ -136,7 +138,7 @@ The server is dual-era (#1544). The tables above describe the **legacy** half (`
 | 400 | `-32020` **HeaderMismatch** | `MCP-Protocol-Version`, `Mcp-Method` or (for `tools/call`) `Mcp-Name` header present but undecodable or different from the body value (`Mcp-Name` is Base64-sentinel-decoded first) |
 | 400 | `-32022` **UnsupportedProtocolVersion** | requested version is not a modern revision this server serves — settled before every other rule; `data` = `{ "supported": [...], "requested": "..." }`. `supported` lists the legacy revisions too — they are reachable through `initialize` |
 | 404 | `-32601` | unknown / unimplemented method (`resources/*`, `prompts/*`, `subscriptions/listen`, …). The legacy path keeps HTTP **200** for the same code |
-| 200 | `-32602` | `ValueError` escaping `execute_tool_call` |
+| 200 | `-32602` | an exception escaping `execute_tool_call` that the #1684 vocabulary classifies as `validation_error` (a plain `ValueError`, or a 4xx `MemoryCloudException` with no more specific code) |
 | 200 | `-32603` | any other exception escaping `execute_tool_call`. `message` and `data` come from the #1684 vocabulary (§4, §5) — the exception text is logged, not returned. The legacy-range `-32001` / `-32002` are **not** used on this path |
 
 **Deliberate leniency.** The spec makes the mirrored headers and `_meta.clientCapabilities` MUSTs. Their *absence* is tolerated — the request is served and a warning naming the gaps is logged — because nothing here routes on those headers or relies on a client capability; only a header that *contradicts* the body is rejected. The `MCP-Protocol-Version` header is likewise not an era signal (legacy session clients send it too).
@@ -257,7 +259,7 @@ These 41 distinct snake_case literals are passed directly as the first argument 
 
 ⚠ `invalid_argument` vs `invalid_arguments`, and `missing_fields` vs `missing_required_fields`, are accidental near-duplicates.
 
-Since #1684 the per-tool `<tool>_error` codes of the unexpected-failure arms are passed as `error=` to `_errors._tool_exception_response(...)`, which the literal grep above does not see, and `_errors` also emits `timeout`, `service_unavailable`, `internal_error`, `validation_error`, `permission_denied`, `not_found`, `conflict`, `quota_exceeded`, `rate_limit_exceeded` and `feature_not_available` for exceptions that reach it.
+Since #1684 the per-tool `<tool>_error` codes of the unexpected-failure arms are passed as `error=` to `_errors._tool_exception_response(...)`, which the literal grep above does not see, and `_errors` also emits `timeout`, `service_unavailable`, `internal_error`, `validation_error`, `permission_denied`, `not_found`, `conflict`, `quota_exceeded`, `rate_limit_exceeded` and `feature_not_available` for exceptions that reach it. The file tools' `service_unavailable` literal above is gone: their storage failures now reach the dispatch catch-all and `_errors`.
 
 ---
 
