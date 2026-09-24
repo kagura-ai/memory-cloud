@@ -943,6 +943,37 @@ from the end user. From the terminal, `kagura auth login` does roughly:
 6. `kagura auth logout` calls `POST /api/v1/oauth/revoke` to revoke
    the issued tokens.
 
+**Device authorization request.** `POST /api/v1/oauth/device/authorize`
+takes `client_id` (required) and `scope` (optional, space-separated) in
+either body encoding:
+
+```bash
+# RFC 8628 §3.1 form encoding
+curl -X POST http://localhost:8080/api/v1/oauth/device/authorize \
+  -d client_id=kagura-cli -d scope=memory:read
+
+# JSON
+curl -X POST http://localhost:8080/api/v1/oauth/device/authorize \
+  -H "Content-Type: application/json" \
+  -d '{"client_id": "kagura-cli", "scope": "memory:read"}'
+```
+
+The media type is matched case-insensitively and parameters such as
+`charset=utf-8` are ignored. A body sent without a `Content-Type` is read as
+JSON. Unrecognised form parameters are ignored. Errors use the RFC 6749 §5.2
+body `{"error": "...", "error_description": "..."}` with
+`Cache-Control: no-store`:
+
+| Condition | Status | `error` |
+|---|---|---|
+| Unknown `client_id` | `400` | `invalid_client` |
+| Missing `client_id`, malformed body, a form parameter sent twice | `400` | `invalid_request` |
+| Any other `Content-Type` (for example `text/plain` or `multipart/form-data`) | `400` | `invalid_request` |
+| Body larger than 4096 bytes | `413` | `invalid_request` |
+
+The request limit below is counted before the body is read, so a refused
+request counts against it too.
+
 **Request limits.** The two unauthenticated device-flow steps are limited
 per client address, counted over a one-minute window:
 
