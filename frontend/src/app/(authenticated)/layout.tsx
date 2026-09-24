@@ -19,17 +19,17 @@ import { MemoryContextProvider } from "@/contexts/MemoryContextContext";
 import { Sidebar } from "@/components/dashboard/Sidebar";
 import { WorkspaceSelectionScreen } from "@/components/workspaces/WorkspaceSelectionScreen";
 import { TermsReacceptanceDialog } from "@/components/auth/TermsReacceptanceDialog";
-import { useSystemInfo } from "@/hooks/useSystemFeatures";
 
 /**
  * Issue #1665: shown INSTEAD of the app while `/auth/me` reports
  * `terms_acceptance_required` — the deployment's terms version changed since
  * this user last accepted. Nothing behind it mounts (no page fetches, no
- * workspace guard) until they accept or sign out.
+ * workspace guard) until they accept or sign out. The version comes from
+ * `/auth/me` itself, so a failed `/system/info` cannot strand the user here.
  */
 function TermsReacceptanceGate() {
-  const { refetchUser, logout } = useAuth();
-  const termsVersion = useSystemInfo()?.terms_version ?? undefined;
+  const { user, refetchUser, logout } = useAuth();
+  const termsVersion = user?.terms_version ?? undefined;
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
       <TermsReacceptanceDialog

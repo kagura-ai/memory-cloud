@@ -32,7 +32,7 @@ export function TermsReacceptanceDialog({
   onAccepted,
   onSignOut,
 }: {
-  /** From `/system/info`; undefined while it loads (the button waits). */
+  /** The version to accept, from `/auth/me`; accept stays disabled without it. */
   termsVersion: string | undefined;
   /** Refresh the auth state — the dialog goes away when the flag clears. */
   onAccepted: () => Promise<void>;

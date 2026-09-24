@@ -40,6 +40,10 @@ export interface User {
   // Issue #1665: the deployment's TERMS_VERSION changed (or was set) since this
   // user last accepted. The authenticated layout blocks until they accept.
   terms_acceptance_required?: boolean;
+  // Issue #1665: the version to accept (null while the deployment records no
+  // acceptance). Comes with the user so the re-acceptance step never depends
+  // on a separate /system/info fetch.
+  terms_version?: string | null;
 }
 
 export interface AuthResponse {
@@ -264,10 +268,9 @@ export interface TermsAcceptanceResult {
 export async function acceptTerms(
   version: string,
 ): Promise<TermsAcceptanceResult> {
-  return apiClient.post<TermsAcceptanceResult>(
-    "/api/v1/me/terms-acceptance",
-    { version },
-  );
+  return apiClient.post<TermsAcceptanceResult>("/api/v1/me/terms-acceptance", {
+    version,
+  });
 }
 
 /**
