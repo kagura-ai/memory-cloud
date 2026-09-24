@@ -85,6 +85,13 @@ This is the MCP *tool execution error* mechanism: the model gets the envelope an
 
 `MemoryCloudException` is caught in tool handlers and its `error_code`/`message`/`details` pass through verbatim (e.g. `backend/src/mcp_server/tools/resource.py:1162-1175`), so REST codes like `CONNECTOR-001` appear unchanged on the MCP surface.
 
+**Unexpected failures (#1684).** The dispatch catch-alls in `execute_tool_call`, the per-tool `except Exception` arms and the transport fallbacks share one vocabulary, `backend/src/mcp_server/tools/_errors.py`:
+
+- a *refusal* (`MemoryCloudException` below 500, a plain `ValueError`, a `PermissionError`) keeps its message under a stable code (`validation_error`, `permission_denied`, `not_found`, `conflict`, `quota_exceeded`, `rate_limit_exceeded`, `feature_not_available`) plus `help`; `AuthorizationError` / `AdminProtectionError` never forward `details`;
+- anything else is a *server failure*: `error` is the tool's legacy `<tool>_error` code or else the `cause`; the envelope adds `cause` (`timeout` / `service_unavailable` / `internal_error`), `help`, `correlation_id` (the request's W3C trace id when set, else random), `retryable` (true only for read-only tools), `retry_after_seconds` (reads, transient causes) and `outcome: "unknown"` (writes). The exception text, type and traceback are logged under the `correlation_id` and never returned.
+
+Before #1684 the dispatch catch-alls returned `{"status": "error", "error": "<str(e)>"}` with no `message`. Caller-facing contract and migration notes: `docs/mcp-tools.md` › Errors.
+
 ### 5. MCP transport — JSON-RPC protocol errors
 
 Exceptions that escape `execute_tool_call` in `tools/call` map to a JSON-RPC error object (`backend/src/mcp_server/transport.py`), HTTP 200. In practice `execute_tool_call` catches handler exceptions itself and returns them as the in-band envelope above (with `isError: true`), so this path is reached only by transport-level failures:
@@ -94,11 +101,13 @@ Exceptions that escape `execute_tool_call` in `tools/call` map to a JSON-RPC err
   "jsonrpc": "2.0", "id": "<request id>",
   "error": {
     "code": -32xxx,
-    "message": "<message>",
-    "data": { "exception_type": "<PyClassName>", "details": "<str(e), truncated 500>" }
+    "message": "<fixed sentence from the #1684 vocabulary>",
+    "data": { "error": "<code>", "help": "...", "cause": "...", "correlation_id": "...", "retryable": false, "outcome": "unknown" }
   }
 }
 ```
+
+`data` is the vocabulary of §4 (server-failure fields only for server failures). Before #1684 it was `{"exception_type": "<PyClassName>", "details": "<str(e), truncated 500>"}` and the `-32603` message was `Internal error: <str(e)>`; neither the exception's text nor its type is returned any more.
 
 | JSON-RPC code | Trigger | Site |
 |---|---|---|
@@ -127,14 +136,14 @@ The server is dual-era (#1544). The tables above describe the **legacy** half (`
 | 400 | `-32020` **HeaderMismatch** | `MCP-Protocol-Version`, `Mcp-Method` or (for `tools/call`) `Mcp-Name` header present but undecodable or different from the body value (`Mcp-Name` is Base64-sentinel-decoded first) |
 | 400 | `-32022` **UnsupportedProtocolVersion** | requested version is not a modern revision this server serves — settled before every other rule; `data` = `{ "supported": [...], "requested": "..." }`. `supported` lists the legacy revisions too — they are reachable through `initialize` |
 | 404 | `-32601` | unknown / unimplemented method (`resources/*`, `prompts/*`, `subscriptions/listen`, …). The legacy path keeps HTTP **200** for the same code |
-| 200 | `-32602` | `ValueError` raised by the tool |
-| 200 | `-32603` | any other tool exception. `PermissionError` keeps its message; timeouts report `Tool execution timeout`; everything else is a bare `Internal error` — the exception text is logged, not returned. The legacy-range `-32001` / `-32002` are **not** used on this path |
+| 200 | `-32602` | `ValueError` escaping `execute_tool_call` |
+| 200 | `-32603` | any other exception escaping `execute_tool_call`. `message` and `data` come from the #1684 vocabulary (§4, §5) — the exception text is logged, not returned. The legacy-range `-32001` / `-32002` are **not** used on this path |
 
 **Deliberate leniency.** The spec makes the mirrored headers and `_meta.clientCapabilities` MUSTs. Their *absence* is tolerated — the request is served and a warning naming the gaps is logged — because nothing here routes on those headers or relies on a client capability; only a header that *contradicts* the body is rejected. The `MCP-Protocol-Version` header is likewise not an era signal (legacy session clients send it too).
 
 Successful results carry `resultType: "complete"` and `_meta["io.modelcontextprotocol/serverInfo"]`; `server/discover` and `tools/list` additionally carry the `ttlMs` / `cacheScope` caching hints.
 
-⚠ The application `error_code` does **not** pass through this path — `MemoryCloudException` falls into the `-32603` bucket with only `exception_type` in `data`. (In practice most tool handlers catch it first, path 4 above.)
+⚠ The application `error_code` does **not** pass through this path — a `MemoryCloudException` falls into the `-32603` bucket and `data.error` carries its #1684 vocabulary code. (In practice `execute_tool_call` catches it first, path 4 above.)
 
 ### 6. MCP transport — OAuth 401 challenge (RFC 6750)
 
@@ -247,6 +256,8 @@ These 41 distinct snake_case literals are passed directly as the first argument 
 `internal_error` (37), `validation_error` (29), `missing_fields` (20), `workspace_required` (13), `invalid_context_id_format` (5), `invalid_report_id` (3), `invalid_memory_id_format` (3), `db_error` (3), `workspace_not_found` (2), `permission_denied` (2), `not_found` (2), `invalid_arguments` (2), and one each of: `update_search_config_error`, `update_context_error`, `unknown_tool`, `setup_resource_error`, `setup_connector_error`, `service_unavailable`, `quota_exceeded`, `missing_required_fields`, `merge_contexts_error`, `list_tags_error`, `list_resource_tokens_error`, `list_my_bindings_error`, `list_analyses_error`, `invalid_search_config`, `invalid_context_id`, `invalid_argument`, `ingest_events_error`, `get_usage_error`, `get_resource_schema_error`, `get_resource_impact_error`, `get_cluster_error`, `get_analysis_error`, `get_active_analysis_error`, `describe_binding_error`, `delete_context_error`, `create_context_error`, `conflict` (also §C), `binding_not_found`, `analyze_context_error`.
 
 ⚠ `invalid_argument` vs `invalid_arguments`, and `missing_fields` vs `missing_required_fields`, are accidental near-duplicates.
+
+Since #1684 the per-tool `<tool>_error` codes of the unexpected-failure arms are passed as `error=` to `_errors._tool_exception_response(...)`, which the literal grep above does not see, and `_errors` also emits `timeout`, `service_unavailable`, `internal_error`, `validation_error`, `permission_denied`, `not_found`, `conflict`, `quota_exceeded`, `rate_limit_exceeded` and `feature_not_available` for exceptions that reach it.
 
 ---
 

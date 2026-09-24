@@ -415,6 +415,54 @@ Background consolidation of memories (decay, edge pruning, theme summarization).
 | `list_my_bindings` | List your public-bound API keys (read-only; owner-scoped) | Viewer+ |
 | `describe_binding` | Describe one binding by `key_id` XOR `context_id` (read-only; owner-scoped) | Viewer+ |
 
+## Errors
+
+A failed call is a tool result with `isError: true` whose text block is one JSON envelope:
+
+```json
+{"status": "error", "error": "<code>", "message": "<what happened>", "help": "<what to do next>"}
+```
+
+Branch on `error`; it is stable. `message` is written for people and may change. `help` is the next action, written for the calling model.
+
+**Refusals.** The request was understood and refused. Repeating the same call fails the same way.
+
+| `error` | Meaning | Next step |
+|---------|---------|-----------|
+| `invalid_argument`, `validation_error`, `invalid_arguments`, `missing_fields`, `invalid_context_id_format`, `invalid_memory_id_format` | An argument is missing, malformed or out of range; `message` names it | Fix the argument |
+| `context_not_found`, `memory_not_found`, `not_found` | The id does not exist or is not visible to you (the two cases are deliberately indistinguishable) | `list_contexts`, `recall` or the matching `list_*` tool |
+| `permission_denied` | Your workspace or context role does not allow the operation | Ask a workspace owner for a higher role |
+| `quota_exceeded`, `rate_limit_exceeded` | A plan quota or the daily MCP call limit is used up; `quota_type`, `limit`, `resets_at` and similar fields say which | `get_usage`; wait for the reset |
+| `plan_required`, `feature_not_available` | The workspace's plan or an operator switch does not include the feature (`gate`, `required_plan`) | None from the model; the workspace owner decides |
+| `conflict` | The target's current state conflicts with the request, for example a locked context | Read the current state before calling again |
+| `unknown_tool` | No tool has that name | `tools/list` |
+
+**Server failures.** The server could not complete the call. The envelope adds these fields:
+
+| Field | Meaning |
+|-------|---------|
+| `cause` | `timeout` (the tool did not finish within its time limit), `service_unavailable` (the database, search index or model provider could not be reached) or `internal_error` (anything else) |
+| `correlation_id` | Identifies the failure in the server log: the request's W3C trace id when the client sent `traceparent`, otherwise a random id. Quote it when reporting a problem |
+| `retryable` | `true` only for read-only tools: repeating the call is safe |
+| `retry_after_seconds` | Suggested wait (5) before retrying a read after a `timeout` or `service_unavailable` |
+| `outcome` | `"unknown"` on tools that change data: the change may or may not have been applied |
+
+Where no tool-specific code exists, `error` equals `cause`. Tools that already had their own failure code keep it — `get_usage_error`, `secret_put_error`, `merge_contexts_error`, `list_tags_error`, `get_analysis_error` and the other `<tool>_error` codes — and `cause` carries the category.
+
+Read-only tools are the ones whose `tools/list` definition sets `annotations.readOnlyHint` (or the older top-level `readOnly`) to `true`. A write is never marked `retryable`: its `help` names the read that shows whether the change took effect (`recall` after `remember`, `reference` after `forget`, `list_contexts` after `create_context`, `list_edges` after `create_edge`, …). Check it before calling again, so the change is not applied twice.
+
+A server-failure envelope never contains exception text, exception types, stack traces, connection strings, file paths or driver messages; the server log keeps them under the `correlation_id`. A refusal's `message` is the sentence the service wrote for the caller.
+
+A failure outside tool execution — the transport itself — is a JSON-RPC error instead of a result. Its numeric code is unchanged (`-32001` timeout and `-32002` permission on session-based connections, otherwise `-32602` / `-32603`), `error.message` is the same fixed sentence and `error.data` carries `error`, `help` and, for server failures, `cause`, `correlation_id` and the retry fields.
+
+### Migration from the earlier error shapes
+
+- An unexpected failure caught by the dispatcher used to return `{"status": "error", "error": "<exception text>"}` with no `message`. It now returns `timeout`, `service_unavailable` or `internal_error` with the fields above. A service-side refusal that reached the dispatcher (a bad argument, a missing record, a permission, quota or conflict refusal) now returns the matching code from the refusal table with its original message. A client that displayed `error` should display `message`; a client that matched on exception text should branch on `error` or `cause`.
+- `get_context_info` used to put the exception text in `error`, and `list_contexts` returned it with no `message`. Both now use the codes above.
+- The `<tool>_error` codes are unchanged. Their `message` is now a fixed sentence instead of the exception text or "An internal error occurred.", with `cause`, `correlation_id` and the retry fields added. A refusal they carry (for example `merge_contexts_error` for two identical contexts) keeps its message.
+- The transport-level JSON-RPC error's `data` is no longer `{exception_type, details}`, and `message` no longer includes the exception text.
+- A [tool guardrail](#tool-guardrails) with `on: "result"` whose `match` targeted the raw exception text of one of these tools no longer matches. Match the `error` code instead.
+
 ## Usage notes
 
 The descriptions an agent receives from `tools/list` are paid for on every session, so they carry only what is needed to call a tool correctly: its purpose, when to use it instead of a neighbour, what each parameter means, the response keys, and the rules that must not be missed. The walkthroughs, rationale and longer examples live here. The plugin's `guide` skill carries the short version for an agent that wants it in-session.
