@@ -134,6 +134,11 @@ def test_user_config_shape() -> None:
         "Add ?guardrails=off to the .mcp.json URL itself (&guardrails=off when the URL "
         "already has a query, such as ?profile=core)" in cfg["server_url"]["description"]
     )
+    assert (
+        "A kagura-mcp entry (kagura setup claude --profile) has no URL there: add "
+        "--guardrails off to its args instead (kagura-mcp 0.39.0+)"
+        in cfg["server_url"]["description"]
+    )
 
 
 def test_user_config_descriptions_carry_the_traps() -> None:
@@ -580,6 +585,58 @@ def test_setup_skill_recognises_the_stdio_proxy_entry() -> None:
         assert secret_printer in text.split("## Rules", 1)[1].split("\n---\n")[0]
 
 
+def test_setup_skill_computes_the_proxy_upstream_url_like_kagura_mcp() -> None:
+    """kagura-mcp 0.39.0+ puts --guardrails / --tool-profile on the upstream URL (#1670)."""
+    b1 = _setup_skill().split("### B1.", 1)[1].split("### B2.")[0]
+    upstream = b1.split("**The upstream URL of a CLI-profile entry.**", 1)[1].split("Report, as")[0]
+    assert "`--guardrails <v>` sets `guardrails=<v>`" in upstream
+    assert "`--tool-profile <n>` sets `profile=<n>`" in upstream
+    assert "replacing every value of that key" in upstream, "the flag wins over --server's query"
+    assert "`off` in any letter case" in upstream
+    assert "`--flag value` and `--flag=value`" in upstream
+    assert "0.39.0" in upstream
+    report = b1.split("Report, as a block:", 1)[1]
+    for source in ("`--guardrails`", "`--tool-profile`", "`--server`", "the profile"):
+        assert source in report.split("**Shadowed entries**")[0], f"source {source} not reported"
+
+
+def test_setup_skill_offers_the_guardrails_flag_before_the_server_pin() -> None:
+    """B3 on a CLI-profile entry: --guardrails off first, --server only for an old SDK (#1670)."""
+    b3 = _setup_skill().split("### B3.", 1)[1].split("### B4.")[0]
+    cli = b3.split("**CLI-profile entry**", 1)[1]
+    # Already applied, whichever flag put it there: offer nothing.
+    assert "already carries `guardrails=off`" in cli and "offer nothing" in cli
+    flag = cli.index('"--guardrails", "off"')
+    pin = cli.index('"--server", "https://<host>/mcp?guardrails=off"')
+    assert flag < pin
+    assert "`kagura --version`" in cli and "0.39.0" in cli
+    # A --guardrails <context-id> is replaced in place, never overridden by a --server query.
+    assert "replace that value with `off` in place" in cli
+    assert "never while the entry's `args` carry `--guardrails`" in cli
+    # `kagura setup claude` writes the same entry for a project or user one; it has no local scope.
+    assert 'kagura setup claude --profile "$(cat "<values dir>/profile")" --guardrails off' in cli
+    assert "--scope user" in cli and "no `local` scope" in cli
+    # The claude mcp add rebuild keeps an existing --tool-profile.
+    rebuild = [
+        ln.strip(" `")
+        for ln in cli.splitlines()
+        if ln.strip(" `").startswith("claude mcp add kagura-memory")
+    ]
+    assert len(rebuild) == 2, "one rebuild line per way"
+    assert rebuild and all("--guardrails off" in ln or "--server" in ln for ln in rebuild)
+    # ...but only when the entry has one: the rebuild line itself never reads a file that may
+    # not exist, and the --tool-profile pair is appended conditionally.
+    assert not any("tool_profile" in ln for ln in rebuild)
+    assert '`--tool-profile "$(cat "<values dir>/tool_profile")"` when B1 wrote' in cli
+    assert "never an empty value" in cli
+
+
+def test_setup_skill_reports_the_computed_upstream() -> None:
+    b7 = _setup_skill().split("### B7.", 1)[1]
+    assert "— from --server (" not in b7, "the upstream row names each parameter's source"
+    assert "guardrails from --guardrails" in b7 and "profile from --tool-profile" in b7
+
+
 def test_setup_skill_mcp_json_reader_handles_the_stdio_form(tmp_path: Path) -> None:
     """The .mcp.json projection runs on a stdio entry without a url and leaks no value."""
     block = _block_containing(_setup_skill(), 'd.get("mcpServers")')
@@ -819,6 +876,7 @@ def test_setup_skill_checks_values_before_the_first_command_that_uses_them() -> 
         "entry_name",
         "new_mcp_url",
         "profile",
+        "tool_profile",
         "marketplace",
     }
     for field in used:
@@ -914,6 +972,9 @@ def test_setup_skill_value_check_accepts_mcp_urls(tmp_path: Path, value: str) ->
         ("entry_name", "-s", False),
         ("entry_name", "--help", False),
         ("profile", "--server", False),
+        ("tool_profile", "core", True),
+        ("tool_profile", "--guardrails", False),
+        ("tool_profile", "core&guardrails=x", False),
         ("marketplace", "kagura-memory-cloud", True),
         ("marketplace", "--scope", False),
         ("marketplace", "cloud$(touch x)", False),

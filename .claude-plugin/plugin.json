@@ -22,7 +22,7 @@
     "server_url": {
       "type": "string",
       "title": "Kagura Memory MCP URL",
-      "description": "The MCP endpoint from .mcp.json — the whole URL, ending in /mcp or /mcp/w/<workspace-id>, never the site root. Example: https://<host>/mcp (or https://<host>/mcp/w/<workspace-id>). The hooks POST load_guardrails to exactly this URL, so a site root answers http 404/405 and no guardrail is ever delivered. Add ?guardrails=off to the .mcp.json URL itself (&guardrails=off when the URL already has a query, such as ?profile=core) so the server does not also send a guardrail digest."
+      "description": "The MCP endpoint from .mcp.json — the whole URL, ending in /mcp or /mcp/w/<workspace-id>, never the site root. Example: https://<host>/mcp (or https://<host>/mcp/w/<workspace-id>). The hooks POST load_guardrails to exactly this URL, so a site root answers http 404/405 and no guardrail is ever delivered. Add ?guardrails=off to the .mcp.json URL itself (&guardrails=off when the URL already has a query, such as ?profile=core) so the server does not also send a guardrail digest. A kagura-mcp entry (kagura setup claude --profile) has no URL there: add --guardrails off to its args instead (kagura-mcp 0.39.0+)."
     },
     "api_key": {
       "type": "string",
