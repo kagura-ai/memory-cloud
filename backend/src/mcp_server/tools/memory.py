@@ -1173,10 +1173,6 @@ class _ReferenceView:
         self.offset = offset
         self.max_chars = max_chars
 
-    @property
-    def is_default(self) -> bool:
-        return self.page_field is None and self.fields == frozenset(_REFERENCE_FIELDS)
-
 
 class _ReferenceOffsetError(Exception):
     """An offset past the end of the field it pages (known only after the read)."""
@@ -1366,20 +1362,28 @@ def _bound_reference_memory(memory: dict[str, Any], view: _ReferenceView) -> dic
     # itself, when smaller), content likewise, a requested page its minimum.
     wholes = [f for f in _REFERENCE_WHOLE_ORDER if f in view.fields and f != view.page_field]
     whole = {f: {key: memory[key] for key in _REFERENCE_FIELD_KEYS[f]} for f in wholes}
-    whole_chars = {f: _part_chars(part) for f, part in whole.items()}
-    omitted = {
-        f: (
-            _omitted_marker(f, len(_dumps(part)), None)
-            if f == "links"
-            else _omitted_marker(f, len(_dumps(memory[f])), 0)
-        )
-        for f, part in whole.items()
+    # Each whole field is serialized once: its compact JSON length is the
+    # <field>_total_chars of its marker and, with its key(s), its size in place
+    # (the four link keys in place are their JSON object less the braces, plus
+    # a leading comma).
+    total = {f: len(_dumps(part if f == "links" else memory[f])) for f, part in whole.items()}
+    whole_chars = {
+        f: total[f] - 1 if f == "links" else len(_dumps(f)) + total[f] + 2 for f in wholes
     }
+    omitted = {f: _omitted_marker(f, total[f], None if f == "links" else 0) for f in wholes}
     need = {f: min(whole_chars[f], _part_chars(omitted[f])) for f in wholes}
 
     content = memory["content"]
     content_after_page = "content" in view.fields and view.page_field != "content"
-    content_chars = _member_chars("content", content) if content_after_page else 0
+    content_chars = 0
+    if content_after_page:
+        # Escaping only lengthens text, so content at least as long as the
+        # budget cannot fit whole; it is not serialized just to be measured.
+        content_chars = (
+            view.max_chars + 1
+            if len(content) >= view.max_chars
+            else _member_chars("content", content)
+        )
     content_need = (
         min(content_chars, _part_chars(_omitted_marker("content", len(content), 0)))
         if content_after_page
@@ -1514,19 +1518,19 @@ async def handle_reference(
                 ),
             }
 
-            # #1685: a default call whose full projection fits is returned
-            # exactly as before; anything else is selected / paged / bounded.
-            text = _dumps({"status": "success", "memory": reference_data})
-            if not (view.is_default and len(text) <= view.max_chars):
-                try:
-                    bounded = _bound_reference_memory(reference_data, view)
-                except _ReferenceOffsetError as e:
-                    await db.rollback()
-                    await _log_tool_usage(
-                        db, user_id, "reference", start_time, 400, current_context_id, workspace_id
-                    )
-                    return e.to_response()
-                text = _dumps({"status": "success", "memory": bounded})
+            # #1685: only the selected / paged / bounded projection is
+            # serialized, never the full one. A default call whose full
+            # projection fits keeps every field whole, so its text is exactly
+            # what reference() returned before.
+            try:
+                bounded = _bound_reference_memory(reference_data, view)
+            except _ReferenceOffsetError as e:
+                await db.rollback()
+                await _log_tool_usage(
+                    db, user_id, "reference", start_time, 400, current_context_id, workspace_id
+                )
+                return e.to_response()
+            text = _dumps({"status": "success", "memory": bounded})
 
             await _log_tool_usage(
                 db, user_id, "reference", start_time, 200, current_context_id, workspace_id

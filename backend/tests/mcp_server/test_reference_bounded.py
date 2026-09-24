@@ -283,6 +283,101 @@ async def test_every_budget_is_respected(max_chars):
     assert len(text) > max_chars - 100
 
 
+@pytest.mark.parametrize("grow", ["content", "details", "context"])
+@pytest.mark.asyncio
+async def test_a_default_call_is_unchanged_up_to_the_budget_and_bounded_past_it(grow):
+    """Sweep one field across the budget: whatever fits is the pre-#1685 text, exactly."""
+
+    def result_with(n: int) -> ReferenceResponse:
+        body = "x" * n
+        return _response(**{grow: body if grow == "content" else {"raw": body}})
+
+    fit = REFERENCE_DEFAULT_MAX_CHARS - len(_legacy_text(result_with(0)))
+    for n in range(fit - 3, fit + 4):
+        result = result_with(n)
+        text, _ = await _call({}, service_result=result)
+        if n <= fit:
+            assert text == _legacy_text(result), n
+            continue
+        assert len(text) <= REFERENCE_DEFAULT_MAX_CHARS, n
+        marker = "content_truncated" if grow == "content" else f"{grow}_omitted"
+        assert _memory(text)[marker] is True, n
+
+
+# ----------------------------------------------------------- serialization cost
+
+
+async def _call_recording_serializations(
+    args: dict, result: ReferenceResponse
+) -> tuple[str, list[int]]:
+    """Run reference(); return (text, length of every string the handler serialized)."""
+    from mcp_server.tools import memory as memory_tools
+
+    real, sizes = memory_tools._dumps, []
+
+    def spy(obj):
+        out = real(obj)
+        sizes.append(len(out))
+        return out
+
+    with patch("mcp_server.tools.memory._dumps", new=spy):
+        text, _ = await _call(args, service_result=result)
+    return text, sizes
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {},
+        {"fields": []},
+        {"fields": ["links"]},
+        {"fields": ["content"]},
+        {"content_offset": 100_000},
+        {"content_offset": 100_000, "max_chars": REFERENCE_MAX_CHARS_LIMIT},
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_large_memory_is_never_serialized_whole(args):
+    """Only the bounded response is serialized, never the full projection.
+
+    A 1M-character content, and details / context the call does not select,
+    cost no full-size string. (A selected details / context is serialized
+    once, since its size is reported as <field>_total_chars.)
+    """
+    unselected = {"raw": "d" * 1_048_576} if args else None
+    result = _response(content="c" * 1_048_576, details=unselected, context=unselected)
+    text, sizes = await _call_recording_serializations(args, result)
+    max_chars = args.get("max_chars", REFERENCE_DEFAULT_MAX_CHARS)
+    assert len(text) <= max_chars
+    assert max(sizes) <= max_chars
+
+
+@pytest.mark.asyncio
+async def test_a_selected_whole_field_is_serialized_once():
+    """details that cannot fit are serialized once, for the budget and details_total_chars."""
+    details = {"raw": "d" * 1_048_576}
+    text, sizes = await _call_recording_serializations(
+        {"fields": ["details"]}, _response(details=details)
+    )
+    memory = _memory(text)
+    assert memory["details_omitted"] is True
+    assert memory["details_total_chars"] == len(_compact(details))
+    assert sum(size > REFERENCE_DEFAULT_MAX_CHARS for size in sizes) == 1
+
+
+@pytest.mark.asyncio
+async def test_omitted_links_report_the_size_of_their_json():
+    result = _response(links=50, link_summary="s" * 200)
+    text, _ = await _call(
+        {"fields": ["links"], "max_chars": REFERENCE_MIN_MAX_CHARS}, service_result=result
+    )
+    legacy = json.loads(_legacy_text(result))["memory"]
+    keys = ("outgoing_links", "outgoing_has_more", "incoming_links", "incoming_has_more")
+    memory = _memory(text)
+    assert memory["links_omitted"] is True
+    assert memory["links_total_chars"] == len(_compact({key: legacy[key] for key in keys}))
+
+
 # ----------------------------------------------------------------- continuation
 
 
