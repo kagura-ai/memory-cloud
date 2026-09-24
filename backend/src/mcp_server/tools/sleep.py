@@ -40,6 +40,17 @@ from utils.logger import get_logger
 # returns a tri-state and the two are handled apart, below.
 logger = get_logger(__name__)
 
+# #1684: the next step after ``partial_rollback``. The report is marked
+# 'failed', which the status check in ``handle_rollback_sleep_run`` refuses, so
+# a repeat cannot undo an already-reversed action twice; the outcome itself is
+# known — ``rollback_summary`` lists it.
+_PARTIAL_ROLLBACK_HELP = (
+    "Every action not listed in rollback_summary.errors was handled and saved. "
+    "The report is now 'failed', so calling rollback_sleep_run on it again is refused. "
+    "get_sleep_report lists the run's recorded actions; quote the correlation_id, "
+    "if present, when reporting a failed action."
+)
+
 
 def _report_to_summary(report: Any) -> dict[str, Any]:
     """Convert SleepReport to summary dict for history listing."""
@@ -731,7 +742,9 @@ async def handle_rollback_sleep_run(
                 return _error_response(
                     "partial_rollback",
                     f"Rollback completed with {len(rollback_summary['errors'])} error(s). "
-                    "Report marked as 'failed' — inspect errors and retry if needed.",
+                    "Report marked as 'failed'; rollback_summary shows what was reversed.",
+                    help=_PARTIAL_ROLLBACK_HELP,
+                    retryable=False,
                     report_id=str(report_uuid),
                     rollback_summary=rollback_summary,
                     **({"correlation_id": correlation_id} if correlation_id else {}),

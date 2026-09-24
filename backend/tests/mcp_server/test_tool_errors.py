@@ -503,6 +503,57 @@ async def test_update_search_config_keeps_the_designed_denial():
     assert _payload(result)["error"] == "permission_denied"
 
 
+@pytest.mark.asyncio
+async def test_get_context_info_does_not_echo_a_value_error():
+    """Its catch-all always answered with a fixed message, and the dispatch has
+    already checked the context_id format: a plain ``ValueError`` reaching it
+    (stored data, a library) is a server failure, not a refusal to echo."""
+    from mcp_server.tools.context import handle_get_context_info
+
+    db = MagicMock()
+    db.rollback = AsyncMock()
+
+    async def fake_get_db():
+        yield db
+
+    with (
+        patch("db.base.get_db", new=fake_get_db),
+        patch(
+            "mcp_server.tools.context._resolve_context_for_read",
+            new=AsyncMock(side_effect=ValueError(_LEAKY)),
+        ),
+        patch("mcp_server.tools.context._log_tool_usage", new=AsyncMock()),
+    ):
+        result = await handle_get_context_info({"context_id": str(uuid4())}, "user-1", None)
+
+    payload = _payload(result)
+    assert payload["error"] == CAUSE_INTERNAL_ERROR
+    assert payload["message"] == "get_context_info failed because of an unexpected server error."
+    assert payload["retryable"] is True
+    assert payload["correlation_id"]
+    for fragment in ("hunter2", "postgresql://", "/srv/app"):
+        assert fragment not in result[0].text
+    db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_id", ["not-a-uuid", None])
+async def test_get_context_info_refuses_a_malformed_context_id_before_the_catch_all(context_id):
+    """The handler's own format check answers like the dispatch pre-check, so a
+    direct call keeps the caller-facing refusal without a database session."""
+    from mcp_server.tools.context import handle_get_context_info
+
+    def no_db():
+        raise AssertionError("no database session for a malformed context_id")
+
+    with patch("db.base.get_db", new=no_db):
+        result = await handle_get_context_info({"context_id": context_id}, "user-1", None)
+
+    payload = _payload(result)
+    assert payload["error"] == "invalid_context_id_format"
+    assert "list_contexts" in payload["message"]
+
+
 # The storage layer's own messages: an object key, and operator configuration.
 _STORAGE_TEXTS = [
     "head_object failed for key='ws-1/ab/abcdef': AccessDenied",

@@ -43,15 +43,19 @@ async def handle_get_context_info(
     """
     include_details = args.get("include_details", True)
 
+    # #1684: parsed before the catch-all, which no longer echoes a ValueError.
+    # Same refusal as the dispatch pre-check, for direct callers.
+    try:
+        current_context_id = _resolve_context_id(args.get("context_id"))
+    except ValueError as e:
+        return _error_response("invalid_context_id_format", str(e))
+
     from db.base import get_db
 
     start_time = time.time()
-    current_context_id = None
     async for db in get_db():
         try:
             from services.memory_service import MemoryService
-
-            current_context_id = _resolve_context_id(args["context_id"])
 
             current_context = None
             is_shared = False
@@ -213,8 +217,9 @@ async def handle_get_context_info(
                 current_context_id,
                 workspace_id,
             )
-            # #1684: the ``error`` code used to be ``str(e)`` itself.
-            return _tool_exception_response("get_context_info", e)
+            # #1684: the ``error`` code used to be ``str(e)`` itself. The
+            # message was always fixed, so a ValueError here is not echoed.
+            return _tool_exception_response("get_context_info", e, echo_value_error=False)
 
     # Safety: should never reach here (get_db always yields)
     return _error_response("internal_error", "Database session unavailable")

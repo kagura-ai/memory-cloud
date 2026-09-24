@@ -405,12 +405,15 @@ class TestRollbackSleepRun:
         assert data["error"] == "report_not_found"
 
     @pytest.mark.asyncio
-    async def test_cannot_rollback_non_completed(self, user_id, workspace_id):
+    # "failed" is what a partial rollback leaves behind: a repeat is refused,
+    # so it cannot undo the already-reversed actions a second time (#1684).
+    @pytest.mark.parametrize("status", ["running", "failed"])
+    async def test_cannot_rollback_non_completed(self, user_id, workspace_id, status):
         report_id = uuid4()
         report = MagicMock()
         report.id = report_id
         report.user_id = user_id
-        report.status = "running"
+        report.status = status
 
         mock_db = AsyncMock()
         mock_result = MagicMock()
@@ -429,7 +432,7 @@ class TestRollbackSleepRun:
         data = json.loads(result[0].text)
         assert data["status"] == "error"
         assert data["error"] == "invalid_status"
-        assert "running" in data["message"]
+        assert status in data["message"]
 
     @pytest.mark.asyncio
     async def test_cannot_rollback_already_rolled_back(self, user_id, workspace_id):
@@ -1022,6 +1025,7 @@ class TestRollbackActionDispatch:
         # …and the following action still ran.
         assert summary["promotions_reversed"] == 1, summary
         assert data.get("error") == "partial_rollback"
+        self._assert_partial_rollback_advice(data)
         # The exception text is in the log only.
         for fragment in (str(exc), "hunter2", "/srv/app"):
             assert fragment not in result[0].text
@@ -1030,6 +1034,20 @@ class TestRollbackActionDispatch:
         assert event.kwargs["exc_info"] is exc
         assert event.kwargs["exc"] == str(exc)
         assert event.kwargs["correlation_id"] == data["correlation_id"]
+
+    @staticmethod
+    def _assert_partial_rollback_advice(data):
+        """#1684 review: ``partial_rollback`` says what a repeat does. The
+        report is now ``failed``, which the status check refuses (see
+        ``test_cannot_rollback_non_completed``), so it is not retryable and
+        ``help`` names the read instead of inviting a retry. The outcome is
+        known — ``rollback_summary`` lists it — so there is no ``outcome``."""
+        assert data["retryable"] is False
+        assert "refused" in data["help"]
+        assert "get_sleep_report" in data["help"]
+        assert "retry" not in data["message"]
+        assert "'failed'" in data["message"]
+        assert "outcome" not in data
 
     async def _run_with_extra(self, actions, extra, user_id, workspace_id, patch_re_embed=True):
         report_id = uuid4()
@@ -1115,6 +1133,9 @@ class TestRollbackActionDispatch:
         assert any("sleep_merge_retention_days" in e for e in summary["errors"]), summary
         re_embed.assert_not_awaited()
         assert data.get("error") == "partial_rollback"
+        self._assert_partial_rollback_advice(data)
+        # No action raised, so there is no server failure to correlate.
+        assert "correlation_id" not in data
 
     @pytest.mark.asyncio
     async def test_prefetch_is_scoped_to_the_caller(self, user_id, workspace_id):
