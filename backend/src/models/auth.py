@@ -668,7 +668,8 @@ class OAuth2Client(Base):
     # Migration 035: Encrypted plaintext secret for display until hidden
     plaintext_secret_encrypted: Mapped[str | None] = mapped_column(String, nullable=True)
 
-    # Migration 036: Provider type (claude, chatgpt, custom)
+    # Migration 036: Provider type (claude, chatgpt, cursor, custom; DCR also
+    # stores codex, hermes, openclaw for loopback native clients — #1657)
     provider: Mapped[str] = mapped_column(String(50), nullable=False, server_default="custom")
 
     # Relationships

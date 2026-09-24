@@ -369,6 +369,222 @@ class TestDcrEndpointAcceptance:
         fake_encryptor.encrypt.assert_not_called()
 
 
+# --- Issue #1657: loopback-only native MCP clients -----------------------
+#
+# Codex CLI, Hermes Agent and OpenClaw register through DCR with a loopback
+# redirect and a ``client_name`` outside the original chatgpt/claude/cursor
+# keywords. The bodies below mirror what each client actually sends.
+
+_DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+
+_CODEX_BODY = {
+    "client_name": "Codex",
+    "redirect_uris": ["http://127.0.0.1:53682/callback"],
+    "grant_types": ["authorization_code", "refresh_token"],
+    "response_types": ["code"],
+    "token_endpoint_auth_method": "none",
+}
+_HERMES_BROWSER_BODY = {
+    "client_name": "Hermes Agent",
+    "redirect_uris": ["http://127.0.0.1:8420/callback"],
+    "grant_types": ["authorization_code", "refresh_token"],
+    "response_types": ["code"],
+    "token_endpoint_auth_method": "none",
+    "application_type": "native",
+}
+_HERMES_DEVICE_BODY = {
+    **_HERMES_BROWSER_BODY,
+    "grant_types": [_DEVICE_CODE_GRANT, "refresh_token"],
+    "response_types": [],
+}
+_OPENCLAW_BODY = {
+    "client_name": "OpenClaw MCP",
+    "redirect_uris": [
+        "http://127.0.0.1:8989/oauth/callback",
+        "http://localhost:8989/oauth/callback",
+    ],
+    "grant_types": ["authorization_code", "refresh_token"],
+    "response_types": ["code"],
+    "token_endpoint_auth_method": "none",
+}
+
+
+class TestDetectDcrProviderLoopbackClients:
+    """``detect_dcr_provider`` for the loopback-only clients (#1657)."""
+
+    @pytest.mark.parametrize(
+        "host",
+        ["127.0.0.1:53682", "localhost:53682", "[::1]:53682", "127.0.0.1", "localhost"],
+    )
+    @pytest.mark.parametrize(
+        ("client_name", "expected"),
+        [
+            ("Codex", "codex"),
+            ("Hermes Agent", "hermes"),
+            ("OpenClaw MCP", "openclaw"),
+            # case-insensitivity and NFKC folding apply to the new keywords too
+            ("CODEX", "codex"),
+            ("ｈｅｒｍｅｓ", "hermes"),
+        ],
+    )
+    def test_loopback_new_clients_detected(self, host: str, client_name: str, expected: str):
+        assert detect_dcr_provider(f"http://{host}/callback", client_name) == expected
+
+    @pytest.mark.parametrize(
+        ("client_name", "expected"),
+        [
+            # A name holding both a pre-#1657 keyword and a new one keeps the
+            # pre-#1657 result: the old keywords are checked first.
+            ("Claude Codex", "claude"),
+            ("Codex for Cursor", "cursor"),
+            ("ChatGPT Hermes bridge", "chatgpt"),
+            ("OpenClaw Claude", "claude"),
+        ],
+    )
+    def test_name_matching_old_and_new_keyword_keeps_old_provider(
+        self, client_name: str, expected: str
+    ):
+        assert detect_dcr_provider("http://127.0.0.1:8080/cb", client_name) == expected
+
+    @pytest.mark.parametrize(
+        "redirect_uri",
+        [
+            "https://codex.example.com/callback",
+            "https://example.com/codex/callback",
+            "https://hermes.example.org/cb",
+            "https://openclaw.example.net/oauth/callback",
+            "https://localhost/callback",  # https loopback is not RFC 8252
+        ],
+    )
+    @pytest.mark.parametrize("client_name", ["Codex", "Hermes Agent", "OpenClaw MCP"])
+    def test_new_names_on_non_loopback_redirect_return_custom(
+        self, redirect_uri: str, client_name: str
+    ):
+        # The new names exist only on the loopback path: there is no hostname
+        # to match, so a non-loopback redirect stays rejected as before.
+        assert detect_dcr_provider(redirect_uri, client_name) == "custom"
+
+    def test_loopback_keywords_cover_every_hostname_provider(self):
+        # Every hostname provider must also be accepted on loopback, and the
+        # pre-#1657 keywords must stay ahead of the new ones.
+        from api.routes.oauth import (
+            _DCR_ALLOWED_PROVIDERS,
+            _LOOPBACK_PROVIDER_KEYWORDS,
+            _PROVIDER_HOSTNAMES,
+        )
+
+        assert set(_PROVIDER_HOSTNAMES) <= set(_DCR_ALLOWED_PROVIDERS)
+        assert _LOOPBACK_PROVIDER_KEYWORDS[:3] == ("chatgpt", "claude", "cursor")
+        assert "codex" not in _PROVIDER_HOSTNAMES
+        assert "hermes" not in _PROVIDER_HOSTNAMES
+        assert "openclaw" not in _PROVIDER_HOSTNAMES
+
+
+class TestDcrEndpointLoopbackClients:
+    """``POST /api/v1/oauth/register`` with each client's real body (#1657)."""
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app) as c:
+            yield c
+
+    @staticmethod
+    def _register(client, body: dict):
+        rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+        ):
+            response = client.post("/api/v1/oauth/register", json=body)
+        return response, fake_session
+
+    @pytest.mark.parametrize(
+        ("body", "expected_provider"),
+        [
+            (_CODEX_BODY, "codex"),
+            (_HERMES_BROWSER_BODY, "hermes"),
+            (_HERMES_DEVICE_BODY, "hermes"),
+            (_OPENCLAW_BODY, "openclaw"),
+        ],
+        ids=["codex", "hermes-browser", "hermes-device", "openclaw"],
+    )
+    def test_real_registration_body_returns_201(self, client, body: dict, expected_provider: str):
+        response, fake_session = self._register(client, body)
+
+        assert response.status_code == 201, response.text
+        resp = response.json()
+        assert resp["provider"] == expected_provider
+        assert resp["client_name"] == body["client_name"]
+        assert resp["redirect_uris"] == body["redirect_uris"]
+        assert resp["token_endpoint_auth_method"] == "none"
+        assert "client_secret" not in resp
+
+        stored = fake_session.add.call_args[0][0]
+        assert stored.provider == expected_provider
+        assert stored.owner_id is None
+        assert stored.token_endpoint_auth_method == "none"
+        assert stored.grant_types == body["grant_types"]
+        assert stored.response_types == body["response_types"]
+
+    def test_hermes_device_flow_keeps_device_code_grant(self, client):
+        response, fake_session = self._register(client, _HERMES_DEVICE_BODY)
+
+        assert response.status_code == 201, response.text
+        assert response.json()["grant_types"] == [_DEVICE_CODE_GRANT, "refresh_token"]
+        assert response.json()["response_types"] == []
+        stored = fake_session.add.call_args[0][0]
+        assert stored.grant_types == [_DEVICE_CODE_GRANT, "refresh_token"]
+        assert stored.response_types == []
+
+    def test_openclaw_localhost_retry_body_returns_201(self, client):
+        # OpenClaw retries once with the localhost redirect alone.
+        body = {**_OPENCLAW_BODY, "redirect_uris": ["http://localhost:8989/oauth/callback"]}
+        response, _ = self._register(client, body)
+
+        assert response.status_code == 201, response.text
+        assert response.json()["provider"] == "openclaw"
+
+    @pytest.mark.parametrize("client_name", ["Codex", "Hermes Agent", "OpenClaw MCP"])
+    def test_new_names_on_non_loopback_redirect_rejected(self, client, client_name: str):
+        rate_limit, fake_session, _ = _patch_dcr_dependencies()
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+        ):
+            response = client.post(
+                "/api/v1/oauth/register",
+                json={
+                    "client_name": client_name,
+                    "redirect_uris": ["https://codex.example.com/callback"],
+                    "token_endpoint_auth_method": "none",
+                },
+            )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == "invalid_client_metadata"
+        fake_session.add.assert_not_called()
+
+    def test_rejection_description_lists_loopback_clients(self, client):
+        rate_limit, _, _ = _patch_dcr_dependencies()
+        with patch("api.routes.oauth.increment_counter", rate_limit):
+            response = client.post(
+                "/api/v1/oauth/register",
+                json={
+                    "client_name": "MyRandomApp",
+                    "redirect_uris": ["http://127.0.0.1:8080/callback"],
+                    "token_endpoint_auth_method": "none",
+                },
+            )
+
+        assert response.status_code == 400
+        description = response.json()["error_description"]
+        for label in ("ChatGPT", "Claude", "Cursor", "Codex", "Hermes Agent", "OpenClaw"):
+            assert label in description, f"{label!r} missing from {description!r}"
+        for provider in ("codex", "hermes", "openclaw"):
+            assert provider in description
+
+
 class TestOAuth2ClientResponseOwnerIdSerialization:
     """Pin that ``OAuth2ClientResponse.owner_id: str | None`` keeps both paths working.
 
