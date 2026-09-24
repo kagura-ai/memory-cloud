@@ -217,6 +217,7 @@ List a context's tag vocabulary with usage counts and recency (tag-drift mitigat
   - `min_count` — integer (default 1)
   - `sort` — string, enum [`count`, `recent`, `alpha`]
   - `prefix` — string (case-insensitive; %/_ escaped)
+  - `with_tags` — array of string (maxItems 50, items maxLength 200; AND drill-down: counts only memories carrying all of them and excludes them from the result; #1669)
 
 ### create_context
 

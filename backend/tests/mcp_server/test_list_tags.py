@@ -7,6 +7,8 @@ Pins:
 - Arg validation: bad ``limit`` / ``min_count`` / oversized ``prefix`` / invalid UUID
   return ``invalid_argument`` / ``invalid_context_id_format`` without touching the DB.
 - ``last_used_at`` datetime is rendered with a ``Z`` suffix.
+- ``with_tags`` (#1669) reaches the service; a non-array / non-string item is
+  rejected pre-DB, and the service's count / length caps map to ``invalid_argument``.
 
 Aggregation correctness (SQL CTE) is exercised at the integration level
 (``tests/integration/test_list_tags_aggregation.py``).
@@ -129,6 +131,7 @@ class TestHandleListTagsHappyPath:
                     "min_count": 3,
                     "sort": "recent",
                     "prefix": "auth",
+                    "with_tags": ["python", "backend"],
                 },
                 user_id,
                 workspace_id,
@@ -141,7 +144,26 @@ class TestHandleListTagsHappyPath:
             min_count=3,
             sort="recent",
             prefix="auth",
+            with_tags=["python", "backend"],
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("args", [{}, {"with_tags": None}])
+    async def test_absent_with_tags_is_no_filter(self, user_id, workspace_id, context_id, args):
+        """#1669: omitted / null ``with_tags`` reaches the service as ``[]`` (no-op)."""
+        _, mock_get_db = _mock_db_context()
+        mock_service = MagicMock(
+            aggregate_tags=AsyncMock(return_value={"context_name": "ctx", "rows": []})
+        )
+
+        with (
+            patch("db.base.get_db", mock_get_db),
+            patch("services.context_service.ContextService", return_value=mock_service),
+            patch("mcp_server.tools.context._log_tool_usage", AsyncMock()),
+        ):
+            await handle_list_tags({"context_id": str(context_id), **args}, user_id, workspace_id)
+
+        assert mock_service.aggregate_tags.await_args.kwargs["with_tags"] == []
 
 
 class TestHandleListTagsErrorSurface:
@@ -195,6 +217,37 @@ class TestHandleListTagsErrorSurface:
         assert payload["error"] == "invalid_argument"
 
     @pytest.mark.asyncio
+    async def test_with_tags_cap_from_service_returns_invalid_argument(
+        self, user_id, workspace_id, context_id
+    ):
+        """#1669: the service owns the 50-tag / 200-char caps; its ValidationError
+        surfaces as ``invalid_argument``, like a bad ``sort``."""
+        from utils.exceptions import ValidationError
+
+        _, mock_get_db = _mock_db_context()
+        mock_service = MagicMock(
+            aggregate_tags=AsyncMock(
+                side_effect=ValidationError("with_tags accepts at most 50 tags.")
+            )
+        )
+
+        with (
+            patch("db.base.get_db", mock_get_db),
+            patch("services.context_service.ContextService", return_value=mock_service),
+            patch("mcp_server.tools.context._log_tool_usage", AsyncMock()),
+        ):
+            result = await handle_list_tags(
+                {"context_id": str(context_id), "with_tags": [f"t{i}" for i in range(51)]},
+                user_id,
+                workspace_id,
+            )
+
+        payload = json.loads(result[0].text)
+        assert payload["status"] == "error"
+        assert payload["error"] == "invalid_argument"
+        assert "50" in payload["message"]
+
+    @pytest.mark.asyncio
     async def test_missing_context_id_returns_required(self, user_id, workspace_id):
         """Missing context_id short-circuits before touching the DB."""
         # No DB patch — if the handler touches get_db it raises.
@@ -229,6 +282,10 @@ class TestHandleListTagsErrorSurface:
             {"prefix": "x" * 201},
             {"prefix": 0},  # falsy non-string; `or ""` shorthand would coerce silently
             {"prefix": False},  # ditto
+            {"with_tags": "python"},  # #1669: a bare string is not an array
+            {"with_tags": {"tag": "python"}},
+            {"with_tags": ["python", 1]},  # non-string item
+            {"with_tags": [None]},
         ],
     )
     async def test_bad_args_short_circuit_without_db(
@@ -245,3 +302,23 @@ class TestHandleListTagsErrorSurface:
         payload = json.loads(result[0].text)
         assert payload["status"] == "error"
         assert payload["error"] == "invalid_argument"
+
+
+class TestListTagsSchema:
+    """#1669: ``with_tags`` is declared, with the service's caps as schema bounds."""
+
+    @staticmethod
+    def _schema() -> dict:
+        from mcp_server.tools import get_tool_definitions
+
+        tool = next(t for t in get_tool_definitions() if t["name"] == "list_tags")
+        return tool["inputSchema"]
+
+    def test_with_tags_property_limits(self):
+        prop = self._schema()["properties"]["with_tags"]
+        assert prop["type"] == "array"
+        assert prop["maxItems"] == 50
+        assert prop["items"] == {"type": "string", "maxLength": 200}
+
+    def test_with_tags_is_optional(self):
+        assert self._schema()["required"] == ["context_id"]

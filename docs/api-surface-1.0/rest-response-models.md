@@ -593,6 +593,7 @@ Notes:
 ### ContextTagsResponse (BaseModel, L273)
 > Response model for ``GET /contexts/{context_id}/tags`` (Issue #614).
 - `context_id: UUID` — required
+- `context_name: str | None` — optional (default `None`; added in #1669)
 - `tags: list[RelatedTagItem]` — required
 - `total: int` — required
 
