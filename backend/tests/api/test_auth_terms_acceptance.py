@@ -374,7 +374,7 @@ class TestRecordingOnSignIn:
         await _google_callback("st1")
 
         kwargs = through_ensure_user.await_args.kwargs
-        assert kwargs["user_id"] == "108"
+        assert kwargs["oauth_identity"] == ("google", "108")
         assert kwargs["accepted_terms"] == VERSION
         assert kwargs["source"] == "login"
 
@@ -389,7 +389,7 @@ class TestRecordingOnSignIn:
         await _github_callback("st1")
 
         kwargs = through_ensure_user.await_args.kwargs
-        assert kwargs["user_id"] == "583231"
+        assert kwargs["oauth_identity"] == ("github", "583231")
         assert kwargs["source"] == "join"
 
     @pytest.mark.asyncio
@@ -589,6 +589,8 @@ class TestAuthMe:
         )
 
         assert result["user"]["terms_acceptance_required"] is True
+        # The version to accept rides along, so the dialog needs no /system/info.
+        assert result["user"]["terms_version"] == VERSION
         required.assert_awaited_once_with("u1")
 
 
@@ -756,3 +758,90 @@ class TestEmailCollisionIsNotMasked:
 
         query = parse_qs(urlparse(response.headers["location"]).query)
         assert query["error"] == ["email_in_use"]
+
+
+class TestLinkedIdentityOwner:
+    """An OAuth acceptance is recorded against the account that OWNS the
+    identity — for a provider linked to another account (#517) that is not the
+    IdP sub."""
+
+    @staticmethod
+    def _db(*rows):
+        db = MagicMock()
+        db.execute = AsyncMock(
+            side_effect=[MagicMock(first=MagicMock(return_value=r)) for r in rows]
+        )
+        return db
+
+    @pytest.fixture
+    def record(self, monkeypatch) -> AsyncMock:
+        stub = AsyncMock()
+        monkeypatch.setattr(
+            auth_routes, "TermsService", MagicMock(return_value=MagicMock(record=stub))
+        )
+        return stub
+
+    def _use_db(self, monkeypatch, db) -> None:
+        async def _fake_db():
+            yield db
+
+        monkeypatch.setattr(auth_routes, "get_db", _fake_db)
+
+    @pytest.mark.asyncio
+    async def test_linked_github_identity_records_for_the_owning_account(
+        self, terms_on, record, monkeypatch
+    ) -> None:
+        from sqlalchemy.dialects import postgresql
+
+        db = self._db(("google-owner-1", "owner@example.test"))
+        self._use_db(monkeypatch, db)
+
+        await auth_routes._record_terms_acceptance(
+            oauth_identity=("github", "583231"),
+            email="gh-address@example.test",
+            accepted_terms=VERSION,
+            source="login",
+            request=None,
+        )
+
+        kwargs = record.await_args.kwargs
+        assert kwargs["user_id"] == "google-owner-1"
+        assert kwargs["user_email"] == "owner@example.test"
+        sql = str(
+            db.execute.await_args_list[0]
+            .args[0]
+            .compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+        )
+        assert "JOIN user_oauth_providers" in sql
+        assert "user_oauth_providers.provider = 'github'" in sql
+        assert "user_oauth_providers.oauth_sub = '583231'" in sql
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_the_sub_without_a_link_row(
+        self, terms_on, record, monkeypatch
+    ) -> None:
+        self._use_db(monkeypatch, self._db(None, ("108", "n@example.test")))
+
+        await auth_routes._record_terms_acceptance(
+            oauth_identity=("google", "108"),
+            email="n@example.test",
+            accepted_terms=VERSION,
+            source="login",
+            request=None,
+        )
+
+        assert record.await_args.kwargs["user_id"] == "108"
+
+    @pytest.mark.asyncio
+    async def test_no_owner_records_nothing(self, terms_on, record, monkeypatch) -> None:
+        self._use_db(monkeypatch, self._db(None, None))
+
+        await auth_routes._record_terms_acceptance(
+            oauth_identity=("google", "108"),
+            email="n@example.test",
+            accepted_terms=VERSION,
+            source="login",
+            request=None,
+        )
+
+        record.assert_not_awaited()

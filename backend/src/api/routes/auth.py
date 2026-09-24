@@ -841,7 +841,7 @@ async def google_callback(
 
         # 4.1. Record the terms acceptance this sign-in carried (#1665).
         await _record_terms_acceptance(
-            user_id=user_info["sub"],
+            oauth_identity=("google", user_info["sub"]),
             email=user_info["email"],
             accepted_terms=accepted_terms,
             source="join" if beta_invite_token_hash else "login",
@@ -1429,15 +1429,48 @@ async def _terms_refusal(
     return _terms_required_redirect(provider, return_to)
 
 
+async def _owning_user(db: AsyncSession, provider: str, idp_sub: str) -> tuple[str, str] | None:
+    """``(user_id, email)`` of the account that owns this IdP identity (#1665).
+
+    Resolved the way ``RoleManager.ensure_user`` resolves it: through the
+    ``(provider, oauth_sub)`` link row — a provider linked to another account
+    (#517) belongs to that account's ``user_id``, not to the sub — falling back
+    to a ``users`` row whose ``user_id`` is the sub.
+    """
+    from models.auth import UserOAuthProvider
+
+    row = (
+        await db.execute(
+            select(User.user_id, User.email)
+            .join(UserOAuthProvider, UserOAuthProvider.user_id == User.user_id)
+            .where(UserOAuthProvider.provider == provider, UserOAuthProvider.oauth_sub == idp_sub)
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        row = (
+            await db.execute(
+                select(User.user_id, User.email).where(User.user_id == idp_sub).limit(1)
+            )
+        ).first()
+    return (row[0], row[1]) if row is not None else None
+
+
 async def _record_terms_acceptance(
     *,
-    user_id: str,
     email: str,
     accepted_terms: str | None,
     source: Literal["login", "join", "password"],
     request: Request | None,
+    user_id: str | None = None,
+    oauth_identity: tuple[str, str] | None = None,
 ) -> None:
     """Record ``accepted_terms`` for a user who just signed in (#1665).
+
+    Pass ``user_id`` when the account is already known (password login), or
+    ``oauth_identity=(provider, sub)`` from an OAuth callback: the acceptance
+    then goes to the account that OWNS the identity, which differs from the sub
+    for a provider linked to another account (#517).
 
     A no-op unless it is exactly the current version. Never fails the sign-in:
     if the write fails the user simply still shows as needing to accept, and
@@ -1448,6 +1481,14 @@ async def _record_terms_acceptance(
         return
     try:
         async for db in get_db():
+            if oauth_identity is not None:
+                owner = await _owning_user(db, *oauth_identity)
+                if owner is None:
+                    logger.warning("terms_acceptance_owner_missing", provider=oauth_identity[0])
+                    break
+                user_id, email = owner
+            if user_id is None:
+                break
             await TermsService(db).record(
                 user_id=user_id,
                 user_email=email,
@@ -1605,6 +1646,10 @@ async def get_current_user_info(
                 if db_user and user_id
                 else False
             ),
+            # The version to accept (null while TERMS_VERSION is empty), so the
+            # re-acceptance step does not depend on a separate /system/info
+            # fetch that may have failed.
+            "terms_version": current_terms_version(),
         }
     }
 
@@ -1910,7 +1955,7 @@ async def github_callback(
 
         # 4.1. Record the terms acceptance this sign-in carried (#1665).
         await _record_terms_acceptance(
-            user_id=user_info["sub"],
+            oauth_identity=("github", user_info["sub"]),
             email=user_info["email"],
             accepted_terms=accepted_terms,
             source="join" if beta_invite_token_hash else "login",
