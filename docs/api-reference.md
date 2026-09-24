@@ -961,7 +961,8 @@ curl -X POST http://localhost:8080/api/v1/oauth/device/authorize \
 The media type is matched case-insensitively and parameters such as
 `charset=utf-8` are ignored. In the form encoding, a parameter sent without a
 value is treated as omitted and unrecognised parameters are ignored (RFC 6749
-§3.1). Errors use the RFC 6749 §5.2 body
+§3.1); a `%` that does not start a two-hex-digit escape makes the body
+malformed. Errors use the RFC 6749 §5.2 body
 `{"error": "...", "error_description": "..."}` with `Cache-Control: no-store`:
 
 | Condition | Status | `error` |

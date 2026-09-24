@@ -22,6 +22,7 @@ Security:
 import hashlib
 import json
 import os
+import re
 import secrets
 import unicodedata
 from datetime import timedelta
@@ -1958,6 +1959,8 @@ async def _device_flow_rate_limited(request: Request, endpoint: str, limit: int)
 
 
 _FORM_MEDIA_TYPE = "application/x-www-form-urlencoded"
+# A "%" that does not start a two-hex-digit escape, which ``parse_qsl`` keeps as text.
+_MALFORMED_PERCENT_ESCAPE = re.compile(rb"%(?![0-9A-Fa-f]{2})")
 
 
 class _DeviceAuthorizationRequestError(Exception):
@@ -2009,8 +2012,11 @@ def _parse_device_authorization_form(body: bytes) -> dict[str, str]:
 
     Per RFC 6749 §3.1, a parameter sent without a value is treated as omitted
     (``parse_qsl`` drops it), unrecognised parameters are ignored and a
-    recognised one sent twice is refused.
+    recognised one sent twice is refused. A body with a malformed
+    percent-escape is refused rather than read with a literal ``%``.
     """
+    if _MALFORMED_PERCENT_ESCAPE.search(body):
+        raise _DeviceAuthorizationRequestError("Request body has a malformed percent-escape")
     try:
         pairs = parse_qsl(body.decode("utf-8"), errors="strict")
     except ValueError as e:  # UnicodeDecodeError is a ValueError

@@ -875,6 +875,10 @@ class TestDeviceAuthorizeRequestEncodings:
             (_FORM, b"client_id=oauth_test_dev_536&client_id=other"),
             (_FORM, b"client_id=%FF"),
             (_FORM, b"client_id=\xff"),
+            # parse_qsl keeps a malformed percent-escape as literal text.
+            (_FORM, b"client_id=%"),
+            (_FORM, b"client_id=%zz"),
+            (_FORM, b"client_id=oauth_test_dev_536%2"),
         ],
         ids=[
             "json-truncated",
@@ -884,8 +888,11 @@ class TestDeviceAuthorizeRequestEncodings:
             "json-deeply-nested",
             "json-deeply-nested-truncated",
             "form-repeated-param",
-            "form-bad-percent-escape",
+            "form-escape-not-utf8",
             "form-not-utf8",
+            "form-lone-percent",
+            "form-non-hex-escape",
+            "form-truncated-escape",
         ],
     )
     def test_malformed_body_is_invalid_request(self, content_type, content):
