@@ -34,6 +34,8 @@ def _db(latest: str | None) -> MagicMock:
         return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=latest))
     )
     db.commit = AsyncMock()
+    # The users-row lock (SELECT ... FOR UPDATE) finds the user.
+    db.scalar = AsyncMock(return_value="u1")
     return db
 
 
@@ -133,7 +135,48 @@ class TestRecord:
         )
         assert result.recorded is False
         db.add.assert_not_called()
-        db.commit.assert_not_awaited()
+        # The commit only ends the transaction that held the row lock.
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_check_and_insert_run_under_a_users_row_lock(self) -> None:
+        db = _db(None)
+        calls: list[str] = []
+        db.scalar.side_effect = lambda *_a, **_k: calls.append("lock") or "u1"
+        original_execute = db.execute
+
+        async def _execute(*args, **kwargs):
+            calls.append("latest")
+            return await original_execute(*args, **kwargs)
+
+        db.execute = AsyncMock(side_effect=_execute)
+
+        await TermsService(db).record(
+            user_id="u1", user_email="u@example.test", version=VERSION, source="login"
+        )
+
+        # The lock comes before the "already accepted?" read.
+        assert calls[:2] == ["lock", "latest"]
+        sql = str(
+            db.scalar.await_args.args[0].compile(
+                dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+            )
+        )
+        assert "FROM users" in sql
+        assert "users.user_id = 'u1'" in sql
+        assert sql.rstrip().endswith("FOR UPDATE")
+
+    @pytest.mark.asyncio
+    async def test_missing_user_is_not_found(self) -> None:
+        from utils.exceptions import NotFoundException
+
+        db = _db(None)
+        db.scalar = AsyncMock(return_value=None)
+        with pytest.raises(NotFoundException):
+            await TermsService(db).record(
+                user_id="gone", user_email="g@example.test", version=VERSION, source="reaccept"
+            )
+        db.add.assert_not_called()
 
 
 class TestModel:

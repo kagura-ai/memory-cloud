@@ -26,8 +26,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
-from models.auth import AuditLog
+from models.auth import AuditLog, User
 from models.terms import TermsAcceptance, TermsAcceptanceSource
+from utils.exceptions import NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -70,6 +71,19 @@ class TermsService:
         )
         return result.scalar_one_or_none()
 
+    async def _lock_user(self, user_id: str) -> None:
+        """Row-lock the user for the rest of the transaction.
+
+        Raises:
+            NotFoundException: No ``users`` row (e.g. a session whose account is
+                gone) — the acceptance would violate the foreign key anyway.
+        """
+        locked = await self.db.scalar(
+            select(User.user_id).where(User.user_id == user_id).with_for_update()
+        )
+        if locked is None:
+            raise NotFoundException("User", user_id)
+
     async def acceptance_required(self, user_id: str) -> bool:
         """True when a version is configured and the user has not accepted it."""
         current = current_terms_version()
@@ -94,10 +108,19 @@ class TermsService:
         ``version`` is acceptable (it must be the current one); this method does
         not read the setting.
 
+        The check and the insert are serialized per user by a row lock on the
+        ``users`` row (``SELECT ... FOR UPDATE``, the beta-invite pattern), so two
+        concurrent sign-ins cannot both see "not yet accepted" and append two
+        rows and two audit rows. The loser waits for the winner's commit, then
+        re-reads and finds the version already recorded.
+
         The audit row names the version only — ``user_metadata`` never carries
         anything the browser sent besides it.
         """
+        await self._lock_user(user_id)
         if await self.latest_version(user_id) == version:
+            # Release the row lock (ends the transaction; nothing was written).
+            await self.db.commit()
             return RecordResult(version=version, recorded=False)
 
         # Client-side id so the audit row can name the acceptance before flush.

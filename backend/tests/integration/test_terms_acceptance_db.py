@@ -6,18 +6,20 @@ The unit suite mocks the session; here the rows are real:
 - ``record`` appends one row and one ``terms.accepted`` audit row naming the
   version only, and a repeat of the newest version writes neither;
 - a version bump makes ``acceptance_required`` true again until re-accepted,
-  while the older row stays as history.
+  while the older row stays as history;
+- parallel records of one version write exactly one row (users-row lock).
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from config.settings import get_settings
 from models.auth import AuditLog, User
@@ -41,11 +43,13 @@ def _new_user() -> User:
 @pytest_asyncio.fixture(loop_scope="session")
 async def people(db_session: AsyncSession) -> AsyncIterator[list[User]]:
     users = [_new_user(), _new_user()]
+    # Read the ids now: the rollback below expires the instances, and touching
+    # an expired attribute outside the async context raises MissingGreenlet.
+    ids = [u.user_id for u in users]
     db_session.add_all(users)
     await db_session.commit()
     yield users
     await db_session.rollback()
-    ids = [u.user_id for u in users]
     await db_session.execute(delete(AuditLog).where(AuditLog.user_id.in_(ids)))
     await db_session.execute(delete(User).where(User.user_id.in_(ids)))
     await db_session.commit()
@@ -109,3 +113,34 @@ async def test_record_history_and_reacceptance(
     )
     assert [a.user_metadata for a in audits] == [{"version": "v1"}, {"version": "v2"}]
     assert all(a.resource.startswith("terms_acceptance:") for a in audits)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_concurrent_records_of_one_version_write_one_row(
+    db_session: AsyncSession, people: list[User], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Parallel sign-ins carrying the same new version: the users-row lock makes
+    exactly one of them write; the others see it and write nothing."""
+    alice, _ = people
+    user_id, email = alice.user_id, alice.email
+    maker = async_sessionmaker(db_session.bind, class_=AsyncSession, expire_on_commit=False)
+
+    async def _one() -> bool:
+        async with maker() as session:
+            result = await TermsService(session).record(
+                user_id=user_id, user_email=email, version="v-race", source="login"
+            )
+            return result.recorded
+
+    outcomes = await asyncio.gather(*(_one() for _ in range(8)))
+
+    assert outcomes.count(True) == 1
+    assert await _rows(db_session, user_id) == 1
+    audits = (
+        await db_session.execute(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.user_id == user_id, AuditLog.action == TERMS_ACCEPTED_ACTION)
+        )
+    ).scalar_one()
+    assert audits == 1
