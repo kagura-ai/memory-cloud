@@ -804,30 +804,20 @@ class TestDeviceAuthorizeRequestEncodings:
             "application/json; charset=utf-8",
             "APPLICATION/JSON",
             "application/vnd.example+json",
-            None,
         ],
-        ids=[
-            "form-charset",
-            "form-mixed-case",
-            "json-charset",
-            "json-upper",
-            "json-suffix",
-            "none",
-        ],
+        ids=["form-charset", "form-mixed-case", "json-charset", "json-upper", "json-suffix"],
     )
     def test_media_type_parameters_and_case_are_accepted(self, test_oauth_client, content_type):
-        is_form = content_type is not None and "form" in content_type.lower()
         content = (
             b"client_id=oauth_test_dev_536&scope=memory%3Aread"
-            if is_form
+            if "form" in content_type.lower()
             else b'{"client_id": "oauth_test_dev_536", "scope": "memory:read"}'
         )
-        # No Content-Type at all is read as JSON, as FastAPI's body parsing did
-        # before #1671, so an existing JSON client that omits the header keeps working.
-        headers = {"Content-Type": content_type} if content_type else {}
         mock_db = _authorize_session(test_oauth_client)
         with patch("api.routes.oauth.get_sync_session", return_value=mock_db):
-            resp = TestClient(app).post(_AUTHORIZE, content=content, headers=headers)
+            resp = TestClient(app).post(
+                _AUTHORIZE, content=content, headers={"Content-Type": content_type}
+            )
 
         assert resp.status_code == 200, resp.text
         assert mock_db.add.call_args.args[0].scope == "memory:read"
@@ -857,14 +847,16 @@ class TestDeviceAuthorizeRequestEncodings:
             ("multipart/form-data; boundary=x1671", b"client_id=oauth_test_dev_536"),
             ("application/xml", b"<client_id>oauth_test_dev_536</client_id>"),
             ("application/jsonl", b'{"client_id": "oauth_test_dev_536"}'),
+            # FastAPI's strict body parsing refused these with 422 before #1671.
+            (None, b'{"client_id": "oauth_test_dev_536"}'),
+            ("", b'{"client_id": "oauth_test_dev_536"}'),
         ],
-        ids=["text-plain", "multipart", "xml", "json-lookalike"],
+        ids=["text-plain", "multipart", "xml", "json-lookalike", "none", "empty"],
     )
     def test_unsupported_content_type_is_invalid_request(self, content_type, content):
+        headers = {} if content_type is None else {"Content-Type": content_type}
         with patch("api.routes.oauth.get_sync_session") as mock_session_fn:
-            resp = TestClient(app).post(
-                _AUTHORIZE, content=content, headers={"Content-Type": content_type}
-            )
+            resp = TestClient(app).post(_AUTHORIZE, content=content, headers=headers)
 
         _assert_rfc6749_error(resp, 400, "invalid_request")
         assert "Content-Type" in resp.json()["error_description"]
@@ -877,6 +869,9 @@ class TestDeviceAuthorizeRequestEncodings:
             ("application/json", b'["oauth_test_dev_536"]'),
             ("application/json", b'{"client_id": 1671}'),
             ("application/json", b""),
+            # Valid JSON nested past the decoder's recursion limit, under the size cap.
+            ("application/json", b'{"a":' + b"[" * 1500 + b"]" * 1500 + b"}"),
+            ("application/json", b"[" * 2000),
             (_FORM, b"client_id=oauth_test_dev_536&client_id=other"),
             (_FORM, b"client_id=%FF"),
             (_FORM, b"client_id=\xff"),
@@ -886,6 +881,8 @@ class TestDeviceAuthorizeRequestEncodings:
             "json-array",
             "json-number",
             "json-empty",
+            "json-deeply-nested",
+            "json-deeply-nested-truncated",
             "form-repeated-param",
             "form-bad-percent-escape",
             "form-not-utf8",
@@ -899,6 +896,66 @@ class TestDeviceAuthorizeRequestEncodings:
 
         _assert_rfc6749_error(resp, 400, "invalid_request")
         mock_session_fn.assert_not_called()
+
+    @pytest.mark.parametrize("content", [b"client_id=", b"client_id", b"client_id=&scope="])
+    def test_blank_client_id_is_a_missing_parameter(self, content):
+        """RFC 6749 §3.1: a parameter sent without a value is treated as omitted."""
+        with patch("api.routes.oauth.get_sync_session") as mock_session_fn:
+            resp = TestClient(app).post(
+                _AUTHORIZE, content=content, headers={"Content-Type": _FORM}
+            )
+
+        _assert_rfc6749_error(resp, 400, "invalid_request")
+        assert resp.json()["error_description"] == "Missing required parameter: client_id"
+        mock_session_fn.assert_not_called()
+
+    def test_blank_form_parameters_are_ignored(self, test_oauth_client):
+        """A blank duplicate is not a repeat, and a blank ``scope`` gets the client's scope."""
+        mock_db = _authorize_session(test_oauth_client)
+        with patch("api.routes.oauth.get_sync_session", return_value=mock_db):
+            resp = TestClient(app).post(
+                _AUTHORIZE,
+                content=b"client_id=&client_id=oauth_test_dev_536&scope=",
+                headers={"Content-Type": _FORM},
+            )
+
+        assert resp.status_code == 200, resp.text
+        row = mock_db.add.call_args.args[0]
+        assert row.client_id == "oauth_test_dev_536"
+        assert row.scope == test_oauth_client.scope
+
+    async def test_client_disconnect_mid_body_is_invalid_request(self):
+        """A dropped upload is refused like any other unreadable body, not raised."""
+        from starlette.requests import Request
+
+        from api.routes.oauth import (
+            _DeviceAuthorizationRequestError,
+            _read_device_authorization_request,
+        )
+
+        async def receive():
+            return {"type": "http.disconnect"}
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": _AUTHORIZE,
+            "headers": [(b"content-type", _FORM.encode())],
+        }
+        with pytest.raises(_DeviceAuthorizationRequestError) as excinfo:
+            await _read_device_authorization_request(Request(scope, receive))
+
+        assert excinfo.value.status_code == 400
+
+    def test_database_failure_is_rfc6749_server_error(self, test_oauth_client):
+        mock_db = _authorize_session(test_oauth_client)
+        mock_db.commit.side_effect = RuntimeError("simulated database failure")
+        with patch("api.routes.oauth.get_sync_session", return_value=mock_db):
+            resp = TestClient(app).post(_AUTHORIZE, data={"client_id": "oauth_test_dev_536"})
+
+        _assert_rfc6749_error(resp, 500, "server_error")
+        assert "simulated" not in resp.text
+        mock_db.rollback.assert_called_once()
 
     def test_unrecognised_form_parameters_are_ignored(self, test_oauth_client):
         """RFC 6749 §3.1: unrecognised request parameters are ignored."""
@@ -984,4 +1041,4 @@ class TestDeviceAuthorizeRequestEncodings:
             assert schema["type"] == "object"
             assert schema["required"] == ["client_id"]
             assert set(schema["properties"]) == {"client_id", "scope"}
-        assert {"400", "413", "429"} <= set(operation["responses"])
+        assert {"400", "413", "429", "500"} <= set(operation["responses"])

@@ -959,17 +959,18 @@ curl -X POST http://localhost:8080/api/v1/oauth/device/authorize \
 ```
 
 The media type is matched case-insensitively and parameters such as
-`charset=utf-8` are ignored. A body sent without a `Content-Type` is read as
-JSON. Unrecognised form parameters are ignored. Errors use the RFC 6749 §5.2
-body `{"error": "...", "error_description": "..."}` with
-`Cache-Control: no-store`:
+`charset=utf-8` are ignored. In the form encoding, a parameter sent without a
+value is treated as omitted and unrecognised parameters are ignored (RFC 6749
+§3.1). Errors use the RFC 6749 §5.2 body
+`{"error": "...", "error_description": "..."}` with `Cache-Control: no-store`:
 
 | Condition | Status | `error` |
 |---|---|---|
 | Unknown `client_id` | `400` | `invalid_client` |
-| Missing `client_id`, malformed body, a form parameter sent twice | `400` | `invalid_request` |
-| Any other `Content-Type` (for example `text/plain` or `multipart/form-data`) | `400` | `invalid_request` |
+| Missing `client_id`, malformed body, `client_id` or `scope` sent twice | `400` | `invalid_request` |
+| No `Content-Type`, or any other one (for example `text/plain` or `multipart/form-data`) | `400` | `invalid_request` |
 | Body larger than 4096 bytes | `413` | `invalid_request` |
+| The device authorization could not be stored | `500` | `server_error` |
 
 The request limit below is counted before the body is read, so a refused
 request counts against it too.
