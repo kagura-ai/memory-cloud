@@ -1,0 +1,19 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.kagura-ai/memory-cloud",
+  "title": "Kagura Memory Cloud",
+  "description": "Persistent memory for AI assistants: store, search, and connect knowledge across conversations.",
+  "version": "0.77.0",
+  "websiteUrl": "https://memory.kagura-ai.com",
+  "repository": {
+    "url": "https://github.com/kagura-ai/memory-cloud",
+    "source": "github",
+    "id": "1194728455"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://memory.kagura-ai.com/mcp"
+    }
+  ]
+}
