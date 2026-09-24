@@ -4,6 +4,26 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.77.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.77.0) — 2026-09-24
+
+Sign-in and client reach. The server can record which terms-of-service version each person accepted and ask again when it changes; three more native MCP clients can register over loopback DCR; `list_tags` gains the drill-down the SDKs already send; and `/kagura-memory:setup` understands the `kagura-mcp` query flags.
+
+### Added
+- **Server-side terms-of-service acceptance** ([#1665](https://github.com/kagura-ai/memory-cloud/issues/1665)): a new `TERMS_VERSION` setting (default empty = off). When set, `GET /api/v1/system/info` and `/auth/me` expose it; Google and GitHub sign-in carry the version the person agreed to (`accepted_terms`, bound to the OAuth state and consumed once), password login and MFA record it too, and each acceptance is stored in the append-only `terms_acceptances` table with a `terms.accepted` audit row. A new account is created only when the sign-up carries the current version; an invite sign-up without it goes back to `/join/<token>` with a notice. Existing users are never locked out: they sign in, then a blocking dialog asks them to accept the current version (`POST /api/v1/me/terms-acceptance`), also before a workspace invitation is accepted. See `docs/deployment.md`.
+- **`with_tags` on MCP `list_tags`** ([#1669](https://github.com/kagura-ai/memory-cloud/issues/1669)): an array of up to 50 tags (200 characters each); only memories carrying all of them are counted, and those tags are left out of the result, so it lists the tags that co-occur with them — the same rules as REST `?with_tags=`. Before, an SDK that sent it got the unfiltered tag cloud without an error. The REST `GET /api/v1/contexts/{id}/tags` response gains an optional `context_name`.
+- **Loopback DCR for Codex, Hermes Agent and OpenClaw** ([#1657](https://github.com/kagura-ai/memory-cloud/issues/1657)): `POST /api/v1/oauth/register` accepts an RFC 8252 loopback redirect whose `client_name` names Codex, Hermes Agent or OpenClaw, and stores `codex` / `hermes` / `openclaw` as the provider. The names are accepted on loopback redirects only; existing matches keep their provider. Hermes Agent's device flow still needs a form-encoded `/device/authorize` body, tracked in [#1671](https://github.com/kagura-ai/memory-cloud/issues/1671).
+
+### Changed
+- **Sign-in buttons wait for `/system/info`** ([#1665](https://github.com/kagura-ai/memory-cloud/issues/1665)): on `/login`, `/join/<token>` and `/invite/<token>` the provider buttons stay disabled until the first `/system/info` answer, so they know whether a terms version applies; a failed fetch unlocks them. This is the only visible change while `TERMS_VERSION` is empty.
+
+### Fixed
+- **`/kagura-memory:setup` and `kagura-mcp` query flags** ([#1670](https://github.com/kagura-ai/memory-cloud/issues/1670)): the skill computes a `kagura-mcp` entry's upstream URL the way the proxy does, with `--guardrails` and `--tool-profile` (kagura-mcp 0.39.0+) applied on top of `--server` or the profile URL, and reports where each query parameter came from. An entry with `--guardrails off` is reported as in the hooks lane. To apply the lane it offers `--guardrails off`, replacing an existing `--guardrails <context-id>`, keeps `--tool-profile` when it rebuilds an entry, and offers the `--server …?guardrails=off` pin only for an older CLI. `docs/mcp-clients.md`, `docs/troubleshooting.md` and the guide say the same.
+
+### Notes
+- **Migration:** `alembic upgrade head` (`e85_1665_terms_acceptances`) creates the new, empty `terms_acceptances` table.
+- **New optional setting:** `TERMS_VERSION` (`[A-Za-z0-9._-]{1,64}`, default empty). Empty keeps today's behaviour. Setting or changing it asks every existing user on their next page load; nobody is signed out, and API keys and MCP clients are not affected.
+- **Plugins:** the Claude Code and Codex plugin manifests are bumped in lockstep.
+
 ## [v0.76.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.76.0) — 2026-09-23
 
 Device and MCP sign-in for new users. A closed-beta invite now survives a CLI device login and an MCP client's sign-in, and the two unauthenticated device-flow endpoints get per-address request limits and a cleanup job for expired codes.
