@@ -266,7 +266,7 @@
         },
         "max_chars": {
           "type": "integer",
-          "minimum": 5000,
+          "minimum": 10000,
           "maximum": 100000
         }
       },

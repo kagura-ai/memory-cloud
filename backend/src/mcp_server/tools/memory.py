@@ -10,6 +10,12 @@ from uuid import UUID
 
 from mcp.types import TextContent
 
+from mcp_server.tools._constants import (
+    REFERENCE_DEFAULT_MAX_CHARS,
+    REFERENCE_MAX_CHARS_LIMIT,
+    REFERENCE_MIN_MAX_CHARS,
+    REFERENCE_MIN_PAGE_CHARS,
+)
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
     _context_response_fields,
@@ -1106,26 +1112,34 @@ async def handle_forget(
 # #1685: bounded reference() responses
 # ============================================================================
 #
-# reference() returns one memory in full. Its "light" fields (ids, summary,
-# context_summary, tags, timestamps, provenance, supersede_candidate) are
-# bounded by the write-side schema and always come back. The heavy fields —
-# content, details, context and the declared links — are selectable (`fields`)
-# and share a per-call budget (`max_chars`, in characters of the serialized
-# tool result). A field that does not fit is never cut silently:
+# reference() returns one memory. Its "light" fields (ids, summary,
+# context_summary, tags, timestamps, provenance, supersede_candidate) always
+# come back whole. The heavy fields — content, details, context and the
+# declared links — are selectable (`fields`) and share what is left of a
+# per-call budget (`max_chars`, in characters of the serialized tool result).
+# A field that does not fit is never cut silently:
 #
 # * content (plain text) comes back as a slice with content_offset /
-#   content_total_chars / content_truncated / content_next_offset;
+#   content_total_chars / content_truncated / content_next_offset, or, when
+#   no slice fits, as content_omitted + content_total_chars +
+#   content_next_offset;
 # * details, context and links (JSON) come back whole or are left out with
 #   <field>_omitted + <field>_total_chars — never sliced mid-structure.
 #   details and context can be paged as their compact JSON text
 #   (<field>_offset -> <field>_json), so a caller can always rebuild 100% of
-#   either; links are capped by the service (50 per direction), so
-#   fields=["links"] with a raised max_chars returns them whole.
+#   either; links are capped by the service (50 per direction), which in
+#   practice fits a raised max_chars (list_edges pages them otherwise).
 #
-# The whole-or-omitted fields are placed first; the page the caller asked for,
-# then content from the start, fill what is left. Offsets count Python str characters (code
-# points). Every page goes through this same handler, so context resolution and
-# the memory-level access check run again on each continuation.
+# The whole-or-omitted fields are placed first, because they cannot be
+# sliced; the page the caller asked for, then content from the start, fill
+# what is left. Room for every marker and for a minimum page is held back
+# before a whole field is placed, so the response stays within max_chars
+# unless the light fields alone leave less than that minimum. Offsets count
+# Python str characters (code points). Every page goes through this same
+# handler, so context resolution and the memory-level access check run again
+# on each continuation — but only a call without an offset that selects
+# content, details or context records the read in the memory's access stats
+# (see handle_reference).
 
 _REFERENCE_FIELD_KEYS: dict[str, tuple[str, ...]] = {
     "content": ("content",),
@@ -1138,8 +1152,12 @@ _REFERENCE_KEY_FIELD = {key: field for field, keys in _REFERENCE_FIELD_KEYS.item
 # Fields a caller can page with ``<field>_offset``.
 _REFERENCE_PAGEABLE = ("content", "details", "context")
 # Budget order of the whole-or-omitted fields: smallest-in-practice first, so
-# one oversized field does not push out the ones that would have fitted.
+# one oversized field does not push out the smaller ones. They all go before
+# content, so a large details that fits comes back whole while content, which
+# can be sliced, continues via content_next_offset.
 _REFERENCE_WHOLE_ORDER = ("links", "context", "details")
+# The fields whose read counts as fetching Layer-3 detail (#1046 adoption).
+_REFERENCE_LAYER3 = frozenset(_REFERENCE_PAGEABLE)
 
 
 class _ReferenceView:
@@ -1184,12 +1202,6 @@ def _parse_reference_view(
     args: dict[str, Any],
 ) -> tuple[_ReferenceView | None, list[TextContent] | None]:
     """Validate ``fields`` / ``*_offset`` / ``max_chars`` before any read."""
-    from mcp_server.tools._constants import (
-        REFERENCE_DEFAULT_MAX_CHARS,
-        REFERENCE_MAX_CHARS_LIMIT,
-        REFERENCE_MIN_MAX_CHARS,
-    )
-
     # ``type(x) is int`` (not isinstance) so bool, which subclasses int, is refused.
     offsets: dict[str, int] = {}
     for field in _REFERENCE_PAGEABLE:
@@ -1285,10 +1297,11 @@ def _reference_page(
 
     ``text`` is the content itself, or the compact JSON of details / context
     (returned under ``<field>_json``). With ``progress`` (the caller is paging
-    this field) a page always advances by at least one character, so a
-    continuation loop terminates even when the light fields crowd the budget.
-    Without it (content read from the start), a page that fits nothing is
-    reported as omitted instead of as an empty slice.
+    this field) a page carries at least ``REFERENCE_MIN_PAGE_CHARS`` serialized
+    characters of the field, or the rest of it, so a continuation loop makes
+    real progress even when the light fields crowd the budget. Without it
+    (content read from the start), a page that fits nothing is reported as
+    omitted instead of as an empty slice.
     """
     total = len(text)
     if offset > total:
@@ -1309,11 +1322,12 @@ def _reference_page(
         sum(_member_chars(k, v) for k, v in meta(nxt, False).items()) for nxt in (None, total)
     )
     budget = remaining - reserve - _member_chars(value_key, "")
+    if progress:
+        # One character escapes to at most six, so this always advances.
+        budget = max(budget, REFERENCE_MIN_PAGE_CHARS)
     size = _fit_slice(text, offset, budget)
     if size == 0 and offset < total:
-        if not progress:
-            return _omitted_marker(field, total, offset)
-        size = 1
+        return _omitted_marker(field, total, offset)
     end = offset + size
     return {
         value_key: text[offset:end],
@@ -1321,13 +1335,22 @@ def _reference_page(
     }
 
 
+def _part_chars(part: dict[str, Any]) -> int:
+    """Characters that the members of ``part`` add to the memory object."""
+    return sum(_member_chars(k, v) for k, v in part.items())
+
+
 def _bound_reference_memory(memory: dict[str, Any], view: _ReferenceView) -> dict[str, Any]:
     """Apply field selection, paging and the character budget to ``memory``.
 
     ``memory`` is the full projection in the historical key order. The result
-    keeps that order, with each field's markers next to it; the serialized
-    ``{"status": "success", "memory": ...}`` stays within ``view.max_chars``
-    unless the always-returned light fields alone nearly fill it.
+    keeps that order, with each field's markers next to it. Before a whole
+    field is placed, room is held back for what every later field needs at
+    least — its omitted marker (or itself, when smaller) and, for a requested
+    page, a ``REFERENCE_MIN_PAGE_CHARS`` page with its metadata — so the
+    serialized ``{"status": "success", "memory": ...}`` stays within
+    ``view.max_chars`` unless the always-returned light fields alone leave less
+    than those minimums.
     """
     head = {k: v for k, v in memory.items() if k not in _REFERENCE_KEY_FIELD}
     # ``head`` always holds memory_id, so every added member costs its comma.
@@ -1337,40 +1360,55 @@ def _bound_reference_memory(memory: dict[str, Any], view: _ReferenceView) -> dic
     def take(field: str, part: dict[str, Any]) -> None:
         nonlocal remaining
         parts[field] = part
-        remaining -= sum(_member_chars(k, v) for k, v in part.items())
+        remaining -= _part_chars(part)
 
-    # 1. JSON fields: whole, or left out with their size and where paging
-    #    starts. The paged field (if any) is handled below instead.
-    for field in _REFERENCE_WHOLE_ORDER:
-        if field not in view.fields or field == view.page_field:
-            continue
-        whole = {key: memory[key] for key in _REFERENCE_FIELD_KEYS[field]}
-        if sum(_member_chars(k, v) for k, v in whole.items()) <= remaining:
-            take(field, whole)
-            continue
-        if field == "links":
-            take(field, _omitted_marker(field, len(_dumps(whole)), None))
-        else:
-            take(field, _omitted_marker(field, len(_dumps(memory[field])), 0))
+    # What each field needs at least: a whole field its omitted marker (or
+    # itself, when smaller), content likewise, a requested page its minimum.
+    wholes = [f for f in _REFERENCE_WHOLE_ORDER if f in view.fields and f != view.page_field]
+    whole = {f: {key: memory[key] for key in _REFERENCE_FIELD_KEYS[f]} for f in wholes}
+    whole_chars = {f: _part_chars(part) for f, part in whole.items()}
+    omitted = {
+        f: (
+            _omitted_marker(f, len(_dumps(part)), None)
+            if f == "links"
+            else _omitted_marker(f, len(_dumps(memory[f])), 0)
+        )
+        for f, part in whole.items()
+    }
+    need = {f: min(whole_chars[f], _part_chars(omitted[f])) for f in wholes}
 
-    # 2. The requested page, then content from the start, fill what is left.
+    content = memory["content"]
     content_after_page = "content" in view.fields and view.page_field != "content"
+    content_chars = _member_chars("content", content) if content_after_page else 0
+    content_need = (
+        min(content_chars, _part_chars(_omitted_marker("content", len(content), 0)))
+        if content_after_page
+        else 0
+    )
+    page_text, page_need = "", 0
     if view.page_field:
         field = view.page_field
-        text = memory[field] if field == "content" else _dumps(memory[field])
-        # Hold back room for content's markers, which are reported after the page.
-        held = (
-            sum(
-                _member_chars(k, v)
-                for k, v in _omitted_marker("content", len(memory["content"]), 0).items()
-            )
-            if content_after_page
-            else 0
+        page_text = memory[field] if field == "content" else _dumps(memory[field])
+        # The smallest page this call returns (raises on a past-the-end offset).
+        page_need = _part_chars(_reference_page(field, page_text, view.offset, 0, progress=True))
+
+    # 1. JSON fields: whole, or left out with their size and where paging
+    #    starts, keeping back what the fields after them need.
+    tail = page_need + content_need + sum(need.values())
+    for field in wholes:
+        tail -= need[field]
+        take(field, whole[field] if whole_chars[field] <= remaining - tail else omitted[field])
+
+    # 2. The requested page, then content from the start, fill what is left.
+    if view.page_field:
+        take(
+            view.page_field,
+            _reference_page(
+                view.page_field, page_text, view.offset, remaining - content_need, progress=True
+            ),
         )
-        take(field, _reference_page(field, text, view.offset, remaining - held, progress=True))
     if content_after_page:
-        content = memory["content"]
-        if _member_chars("content", content) <= remaining:
+        if content_chars <= remaining:
             take("content", {"content": content})
         else:
             take("content", _reference_page("content", content, 0, remaining, progress=False))
@@ -1415,9 +1453,19 @@ async def handle_reference(
             )
 
             service = MemoryService(db)
+            # #1685: one logical read is one adoption (#1046). A call with an
+            # offset continues a read the first call already recorded, and a
+            # call that selects no Layer-3 field (fields=[] / ["links"]) fetched
+            # no Layer-3 detail — neither touches the access stats. The access
+            # check and the access audit event still run on every call.
+            record_access = view.page_field is None and not view.fields.isdisjoint(
+                _REFERENCE_LAYER3
+            )
             try:
                 result = await execute_with_timeout(
-                    service.reference(request.memory_id, user_id=user_id),
+                    service.reference(
+                        request.memory_id, user_id=user_id, record_access=record_access
+                    ),
                     operation_name="reference",
                 )
             except NotFoundException:

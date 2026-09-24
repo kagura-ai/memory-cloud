@@ -9,7 +9,8 @@ large memory produced a response of any size. These tests pin the contract:
 * a field that does not fit is sliced (content) or left out (details, context,
   links) with explicit markers, never cut silently;
 * following ``*_next_offset`` reproduces content and details exactly;
-* every continuation goes through the same context / memory authorization.
+* every continuation goes through the same context / memory authorization,
+  but only a read without an offset records access (one adoption per read).
 
 The service is mocked; DB-backed reference() behaviour is covered elsewhere.
 These are RESPONSE budgets — the tools/list definition budgets live in
@@ -30,10 +31,15 @@ from mcp_server.tools._constants import (
     REFERENCE_DEFAULT_MAX_CHARS,
     REFERENCE_MAX_CHARS_LIMIT,
     REFERENCE_MIN_MAX_CHARS,
+    REFERENCE_MIN_PAGE_CHARS,
 )
 from mcp_server.tools._helpers import _ContextNotFoundError
-from mcp_server.tools.memory import handle_reference
-from models.schemas import LinkedMemoryRef, ReferenceResponse
+from mcp_server.tools.memory import (
+    _bound_reference_memory,
+    _parse_reference_view,
+    handle_reference,
+)
+from models.schemas import LinkedMemoryRef, ReferenceResponse, SupersedeCandidate
 from utils.exceptions import NotFoundException
 
 MEM_ID = uuid4()
@@ -49,7 +55,13 @@ def _big_text(n: int) -> str:
     return (_MIXED * (n // len(_MIXED) + 1))[:n]
 
 
-def _response(content: str = "full layer-3 content", details=None, context=None, links=1):
+def _response(
+    content: str = "full layer-3 content",
+    details=None,
+    context=None,
+    links=1,
+    link_summary: str = "linked memory number",
+):
     return ReferenceResponse(
         memory_id=MEM_ID,
         summary="seed summary for a bounded reference test",
@@ -69,7 +81,7 @@ def _response(content: str = "full layer-3 content", details=None, context=None,
         outgoing_links=[
             LinkedMemoryRef(
                 memory_id=uuid4(),
-                summary=f"linked memory number {i}",
+                summary=f"{link_summary} {i}",
                 type="code",
                 importance=0.5,
                 weight=1.0,
@@ -249,10 +261,10 @@ async def test_large_context_and_links_are_omitted_with_markers():
     assert "context" not in memory
     assert memory["context_omitted"] is True
     assert memory["context_next_offset"] == 0
-    # 50 links fit in 20k here; force links out with a tighter budget
+    # 50 short links fit even the minimum budget; longer summaries push them out
     text, _ = await _call(
         {"max_chars": REFERENCE_MIN_MAX_CHARS},
-        service_result=_response(context=context, links=50),
+        service_result=_response(context=context, links=50, link_summary="s" * 200),
     )
     memory = _memory(text)
     assert len(text) <= REFERENCE_MIN_MAX_CHARS
@@ -487,7 +499,7 @@ async def test_continuation_for_an_inaccessible_context_is_refused_the_same_way(
     ],
 )
 @pytest.mark.asyncio
-async def test_continuation_for_another_contexts_memory_is_refused_the_same_way(continuation):
+async def test_continuation_for_an_inaccessible_memory_is_refused_the_same_way(continuation):
     """The memory-level check (service.reference) runs on every continuation."""
     missing = NotFoundException("Memory", str(MEM_ID))
     plain, _ = await _call({}, service_error=missing)
@@ -495,7 +507,57 @@ async def test_continuation_for_another_contexts_memory_is_refused_the_same_way(
     assert _error(paged)["error"] == "memory_not_found"
     assert paged == plain
     paged_svc.reference.assert_awaited_once()
-    assert paged_svc.reference.await_args.kwargs == {"user_id": "u"}
+    assert paged_svc.reference.await_args.kwargs["user_id"] == "u"
+
+
+# ------------------------------------------------------------ access stats
+
+
+@pytest.mark.parametrize(
+    "args, records",
+    [
+        ({}, True),
+        ({"fields": ["details"]}, True),
+        ({"fields": ["content", "links"]}, True),
+        ({"max_chars": REFERENCE_MAX_CHARS_LIMIT}, True),
+        # a continuation: the first call already recorded this read
+        ({"content_offset": 0}, False),
+        ({"content_offset": 5}, False),
+        ({"details_offset": 0}, False),
+        ({"fields": ["content", "context"], "context_offset": 0}, False),
+        # no Layer-3 field fetched
+        ({"fields": []}, False),
+        ({"fields": ["links"]}, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_only_a_read_without_an_offset_records_access(args, records):
+    """One logical read is one adoption (#1046), however many pages it takes."""
+    _, svc = await _call(args, service_result=_response(content=_big_text(60_000)))
+    svc.reference.assert_awaited_once()
+    assert svc.reference.await_args.kwargs["record_access"] is records
+
+
+@pytest.mark.asyncio
+async def test_a_past_the_end_offset_records_no_access():
+    text, svc = await _call({"content_offset": 10_000}, service_result=_response())
+    assert _error(text)["error"] == "invalid_argument"
+    assert svc.reference.await_args.kwargs["record_access"] is False
+
+
+@pytest.mark.asyncio
+async def test_reading_a_large_memory_page_by_page_records_one_access():
+    content = _big_text(70_000)
+    result = _response(content=content)
+    text, first = await _call({}, service_result=result)
+    records = [first.reference.await_args.kwargs["record_access"]]
+    offset = _memory(text)["content_next_offset"]
+    while offset is not None:
+        text, svc = await _call({"content_offset": offset}, service_result=result)
+        records.append(svc.reference.await_args.kwargs["record_access"])
+        offset = _memory(text)["content_next_offset"]
+    assert len(records) > 2
+    assert records.count(True) == 1 and records[0] is True
 
 
 # ------------------------------------------------------------------ definition
@@ -556,3 +618,110 @@ async def test_budget_and_markers_hold_for_every_combination(sizes, args, max_ch
     selected = args.get("fields", offset_fields or ["content", "details", "context", "links"])
     for field in ("content", "details", "context", "links"):
         assert _accounted_for(memory, field) is (field in selected), field
+
+
+def _compact(obj) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+@pytest.mark.asyncio
+async def test_whole_details_that_nearly_fill_the_budget_leave_room_for_contents_marker():
+    """Review case: details kept whole used to push content's marker over max_chars."""
+    result = _response(content="c" * 30_000, details={"raw": "x" * 19_298})
+    text, _ = await _call({}, service_result=result)
+    assert len(text) <= REFERENCE_DEFAULT_MAX_CHARS
+    memory = _memory(text)
+    assert _accounted_for(memory, "content") and _accounted_for(memory, "details")
+
+
+@pytest.mark.parametrize(
+    "args, grow",
+    [
+        ({}, "details"),
+        ({}, "context"),
+        ({"fields": ["context", "details"], "details_offset": 0}, "context"),
+        ({"fields": ["content", "details", "context", "links"], "context_offset": 0}, "details"),
+        ({"fields": ["content", "details", "context", "links"], "content_offset": 9}, "details"),
+    ],
+)
+@pytest.mark.parametrize("max_chars", [REFERENCE_MIN_MAX_CHARS, REFERENCE_DEFAULT_MAX_CHARS])
+def test_budget_holds_when_a_whole_field_nearly_fills_it(args, grow, max_chars):
+    """Sweep one whole field's size across the point where it stops fitting.
+
+    Markers still owed to the other fields, and the minimum page, are held
+    back before a whole field is kept, so no size lands over the budget.
+    """
+    view, error = _parse_reference_view({**args, "max_chars": max_chars})
+    assert error is None and view is not None
+    base = json.loads(
+        _legacy_text(_response(content="c" * 30_000, details={"raw": "y" * 30_000}, links=3))
+    )["memory"]
+    selected = sorted(view.fields)
+    for n in range(max_chars - 2_000, max_chars + 20):
+        memory = {**base, grow: {"raw": "x" * n}}
+        bounded = _bound_reference_memory(memory, view)
+        text = _compact({"status": "success", "memory": bounded})
+        assert len(text) <= max_chars, n
+        for field in ("content", "details", "context", "links"):
+            assert _accounted_for(bounded, field) is (field in selected), (n, field)
+
+
+def _with_largest_light_fields(result: ReferenceResponse, char: str) -> ReferenceResponse:
+    """``result`` with each light field at its write-side limit, text made of ``char``."""
+    return result.model_copy(
+        update={
+            "summary": char * 500,
+            "context_summary": char * 2_000,
+            "type": "t" * 50,
+            "source_uri": "https://example.com/" + "p" * (2_048 - 20),
+            "tags": [f"tag-{i:02d}-" + "t" * 12 for i in range(20)],
+            "supersede_candidate": SupersedeCandidate(
+                memory_id=uuid4(),
+                summary=char * 500,
+                similarity=0.93,
+                detected_at=datetime(2026, 6, 1, 12, 0, 0),
+            ),
+        }
+    )
+
+
+@pytest.mark.parametrize("char", ["s", '"', "\n"])
+@pytest.mark.asyncio
+async def test_largest_light_fields_leave_room_for_pages_at_the_minimum_budget(char):
+    """Even quote- or newline-heavy light fields at their limits fit the minimum budget."""
+    result = _with_largest_light_fields(
+        _response(content="c" * 50_000, details={"raw": "d" * 50_000}), char
+    )
+    budget = {"max_chars": REFERENCE_MIN_MAX_CHARS}
+    text, _ = await _call(budget, service_result=result)
+    assert len(text) <= REFERENCE_MIN_MAX_CHARS
+    assert _accounted_for(_memory(text), "details")
+
+    for args in ({"content_offset": 100}, {"details_offset": 0}):
+        text, _ = await _call({**budget, **args}, service_result=result)
+        assert len(text) <= REFERENCE_MIN_MAX_CHARS
+        memory = _memory(text)
+        page = memory.get("content") or memory["details_json"]
+        assert len(page) >= REFERENCE_MIN_PAGE_CHARS
+
+
+@pytest.mark.asyncio
+async def test_light_fields_over_the_budget_still_page_in_useful_steps():
+    """Control characters escape to six, so the light fields alone can pass max_chars.
+
+    The response then goes over the budget, but every field is still accounted
+    for and a page still advances by the minimum page size, not one character.
+    """
+    result = _with_largest_light_fields(_response(content="c" * 50_000), "\x01")
+    text, _ = await _call({"max_chars": REFERENCE_MIN_MAX_CHARS}, service_result=result)
+    memory = _memory(text)
+    assert len(text) > REFERENCE_MIN_MAX_CHARS
+    for field in ("content", "details", "context", "links"):
+        assert _accounted_for(memory, field), field
+
+    text, _ = await _call(
+        {"max_chars": REFERENCE_MIN_MAX_CHARS, "content_offset": 0}, service_result=result
+    )
+    memory = _memory(text)
+    assert len(memory["content"]) == REFERENCE_MIN_PAGE_CHARS
+    assert memory["content_next_offset"] == REFERENCE_MIN_PAGE_CHARS

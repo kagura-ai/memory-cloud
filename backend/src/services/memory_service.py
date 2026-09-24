@@ -1784,12 +1784,20 @@ class MemoryService:
             lint=result.lint,
         )
 
-    async def reference(self, memory_id: UUID, user_id: str) -> ReferenceResponse:
+    async def reference(
+        self, memory_id: UUID, user_id: str, *, record_access: bool = True
+    ) -> ReferenceResponse:
         """Get full memory details (Layer 3).
 
         Args:
             memory_id: Memory UUID
             user_id: User ID (for access control)
+            record_access: Record the read in the memory's access stats
+                (access_count, the #1046 adoption signal reference_count,
+                last_used_at). The MCP handler passes False for a
+                continuation page of a read it already recorded, and for a
+                call that returns no Layer-3 field (#1685). The access check
+                and the access audit event run either way.
 
         Returns:
             ReferenceResponse with full details
@@ -1836,8 +1844,11 @@ class MemoryService:
         # (#1046): the agent deliberately fetched Layer-3 detail, so this bumps
         # reference_count in addition to access_count. Surfacing call sites
         # (recall return, explore spread) below leave count_as_adoption False.
-        await self.memory_repo.update_access_stats(memory_id, client="api", count_as_adoption=True)
-        await self.db.commit()
+        if record_access:
+            await self.memory_repo.update_access_stats(
+                memory_id, client="api", count_as_adoption=True
+            )
+            await self.db.commit()
 
         logger.info("memory_referenced", memory_id=str(memory_id), user_id=user_id)
 
