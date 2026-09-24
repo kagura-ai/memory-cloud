@@ -67,6 +67,21 @@ def get_tool_timeout(tool_name: str) -> float:
     return TOOL_TIMEOUTS.get(tool_name, DEFAULT_TOOL_TIMEOUT)
 
 
+# Issue #1685: reference() response budget. The unit is CHARACTERS (Python str
+# code points) of the serialized tool result — the compact JSON text the model
+# reads, escapes included — not tokens and not UTF-8 bytes.
+#
+# Claude Code warns when an MCP tool result passes ~10k tokens and caps it at
+# 25k tokens by default. English prose runs about 4 characters per token,
+# but CJK text can approach one token per character, so 40,000 characters of
+# Japanese could reach that cap. 20,000 keeps an English response near 5k
+# tokens and a Japanese one under the cap. Callers may lower the budget, or
+# raise it up to the hard limit (for SDKs and other non-model readers).
+REFERENCE_DEFAULT_MAX_CHARS = 20_000
+REFERENCE_MIN_MAX_CHARS = 5_000
+REFERENCE_MAX_CHARS_LIMIT = 100_000
+
+
 # Issue #215, #240: Instructions for AI clients
 # Returned by get_context_info() to help AI clients use memory tools effectively
 KAGURA_MEMORY_INSTRUCTIONS = """# Kagura Memory Cloud - Quick Reference

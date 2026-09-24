@@ -1102,13 +1102,300 @@ async def handle_forget(
     return _error_response("internal_error", "Database session unavailable")
 
 
+# ============================================================================
+# #1685: bounded reference() responses
+# ============================================================================
+#
+# reference() returns one memory in full. Its "light" fields (ids, summary,
+# context_summary, tags, timestamps, provenance, supersede_candidate) are
+# bounded by the write-side schema and always come back. The heavy fields —
+# content, details, context and the declared links — are selectable (`fields`)
+# and share a per-call budget (`max_chars`, in characters of the serialized
+# tool result). A field that does not fit is never cut silently:
+#
+# * content (plain text) comes back as a slice with content_offset /
+#   content_total_chars / content_truncated / content_next_offset;
+# * details, context and links (JSON) come back whole or are left out with
+#   <field>_omitted + <field>_total_chars — never sliced mid-structure.
+#   details and context can be paged as their compact JSON text
+#   (<field>_offset -> <field>_json), so a caller can always rebuild 100% of
+#   either; links are capped by the service (50 per direction), so
+#   fields=["links"] with a raised max_chars returns them whole.
+#
+# The whole-or-omitted fields are placed first; the page the caller asked for,
+# then content from the start, fill what is left. Offsets count Python str characters (code
+# points). Every page goes through this same handler, so context resolution and
+# the memory-level access check run again on each continuation.
+
+_REFERENCE_FIELD_KEYS: dict[str, tuple[str, ...]] = {
+    "content": ("content",),
+    "details": ("details",),
+    "context": ("context",),
+    "links": ("outgoing_links", "outgoing_has_more", "incoming_links", "incoming_has_more"),
+}
+_REFERENCE_FIELDS = tuple(_REFERENCE_FIELD_KEYS)
+_REFERENCE_KEY_FIELD = {key: field for field, keys in _REFERENCE_FIELD_KEYS.items() for key in keys}
+# Fields a caller can page with ``<field>_offset``.
+_REFERENCE_PAGEABLE = ("content", "details", "context")
+# Budget order of the whole-or-omitted fields: smallest-in-practice first, so
+# one oversized field does not push out the ones that would have fitted.
+_REFERENCE_WHOLE_ORDER = ("links", "context", "details")
+
+
+class _ReferenceView:
+    """The validated selection / paging / budget arguments of one reference() call."""
+
+    __slots__ = ("fields", "page_field", "offset", "max_chars")
+
+    def __init__(
+        self, fields: frozenset[str], page_field: str | None, offset: int, max_chars: int
+    ) -> None:
+        self.fields = fields
+        self.page_field = page_field
+        self.offset = offset
+        self.max_chars = max_chars
+
+    @property
+    def is_default(self) -> bool:
+        return self.page_field is None and self.fields == frozenset(_REFERENCE_FIELDS)
+
+
+class _ReferenceOffsetError(Exception):
+    """An offset past the end of the field it pages (known only after the read)."""
+
+    def __init__(self, field: str, offset: int, total: int) -> None:
+        self.field = field
+        self.offset = offset
+        self.total = total
+        super().__init__(field)
+
+    def to_response(self) -> list[TextContent]:
+        return _error_response(
+            "invalid_argument",
+            f"{self.field}_offset {self.offset} is beyond the end of {self.field} "
+            f"({self.total} characters).",
+            received=self.offset,
+            help=f"Use {self.field}_next_offset from the previous response, or 0 to start over.",
+            **{f"{self.field}_total_chars": self.total},
+        )
+
+
+def _parse_reference_view(
+    args: dict[str, Any],
+) -> tuple[_ReferenceView | None, list[TextContent] | None]:
+    """Validate ``fields`` / ``*_offset`` / ``max_chars`` before any read."""
+    from mcp_server.tools._constants import (
+        REFERENCE_DEFAULT_MAX_CHARS,
+        REFERENCE_MAX_CHARS_LIMIT,
+        REFERENCE_MIN_MAX_CHARS,
+    )
+
+    # ``type(x) is int`` (not isinstance) so bool, which subclasses int, is refused.
+    offsets: dict[str, int] = {}
+    for field in _REFERENCE_PAGEABLE:
+        name = f"{field}_offset"
+        value = args.get(name)
+        if value is None:
+            continue
+        if type(value) is not int or value < 0:
+            return None, _error_response(
+                "invalid_argument",
+                f"{name} must be a non-negative integer (a character offset).",
+                received=value,
+                help=f"Pass the {name.replace('_offset', '_next_offset')} of the previous response.",
+            )
+        offsets[field] = value
+    if len(offsets) > 1:
+        return None, _error_response(
+            "invalid_argument",
+            "Pass only one of content_offset, details_offset, context_offset per call.",
+            received=sorted(f"{field}_offset" for field in offsets),
+        )
+    page_field, offset = next(iter(offsets.items()), (None, 0))
+
+    raw_fields = args.get("fields")
+    if raw_fields is None:
+        # An offset alone asks for the next page of that one field.
+        fields = frozenset([page_field] if page_field else _REFERENCE_FIELDS)
+    elif type(raw_fields) is not list or any(f not in _REFERENCE_FIELDS for f in raw_fields):
+        return None, _error_response(
+            "invalid_argument",
+            f"fields must be an array of: {', '.join(_REFERENCE_FIELDS)}.",
+            received=raw_fields,
+        )
+    else:
+        fields = frozenset(raw_fields)
+        if page_field and page_field not in fields:
+            return None, _error_response(
+                "invalid_argument",
+                f"{page_field}_offset needs '{page_field}' in fields.",
+                received=raw_fields,
+            )
+
+    max_chars = args.get("max_chars")
+    if max_chars is None:
+        max_chars = REFERENCE_DEFAULT_MAX_CHARS
+    elif type(max_chars) is not int or not (
+        REFERENCE_MIN_MAX_CHARS <= max_chars <= REFERENCE_MAX_CHARS_LIMIT
+    ):
+        return None, _error_response(
+            "invalid_argument",
+            f"max_chars must be an integer between {REFERENCE_MIN_MAX_CHARS} and "
+            f"{REFERENCE_MAX_CHARS_LIMIT} (characters, not tokens).",
+            received=max_chars,
+        )
+    return _ReferenceView(fields, page_field, offset, max_chars), None
+
+
+def _member_chars(key: str, value: Any) -> int:
+    """Characters that ``,"key":value`` adds to a compact JSON object."""
+    return len(_dumps(key)) + len(_dumps(value)) + 2
+
+
+def _fit_slice(text: str, start: int, budget: int) -> int:
+    """Longest ``n`` whose ``text[start:start + n]`` serializes within ``budget``.
+
+    Measured on the escaped JSON string (quotes excluded): a quote, backslash or
+    newline costs two characters and a control character six, so the slice
+    length cannot be read off the budget. Escaped length only grows with ``n``,
+    which makes a binary search exact; every probe is at most ``budget`` long.
+    """
+    lo, hi = 0, min(len(text) - start, max(budget, 0))
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if len(_dumps(text[start : start + mid])) - 2 <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def _omitted_marker(field: str, total: int, next_offset: int | None) -> dict[str, Any]:
+    """The markers that stand in for a field left out of the response."""
+    marker: dict[str, Any] = {f"{field}_omitted": True, f"{field}_total_chars": total}
+    if next_offset is not None:
+        marker[f"{field}_next_offset"] = next_offset
+    return marker
+
+
+def _reference_page(
+    field: str, text: str, offset: int, remaining: int, *, progress: bool
+) -> dict[str, Any]:
+    """One page of ``text`` from ``offset`` that fits ``remaining`` characters.
+
+    ``text`` is the content itself, or the compact JSON of details / context
+    (returned under ``<field>_json``). With ``progress`` (the caller is paging
+    this field) a page always advances by at least one character, so a
+    continuation loop terminates even when the light fields crowd the budget.
+    Without it (content read from the start), a page that fits nothing is
+    reported as omitted instead of as an empty slice.
+    """
+    total = len(text)
+    if offset > total:
+        raise _ReferenceOffsetError(field, offset, total)
+    value_key = field if field == "content" else f"{field}_json"
+
+    def meta(next_offset: int | None, truncated: bool) -> dict[str, Any]:
+        return {
+            f"{field}_offset": offset,
+            f"{field}_total_chars": total,
+            f"{field}_truncated": truncated,
+            f"{field}_next_offset": next_offset,
+        }
+
+    # Reserve room for the metadata at its widest (``false`` > ``true``; the
+    # next offset is either ``null`` or at most ``total``).
+    reserve = max(
+        sum(_member_chars(k, v) for k, v in meta(nxt, False).items()) for nxt in (None, total)
+    )
+    budget = remaining - reserve - _member_chars(value_key, "")
+    size = _fit_slice(text, offset, budget)
+    if size == 0 and offset < total:
+        if not progress:
+            return _omitted_marker(field, total, offset)
+        size = 1
+    end = offset + size
+    return {
+        value_key: text[offset:end],
+        **meta(end if end < total else None, end < total),
+    }
+
+
+def _bound_reference_memory(memory: dict[str, Any], view: _ReferenceView) -> dict[str, Any]:
+    """Apply field selection, paging and the character budget to ``memory``.
+
+    ``memory`` is the full projection in the historical key order. The result
+    keeps that order, with each field's markers next to it; the serialized
+    ``{"status": "success", "memory": ...}`` stays within ``view.max_chars``
+    unless the always-returned light fields alone nearly fill it.
+    """
+    head = {k: v for k, v in memory.items() if k not in _REFERENCE_KEY_FIELD}
+    # ``head`` always holds memory_id, so every added member costs its comma.
+    remaining = view.max_chars - len(_dumps({"status": "success", "memory": head}))
+    parts: dict[str, dict[str, Any]] = {}
+
+    def take(field: str, part: dict[str, Any]) -> None:
+        nonlocal remaining
+        parts[field] = part
+        remaining -= sum(_member_chars(k, v) for k, v in part.items())
+
+    # 1. JSON fields: whole, or left out with their size and where paging
+    #    starts. The paged field (if any) is handled below instead.
+    for field in _REFERENCE_WHOLE_ORDER:
+        if field not in view.fields or field == view.page_field:
+            continue
+        whole = {key: memory[key] for key in _REFERENCE_FIELD_KEYS[field]}
+        if sum(_member_chars(k, v) for k, v in whole.items()) <= remaining:
+            take(field, whole)
+            continue
+        if field == "links":
+            take(field, _omitted_marker(field, len(_dumps(whole)), None))
+        else:
+            take(field, _omitted_marker(field, len(_dumps(memory[field])), 0))
+
+    # 2. The requested page, then content from the start, fill what is left.
+    content_after_page = "content" in view.fields and view.page_field != "content"
+    if view.page_field:
+        field = view.page_field
+        text = memory[field] if field == "content" else _dumps(memory[field])
+        # Hold back room for content's markers, which are reported after the page.
+        held = (
+            sum(
+                _member_chars(k, v)
+                for k, v in _omitted_marker("content", len(memory["content"]), 0).items()
+            )
+            if content_after_page
+            else 0
+        )
+        take(field, _reference_page(field, text, view.offset, remaining - held, progress=True))
+    if content_after_page:
+        content = memory["content"]
+        if _member_chars("content", content) <= remaining:
+            take("content", {"content": content})
+        else:
+            take("content", _reference_page("content", content, 0, remaining, progress=False))
+
+    bounded: dict[str, Any] = {}
+    for key, value in memory.items():
+        field = _REFERENCE_KEY_FIELD.get(key)
+        if field is None:
+            bounded[key] = value
+        elif key == _REFERENCE_FIELD_KEYS[field][0]:
+            bounded.update(parts.get(field, {}))
+    return bounded
+
+
 async def handle_reference(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """Get complete memory details (Layer 3)."""
+    """Get complete memory details (Layer 3), within a character budget (#1685)."""
     memory_uuid, error = _validate_memory_id(args, "reference")
     if error or memory_uuid is None:
         return error or _error_response("invalid_memory_id_format", "Invalid memory_id")
+
+    view, error = _parse_reference_view(args)
+    if error or view is None:
+        return error or _error_response("invalid_argument", "Invalid reference arguments")
 
     from db.base import get_db
     from models.schemas import ReferenceRequest
@@ -1179,6 +1466,20 @@ async def handle_reference(
                 ),
             }
 
+            # #1685: a default call whose full projection fits is returned
+            # exactly as before; anything else is selected / paged / bounded.
+            text = _dumps({"status": "success", "memory": reference_data})
+            if not (view.is_default and len(text) <= view.max_chars):
+                try:
+                    bounded = _bound_reference_memory(reference_data, view)
+                except _ReferenceOffsetError as e:
+                    await db.rollback()
+                    await _log_tool_usage(
+                        db, user_id, "reference", start_time, 400, current_context_id, workspace_id
+                    )
+                    return e.to_response()
+                text = _dumps({"status": "success", "memory": bounded})
+
             await _log_tool_usage(
                 db, user_id, "reference", start_time, 200, current_context_id, workspace_id
             )
@@ -1187,12 +1488,7 @@ async def handle_reference(
             await _touch_context_last_used(db, current_context)
             await db.commit()
 
-            return [
-                TextContent(
-                    type="text",
-                    text=_dumps({"status": "success", "memory": reference_data}),
-                )
-            ]
+            return [TextContent(type="text", text=text)]
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()

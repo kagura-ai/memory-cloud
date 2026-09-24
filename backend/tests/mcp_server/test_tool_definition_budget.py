@@ -47,7 +47,7 @@ SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 # schema skeleton (21,391), the "Returns:" contracts, one line of meaning per
 # parameter and the rules an agent must not lose (SECURITY, supersedes, trust
 # tier, error codes). Going lower means cutting those, not prose.
-FULL_LIST_BUDGET = 84_000
+FULL_LIST_BUDGET = 85_500  # #1685: reference() selection/paging params (85,157 measured)
 CORE_LIST_BUDGET = 31_000
 RECALL_BUDGET = 6_500
 REMEMBER_BUDGET = 6_000
