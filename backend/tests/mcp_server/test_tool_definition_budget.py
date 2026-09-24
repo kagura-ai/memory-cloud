@@ -14,8 +14,8 @@ way:
 * **Skeleton** — trimming is a text-only change. Every definition with its
   ``description`` strings removed must equal the committed snapshot, which was
   generated from the registry *before* any text was touched. Names, types,
-  ``required``, enums, bounds, ``additionalProperties`` and ``readOnly`` flags
-  are therefore pinned, in order.
+  ``required``, enums, bounds, ``additionalProperties``, ``readOnly`` flags,
+  titles and annotations are therefore pinned, in order.
 
 A deliberate schema change (a new tool or parameter) regenerates the snapshot::
 
@@ -47,11 +47,15 @@ SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 # schema skeleton (21,391), the "Returns:" contracts, one line of meaning per
 # parameter and the rules an agent must not lose (SECURITY, supersedes, trust
 # tier, error codes). Going lower means cutting those, not prose.
-FULL_LIST_BUDGET = 84_000
+#
+# #1683 added a title and the four standard annotations to every definition,
+# about 160 characters each: full list 94,113, core list 30,600, recall 6,504,
+# remember 6,092.
+FULL_LIST_BUDGET = 95_000  # (#1683) was 84,000
 CORE_LIST_BUDGET = 31_000
-RECALL_BUDGET = 6_500
-REMEMBER_BUDGET = 6_000
-PER_TOOL_BUDGET = 6_500
+RECALL_BUDGET = 6_600  # (#1683) was 6,500
+REMEMBER_BUDGET = 6_200  # (#1683) was 6,000
+PER_TOOL_BUDGET = 6_600  # (#1683) was 6,500
 
 # A ceiling more than this far above the measured size is a stale constant.
 MAX_SLACK = 0.15

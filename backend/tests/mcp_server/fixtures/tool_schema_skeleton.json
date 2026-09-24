@@ -6,6 +6,14 @@
       "type": "object",
       "properties": {},
       "additionalProperties": false
+    },
+    "title": "List My Key Bindings",
+    "annotations": {
+      "title": "List My Key Bindings",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -23,6 +31,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Describe Key Binding",
+    "annotations": {
+      "title": "Describe Key Binding",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -107,6 +123,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Store Memory",
+    "annotations": {
+      "title": "Store Memory",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -168,11 +192,18 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Update Memory",
+    "annotations": {
+      "title": "Update Memory",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
     "name": "recall",
-    "readOnly": true,
     "inputSchema": {
       "type": "object",
       "required": [
@@ -220,6 +251,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Search Memories",
+    "annotations": {
+      "title": "Search Memories",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -242,6 +281,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Read Memory",
+    "annotations": {
+      "title": "Read Memory",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -271,6 +318,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "List Upcoming Memories",
+    "annotations": {
+      "title": "List Upcoming Memories",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -302,6 +357,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "List Nearby Memories",
+    "annotations": {
+      "title": "List Nearby Memories",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -322,6 +385,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Load Pinned Memories",
+    "annotations": {
+      "title": "Load Pinned Memories",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -342,6 +413,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Load Guardrails",
+    "annotations": {
+      "title": "Load Guardrails",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -368,6 +447,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Forget Memories",
+    "annotations": {
+      "title": "Forget Memories",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -403,6 +490,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Explore Memory Graph",
+    "annotations": {
+      "title": "Explore Memory Graph",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -438,6 +533,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "List Memory Edges",
+    "annotations": {
+      "title": "List Memory Edges",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -490,6 +593,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Create Memory Edge",
+    "annotations": {
+      "title": "Create Memory Edge",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -532,6 +643,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Update Memory Edge",
+    "annotations": {
+      "title": "Update Memory Edge",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -558,6 +677,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Delete Memory Edge",
+    "annotations": {
+      "title": "Delete Memory Edge",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -578,6 +705,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Get Context Info",
+    "annotations": {
+      "title": "Get Context Info",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -601,6 +736,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "List Contexts",
+    "annotations": {
+      "title": "List Contexts",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -643,6 +786,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "List Tags",
+    "annotations": {
+      "title": "List Tags",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -679,6 +830,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Create Context",
+    "annotations": {
+      "title": "Create Context",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -719,6 +878,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Update Context",
+    "annotations": {
+      "title": "Update Context",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -735,6 +902,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Delete Context",
+    "annotations": {
+      "title": "Delete Context",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -759,6 +934,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Merge Contexts",
+    "annotations": {
+      "title": "Merge Contexts",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -815,6 +998,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Update Search Config",
+    "annotations": {
+      "title": "Update Search Config",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -824,6 +1015,14 @@
       "type": "object",
       "properties": {},
       "additionalProperties": false
+    },
+    "title": "Get Usage",
+    "annotations": {
+      "title": "Get Usage",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -845,6 +1044,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Get Sleep History",
+    "annotations": {
+      "title": "Get Sleep History",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -862,6 +1069,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Get Sleep Report",
+    "annotations": {
+      "title": "Get Sleep Report",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -878,6 +1093,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Roll Back Sleep Run",
+    "annotations": {
+      "title": "Roll Back Sleep Run",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -906,6 +1129,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Set Up Resource",
+    "annotations": {
+      "title": "Set Up Resource",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -1092,6 +1323,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Set Up Connector",
+    "annotations": {
+      "title": "Set Up Connector",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true
     }
   },
   {
@@ -1145,6 +1384,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Ingest Resource Events",
+    "annotations": {
+      "title": "Ingest Resource Events",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -1161,6 +1408,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Get Resource Impact",
+    "annotations": {
+      "title": "Get Resource Impact",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1180,6 +1435,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Get Resource Schema",
+    "annotations": {
+      "title": "Get Resource Schema",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1203,6 +1466,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "List Resource Tokens",
+    "annotations": {
+      "title": "List Resource Tokens",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1243,6 +1514,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Analyze Context",
+    "annotations": {
+      "title": "Analyze Context",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -1260,6 +1539,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Get Analysis",
+    "annotations": {
+      "title": "Get Analysis",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1283,6 +1570,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "List Analyses",
+    "annotations": {
+      "title": "List Analyses",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1300,6 +1595,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Get Active Analysis",
+    "annotations": {
+      "title": "Get Active Analysis",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1327,6 +1630,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Get Analysis Cluster",
+    "annotations": {
+      "title": "Get Analysis Cluster",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1360,6 +1671,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Start File Upload",
+    "annotations": {
+      "title": "Start File Upload",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -1382,6 +1701,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Complete File Upload",
+    "annotations": {
+      "title": "Complete File Upload",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1401,7 +1728,15 @@
       },
       "additionalProperties": false
     },
-    "readOnly": true
+    "readOnly": true,
+    "title": "Get File Download URL",
+    "annotations": {
+      "title": "Get File Download URL",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "name": "delete_file",
@@ -1419,6 +1754,14 @@
         }
       },
       "additionalProperties": false
+    },
+    "title": "Delete File",
+    "annotations": {
+      "title": "Delete File",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1435,7 +1778,15 @@
       },
       "additionalProperties": false
     },
-    "readOnly": true
+    "readOnly": true,
+    "title": "List Files",
+    "annotations": {
+      "title": "List Files",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   },
   {
     "name": "feedback",
@@ -1465,6 +1816,14 @@
         "helpful"
       ],
       "additionalProperties": false
+    },
+    "title": "Record Recall Feedback",
+    "annotations": {
+      "title": "Record Recall Feedback",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -1490,6 +1849,14 @@
         "value"
       ],
       "additionalProperties": false
+    },
+    "title": "Set Agent State",
+    "annotations": {
+      "title": "Set Agent State",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1510,6 +1877,14 @@
         "context_id"
       ],
       "additionalProperties": false
+    },
+    "title": "Get Agent State",
+    "annotations": {
+      "title": "Get Agent State",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1550,6 +1925,14 @@
         "value"
       ],
       "additionalProperties": false
+    },
+    "title": "Record Measurement",
+    "annotations": {
+      "title": "Record Measurement",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -1596,6 +1979,14 @@
         "metric"
       ],
       "additionalProperties": false
+    },
+    "title": "Get Measurement Series",
+    "annotations": {
+      "title": "Get Measurement Series",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1623,6 +2014,14 @@
         "name"
       ],
       "additionalProperties": false
+    },
+    "title": "Register Agent",
+    "annotations": {
+      "title": "Register Agent",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -1632,6 +2031,14 @@
       "type": "object",
       "properties": {},
       "additionalProperties": false
+    },
+    "title": "List Agents",
+    "annotations": {
+      "title": "List Agents",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1649,6 +2056,14 @@
         "agent_id"
       ],
       "additionalProperties": false
+    },
+    "title": "Get Agent",
+    "annotations": {
+      "title": "Get Agent",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1695,6 +2110,14 @@
         "agent_id"
       ],
       "additionalProperties": false
+    },
+    "title": "Update Agent",
+    "annotations": {
+      "title": "Update Agent",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1711,6 +2134,14 @@
         "agent_id"
       ],
       "additionalProperties": false
+    },
+    "title": "Delete Agent",
+    "annotations": {
+      "title": "Delete Agent",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1763,6 +2194,14 @@
         "context_id"
       ],
       "additionalProperties": false
+    },
+    "title": "Bind Agent to Context",
+    "annotations": {
+      "title": "Bind Agent to Context",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -1780,6 +2219,14 @@
         "agent_id"
       ],
       "additionalProperties": false
+    },
+    "title": "List Agent Bindings",
+    "annotations": {
+      "title": "List Agent Bindings",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1832,6 +2279,14 @@
         "binding_id"
       ],
       "additionalProperties": false
+    },
+    "title": "Update Agent Binding",
+    "annotations": {
+      "title": "Update Agent Binding",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
@@ -1853,11 +2308,18 @@
         "binding_id"
       ],
       "additionalProperties": false
+    },
+    "title": "Unbind Agent from Context",
+    "annotations": {
+      "title": "Unbind Agent from Context",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   },
   {
     "name": "get_agent_bootstrap",
-    "readOnly": true,
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -1926,6 +2388,14 @@
         "agent_id"
       ],
       "additionalProperties": false
+    },
+    "title": "Get Agent Bootstrap",
+    "annotations": {
+      "title": "Get Agent Bootstrap",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -1944,6 +2414,14 @@
         "pubkey"
       ],
       "additionalProperties": false
+    },
+    "title": "Register Secret Public Key",
+    "annotations": {
+      "title": "Register Secret Public Key",
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -1978,6 +2456,14 @@
         "grant_pubkey_ids"
       ],
       "additionalProperties": false
+    },
+    "title": "Store Secret",
+    "annotations": {
+      "title": "Store Secret",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
     }
   },
   {
@@ -1996,7 +2482,16 @@
         "name"
       ],
       "additionalProperties": false
-    }
+    },
+    "title": "Get Secret",
+    "annotations": {
+      "title": "Get Secret",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "readOnly": true
   },
   {
     "name": "secret_list",
@@ -2004,7 +2499,16 @@
       "type": "object",
       "properties": {},
       "additionalProperties": false
-    }
+    },
+    "title": "List Secrets",
+    "annotations": {
+      "title": "List Secrets",
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "readOnly": true
   },
   {
     "name": "secret_revoke_grant",
@@ -2024,6 +2528,14 @@
         "recipient_pubkey_id"
       ],
       "additionalProperties": false
+    },
+    "title": "Revoke Secret Grant",
+    "annotations": {
+      "title": "Revoke Secret Grant",
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false
     }
   }
 ]

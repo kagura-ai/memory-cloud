@@ -22,6 +22,24 @@ Sizes are the compact JSON of the `tools` array, measured at v0.73.0 (the descri
 
 > **A profile is a view, not an authorization boundary.** It filters `tools/list` and nothing else. `tools/call` never reads it: a tool left out of the list stays callable by anyone whose role allows it. To restrict what a key can do, use workspace and context roles.
 
+## Tool annotations
+
+Every definition in `tools/list` carries a human-readable `title` and the standard MCP `annotations` object: the same `title` plus `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint`, all four sent on every tool (read-only tools send `destructiveHint: false` and `idempotentHint: true`). `annotations` exists since MCP 2025-03-26 and a top-level `title` since 2025-06-18; a client that does not know them ignores them. Together they add about 160 characters per tool, on every profile.
+
+**Classification rule.** A tool is read-only when it changes nothing a user stored or can see. Changing stored memories, contexts, edges, files, secrets and grants, agents and bindings, settings, or learned state that changes later results is a modification. Usage and audit logging, access counters (`access_count`, `reference_count`, `last_used_at`) and sweeping already-expired state are not, although re-ranking and consolidation read those counters later. A tool is destructive when some argument can make it remove or overwrite existing data: soft delete, an overwritten value and a revoked grant all count, a tool that only adds rows does not. `idempotentHint` is true only when repeating a call with the same arguments changes nothing further. `openWorldHint` is true only for `setup_connector`, which stores a third-party chat platform's OAuth tokens for a connector that reads from it; the embedding, reranking and analysis model providers the server calls to process data it already holds do not count.
+
+| Class | Tools |
+|-------|-------|
+| Destructive, safe to repeat | `create_edge`, `update_edge`, `delete_edge`, `update_context`, `delete_context`, `update_search_config`, `rollback_sleep_run`, `delete_file`, `set_state`, `update_agent`, `delete_agent`, `update_agent_binding`, `unbind_agent_context`, `secret_revoke_grant` |
+| Destructive, not idempotent | `update_memory` (`external_id` mode replaces the memory each call), `forget` (`query` mode deletes the next top-k), `merge_contexts`, `ingest_events`, `secret_put` |
+| Additive writes | `remember`, `recall`, `get_agent_bootstrap`, `feedback`, `record_measurement`, `create_context`, `setup_resource`, `setup_connector`, `analyze_context`, `init_file_upload`, `complete_file_upload` (idempotent), `register_agent`, `bind_agent_context`, `secret_register_pubkey` |
+| Read-only | The other 31 tools |
+
+- **`recall` is not read-only.** It writes Hebbian graph edges between the memories it returns and promotes working memories that reach the promotion threshold; both change later results. It removes nothing, so it is not destructive, and a repeat strengthens the graph again, so it is not idempotent. `get_agent_bootstrap` runs the same recall when given a `query`. A client that confirms every non-read-only tool asks before these two as well. `reference`, `explore`, `load_pinned`, `recall_upcoming` and `recall_nearby` only bump access counters and stay read-only.
+- `create_edge` is destructive because, on a pair that already has an edge, it applies your values over an automatic edge (and over a declared one with `overwrite=true`). `set_state` overwrites the value at its key; `secret_put` revokes the grants the new version does not list. `secret_get` writes an audit entry and nothing else, so it is read-only.
+- **Legacy `readOnly`.** The non-standard top-level `readOnly: true` of earlier releases is still sent for clients that read it, now derived from `readOnlyHint`: present exactly on the read-only tools. It is gone from `recall` and `get_agent_bootstrap` and new on `secret_get` and `secret_list`.
+- **Hints, not authorization.** Annotations tell a client what a call does so it can decide when to ask for confirmation. The server's workspace and context role checks are unchanged, and a client may ignore the hints.
+
 ## Memory (7)
 
 | Tool | Description | Required Role |

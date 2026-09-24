@@ -19,6 +19,7 @@ import pytest
 
 import mcp_server.transport as transport
 from mcp_server.tools import get_tool_definitions
+from mcp_server.tools._annotations import TOOL_ANNOTATIONS
 from mcp_server.tools._profiles import CORE_TOOLS
 from mcp_server.transport import TOOLS_LIST_TTL_MS, handle_streamable_http_post, mcp_asgi_app
 from mcp_server.transport_stateless import handle_stateless_post
@@ -213,6 +214,27 @@ async def test_stateless_result_keeps_its_caching_hints():
     assert result["resultType"] == "complete"
     assert result["ttlMs"] == TOOLS_LIST_TTL_MS
     assert result["cacheScope"] == "public"
+
+
+# ----------------------------------------------------------------- annotations
+
+
+@DRIVERS
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", [None, b"profile=core", b"tools=forget,recall,secret_get"])
+async def test_listed_tools_carry_their_title_and_annotations(drive, query):
+    """#1683: both eras send the standard metadata, whatever the profile."""
+    send = await drive(query)
+
+    tools = send.body["result"]["tools"]
+    assert tools
+    for tool in tools:
+        expected = TOOL_ANNOTATIONS[tool["name"]]
+        assert tool["annotations"] == expected
+        assert tool["title"] == expected["title"]
+    by_name = {tool["name"]: tool for tool in tools}
+    assert by_name["forget"]["annotations"]["destructiveHint"] is True
+    assert by_name["recall"]["annotations"]["readOnlyHint"] is False
 
 
 # ---------------------------------------------------------------------- errors

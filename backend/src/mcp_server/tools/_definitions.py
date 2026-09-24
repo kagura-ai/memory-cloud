@@ -8,6 +8,7 @@ from config.constants import (
     CONTEXT_SUMMARY_MAX_LENGTH,
     CONTEXT_USAGE_GUIDE_MAX_LENGTH,
 )
+from mcp_server.tools._annotations import annotate_tool_definitions
 
 
 def get_tool_definitions() -> list[dict]:
@@ -2307,7 +2308,10 @@ Returns: {status, name, rotation_needed: true}.""",
         schema = tool.get("inputSchema")
         if isinstance(schema, dict) and schema.get("type") == "object":
             schema.setdefault("additionalProperties", False)
-    return tools
+    # #1683: title and standard ToolAnnotations come from one table in
+    # ``_annotations.py``, which also sets the legacy ``readOnly`` from
+    # ``readOnlyHint`` — it overrides any ``readOnly`` written in an entry above.
+    return annotate_tool_definitions(tools)
 
 
 # ============================================================================
