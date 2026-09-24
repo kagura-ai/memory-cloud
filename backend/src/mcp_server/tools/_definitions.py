@@ -2311,6 +2311,9 @@ Returns: {status, name, rotation_needed: true}.""",
     # #1683: title and standard ToolAnnotations come from one table in
     # ``_annotations.py``, which also sets the legacy ``readOnly`` from
     # ``readOnlyHint`` — it overrides any ``readOnly`` written in an entry above.
+    # Those per-entry keys are dead text, due for removal in a follow-up; the
+    # ``recall`` and ``get_agent_bootstrap`` entries still say ``readOnly: True``
+    # but are served without it.
     return annotate_tool_definitions(tools)
 
 

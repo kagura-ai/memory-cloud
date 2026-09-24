@@ -10,22 +10,23 @@ the tool.
 What counts as modifying the environment (``readOnlyHint=false``): changing
 stored memories, contexts, edges, files, secrets and grants, agents and
 bindings, settings, or learned state that changes later results — the Hebbian
-graph edges and working → persistent promotions a ``recall`` writes, or a
+graph updates and working → persistent promotions a ``recall`` makes, or a
 ``feedback`` row the ranking reads. Usage and audit logging, access bookkeeping
 (``access_count``, ``reference_count``, ``last_used_at``) and sweeping
 already-expired state do not count, although re-ranking and consolidation read
 those counters later: the call changes nothing a user stored or can see.
 ``destructiveHint`` is true when a call can remove or overwrite existing data —
-soft delete, a value overwritten, a grant revoked — including branches picked by
-arguments (``forget(query=...)``, ``ingest_events`` delete / upsert,
+soft delete, a value overwritten, a grant revoked, an edge reweighted or pruned
+by ``recall``'s Hebbian learning — including branches picked by arguments
+(``forget(query=...)``, ``ingest_events`` delete / upsert,
 ``merge_contexts(delete_source=true)``); a call that only adds rows is not
 destructive. ``idempotentHint`` is true only when repeating the call with the
 same arguments changes nothing further (set-to-value updates, deleting a named
-target); creates that mint new ids or tokens are not. ``openWorldHint`` is true
-when a tool connects this server to an outside system (``setup_connector``, a
-third-party chat platform). The model providers the server calls to process
-data it already holds (embedding, reranking, analysis labelling) do not make a
-tool open-world.
+target); creates that mint new ids or tokens are not, and neither is a call that
+restarts a relative expiry. ``openWorldHint`` is true when a tool connects this
+server to an outside system (``setup_connector``, a third-party chat platform).
+The model providers the server calls to process data it already holds
+(embedding, reranking, analysis labelling) do not make a tool open-world.
 
 These are hints for a client's confirmation UI, not authorization: every tool
 keeps its role checks, and a client is free to ignore them.
@@ -36,6 +37,10 @@ exactly when ``readOnlyHint`` is), so the two never disagree.
 """
 
 from typing import Any
+
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def _hints(
@@ -75,8 +80,10 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     "remember": _additive("Store Memory"),  # supersedes adds an edge; the old memory is untouched
     # external_id mode replaces the memory with a new one on every call.
     "update_memory": _destructive("Update Memory", idempotent=False),
-    # Writes Hebbian graph edges and promotes working memories it returns.
-    "recall": _additive("Search Memories"),
+    # Hebbian learning reweights existing edges (a declared edge's weight too),
+    # prunes those that decay below the threshold and evicts the weakest
+    # automatic edges past the per-node cap; it also promotes working memories.
+    "recall": _destructive("Search Memories", idempotent=False),
     "reference": _read("Read Memory"),  # bumps reference_count: bookkeeping
     "recall_upcoming": _read("List Upcoming Memories"),
     "recall_nearby": _read("List Nearby Memories"),
@@ -122,7 +129,8 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     "delete_file": _destructive("Delete File", idempotent=True),
     "list_files": _read("List Files"),
     "feedback": _additive("Record Recall Feedback"),  # re-ranking reads it
-    "set_state": _destructive("Set Agent State", idempotent=True),  # upsert overwrites the key
+    # The upsert overwrites the key; ttl_seconds restarts the expiry on every call.
+    "set_state": _destructive("Set Agent State", idempotent=False),
     "get_state": _read("Get Agent State"),
     "record_measurement": _additive("Record Measurement"),
     "recall_series": _read("Get Measurement Series"),
@@ -136,7 +144,7 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     "update_agent_binding": _destructive("Update Agent Binding", idempotent=True),
     "unbind_agent_context": _destructive("Unbind Agent from Context", idempotent=True),
     # With a query it runs recall, with recall's learning writes.
-    "get_agent_bootstrap": _additive("Get Agent Bootstrap"),
+    "get_agent_bootstrap": _destructive("Get Agent Bootstrap", idempotent=False),
     "secret_register_pubkey": _additive("Register Secret Public Key"),
     # New version each call; grants not listed are revoked.
     "secret_put": _destructive("Store Secret", idempotent=False),
@@ -149,14 +157,21 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
 def annotate_tool_definitions(tools: list[dict]) -> list[dict]:
     """Attach ``title``, ``annotations`` and the legacy ``readOnly`` in place.
 
-    Raises:
-        KeyError: A tool has no ``TOOL_ANNOTATIONS`` entry — add one when adding
-            a tool.
+    A tool with no ``TOOL_ANNOTATIONS`` entry is logged as an error and served
+    without ``title``, ``annotations`` or ``readOnly``, which a client reads as
+    the spec's conservative defaults (a write that may be destructive). This
+    does not raise: it runs inside ``get_tool_definitions()``, which
+    ``_arg_coercion`` also calls when the tools package is imported, so a raise
+    would fail every ``tools/call`` as well as ``tools/list``. The missing entry
+    fails the build instead (``test_the_table_covers_exactly_the_registry``).
     """
+    missing = []
     for tool in tools:
         name = tool["name"]
         if name not in TOOL_ANNOTATIONS:
-            raise KeyError(f"MCP tool {name!r} has no entry in TOOL_ANNOTATIONS")
+            missing.append(name)
+            tool.pop("readOnly", None)
+            continue
         annotations = dict(TOOL_ANNOTATIONS[name])  # a fresh copy per tools/list
         tool["title"] = annotations["title"]
         tool["annotations"] = annotations
@@ -164,4 +179,6 @@ def annotate_tool_definitions(tools: list[dict]) -> list[dict]:
             tool["readOnly"] = True
         else:
             tool.pop("readOnly", None)
+    if missing:
+        logger.error("mcp_tool_annotations_missing", tools=missing)
     return tools

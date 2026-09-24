@@ -10,9 +10,11 @@ paths — is in ``test_transport_tool_profiles``.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
-from mcp_server.tools import get_tool_definitions
+from mcp_server.tools import _annotations, get_tool_definitions
 from mcp_server.tools._annotations import TOOL_ANNOTATIONS, annotate_tool_definitions
 from mcp_server.tools._profiles import CORE_TOOLS, select_tool_definitions
 
@@ -55,13 +57,31 @@ def test_titles_are_unique():
 
 
 def test_the_table_covers_exactly_the_registry():
-    """No stale entry for a removed tool, no missing entry for a new one."""
+    """No stale entry for a removed tool, no missing entry for a new one.
+
+    This is the gate for a new tool: at runtime a missing entry only logs.
+    """
     assert set(TOOL_ANNOTATIONS) == {tool["name"] for tool in get_tool_definitions()}
 
 
-def test_a_tool_without_an_entry_fails_loudly():
-    with pytest.raises(KeyError, match="no_such_tool"):
-        annotate_tool_definitions([{"name": "no_such_tool", "inputSchema": {}}])
+def test_a_tool_without_an_entry_is_served_bare_and_logged(monkeypatch):
+    """A missing entry must not take the server down: ``get_tool_definitions()``
+    also runs when the tools package is imported, so a raise would fail every
+    ``tools/call``. The tool goes out without metadata — the spec's conservative
+    defaults — and without a legacy ``readOnly`` that would contradict them.
+    """
+    logger = MagicMock()
+    monkeypatch.setattr(_annotations, "logger", logger)
+    tools = [
+        {"name": "no_such_tool", "inputSchema": {}, "readOnly": True},
+        {"name": "forget", "inputSchema": {}},
+    ]
+
+    annotate_tool_definitions(tools)
+
+    assert tools[0] == {"name": "no_such_tool", "inputSchema": {}}
+    assert tools[1]["annotations"] == TOOL_ANNOTATIONS["forget"]
+    logger.error.assert_called_once_with("mcp_tool_annotations_missing", tools=["no_such_tool"])
 
 
 def test_hints_are_coherent():
@@ -120,15 +140,17 @@ OVERWRITES = [
     "secret_put",
 ]
 
-# Destructive only on a branch the arguments pick, and not safe to repeat:
+# Destructive and not safe to repeat, often on a branch the arguments pick:
 # forget(query=) deletes the next top-k, update_memory(external_id=) replaces
 # the memory again, merge_contexts copies again, ingest_events appends events,
-# secret_put mints a version and revokes unlisted grants.
+# set_state(ttl_seconds=) restarts the expiry, secret_put mints a version and
+# revokes unlisted grants.
 CONDITIONAL_NON_IDEMPOTENT = [
     "forget",
     "update_memory",
     "merge_contexts",
     "ingest_events",
+    "set_state",
     "secret_put",
 ]
 
@@ -197,18 +219,22 @@ def test_clear_reads_are_read_only(name):
 
 
 @pytest.mark.parametrize("name", ["recall", "get_agent_bootstrap"])
-def test_recall_is_not_read_only_because_it_learns(name):
-    """recall persists Hebbian graph edges and promotes working memories it
+def test_recall_is_destructive_because_it_learns(name):
+    """recall persists Hebbian graph updates and promotes working memories it
     returns (``MemoryService._recall_run_hebbian_learning`` /
     ``_check_and_promote``); both change later results, so it is not read-only.
-    Nothing is removed or overwritten, and a repeat strengthens the graph
-    further, so: not destructive, not idempotent. get_agent_bootstrap runs the
-    same recall when given a query. The legacy ``readOnly`` flag used to say
-    true for both; a client that confirms non-read-only tools now asks first.
+    The learning pass also overwrites and removes existing edges
+    (``HebbianLearner.apply_updates``): it rewrites the weight of an edge it
+    touches, a declared one included, deletes one that decays below
+    ``prune_threshold``, and evicts the weakest automatic edges past
+    ``top_m_edges``. Under the same rule that makes ``create_edge`` destructive,
+    so is recall; a repeat changes the weights again, so it is not idempotent.
+    get_agent_bootstrap runs the same recall when given a query. The legacy
+    ``readOnly`` flag used to say true for both.
     """
     hints = _hints(name)
     assert hints["readOnlyHint"] is False
-    assert hints["destructiveHint"] is False
+    assert hints["destructiveHint"] is True
     assert hints["idempotentHint"] is False
     assert "readOnly" not in _by_name()[name]
 
