@@ -6,6 +6,7 @@ Database URLs are managed directly via os.getenv() in config/database.py.
 """
 
 import os
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
@@ -17,6 +18,12 @@ from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
 
 if TYPE_CHECKING:
     from config.llm_pricing_overrides import PricingOverride
+
+# Issue #1665: the shape of a terms-of-service version string. It rides the
+# OAuth login URL (``accepted_terms=``) and the API unescaped, so it is kept to
+# a plain token. Shared with the login endpoints, which validate the value a
+# browser sends against the same pattern before binding it to the OAuth state.
+TERMS_VERSION_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 # Issue #1470: the total memory quota one inviter's referral chain may mint.
 #
@@ -1041,6 +1048,40 @@ class Settings(BaseSettings):
             "only system admins can mint."
         ),
     )
+
+    # Terms-of-service acceptance (Issue #1665)
+    terms_version: str = Field(
+        default="",
+        description=(
+            "The current terms-of-service version (#1665), e.g. '2026-09'. EMPTY "
+            "(the default) DISABLES server-side terms acceptance: nothing is "
+            "enforced or recorded and nobody is asked to re-accept — sign-in "
+            "behaves exactly as before. When set, a new OAuth account is created "
+            "only if the sign-up carries this version, each acceptance is recorded "
+            "in terms_acceptances, and a signed-in user whose latest accepted "
+            "version differs is asked to accept it. Changing the value asks every "
+            "existing user again. 1-64 characters from [A-Za-z0-9._-]. Surfaced "
+            "to the frontend via GET /api/v1/system/info terms_version."
+        ),
+    )
+
+    @field_validator("terms_version", mode="before")
+    @classmethod
+    def _check_terms_version(cls, v: Any) -> Any:
+        """Trim whitespace; refuse a value that cannot travel in a URL as-is.
+
+        The version rides the OAuth login URL (``accepted_terms=``) and is
+        echoed in the API, so it is limited to a plain token rather than
+        escaped everywhere. Empty stays empty (= disabled).
+        """
+        if v is None:
+            return ""
+        if not isinstance(v, str):
+            return v
+        v = v.strip()
+        if v and not TERMS_VERSION_RE.fullmatch(v):
+            raise ValueError("TERMS_VERSION must be 1-64 characters from [A-Za-z0-9._-]")
+        return v
 
     # Workspace Governance (Issue #1113)
     require_dual_control_force_transfer: bool = Field(

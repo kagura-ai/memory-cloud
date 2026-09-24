@@ -135,6 +135,10 @@ async def system_info():
         # UI renders the real deployment default instead of baked copy.
         # Provider/model names only — never URLs or keys (public endpoint).
         "search_defaults": search_config_defaults(settings),
+        # Issue #1665: the current terms-of-service version, or null when
+        # TERMS_VERSION is empty (server-side acceptance disabled). The sign-in
+        # pages send it back as ``accepted_terms`` once the box is ticked.
+        "terms_version": settings.terms_version or None,
         "features": {
             "neural_memory": settings.enable_neural_memory,
             "research_tools": settings.enable_research_tools,

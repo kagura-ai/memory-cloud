@@ -120,6 +120,10 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         # bookkeeping note (like an API key's name), not knowledge content.
         # Cascades with the inviter on erasure.
         "beta_invites",
+        # Terms-of-service acceptance history (#1665) — who accepted which
+        # terms version and when. Legal/auth bookkeeping, no user content and
+        # no learned structure. Cascades with the user on erasure.
+        "terms_acceptances",
         "config_overrides",
         "llm_call_log",
         "llm_pricing",

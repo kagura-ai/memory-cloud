@@ -14,6 +14,11 @@
  *    - Authenticated + email mismatch → Logout prompt
  *    - Authenticated + email match → Auto-accept
  *
+ * Issue #1665: a workspace invitation can be someone's first sign-in, so when
+ * the deployment records terms acceptance (`system/info.terms_version`) the
+ * login prompt asks for it like /login does and sends it as `accepted_terms`.
+ * Without a version the prompt is unchanged.
+ *
  * Next.js 15: params is now a Promise and must be unwrapped with React.use()
  */
 
@@ -31,7 +36,10 @@ import {
   buildOAuthRedirect,
   type OAuthProvider,
 } from "@/lib/auth/buildOAuthRedirect";
+import { useSystemInfo } from "@/hooks/useSystemFeatures";
 import { Button } from "@/components/ui/button";
+import { TermsAgreement } from "@/components/auth/TermsAgreement";
+import { TermsReacceptanceDialog } from "@/components/auth/TermsReacceptanceDialog";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { LanguageSelector } from "@/components/LanguageSelector";
 import { Check, AlertCircle, Github, LogIn, Mail } from "lucide-react";
@@ -41,6 +49,7 @@ type PageState =
   | "login_required"
   | "email_mismatch"
   | "accepting"
+  | "terms_required"
   | "success"
   | "error";
 
@@ -48,6 +57,17 @@ interface CurrentUser {
   user_id: string;
   email: string;
   name: string;
+}
+
+/**
+ * The part of the `/auth/me` payload the #1665 gate reads. The endpoint wraps
+ * the user as `{user: {...}}`.
+ */
+interface TermsFields {
+  user?: {
+    terms_acceptance_required?: boolean;
+    terms_version?: string | null;
+  };
 }
 
 export default function AcceptInvitationPage({
@@ -66,6 +86,17 @@ export default function AcceptInvitationPage({
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [result, setResult] = useState<AcceptInvitationResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // #1665: this page is outside the (authenticated) layout, so it runs the
+  // re-acceptance step itself before accepting on the user's behalf.
+  const [reacceptVersion, setReacceptVersion] = useState<string | undefined>();
+  // #1665: only asked when the deployment names a terms version. Until the
+  // first /system/info answer the buttons wait; a failed fetch resolves to
+  // "no version", so that never locks anyone out.
+  const systemInfo = useSystemInfo();
+  const termsVersion = systemInfo?.terms_version ?? undefined;
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
+  const termsPending =
+    systemInfo === null || (termsVersion !== undefined && !agreedToTerms);
 
   useEffect(() => {
     initializeAcceptanceFlow();
@@ -89,6 +120,15 @@ export default function AcceptInvitationPage({
       }
 
       setCurrentUser(user);
+
+      // #1665: a signed-in user who still has to accept updated terms does
+      // that first; the invitation is accepted from the dialog's success.
+      const me = (user as unknown as TermsFields).user;
+      if (me?.terms_acceptance_required) {
+        setReacceptVersion(me.terms_version ?? undefined);
+        setState("terms_required");
+        return;
+      }
 
       // Step 3: Check email match (if invitation has email restriction)
       if (info.email_restricted) {
@@ -171,8 +211,11 @@ export default function AcceptInvitationPage({
   };
 
   const startOAuthLogin = (provider: OAuthProvider) => {
+    if (termsPending) return;
     const returnTo = window.location.pathname + window.location.search;
-    window.location.href = buildOAuthRedirect(provider, returnTo);
+    window.location.href = buildOAuthRedirect(provider, returnTo, {
+      acceptedTerms: termsVersion,
+    });
   };
 
   const handleLogout = async () => {
@@ -217,6 +260,19 @@ export default function AcceptInvitationPage({
   };
 
   // Loading State
+  // #1665: blocking re-acceptance, then the invitation continues.
+  if (state === "terms_required" && currentUser) {
+    return (
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
+        <TermsReacceptanceDialog
+          termsVersion={reacceptVersion}
+          onAccepted={() => attemptAcceptInvitation(currentUser)}
+          onSignOut={handleLogout}
+        />
+      </div>
+    );
+  }
+
   if (state === "loading" || state === "accepting") {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
@@ -264,8 +320,19 @@ export default function AcceptInvitationPage({
               )}
             </p>
 
+            {termsVersion !== undefined && (
+              <div className="mb-4">
+                <TermsAgreement
+                  checked={agreedToTerms}
+                  onCheckedChange={setAgreedToTerms}
+                  themed
+                />
+              </div>
+            )}
+
             <Button
               onClick={() => startOAuthLogin("google")}
+              disabled={termsPending}
               size="lg"
               className="w-full mb-3 text-base [&_svg]:size-5"
             >
@@ -275,6 +342,7 @@ export default function AcceptInvitationPage({
 
             <Button
               onClick={() => startOAuthLogin("github")}
+              disabled={termsPending}
               variant="outline"
               size="lg"
               className="w-full mb-4 text-base [&_svg]:size-5"

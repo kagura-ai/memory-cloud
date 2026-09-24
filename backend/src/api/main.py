@@ -190,6 +190,13 @@ openapi_tags = [
         "name": "me-oauth",
         "description": "Refresh the current user's OAuth-backed session credentials",
     },
+    {
+        "name": "me-terms",
+        "description": (
+            "Terms-of-service re-acceptance (Issue #1665): the signed-in user "
+            "accepts the current TERMS_VERSION. 404s unless the deployment sets it."
+        ),
+    },
     # Workspace
     {"name": "workspace", "description": "Workspace dashboard and stats"},
     {"name": "workspaces", "description": "Workspace CRUD operations"},
@@ -647,6 +654,7 @@ from api.routes import (  # noqa: E402
     mcp,
     me_account,  # Issue #360: GDPR right-to-erasure self-service endpoints
     me_oauth,  # Issue #515: manual IdP refresh endpoint
+    me_terms,  # Issue #1665: terms-of-service re-acceptance
     member_credentials,
     memory,
     neural_config,
@@ -684,6 +692,9 @@ app.include_router(me_account.router, prefix="/api/v1")
 
 # Manual OAuth refresh endpoint (Issue #515 - manual IdP re-sync)
 app.include_router(me_oauth.router, prefix="/api/v1")
+
+# Terms-of-service re-acceptance (Issue #1665)
+app.include_router(me_terms.router, prefix="/api/v1")
 
 # OAuth2 Server routes (Issue #33 - OAuth2 client management)
 app.include_router(oauth.router, prefix="/api/v1")

@@ -12,6 +12,7 @@ vi.mock("../api/base", () => ({
 }));
 
 import {
+  acceptTerms,
   getAuthUrl,
   getGitHubAuthUrl,
   loginWithPassword,
@@ -164,5 +165,40 @@ describe("logout — scope (#1488 Phase 4)", () => {
   it("propagates a failure rather than reporting a sign-out that did not happen", async () => {
     mockApiClientPost.mockRejectedValue(new Error("network"));
     await expect(logout("all")).rejects.toThrow("network");
+  });
+});
+
+describe("terms acceptance plumbing (#1665)", () => {
+  it("getAuthUrl / getGitHubAuthUrl add ?accepted_terms when given", async () => {
+    await getAuthUrl("2026-09");
+    expect(mockApiClientGet).toHaveBeenLastCalledWith(
+      "/api/v1/auth/google/login?accepted_terms=2026-09",
+    );
+    await getGitHubAuthUrl("a&b");
+    expect(mockApiClientGet).toHaveBeenLastCalledWith(
+      "/api/v1/auth/github/login?accepted_terms=a%26b",
+    );
+  });
+
+  it("loginWithPassword sends accepted_terms in the body only when given", async () => {
+    await loginWithPassword("user", "pass", undefined, "2026-09");
+    expect(mockApiClientPost).toHaveBeenLastCalledWith("/api/v1/auth/login", {
+      login_id: "user",
+      password: "pass",
+      accepted_terms: "2026-09",
+    });
+    await loginWithPassword("user", "pass");
+    expect(mockApiClientPost).toHaveBeenLastCalledWith("/api/v1/auth/login", {
+      login_id: "user",
+      password: "pass",
+    });
+  });
+
+  it("acceptTerms posts the version to /me/terms-acceptance", async () => {
+    await acceptTerms("2026-09");
+    expect(mockApiClientPost).toHaveBeenCalledWith(
+      "/api/v1/me/terms-acceptance",
+      { version: "2026-09" },
+    );
   });
 });

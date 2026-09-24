@@ -7,6 +7,8 @@
 export const INVITE_HANDOFF_TEST_IDS = {
   /** Terms-of-service checkbox on /join/[token]. */
   joinTerms: "join-terms",
+  /** "Agree to the current terms" banner on /join/[token] (#1665). */
+  joinTermsRequired: "join-terms-required",
   /** "Continue with {provider}" sign-up button on /join/[token]. */
   joinProvider: (provider: string) => `join-continue-${provider}`,
   /** "Approve" on the /device consent screen. */

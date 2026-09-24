@@ -21,6 +21,23 @@ vi.mock("@/lib/api/base", async () => {
   };
 });
 
+// #1665: the terms version /system/info reports; null = not recorded.
+let mockTermsVersion: string | null = null;
+// #1665: true = /system/info has not answered yet (the hook returns null).
+let mockSystemInfoPending = false;
+vi.mock("@/hooks/useSystemFeatures", () => ({
+  useSystemInfo: () =>
+    mockSystemInfoPending
+      ? null
+      : { features: {}, terms_version: mockTermsVersion },
+}));
+
+// #1665: the re-acceptance dialog posts through this.
+const mockAcceptTerms = vi.fn();
+vi.mock("@/lib/auth/auth", () => ({
+  acceptTerms: (...args: unknown[]) => mockAcceptTerms(...args),
+}));
+
 vi.mock("next-intl", () => ({
   useTranslations: () => (k: string) => k,
 }));
@@ -63,6 +80,9 @@ beforeEach(() => {
   mockApiClientGet.mockReset();
   mockPush.mockReset();
   hrefAssignments = [];
+  mockTermsVersion = null;
+  mockSystemInfoPending = false;
+  mockAcceptTerms.mockReset();
 
   Object.defineProperty(window, "location", {
     configurable: true,
@@ -172,5 +192,105 @@ describe("AcceptInvitationPage OAuth login wiring", () => {
       /^https:\/\/api\.example\.com\/api\/v1\/auth\/google\/login\?return_to=/,
     );
     expect(hrefAssignments[0]).not.toMatch(/\/api\/v1\/api\/v1\//);
+  });
+});
+
+describe("AcceptInvitationPage terms acceptance (#1665)", () => {
+  it("shows no terms checkbox when the deployment records none", async () => {
+    await renderInLoginRequiredState();
+
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /loginButton/i }),
+    ).not.toBeDisabled();
+  });
+
+  it("asks for the terms and sends the version once ticked", async () => {
+    mockTermsVersion = "2026-09";
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+    await renderInLoginRequiredState();
+
+    const google = screen.getByRole("button", { name: /loginButton/i });
+    const github = screen.getByRole("button", { name: /continueWithGitHub/i });
+    expect(google).toBeDisabled();
+    expect(github).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /agreeToTerms/i }));
+    expect(google).not.toBeDisabled();
+    fireEvent.click(github);
+
+    await waitFor(() => expect(hrefAssignments).toHaveLength(1));
+    expect(hrefAssignments[0]).toBe(
+      `https://api.example.com/api/v1/auth/github/login?return_to=${encodeURIComponent(INVITE_URL)}&accepted_terms=2026-09`,
+    );
+  });
+});
+
+describe("AcceptInvitationPage waits for /system/info (#1665)", () => {
+  it("keeps the login buttons disabled until it answers", async () => {
+    mockSystemInfoPending = true;
+    await renderInLoginRequiredState();
+
+    const google = screen.getByRole("button", { name: /loginButton/i });
+    expect(google).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /continueWithGitHub/i }),
+    ).toBeDisabled();
+    fireEvent.click(google);
+    expect(hrefAssignments).toHaveLength(0);
+  });
+});
+
+describe("AcceptInvitationPage signed in with terms to re-accept (#1665)", () => {
+  const ME = {
+    user: {
+      id: "u1",
+      email: "u@example.test",
+      terms_acceptance_required: true,
+      terms_version: "2026-09",
+    },
+  };
+
+  it("asks for the updated terms before accepting the invitation", async () => {
+    mockApiClientGet.mockResolvedValue(ME);
+    mockAcceptTerms.mockResolvedValue({
+      version: "2026-09",
+      recorded: true,
+      terms_acceptance_required: false,
+    });
+    mockAcceptInvitation.mockResolvedValue({
+      workspace_name: "Test Workspace",
+    });
+    // params type is Promise<{token}>; the react.use mock above unwraps plain values.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    render(<AcceptInvitationPage params={{ token: TOKEN } as any} />);
+
+    await screen.findByRole("dialog");
+    // Nothing is accepted on the user's behalf while the dialog is up.
+    expect(mockAcceptInvitation).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /agreeToTerms/i }));
+    fireEvent.click(screen.getByRole("button", { name: "accept" }));
+
+    await waitFor(() =>
+      expect(mockAcceptInvitation).toHaveBeenCalledWith(TOKEN),
+    );
+    expect(mockAcceptTerms).toHaveBeenCalledWith("2026-09");
+  });
+
+  it("accepts straight away when no re-acceptance is required", async () => {
+    mockApiClientGet.mockResolvedValue({
+      user: { ...ME.user, terms_acceptance_required: false },
+    });
+    mockAcceptInvitation.mockResolvedValue({
+      workspace_name: "Test Workspace",
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    render(<AcceptInvitationPage params={{ token: TOKEN } as any} />);
+
+    await waitFor(() =>
+      expect(mockAcceptInvitation).toHaveBeenCalledWith(TOKEN),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

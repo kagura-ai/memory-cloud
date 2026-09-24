@@ -12,6 +12,9 @@
  * the form.
  * Issue #1655: "I have an invite link" hands an invite holder to
  * /join/<token>, keeping the validated return_to beside it.
+ * Issue #1665: when the deployment reports a `terms_version`, the ticked
+ * checkbox is sent as `accepted_terms` with every sign-in so the backend can
+ * record it; without one the requests are unchanged.
  */
 
 import { useEffect, useRef, useState, Suspense } from "react";
@@ -34,7 +37,7 @@ import { safeReturnTo } from "@/lib/auth/safeReturnTo";
 import { buildOAuthRedirect } from "@/lib/auth/buildOAuthRedirect";
 import { resolveForwardTarget } from "@/lib/auth/resolveForwardTarget";
 import { parseBetaInviteInput } from "@/lib/auth/betaInviteToken";
-import { useSystemFeatures } from "@/hooks/useSystemFeatures";
+import { useSystemFeatures, useSystemInfo } from "@/hooks/useSystemFeatures";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   ArrowRight,
@@ -65,6 +68,14 @@ function LoginContent() {
   // provider's first fetch) and the two would bounce the visitor forever.
   const { user, isLoading: authLoading } = useAuth();
   const features = useSystemFeatures();
+  // #1665: the terms version the checkbox refers to, or undefined when the
+  // deployment does not record acceptance. The sign-in buttons wait for the
+  // first /system/info answer so a quick click cannot go out without the
+  // version; a failed fetch resolves (to no version), so this never locks
+  // anyone out.
+  const systemInfo = useSystemInfo();
+  const systemInfoPending = systemInfo === null;
+  const termsVersion = systemInfo?.terms_version ?? undefined;
 
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -169,6 +180,10 @@ function LoginContent() {
     } else if (errorParam === "oauth_expired") {
       // #1381: expired/replayed sign-in link — retryable, so say so.
       setError(t("oauthExpired"));
+    } else if (errorParam === "terms_required") {
+      // #1665: a sign-up reached the callback without the current terms
+      // version (a stale page, or a direct link) — no account was created.
+      setError(t("termsRequired"));
     } else if (errorParam) {
       setError(decodeURIComponent(errorParam));
     }
@@ -213,7 +228,12 @@ function LoginContent() {
     setError(null);
 
     try {
-      const result = await loginWithPassword(loginId, password, returnTo);
+      const result = await loginWithPassword(
+        loginId,
+        password,
+        returnTo,
+        termsVersion,
+      );
 
       if (result.mfa_required && result.mfa_session_token) {
         setMfaRequired(true);
@@ -272,9 +292,7 @@ function LoginContent() {
       setInviteInputInvalid(true);
       return;
     }
-    const query = returnTo
-      ? `?return_to=${encodeURIComponent(returnTo)}`
-      : "";
+    const query = returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
     router.push(`/join/${token}${query}`);
   };
 
@@ -282,11 +300,17 @@ function LoginContent() {
     setLoadingAction("google");
     setError(null);
     if (returnTo) {
-      window.location.href = buildOAuthRedirect("google", returnTo);
+      window.location.href = buildOAuthRedirect("google", returnTo, {
+        acceptedTerms: termsVersion,
+      });
       return;
     }
     try {
-      const authUrl = await getAuthUrl();
+      // #1665: the argument only when there is a version, so a deployment
+      // without TERMS_VERSION makes exactly the call it made before.
+      const authUrl = await (termsVersion
+        ? getAuthUrl(termsVersion)
+        : getAuthUrl());
       window.location.href = authUrl;
     } catch (err) {
       setLoadingAction(null);
@@ -298,11 +322,15 @@ function LoginContent() {
     setLoadingAction("github");
     setError(null);
     if (returnTo) {
-      window.location.href = buildOAuthRedirect("github", returnTo);
+      window.location.href = buildOAuthRedirect("github", returnTo, {
+        acceptedTerms: termsVersion,
+      });
       return;
     }
     try {
-      const authUrl = await getGitHubAuthUrl();
+      const authUrl = await (termsVersion
+        ? getGitHubAuthUrl(termsVersion)
+        : getGitHubAuthUrl());
       window.location.href = authUrl;
     } catch (err) {
       setLoadingAction(null);
@@ -483,6 +511,7 @@ function LoginContent() {
                         disabled={
                           loadingAction !== null ||
                           !agreedToTerms ||
+                          systemInfoPending ||
                           !loginId ||
                           !password
                         }
@@ -511,7 +540,11 @@ function LoginContent() {
                 {authConfig?.google_oauth_enabled && (
                   <Button
                     onClick={handleGoogleLogin}
-                    disabled={loadingAction !== null || !agreedToTerms}
+                    disabled={
+                      loadingAction !== null ||
+                      !agreedToTerms ||
+                      systemInfoPending
+                    }
                     size="lg"
                     variant={showAdminLogin ? "outline" : "default"}
                     className={`group relative h-14 w-full overflow-hidden text-base font-semibold transition-all hover:scale-[1.02] disabled:opacity-50 disabled:hover:scale-100 ${
@@ -569,7 +602,11 @@ function LoginContent() {
                     )}
                     <Button
                       onClick={handleGitHubLogin}
-                      disabled={loadingAction !== null || !agreedToTerms}
+                      disabled={
+                        loadingAction !== null ||
+                        !agreedToTerms ||
+                        systemInfoPending
+                      }
                       size="lg"
                       variant="outline"
                       className="group relative mt-2 h-14 w-full overflow-hidden text-base font-semibold shadow-md transition-all hover:scale-[1.02] hover:shadow-lg disabled:opacity-50 disabled:hover:scale-100"

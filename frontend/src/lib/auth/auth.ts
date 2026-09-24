@@ -6,6 +6,16 @@
 
 import { apiClient } from "../api/base";
 
+/**
+ * Build a `?accepted_terms=<encoded>` query string for the JSON-mode OAuth
+ * login (#1665), or "" when no terms version is in play.
+ */
+function acceptedTermsParam(acceptedTerms?: string): string {
+  return acceptedTerms
+    ? `?accepted_terms=${encodeURIComponent(acceptedTerms)}`
+    : "";
+}
+
 /** Build a `?return_to=<encoded>` query string, or "" when returnTo is absent. */
 function returnToParam(returnTo?: string): string {
   return returnTo ? `?return_to=${encodeURIComponent(returnTo)}` : "";
@@ -27,6 +37,13 @@ export interface User {
   // Issue #953: protected initial administrator — cannot self-delete
   // (backend blocks erasure with ERASURE-004 / 403). Hides the danger zone.
   is_initial_admin?: boolean;
+  // Issue #1665: the deployment's TERMS_VERSION changed (or was set) since this
+  // user last accepted. The authenticated layout blocks until they accept.
+  terms_acceptance_required?: boolean;
+  // Issue #1665: the version to accept (null while the deployment records no
+  // acceptance). Comes with the user so the re-acceptance step never depends
+  // on a separate /system/info fetch.
+  terms_version?: string | null;
 }
 
 export interface AuthResponse {
@@ -45,10 +62,10 @@ export interface AuthResponse {
  * `if (returnTo)` branch in `handleGoogleLogin` / `handleGitHubLogin` of
  * `/app/login/page.tsx` for the canonical pattern.
  */
-export async function getAuthUrl(): Promise<string> {
+export async function getAuthUrl(acceptedTerms?: string): Promise<string> {
   try {
     const response = await apiClient.get<{ authorization_url: string }>(
-      "/api/v1/auth/google/login",
+      `/api/v1/auth/google/login${acceptedTermsParam(acceptedTerms)}`,
     );
     return response.authorization_url;
   } catch (error) {
@@ -62,10 +79,12 @@ export async function getAuthUrl(): Promise<string> {
  * Issue #315: GitHub OAuth2 Authentication.
  * See `getAuthUrl` for the `return_to` mode-switch contract.
  */
-export async function getGitHubAuthUrl(): Promise<string> {
+export async function getGitHubAuthUrl(
+  acceptedTerms?: string,
+): Promise<string> {
   try {
     const response = await apiClient.get<{ authorization_url: string }>(
-      "/api/v1/auth/github/login",
+      `/api/v1/auth/github/login${acceptedTermsParam(acceptedTerms)}`,
     );
     return response.authorization_url;
   } catch (error) {
@@ -211,20 +230,47 @@ export async function getAuthConfig(): Promise<AuthConfig> {
 }
 
 /**
- * Login with username and password
+ * Login with username and password.
+ *
+ * `acceptedTerms` (#1665) is the terms version the checkbox referred to; the
+ * backend records it on success (after MFA, when MFA is on). Omitted from the
+ * body when absent, so a deployment without `TERMS_VERSION` sends the same
+ * request as before.
  */
 export async function loginWithPassword(
   loginId: string,
   password: string,
   returnTo?: string,
+  acceptedTerms?: string,
 ): Promise<PasswordLoginResult> {
   return apiClient.post<PasswordLoginResult>(
     `/api/v1/auth/login${returnToParam(returnTo)}`,
     {
       login_id: loginId,
       password,
+      ...(acceptedTerms ? { accepted_terms: acceptedTerms } : {}),
     },
   );
+}
+
+export interface TermsAcceptanceResult {
+  version: string;
+  recorded: boolean;
+  terms_acceptance_required: boolean;
+}
+
+/**
+ * Accept the current terms version as the signed-in user (#1665).
+ *
+ * 409 means the version changed since the page loaded; 404 means the
+ * deployment does not enforce terms acceptance. Both throw an `ApiError`.
+ */
+export async function acceptTerms(
+  version: string,
+): Promise<TermsAcceptanceResult> {
+  return apiClient.post<TermsAcceptanceResult>("/api/v1/me/terms-acceptance", {
+    version,
+  });
 }
 
 /**

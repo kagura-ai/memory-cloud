@@ -27,7 +27,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,11 +45,13 @@ from auth.password import verify_password
 from auth.roles import get_role_manager
 from auth.session import SessionManager
 from auth.totp import verify_totp
+from config.settings import TERMS_VERSION_RE
 from db.base import get_db
 from models.auth import User
 from services.account_linking_service import AccountLinkingService
 from services.beta_invite_service import BETA_INVITE_TOKEN_PATTERN
 from services.signup_gate_service import check_signup_access
+from services.terms_service import TermsService, current_terms_version
 from services.workspace_service import WorkspaceService
 from utils.datetime import utcnow
 from utils.encryption import get_encryptor
@@ -502,6 +504,7 @@ async def google_login(
     return_to: str | None = None,
     add_account: bool = False,
     invite: str | None = None,
+    accepted_terms: str | None = None,
 ):
     """Initiate Google OAuth2 login flow.
 
@@ -512,6 +515,9 @@ async def google_login(
         return_to: If provided, auto-redirects browser to Google (for iOS/browser users)
         invite: Optional closed-beta invite token (#1581). Its hash is bound to
             this flow's state for the signup gate; malformed values are ignored.
+        accepted_terms: The terms version the person agreed to on the sign-in
+            page (#1665). Bound to this flow's state; ignored while
+            ``TERMS_VERSION`` is empty.
 
     Returns:
         If return_to: RedirectResponse to Google OAuth (browser user)
@@ -532,6 +538,12 @@ async def google_login(
 
     if not _oauth2_manager:
         raise HTTPException(status_code=500, detail="OAuth2 manager not initialized")
+
+    # #1665: an invite sign-up that would be refused goes back to /join now,
+    # while the token is still at hand.
+    invite_bounce = _invite_terms_bounce(invite, accepted_terms, return_to)
+    if invite_bounce is not None:
+        return invite_bounce
 
     # Generate CSRF state token
     state = secrets.token_urlsafe(32)
@@ -554,6 +566,9 @@ async def google_login(
 
         # #1581: closed-beta invite — only its hash, bound to this state.
         _remember_beta_invite(state, invite)
+
+        # #1665: the terms version the person agreed to, bound to this state.
+        _remember_accepted_terms(state, accepted_terms)
 
     # Get authorization URL
     redirect = redirect_uri or os.getenv("GOOGLE_REDIRECT_URI")
@@ -737,6 +752,8 @@ async def google_callback(
     # after the CSRF check, consumed on every path — so a failed exchange below
     # cannot leave it behind for a replay of the same state.
     beta_invite_token_hash = _take_beta_invite_hash(state)
+    # #1665: likewise single-use and taken only after the CSRF check.
+    accepted_terms = _take_accepted_terms(state)
 
     try:
         # 2. Exchange code for token
@@ -764,6 +781,20 @@ async def google_callback(
         )
         if link_redirect is not None:
             return link_redirect
+
+        # 3.45. Terms gate (#1665). Runs BEFORE the signup gate: that gate may
+        # redeem a beta invite, which must not be spent on a sign-up that is
+        # then refused. Existing users always pass (re-acceptance happens in
+        # the web UI); a new identity needs the current version.
+        terms_refusal = await _terms_refusal(
+            provider="google",
+            idp_sub=user_info["sub"],
+            email=user_info["email"],
+            accepted_terms=accepted_terms,
+            state=state,
+        )
+        if terms_refusal is not None:
+            return terms_refusal
 
         # 3.5. Registration gate. #655 removed the Google pass-through that
         # #358 Phase 1 had — Google's "Testing" status does not enforce the
@@ -806,6 +837,15 @@ async def google_callback(
             email_verified=user_info.get("email_verified") is True,
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
+        )
+
+        # 4.1. Record the terms acceptance this sign-in carried (#1665).
+        await _record_terms_acceptance(
+            oauth_identity=("google", user_info["sub"]),
+            email=user_info["email"],
+            accepted_terms=accepted_terms,
+            source="join" if beta_invite_token_hash else "login",
+            request=request,
         )
 
         # Issue #515: refresh-mode short-circuit. POST /me/refresh-oauth set
@@ -1207,6 +1247,261 @@ def _take_beta_invite_hash(state: str) -> str | None:
     return token_hash
 
 
+# --- carrying the accepted terms version across the OAuth round trip (#1665) --
+#
+# ``GET /auth/{provider}/login?accepted_terms=<version>`` travels exactly like
+# the invite above: a short-lived Redis key beside the CSRF state, read and
+# deleted by the callback after the state check. The value is the version string
+# the sign-in page showed (not a credential), limited to the TERMS_VERSION
+# shape. While TERMS_VERSION is empty the parameter is inert.
+_ACCEPTED_TERMS_KEY = "oauth2_accepted_terms:{state}"
+_ACCEPTED_TERMS_TTL = 300  # same lifetime as oauth2_state:{state}
+
+
+def _remember_accepted_terms(state: str, accepted_terms: str | None) -> None:
+    """Bind the terms version the person agreed to to this OAuth ``state``.
+
+    A malformed value is ignored, not an error — the callback then sees no
+    acceptance, which refuses a new account and changes nothing for an existing
+    one. Whether the value is the *current* version is decided in the callback,
+    so a version bump inside the 5-minute window cannot slip an old one through.
+    """
+    if not accepted_terms or not _session_manager:
+        return
+    if current_terms_version() is None:
+        return
+    if not TERMS_VERSION_RE.fullmatch(accepted_terms):
+        return
+    _session_manager._redis.setex(
+        _ACCEPTED_TERMS_KEY.format(state=state), _ACCEPTED_TERMS_TTL, accepted_terms
+    )
+
+
+def _take_accepted_terms(state: str) -> str | None:
+    """Read-and-delete the accepted terms version bound to ``state``.
+
+    Call only AFTER the CSRF state check has passed. Consumes the key on every
+    path; returns ``None`` when the feature is off or the stored value does not
+    have the version shape.
+    """
+    if not _session_manager:
+        return None
+    key = _ACCEPTED_TERMS_KEY.format(state=state)
+    value = _session_manager._redis.get(key)
+    if not value:
+        return None
+    _session_manager._redis.delete(key)
+    if current_terms_version() is None:
+        return None
+    if not isinstance(value, str) or not TERMS_VERSION_RE.fullmatch(value):
+        return None
+    return value
+
+
+async def _identity_exists(provider: str, idp_sub: str, email: str) -> bool:
+    """Whether ``ensure_user`` would NOT create a new account here (#1665).
+
+    Mirrors every branch of ``RoleManager.ensure_user`` that ends without an
+    insert:
+
+    - the ``(provider, oauth_sub)`` link row — a returning user;
+    - a ``users`` row whose ``user_id`` is the sub — the identity that somehow
+      lacks a link row (ensure_user's IntegrityError retry lands on it);
+    - a ``users`` row holding ``email`` — ensure_user's insert trips the
+      ``users.email`` UNIQUE constraint and raises ``ConflictError``
+      (``/login?error=email_in_use``). Plain equality, like that constraint,
+      and regardless of ``email_verified``, like the insert. Treating it as
+      "not new" keeps that pre-#1665 answer instead of masking it with
+      ``terms_required``; no account is created either way.
+    """
+    from models.auth import UserOAuthProvider
+
+    exists = False
+    async for db in get_db():
+        link = await db.execute(
+            select(UserOAuthProvider.user_id)
+            .where(UserOAuthProvider.provider == provider, UserOAuthProvider.oauth_sub == idp_sub)
+            .limit(1)
+        )
+        if link.scalar_one_or_none() is not None:
+            exists = True
+        else:
+            existing = await db.execute(
+                select(User.user_id)
+                .where(or_(User.user_id == idp_sub, User.email == email))
+                .limit(1)
+            )
+            exists = existing.scalar_one_or_none() is not None
+        break
+    return exists
+
+
+def _invite_terms_bounce(
+    invite: str | None, accepted_terms: str | None, return_to: str | None
+) -> RedirectResponse | None:
+    """Send an invite sign-up without the current terms back to its /join page.
+
+    The callback only ever sees the invite's hash, so a sign-up it refuses can
+    only be sent to the generic ``/login`` — where the invite is gone. The
+    login endpoint still holds the token the browser sent (it is in this
+    request's own URL), so an invite flow that is going to be refused is
+    stopped here instead, before any state is written or the IdP is visited:
+    back to ``/join/{token}?error=terms_required``, which shows the banner and
+    the checkbox with the current version. Only for a browser flow
+    (``return_to`` present — /join always sends one), only with the invite
+    feature on and a well-formed token; ``return_to`` rides along when it
+    passes ``_safe_redirect_url`` unchanged. The token is never logged.
+
+    An existing user following a /join link with stale terms is bounced too —
+    harmless: the page they land on asks for the current version.
+    """
+    from urllib.parse import quote
+
+    from config.settings import get_settings
+
+    current = current_terms_version()
+    if current is None or accepted_terms == current:
+        return None
+    if not invite or not return_to or not get_settings().enable_beta_invites:
+        return None
+    if not _BETA_INVITE_TOKEN_RE.fullmatch(invite):
+        return None
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+    url = f"{frontend_url}/join/{quote(invite, safe='')}?error=terms_required"
+    if _safe_redirect_url(return_to) == return_to:
+        url += f"&return_to={quote(return_to, safe='')}"
+    return RedirectResponse(url, status_code=303)
+
+
+def _terms_required_redirect(provider: str, return_to: str | None) -> RedirectResponse:
+    """Send a refused sign-up back to the login page (#1665).
+
+    ``error=terms_required`` is a fixed token the login page maps to an i18n'd
+    banner, like ``registration_disabled``. The flow's own ``return_to`` is kept
+    when it passes ``_safe_redirect_url`` unchanged, so agreeing and signing in
+    again resumes where the person was going. The base is the fixed
+    ``FRONTEND_URL`` origin (CWE-601).
+    """
+    from urllib.parse import quote
+
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+    url = f"{frontend_url}/login?error=terms_required&provider={quote(provider, safe='')}"
+    if return_to and _safe_redirect_url(return_to) == return_to:
+        url += f"&return_to={quote(return_to, safe='')}"
+    return RedirectResponse(url, status_code=303)
+
+
+async def _terms_refusal(
+    *, provider: str, idp_sub: str, email: str, accepted_terms: str | None, state: str
+) -> RedirectResponse | None:
+    """Refuse to create an account for a sign-up without the current terms.
+
+    Returns ``None`` (proceed) when ``TERMS_VERSION`` is empty, when the flow
+    carried the current version, or when the identity already has an account —
+    an existing user with a missing or stale acceptance signs in normally and
+    is asked to accept in the web UI. Otherwise nothing is created: the flow's
+    remaining state-bound keys are dropped and the browser goes back to
+    ``/login?error=terms_required``.
+    """
+    current = current_terms_version()
+    if current is None or accepted_terms == current:
+        return None
+    if await _identity_exists(provider, idp_sub, email):
+        return None
+
+    logger.info(
+        "oauth_signup_refused_terms_not_accepted",
+        provider=provider,
+        state_hash=_state_hash(state),
+    )
+    # delete-on-read: this flow ends here, so nothing bound to its state may
+    # linger for the TTL.
+    redis = _session_manager._redis if _session_manager else None
+    return_to = None
+    if redis is not None:
+        return_to = redis.get(f"oauth2_return_to:{state}")
+        redis.delete(
+            f"oauth2_return_to:{state}",
+            _ADD_ACCOUNT_KEY.format(state=state),
+            f"oauth2_state_intent:{state}",
+            f"oauth2_state_user:{state}",
+        )
+    return _terms_required_redirect(provider, return_to)
+
+
+async def _owning_user(db: AsyncSession, provider: str, idp_sub: str) -> tuple[str, str] | None:
+    """``(user_id, email)`` of the account that owns this IdP identity (#1665).
+
+    Resolved the way ``RoleManager.ensure_user`` resolves it: through the
+    ``(provider, oauth_sub)`` link row — a provider linked to another account
+    (#517) belongs to that account's ``user_id``, not to the sub — falling back
+    to a ``users`` row whose ``user_id`` is the sub.
+    """
+    from models.auth import UserOAuthProvider
+
+    row = (
+        await db.execute(
+            select(User.user_id, User.email)
+            .join(UserOAuthProvider, UserOAuthProvider.user_id == User.user_id)
+            .where(UserOAuthProvider.provider == provider, UserOAuthProvider.oauth_sub == idp_sub)
+            .limit(1)
+        )
+    ).first()
+    if row is None:
+        row = (
+            await db.execute(
+                select(User.user_id, User.email).where(User.user_id == idp_sub).limit(1)
+            )
+        ).first()
+    return (row[0], row[1]) if row is not None else None
+
+
+async def _record_terms_acceptance(
+    *,
+    email: str,
+    accepted_terms: str | None,
+    source: Literal["login", "join", "password"],
+    request: Request | None,
+    user_id: str | None = None,
+    oauth_identity: tuple[str, str] | None = None,
+) -> None:
+    """Record ``accepted_terms`` for a user who just signed in (#1665).
+
+    Pass ``user_id`` when the account is already known (password login), or
+    ``oauth_identity=(provider, sub)`` from an OAuth callback: the acceptance
+    then goes to the account that OWNS the identity, which differs from the sub
+    for a provider linked to another account (#517).
+
+    A no-op unless it is exactly the current version. Never fails the sign-in:
+    if the write fails the user simply still shows as needing to accept, and
+    the web UI asks them.
+    """
+    current = current_terms_version()
+    if current is None or accepted_terms != current:
+        return
+    try:
+        async for db in get_db():
+            if oauth_identity is not None:
+                owner = await _owning_user(db, *oauth_identity)
+                if owner is None:
+                    logger.warning("terms_acceptance_owner_missing", provider=oauth_identity[0])
+                    break
+                user_id, email = owner
+            if user_id is None:
+                break
+            await TermsService(db).record(
+                user_id=user_id,
+                user_email=email,
+                version=current,
+                source=source,
+                ip_address=request.client.host if request and request.client else None,
+                user_agent=request.headers.get("user-agent") if request else None,
+            )
+            break
+    except Exception:
+        logger.error("terms_acceptance_record_failed", user_id=user_id, exc_info=True)
+
+
 @router.get("/accounts")
 async def list_signed_in_accounts(request: Request, user: SessionUser):
     """List the accounts signed in on THIS browser session (#1488 Phase 2).
@@ -1343,6 +1638,18 @@ async def get_current_user_info(
             # blocks erasure of this account (InitialAdminCannotBeErasedError —
             # ERASURE-004 / 403); this just keeps the UI honest.
             "is_initial_admin": db_user.is_initial_admin if db_user else False,
+            # Issue #1665: true only when TERMS_VERSION is set and this user's
+            # latest accepted version differs; the web UI then blocks on an
+            # "accept the updated terms" step (POST /me/terms-acceptance).
+            "terms_acceptance_required": (
+                await TermsService(db).acceptance_required(user_id)
+                if db_user and user_id
+                else False
+            ),
+            # The version to accept (null while TERMS_VERSION is empty), so the
+            # re-acceptance step does not depend on a separate /system/info
+            # fetch that may have failed.
+            "terms_version": current_terms_version(),
         }
     }
 
@@ -1391,11 +1698,14 @@ async def github_login(
     return_to: str | None = None,
     add_account: bool = False,
     invite: str | None = None,
+    accepted_terms: str | None = None,
 ):
     """Initiate GitHub OAuth2 login flow.
 
-    ``invite`` is an optional closed-beta invite token (#1581) — see
-    ``google_login``; both providers share ``_remember_beta_invite``.
+    ``invite`` is an optional closed-beta invite token (#1581) and
+    ``accepted_terms`` the terms version agreed to (#1665) — see
+    ``google_login``; both providers share ``_remember_beta_invite`` and
+    ``_remember_accepted_terms``.
     """
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Auth managers not initialized")
@@ -1403,6 +1713,11 @@ async def github_login(
     client_id = os.getenv("GITHUB_CLIENT_ID")
     if not client_id:
         raise HTTPException(status_code=500, detail="GITHUB_CLIENT_ID not configured")
+
+    # #1665: see google_login.
+    invite_bounce = _invite_terms_bounce(invite, accepted_terms, return_to)
+    if invite_bounce is not None:
+        return invite_bounce
 
     state = secrets.token_urlsafe(32)
     _session_manager._redis.setex(f"oauth2_state:{state}", 300, "pending")
@@ -1419,6 +1734,9 @@ async def github_login(
 
     # #1581: closed-beta invite — only its hash, bound to this state.
     _remember_beta_invite(state, invite)
+
+    # #1665: the terms version the person agreed to, bound to this state.
+    _remember_accepted_terms(state, accepted_terms)
 
     redirect_uri = os.getenv(
         "GITHUB_REDIRECT_URI",
@@ -1558,6 +1876,8 @@ async def github_callback(
 
     # #1581: closed-beta invite hash bound to this state — see google_callback.
     beta_invite_token_hash = _take_beta_invite_hash(state)
+    # #1665: the accepted terms version — see google_callback.
+    accepted_terms = _take_accepted_terms(state)
 
     try:
         # 2. Exchange code for token
@@ -1580,6 +1900,17 @@ async def github_callback(
         )
         if link_redirect is not None:
             return link_redirect
+
+        # 3.45. Terms gate (#1665) — see google_callback.
+        terms_refusal = await _terms_refusal(
+            provider="github",
+            idp_sub=user_info["sub"],
+            email=user_info["email"],
+            accepted_terms=accepted_terms,
+            state=state,
+        )
+        if terms_refusal is not None:
+            return terms_refusal
 
         # 3.5. Registration gate: admin-configurable (Issue #358) with legacy
         # _check_registration_allowed delegation when disabled (Issue #349).
@@ -1620,6 +1951,15 @@ async def github_callback(
             email_verified=user_info["email_verified"],
             ip_address=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
+        )
+
+        # 4.1. Record the terms acceptance this sign-in carried (#1665).
+        await _record_terms_acceptance(
+            oauth_identity=("github", user_info["sub"]),
+            email=user_info["email"],
+            accepted_terms=accepted_terms,
+            source="join" if beta_invite_token_hash else "login",
+            request=request,
         )
 
         # Issue #515: refresh-mode short-circuit (see google_callback for the
@@ -1728,6 +2068,11 @@ class PasswordLoginRequest(BaseModel):
 
     login_id: str
     password: str
+    # #1665: the terms version the person agreed to on the sign-in page.
+    # Recorded on success when it is the current TERMS_VERSION; ignored
+    # otherwise. Password login never creates an account, so a missing value
+    # never blocks it.
+    accepted_terms: str | None = Field(None, max_length=64)
 
 
 class PasswordLoginResponse(BaseModel):
@@ -1914,6 +2259,37 @@ def _clear_login_failures(login_id: str) -> None:
     _session_manager._redis.delete(f"{_LOGIN_ATTEMPT_PREFIX}{login_id}")
 
 
+# #1665: a password login that stops at the MFA step carries its terms
+# acceptance to /mfa/verify beside ``mfa_pending:{token}`` — a separate key, so
+# the pending token's value contract (the bare user_id) is unchanged.
+_MFA_ACCEPTED_TERMS_KEY = "mfa_pending_terms:{token}"
+
+
+def _remember_mfa_accepted_terms(mfa_token: str, accepted_terms: str | None) -> None:
+    """Bind a well-formed ``accepted_terms`` to a pending MFA token (#1665)."""
+    if not accepted_terms or not _session_manager:
+        return
+    if current_terms_version() is None:
+        return
+    if not TERMS_VERSION_RE.fullmatch(accepted_terms):
+        return
+    _session_manager._redis.setex(
+        _MFA_ACCEPTED_TERMS_KEY.format(token=mfa_token), 300, accepted_terms
+    )
+
+
+def _take_mfa_accepted_terms(mfa_token: str) -> str | None:
+    """Read-and-delete the acceptance bound to a pending MFA token (#1665)."""
+    if not _session_manager:
+        return None
+    key = _MFA_ACCEPTED_TERMS_KEY.format(token=mfa_token)
+    value = _session_manager._redis.get(key)
+    if not value:
+        return None
+    _session_manager._redis.delete(key)
+    return value if isinstance(value, str) else None
+
+
 @router.get("/config")
 async def get_auth_config():
     """Get authentication configuration (public)."""
@@ -1927,6 +2303,7 @@ async def get_auth_config():
 @router.post("/login")
 async def password_login(
     body: PasswordLoginRequest,
+    request: Request,
     return_to: str | None = Query(None),
 ):
     """Authenticate with login_id and password."""
@@ -1957,12 +2334,22 @@ async def password_login(
     if user.totp_enabled and user.totp_secret:
         mfa_token = secrets.token_urlsafe(32)
         _session_manager._redis.setex(f"mfa_pending:{mfa_token}", 300, user.user_id)
+        # #1665: the acceptance waits beside the pending MFA step and is
+        # recorded only once the second factor succeeds.
+        _remember_mfa_accepted_terms(mfa_token, body.accepted_terms)
 
         return PasswordLoginResponse(success=True, mfa_required=True, mfa_session_token=mfa_token)
 
     # No MFA — create session
     session_id = await _create_session_and_workspace(
         user_id=user.user_id, email=user.email, name=user.name, role=user.role
+    )
+    await _record_terms_acceptance(
+        user_id=user.user_id,
+        email=user.email,
+        accepted_terms=body.accepted_terms,
+        source="password",
+        request=request,
     )
 
     response = Response(
@@ -1980,6 +2367,7 @@ async def password_login(
 @router.post("/mfa/verify")
 async def mfa_verify(
     body: MfaVerifyRequest,
+    request: Request,
     return_to: str | None = Query(None),
 ):
     """Verify TOTP code and create session."""
@@ -2003,6 +2391,10 @@ async def mfa_verify(
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to decrypt MFA secret") from e
 
+    # #1665: single-use like the pending token itself — taken (and deleted) on
+    # the success and the failure path alike.
+    accepted_terms = _take_mfa_accepted_terms(body.mfa_session_token)
+
     if not verify_totp(totp_secret, body.totp_code):
         # Delete MFA token on failed attempt (prevent brute-force replay)
         _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
@@ -2012,6 +2404,13 @@ async def mfa_verify(
 
     session_id = await _create_session_and_workspace(
         user_id=user.user_id, email=user.email, name=user.name, role=user.role
+    )
+    await _record_terms_acceptance(
+        user_id=user.user_id,
+        email=user.email,
+        accepted_terms=accepted_terms,
+        source="password",
+        request=request,
     )
 
     response = Response(

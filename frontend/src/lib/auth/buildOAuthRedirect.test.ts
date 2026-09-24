@@ -194,3 +194,32 @@ describe("buildOAuthRedirect — returnTo validation (CWE-601 defense)", () => {
     ).not.toThrow();
   });
 });
+
+describe("buildOAuthRedirect — optional accepted terms version (#1665)", () => {
+  it("appends &accepted_terms=<version> after the invite", () => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+    const url = buildOAuthRedirect("github", "/", {
+      invite: "tok",
+      acceptedTerms: "2026-09",
+    });
+    expect(url).toBe(
+      `https://api.example.com/api/v1/auth/github/login?return_to=${encodeURIComponent(`${FRONTEND_ORIGIN}/`)}&invite=tok&accepted_terms=2026-09`,
+    );
+  });
+
+  it("URL-encodes the version", () => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+    const url = buildOAuthRedirect("google", "/", { acceptedTerms: "a&b" });
+    expect(new URL(url).searchParams.get("accepted_terms")).toBe("a&b");
+  });
+
+  it.each([
+    ["undefined", { acceptedTerms: undefined }],
+    ["empty", { acceptedTerms: "" }],
+  ])("is byte-identical to the two-argument form with %s", (_l, options) => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://api.example.com");
+    expect(buildOAuthRedirect("google", "/x", options)).toBe(
+      buildOAuthRedirect("google", "/x"),
+    );
+  });
+});
