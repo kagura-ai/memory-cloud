@@ -1986,9 +1986,9 @@ async def _read_bounded_body(request: Request, limit: int) -> bytes:
     """
 
     def too_large() -> _DeviceAuthorizationRequestError:
-        return _DeviceAuthorizationRequestError(
-            f"Request body is larger than {limit} bytes", status.HTTP_413_CONTENT_TOO_LARGE
-        )
+        # A literal 413: Starlette before 0.48, which fastapi>=0.115.0 allows, has
+        # no HTTP_413_CONTENT_TOO_LARGE, and later ones deprecate the old name.
+        return _DeviceAuthorizationRequestError(f"Request body is larger than {limit} bytes", 413)
 
     declared = request.headers.get("content-length", "")
     if declared.isascii() and declared.isdigit() and int(declared) > limit:

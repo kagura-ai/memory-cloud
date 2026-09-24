@@ -983,6 +983,18 @@ class TestDeviceAuthorizeRequestEncodings:
         _assert_rfc6749_error(resp, 413, "invalid_request")
         mock_session_fn.assert_not_called()
 
+    def test_oversized_body_status_needs_no_rfc9110_constant_name(self, monkeypatch):
+        """fastapi>=0.115.0 allows Starlette before 0.48, which has no HTTP_413_CONTENT_TOO_LARGE."""
+        from starlette import status as starlette_status
+
+        monkeypatch.delattr(starlette_status, "HTTP_413_CONTENT_TOO_LARGE")
+        with patch("api.routes.oauth.get_sync_session"):
+            resp = TestClient(app).post(
+                _AUTHORIZE, content=b"client_id=" + b"x" * 8192, headers={"Content-Type": _FORM}
+            )
+
+        _assert_rfc6749_error(resp, 413, "invalid_request")
+
     def test_rate_limit_applies_to_form_requests(self):
         with (
             patch("api.routes.oauth.increment_counter", AsyncMock(return_value=11)),
