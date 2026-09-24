@@ -39,6 +39,7 @@ import {
 import { useSystemInfo } from "@/hooks/useSystemFeatures";
 import { Button } from "@/components/ui/button";
 import { TermsAgreement } from "@/components/auth/TermsAgreement";
+import { TermsReacceptanceDialog } from "@/components/auth/TermsReacceptanceDialog";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 import { LanguageSelector } from "@/components/LanguageSelector";
 import { Check, AlertCircle, Github, LogIn, Mail } from "lucide-react";
@@ -48,6 +49,7 @@ type PageState =
   | "login_required"
   | "email_mismatch"
   | "accepting"
+  | "terms_required"
   | "success"
   | "error";
 
@@ -55,6 +57,17 @@ interface CurrentUser {
   user_id: string;
   email: string;
   name: string;
+}
+
+/**
+ * The part of the `/auth/me` payload the #1665 gate reads. The endpoint wraps
+ * the user as `{user: {...}}`.
+ */
+interface TermsFields {
+  user?: {
+    terms_acceptance_required?: boolean;
+    terms_version?: string | null;
+  };
 }
 
 export default function AcceptInvitationPage({
@@ -73,6 +86,9 @@ export default function AcceptInvitationPage({
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [result, setResult] = useState<AcceptInvitationResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // #1665: this page is outside the (authenticated) layout, so it runs the
+  // re-acceptance step itself before accepting on the user's behalf.
+  const [reacceptVersion, setReacceptVersion] = useState<string | undefined>();
   // #1665: only asked when the deployment names a terms version. Until the
   // first /system/info answer the buttons wait; a failed fetch resolves to
   // "no version", so that never locks anyone out.
@@ -104,6 +120,15 @@ export default function AcceptInvitationPage({
       }
 
       setCurrentUser(user);
+
+      // #1665: a signed-in user who still has to accept updated terms does
+      // that first; the invitation is accepted from the dialog's success.
+      const me = (user as unknown as TermsFields).user;
+      if (me?.terms_acceptance_required) {
+        setReacceptVersion(me.terms_version ?? undefined);
+        setState("terms_required");
+        return;
+      }
 
       // Step 3: Check email match (if invitation has email restriction)
       if (info.email_restricted) {
@@ -235,6 +260,19 @@ export default function AcceptInvitationPage({
   };
 
   // Loading State
+  // #1665: blocking re-acceptance, then the invitation continues.
+  if (state === "terms_required" && currentUser) {
+    return (
+      <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
+        <TermsReacceptanceDialog
+          termsVersion={reacceptVersion}
+          onAccepted={() => attemptAcceptInvitation(currentUser)}
+          onSignOut={handleLogout}
+        />
+      </div>
+    );
+  }
+
   if (state === "loading" || state === "accepting") {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
