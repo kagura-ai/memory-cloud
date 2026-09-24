@@ -331,7 +331,9 @@ With a version set:
 - **Existing users are never locked out.** A sign-in with a missing or older
   version succeeds. The web UI then sees `terms_acceptance_required: true` on
   `GET /api/v1/auth/me` and shows a blocking "updated terms" dialog; accepting
-  calls `POST /api/v1/me/terms-acceptance` (the user can sign out instead).
+  calls `POST /api/v1/me/terms-acceptance` (the user can sign out instead). The
+  workspace invitation page, which sits outside the app layout, shows the same
+  dialog before it accepts an invitation for a signed-in user.
 - Each acceptance is one row in `terms_acceptances` (user, version, source
   `login` / `join` / `password` / `reaccept`, timestamp) and one audit row
   `terms.accepted` carrying the version only. A sign-in with the version the

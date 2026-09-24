@@ -1278,7 +1278,7 @@ Issue #1665. Everything below is inert while the deployment's `TERMS_VERSION` is
 
 - `GET /api/v1/auth/{google,github}/login?accepted_terms=<version>` — the version the person agreed to, bound to the OAuth state. A sign-up (an identity with no account yet) without the current version is refused: no account is created and the callback redirects to `{FRONTEND_URL}/login?error=terms_required&provider=<provider>` (plus the flow's `return_to` when it is safe). A browser flow that also carries a well-formed `invite=` (with `ENABLE_BETA_INVITES` on) is redirected by the login endpoint itself, before the provider, to `{FRONTEND_URL}/join/{token}?error=terms_required` (plus a safe `return_to`). Existing users — including an identity whose e-mail already belongs to an account, which still ends on `error=email_in_use` — are not refused.
 - `POST /api/v1/auth/login` accepts an optional `"accepted_terms": "<version>"` in the body; it is recorded on success (after `POST /api/v1/auth/mfa/verify` when MFA is on).
-- `GET /api/v1/auth/me` → `user.terms_acceptance_required`: `true` when a version is configured and the user's latest accepted version differs.
+- `GET /api/v1/auth/me` → `user.terms_acceptance_required`: `true` when a version is configured and the user's latest accepted version differs; `user.terms_version`: the current version (`null` when off). An acceptance from an OAuth sign-in is recorded for the account that owns the identity — for a provider linked to another account, that account.
 
 ### POST /api/v1/me/terms-acceptance
 
