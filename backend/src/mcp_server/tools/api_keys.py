@@ -90,8 +90,11 @@ async def handle_list_my_bindings(
                 db, user_id, "list_my_bindings", start_time, 500, None, workspace_id
             )
             # The full exception (which may carry DB schema / internal detail)
-            # stays in the server-side log only (#1684 vocabulary).
-            return _tool_exception_response("list_my_bindings", e, error="list_my_bindings_error")
+            # stays in the server-side log only (#1684 vocabulary). A plain
+            # ValueError too: these arms always returned a fixed message.
+            return _tool_exception_response(
+                "list_my_bindings", e, error="list_my_bindings_error", echo_value_error=False
+            )
 
     return _error_response("internal_error", "Failed to acquire database session")
 
@@ -185,6 +188,8 @@ async def handle_describe_binding(
                 db, user_id, "describe_binding", start_time, 500, None, workspace_id
             )
             # The full exception stays in the server-side log only (#1684).
-            return _tool_exception_response("describe_binding", e, error="describe_binding_error")
+            return _tool_exception_response(
+                "describe_binding", e, error="describe_binding_error", echo_value_error=False
+            )
 
     return _error_response("internal_error", "Failed to acquire database session")

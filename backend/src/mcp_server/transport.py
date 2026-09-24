@@ -682,18 +682,21 @@ async def handle_streamable_http_post(
         except Exception as e:
             # #1684: ``execute_tool_call`` turns handler exceptions into tool
             # results, so this only sees failures in the plumbing around it.
-            # The numeric codes are unchanged (Issue #163: -32001 / -32002 are
-            # custom); message and ``data`` come from the shared error
+            # The numeric codes are the same set (Issue #163: -32001 / -32002
+            # are custom); message and ``data`` come from the shared error
             # vocabulary, which logs the exception with a correlation_id and
             # never returns an unexpected exception's text or type.
-            from mcp_server.tools._errors import describe_tool_exception
+            from mcp_server.tools._errors import CAUSE_TIMEOUT, describe_tool_exception
 
             failure = describe_tool_exception(tool_name, e)
-            if isinstance(e, asyncio.TimeoutError):
+            # The numeric code follows the classification, so it never
+            # contradicts ``data`` (a ValueError subclass is a server failure,
+            # an httpx timeout is a timeout).
+            if failure.fields.get("cause") == CAUSE_TIMEOUT:
                 error_code = -32001  # Custom: Tool execution timeout
-            elif isinstance(e, PermissionError):
+            elif failure.error == "permission_denied":
                 error_code = -32002  # Custom: Permission denied
-            elif isinstance(e, ValueError):
+            elif failure.error == "validation_error":
                 error_code = -32602  # Standard: Invalid params
             else:
                 error_code = -32603  # Standard: Internal error

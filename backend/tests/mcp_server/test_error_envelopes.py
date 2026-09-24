@@ -454,9 +454,9 @@ async def _dispatch_raising(tool: str, exc: BaseException, args: dict | None = N
 
 class TestDispatchCatchAll:
     @pytest.mark.asyncio
-    async def test_unexpected_error_on_a_read_is_safe_and_retryable(self, caplog):
+    async def test_unexpected_error_on_a_read_is_safe_and_retryable(self):
         exc = RuntimeError(_LEAKY)
-        with caplog.at_level("ERROR", logger="mcp_server.tools._errors"):
+        with patch("mcp_server.tools._errors.logger") as log:
             result = await _dispatch_raising("list_contexts", exc)
 
         assert isinstance(result, ToolErrorContent)
@@ -470,12 +470,14 @@ class TestDispatchCatchAll:
         assert "report the correlation_id" in payload["help"]
         for fragment in ("hunter2", "postgresql://", "10.0.0.5", "/srv/app", "RuntimeError"):
             assert fragment not in text
-        # The exception itself went to the log, keyed by the same id.
-        record = next(r for r in caplog.records if r.name == "mcp_server.tools._errors")
-        assert record.levelname == "ERROR"
-        assert record.exc_info is not None and record.exc_info[1] is exc
-        assert payload["correlation_id"] in record.getMessage()
-        assert "hunter2" in record.getMessage()
+        # The exception itself went to the error log, keyed by the same id.
+        log.error.assert_called_once()
+        event = log.error.call_args
+        assert event.args == ("mcp_tool_failed",)
+        assert event.kwargs["exc_info"] is exc
+        assert event.kwargs["correlation_id"] == payload["correlation_id"]
+        assert event.kwargs["tool"] == "list_contexts"
+        assert "hunter2" in event.kwargs["exc"]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("tool", ["forget", "remember"])

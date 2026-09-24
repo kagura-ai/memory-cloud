@@ -960,8 +960,23 @@ class TestRollbackActionDispatch:
         qdrant.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_one_failing_action_does_not_abandon_the_rest(self, user_id, workspace_id):
-        """Per-action isolation: the loop keeps going and records the failure."""
+    @pytest.mark.parametrize(
+        ("exc", "cause"),
+        [
+            (RuntimeError("edge store unavailable"), "internal_error"),
+            # #1684: driver / provider text — a DSN and a server path here —
+            # never reaches the returned summary.
+            (
+                ConnectionError("postgresql://svc:hunter2@10.0.0.5/kagura via /srv/app/db.py"),
+                "service_unavailable",
+            ),
+        ],
+    )
+    async def test_one_failing_action_does_not_abandon_the_rest(
+        self, user_id, workspace_id, exc, cause
+    ):
+        """Per-action isolation: the loop keeps going and records the failure,
+        by action, cause and correlation_id — the exception stays in the log."""
         boom = self._action("create_edge", id=1)
         ok = self._action("promote", id=2)
 
@@ -982,7 +997,7 @@ class TestRollbackActionDispatch:
                 pass
 
             async def delete_edge(self, **_kw):
-                raise RuntimeError("edge store unavailable")
+                raise exc
 
         with (
             patch("db.base.get_db", new=mock_get_db),
@@ -992,6 +1007,7 @@ class TestRollbackActionDispatch:
                 return_value=None,
             ),
             patch("repositories.neural_edge.NeuralEdgeRepository", new=_ExplodingEdgeRepo),
+            patch("mcp_server.tools.sleep.logger") as log,
         ):
             result = await handle_rollback_sleep_run(
                 {"report_id": str(report_id)}, user_id, workspace_id
@@ -999,11 +1015,21 @@ class TestRollbackActionDispatch:
 
         data = json.loads(result[0].text)
         summary = data["rollback_summary"]
-        # The failure is recorded…
-        assert any("edge store unavailable" in e for e in summary["errors"]), summary
+        # The failure is recorded by action, cause and correlation_id…
+        assert summary["errors"] == [
+            f"Action 1 (create_edge) failed: {cause} (correlation_id {data['correlation_id']})"
+        ], summary
         # …and the following action still ran.
         assert summary["promotions_reversed"] == 1, summary
         assert data.get("error") == "partial_rollback"
+        # The exception text is in the log only.
+        for fragment in (str(exc), "hunter2", "/srv/app"):
+            assert fragment not in result[0].text
+        event = log.warning.call_args_list[-1]
+        assert event.args == ("rollback_action_failed",)
+        assert event.kwargs["exc_info"] is exc
+        assert event.kwargs["exc"] == str(exc)
+        assert event.kwargs["correlation_id"] == data["correlation_id"]
 
     async def _run_with_extra(self, actions, extra, user_id, workspace_id, patch_re_embed=True):
         report_id = uuid4()

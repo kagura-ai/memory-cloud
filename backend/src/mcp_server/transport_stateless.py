@@ -255,7 +255,8 @@ async def _call_tool(
         from mcp_server.tools._errors import describe_tool_exception
 
         failure = describe_tool_exception(tool_name, e)
-        code = -32602 if isinstance(e, ValueError) else -32603
+        # From the classification, so the code never contradicts ``data``.
+        code = -32602 if failure.error == "validation_error" else -32603
         await _send_error(send, 200, request_id, code, failure.message, failure.jsonrpc_data())
         return
 

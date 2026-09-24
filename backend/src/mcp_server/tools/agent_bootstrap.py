@@ -166,7 +166,8 @@ async def handle_get_agent_bootstrap(
                 db, user_id, "get_agent_bootstrap", start_time, 500, None, workspace_id
             )
             # #1684: internal_error / timeout / service_unavailable with a
-            # correlation_id; the exception itself stays in the server log.
-            return _tool_exception_response("get_agent_bootstrap", e)
+            # correlation_id; the exception itself (a plain ValueError too —
+            # this arm always returned a fixed message) stays in the server log.
+            return _tool_exception_response("get_agent_bootstrap", e, echo_value_error=False)
 
     return _error_response("internal_error", "Database session unavailable")

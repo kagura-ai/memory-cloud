@@ -1996,7 +1996,8 @@
         "name"
       ],
       "additionalProperties": false
-    }
+    },
+    "readOnly": true
   },
   {
     "name": "secret_list",
@@ -2004,7 +2005,8 @@
       "type": "object",
       "properties": {},
       "additionalProperties": false
-    }
+    },
+    "readOnly": true
   },
   {
     "name": "secret_revoke_grant",

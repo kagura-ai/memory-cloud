@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import json
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -279,6 +280,8 @@ async def test_unknown_tool_envelope_is_flagged():
     ("exc", "code", "error_code"),
     [
         (ValueError("bad arg"), -32602, "validation_error"),
+        # A ValueError *subclass* is a server failure; the code agrees with data.
+        (json.JSONDecodeError("Expecting value", "/srv/app/x.json", 0), -32603, "internal_error"),
         (PermissionError("nope"), -32603, "permission_denied"),
         (TimeoutError(), -32603, "timeout"),
         (RuntimeError("secret dsn"), -32603, "internal_error"),
@@ -311,7 +314,7 @@ async def test_tools_call_failure_uses_only_standard_jsonrpc_codes(
 
 
 @pytest.mark.asyncio
-async def test_unexpected_tool_exception_text_is_not_echoed_to_the_client(monkeypatch, caplog):
+async def test_unexpected_tool_exception_text_is_not_echoed_to_the_client(monkeypatch):
     """#1684: a DSN / path in the exception reaches the server log (with the
     correlation_id the client gets), never the JSON-RPC error."""
     import mcp_server.tools as tools_mod
@@ -322,7 +325,7 @@ async def test_unexpected_tool_exception_text_is_not_echoed_to_the_client(monkey
         raise exc
 
     monkeypatch.setattr(tools_mod, "execute_tool_call", boom)
-    with caplog.at_level("ERROR", logger="mcp_server.tools._errors"):
+    with patch("mcp_server.tools._errors.logger") as log:
         send = await _post(_request("tools/call", {"name": "list_contexts"}))
 
     wire = json.dumps(send.body)
@@ -332,9 +335,9 @@ async def test_unexpected_tool_exception_text_is_not_echoed_to_the_client(monkey
     data = send.body["error"]["data"]
     assert data["error"] == "internal_error"
     assert data["retryable"] is True  # list_contexts only reads
-    record = next(r for r in caplog.records if r.name == "mcp_server.tools._errors")
-    assert record.exc_info is not None and record.exc_info[1] is exc
-    assert data["correlation_id"] in record.getMessage()
+    event = log.error.call_args
+    assert event.kwargs["exc_info"] is exc
+    assert event.kwargs["correlation_id"] == data["correlation_id"]
 
 
 @pytest.mark.asyncio

@@ -204,7 +204,10 @@ def _gate_error_response(exc: Exception, tool_name: str) -> list[TextContent]:
         )
     # Unexpected — the shared vocabulary logs the real detail server-side
     # under a correlation_id and returns no SQL/driver internals (#1247, #1684).
-    return _tool_exception_response(tool_name, exc)
+    # Every catch-all in this module passes ``echo_value_error=False``: they
+    # always returned a fixed message, so a plain ValueError reaching one is a
+    # server fault whose text is logged, not returned.
+    return _tool_exception_response(tool_name, exc, echo_value_error=False)
 
 
 def _serialize_run_row(row: Any) -> dict[str, Any]:
@@ -464,7 +467,9 @@ async def handle_analyze_context(
             await _log_tool_usage(
                 db, user_id, "analyze_context", start_time, 500, workspace_id=workspace_id
             )
-            return _tool_exception_response("analyze_context", e, error="analyze_context_error")
+            return _tool_exception_response(
+                "analyze_context", e, error="analyze_context_error", echo_value_error=False
+            )
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -540,7 +545,9 @@ async def handle_get_analysis(
             await _log_tool_usage(
                 db, user_id, "get_analysis", start_time, 500, workspace_id=workspace_id
             )
-            return _tool_exception_response("get_analysis", e, error="get_analysis_error")
+            return _tool_exception_response(
+                "get_analysis", e, error="get_analysis_error", echo_value_error=False
+            )
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -609,7 +616,9 @@ async def handle_list_analyses(
             await _log_tool_usage(
                 db, user_id, "list_analyses", start_time, 500, workspace_id=workspace_id
             )
-            return _tool_exception_response("list_analyses", e, error="list_analyses_error")
+            return _tool_exception_response(
+                "list_analyses", e, error="list_analyses_error", echo_value_error=False
+            )
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -693,7 +702,10 @@ async def handle_get_active_analysis(
                 workspace_id=workspace_id,
             )
             return _tool_exception_response(
-                "get_active_analysis", e, error="get_active_analysis_error"
+                "get_active_analysis",
+                e,
+                error="get_active_analysis_error",
+                echo_value_error=False,
             )
 
     return _error_response("internal_error", "Database session unavailable")
@@ -812,6 +824,8 @@ async def handle_get_cluster(
             await _log_tool_usage(
                 db, user_id, "get_cluster", start_time, 500, workspace_id=workspace_id
             )
-            return _tool_exception_response("get_cluster", e, error="get_cluster_error")
+            return _tool_exception_response(
+                "get_cluster", e, error="get_cluster_error", echo_value_error=False
+            )
 
     return _error_response("internal_error", "Database session unavailable")

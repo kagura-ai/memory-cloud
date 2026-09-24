@@ -2269,6 +2269,8 @@ Returns: {status, name, version_number, alg, ciphertext, recipients_snapshot, ro
                 },
                 "required": ["name"],
             },
+            # #1684: only the fetch audit is written, so retrying is safe.
+            "readOnly": True,
         },
         {
             "name": "secret_list",
@@ -2276,6 +2278,7 @@ Returns: {status, name, version_number, alg, ciphertext, recipients_snapshot, ro
 
 Returns: {status, secrets: [{name, status, rotation_needed, current_version, grant_count, created_at, updated_at}], count}.""",
             "inputSchema": {"type": "object", "properties": {}},
+            "readOnly": True,
         },
         {
             "name": "secret_revoke_grant",

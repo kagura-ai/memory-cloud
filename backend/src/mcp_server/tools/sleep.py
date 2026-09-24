@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import CursorResult
 
 from config.constants import TOMBSTONE_PURGER_CLAUSE
+from mcp_server.tools._errors import classify_cause, new_correlation_id
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
     _ContextNotFoundError,
@@ -673,6 +674,8 @@ async def handle_rollback_sleep_run(
                 edge_repo=NeuralEdgeRepository(db),
             )
 
+            # One id per run, shared by every failed action's log line (#1684).
+            correlation_id: str | None = None
             for action in actions:
                 handler = _UNDO_HANDLERS.get(action.action_type)
                 if handler is None:
@@ -683,12 +686,25 @@ async def handle_rollback_sleep_run(
                     # Per-action isolation: one failed undo must not abandon the
                     # rest of the run. The error lands in the summary, which is
                     # what flips the report to partial_rollback below.
+                    # #1684: the summary is returned to the caller, so it names
+                    # the action, the failure category and the correlation_id;
+                    # the exception text (SQL, vector-store or model-provider
+                    # messages) stays in the server log under that id.
+                    correlation_id = correlation_id or new_correlation_id()
+                    cause = classify_cause(e)
                     logger.warning(
-                        f"rollback_action_failed: action={action.id} "
-                        f"type={action.action_type} error={e}"
+                        "rollback_action_failed",
+                        action_id=action.id,
+                        action_type=action.action_type,
+                        cause=cause,
+                        correlation_id=correlation_id,
+                        exc_type=type(e).__name__,
+                        exc=str(e),
+                        exc_info=e,
                     )
                     rollback_summary["errors"].append(
-                        f"Action {action.id} ({action.action_type}): {e}"
+                        f"Action {action.id} ({action.action_type}) failed: {cause} "
+                        f"(correlation_id {correlation_id})"
                     )
 
             has_errors = bool(rollback_summary["errors"])
@@ -718,6 +734,7 @@ async def handle_rollback_sleep_run(
                     "Report marked as 'failed' — inspect errors and retry if needed.",
                     report_id=str(report_uuid),
                     rollback_summary=rollback_summary,
+                    **({"correlation_id": correlation_id} if correlation_id else {}),
                 )
 
             return _success_response(

@@ -18,21 +18,37 @@ transports. An exception is one of two kinds:
 
 Retry advice follows the tool's read-only hint: repeating a read is safe; a
 write whose outcome is unknown is never marked retryable, and ``help`` names
-the read that shows whether it took effect.
+the read that shows whether it took effect. A few writes are safe to repeat
+(``_REPEAT_SAFE_WRITES``) and are advised like reads.
 """
 
 from __future__ import annotations
 
 import functools
-import logging
 import secrets
 import socket
 from dataclasses import dataclass
 from typing import Any
 
-from mcp_server.tools._helpers import ToolErrorContent, _ContextNotFoundError, _error_response
+import httpx
+import redis.exceptions
+from qdrant_client.http.exceptions import ResponseHandlingException
+from sqlalchemy import exc as sa_exc
 
-logger = logging.getLogger(__name__)
+from mcp_server.tools._helpers import ToolErrorContent, _ContextNotFoundError, _error_response
+from utils.exceptions import (
+    AdminProtectionError,
+    AuthorizationError,
+    DatabaseConnectionError,
+    ExternalServiceError,
+    FeatureNotAvailableError,
+    MemoryCloudException,
+    QuotaExceededError,
+    RateLimitError,
+)
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 CAUSE_TIMEOUT = "timeout"
 CAUSE_SERVICE_UNAVAILABLE = "service_unavailable"
@@ -41,12 +57,36 @@ CAUSE_INTERNAL_ERROR = "internal_error"
 # Same wait the REST database-unavailable 503 advertises in ``Retry-After``.
 RETRY_AFTER_SECONDS = 5
 
+# ``asyncio.TimeoutError`` is the builtin on 3.11+, so this covers
+# ``execute_with_timeout`` as well as socket-level timeouts.
+_TIMEOUT_TYPES: tuple[type[BaseException], ...] = (
+    TimeoutError,
+    httpx.TimeoutException,
+    redis.exceptions.TimeoutError,
+)
+
+# A backing service could not be reached or used.
+_DEPENDENCY_TYPES: tuple[type[BaseException], ...] = (
+    ConnectionError,
+    socket.gaierror,
+    DatabaseConnectionError,
+    ExternalServiceError,
+    sa_exc.OperationalError,
+    sa_exc.InterfaceError,
+    sa_exc.DisconnectionError,
+    sa_exc.TimeoutError,  # connection-pool checkout timeout
+    httpx.TransportError,
+    ResponseHandlingException,
+    redis.exceptions.ConnectionError,
+)
+
 # Envelope keys a forwarded ``details`` block must not overwrite.
 _RESERVED_KEYS = frozenset({"status", "error", "message"})
 
 # The read that shows whether a write took effect, named in ``help`` when a
-# write fails with an unknown outcome. Writes without an entry get the generic
-# advice; ``test_tool_errors.py`` keeps every name registered.
+# write fails with an unknown outcome. ``test_tool_errors.py`` keeps every name
+# registered and requires every write to appear here, in
+# ``_REPEAT_SAFE_WRITES`` or in ``_UNVERIFIABLE_WRITES``.
 _VERIFY_WITH: dict[str, str] = {
     "remember": "recall",
     "update_memory": "reference",
@@ -61,6 +101,7 @@ _VERIFY_WITH: dict[str, str] = {
     "update_search_config": "get_context_info",
     "rollback_sleep_run": "get_sleep_report",
     "setup_resource": "list_resource_tokens",
+    "setup_connector": "list_resource_tokens",
     "ingest_events": "get_resource_impact",
     "analyze_context": "list_analyses",
     "init_file_upload": "list_files",
@@ -76,6 +117,27 @@ _VERIFY_WITH: dict[str, str] = {
     "unbind_agent_context": "list_agent_bindings",
     "secret_put": "secret_list",
     "secret_revoke_grant": "secret_list",
+}
+
+# Writes a repeat cannot turn into a duplicate: they get read-style advice
+# (``retryable: true``) and say why. ``recall`` / ``get_agent_bootstrap`` only
+# write ranking-learning state (#1683 marks them not read-only), which any
+# repeated query updates the same way; a pubkey already registered is refused.
+_REPEAT_SAFE_WRITES: dict[str, str] = {
+    "recall": "This tool searches; its only writes are ranking updates, which a repeat applies "
+    "like any other query.",
+    "get_agent_bootstrap": "This tool reads the agent's starting context; its only writes are "
+    "the ranking updates of its recall.",
+    "secret_register_pubkey": "Registering the same key again is refused as a duplicate, never "
+    "stored twice.",
+}
+
+# Writes with no read that shows their outcome: ``help`` says what a repeat does.
+_UNVERIFIABLE_WRITES: dict[str, str] = {
+    "feedback": (
+        "Feedback is append-only and no tool reads it back, so calling it again may record the "
+        "rating twice. Skip the retry unless the rating matters."
+    ),
 }
 
 _REFUSAL_HELP: dict[str, str] = {
@@ -98,20 +160,14 @@ _REFUSAL_HELP: dict[str, str] = {
     ),
 }
 
-_READ_HELP: dict[str, str] = {
-    CAUSE_TIMEOUT: (
-        "This tool only reads, so calling it again is safe. Wait a few seconds and retry; "
-        "if it keeps failing, report the correlation_id."
-    ),
-    CAUSE_SERVICE_UNAVAILABLE: (
-        "This tool only reads, so calling it again is safe. Wait a few seconds and retry; "
-        "if it keeps failing, report the correlation_id."
-    ),
-    CAUSE_INTERNAL_ERROR: (
-        "This tool only reads, so one more attempt is safe. If it fails again, stop "
-        "retrying and report the correlation_id."
-    ),
-}
+_READ_ONLY = "This tool only reads, so"
+_RETRY_TRANSIENT = (
+    "calling it again is safe. Wait a few seconds and retry; "
+    "if it keeps failing, report the correlation_id."
+)
+_RETRY_INTERNAL = (
+    "one more attempt is safe. If it fails again, stop retrying and report the correlation_id."
+)
 
 
 @dataclass(frozen=True)
@@ -152,6 +208,7 @@ def read_only_hint(definition: dict[str, Any]) -> bool:
 
 @functools.cache
 def _tool_hints() -> dict[str, bool]:
+    # Lazy: ``_definitions`` is loaded by the tools package that imports us.
     from mcp_server.tools._definitions import get_tool_definitions
 
     return {d["name"]: read_only_hint(d) for d in get_tool_definitions()}
@@ -166,100 +223,39 @@ def is_read_only_tool(tool_name: object) -> bool:
     return isinstance(tool_name, str) and _tool_hints().get(tool_name, False)
 
 
+def _is_repeat_safe(tool_name: object) -> bool:
+    return is_read_only_tool(tool_name) or (
+        isinstance(tool_name, str) and tool_name in _REPEAT_SAFE_WRITES
+    )
+
+
 # ============================================================================
 # Classification
 # ============================================================================
 
 
-@functools.cache
-def _timeout_types() -> tuple[type[BaseException], ...]:
-    # ``asyncio.TimeoutError`` is the builtin on 3.11+, so this covers
-    # ``execute_with_timeout`` as well as socket-level timeouts.
-    types: list[type[BaseException]] = [TimeoutError]
-    try:
-        import httpx
-
-        types.append(httpx.TimeoutException)
-    except ImportError:  # pragma: no cover - dependency is always installed
-        pass
-    try:
-        import redis.exceptions
-
-        types.append(redis.exceptions.TimeoutError)
-    except ImportError:  # pragma: no cover
-        pass
-    return tuple(types)
-
-
-@functools.cache
-def _dependency_types() -> tuple[type[BaseException], ...]:
-    """Exceptions meaning a backing service could not be reached or used."""
-    from sqlalchemy import exc as sa_exc
-
-    from utils.exceptions import DatabaseConnectionError, ExternalServiceError
-
-    types: list[type[BaseException]] = [
-        ConnectionError,
-        socket.gaierror,
-        DatabaseConnectionError,
-        ExternalServiceError,
-        sa_exc.OperationalError,
-        sa_exc.InterfaceError,
-        sa_exc.DisconnectionError,
-        sa_exc.TimeoutError,  # connection-pool checkout timeout
-    ]
-    try:
-        import httpx
-
-        types.append(httpx.TransportError)
-    except ImportError:  # pragma: no cover
-        pass
-    try:
-        from qdrant_client.http.exceptions import ResponseHandlingException
-
-        types.append(ResponseHandlingException)
-    except ImportError:  # pragma: no cover
-        pass
-    try:
-        import redis.exceptions
-
-        types.append(redis.exceptions.ConnectionError)
-    except ImportError:  # pragma: no cover
-        pass
-    return tuple(types)
-
-
 def classify_cause(exc: BaseException) -> str:
     """Map a server-side exception to ``timeout`` / ``service_unavailable`` /
     ``internal_error``."""
-    if isinstance(exc, _timeout_types()):
+    if isinstance(exc, _TIMEOUT_TYPES):
         return CAUSE_TIMEOUT
-    if isinstance(exc, _dependency_types()):
+    if isinstance(exc, _DEPENDENCY_TYPES):
         return CAUSE_SERVICE_UNAVAILABLE
     return CAUSE_INTERNAL_ERROR
 
 
-def _is_refusal(exc: BaseException) -> bool:
-    from utils.exceptions import MemoryCloudException
-
+def _is_refusal(exc: BaseException, *, echo_value_error: bool) -> bool:
     if isinstance(exc, MemoryCloudException):
         return exc.status_code < 500
+    if isinstance(exc, PermissionError):
+        return True
     # Exact type: a ValueError *subclass* (UnicodeDecodeError, JSONDecodeError,
     # pydantic's ValidationError …) is library detail, not a message for the caller.
-    return type(exc) is ValueError or isinstance(exc, PermissionError)
+    return echo_value_error and type(exc) is ValueError
 
 
 def _refusal(exc: BaseException) -> tuple[str, str, dict[str, Any]]:
     """``(vocabulary code, message, extra fields)`` for a refusal."""
-    from utils.exceptions import (
-        AdminProtectionError,
-        AuthorizationError,
-        FeatureNotAvailableError,
-        MemoryCloudException,
-        QuotaExceededError,
-        RateLimitError,
-    )
-
     if not isinstance(exc, MemoryCloudException):
         if isinstance(exc, PermissionError):
             # An OSError: its text can name a server path, so it is never echoed.
@@ -293,7 +289,8 @@ def _refusal(exc: BaseException) -> tuple[str, str, dict[str, Any]]:
 
 def _shown(tool_name: object) -> str:
     """Log-safe rendering of a (possibly client-supplied) tool name."""
-    return repr(str(tool_name)[:100])
+    name = str(tool_name)[:100]
+    return name if name.isprintable() else repr(name)
 
 
 def _server_failure_message(tool_name: object, cause: str) -> str:
@@ -303,13 +300,25 @@ def _server_failure_message(tool_name: object, cause: str) -> str:
     if cause == CAUSE_SERVICE_UNAVAILABLE:
         return (
             f"{subject} could not reach a service it depends on "
-            "(database, search index or model provider)."
+            "(database, search index, file storage or model provider)."
         )
     return f"{subject} failed because of an unexpected server error."
 
 
+def _retry_help(tool_name: object, cause: str) -> str:
+    """``help`` for a tool whose repeat is safe (a read, or a repeat-safe write)."""
+    retry = _RETRY_INTERNAL if cause == CAUSE_INTERNAL_ERROR else _RETRY_TRANSIENT
+    why = _REPEAT_SAFE_WRITES.get(tool_name) if isinstance(tool_name, str) else None
+    if why is None:
+        return f"{_READ_ONLY} {retry}"
+    return f"{why} So {retry}"
+
+
 def _write_help(tool_name: object) -> str:
-    verify = _VERIFY_WITH.get(tool_name) if isinstance(tool_name, str) else None
+    name = tool_name if isinstance(tool_name, str) else ""
+    if name in _UNVERIFIABLE_WRITES:
+        return f"{_UNVERIFIABLE_WRITES[name]} If it keeps failing, report the correlation_id."
+    verify = _VERIFY_WITH.get(name)
     check = f"Check with {verify}" if verify else "Check the current state"
     return (
         "This tool changes data, and the change may or may not have been applied. "
@@ -345,6 +354,7 @@ def describe_tool_exception(
     exc: BaseException,
     *,
     error: str | None = None,
+    echo_value_error: bool = True,
 ) -> ToolFailure:
     """Classify ``exc`` raised while running ``tool_name`` and log it.
 
@@ -356,45 +366,63 @@ def describe_tool_exception(
             ``merge_contexts_error`` …), kept as the envelope's ``error`` so
             existing client branches still match. ``None`` (dispatch and
             transports) uses the vocabulary code.
+        echo_value_error: ``False`` treats a plain ``ValueError`` as a server
+            failure instead of a refusal, so its text is logged, not returned.
+            For the handlers whose catch-all always returned a fixed message
+            (#1247): a ``ValueError`` reaching them is not a designed refusal.
 
     Returns:
         The failure, for ``.response()`` (tool result) or ``.jsonrpc_data()``.
     """
-    if _is_refusal(exc):
+    if _is_refusal(exc, echo_value_error=echo_value_error):
         code, message, details = _refusal(exc)
-        # Expected: the caller's request was refused. No traceback.
-        logger.warning(
-            "mcp_tool_refused: tool=%s error=%s exc_type=%s",
-            _shown(tool_name),
-            error or code,
-            type(exc).__name__,
-        )
+        if isinstance(exc, MemoryCloudException):
+            # A designed refusal: its message is the whole story.
+            logger.warning(
+                "mcp_tool_refused",
+                tool=_shown(tool_name),
+                error=error or code,
+                exc_type=type(exc).__name__,
+            )
+        else:
+            # A builtin ValueError / PermissionError can also be a server bug
+            # (bad stored data, a path the process cannot read): keep its text
+            # and traceback in the log, since the caller gets a fixed message
+            # (PermissionError) or only the text.
+            logger.warning(
+                "mcp_tool_refused",
+                tool=_shown(tool_name),
+                error=error or code,
+                exc_type=type(exc).__name__,
+                exc=str(exc),
+                exc_info=exc,
+            )
         return ToolFailure(error or code, message, {"help": _REFUSAL_HELP[code], **details})
 
     cause = classify_cause(exc)
     correlation_id = new_correlation_id()
-    read_only = is_read_only_tool(tool_name)
+    repeat_safe = _is_repeat_safe(tool_name)
     # The only place the exception itself is recorded: text + traceback in the
     # server log, keyed by the correlation_id the caller receives.
     logger.error(
-        "mcp_tool_failed: tool=%s error=%s cause=%s correlation_id=%s exc_type=%s exc=%s",
-        _shown(tool_name),
-        error or cause,
-        cause,
-        correlation_id,
-        type(exc).__name__,
-        exc,
+        "mcp_tool_failed",
+        tool=_shown(tool_name),
+        error=error or cause,
+        cause=cause,
+        correlation_id=correlation_id,
+        exc_type=type(exc).__name__,
+        exc=str(exc),
         exc_info=exc,
     )
     fields: dict[str, Any] = {
         "cause": cause,
-        "help": _READ_HELP[cause] if read_only else _write_help(tool_name),
+        "help": _retry_help(tool_name, cause) if repeat_safe else _write_help(tool_name),
         "correlation_id": correlation_id,
-        "retryable": read_only,
+        "retryable": repeat_safe,
     }
-    if read_only and cause != CAUSE_INTERNAL_ERROR:
+    if repeat_safe and cause != CAUSE_INTERNAL_ERROR:
         fields["retry_after_seconds"] = RETRY_AFTER_SECONDS
-    if not read_only:
+    if not repeat_safe:
         fields["outcome"] = "unknown"
     return ToolFailure(error or cause, _server_failure_message(tool_name, cause), fields)
 
@@ -404,11 +432,14 @@ def _tool_exception_response(
     exc: BaseException,
     *,
     error: str | None = None,
+    echo_value_error: bool = True,
 ) -> ToolErrorContent:
     """The ``isError`` envelope for an exception a tool handler raised.
 
-    See :func:`describe_tool_exception` for ``error``.
+    See :func:`describe_tool_exception` for ``error`` and ``echo_value_error``.
     """
     if isinstance(exc, _ContextNotFoundError):
         return exc.to_response()
-    return describe_tool_exception(tool_name, exc, error=error).response()
+    return describe_tool_exception(
+        tool_name, exc, error=error, echo_value_error=echo_value_error
+    ).response()

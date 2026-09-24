@@ -103,8 +103,14 @@ async def handle_secret_register_pubkey(
             await _log_tool_usage(
                 db, user_id, "secret_register_pubkey", start_time, 500, None, workspace_id
             )
+            # #1684: every catch-all in this module passes echo_value_error=False.
+            # They always returned a fixed message, so a plain ValueError that
+            # reaches one (not the ``invalid_arguments`` arm) is logged, not echoed.
             return _tool_exception_response(
-                "secret_register_pubkey", e, error="secret_register_pubkey_error"
+                "secret_register_pubkey",
+                e,
+                error="secret_register_pubkey_error",
+                echo_value_error=False,
             )
     return _error_response("internal_error", "Failed to acquire database session")
 
@@ -166,7 +172,9 @@ async def handle_secret_put(
         except Exception as e:
             await db.rollback()
             await _log_tool_usage(db, user_id, "secret_put", start_time, 500, None, workspace_id)
-            return _tool_exception_response("secret_put", e, error="secret_put_error")
+            return _tool_exception_response(
+                "secret_put", e, error="secret_put_error", echo_value_error=False
+            )
     return _error_response("internal_error", "Failed to acquire database session")
 
 
@@ -226,7 +234,9 @@ async def handle_secret_get(
         except Exception as e:
             await db.rollback()
             await _log_tool_usage(db, user_id, "secret_get", start_time, 500, None, workspace_id)
-            return _tool_exception_response("secret_get", e, error="secret_get_error")
+            return _tool_exception_response(
+                "secret_get", e, error="secret_get_error", echo_value_error=False
+            )
     return _error_response("internal_error", "Failed to acquire database session")
 
 
@@ -265,7 +275,9 @@ async def handle_secret_list(
         except Exception as e:
             await db.rollback()
             await _log_tool_usage(db, user_id, "secret_list", start_time, 500, None, workspace_id)
-            return _tool_exception_response("secret_list", e, error="secret_list_error")
+            return _tool_exception_response(
+                "secret_list", e, error="secret_list_error", echo_value_error=False
+            )
     return _error_response("internal_error", "Failed to acquire database session")
 
 
@@ -314,6 +326,9 @@ async def handle_secret_revoke_grant(
                 db, user_id, "secret_revoke_grant", start_time, 500, None, workspace_id
             )
             return _tool_exception_response(
-                "secret_revoke_grant", e, error="secret_revoke_grant_error"
+                "secret_revoke_grant",
+                e,
+                error="secret_revoke_grant_error",
+                echo_value_error=False,
             )
     return _error_response("internal_error", "Failed to acquire database session")

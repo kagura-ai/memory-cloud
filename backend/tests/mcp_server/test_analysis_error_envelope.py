@@ -5,7 +5,8 @@ Unexpected exceptions inside the analysis MCP handlers used to place
 into the error envelope returned to the caller. These tests pin the
 hardened behavior: the envelope carries the shared #1684 server-failure
 fields (fixed message, ``cause``, ``correlation_id``) and the sensitive
-marker planted in the raised exception never reaches the caller.
+marker planted in the raised exception never reaches the caller — a plain
+``ValueError`` included, since these handlers always returned a fixed message.
 """
 
 from __future__ import annotations
@@ -47,8 +48,14 @@ def db_mock():
     return m
 
 
+# A plain ValueError is a refusal on the dispatch path; here it must not be
+# echoed (``echo_value_error=False``, #1684).
+_RAISED = pytest.mark.parametrize("exc_type", [RuntimeError, ValueError])
+
+
 @pytest.mark.asyncio
-async def test_unexpected_service_error_envelope_is_generic(db_mock):
+@_RAISED
+async def test_unexpected_service_error_envelope_is_generic(db_mock, exc_type):
     """A service raising an exception must yield a generic envelope, never
     the raw exception text."""
     with (
@@ -59,7 +66,7 @@ async def test_unexpected_service_error_envelope_is_generic(db_mock):
         ),
         patch(
             "services.analysis.query_service.get_analysis",
-            AsyncMock(side_effect=RuntimeError(_SECRET_MARKER)),
+            AsyncMock(side_effect=exc_type(_SECRET_MARKER)),
         ),
         patch("mcp_server.tools.analysis._log_tool_usage", AsyncMock()),
     ):
@@ -84,14 +91,15 @@ async def test_unexpected_service_error_envelope_is_generic(db_mock):
 
 
 @pytest.mark.asyncio
-async def test_gate_unexpected_error_envelope_is_generic(db_mock):
+@_RAISED
+async def test_gate_unexpected_error_envelope_is_generic(db_mock, exc_type):
     """An unmapped exception from the gate chain routes through
     ``_gate_error_response`` and must also produce the generic envelope."""
     with (
         patch("db.base.get_db", _fake_get_db(db_mock)),
         patch(
             "auth.analysis_gates.check_memory_analysis_access_mcp",
-            AsyncMock(side_effect=RuntimeError(_SECRET_MARKER)),
+            AsyncMock(side_effect=exc_type(_SECRET_MARKER)),
         ),
         patch("mcp_server.tools.analysis._log_tool_usage", AsyncMock()),
     ):

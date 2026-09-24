@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
+import httpx
 import pytest
 
 from mcp_server.transport import handle_streamable_http_post
+from utils.exceptions import AuthorizationError
 
 
 class _Recorder:
@@ -438,7 +441,12 @@ async def test_handler_exception_caught_by_dispatch_is_flagged(monkeypatch):
     ("exc", "code", "error_code"),
     [
         (ValueError("bad arg"), -32602, "validation_error"),
+        # The code follows the classification, not the Python type (#1684):
+        # a ValueError subclass is a server failure, an httpx timeout a timeout.
+        (json.JSONDecodeError("Expecting value", "/srv/app/x.json", 0), -32603, "internal_error"),
+        (httpx.ReadTimeout("read timed out"), -32001, "timeout"),
         (PermissionError("nope"), -32002, "permission_denied"),
+        (AuthorizationError(), -32002, "permission_denied"),
         (TimeoutError(), -32001, "timeout"),
         (RuntimeError("x"), -32603, "internal_error"),
     ],
@@ -467,7 +475,7 @@ async def test_tools_call_failure_maps_to_a_jsonrpc_error(monkeypatch, exc, code
 
 
 @pytest.mark.asyncio
-async def test_tools_call_failure_keeps_exception_detail_in_the_log(monkeypatch, caplog):
+async def test_tools_call_failure_keeps_exception_detail_in_the_log(monkeypatch):
     """#1684: the legacy fallback used to return ``Internal error: <str(e)>`` and
     ``data.details``. A DSN / path now reaches the log only, joined to the
     response by ``correlation_id``."""
@@ -479,7 +487,7 @@ async def test_tools_call_failure_keeps_exception_detail_in_the_log(monkeypatch,
         raise exc
 
     monkeypatch.setattr(tools_mod, "execute_tool_call", boom)
-    with caplog.at_level("ERROR", logger="mcp_server.tools._errors"):
+    with patch("mcp_server.tools._errors.logger") as log:
         send = await _post(
             {
                 "jsonrpc": "2.0",
@@ -497,9 +505,9 @@ async def test_tools_call_failure_keeps_exception_detail_in_the_log(monkeypatch,
     assert error["message"] == "remember failed because of an unexpected server error."
     assert error["data"]["retryable"] is False  # a write with an unknown outcome
     assert error["data"]["outcome"] == "unknown"
-    record = next(r for r in caplog.records if r.name == "mcp_server.tools._errors")
-    assert record.exc_info is not None and record.exc_info[1] is exc
-    assert error["data"]["correlation_id"] in record.getMessage()
+    event = log.error.call_args
+    assert event.kwargs["exc_info"] is exc
+    assert event.kwargs["correlation_id"] == error["data"]["correlation_id"]
 
 
 @pytest.mark.asyncio
