@@ -29,9 +29,14 @@ Remote MCP boundaries and OAuth. Tool descriptions and server instructions descr
 ### Fixed
 - **Authlib 1.8** ([#1686](https://github.com/kagura-ai/memory-cloud/issues/1686)): the OAuth server works with Authlib 1.8.0, which fresh installs now resolve.
 
+### Migration
+- **OAuth clients:** use PKCE `S256` (`plain` is refused), and send a `code_challenge` from a public client. Send `resource` as this server's MCP URL (any `/mcp` form), or leave it out. Send each token-request parameter once. At registration, every `redirect_uris` entry must be one the server accepts on its own.
+- **MCP clients with OAuth tokens:** a token narrowed to `memory:read` gets `403 insufficient_scope` on write tools. Re-authorize requesting the `scope` the challenge names (it includes `memory:write`). Tokens issued through the default registration carry both scopes.
+- **`get_agent_bootstrap`:** read `context.usage_guide` for the context's guide; `instructions` no longer starts with it.
+- **Legacy SSE endpoints:** `GET /mcp/sse` and `POST /mcp/messages/…` answer `410` regardless of the session id; connect with Streamable HTTP on `/mcp`.
+
 ### Notes
-- No migration, no new environment variables.
-- **MCP clients:** a client whose OAuth token was narrowed to `memory:read` now gets 403 `insufficient_scope` on write tools; re-authorize with `memory:write`. Tokens issued through the default registration carry both scopes.
+- No database migration, no new environment variables.
 - **Device flow:** a device code no longer resolves on `/device` after its token has been issued.
 - **Plugins:** the Claude Code and Codex plugin manifests are bumped in lockstep.
 
