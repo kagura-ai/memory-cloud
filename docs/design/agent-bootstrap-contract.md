@@ -43,7 +43,7 @@ one envelope with embedded instructions.
 
 | Component | Delegated primitive (chokepoint) | Inherited bounds / invariants |
 |---|---|---|
-| `context` + `instructions` | `_resolve_context_for_read` + context row + search-config fallback, as in `tools/context.py`; instructions from the static constant in `tools/_constants.py` plus the context `usage_guide` | uniform `context_not_found` on any deny (CWE-639); API-key workspace confinement via contextvar |
+| `context` + `instructions` | `_resolve_context_for_read` + context row + search-config fallback, as in `tools/context.py`; `instructions` is the static constant in `tools/_constants.py` alone — the string `get_context_info` returns; the context's `usage_guide` stays in the `context` block as data (before v0.79.0 it was prefixed to `instructions`, [#1682](https://github.com/kagura-ai/memory-cloud/issues/1682)) | uniform `context_not_found` on any deny (CWE-639); API-key workspace confinement via contextvar |
 | `pinned` | `MemoryService.load_pinned` | `pinned_load_cap` default 100, clamp [1, 1000]; deterministic `importance DESC, created_at ASC, id ASC`; `truncated` + `total_available` never silent; partial columns (no `content`/`details`) |
 | `recall` | `MemoryService` recall with `filters={"trust_tier": "trusted"}` | trusted-context subquery + `source_type != 'connector'` defence-in-depth; normal recall semantics incl. reinforcement re-rank and access counters — unchanged by design |
 | `upcoming` | the `recall_upcoming` window-overlap query | `k` default 20, clamp [1, 100]; `from` is always `"now"`; rows are `recall_upcoming`'s default shape `{memory_id, summary, type, trigger}` — never the full `details` (bootstrap has no `include_details`; fetch one memory with `reference`) |
@@ -119,8 +119,8 @@ one exists. If the agent has multiple bindings and no default, the call fails wi
     "binding": { "context_id": "…", "is_default": true }
   },
   "context": { /* byte-compatible with get_context_info's context block */ },
-  "instructions": "<context usage_guide, then the standard instructions constant, concatenated
-                    in that order with a blank-line separator — the get_context_info precedent>",
+  "instructions": "<the static instructions constant — byte-identical to get_context_info's
+                    instructions; the owner-written usage_guide is context.usage_guide, not here>",
   "components": {
     "pinned":   { "status": "ok", "memories": [ /* load_pinned rows */ ],
                   "total_available": 12, "truncated": false, "cap": 100 },

@@ -1500,7 +1500,7 @@ These tools back the [Agent Memory Substrate](concepts.md#agent-memory-substrate
 
 #### 8. load_pinned
 
-Deterministically load a context's always-load memories (`delivery_mode="always"`) — the complete, unranked set, every call. The deterministic counterpart to probabilistic `recall()`; use it for an agent's Goal / Guardrail / critical policy.
+Deterministically load a context's always-load memories (`delivery_mode="always"`) — the complete, unranked set, every call. The deterministic counterpart to probabilistic `recall()`; use it for notes that stay relevant every turn, such as an agent's goal or a standing decision.
 
 ```python
 {

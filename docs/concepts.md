@@ -275,7 +275,7 @@ Kagura is a **knowledge store** for humans *and* an **agent memory substrate** f
 | `delivery_mode` | Surfaced | Read with | Use for |
 |---|---|---|---|
 | `on_recall` (default) | Probabilistically, via Hybrid Search | `recall()` | Ordinary knowledge |
-| `always` | **Deterministically, every turn** | `load_pinned()` | An agent's Goal / Guardrail / critical policy |
+| `always` | **Deterministically, every turn** | `load_pinned()` | Notes that stay relevant every turn, such as an agent's goal or a standing decision |
 | `on_trigger` | Reserved. Time Memories are keyed on `type="time"`, not on this value — the write path never sets it | `recall_upcoming()` (by type) | Deadlines, dated follow-ups (Time Memories, `type="time"`) |
 | *(any)* + `details.tool_trigger` | **At the matching tool call**, by a client-side hook | `load_guardrails()` (hooks cache it) | Tool guardrails — the lesson about one specific tool call |
 | *(any)* + `details.tool_trigger`, client **without** hooks | **At connect** (server `instructions`, `?guardrails=<context_id>` or an agent default binding), **at session start** (`get_context_info.guardrails`, default on) or **from an always-loaded file** (`AGENTS.md` export block) | a digest of `load_guardrails`' tool-triggered lane — summaries only ([Server instructions](mcp-tools.md#server-instructions)) | The same tool guardrails for ChatGPT web, ChatGPT Work web, Claude Desktop / Claude Chat and Codex cloud |
