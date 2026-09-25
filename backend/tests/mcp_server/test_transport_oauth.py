@@ -110,9 +110,14 @@ class _Sessions:
         self.add(session_id, user_id, workspace_id)
         return self._sessions[session_id]
 
-    async def get_session(self, session_id):
-        self.calls.append(("get_session", session_id))
-        return self._sessions.get(session_id)
+    async def get_owned_session(self, session_id, user_id, workspace_id):
+        self.calls.append(("get_owned_session", session_id))
+        session = self._sessions.get(session_id)
+        if session is None:
+            return "missing", None
+        if (session.user_id, session.workspace_id) != (user_id, workspace_id):
+            return "foreign", None
+        return "owned", session
 
     async def remove_session(self, session_id):
         self.calls.append(("remove_session", session_id))
@@ -128,6 +133,7 @@ def app(monkeypatch):
         api_key=False,
         sessions=_Sessions(),
         executed=[],
+        workspace=None,
     )
 
     async def verify_api_key(_token):
@@ -137,7 +143,7 @@ def app(monkeypatch):
         return state.grant
 
     async def no_workspace(_user_id):
-        return None
+        return state.workspace
 
     async def execute_tool_call(**kwargs):
         state.executed.append(kwargs["tool_name"])
@@ -396,6 +402,51 @@ async def test_the_client_scope_is_read_only_when_the_token_names_no_memory_scop
 
 
 @pytest.mark.asyncio
+async def test_a_failed_client_lookup_grants_no_memory_scope(monkeypatch):
+    """Fail closed: no DCR-default fallback when the registration cannot be read."""
+    from sqlalchemy.exc import OperationalError
+
+    import auth.oauth2_bearer as bearer
+    import db.base
+
+    row = SimpleNamespace(user_id="u-1", scope="claudeai", resource=None, client_id="client-1")
+
+    class _Db:
+        async def execute(self, _stmt):
+            raise OperationalError("SELECT", {}, Exception("connection lost"))
+
+    async def get_db():
+        yield _Db()
+
+    async def find(_token, _db):
+        return row
+
+    monkeypatch.setattr(db.base, "get_db", get_db)
+    monkeypatch.setattr(bearer, "find_active_oauth_token", find)
+
+    grant = await mcp_auth._verify_oauth2_token("tok")
+
+    assert grant.client_scope_unavailable is True
+    assert grant.client_scope is None
+    granted = mcp_auth.granted_scopes(
+        grant.scope, grant.client_scope, client_scope_unavailable=True
+    )
+    assert granted == {"claudeai"}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_client_lookup_refuses_every_tool_call(app):
+    app.grant = OAuthGrant("user-1", "claudeai", None, None, True)
+    await _open_session(app)
+    headers = {b"mcp-session-id": b"mcp-open"}
+
+    read = await app.call(_rpc("tools/call", 3, name="list_contexts"), headers=headers)
+    assert read.status == 403
+    assert read.body["error"]["data"]["error"] == "insufficient_scope"
+    assert app.executed == []
+
+
+@pytest.mark.asyncio
 async def test_api_keys_carry_no_oauth_scope(monkeypatch):
     """A previous OAuth request's scopes never leak into an API-key request."""
     monkeypatch.setattr(
@@ -479,14 +530,18 @@ async def test_a_write_only_token_cannot_read(app):
 
 
 @pytest.mark.asyncio
-async def test_handshake_listing_and_ping_are_not_scope_gated(app):
-    app.grant = OAuthGrant("user-1", "memory:read", None)
+async def test_handshake_listing_ping_and_discover_are_not_scope_gated(app):
+    """A token without ``memory:read`` still connects, lists and pings."""
+    app.grant = OAuthGrant("user-1", "memory:write", None)
     session = await _initialize(app)
 
     assert (await app.call(_rpc("tools/list", 2), headers=session)).status == 200
     assert (await app.call(_rpc("ping", 3), headers=session)).status == 200
-    call = await app.call(_rpc("tools/call", 4, name="forget", arguments={}), headers=session)
+    assert (await app.call(_rpc("server/discover", 4))).status == 200
+    call = await app.call(_rpc("tools/call", 5, name="list_contexts"), headers=session)
     assert call.status == 403
+    assert call.body["error"]["data"]["required_scope"] == "memory:read"
+    assert app.executed == []
 
 
 @pytest.mark.asyncio
@@ -608,6 +663,67 @@ async def test_an_unknown_session_id_is_re_adopted_for_the_caller(app, path, met
 
 
 @pytest.mark.asyncio
+async def test_re_adoption_keeps_the_callers_workspace(app):
+    from uuid import uuid4
+
+    app.workspace = uuid4()
+    first = await app.call(_rpc("ping", 7), headers={b"mcp-session-id": b"mcp-gone"})
+    assert first.status == 200
+    assert app.sessions._sessions["mcp-gone"].workspace_id == app.workspace
+
+    again = await app.call(_rpc("ping", 8), headers={b"mcp-session-id": b"mcp-gone"})
+    assert again.status == 200
+    assert again.headers[b"mcp-session-id"] == b"mcp-gone"
+    assert app.sessions.calls.count(("get_or_create_session", "mcp-gone")) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_session_adopted_by_someone_else_meanwhile_is_404(app):
+    """Race: missing at lookup, then taken before the caller adopts it."""
+
+    async def taken(**_kwargs):
+        raise PermissionError("Session belongs to a different user")
+
+    app.sessions.get_or_create_session = taken
+    send = await app.call(
+        _rpc("tools/call", 7, name="list_contexts"), headers={b"mcp-session-id": b"mcp-race"}
+    )
+
+    assert send.status == 404
+    assert app.executed == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["POST", "DELETE"])
+async def test_a_rejected_session_is_not_kept_alive_and_is_adopted_after_cleanup(
+    monkeypatch, app, method
+):
+    """Ownership before activity: a 404 never refreshes another caller's
+    session, so it idles out and its id can then be opened by the caller."""
+    from datetime import timedelta
+
+    from mcp_server.session import MCPSessionManager
+    from utils.datetime import utcnow
+
+    manager = MCPSessionManager()
+    monkeypatch.setattr(transport, "get_session_manager", lambda: manager)
+    theirs = await manager.get_or_create_session(user_id="user-2", session_id="mcp-shared")
+    idle_since = utcnow() - timedelta(hours=2)
+    theirs.last_active_at = idle_since
+
+    body = _rpc("ping", 7) if method == "POST" else None
+    rejected = await app.call(body, headers={b"mcp-session-id": b"mcp-shared"}, method=method)
+    assert rejected.status == 404
+    assert theirs.last_active_at == idle_since
+
+    await manager.cleanup_inactive_sessions(timeout_seconds=3600)
+    adopted = await app.call(_rpc("ping", 8), headers={b"mcp-session-id": b"mcp-shared"})
+    assert adopted.status == 200
+    assert adopted.headers[b"mcp-session-id"] == b"mcp-shared"
+    assert manager._sessions["mcp-shared"].user_id == "user-1"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("method", ["POST", "GET", "DELETE"])
 @pytest.mark.parametrize("owner", [("user-2", None), ("user-1", "ws-other")])
 async def test_another_users_or_workspaces_session_is_404(app, owner, method):
@@ -616,8 +732,12 @@ async def test_another_users_or_workspaces_session_is_404(app, owner, method):
     send = await app.call(body, headers={b"mcp-session-id": b"mcp-theirs"}, method=method)
 
     assert send.status == 404
-    assert "re-initialize" in send.body["error"]["message"]
-    assert "initialize" in send.body["error"]["data"]["action"]
+    error = send.body["error"]
+    assert error["message"] == (
+        "This session id cannot be used by this connection. "
+        "Send a new initialize request without Mcp-Session-Id."
+    )
+    assert set(error["data"]) == {"session_id", "action"}  # no expiry or restart claim
     assert "mcp-theirs" in app.sessions._sessions  # untouched
     assert not any(call[0] == "get_or_create_session" for call in app.sessions.calls)
 
@@ -676,6 +796,7 @@ async def test_initialize_without_a_session_id_gets_a_server_minted_one(app):
         ("PUT", "/mcp/", 405),
         ("PATCH", "/mcp", 405),
         ("GET", "/mcp/sse", 410),
+        ("POST", "/mcp/messages/mcp-chosen/", 410),
     ],
 )
 async def test_other_methods_and_paths_open_no_session(app, method, path, status):

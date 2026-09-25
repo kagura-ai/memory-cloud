@@ -579,29 +579,14 @@ async def _reject_insufficient_scope(
     return True
 
 
-# The answer to a session-era request naming a session another user or
-# workspace holds (and to a DELETE of a session this server does not hold):
-# MCP 2025-03-26 session management — 404, and the client starts a new
+# The answer to a session-era request naming a session id this connection
+# cannot use — held by another user or workspace, or (for DELETE) not held at
+# all: MCP 2025-03-26 session management — 404, and the client starts a new
 # session with ``initialize``.
 _SESSION_NOT_FOUND_MESSAGE = (
-    "MCP session not found or expired. Please re-initialize your connection."
+    "This session id cannot be used by this connection. "
+    "Send a new initialize request without Mcp-Session-Id."
 )
-
-
-def _session_owned_by(session: "MCPSession", user_id: str, workspace_id: "UUID | None") -> bool:
-    """Whether ``session`` was opened by this user in this workspace (Issue #102 / #146).
-
-    A session another user or workspace opened is never served to the caller:
-    it is answered 404 like one this server does not hold.
-    """
-    if session.user_id == user_id and session.workspace_id == workspace_id:
-        return True
-    logger.warning(
-        f"MCP session owner mismatch: session={session.session_id}, owner={session.user_id}, "
-        f"requester={user_id}, stored_workspace={session.workspace_id}, "
-        f"requested_workspace={workspace_id}"
-    )
-    return False
 
 
 async def _send_session_creation_failed(send: Send) -> None:
@@ -634,9 +619,9 @@ async def _end_session(
             },
         )
         return
-    session = await manager.get_session(session_id)
-    if session is None or not _session_owned_by(session, user_id, workspace_id):
-        logger.info(f"MCP DELETE /mcp: no session {session_id} for user={user_id}")
+    lookup, _session = await manager.get_owned_session(session_id, user_id, workspace_id)
+    if lookup != "owned":
+        logger.info(f"MCP DELETE /mcp: no session {session_id} for user={user_id} ({lookup})")
         await _send_session_not_found(send, session_id)
         return
     await manager.remove_session(session_id)
@@ -650,8 +635,8 @@ async def _answer_without_session(
 ) -> None:
     """Answer a request that no MCP handler serves, without touching sessions.
 
-    405 for another method on ``/mcp``, 410 for the removed SSE endpoint
-    (Issue #248), 404 for any other path.
+    405 for another method on ``/mcp``, 410 for the removed SSE endpoints
+    (Issue #248: ``GET /sse`` and ``POST /messages/…``), 404 for any other path.
     """
     normalized_path = _normalize_mcp_path(path)
     if path in ("/mcp", "/mcp/"):
@@ -666,6 +651,19 @@ async def _answer_without_session(
             {
                 "error": "SSE transport removed",
                 "message": "SSE transport was deprecated in MCP spec 2025-03-26. Please use Streamable HTTP (POST /mcp).",
+                "migration_guide": "https://modelcontextprotocol.io/specification/2025-03-26/basic/transports",
+            }
+        )
+        await Response(
+            error_response, status_code=410, headers={"Content-Type": "application/json"}
+        )(scope, receive, send)
+    elif method == "POST" and normalized_path.startswith("/messages/"):
+        # Issue #248: Legacy POST /messages/ endpoint removed
+        logger.warning(f"MCP legacy POST endpoint removed: {method} {normalized_path}")
+        error_response = json.dumps(
+            {
+                "error": "Legacy endpoint removed",
+                "message": "POST /messages/ was part of deprecated SSE transport. Please use POST /mcp.",
                 "migration_guide": "https://modelcontextprotocol.io/specification/2025-03-26/basic/transports",
             }
         )
@@ -688,8 +686,7 @@ async def _send_session_not_found(send: Send, session_id: str) -> None:
                 "message": _SESSION_NOT_FOUND_MESSAGE,
                 "data": {
                     "session_id": session_id,
-                    "reason": "Session may have expired due to inactivity (1 hour timeout) or server restart",
-                    "action": "Send a new 'initialize' request without Mcp-Session-Id header",
+                    "action": "Send a new 'initialize' request without the Mcp-Session-Id header",
                 },
             },
             "id": None,
@@ -1307,8 +1304,8 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
     #   used when it is the caller's, re-adopted when this server does not
     #   hold it, and answered 404 when another user or workspace holds it.
     # DELETE /mcp: end the caller's session (204).
-    # LEGACY: POST /messages/ - require existing session (answered 410 below)
-    # Anything else is answered without touching the session store.
+    # Anything else — including the removed POST /messages/ and GET /sse
+    # endpoints (410) — is answered without touching the session store.
     if method == "DELETE" and path in ("/mcp", "/mcp/"):
         await _end_session(send, session_manager, session_id, user_id, workspace_id)
         return
@@ -1330,8 +1327,12 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                 return
             logger.info(f"MCP {method} /mcp: created new session: {session.session_id}")
         else:
-            existing = await session_manager.get_session(session_id)
-            if existing is None:
+            # Ownership before activity: only the caller's own session is
+            # touched, so a rejected one still idles out.
+            lookup, session = await session_manager.get_owned_session(
+                session_id, user_id, workspace_id
+            )
+            if lookup == "missing":
                 # Not held here: expired, or lost on a restart or deploy. It
                 # is re-adopted for the authenticated caller under the same
                 # id, so a client that cannot re-initialize after a 404 keeps
@@ -1353,53 +1354,14 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                         f"MCP {method} /mcp: re-adopted unknown session {session_id} "
                         f"for user={user_id}"
                     )
-            elif _session_owned_by(existing, user_id, workspace_id):
-                session = existing
+            elif session is not None:
                 logger.info(f"MCP {method} /mcp: using existing session: {session.session_id}")
-            else:
-                session = None
             if session is None:
                 # Another user's or workspace's session: MCP session
                 # management — 404, and the client re-initializes.
                 await _send_session_not_found(send, session_id)
                 return
 
-    elif method == "POST" and path.startswith("/mcp/messages/"):
-        if session_id:
-            session = await session_manager.get_session(session_id)
-            if session is None:
-                # Session not found - return helpful error (Issue #50)
-                logger.warning(f"MCP POST to non-existent session: {session_id}")
-
-                await _send_json_error(
-                    send,
-                    404,
-                    {
-                        "jsonrpc": "2.0",
-                        "error": {
-                            "code": -32603,
-                            "message": "MCP session not found or expired. Please reconnect using /mcp command.",
-                            "data": {
-                                "session_id": session_id,
-                                "reconnect_command": "/mcp",
-                                "hint": "The session may have expired due to inactivity or server restart",
-                            },
-                        },
-                        "id": None,
-                    },
-                )
-                return
-        else:
-            # No session_id provided for POST
-            await _send_json_error(
-                send,
-                400,
-                {
-                    "error": "Missing session_id",
-                    "message": "POST requests require a valid session_id. Please connect using /mcp first.",
-                },
-            )
-            return
     else:
         # Every other method or path: answered without opening a session, so
         # no session is ever created under a client-supplied id here (#1686).
@@ -1429,21 +1391,6 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         elif method == "GET" and (path == "/mcp" or path == "/mcp/"):
             # NEW: Optional GET /mcp stream endpoint
             await handle_streamable_http_get(scope, receive, send, session, headers)
-            return
-
-        elif method == "POST" and normalized_path.startswith("/messages/"):
-            # Issue #248: Legacy POST /messages/ endpoint removed
-            logger.warning(f"MCP legacy POST endpoint removed: {method} {normalized_path}")
-            error_response = json.dumps(
-                {
-                    "error": "Legacy endpoint removed",
-                    "message": "POST /messages/ was part of deprecated SSE transport. Please use POST /mcp.",
-                    "migration_guide": "https://modelcontextprotocol.io/specification/2025-03-26/basic/transports",
-                }
-            )
-            await Response(
-                error_response, status_code=410, headers={"Content-Type": "application/json"}
-            )(modified_scope, receive, send)
             return
 
         else:

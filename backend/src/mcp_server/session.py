@@ -8,6 +8,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 from uuid import UUID, uuid4
 
 from mcp.server import Server
@@ -15,6 +16,9 @@ from mcp.server import Server
 from utils.datetime import utcnow
 
 logger = logging.getLogger(__name__)
+
+# How ``MCPSessionManager.get_owned_session`` found a session id (#1686).
+SessionLookup = Literal["owned", "foreign", "missing"]
 
 
 @dataclass
@@ -85,6 +89,39 @@ class MCPSessionManager:
             else:
                 logger.debug(f"Session not found: session_id={session_id}")
             return session
+
+    async def get_owned_session(
+        self, session_id: str, user_id: str, workspace_id: UUID | None
+    ) -> tuple[SessionLookup, MCPSession | None]:
+        """Look up ``session_id`` for a caller, touching only the caller's own session.
+
+        #1686: ownership is decided before activity is recorded. A session held
+        by another user or workspace keeps its ``last_active_at``, so a
+        rejected id still idles out (and can then be opened by its caller).
+
+        Args:
+            session_id: Session ID from the request
+            user_id: The authenticated caller
+            workspace_id: The caller's workspace for this request
+
+        Returns:
+            ``("owned", session)`` with ``last_active_at`` refreshed,
+            ``("foreign", None)`` for another user's or workspace's session,
+            or ``("missing", None)`` when no session has that id.
+        """
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return "missing", None
+            if session.user_id != user_id or session.workspace_id != workspace_id:
+                logger.warning(
+                    f"MCP session owner mismatch: session={session_id}, "
+                    f"owner={session.user_id}, requester={user_id}, "
+                    f"stored_workspace={session.workspace_id}, requested_workspace={workspace_id}"
+                )
+                return "foreign", None
+            session.last_active_at = utcnow()
+            return "owned", session
 
     async def get_or_create_session(
         self,

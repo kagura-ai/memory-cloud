@@ -48,6 +48,8 @@ class OAuthGrant:
     # The issuing client's registered scope; read only when ``scope`` names no
     # ``memory:*`` scope (see ``granted_scopes``).
     client_scope: str | None = None
+    # True when that read failed: the token then grants no ``memory:*`` scope.
+    client_scope_unavailable: bool = False
 
 
 # The OAuth scopes of the current request's access token; ``None`` when the
@@ -79,18 +81,28 @@ def names_memory_scope(scope: str | None) -> bool:
     return bool(_memory_scopes(_scope_set(scope)))
 
 
-def granted_scopes(scope: str | None, client_scope: str | None = None) -> frozenset[str]:
+def granted_scopes(
+    scope: str | None,
+    client_scope: str | None = None,
+    *,
+    client_scope_unavailable: bool = False,
+) -> frozenset[str]:
     """The scopes an OAuth access token grants on ``/mcp``.
 
     The ``memory:*`` scopes the token's stored scope names. A token whose
     scope names none (an empty scope, or one such as ``openid
     offline_access`` or a client-specific value) gets the ``memory:*`` scopes
-    its client registered, or the DCR default scope when the client
-    registered none. The token's other scopes are kept, so they reappear in an
-    ``insufficient_scope`` challenge.
+    its client registered, or the DCR default scope when the client is
+    unknown or registered none. When the client's registration could not be
+    read, such a token grants no ``memory:*`` scope (fail closed: every
+    ``tools/call`` is refused with ``insufficient_scope``). The token's other
+    scopes are kept, so they reappear in an ``insufficient_scope`` challenge.
     """
     stored = _scope_set(scope)
     if _memory_scopes(stored):
+        return stored
+    if client_scope_unavailable:
+        logger.warning("MCP OAuth token names no memory scope and its client could not be read")
         return stored
     registered = _memory_scopes(_scope_set(client_scope))
     if registered:
@@ -208,7 +220,13 @@ async def authenticate_mcp_request(
                 "The access token was issued for a different resource. "
                 "Re-authorize this server to get a token for it."
             )
-        _mcp_oauth_scopes.set(granted_scopes(grant.scope, grant.client_scope))
+        _mcp_oauth_scopes.set(
+            granted_scopes(
+                grant.scope,
+                grant.client_scope,
+                client_scope_unavailable=grant.client_scope_unavailable,
+            )
+        )
         logger.info(f"MCP auth success: method=oauth2, user={grant.user_id}")
         # Issue #245: context_id is now required in tool args, not from auth
         return (grant.user_id, None, None)
@@ -285,32 +303,35 @@ async def _verify_oauth2_token(access_token: str) -> OAuthGrant | None:
         if token is None:
             return None
         client_scope = None
+        client_scope_unavailable = False
         if not names_memory_scope(token.scope):
-            client_scope = await _registered_client_scope(token.client_id, db)
+            try:
+                client_scope = await _registered_client_scope(token.client_id, db)
+            except Exception as e:  # noqa: BLE001 - fail closed, see granted_scopes
+                logger.warning(f"MCP OAuth client scope lookup failed: {type(e).__name__}")
+                client_scope_unavailable = True
         return OAuthGrant(
             user_id=token.user_id,
             scope=token.scope,
             resource=token.resource,
             client_scope=client_scope,
+            client_scope_unavailable=client_scope_unavailable,
         )
     return None
 
 
 async def _registered_client_scope(client_id: str, db: "AsyncSession") -> str | None:
-    """The scope the OAuth client registered, or ``None`` (unknown client, lookup failure)."""
+    """The scope the OAuth client registered, or ``None`` for an unknown client.
+
+    Raises:
+        Exception: Whatever the lookup raises; the caller fails closed.
+    """
     from sqlalchemy import select
-    from sqlalchemy.exc import SQLAlchemyError
 
     from models.auth import OAuth2Client
 
-    try:
-        result = await db.execute(
-            select(OAuth2Client.scope).where(OAuth2Client.client_id == client_id)
-        )
-        return result.scalar_one_or_none()
-    except SQLAlchemyError as e:
-        logger.warning(f"MCP OAuth client scope lookup failed: {type(e).__name__}")
-        return None
+    result = await db.execute(select(OAuth2Client.scope).where(OAuth2Client.client_id == client_id))
+    return result.scalar_one_or_none()
 
 
 async def _verify_session_cookie(cookie_header: bytes) -> str | None:

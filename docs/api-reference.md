@@ -1495,9 +1495,9 @@ Kagura Memory Cloud provides 64 MCP tools for AI assistants across 13 categories
 - **Sessions (session-based Streamable HTTP)** on `/mcp`, `/mcp/` and `/mcp/w/{workspace_id}`:
   - `POST` / `GET` without `Mcp-Session-Id` opens a session under an id the server chooses (returned in `Mcp-Session-Id`).
   - `POST` / `GET` naming a session of the caller uses it. One the server does not hold (expired after an hour idle, or lost on a restart or deploy) is re-adopted for the authenticated caller under the same id, so a client keeps working without re-initializing.
-  - A session id opened by another user or in another workspace gets `404` with a JSON-RPC error asking the client to send a new `initialize` without the header.
-  - `DELETE` with the caller's `Mcp-Session-Id` ends that session (`204`); an unknown or foreign id gets `404`, a request without one `400`.
-  - Other methods get `405` (`Allow: GET, POST, DELETE`); other paths `404` (the removed SSE endpoint `/mcp/sse` keeps `410`). None of them opens a session.
+  - A session id opened by another user or in another workspace gets `404` with the JSON-RPC error "This session id cannot be used by this connection. Send a new initialize request without Mcp-Session-Id." Such a request does not refresh that session's idle timer.
+  - `DELETE` with the caller's `Mcp-Session-Id` ends that session (`204`); an unknown or foreign id gets the same `404`, a request without one `400`.
+  - Other methods get `405` (`Allow: GET, POST, DELETE`) and other paths `404`. The removed SSE transport answers `410`: `GET /mcp/sse` and `POST /mcp/messages/…`. None of them reads or opens a session.
   - Stateless MCP 2026-07-28 requests have no session and ignore an `Mcp-Session-Id` header.
 
 ### 1. remember
