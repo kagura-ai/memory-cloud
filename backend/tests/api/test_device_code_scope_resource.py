@@ -21,6 +21,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
+from urllib.parse import urlencode
 
 _BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_BACKEND_SRC) not in sys.path:
@@ -286,3 +287,32 @@ class TestDeviceConfirmLogging:
         assert approved["user_code_prefix"] == user_code[:4]
         assert "user_code" not in approved
         assert not any(user_code in repr(event) for event in events)
+
+
+class TestDeviceRepeatedResource:
+    @pytest.mark.parametrize(
+        "resources",
+        [["https://other.example/mcp", MCP_RESOURCE], [MCP_RESOURCE, "https://other.example/mcp"]],
+        ids=["foreign-then-valid", "valid-then-foreign"],
+    )
+    def test_poll_with_two_resources_is_invalid_target(
+        self, api: TestClient, db_factory: sessionmaker, resources: list[str]
+    ) -> None:
+        grant = _authorize(api, scope="memory:read").json()
+        _approve(api, db_factory, grant)
+        pairs = [
+            ("grant_type", DEVICE_GRANT),
+            ("device_code", grant["device_code"]),
+            ("client_id", CLI_CLIENT),
+        ] + [("resource", resource) for resource in resources]
+
+        token = api.post(
+            "/api/v1/oauth/token",
+            content=urlencode(pairs),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
+        assert token.status_code == 400
+        assert token.json()["error"] == "invalid_target"
+        with db_factory() as db:
+            assert db.query(OAuth2Token).count() == 0

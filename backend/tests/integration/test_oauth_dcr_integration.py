@@ -735,3 +735,20 @@ class TestOAuthGrantSingleUse:
 
         assert sorted(statuses) == [200, 400]
         assert self._token_count(sync_db, client_id) == 1
+
+    def test_poll_waits_for_a_locked_device_code_and_then_finds_it_used(self, client, sync_db):
+        client_id = self._register(client, grant_types=[self._DEVICE_GRANT, "refresh_token"])
+        device_code = self._insert_approved_device_code(sync_db, client_id)
+
+        response = _lock_then_release(
+            "SELECT id FROM oauth_device_codes WHERE device_code = :device_code FOR UPDATE",
+            "DELETE FROM oauth_device_codes WHERE device_code = :device_code",
+            {"device_code": device_code},
+            "oauth_device_codes",
+            lambda: self._poll(client, client_id, device_code),
+        )
+
+        # Refused as an unknown device code, not a server error.
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == "invalid_request"
+        assert self._token_count(sync_db, client_id) == 0

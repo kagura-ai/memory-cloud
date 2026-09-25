@@ -200,7 +200,7 @@ class TestNarrowedClientScopeRequestRespectsIntersection:
     """
 
     def test_narrowed_client_requesting_admin_gets_intersection(self) -> None:
-        from auth.oauth2_server import client_registered_scope, granted_scope  # noqa: PLC0415
+        from auth.oauth_scope import client_registered_scope, granted_scope  # noqa: PLC0415
         from models.auth import OAuth2Client  # noqa: PLC0415
 
         narrowed_client = OAuth2Client(
@@ -236,7 +236,7 @@ class TestNarrowedClientScopeRequestRespectsIntersection:
         symmetric — narrowing applies only when the client wasn't granted
         admin in the first place.
         """
-        from auth.oauth2_server import client_registered_scope, granted_scope  # noqa: PLC0415
+        from auth.oauth_scope import client_registered_scope, granted_scope  # noqa: PLC0415
         from models.auth import OAuth2Client  # noqa: PLC0415
 
         explicit_admin_client = OAuth2Client(

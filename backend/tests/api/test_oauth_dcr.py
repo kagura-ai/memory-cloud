@@ -679,6 +679,12 @@ class TestDcrEveryRedirectUri:
                 ["http://localhost:53682/callback", "http://127.0.0.1:53682/callback"],
                 "claude",
             ),
+            # A provider host and a loopback entry of the same provider.
+            (
+                "Claude",
+                ["https://claude.ai/api/mcp/auth_callback", "http://localhost:9000/callback"],
+                "claude",
+            ),
             # Entries of two different allowed providers: the first one's is stored.
             (
                 "Claude",

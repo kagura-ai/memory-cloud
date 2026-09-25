@@ -40,13 +40,13 @@ from starlette.requests import ClientDisconnect
 from auth.dependencies import SessionUser, require_admin
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth2_server import (
+    TOKEN_REQUEST_SINGLE_VALUED,
     _OAuthUser,
-    client_registered_scope,
     create_authorization_server,
-    granted_scope,
-    registration_scope,
+    repeated_parameter,
     validate_authorization_parameters,
 )
+from auth.oauth_scope import client_registered_scope, granted_scope, registration_scope
 from auth.starlette_oauth2_request import StarletteOAuth2Payload
 from config.settings import get_settings
 from db.base import get_db, get_sync_session
@@ -92,13 +92,17 @@ async def preload_form(request: Request):
     """Preload form data for OAuth2 endpoints.
 
     Authlib's create_oauth2_request is sync, but FastAPI's request.form() is async.
-    This dependency reads form data in advance and stores it in request.state.
+    This dependency reads form data in advance and stores it in request.state:
+    ``form_data`` holds one value per name, ``form_items`` every value in
+    order, so a repeated parameter is seen in full (#1686).
     """
     if request.method.upper() == "POST":
         form = await request.form()
         request.state.form_data = dict(form)
+        request.state.form_items = list(form.multi_items())
     else:
         request.state.form_data = {}
+        request.state.form_items = []
     return request
 
 
@@ -1942,6 +1946,17 @@ async def oauth_token(request: Request):
         grant_type=form_data.get("grant_type"),
         params=sorted(form_data),
     )
+
+    # Every value of a repeated parameter is kept (``form_items``). A parameter
+    # read as one value must not repeat (RFC 6749 §3.1); every ``resource``
+    # value is checked by the grant (#1686).
+    repeated = repeated_parameter(StarletteOAuth2Payload(request), TOKEN_REQUEST_SINGLE_VALUED)
+    if repeated:
+        logger.info("token_request_rejected", reason="repeated_parameter", param=repeated)
+        return rfc6749_error_response(
+            error="invalid_request",
+            description=f"Parameter {repeated} is included more than once.",
+        )
 
     # Run Authlib operations in thread pool to avoid blocking event loop.
     # Traceback is captured inside _run_oauth_sync; this wrapper only shapes

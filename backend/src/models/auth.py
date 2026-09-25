@@ -47,6 +47,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
+from auth.oauth_scope import client_registered_scope, granted_scope
 from auth.workspace_roles import (
     CONTEXT_ROLE_CHECK_SQL,
     WORKSPACE_ROLE_CHECK_SQL,
@@ -607,9 +608,8 @@ class OAuth2Client(Base):
         - check_token_endpoint_auth_method(method): Validates auth method
         - check_response_type(response_type): Validates response_type
         - check_grant_type(grant_type): Validates grant_type
-
-        The granted scope is computed by ``auth.oauth2_server.granted_scope``
-        (#1686), not by the client model.
+        - get_allowed_scope(scope): The scope granted for a request, by the
+          rule in ``auth.oauth_scope`` (#1686)
     """
 
     __tablename__ = "oauth_clients"
@@ -806,6 +806,24 @@ class OAuth2Client(Base):
             True if grant_type is in registered grant_types
         """
         return grant_type in self.grant_types
+
+    def get_allowed_scope(self, scope: str | None) -> str | None:
+        """Get the scope granted for a request.
+
+        Required by Authlib, which calls it while it validates an
+        authorization request and uses the result as the request's scope.
+        It applies the same rule as the authorization and device endpoints
+        (``auth.oauth_scope.granted_scope`` on this client's registered
+        scope), so both paths grant the same scope (#1686).
+
+        Args:
+            scope: Requested scope (space-separated), or ``None``.
+
+        Returns:
+            The granted scope, or ``None`` when nothing can be granted (Authlib
+            answers ``invalid_scope``).
+        """
+        return granted_scope(scope, client_registered_scope(self)) or None
 
 
 class OAuth2AuthorizationCode(Base):

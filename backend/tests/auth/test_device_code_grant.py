@@ -9,7 +9,7 @@ _BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_BACKEND_SRC) not in sys.path:
     sys.path.insert(0, str(_BACKEND_SRC))
 
-import pytest  # noqa: E402, F401
+import pytest  # noqa: E402
 
 from auth.oauth2_server import (  # noqa: E402
     DeviceAuthorizationGrant,
@@ -39,6 +39,8 @@ def _make_grant():
     grant = DeviceAuthorizationGrant.__new__(DeviceAuthorizationGrant)
     grant.server = MagicMock()
     grant.server.db_session = MagicMock()
+    # should_slow_down records the poll with an update that matches the row.
+    grant.server.db_session.query().filter_by().update.return_value = 1
     return grant
 
 
@@ -55,14 +57,14 @@ class TestDeviceAuthorizationGrant:
     def test_query_device_credential_found(self):
         grant = _make_grant()
         device = _make_device()
-        grant.server.db_session.query().filter_by().first.return_value = device
+        grant.server.db_session.query().filter_by().with_for_update().first.return_value = device
 
         result = grant.query_device_credential("test-device-code-abc123")
         assert result is device
 
     def test_query_device_credential_not_found(self):
         grant = _make_grant()
-        grant.server.db_session.query().filter_by().first.return_value = None
+        grant.server.db_session.query().filter_by().with_for_update().first.return_value = None
 
         result = grant.query_device_credential("nonexistent")
         assert result is None
@@ -124,6 +126,23 @@ class TestDeviceAuthorizationGrant:
 
         result = grant.should_slow_down(device)
         assert result is False
+
+    def test_should_slow_down_for_a_vanished_code_is_invalid_grant(self):
+        from authlib.oauth2.rfc6749.errors import InvalidGrantError
+
+        grant = _make_grant()
+        grant.server.db_session.query().filter_by().update.return_value = 0
+        device = _make_device(last_polled_at=utcnow() - timedelta(seconds=6))
+
+        with pytest.raises(InvalidGrantError):
+            grant.should_slow_down(device)
+
+    def test_should_slow_down_does_not_commit(self):
+        # The poll time is committed with the poll's response, so the row
+        # lock taken by query_device_credential lasts until then.
+        grant = _make_grant()
+        grant.should_slow_down(_make_device())
+        grant.server.db_session.commit.assert_not_called()
 
     def test_token_endpoint_auth_methods(self):
         assert "none" in DeviceAuthorizationGrant.TOKEN_ENDPOINT_AUTH_METHODS

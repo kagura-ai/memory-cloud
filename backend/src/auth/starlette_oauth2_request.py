@@ -99,9 +99,14 @@ class StarletteOAuth2Payload:
         for k, v in self._request.query_params.multi_items():
             values[k].append(v)
 
-        # Form data
+        # Form data: every value of a repeated field (``form_items``, #1686),
+        # else the one-value-per-name ``form_data``.
+        form_items = getattr(self._request.state, "form_items", None)
         form: dict | None = getattr(self._request.state, "form_data", None)
-        if form:
+        if form_items is not None:
+            for k, v in form_items:
+                values[k].append(v)
+        elif form:
             for k, v in form.items():
                 values[k].append(v)
 

@@ -132,6 +132,8 @@ def _make_device_grant() -> DeviceAuthorizationGrant:
     grant = DeviceAuthorizationGrant.__new__(DeviceAuthorizationGrant)
     grant.server = MagicMock()
     grant.server.db_session = MagicMock()
+    # should_slow_down records the poll with an update that matches the row.
+    grant.server.db_session.query().filter_by().update.return_value = 1
     return grant
 
 
@@ -692,12 +694,38 @@ class TestServerWrapperDelegation:
         assert result == "consent"
         wrapper.server.get_consent_grant.assert_called_once_with(request="req", end_user="eu")
 
-    def test_create_authorization_response_delegates(self) -> None:
+    def test_create_authorization_response_passes_the_grant(self) -> None:
         wrapper = self._wrapper()
+        wrapper.server.create_oauth2_request.return_value = "oauth-req"
+        wrapper.server.get_authorization_grant.return_value = "the-grant"
         wrapper.server.create_authorization_response.return_value = "authz-resp"
+
         result = wrapper.create_authorization_response("req", grant_user="gu")
+
         assert result == "authz-resp"
-        wrapper.server.create_authorization_response.assert_called_once_with("req", grant_user="gu")
+        wrapper.server.create_oauth2_request.assert_called_once_with("req")
+        wrapper.server.get_authorization_grant.assert_called_once_with("oauth-req")
+        wrapper.server.create_authorization_response.assert_called_once_with(
+            "oauth-req", grant_user="gu", grant="the-grant"
+        )
+
+    def test_create_authorization_response_unsupported_response_type(self) -> None:
+        from authlib.oauth2.rfc6749.errors import UnsupportedResponseTypeError
+
+        wrapper = self._wrapper()
+        oauth_request = SimpleNamespace(payload=SimpleNamespace(state="st"))
+        wrapper.server.create_oauth2_request.return_value = oauth_request
+        wrapper.server.get_authorization_grant.side_effect = UnsupportedResponseTypeError(
+            "unsupported", "token"
+        )
+        wrapper.server.handle_error_response.return_value = "error-resp"
+
+        result = wrapper.create_authorization_response("req", grant_user="gu")
+
+        assert result == "error-resp"
+        error = wrapper.server.handle_error_response.call_args.args[1]
+        assert error.state == "st"
+        wrapper.server.create_authorization_response.assert_not_called()
 
     def test_create_token_response_delegates(self) -> None:
         wrapper = self._wrapper()
@@ -878,13 +906,13 @@ class TestDeviceAuthorizationGrant:
     def test_query_device_credential_found(self) -> None:
         grant = _make_device_grant()
         device = _make_device()
-        grant.server.db_session.query().filter_by().first.return_value = device
+        grant.server.db_session.query().filter_by().with_for_update().first.return_value = device
 
         assert grant.query_device_credential("dev-code-abc") is device
 
     def test_query_device_credential_not_found(self) -> None:
         grant = _make_device_grant()
-        grant.server.db_session.query().filter_by().first.return_value = None
+        grant.server.db_session.query().filter_by().with_for_update().first.return_value = None
 
         assert grant.query_device_credential("missing") is None
 
