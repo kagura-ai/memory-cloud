@@ -23,19 +23,18 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-async def verify_oauth_bearer_token(
+async def find_active_oauth_token(
     access_token: str,
     db: AsyncSession,
-) -> tuple[str, str | None] | None:
-    """Verify an OAuth 2.0 Bearer access token issued by the device flow.
+) -> OAuth2Token | None:
+    """Look up an OAuth 2.0 Bearer access token that is neither revoked nor expired.
 
-    Looks up the token row in ``oauth_tokens``, checks expiry and
-    revocation, and returns ``(user_id, scope)`` — ``scope`` is a
-    space-separated RFC 6749 §3.3 string and may be ``None`` for tokens
-    issued without scope (legacy / non-CLI clients). Returns ``None`` if
-    the token is unknown, expired, revoked, or if the lookup itself
-    fails (matches ``verify_api_key``'s silent-failure contract so a
-    transient DB error surfaces as 401 to the client, not 500).
+    Returns the ``oauth_tokens`` row, or ``None`` if the token is unknown,
+    expired, revoked, or if the lookup itself fails (matches
+    ``verify_api_key``'s silent-failure contract so a transient DB error
+    surfaces as 401 to the client, not 500). REST reads ``(user_id, scope)``
+    through ``verify_oauth_bearer_token``; MCP also reads the RFC 8707
+    ``resource`` (audience) from the row.
 
     The async query uses the caller's request-scoped session so this
     function does not contend with the smaller sync pool that Authlib's
@@ -59,6 +58,23 @@ async def verify_oauth_bearer_token(
         return None
     if token.is_expired():
         logger.debug("oauth_bearer_token_expired", token_id=token.id)
+        return None
+    return token
+
+
+async def verify_oauth_bearer_token(
+    access_token: str,
+    db: AsyncSession,
+) -> tuple[str, str | None] | None:
+    """Verify an OAuth 2.0 Bearer access token issued by the device flow.
+
+    Returns ``(user_id, scope)`` for an active token (see
+    ``find_active_oauth_token``) — ``scope`` is a space-separated RFC 6749
+    §3.3 string and may be ``None`` for tokens issued without scope
+    (legacy / non-CLI clients) — or ``None`` otherwise.
+    """
+    token = await find_active_oauth_token(access_token, db)
+    if token is None:
         return None
     return (token.user_id, token.scope)
 

@@ -16,7 +16,7 @@ Every reachable branch is targeted deliberately:
   UnicodeDecodeError, generic exception, "sub" fallback).
 
 All external I/O (DB session via ``get_db``, Redis ``SessionManager``,
-``verify_api_key``, ``verify_oauth_bearer_token``) is mocked -- no network,
+``verify_api_key``, ``find_active_oauth_token``) is mocked -- no network,
 no DB. The real ``VerifiedKey`` NamedTuple is used so attribute access in
 ``_verify_api_key`` is faithfully exercised.
 """
@@ -35,6 +35,7 @@ import pytest
 
 from auth.api_keys import VerifiedKey
 from mcp_server.auth import (
+    OAuthGrant,
     _verify_api_key,
     _verify_oauth2_token,
     _verify_session_cookie,
@@ -149,7 +150,7 @@ class TestAuthenticateMcpRequestOAuth2:
             patch("auth.dependencies.verify_api_key", new=AsyncMock(return_value=None)),
             patch(
                 "mcp_server.auth._verify_oauth2_token",
-                new=AsyncMock(return_value="oauth-user"),
+                new=AsyncMock(return_value=OAuthGrant("oauth-user", "memory:read", None)),
             ),
         ):
             result = await authenticate_mcp_request("Bearer opaque_oauth_token")
@@ -185,25 +186,28 @@ class TestVerifyApiKey:
 class TestVerifyOauth2Token:
     """Direct tests of the ``_verify_oauth2_token`` shim (own DB session)."""
 
-    async def test_valid_token_returns_user_id(self):
-        """verify_oauth_bearer_token returns (user_id, scope) -> user_id."""
+    async def test_valid_token_returns_the_grant(self):
+        """An active token row -> its user_id, scope and resource (audience)."""
         db = AsyncMock()
+        row = MagicMock(user_id="oauth-uid", scope="memory:read", resource="https://x/mcp")
         with (
             patch("db.base.get_db", new=_mock_get_db(db)),
             patch(
-                "auth.oauth2_bearer.verify_oauth_bearer_token",
-                new=AsyncMock(return_value=("oauth-uid", "read write")),
+                "auth.oauth2_bearer.find_active_oauth_token",
+                new=AsyncMock(return_value=row),
             ),
         ):
-            assert await _verify_oauth2_token("tok") == "oauth-uid"
+            assert await _verify_oauth2_token("tok") == OAuthGrant(
+                "oauth-uid", "memory:read", "https://x/mcp"
+            )
 
     async def test_invalid_token_returns_none(self):
-        """verify_oauth_bearer_token None -> None."""
+        """find_active_oauth_token None -> None."""
         db = AsyncMock()
         with (
             patch("db.base.get_db", new=_mock_get_db(db)),
             patch(
-                "auth.oauth2_bearer.verify_oauth_bearer_token",
+                "auth.oauth2_bearer.find_active_oauth_token",
                 new=AsyncMock(return_value=None),
             ),
         ):

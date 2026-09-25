@@ -291,8 +291,8 @@ class _Sessions:
     async def get_or_create_session(self, **_kwargs):
         return SimpleNamespace(session_id="sess-1", user_id="user-1", workspace_id=None)
 
-    async def get_session(self, _session_id):
-        return SimpleNamespace(session_id="sess-1", user_id="user-1", workspace_id=None)
+    async def get_owned_session(self, _session_id, _user_id, _workspace_id):
+        return "owned", SimpleNamespace(session_id="sess-1", user_id="user-1", workspace_id=None)
 
 
 @pytest.fixture

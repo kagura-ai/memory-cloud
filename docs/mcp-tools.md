@@ -38,7 +38,24 @@ Every definition in `tools/list` carries a human-readable `title` and the standa
 - **`recall` is destructive.** It runs Hebbian learning over the memories it returns and promotes working memories that reach the promotion threshold; both change later results. The learning pass also overwrites and removes existing edges: it rewrites the weight of each edge it updates, including one you declared with `create_edge`, deletes an edge whose weight decays below the prune threshold, and evicts the weakest automatic edges past the per-memory cap. Under the rule that makes `create_edge` destructive, `recall` is too, and a repeat changes the weights again, so it is not idempotent. `get_agent_bootstrap` runs the same recall when given a `query`. A client that confirms destructive tools asks before these two as well. `reference` and `explore` only bump access counters; `load_pinned`, `load_guardrails`, `recall_upcoming` and `recall_nearby` write only usage and audit rows. All six stay read-only.
 - `create_edge` is destructive because, on a pair that already has an edge, it applies your values over an automatic edge (and over a declared one with `overwrite=true`). `set_state` overwrites the value at its key, and with `ttl_seconds` each call restarts the expiry, so a repeat is not a no-op; `secret_put` revokes the grants the new version does not list. `secret_get` writes an audit entry and nothing else, so it is read-only.
 - **Legacy `readOnly`.** The non-standard top-level `readOnly: true` of earlier releases is still sent for clients that read it, now derived from `readOnlyHint`: present exactly on the read-only tools. It is gone from `recall` and `get_agent_bootstrap` and new on `secret_get` and `secret_list`.
-- **Hints, not authorization.** Annotations tell a client what a call does so it can decide when to ask for confirmation. The server's workspace and context role checks are unchanged, and a client may ignore the hints.
+- **Hints, and the OAuth scope.** Annotations tell a client what a call does so it can decide when to ask for confirmation, and `readOnlyHint` also decides which [OAuth scope](#oauth-scopes) a call needs. The server's workspace and context role checks are unchanged, and a client may ignore the hints.
+
+## OAuth scopes
+
+With an OAuth access token, `tools/call` checks the token's scope before the tool runs, on session-based and stateless connections alike:
+
+| Scope | Tools |
+|-------|-------|
+| `memory:read` | The 31 read-only tools (`readOnlyHint: true`), plus `recall` and `get_agent_bootstrap`: searches whose only writes are ranking updates |
+| `memory:write` | Every other tool |
+
+- A token without the scope gets HTTP `403` with `WWW-Authenticate: Bearer error="insufficient_scope", scope="…", resource_metadata="…"`. `scope` lists the scopes the token already has plus the missing one, so a client that re-authorizes with it keeps what it had. The body is a JSON-RPC error whose `data` carries `error: "insufficient_scope"`, `required_scope` and `help`; the code is `-32002` on session-based connections and `-32603` on stateless ones. The tool does not run. To recover, reconnect the server in the client and approve the missing scope.
+- `initialize`, `tools/list`, `ping` and `server/discover` are not scope-gated, so a read-only token still lists every tool.
+- `memory:delete` and `memory:admin` are not checked separately on MCP: deletes need `memory:write` like other writes, and the workspace and context role checks apply to every call as before.
+- The scopes checked are the `memory:*` scopes in the token's stored scope (space- or comma-separated). A token whose stored scope names none — an empty scope, or one such as `openid offline_access` or a client-specific value — gets the `memory:*` scopes its OAuth client registered, or the DCR default scope (`openid memory:read memory:write memory:delete offline_access`) when the client registered none.
+- API keys, agent-bound keys and session cookies carry no OAuth scope; only roles apply to them.
+
+The 401 challenges, the token audience rule and session handling on `/mcp` are in [API Reference › Authentication and sessions on /mcp](api-reference.md#authentication-and-sessions-on-mcp).
 
 ## Memory (7)
 
@@ -475,7 +492,7 @@ Read-only tools are the ones whose `tools/list` definition sets `annotations.rea
 
 A server-failure envelope never contains exception text, exception types, stack traces, connection strings, file paths, storage keys or driver messages; the server log keeps them under the `correlation_id`. A refusal's `message` is the sentence the service wrote for the caller. `rollback_sleep_run` keeps going when one recorded action cannot be undone; its `partial_rollback` result lists each such action as `Action <id> (<type>) failed: <cause> (correlation_id <id>)` and carries the `correlation_id`. It also carries `help` and `retryable: false`: the report is marked `failed`, so a second `rollback_sleep_run` on it is refused with `invalid_status` rather than undoing an action twice, and `get_sleep_report` lists the run's recorded actions.
 
-A failure outside tool execution — the transport itself — is a JSON-RPC error instead of a result. `error.message` is the same fixed sentence and `error.data` carries `error`, `help` and, for server failures, `cause`, `correlation_id` and the retry fields. The numeric code follows `data`: on session-based connections `-32001` for a `timeout`, `-32002` for `permission_denied`, `-32602` for `validation_error` and `-32603` otherwise; on stateless connections `-32602` for `validation_error` and `-32603` otherwise.
+A failure outside tool execution — the transport itself — is a JSON-RPC error instead of a result. `error.message` is the same fixed sentence and `error.data` carries `error`, `help` and, for server failures, `cause`, `correlation_id` and the retry fields. The numeric code follows `data`: on session-based connections `-32001` for a `timeout`, `-32002` for `permission_denied`, `-32602` for `validation_error` and `-32603` otherwise; on stateless connections `-32602` for `validation_error` and `-32603` otherwise. A call refused for its [OAuth scope](#oauth-scopes) is one of these errors too, with HTTP `403` and `error: "insufficient_scope"` (`-32002` on session-based connections).
 
 ### Migration from the earlier error shapes
 

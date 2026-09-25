@@ -245,7 +245,7 @@ def directory_connector(monkeypatch):
         return None
 
     async def oauth_user(_token):
-        return "oauth-user"
+        return mcp_auth.OAuthGrant("oauth-user", "memory:read memory:write", None)
 
     async def no_workspace(_user_id):
         return None

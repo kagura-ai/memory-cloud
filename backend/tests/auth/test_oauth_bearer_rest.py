@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -264,36 +264,74 @@ class TestRequireSessionAuthRejectsOAuth:
 
 
 class TestMCPOAuth2TokenShim:
-    """Ensure ``mcp_server.auth._verify_oauth2_token`` still returns just
-    ``user_id`` after the verifier was relocated to
-    ``auth.oauth2_bearer.verify_oauth_bearer_token`` (Issue #649).
-
-    MCP scope enforcement happens at the tool layer
-    (``auth.mcp_scopes``), not the transport gate, so the MCP shim
-    intentionally discards scope here. This test pins that contract.
+    """``mcp_server.auth._verify_oauth2_token`` reads the token through the
+    shared lookup (``auth.oauth2_bearer.find_active_oauth_token``, Issue
+    #649) and returns what MCP needs from it: the user, the scope for the
+    ``tools/call`` scope check and the RFC 8707 resource for the audience
+    check (#1686).
     """
 
     @pytest.mark.asyncio
-    async def test_shim_returns_user_id_only(self):
-        from mcp_server.auth import _verify_oauth2_token
+    async def test_shim_returns_user_scope_and_resource(self):
+        from mcp_server.auth import OAuthGrant, _verify_oauth2_token
 
+        row = MagicMock(user_id="user-mcp-xyz", scope="memory:read", resource=None)
         with patch(
-            "auth.oauth2_bearer.verify_oauth_bearer_token",
-            new=AsyncMock(return_value=("user-mcp-xyz", "memory:read")),
+            "auth.oauth2_bearer.find_active_oauth_token",
+            new=AsyncMock(return_value=row),
         ):
             result = await _verify_oauth2_token("randomtok")
-            assert result == "user-mcp-xyz"
+            assert result == OAuthGrant("user-mcp-xyz", "memory:read", None)
 
     @pytest.mark.asyncio
     async def test_shim_returns_none_on_invalid(self):
         from mcp_server.auth import _verify_oauth2_token
 
         with patch(
-            "auth.oauth2_bearer.verify_oauth_bearer_token",
+            "auth.oauth2_bearer.find_active_oauth_token",
             new=AsyncMock(return_value=None),
         ):
             result = await _verify_oauth2_token("randomtok")
             assert result is None
+
+
+class TestSharedLookup:
+    """REST's ``verify_oauth_bearer_token`` and MCP read the same lookup."""
+
+    @staticmethod
+    def _db_returning(row):
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = row
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=result)
+        return db
+
+    @staticmethod
+    def _row(*, revoked=False, expired=False):
+        row = MagicMock(user_id="u-1", scope="memory:read", resource="https://x/mcp")
+        row.is_revoked.return_value = revoked
+        row.is_expired.return_value = expired
+        return row
+
+    @pytest.mark.asyncio
+    async def test_active_token_row_and_rest_pair(self):
+        from auth.oauth2_bearer import find_active_oauth_token, verify_oauth_bearer_token
+
+        row = self._row()
+        assert await find_active_oauth_token("tok", self._db_returning(row)) is row
+        assert await verify_oauth_bearer_token("tok", self._db_returning(row)) == (
+            "u-1",
+            "memory:read",
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", [{"revoked": True}, {"expired": True}])
+    async def test_revoked_or_expired_token_is_none(self, state):
+        from auth.oauth2_bearer import find_active_oauth_token, verify_oauth_bearer_token
+
+        row = self._row(**state)
+        assert await find_active_oauth_token("tok", self._db_returning(row)) is None
+        assert await verify_oauth_bearer_token("tok", self._db_returning(row)) is None
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,11 @@ from starlette.types import Receive, Scope, Send
 
 from config.constants import APP_VERSION
 from config.settings import get_settings
-from mcp_server.auth import authenticate_mcp_request
+from mcp_server.auth import (
+    MissingCredentialsError,
+    authenticate_mcp_request,
+    get_mcp_oauth_scopes,
+)
 from mcp_server.session import get_session_manager
 
 if TYPE_CHECKING:
@@ -41,6 +45,32 @@ def _sanitize_challenge_attr_value(value: str) -> str:
     the unsanitized description for client logging.
     """
     return value.replace("\r", " ").replace("\n", " ").replace('"', "'")
+
+
+def _bearer_challenge(
+    *, error: str | None = None, error_description: str | None = None, scope: str | None = None
+) -> bytes:
+    """Build a ``WWW-Authenticate: Bearer ...`` value (RFC 6750 §3, RFC 9728 §5.1).
+
+    ``error`` is left out for a request that carried no credentials (RFC 6750
+    §3.1). ``resource_metadata`` is always present and anchored to
+    ``frontend_url`` so a reverse-proxied deployment produces the same absolute
+    URL the well-known endpoints publish. Every interpolated value is
+    sanitized — ``frontend_url`` is server-side config, but a typo or stale
+    value with a stray quote / CR / LF would corrupt the header just as
+    effectively as user-controlled token bytes. Defense in depth.
+    """
+    base_url = get_settings().frontend_url.strip().rstrip("/")
+    attrs = [("realm", "Kagura Memory Cloud")]
+    if error:
+        attrs.append(("error", error))
+    if error_description:
+        attrs.append(("error_description", error_description))
+    if scope:
+        attrs.append(("scope", scope))
+    attrs.append(("resource_metadata", f"{base_url}/.well-known/oauth-protected-resource"))
+    challenge = ", ".join(f'{name}="{_sanitize_challenge_attr_value(v)}"' for name, v in attrs)
+    return f"Bearer {challenge}".encode()
 
 
 async def _send_json_error(
@@ -134,12 +164,13 @@ async def _get_user_workspace_id(user_id: str) -> "UUID | None":
     from models.auth import User
 
     try:
-        async for db in get_db():
-            result = await db.execute(
-                select(User.current_workspace_id).where(User.user_id == user_id)
-            )
-            workspace_id = result.scalar_one_or_none()
-            return workspace_id
+        async with contextlib.aclosing(get_db()) as sessions:
+            async for db in sessions:
+                result = await db.execute(
+                    select(User.current_workspace_id).where(User.user_id == user_id)
+                )
+                workspace_id = result.scalar_one_or_none()
+                return workspace_id
     except Exception as e:
         logger.warning(f"Failed to get user workspace_id: {e}")
         return None
@@ -493,6 +524,177 @@ def _tool_call_result(result: "Sequence[Any]") -> dict[str, Any]:
     return payload
 
 
+async def _reject_insufficient_scope(
+    send: Send, request_id: Any, tool_name: object, *, jsonrpc_code: int
+) -> bool:
+    """Refuse a ``tools/call`` whose OAuth token lacks the tool's scope (#1686).
+
+    Shared by both eras, before dispatch. Only OAuth access tokens are gated
+    (``get_mcp_oauth_scopes()`` is ``None`` for API keys, agent-bound keys and
+    session cookies). The refusal is HTTP 403 with an ``insufficient_scope``
+    challenge (MCP authorization, scope challenge handling) and a JSON-RPC
+    error whose ``data`` follows the tool-error vocabulary.
+
+    Args:
+        send: ASGI send callable.
+        request_id: The JSON-RPC request id to echo.
+        tool_name: ``params.name`` as sent (client-supplied).
+        jsonrpc_code: The era's code for a refused call.
+
+    Returns:
+        True when the refusal was sent and the call must not run.
+    """
+    granted = get_mcp_oauth_scopes()
+    if granted is None:
+        return False
+    from mcp_server.tools._scopes import challenge_scope, required_scope_for_tool
+
+    required = required_scope_for_tool(tool_name)
+    if required in granted:
+        return False
+
+    from mcp_server.tools._errors import insufficient_scope_failure
+
+    failure = insufficient_scope_failure(tool_name, required)
+    shown = str(tool_name)[:100]
+    logger.info(f"MCP tools/call refused: tool={shown!r} needs scope {required}")
+    challenge = _bearer_challenge(
+        error="insufficient_scope",
+        error_description=f"This tool needs the {required} scope",
+        scope=challenge_scope(granted, required),
+    )
+    await _send_json_error(
+        send,
+        403,
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {
+                "code": jsonrpc_code,
+                "message": failure.message,
+                "data": failure.jsonrpc_data(),
+            },
+        },
+        [[b"www-authenticate", challenge]],
+    )
+    return True
+
+
+# The answer to a session-era request naming a session id this connection
+# cannot use — held by another user or workspace, or (for DELETE) not held at
+# all: MCP 2025-03-26 session management — 404, and the client starts a new
+# session with ``initialize``.
+_SESSION_NOT_FOUND_MESSAGE = (
+    "This session id cannot be used by this connection. "
+    "Send a new initialize request without Mcp-Session-Id."
+)
+
+
+async def _send_session_creation_failed(send: Send) -> None:
+    await _send_json_error(
+        send,
+        500,
+        {"error": "Internal error", "message": "Failed to create session."},
+        # #1456 review: the exception text stays in the caller's log line
+        # (with exc_info) and out of the client body — it can carry
+        # driver/DSN/path detail an MCP client has no business seeing, and
+        # nothing actionable for it either way.
+    )
+
+
+async def _end_session(
+    send: Send, manager: Any, session_id: str | None, user_id: str, workspace_id: "UUID | None"
+) -> None:
+    """``DELETE /mcp``: end the caller's session (MCP session management).
+
+    204 when the named session is the caller's; 404 when this server does not
+    hold it or another user or workspace does; 400 without a session id.
+    """
+    if not session_id:
+        await _send_json_error(
+            send,
+            400,
+            {
+                "error": "Missing session_id",
+                "message": "DELETE requires the Mcp-Session-Id header of the session to end.",
+            },
+        )
+        return
+    lookup, _session = await manager.get_owned_session(session_id, user_id, workspace_id)
+    if lookup != "owned":
+        logger.info(f"MCP DELETE /mcp: no session {session_id} for user={user_id} ({lookup})")
+        await _send_session_not_found(send, session_id)
+        return
+    await manager.remove_session(session_id)
+    logger.info(f"MCP DELETE /mcp: session {session_id} ended by user={user_id}")
+    await send({"type": "http.response.start", "status": 204, "headers": []})
+    await send({"type": "http.response.body", "body": b""})
+
+
+async def _answer_without_session(
+    scope: Scope, receive: Receive, send: Send, method: str, path: str
+) -> None:
+    """Answer a request that no MCP handler serves, without touching sessions.
+
+    405 for another method on ``/mcp``, 410 for the removed SSE endpoints
+    (Issue #248: ``GET /sse`` and ``POST /messages/…``), 404 for any other path.
+    """
+    normalized_path = _normalize_mcp_path(path)
+    if path in ("/mcp", "/mcp/"):
+        logger.warning(f"MCP method not allowed: {method} {path}")
+        await Response(
+            "Method Not Allowed", status_code=405, headers={"Allow": "GET, POST, DELETE"}
+        )(scope, receive, send)
+    elif method == "GET" and normalized_path == "/sse":
+        # Issue #248: SSE transport removed (deprecated in MCP spec 2025-03-26)
+        logger.warning(f"MCP SSE endpoint removed: {method} {normalized_path}")
+        error_response = json.dumps(
+            {
+                "error": "SSE transport removed",
+                "message": "SSE transport was deprecated in MCP spec 2025-03-26. Please use Streamable HTTP (POST /mcp).",
+                "migration_guide": "https://modelcontextprotocol.io/specification/2025-03-26/basic/transports",
+            }
+        )
+        await Response(
+            error_response, status_code=410, headers={"Content-Type": "application/json"}
+        )(scope, receive, send)
+    elif method == "POST" and normalized_path.startswith("/messages/"):
+        # Issue #248: Legacy POST /messages/ endpoint removed
+        logger.warning(f"MCP legacy POST endpoint removed: {method} {normalized_path}")
+        error_response = json.dumps(
+            {
+                "error": "Legacy endpoint removed",
+                "message": "POST /messages/ was part of deprecated SSE transport. Please use POST /mcp.",
+                "migration_guide": "https://modelcontextprotocol.io/specification/2025-03-26/basic/transports",
+            }
+        )
+        await Response(
+            error_response, status_code=410, headers={"Content-Type": "application/json"}
+        )(scope, receive, send)
+    else:
+        logger.warning(f"MCP unsupported: {method} {path}")
+        await Response("Not Found", status_code=404)(scope, receive, send)
+
+
+async def _send_session_not_found(send: Send, session_id: str) -> None:
+    await _send_json_error(
+        send,
+        404,
+        {
+            "jsonrpc": "2.0",
+            "error": {
+                "code": -32603,
+                "message": _SESSION_NOT_FOUND_MESSAGE,
+                "data": {
+                    "session_id": session_id,
+                    "action": "Send a new 'initialize' request without the Mcp-Session-Id header",
+                },
+            },
+            "id": None,
+        },
+    )
+
+
 async def handle_streamable_http_post(
     scope: Scope,
     receive: Receive,
@@ -660,6 +862,36 @@ async def handle_streamable_http_post(
     # Handle tools/call request
     elif method == "tools/call":
         logger.info(f"MCP tools/call (Streamable HTTP): session={session.session_id}")
+
+        # Params first (#1686), as the stateless era does: a call without a
+        # tool name is invalid params, whatever the token's scope.
+        call_params = body.get("params")
+        call_name = call_params.get("name") if isinstance(call_params, dict) else None
+        if not isinstance(call_name, str) or not call_name:
+            await _send_json_error(
+                send,
+                200,  # HTTP 200 + JSON-RPC error, like the other errors of this handler
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": -32602,
+                        "message": "Invalid params: 'name' must be a non-empty string",
+                    },
+                },
+                [[b"mcp-session-id", session.session_id.encode()]],
+            )
+            return
+
+        # #1686: the OAuth scope check, from this request's token — never the
+        # session's, which may have been opened with another one.
+        if await _reject_insufficient_scope(
+            send,
+            request_id,
+            call_name,
+            jsonrpc_code=-32002,  # Custom: Permission denied (see the catch-all below)
+        ):
+            return
 
         tool_name = None
         try:
@@ -872,15 +1104,15 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
     # Extract headers
     headers = dict(scope.get("headers", []))
 
-    # Debug: Log all headers
-    logger.debug(f"MCP headers: {headers}")
+    # Debug: header names only — values carry credentials (Authorization, Cookie).
+    logger.debug(f"MCP headers: {sorted(name.decode('latin-1')[:100] for name in headers)}")
 
     # Authenticate request (Issue #155: Support both Authorization header and session cookie)
     auth_header = headers.get(b"authorization")
     cookie_header = headers.get(b"cookie")
 
-    # Debug: Log auth sources
-    logger.debug(f"MCP auth_header: {auth_header}")
+    # Debug: Log auth sources (presence only)
+    logger.debug(f"MCP auth_header: {auth_header is not None}")
     logger.debug(f"MCP cookie_header: {cookie_header is not None}")
 
     try:
@@ -971,36 +1203,37 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                     workspace_uuid = UUID(workspace_id_from_url)
 
                     # Check if user is a member of the workspace
-                    async for db in get_db():
-                        from sqlalchemy import select
+                    async with contextlib.aclosing(get_db()) as sessions:
+                        async for db in sessions:
+                            from sqlalchemy import select
 
-                        from models.auth import WorkspaceMember
+                            from models.auth import WorkspaceMember
 
-                        result = await db.execute(
-                            select(WorkspaceMember).where(
-                                WorkspaceMember.workspace_id == workspace_uuid,
-                                WorkspaceMember.user_id == user_id,
+                            result = await db.execute(
+                                select(WorkspaceMember).where(
+                                    WorkspaceMember.workspace_id == workspace_uuid,
+                                    WorkspaceMember.user_id == user_id,
+                                )
                             )
-                        )
-                        member = result.scalar_one_or_none()
+                            member = result.scalar_one_or_none()
 
-                        if member:
-                            workspace_id = workspace_uuid
-                            logger.info(f"MCP OAuth2 workspace switch: {workspace_id_from_url}")
-                        else:
-                            logger.warning(
-                                f"MCP OAuth2 not a member: url={workspace_id_from_url}, user={user_id}"
-                            )
-                            await _send_json_error(
-                                send,
-                                403,
-                                {
-                                    "error": "access_denied",
-                                    "error_description": "You are not a member of this workspace.",
-                                },
-                            )
-                            return
-                        break
+                            if member:
+                                workspace_id = workspace_uuid
+                                logger.info(f"MCP OAuth2 workspace switch: {workspace_id_from_url}")
+                            else:
+                                logger.warning(
+                                    f"MCP OAuth2 not a member: url={workspace_id_from_url}, user={user_id}"
+                                )
+                                await _send_json_error(
+                                    send,
+                                    403,
+                                    {
+                                        "error": "access_denied",
+                                        "error_description": "You are not a member of this workspace.",
+                                    },
+                                )
+                                return
+                            break
 
                 except ValueError:
                     logger.warning(f"MCP invalid workspace UUID in URL: {workspace_id_from_url}")
@@ -1024,8 +1257,10 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         # RFC 6750 limits the error attribute to "invalid_request",
         # "invalid_token", and "insufficient_scope" — internal error codes
         # like AUTH-001/AUTH-003 must NOT leak into the challenge header.
-        # All token-related auth failures map to invalid_token; everything
-        # else (missing Bearer header, malformed request) is invalid_request.
+        # An invalid, expired, revoked or other-audience token is
+        # invalid_token; a request without credentials gets a challenge with
+        # no error code (#1686); anything else (a malformed Authorization
+        # header) is invalid_request.
         error_code = "invalid_request"
         error_description = str(auth_error)
 
@@ -1033,42 +1268,19 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
             error_code = "invalid_token"
             error_description = getattr(auth_error, "error_description", str(auth_error))
 
-        # Sanitize every interpolated value, not just error_description.
-        # Settings.frontend_url is server-side config but a typo or stale
-        # value with a stray quote / CR / LF would corrupt the header just
-        # as effectively as user-controlled token bytes. Defense in depth.
-        safe_code = _sanitize_challenge_attr_value(error_code)
-        safe_description = _sanitize_challenge_attr_value(error_description)
+        if isinstance(auth_error, MissingCredentialsError):
+            www_authenticate = _bearer_challenge()
+        else:
+            www_authenticate = _bearer_challenge(
+                error=error_code, error_description=error_description
+            )
 
-        # RFC 6750 + RFC 9728 §5.1 challenge. resource_metadata is anchored
-        # to frontend_url so a reverse-proxied deployment produces the same
-        # absolute URL the well-known endpoints publish.
-        base_url = get_settings().frontend_url.strip().rstrip("/")
-        safe_resource_metadata_url = _sanitize_challenge_attr_value(
-            f"{base_url}/.well-known/oauth-protected-resource"
+        await _send_json_error(
+            send,
+            401,
+            {"error": error_code, "error_description": error_description},
+            [[b"www-authenticate", www_authenticate]],
         )
-        www_authenticate = (
-            f'Bearer realm="Kagura Memory Cloud", '
-            f'error="{safe_code}", '
-            f'error_description="{safe_description}", '
-            f'resource_metadata="{safe_resource_metadata_url}"'
-        )
-
-        error_response = json.dumps(
-            {"error": error_code, "error_description": error_description}
-        ).encode("utf-8")
-
-        await send(
-            {
-                "type": "http.response.start",
-                "status": 401,
-                "headers": [
-                    [b"content-type", b"application/json"],
-                    [b"www-authenticate", www_authenticate.encode("utf-8")],
-                ],
-            }
-        )
-        await send({"type": "http.response.body", "body": error_response})
         return
 
     # Era split (#1544). Runs after authentication and the workspace checks
@@ -1108,134 +1320,74 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
 
     session_manager = get_session_manager()
 
-    # Session management logic
-    # NEW: POST /mcp - create session for initialize, require for others
-    # LEGACY: POST /messages/ - require existing session
-    # LEGACY: GET /sse - create session if needed
-    if method == "POST" and path == "/mcp":
-        # NEW: Streamable HTTP POST endpoint
-        # Need to peek at the body to determine if this is initialize request
-        # For initialize, create new session. For others, require existing session.
-
-        # If no session_id in header, this must be an initialize request
+    # Session management logic (#1686)
+    # POST / GET /mcp: open a session when none is named; a named session is
+    #   used when it is the caller's, re-adopted when this server does not
+    #   hold it, and answered 404 when another user or workspace holds it.
+    # DELETE /mcp: end the caller's session (204).
+    # Anything else — including the removed POST /messages/ and GET /sse
+    # endpoints (410) — is answered without touching the session store.
+    if method == "DELETE" and path in ("/mcp", "/mcp/"):
+        await _end_session(send, session_manager, session_id, user_id, workspace_id)
+        return
+    if method in ("POST", "GET") and path in ("/mcp", "/mcp/"):
+        # NEW: Streamable HTTP endpoint. ``/mcp/`` is what the FastAPI routes
+        # hand over for every /mcp, /mcp/ and /mcp/w/{id} request, ``/mcp``
+        # the raw ASGI mount: the same rules for both.
         if not session_id:
-            # Create new session for initialize
-            # Issue #245: context_id removed (now required in tool args)
-            session = await session_manager.get_or_create_session(
-                user_id=user_id,
-                workspace_id=workspace_id,  # Issue #146
-            )
-            logger.info(f"MCP POST /mcp: created new session for initialize: {session.session_id}")
-        else:
-            # Session ID provided - validate it exists
-            session = await session_manager.get_session(session_id)
-            if session is None:
-                # Issue #163: Improved session not found error with diagnostic info
-                active_count = len(session_manager._sessions)
-                logger.warning(
-                    f"MCP POST /mcp with invalid session: {session_id}, "
-                    f"active_sessions={active_count}"
+            # No session named (``initialize``, or a GET stream): open one
+            # under a server-minted id. Issue #245: context_id removed.
+            try:
+                session = await session_manager.get_or_create_session(
+                    user_id=user_id,
+                    workspace_id=workspace_id,  # Issue #146
                 )
-                await _send_json_error(
-                    send,
-                    404,
-                    {
-                        "jsonrpc": "2.0",
-                        "error": {
-                            "code": -32603,
-                            "message": "MCP session not found or expired. Please re-initialize your connection.",
-                            "data": {
-                                "session_id": session_id,
-                                "reason": "Session may have expired due to inactivity (1 hour timeout) or server restart",
-                                "action": "Send a new 'initialize' request without Mcp-Session-Id header",
-                            },
-                        },
-                        "id": None,
-                    },
-                )
+            except Exception as e:
+                logger.error(f"MCP {method} /mcp session creation failed: {e}", exc_info=True)
+                await _send_session_creation_failed(send)
                 return
-            logger.info(f"MCP POST /mcp: using existing session: {session.session_id}")
-
-    elif method == "POST" and path.startswith("/mcp/messages/"):
-        if session_id:
-            session = await session_manager.get_session(session_id)
-            if session is None:
-                # Session not found - return helpful error (Issue #50)
-                logger.warning(f"MCP POST to non-existent session: {session_id}")
-
-                await _send_json_error(
-                    send,
-                    404,
-                    {
-                        "jsonrpc": "2.0",
-                        "error": {
-                            "code": -32603,
-                            "message": "MCP session not found or expired. Please reconnect using /mcp command.",
-                            "data": {
-                                "session_id": session_id,
-                                "reconnect_command": "/mcp",
-                                "hint": "The session may have expired due to inactivity or server restart",
-                            },
-                        },
-                        "id": None,
-                    },
-                )
-                return
+            logger.info(f"MCP {method} /mcp: created new session: {session.session_id}")
         else:
-            # No session_id provided for POST
-            await _send_json_error(
-                send,
-                400,
-                {
-                    "error": "Missing session_id",
-                    "message": "POST requests require a valid session_id. Please connect using /mcp first.",
-                },
+            # Ownership before activity: only the caller's own session is
+            # touched, so a rejected one still idles out.
+            lookup, session = await session_manager.get_owned_session(
+                session_id, user_id, workspace_id
             )
-            return
-    elif method == "GET" and path == "/mcp":
-        # NEW: Streamable HTTP GET endpoint (optional SSE stream)
-        # Create session if needed (session_id optional for GET)
-        # Issue #245: context_id removed (now required in tool args)
-        try:
-            session = await session_manager.get_or_create_session(
-                user_id=user_id,
-                workspace_id=workspace_id,  # Issue #146
-                session_id=session_id,
-            )
-            logger.info(f"MCP GET /mcp: session={session.session_id}")
-        except Exception as e:
-            logger.error(f"MCP GET /mcp session creation failed: {e}", exc_info=True)
-            await _send_json_error(
-                send,
-                500,
-                {"error": "Internal error", "message": "Failed to create session."},
-                # #1456 review: the exception text stays in the log line
-                # above (with exc_info) and out of the client body — it can
-                # carry driver/DSN/path detail an MCP client has no business
-                # seeing, and nothing actionable for it either way.
-            )
-            return
+            if lookup == "missing":
+                # Not held here: expired, or lost on a restart or deploy. It
+                # is re-adopted for the authenticated caller under the same
+                # id, so a client that cannot re-initialize after a 404 keeps
+                # working across restarts and idle timeouts.
+                try:
+                    session = await session_manager.get_or_create_session(
+                        user_id=user_id,
+                        workspace_id=workspace_id,  # Issue #146
+                        session_id=session_id,
+                    )
+                except PermissionError:
+                    session = None  # adopted by another caller in the meantime
+                except Exception as e:
+                    logger.error(f"MCP {method} /mcp session creation failed: {e}", exc_info=True)
+                    await _send_session_creation_failed(send)
+                    return
+                else:
+                    logger.info(
+                        f"MCP {method} /mcp: re-adopted unknown session {session_id} "
+                        f"for user={user_id}"
+                    )
+            elif session is not None:
+                logger.info(f"MCP {method} /mcp: using existing session: {session.session_id}")
+            if session is None:
+                # Another user's or workspace's session: MCP session
+                # management — 404, and the client re-initializes.
+                await _send_session_not_found(send, session_id)
+                return
+
     else:
-        # LEGACY: GET /sse - create session if needed
-        # Issue #245: context_id removed (now required in tool args)
-        try:
-            session = await session_manager.get_or_create_session(
-                user_id=user_id,
-                workspace_id=workspace_id,  # Issue #146
-                session_id=session_id,
-            )
-        except Exception as e:
-            logger.error(f"MCP session creation failed: {e}", exc_info=True)
-            await _send_json_error(
-                send,
-                500,
-                {"error": "Internal error", "message": "Failed to create session."},
-                # #1456 review: the exception text stays in the log line
-                # above (with exc_info) and out of the client body — it can
-                # carry driver/DSN/path detail an MCP client has no business
-                # seeing, and nothing actionable for it either way.
-            )
-            return
+        # Every other method or path: answered without opening a session, so
+        # no session is ever created under a client-supplied id here (#1686).
+        await _answer_without_session(scope, receive, send, method, path)
+        return
 
     # Normalize path (remove /mcp prefix if present)
     normalized_path = _normalize_mcp_path(path)
@@ -1260,36 +1412,6 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         elif method == "GET" and (path == "/mcp" or path == "/mcp/"):
             # NEW: Optional GET /mcp stream endpoint
             await handle_streamable_http_get(scope, receive, send, session, headers)
-            return
-
-        elif method == "GET" and normalized_path == "/sse":
-            # Issue #248: SSE transport removed (deprecated in MCP spec 2025-03-26)
-            logger.warning(f"MCP SSE endpoint removed: {method} {normalized_path}")
-            error_response = json.dumps(
-                {
-                    "error": "SSE transport removed",
-                    "message": "SSE transport was deprecated in MCP spec 2025-03-26. Please use Streamable HTTP (POST /mcp).",
-                    "migration_guide": "https://modelcontextprotocol.io/specification/2025-03-26/basic/transports",
-                }
-            )
-            await Response(
-                error_response, status_code=410, headers={"Content-Type": "application/json"}
-            )(modified_scope, receive, send)
-            return
-
-        elif method == "POST" and normalized_path.startswith("/messages/"):
-            # Issue #248: Legacy POST /messages/ endpoint removed
-            logger.warning(f"MCP legacy POST endpoint removed: {method} {normalized_path}")
-            error_response = json.dumps(
-                {
-                    "error": "Legacy endpoint removed",
-                    "message": "POST /messages/ was part of deprecated SSE transport. Please use POST /mcp.",
-                    "migration_guide": "https://modelcontextprotocol.io/specification/2025-03-26/basic/transports",
-                }
-            )
-            await Response(
-                error_response, status_code=410, headers={"Content-Type": "application/json"}
-            )(modified_scope, receive, send)
             return
 
         else:

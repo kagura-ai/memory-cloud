@@ -427,6 +427,28 @@ def describe_tool_exception(
     return ToolFailure(error or cause, _server_failure_message(tool_name, cause), fields)
 
 
+def insufficient_scope_failure(tool_name: object, required_scope: str) -> ToolFailure:
+    """A ``tools/call`` refused before dispatch: the OAuth token lacks ``required_scope``.
+
+    The transports send it as HTTP 403 with an ``insufficient_scope``
+    challenge (#1686); nothing ran, so there is no outcome to verify.
+    """
+    subject = tool_name if is_known_tool(tool_name) else "This tool call"
+    return ToolFailure(
+        "insufficient_scope",
+        f"{subject} needs the OAuth scope {required_scope}, which this connection's "
+        "authorization does not grant.",
+        {
+            "required_scope": required_scope,
+            "help": (
+                f"Reconnect this server in your MCP client and approve access that includes "
+                f"{required_scope}, then call the tool again. Tools the current authorization "
+                "covers keep working."
+            ),
+        },
+    )
+
+
 def _tool_exception_response(
     tool_name: str,
     exc: BaseException,

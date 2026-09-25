@@ -1499,6 +1499,27 @@ System-admin (`role=admin`) lifecycle API for platform worker app identities (Sl
 
 Kagura Memory Cloud provides 64 MCP tools for AI assistants across 13 categories (Memory, Agent Substrate, Agent Control Plane, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
 
+### Authentication and sessions on /mcp
+
+`/mcp` (and `/mcp/w/{workspace_id}`) accepts an API key, an OAuth2 access token or a session cookie. A failed check answers with an RFC 6750 challenge that always names the protected-resource metadata (RFC 9728):
+
+| Request | Status | `WWW-Authenticate` |
+|---------|--------|--------------------|
+| No credentials | `401` | `Bearer realm="Kagura Memory Cloud", resource_metadata="<origin>/.well-known/oauth-protected-resource"` — no error code (RFC 6750 §3.1) |
+| Unknown, expired or revoked token, or an OAuth token issued for another resource | `401` | `Bearer realm="…", error="invalid_token", error_description="…", resource_metadata="…"` |
+| Malformed `Authorization` header: not `Bearer <token>` (the scheme is case-insensitive), or an empty token or one containing whitespace | `401` | `Bearer realm="…", error="invalid_request", error_description="…", resource_metadata="…"` |
+| OAuth token without the scope a `tools/call` needs | `403` | `Bearer realm="…", error="insufficient_scope", error_description="…", scope="<granted scopes plus the required one>", resource_metadata="…"` |
+
+- **Audience (RFC 8707).** An OAuth access token bound to a resource must be bound to this server's MCP resource. Every form the [resource rule](#authorization-code-grant-mcp-clients) accepts qualifies: `<origin>/mcp`, `<origin>/mcp/` and paths beneath it such as `/mcp/w/{workspace_id}`, the default port given or left out, the host in any case, any query. The rule applies on `/mcp/w/{workspace_id}` too. A token issued without `resource` is accepted.
+- **Scope.** `memory:read` or `memory:write` per tool, checked on `tools/call` only; see [MCP Tools › OAuth scopes](mcp-tools.md#oauth-scopes). API keys, agent-bound keys and session cookies are not scope-checked.
+- **Sessions (session-based Streamable HTTP)** on `/mcp`, `/mcp/` and `/mcp/w/{workspace_id}`:
+  - `POST` / `GET` without `Mcp-Session-Id` opens a session under an id the server chooses (returned in `Mcp-Session-Id`).
+  - `POST` / `GET` naming a session of the caller uses it. One the server does not hold (expired after an hour idle, or lost on a restart or deploy) is re-adopted for the authenticated caller under the same id, so a client keeps working without re-initializing.
+  - A session id opened by another user or in another workspace gets `404` with the JSON-RPC error "This session id cannot be used by this connection. Send a new initialize request without Mcp-Session-Id." Such a request does not refresh that session's idle timer.
+  - `DELETE` with the caller's `Mcp-Session-Id` ends that session (`204`); an unknown or foreign id gets the same `404`, a request without one `400`.
+  - Other methods get `405` (`Allow: GET, POST, DELETE`) and other paths `404`. The removed SSE transport answers `410`: `GET /mcp/sse` and `POST /mcp/messages/…`. None of them reads or opens a session.
+  - Stateless MCP 2026-07-28 requests have no session and ignore an `Mcp-Session-Id` header.
+
 ### 1. remember
 
 Store a new memory.
