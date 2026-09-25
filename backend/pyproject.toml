@@ -11,7 +11,17 @@ authors = [
 
 dependencies = [
     # Web Framework
+    # No upper bound on fastapi on purpose: its breaking changes ship in 0.x
+    # minor releases, so the only useful bound is the minor, which would need a
+    # manual bump every few weeks; a tracked lockfile (#1706) is the planned
+    # control.
     "fastapi>=0.115.0",
+    # Imported directly on the auth path (the Authlib request adapter in
+    # auth/starlette_oauth2_request.py, BaseHTTPMiddleware in the session
+    # middleware) and not capped by fastapi or mcp. Semver, and 1.x already
+    # deprecates names the code uses (HTTP_422_UNPROCESSABLE_ENTITY), so stop
+    # at the next major. Runs on 1.0-1.7 (#1705).
+    "starlette>=1.0.0,<2",
     "uvicorn[standard]>=0.32.0",
     "jinja2>=3.1.0",  # Template engine for OAuth2 screens
 
@@ -41,11 +51,21 @@ dependencies = [
     "voyageai>=0.3.0",      # Reranking (Issue #105: Voyage AI alternative)
 
     # Authentication
-    "authlib>=1.3.0",       # OAuth2 client/server + JWT (authlib.jose)
-    "google-auth>=2.35.0",  # Google OAuth2
-    "google-auth-oauthlib>=1.2.0",  # Google OAuth2 helpers
-    "bcrypt>=4.0.0",        # Password hashing (Issue #51)
-    "pyotp>=2.9.0",         # TOTP MFA (Issue #51)
+    # Auth-critical dependencies carry an upper bound (#1705): CI and the image
+    # resolve these ranges afresh on each build, so a release past a bound
+    # arrives only when someone raises the bound and re-runs tests/auth and
+    # tests/api/test_*oauth*. The set is authlib, google-auth,
+    # google-auth-oauthlib, bcrypt and pyotp here, plus starlette above and mcp
+    # and cryptography below; tests/test_dependency_bounds.py enforces it.
+    # Authlib changes behaviour in minor releases (1.8.0 changed
+    # get_allowed_scope and PKCE handling), and auth/oauth2_server.py overrides
+    # its PKCE and grant hooks, verified on 1.8 (#1701): pin the minor.
+    "authlib>=1.8.0,<1.9",  # OAuth2 server + JWT (authlib.jose)
+    # Semver, used through stable API only: take minors, stop at the next major.
+    "google-auth>=2.35.0,<3",  # Google OAuth2
+    "google-auth-oauthlib>=1.2.0,<2",  # Google OAuth2 helpers
+    "bcrypt>=4.0.0,<6",     # Password hashing (Issue #51)
+    "pyotp>=2.9.0,<3",      # TOTP MFA (Issue #51)
     "qrcode[pil]>=7.4",    # QR code for MFA setup (Issue #51)
 
     # Cache & Queue
@@ -71,7 +91,10 @@ dependencies = [
     "apscheduler>=3.10.0",
 
     # MCP (Model Context Protocol)
-    "mcp>=1.0.0",
+    # Only mcp.server.Server and mcp.types are used; the Streamable HTTP
+    # transport and its OAuth checks are in-house (mcp_server/). Semver: the
+    # code runs on 1.x and 2.x (CI resolves 2.x), so stop at the next major (#1705).
+    "mcp>=1.0.0,<3",
 
     # Logging
     "structlog>=24.0.0",
@@ -80,7 +103,12 @@ dependencies = [
     "pyyaml>=6.0",
 
     # Encryption
-    "cryptography>=42.0.0",
+    # cryptography raises its major on every feature release, and its API
+    # stability policy keeps code that runs without deprecation warnings
+    # working for two more majors. CI runs 50.x with no
+    # CryptographyDeprecationWarning, so allow up to 52.x; move the bound to two
+    # majors past the newest warning-free version CI runs (#1705).
+    "cryptography>=42.0.0,<53",
 
     # Hashing (Issue #84 Phase 2A)
     "xxhash>=3.4.0",
