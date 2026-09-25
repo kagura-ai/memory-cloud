@@ -79,7 +79,7 @@ These process data the server already holds. Each destination is configured by t
 The server has no code path that fetches a Claude user's memory, chat history, conversation summaries, project files or uploaded files from Claude or from any Anthropic API. It only receives what the client sends in a tool call. What was checked in `backend/src`:
 
 - The only Anthropic SDK use is `messages.create` in `services/llm_providers/anthropic_provider.py`. It is the optional LLM provider for `analyze_context`, and its prompt is built from memory summaries the server already stores. No other Anthropic client or endpoint (files, batches, beta APIs) is used.
-- `claude.ai` and `anthropic.com` appear only as redirect-URI hostnames that identify an OAuth client during Dynamic Client Registration (`api/routes/oauth.py`), and in a docstring (`utils/redirect_uri.py`).
+- `claude.ai`, `claude.com` and `anthropic.com` appear only as redirect-URI hostnames that identify an OAuth client during Dynamic Client Registration (`api/routes/oauth.py`), and in a docstring (`utils/redirect_uri.py`).
 - The only HTTP client imported in `backend/src/mcp_server/` is `httpx` in `tools/_errors.py`, and it is used to classify exceptions.
 
 ## 3. Guardrail and pinned-memory delivery

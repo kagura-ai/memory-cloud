@@ -8,6 +8,7 @@ import os
 
 from fastapi import APIRouter, Request
 
+from auth.mcp_resource import mcp_resource_identifier
 from auth.mcp_scopes import ALL_ADVERTISED_SCOPES
 
 router = APIRouter(tags=["well-known"])
@@ -39,8 +40,9 @@ async def oauth_protected_resource():
     """
     # Get configuration from environment
     base_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
-    mcp_path = os.getenv("MCP_BASE_PATH", "/mcp")  # Configurable MCP mount path
-    mcp_base = f"{base_url}{mcp_path}"  # MCP server canonical URL
+    # MCP server canonical URL: FRONTEND_URL + MCP_BASE_PATH. The authorization
+    # server binds token audiences to this same value (#1686).
+    mcp_base = mcp_resource_identifier()
 
     return {
         "resource": mcp_base,  # Must match MCP server URL exactly (RFC 9728)

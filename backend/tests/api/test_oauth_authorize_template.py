@@ -8,9 +8,9 @@ the template name and Jinja2's cache lookup raises
 ``TypeError: unhashable type: 'dict'`` deep in the call stack, surfacing
 to the client as a bare 500 "Internal Server Error".
 
-This test mocks the session, sync DB, and Redis dependencies so the
-authorize handler reaches the ``TemplateResponse`` call and verifies it
-returns a 200 HTML response instead of crashing.
+This test mocks the session and sync DB dependencies so the authorize
+handler reaches the ``TemplateResponse`` call and verifies it returns a 200
+HTML response instead of crashing.
 """
 
 import sys
@@ -33,13 +33,16 @@ class TestOAuthAuthorizeTemplate:
         the first positional arg, otherwise Jinja2 raises
         TypeError: unhashable type: 'dict' and the client sees 500."""
         fake_user = MagicMock(email="test@example.com")
-        fake_client = MagicMock(client_name="Test Client")
+        fake_client = MagicMock(
+            client_name="Test Client",
+            scope="memory:read memory:write",
+            token_endpoint_auth_method="none",
+        )
         fake_db_user = MagicMock(locale="en")
 
         with (
             patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
             patch("api.routes.oauth.get_sync_session") as mock_sess,
-            patch("redis.Redis") as mock_redis,
         ):
             db = MagicMock()
             db.query.return_value.filter_by.return_value.first.side_effect = [
@@ -47,7 +50,6 @@ class TestOAuthAuthorizeTemplate:
                 fake_db_user,
             ]
             mock_sess.return_value = db
-            mock_redis.from_url.return_value.setex = MagicMock()
 
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(
@@ -57,7 +59,7 @@ class TestOAuthAuthorizeTemplate:
                         "client_id": "test",
                         "redirect_uri": "http://x",
                         "state": "s",
-                        "code_challenge": "abc",
+                        "code_challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
                         "code_challenge_method": "S256",
                     },
                     follow_redirects=False,

@@ -63,8 +63,16 @@ from api.main import app  # noqa: E402
 
 
 def _make_fake_client(*, accepts: bool, client_name: str = "Test Client"):
-    """Build a MagicMock OAuth2Client with a deterministic check_redirect_uri."""
-    fake_client = MagicMock(client_name=client_name)
+    """Build a MagicMock OAuth2Client with a deterministic check_redirect_uri.
+
+    A confidential client with a registered scope, so a request that passes
+    the redirect_uri check also passes the scope and PKCE rules (#1686).
+    """
+    fake_client = MagicMock(
+        client_name=client_name,
+        scope="memory:read memory:write",
+        token_endpoint_auth_method="client_secret_post",
+    )
     fake_client.check_redirect_uri = MagicMock(return_value=accepts)
     return fake_client
 
@@ -79,12 +87,10 @@ class TestGetAuthorizeRedirectUriPreCheck:
         with (
             patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
             patch("api.routes.oauth.get_sync_session") as mock_sess,
-            patch("redis.Redis") as mock_redis,
         ):
             db = MagicMock()
             db.query.return_value.filter_by.return_value.first.return_value = fake_client
             mock_sess.return_value = db
-            mock_redis.from_url.return_value.setex = MagicMock()
 
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(
@@ -120,12 +126,10 @@ class TestGetAuthorizeRedirectUriPreCheck:
         with (
             patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
             patch("api.routes.oauth.get_sync_session") as mock_sess,
-            patch("redis.Redis") as mock_redis,
         ):
             db = MagicMock()
             db.query.return_value.filter_by.return_value.first.return_value = fake_client
             mock_sess.return_value = db
-            mock_redis.from_url.return_value.setex = MagicMock()
 
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(
@@ -164,12 +168,10 @@ class TestGetAuthorizePercentEncodedTraversal:
         with (
             patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
             patch("api.routes.oauth.get_sync_session") as mock_sess,
-            patch("redis.Redis") as mock_redis,
         ):
             db = MagicMock()
             db.query.return_value.filter_by.return_value.first.return_value = real_client
             mock_sess.return_value = db
-            mock_redis.from_url.return_value.setex = MagicMock()
 
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(
@@ -201,12 +203,10 @@ class TestGetAuthorizePercentEncodedTraversal:
         with (
             patch("api.routes.oauth.get_current_user_from_session", return_value=fake_user),
             patch("api.routes.oauth.get_sync_session") as mock_sess,
-            patch("redis.Redis") as mock_redis,
         ):
             db = MagicMock()
             db.query.return_value.filter_by.return_value.first.return_value = real_client
             mock_sess.return_value = db
-            mock_redis.from_url.return_value.setex = MagicMock()
 
             with TestClient(app, raise_server_exceptions=False) as client:
                 response = client.get(

@@ -3,10 +3,12 @@
 Issue #33 - OAuth2 authentication support for ChatGPT MCP integration
 
 Provides OAuth2 authorization server functionality with:
-- Authorization Code Grant (RFC 6749 Section 4.1) with PKCE (RFC 7636) for
-  public clients (``token_endpoint_auth_method="none"``)
+- Authorization Code Grant (RFC 6749 Section 4.1) with PKCE (RFC 7636, ``S256``
+  only) for public clients (``token_endpoint_auth_method="none"``)
 - Refresh Token Grant (RFC 6749 Section 6)
 - Both confidential and public clients are supported (Issue #157, #513)
+- Resource Indicators (RFC 8707): the ``resource`` of the authorization request
+  travels with the code and becomes the token's audience (#1686)
 
 Architecture:
     Built on Authlib's SQLAlchemy integration pattern, adapted for FastAPI with
@@ -29,16 +31,32 @@ References:
     - RFC 6749: The OAuth 2.0 Authorization Framework
 """
 
+import logging
 import secrets
 from datetime import timedelta
 from typing import Any, cast
 
 from authlib.oauth2 import OAuth2Request
 from authlib.oauth2.rfc6749 import grants
+from authlib.oauth2.rfc6749.errors import (
+    InvalidGrantError,
+    InvalidRequestError,
+    InvalidScopeError,
+    OAuth2Error,
+    UnsupportedResponseTypeError,
+)
 from authlib.oauth2.rfc7636 import CodeChallenge
+from authlib.oauth2.rfc7636.challenge import (
+    CODE_CHALLENGE_PATTERN,
+    CODE_VERIFIER_PATTERN,
+    compare_s256_code_challenge,
+)
 from authlib.oauth2.rfc8628 import DeviceCodeGrant as _DeviceCodeGrant
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
+from auth.mcp_resource import is_same_mcp_resource, mcp_resource_identifier
+from auth.oauth_scope import client_registered_scope, granted_scope
 from config.settings import get_settings
 from models.auth import (
     OAuth2AuthorizationCode,
@@ -53,7 +71,236 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Authlib's grants log each issued token dict at DEBUG ("Issue token %r to
+# %r") and log nothing above DEBUG. Holding the library's loggers at INFO keeps
+# token values out of the log stream even when LOG_LEVEL=DEBUG (#1686).
+logging.getLogger("authlib").setLevel(logging.INFO)
+
 _TOKEN_ENDPOINT_AUTH_METHODS = ["none", "client_secret_post", "client_secret_basic"]
+
+# The one PKCE transformation this server accepts — the value of
+# ``code_challenge_methods_supported`` in the authorization-server metadata.
+PKCE_METHOD = "S256"
+
+
+# ============================================================================
+# Authorization request rules: scope, PKCE, resource (#1686)
+# ============================================================================
+
+
+class InvalidTargetError(OAuth2Error):
+    """RFC 8707 §2 ``invalid_target``: the requested resource is not served here."""
+
+    error = "invalid_target"
+
+
+# Token request parameters this server reads; each may be sent once (RFC 6749
+# §3.1). ``resource`` may repeat (RFC 8707 §2) and every value is checked.
+TOKEN_REQUEST_SINGLE_VALUED = (
+    "grant_type",
+    "code",
+    "redirect_uri",
+    "client_id",
+    "client_secret",
+    "code_verifier",
+    "refresh_token",
+    "scope",
+    "device_code",
+)
+
+
+def repeated_parameter(payload: Any, names: tuple[str, ...]) -> str | None:
+    """The first of ``names`` sent more than once in the request, if any.
+
+    Args:
+        payload: The request payload (``datalist`` holds every value).
+        names: Parameters that may be sent once.
+
+    Returns:
+        The parameter name, or ``None`` when each is sent at most once.
+    """
+    for name in names:
+        if len(payload.datalist.get(name, [])) > 1:
+            return name
+    return None
+
+
+def requested_resource(payload: Any) -> str | None:
+    """Read the RFC 8707 ``resource`` of an authorization or token request.
+
+    Every ``resource`` value must name this server's MCP resource
+    (:func:`auth.mcp_resource.is_same_mcp_resource`: the published identifier,
+    a path beneath it, any query). The published identifier is returned, so
+    codes and tokens always store the discoverable value. A parameter sent
+    without a value counts as omitted (RFC 6749 §3.1).
+
+    Args:
+        payload: The request payload (``data`` and ``datalist``).
+
+    Returns:
+        The MCP resource identifier, or ``None`` when no ``resource`` was sent.
+
+    Raises:
+        InvalidTargetError: A ``resource`` names anything else.
+    """
+    values = [value for value in payload.datalist.get("resource", []) if value]
+    if not values:
+        return None
+    if not all(is_same_mcp_resource(value) for value in values):
+        raise InvalidTargetError(
+            description=(
+                "Unknown resource. Use the resource published at "
+                "/.well-known/oauth-protected-resource."
+            )
+        )
+    return mcp_resource_identifier()
+
+
+def settle_audience(requested: str | None, bound: str | None) -> str | None:
+    """Audience of a token issued for an authorization code or a refresh token.
+
+    Args:
+        requested: The token request's ``resource`` as returned by
+            :func:`requested_resource` (the published identifier or ``None``).
+        bound: The ``resource`` the code or the refreshed token carries. It
+            may have been stored before these rules, in any form.
+
+    Returns:
+        The published identifier when ``bound`` names the MCP resource in any
+        form :func:`auth.mcp_resource.is_same_mcp_resource` accepts;
+        ``requested`` when nothing is bound; otherwise ``bound`` unchanged.
+
+    Raises:
+        InvalidTargetError: ``bound`` names another resource and the request
+            names one too.
+    """
+    if not bound:
+        return requested
+    if is_same_mcp_resource(bound):
+        return mcp_resource_identifier()
+    if requested is not None:
+        raise InvalidTargetError(
+            description="The resource differs from the one this grant is bound to."
+        )
+    return bound
+
+
+def _raise_if_no_scope(scope: str) -> None:
+    if not scope:
+        raise InvalidScopeError(description="This client is registered without a memory scope.")
+
+
+def check_code_challenge(payload: Any, client: OAuth2Client, required: bool) -> None:
+    """Validate the PKCE parameters of an authorization request (RFC 7636).
+
+    ``code_challenge_method`` must be ``S256``, the one method the metadata
+    advertises; an omitted method means ``plain`` (RFC 7636 §4.3). When
+    ``required`` is set, a public client (``token_endpoint_auth_method="none"``)
+    must send a ``code_challenge``: the token endpoint requires its verifier.
+
+    Args:
+        payload: The authorization request payload.
+        client: The requesting client.
+        required: Whether PKCE is enforced (``settings.oauth_pkce_required``).
+
+    Raises:
+        InvalidRequestError: The parameters break a rule above
+            (RFC 7636 §4.4.1).
+    """
+    challenge = payload.data.get("code_challenge")
+    method = payload.data.get("code_challenge_method")
+    if not challenge and not method:
+        if required and client.token_endpoint_auth_method == "none":
+            raise InvalidRequestError(
+                "Missing 'code_challenge'. Public clients must use PKCE with S256."
+            )
+        return
+    if not challenge:
+        raise InvalidRequestError("Missing 'code_challenge'")
+    for name in ("code_challenge", "code_challenge_method"):
+        if len(payload.datalist.get(name, [])) > 1:
+            raise InvalidRequestError(f"Multiple '{name}' in request.")
+    if not CODE_CHALLENGE_PATTERN.match(challenge):
+        raise InvalidRequestError("Invalid 'code_challenge'")
+    if method != PKCE_METHOD:
+        raise InvalidRequestError("Unsupported 'code_challenge_method'. Only S256 is supported.")
+
+
+def validate_authorization_parameters(client: OAuth2Client, payload: Any) -> str:
+    """Apply the authorization request rules before the consent page is shown.
+
+    The consent submission runs the same rules through the grant (scope, then
+    PKCE when enforced, then ``resource``), so a request the page would accept
+    is one the grant accepts.
+
+    Args:
+        client: The requesting client (its ``redirect_uri`` already checked).
+        payload: The authorization request payload.
+
+    Returns:
+        The granted scope.
+
+    Raises:
+        OAuth2Error: ``invalid_scope``, ``invalid_request`` or
+            ``invalid_target``.
+    """
+    scope = granted_scope(payload.data.get("scope"), client_registered_scope(client))
+    _raise_if_no_scope(scope)
+    if get_settings().oauth_pkce_required:
+        check_code_challenge(payload, client, required=True)
+    requested_resource(payload)
+    return scope
+
+
+class S256CodeChallenge(CodeChallenge):
+    """PKCE (RFC 7636) with ``S256`` as the only transformation.
+
+    At the authorization endpoint the request must follow
+    :func:`check_code_challenge`. At the token endpoint the verifier is
+    checked against the stored challenge with ``S256``; a code stored with any
+    other method yields ``invalid_grant``.
+    """
+
+    SUPPORTED_CODE_CHALLENGE_METHOD = [PKCE_METHOD]
+    CODE_CHALLENGE_METHODS = {PKCE_METHOD: compare_s256_code_challenge}
+
+    def validate_code_challenge(self, grant: Any, redirect_uri: Any = None) -> None:
+        """Authorization-endpoint hook (``after_validate_authorization_request_payload``)."""
+        check_code_challenge(grant.request.payload, grant.request.client, self.required)
+
+    def validate_code_verifier(self, grant: Any, result: Any = None) -> None:
+        """Token-endpoint hook (``after_validate_token_request``).
+
+        Raises:
+            InvalidRequestError: The verifier is missing or malformed, or sent
+                for a code issued without a challenge.
+            InvalidGrantError: The verifier does not match the challenge.
+        """
+        request = grant.request
+        verifier = request.form.get("code_verifier")
+        # A public client must always prove possession (RFC 7636 §4.5).
+        if self.required and request.auth_method == "none" and not verifier:
+            raise InvalidRequestError("Missing 'code_verifier'")
+
+        authorization_code = request.authorization_code
+        challenge = self.get_authorization_code_challenge(authorization_code)
+        if not challenge and not verifier:
+            return
+        # RFC 9700 §4.8: a code issued without a challenge is not exchanged
+        # with a verifier (as Authlib's CodeChallenge does from 1.8).
+        if not challenge:
+            raise InvalidRequestError(
+                "The authorization request had no 'code_challenge', "
+                "but a 'code_verifier' was provided."
+            )
+        if not verifier:
+            raise InvalidRequestError("Missing 'code_verifier'")
+        if not CODE_VERIFIER_PATTERN.match(verifier):
+            raise InvalidRequestError("Invalid 'code_verifier'")
+
+        method = self.get_authorization_code_challenge_method(authorization_code)
+        if method != PKCE_METHOD or not compare_s256_code_challenge(verifier, challenge):
+            raise InvalidGrantError(description="Code challenge failed.")
 
 
 class _OAuthUser:
@@ -94,39 +341,35 @@ def query_client(session: Session, client_id: str) -> OAuth2Client | None:
     return client
 
 
-def save_token(token: dict[str, Any], request: OAuth2Request, session: Session) -> None:
+def save_token(
+    token: dict[str, Any],
+    request: OAuth2Request,
+    session: Session,
+    resource: str | None = None,
+) -> None:
     """Save access token to database.
 
     Required by Authlib.
-    Issue #157: Save resource parameter (RFC 8707).
 
     Args:
         token: Token data from Authlib
         request: OAuth2 request object
         session: SQLAlchemy session
+        resource: The token's audience (RFC 8707), as settled by the grant
+            while it validated the token request; ``None`` for no audience.
     """
     # Extract client and user from request. Authlib types request.client as
     # ClientMixin; the runtime object is our OAuth2Client.
     client_id = cast(OAuth2Client, request.client).client_id
-    user_id = request.user.user_id if hasattr(request, "user") else None
+    user_id = getattr(getattr(request, "user", None), "user_id", None)
 
-    # For refresh token grant, user comes from existing token
-    if not user_id and hasattr(request, "credential"):
-        user_id = request.credential.user_id
+    # Fall back to the user of the credential being exchanged.
+    if not user_id:
+        user_id = getattr(getattr(request, "credential", None), "user_id", None)
 
     if not user_id:
         logger.error("Cannot save token: user_id not found in request")
         raise ValueError("User ID required for token issuance")
-
-    # Extract resource parameter (RFC 8707, Issue #157)
-    # Resource can come from:
-    # 1. Authorization code (stored during authorization)
-    # 2. Token request data (for refresh token grant)
-    resource = None
-    if hasattr(request, "credential") and hasattr(request.credential, "resource"):
-        resource = request.credential.resource  # From authorization code
-    elif hasattr(request, "data"):
-        resource = request.data.get("resource")  # From token request
 
     # Create new token record
     oauth_token = OAuth2Token(
@@ -137,7 +380,7 @@ def save_token(token: dict[str, Any], request: OAuth2Request, session: Session) 
         refresh_token=token.get("refresh_token"),
         scope=token.get("scope", ""),
         expires_in=token.get("expires_in", 3600),
-        resource=resource,  # RFC 8707 (Issue #157)
+        resource=resource,  # RFC 8707 audience (Issue #157, #1686)
         revoked=False,
     )
 
@@ -186,12 +429,27 @@ def _generate_token_with_expiry(
     return token
 
 
+class _ResourceBoundGrant:
+    """Hands the audience a grant settled for its token to ``save_token``.
+
+    Each grant sets ``token_resource`` while it validates the token request
+    (RFC 8707), and the issued token is stored with that audience.
+    """
+
+    #: Audience of the token being issued; ``None`` issues it without one.
+    token_resource: str | None = None
+
+    def save_token(self, token: dict[str, Any]) -> None:
+        grant = cast(Any, self)
+        save_token(token, grant.request, grant.server.db_session, resource=self.token_resource)
+
+
 # ============================================================================
 # Authorization Code Grant
 # ============================================================================
 
 
-class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
+class AuthorizationCodeGrant(_ResourceBoundGrant, grants.AuthorizationCodeGrant):
     """Authorization Code Grant implementation.
 
     Implements RFC 6749 Section 4.1 (Authorization Code Grant) with
@@ -209,6 +467,10 @@ class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
     Security:
         - Confidential clients: client_secret required
         - Public clients: PKCE (code_verifier) required, client_secret optional
+        - PKCE accepts ``S256`` only (``S256CodeChallenge``)
+        - Granted scope: requested ∩ registered ∩ advertised (``granted_scope``)
+        - ``resource`` (RFC 8707) must be this server's MCP resource; the
+          code carries it and the token takes it as its audience
         - Authorization codes expire after 10 minutes
         - Codes are single-use (deleted after exchange)
         - Client secret required (confidential clients only)
@@ -217,6 +479,56 @@ class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
     # Token endpoint auth methods (Issue #157: Public Client + PKCE support)
     TOKEN_ENDPOINT_AUTH_METHODS = _TOKEN_ENDPOINT_AUTH_METHODS
     TOKEN_EXPIRES_IN = 3600
+
+    def validate_requested_scope(self) -> None:
+        """Refuse a request that would be granted no scope (RFC 6749 §3.3).
+
+        Authlib calls this while it validates the authorization request, so an
+        error here is reported by redirect to the client.
+
+        Raises:
+            InvalidScopeError: No requested scope can be granted.
+        """
+        client = cast(OAuth2Client, self.request.client)
+        _raise_if_no_scope(
+            granted_scope(self.request.payload.scope, client_registered_scope(client))
+        )
+
+    def validate_authorization_request(self) -> str:
+        """Validate the authorization request, then its ``resource`` (RFC 8707).
+
+        Returns:
+            The validated redirect URI.
+
+        Raises:
+            OAuth2Error: The request is invalid; ``invalid_target`` when the
+                ``resource`` is not this server's MCP resource.
+        """
+        redirect_uri = super().validate_authorization_request()
+        try:
+            requested_resource(self.request.payload)
+        except OAuth2Error as error:
+            error.redirect_uri = redirect_uri
+            raise
+        return redirect_uri
+
+    def validate_token_request(self) -> None:
+        """Validate the code exchange and settle the token's audience.
+
+        The audience is the ``resource`` the authorization request carried
+        with the code, or else the token request's (RFC 8707 §2.2); see
+        :func:`settle_audience`.
+
+        Raises:
+            OAuth2Error: The request is invalid; ``invalid_target`` when the
+                token request's ``resource`` is not this server's MCP resource
+                or differs from the code's.
+        """
+        super().validate_token_request()
+        code = cast(OAuth2AuthorizationCode, self.request.authorization_code)
+        self.token_resource = settle_audience(
+            requested_resource(self.request.payload), code.resource
+        )
 
     def generate_token(
         self,
@@ -236,8 +548,10 @@ class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
     def save_authorization_code(self, code: str, request: OAuth2Request) -> OAuth2AuthorizationCode:
         """Save authorization code to database.
 
-        Called by Authlib after user authorization.
-        Issue #157: Save resource parameter (RFC 8707).
+        Called by Authlib after user authorization, once the request has
+        passed ``validate_authorization_request``. The code stores what that
+        validated request carried: the granted scope, the PKCE challenge and
+        the ``resource`` (RFC 8707) the token will be bound to.
 
         Args:
             code: Generated authorization code
@@ -247,72 +561,21 @@ class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
             Saved OAuth2AuthorizationCode instance
         """
         # Extract data from request (Authlib ClientMixin → OAuth2Client narrow).
-        client_id = cast(OAuth2Client, request.client).client_id
-        user_id = request.user.user_id if hasattr(request, "user") else None
-        redirect_uri = request.redirect_uri
-        scope = request.scope
+        client = cast(OAuth2Client, request.client)
+        client_id = client.client_id
+        user_id = getattr(getattr(request, "user", None), "user_id", None)
+        payload = request.payload
+        request_data = payload.data
 
-        # Get request data (Authlib 1.x compatibility, Issue #157)
-        # Authlib 1.x: request.payload contains query params and form data
-        request_data = {}
-        if hasattr(request, "payload") and request.payload is not None:
-            if isinstance(request.payload, dict):
-                request_data = request.payload
-                logger.debug(f"Using request.payload (dict), keys: {list(request_data.keys())}")
-            elif hasattr(request.payload, "data"):
-                request_data = request.payload.data or {}
-                logger.debug(
-                    f"Using request.payload.data, keys: {list(request_data.keys()) if request_data else 'empty'}"
-                )
-            else:
-                logger.warning(f"request.payload exists but unknown type: {type(request.payload)}")
-        elif hasattr(request, "data") and request.data is not None:
-            request_data = request.data
-            logger.debug(f"Using request.data (Authlib 0.x), keys: {list(request_data.keys())}")
-        else:
-            logger.warning("No request.payload or request.data available")
-
-        # PKCE support (RFC 7636) - for public clients (ChatGPT/Claude)
+        scope = granted_scope(request_data.get("scope"), client_registered_scope(client))
         code_challenge = request_data.get("code_challenge")
         code_challenge_method = request_data.get("code_challenge_method")
-
-        # RFC 8707 Resource Indicators (Issue #157)
-        # Try to get from request data first, then from Redis (saved in GET /authorize)
-        resource = request_data.get("resource")
-
-        # Restore from Redis if state is provided (saved in GET /authorize)
-        state = request_data.get("state")
-        if state:
-            from redis import Redis
-
-            from config.database import get_redis_url
-
-            redis_url = get_redis_url()
-            redis = Redis.from_url(redis_url, decode_responses=True)
-
-            # Restore resource (RFC 8707)
-            if not resource:
-                resource = redis.get(f"oauth_state:{state}:resource")
-                if resource:
-                    logger.debug(
-                        f"Restored resource from Redis: state={state}, resource={resource}"
-                    )
-                    redis.delete(f"oauth_state:{state}:resource")  # One-time use
-
-            # Restore PKCE parameters (RFC 7636)
-            if not code_challenge:
-                code_challenge = redis.get(f"oauth_state:{state}:code_challenge")
-                if code_challenge:
-                    code_challenge_method = redis.get(f"oauth_state:{state}:code_challenge_method")
-                    logger.debug(
-                        f"Restored PKCE from Redis: state={state}, method={code_challenge_method}"
-                    )
-                    redis.delete(f"oauth_state:{state}:code_challenge")
-                    if code_challenge_method:
-                        redis.delete(f"oauth_state:{state}:code_challenge_method")
+        resource = requested_resource(payload)
 
         logger.info(
-            f"Authorization code data: resource={resource}, code_challenge={code_challenge is not None}"
+            "authorization_code_data",
+            resource=resource,
+            code_challenge_present=code_challenge is not None,
         )
 
         if not user_id:
@@ -324,11 +587,11 @@ class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
             code=code,
             client_id=client_id,
             user_id=user_id,
-            redirect_uri=redirect_uri,
+            redirect_uri=request_data.get("redirect_uri"),
             scope=scope,
             code_challenge=code_challenge,
             code_challenge_method=code_challenge_method,
-            resource=resource,  # RFC 8707 (Issue #157)
+            resource=resource,  # RFC 8707 (Issue #157, #1686)
             auth_time=utcnow(),
             expires_at=utcnow() + timedelta(seconds=600),  # 10 min
         )
@@ -345,7 +608,9 @@ class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
     ) -> OAuth2AuthorizationCode | None:
         """Query authorization code from database.
 
-        Called by Authlib during token exchange.
+        Called by Authlib during token exchange. The row is locked
+        (``SELECT ... FOR UPDATE``) until the exchange commits, so a concurrent
+        exchange of the same code waits for it and then finds no code.
 
         Args:
             code: Authorization code
@@ -357,6 +622,7 @@ class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
         auth_code = (
             self.server.db_session.query(OAuth2AuthorizationCode)
             .filter_by(code=code, client_id=client.client_id)
+            .with_for_update()
             .first()
         )
 
@@ -369,22 +635,39 @@ class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
 
         return auth_code
 
-    def delete_authorization_code(self, authorization_code: OAuth2AuthorizationCode) -> None:
-        """Delete authorization code after use.
+    def save_token(self, token: dict[str, Any]) -> None:
+        """Consume the authorization code and store the token in one transaction.
 
-        Called by Authlib after successful token exchange.
-        Codes are single-use only.
+        The code row is deleted first and the delete must remove exactly that
+        row, so of two exchanges of one code only one issues a token.
+
+        Raises:
+            InvalidGrantError: The code was consumed by another exchange.
+        """
+        code = cast(OAuth2AuthorizationCode, self.request.authorization_code)
+        client_id = code.client_id
+        session = self.server.db_session
+        consumed = (
+            session.query(OAuth2AuthorizationCode)
+            .filter_by(id=code.id)
+            .delete(synchronize_session=False)
+        )
+        if consumed != 1:
+            session.rollback()
+            logger.warning("authorization_code_already_consumed", client_id=client_id)
+            raise InvalidGrantError("Invalid 'code' in request.")
+        super().save_token(token)
+        logger.info("authorization_code_consumed", client_id=client_id)
+
+    def delete_authorization_code(self, authorization_code: OAuth2AuthorizationCode) -> None:
+        """Called by Authlib after a successful exchange.
+
+        Nothing is left to do: :meth:`save_token` deleted the code in the
+        transaction that stored the token.
 
         Args:
-            authorization_code: OAuth2AuthorizationCode instance to delete
+            authorization_code: The exchanged code (no longer in the database).
         """
-        self.server.db_session.delete(authorization_code)
-        self.server.db_session.commit()
-
-        logger.info(
-            f"Authorization code deleted: code={authorization_code.code[:8]}..., "
-            f"client={authorization_code.client_id}"
-        )
 
     def authenticate_user(self, authorization_code: OAuth2AuthorizationCode) -> Any:
         """Get user from authorization code.
@@ -406,7 +689,7 @@ class AuthorizationCodeGrant(grants.AuthorizationCodeGrant):
 # ============================================================================
 
 
-class RefreshTokenGrant(grants.RefreshTokenGrant):
+class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
     """Refresh Token Grant implementation.
 
     Implements RFC 6749 Section 6 (Refreshing an Access Token).
@@ -420,11 +703,35 @@ class RefreshTokenGrant(grants.RefreshTokenGrant):
         - Refresh tokens can be revoked independently
         - Refresh tokens are long-lived (no automatic expiration)
         - Client secret required for confidential clients
+        - Rotation is atomic: one refresh per refresh token issues a token
+        - The requested scope cannot exceed the original grant
+        - The new token keeps the audience of the refreshed one (RFC 8707)
     """
 
     # Token endpoint auth methods (Issue #157: Public Client + PKCE support)
     TOKEN_ENDPOINT_AUTH_METHODS = _TOKEN_ENDPOINT_AUTH_METHODS
     TOKEN_EXPIRES_IN = 3600
+
+    def validate_token_request(self) -> None:
+        """Validate the refresh request and settle the new token's audience.
+
+        The new token keeps the refreshed token's audience, stored as the
+        published identifier when it names the MCP resource in any accepted
+        form (a token may carry ``.../mcp/w/<id>`` or ``.../mcp?profile=...``
+        from before). A token issued without one takes the request's
+        ``resource``, which can only name this server's MCP resource and so
+        narrows it. See :func:`settle_audience`.
+
+        Raises:
+            OAuth2Error: The request is invalid; ``invalid_target`` when the
+                ``resource`` is not this server's MCP resource or differs from
+                the refreshed token's audience.
+        """
+        super().validate_token_request()
+        credential = cast(OAuth2Token, self.request.refresh_token)
+        self.token_resource = settle_audience(
+            requested_resource(self.request.payload), credential.resource
+        )
 
     def generate_token(
         self,
@@ -444,7 +751,9 @@ class RefreshTokenGrant(grants.RefreshTokenGrant):
     def authenticate_refresh_token(self, refresh_token: str) -> OAuth2Token | None:
         """Query and validate refresh token.
 
-        Called by Authlib during refresh token grant.
+        Called by Authlib during refresh token grant. The row is locked
+        (``SELECT ... FOR UPDATE``) until the refresh commits, so a concurrent
+        refresh with the same token waits for it and then finds it revoked.
 
         Args:
             refresh_token: Refresh token value
@@ -453,7 +762,10 @@ class RefreshTokenGrant(grants.RefreshTokenGrant):
             OAuth2Token or None
         """
         token = (
-            self.server.db_session.query(OAuth2Token).filter_by(refresh_token=refresh_token).first()
+            self.server.db_session.query(OAuth2Token)
+            .filter_by(refresh_token=refresh_token)
+            .with_for_update()
+            .first()
         )
 
         # Validate token
@@ -482,26 +794,51 @@ class RefreshTokenGrant(grants.RefreshTokenGrant):
 
         return _OAuthUser(user_id=credential.user_id)
 
-    def revoke_old_credential(self, credential: OAuth2Token) -> None:
-        """Revoke old access and refresh tokens.
+    def save_token(self, token: dict[str, Any]) -> None:
+        """Revoke the refreshed pair and store the new one in one transaction.
 
-        Called by Authlib after issuing new token pair.
-        Revokes both the old access token and the old refresh token
-        to enforce refresh token rotation (RFC 6819 Section 5.2.2.3).
+        Refresh token rotation (RFC 6819 §5.2.2.3): the old access and refresh
+        tokens are revoked by an update that must match exactly the unrevoked
+        row, so of two refreshes with one refresh token only one issues a
+        token.
+
+        Raises:
+            InvalidGrantError: The refresh token was rotated by another request.
+        """
+        credential = cast(OAuth2Token, self.request.refresh_token)
+        client_id, user_id = credential.client_id, credential.user_id
+        session = self.server.db_session
+        now = utcnow()
+        revoked = (
+            session.query(OAuth2Token)
+            .filter(
+                OAuth2Token.id == credential.id,
+                OAuth2Token.refresh_token_revoked_at.is_(None),
+            )
+            .update(
+                {
+                    OAuth2Token.access_token_revoked_at: now,
+                    OAuth2Token.refresh_token_revoked_at: now,
+                },
+                synchronize_session=False,
+            )
+        )
+        if revoked != 1:
+            session.rollback()
+            logger.warning("refresh_token_already_rotated", client_id=client_id)
+            raise InvalidGrantError()
+        super().save_token(token)
+        logger.info("oauth_refresh_token_rotated", client_id=client_id, user_id=user_id)
+
+    def revoke_old_credential(self, credential: OAuth2Token) -> None:
+        """Called by Authlib after issuing the new token pair.
+
+        Nothing is left to do: :meth:`save_token` revoked the old pair in the
+        transaction that stored the new one.
 
         Args:
-            credential: Old OAuth2Token instance
+            credential: The refreshed OAuth2Token.
         """
-        now = utcnow()
-        credential.access_token_revoked_at = now
-        credential.refresh_token_revoked_at = now
-        self.server.db_session.commit()
-
-        logger.info(
-            "oauth_refresh_token_rotated: client=%s, user=%s",
-            credential.client_id,
-            credential.user_id,
-        )
 
 
 # ============================================================================
@@ -509,7 +846,7 @@ class RefreshTokenGrant(grants.RefreshTokenGrant):
 # ============================================================================
 
 
-class DeviceAuthorizationGrant(_DeviceCodeGrant):
+class DeviceAuthorizationGrant(_ResourceBoundGrant, _DeviceCodeGrant):
     """Device Authorization Grant for CLI tools (Claude Code, etc.).
 
     Implements steps (E) and (F) of RFC 8628 — the polling loop where
@@ -519,6 +856,19 @@ class DeviceAuthorizationGrant(_DeviceCodeGrant):
 
     TOKEN_ENDPOINT_AUTH_METHODS = _TOKEN_ENDPOINT_AUTH_METHODS
     TOKEN_EXPIRES_IN = 3600
+
+    def validate_token_request(self) -> None:
+        """Validate the polling request; its ``resource`` sets the audience.
+
+        Raises:
+            OAuth2Error: The request is invalid or not yet approved;
+                ``invalid_target`` when ``resource`` is not this server's MCP
+                resource.
+        """
+        # Checked first so a polling client learns of it before approval.
+        resource = requested_resource(self.request.payload)
+        super().validate_token_request()
+        self.token_resource = resource
 
     def generate_token(
         self,
@@ -570,10 +920,42 @@ class DeviceAuthorizationGrant(_DeviceCodeGrant):
 
         return token
 
+    def save_token(self, token: dict[str, Any]) -> None:
+        """Consume the device code and store the token in one transaction.
+
+        A device code yields one token (RFC 8628 §3.5): the row is deleted by
+        a delete that must remove exactly that row, so of two polls that both
+        find the code approved only one issues a token.
+
+        Raises:
+            InvalidGrantError: The device code was used by another request.
+        """
+        credential = cast(OAuth2DeviceCode, self.request.credential)
+        client_id = credential.client_id
+        session = self.server.db_session
+        consumed = (
+            session.query(OAuth2DeviceCode)
+            .filter_by(id=credential.id)
+            .delete(synchronize_session=False)
+        )
+        if consumed != 1:
+            session.rollback()
+            logger.warning("device_code_already_used", client_id=client_id)
+            raise InvalidGrantError("The device code has already been used.")
+        super().save_token(token)
+        logger.info("device_code_consumed", client_id=client_id)
+
     def query_device_credential(self, device_code: str) -> OAuth2DeviceCode | None:
+        """Find a device code for a polling request.
+
+        The row is locked (``SELECT ... FOR UPDATE``) until the poll's
+        transaction ends, so a concurrent poll of the same code waits for it
+        and, once a token was issued, finds no code.
+        """
         return (
             self.server.db_session.query(OAuth2DeviceCode)
             .filter_by(device_code=device_code)
+            .with_for_update()
             .first()
         )
 
@@ -590,15 +972,30 @@ class DeviceAuthorizationGrant(_DeviceCodeGrant):
         return None
 
     def should_slow_down(self, credential: OAuth2DeviceCode) -> bool:
-        if credential.last_polled_at is None:
-            credential.last_polled_at = utcnow()
-            self.server.db_session.commit()
+        """Record this poll and tell whether it came before the interval (RFC 8628 §3.5).
+
+        The poll time is written by an update that must match the code's row
+        and is committed with the poll's response, which keeps the row locked
+        until then.
+
+        Raises:
+            InvalidGrantError: The device code no longer exists.
+        """
+        now = utcnow()
+        previous = credential.last_polled_at
+        updated = (
+            self.server.db_session.query(OAuth2DeviceCode)
+            .filter_by(id=credential.id)
+            .update({OAuth2DeviceCode.last_polled_at: now}, synchronize_session=False)
+        )
+        if updated != 1:
+            raise InvalidGrantError("The device code is no longer valid.")
+        # Keep the loaded row in step without scheduling another UPDATE.
+        set_committed_value(credential, "last_polled_at", now)
+        if previous is None:
             return False
         interval = get_settings().oauth_device_polling_interval
-        elapsed = (utcnow() - credential.last_polled_at).total_seconds()
-        credential.last_polled_at = utcnow()
-        self.server.db_session.commit()
-        return elapsed < interval
+        return (now - previous).total_seconds() < interval
 
 
 # ============================================================================
@@ -755,7 +1152,9 @@ class OAuth2AuthorizationServer:
         on the authorization code (Authlib's "challenge stored → verifier
         required" branch fires regardless of the flag), so a true rollback to
         pre-#513 behavior requires SKIPPING registration. We therefore:
-        - register with ``required=True`` when the kill-switch is on (default)
+        - register ``S256CodeChallenge(required=True)`` when the kill-switch is
+          on (default): ``S256`` only, and a public client must send a
+          ``code_challenge`` at the authorization endpoint (#1686)
         - skip registration entirely when the kill-switch is off (emergency
           rollback path; matches pre-#513 behavior exactly).
         """
@@ -764,7 +1163,7 @@ class OAuth2AuthorizationServer:
         if pkce_required:
             self.server.register_grant(
                 AuthorizationCodeGrant,
-                [CodeChallenge(required=True)],
+                [S256CodeChallenge(required=True)],
             )
         else:
             # Emergency rollback: pre-#513 behavior with no PKCE enforcement.
@@ -808,7 +1207,17 @@ class OAuth2AuthorizationServer:
         Returns:
             Authorization response (redirect or error)
         """
-        return self.server.create_authorization_response(request, grant_user=grant_user)
+        # Resolve the grant here and pass it: Authlib's fallback for a missing
+        # ``grant`` argument is deprecated ("will become mandatory").
+        oauth_request = self.server.create_oauth2_request(request)
+        try:
+            grant = self.server.get_authorization_grant(oauth_request)
+        except UnsupportedResponseTypeError as error:
+            error.state = oauth_request.payload.state
+            return self.server.handle_error_response(oauth_request, error)
+        return self.server.create_authorization_response(
+            oauth_request, grant_user=grant_user, grant=grant
+        )
 
     def create_token_response(self, request: Any) -> Any:
         """Create token response.

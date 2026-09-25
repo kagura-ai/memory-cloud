@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from api.main import app  # noqa: E402
 from api.routes.oauth import OAuth2ClientResponse, detect_dcr_provider  # noqa: E402
+from auth.mcp_scopes import DCR_DEFAULT_SCOPE  # noqa: E402
 
 
 class TestDetectDcrProvider:
@@ -636,3 +637,171 @@ class TestOAuth2ClientResponseOwnerIdSerialization:
         )
         assert response.owner_id is None
         assert response.model_dump()["owner_id"] is None
+
+
+# --- Issue #1686: every redirect_uri is checked -------------------------------
+
+
+class TestDcrEveryRedirectUri:
+    """Each entry of ``redirect_uris`` must pass provider detection on its own."""
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app) as c:
+            yield c
+
+    def _register(self, client, body: dict):
+        rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+        ):
+            response = client.post("/api/v1/oauth/register", json=body)
+        return response, fake_session
+
+    @pytest.mark.parametrize(
+        ("client_name", "redirect_uris", "expected_provider"),
+        [
+            # Claude's connector callback.
+            ("Claude", ["https://claude.ai/api/mcp/auth_callback"], "claude"),
+            (
+                "ChatGPT",
+                [
+                    "https://chatgpt.com/connector_platform_oauth_redirect",
+                    "https://chat.openai.com/connector_platform_oauth_redirect",
+                ],
+                "chatgpt",
+            ),
+            ("Claude Code", ["http://localhost:53682/callback"], "claude"),
+            (
+                "Claude Code",
+                ["http://localhost:53682/callback", "http://127.0.0.1:53682/callback"],
+                "claude",
+            ),
+            # A provider host and a loopback entry of the same provider.
+            (
+                "Claude",
+                ["https://claude.ai/api/mcp/auth_callback", "http://localhost:9000/callback"],
+                "claude",
+            ),
+            # Entries of two different allowed providers: the first one's is stored.
+            (
+                "Claude",
+                [
+                    "https://claude.ai/api/mcp/auth_callback",
+                    "https://chatgpt.com/connector_platform_oauth_redirect",
+                ],
+                "claude",
+            ),
+            # Both Claude hosts, and both ChatGPT hosts, in one registration.
+            (
+                "Claude",
+                [
+                    "https://claude.ai/api/mcp/auth_callback",
+                    "https://claude.com/api/mcp/auth_callback",
+                ],
+                "claude",
+            ),
+            (
+                "ChatGPT",
+                [
+                    "https://chatgpt.com/connector_platform_oauth_redirect",
+                    "https://platform.openai.com/connector_platform_oauth_redirect",
+                ],
+                "chatgpt",
+            ),
+        ],
+    )
+    def test_every_entry_allowed_is_registered(
+        self, client, client_name: str, redirect_uris: list[str], expected_provider: str
+    ):
+        response, fake_session = self._register(
+            client, {"client_name": client_name, "redirect_uris": redirect_uris}
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["provider"] == expected_provider
+        assert response.json()["redirect_uris"] == redirect_uris
+        fake_session.add.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("client_name", "redirect_uris"),
+        [
+            ("Claude", ["https://claude.ai/api/mcp/auth_callback", "https://attacker.example/cb"]),
+            ("Claude Code", ["http://localhost:53682/callback", "https://attacker.example/cb"]),
+            # The loopback entry needs a recognized client_name of its own.
+            ("Anthropic", ["https://claude.ai/api/mcp/auth_callback", "http://localhost:9/cb"]),
+            (
+                "ChatGPT",
+                ["https://chatgpt.com/cb", "https://attacker.example/?fake=chatgpt.com"],
+            ),
+        ],
+    )
+    def test_any_refused_entry_rejects_the_registration(
+        self, client, client_name: str, redirect_uris: list[str]
+    ):
+        response, fake_session = self._register(
+            client, {"client_name": client_name, "redirect_uris": redirect_uris}
+        )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == "invalid_client_metadata"
+        fake_session.add.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("redirect_uri", "expected_provider"),
+        [
+            ("https://claude.ai/api/mcp/auth_callback", "claude"),
+            ("https://claude.com/api/mcp/auth_callback", "claude"),
+            ("https://chatgpt.com/connector_platform_oauth_redirect", "chatgpt"),
+            ("https://platform.openai.com/connector_platform_oauth_redirect", "chatgpt"),
+        ],
+    )
+    def test_provider_hosts(self, client, redirect_uri: str, expected_provider: str):
+        assert detect_dcr_provider(redirect_uri, "Any Client") == expected_provider
+        response, _ = self._register(
+            client, {"client_name": "Any Client", "redirect_uris": [redirect_uri]}
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["provider"] == expected_provider
+
+
+class TestDcrRegisteredScope:
+    """#1686: ``/register`` stores the requested scopes the server defines, or
+    ``DCR_DEFAULT_SCOPE`` when those hold no memory scope."""
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app) as c:
+            yield c
+
+    @pytest.mark.parametrize(
+        ("requested", "stored"),
+        [
+            (None, DCR_DEFAULT_SCOPE),
+            ("claudeai", DCR_DEFAULT_SCOPE),
+            ("openid offline_access", DCR_DEFAULT_SCOPE),
+            ("openid profile", DCR_DEFAULT_SCOPE),
+            ("memory:read claudeai", "memory:read"),
+            ("memory:read memory:admin", "memory:read memory:admin"),
+        ],
+    )
+    def test_stored_scope(self, client, requested: str | None, stored: str):
+        rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
+        body = {
+            "client_name": "Claude",
+            "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+        }
+        if requested is not None:
+            body["scope"] = requested
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+        ):
+            response = client.post("/api/v1/oauth/register", json=body)
+
+        assert response.status_code == 201, response.text
+        assert response.json()["scope"] == stored
+        assert fake_session.add.call_args.args[0].scope == stored
