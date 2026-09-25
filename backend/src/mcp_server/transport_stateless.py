@@ -29,6 +29,7 @@ from mcp_server.transport import (
     SUPPORTED_PROTOCOL_VERSIONS,
     TOOLS_LIST_TTL_MS,
     _discover_result,
+    _reject_insufficient_scope,
     _send_json_error,
     _send_jsonrpc_result,
     _tool_call_result,
@@ -399,6 +400,10 @@ async def handle_stateless_post(
         )
 
     elif method == "tools/call":
+        # #1686: the OAuth scope check. -32603 as for any refused call on this
+        # era (``_call_tool``); ``data.error`` carries ``insufficient_scope``.
+        if await _reject_insufficient_scope(send, request_id, params["name"], jsonrpc_code=-32603):
+            return
         await _call_tool(send, request_id, params, user_id, workspace_id)
 
     else:

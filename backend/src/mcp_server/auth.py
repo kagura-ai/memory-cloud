@@ -7,15 +7,75 @@ Provides unified authentication for MCP over HTTP/SSE:
 
 Authentication is always required. No anonymous access is allowed.
 
+OAuth2 access tokens (#1686): a token bound to an RFC 8707 resource must be
+bound to this server's MCP resource, and its granted scopes are recorded per
+request for the ``tools/call`` scope check (``mcp_server.tools._scopes``).
+
 Adapted from v4.4.0 mcp_auth.py for memory-cloud architecture.
 """
 
 import logging
+import os
+from contextvars import ContextVar
+from dataclasses import dataclass
 from uuid import UUID
 
-from utils.exceptions import AuthenticationError
+from utils.exceptions import AuthenticationError, InvalidTokenError
 
 logger = logging.getLogger(__name__)
+
+
+class MissingCredentialsError(AuthenticationError):
+    """The request carries no credentials at all (no Bearer token, no valid session).
+
+    RFC 6750 §3.1: the challenge for such a request carries no error code.
+    """
+
+
+@dataclass(frozen=True)
+class OAuthGrant:
+    """What an active OAuth2 access token grants on ``/mcp``."""
+
+    user_id: str
+    scope: str | None
+    resource: str | None
+
+
+# The OAuth scopes of the current request's access token; ``None`` when the
+# request is not authenticated with an OAuth2 access token (API key, agent-bound
+# key, session cookie), which the ``tools/call`` scope check does not gate.
+# Set once per request by ``authenticate_mcp_request``.
+_mcp_oauth_scopes: ContextVar[frozenset[str] | None] = ContextVar("mcp_oauth_scopes", default=None)
+
+
+def get_mcp_oauth_scopes() -> frozenset[str] | None:
+    """The current request's OAuth scopes, or ``None`` for a non-OAuth credential."""
+    return _mcp_oauth_scopes.get()
+
+
+def mcp_resource_url() -> str:
+    """This server's MCP resource: what ``/.well-known/oauth-protected-resource`` publishes."""
+    base_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+    return base_url + os.getenv("MCP_BASE_PATH", "/mcp")
+
+
+def is_mcp_resource(resource: str) -> bool:
+    """Whether an RFC 8707 ``resource`` names this server's MCP resource (``/mcp`` == ``/mcp/``)."""
+    return resource.rstrip("/") == mcp_resource_url().rstrip("/")
+
+
+def granted_scopes(scope: str | None) -> frozenset[str]:
+    """The scopes a stored token scope grants on ``/mcp``.
+
+    A token stored without scope (issued before scopes were canonicalised) is
+    treated as the DCR default scope.
+    """
+    if scope and scope.strip():
+        return frozenset(scope.split())
+    from auth.mcp_scopes import DCR_DEFAULT_SCOPE
+
+    logger.debug("MCP OAuth token without stored scope: treated as the DCR default scope")
+    return frozenset(DCR_DEFAULT_SCOPE.split())
 
 
 async def authenticate_mcp_request(
@@ -50,7 +110,10 @@ async def authenticate_mcp_request(
         - For session/OAuth2: context_id=<UUID>, workspace_id=None
 
     Raises:
-        AuthenticationError: If authentication fails
+        MissingCredentialsError: If the request carries no credentials
+        InvalidTokenError: If the Bearer token is invalid, expired, revoked, or
+            an OAuth2 access token bound to another resource
+        AuthenticationError: If the Authorization header is malformed
 
     Example:
         >>> user_id, context_id, workspace_id = await authenticate_mcp_request("Bearer api_key_...")
@@ -60,9 +123,11 @@ async def authenticate_mcp_request(
     # session/OAuth paths never carry an agent binding, and the API-key branch
     # (auth.dependencies.verify_api_key) re-sets it when the key is
     # agent-bound. Defense in depth against a stale scope in reused contexts.
+    # #1686: the OAuth scopes likewise; only the OAuth2 branch sets them.
     from auth.agent_scope import set_agent_scope
 
     set_agent_scope(None)
+    _mcp_oauth_scopes.set(None)
 
     # Try session cookie first (Issue #155: Claude Web UI support)
     # Issue #245: context_id is no longer returned from auth (now required in tool args)
@@ -74,7 +139,7 @@ async def authenticate_mcp_request(
 
     # No auth header and no session → authentication required
     if not authorization_header:
-        raise AuthenticationError("Authorization header or session cookie required")
+        raise MissingCredentialsError("Authorization header or session cookie required")
 
     # Parse Authorization header
     if isinstance(authorization_header, bytes):
@@ -104,15 +169,27 @@ async def authenticate_mcp_request(
         return result
 
     # Try OAuth2 token verification (Issue #33)
-    user_id_oauth = await _verify_oauth2_token(token)
-    if user_id_oauth:
-        logger.info(f"MCP auth success: method=oauth2, user={user_id_oauth}")
+    grant = await _verify_oauth2_token(token)
+    if grant:
+        # #1686: RFC 8707 audience. A token issued without ``resource`` carries
+        # no audience and is accepted.
+        if grant.resource and not is_mcp_resource(grant.resource):
+            logger.warning(
+                f"MCP auth failed: method=oauth2, audience {grant.resource[:200]!r} "
+                f"is not this server's MCP resource, token={token[:8]}..."
+            )
+            raise InvalidTokenError(
+                "The access token was issued for a different resource. "
+                "Re-authorize this server to get a token for it."
+            )
+        _mcp_oauth_scopes.set(granted_scopes(grant.scope))
+        logger.info(f"MCP auth success: method=oauth2, user={grant.user_id}")
         # Issue #245: context_id is now required in tool args, not from auth
-        return (user_id_oauth, None, None)
+        return (grant.user_id, None, None)
 
     # Authentication failed
     logger.warning(f"MCP auth failed: token={token[:8]}...")
-    raise AuthenticationError("Invalid or expired Bearer token")
+    raise InvalidTokenError("Invalid or expired Bearer token")
 
 
 async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | None"] | None:
@@ -164,25 +241,24 @@ async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | Non
         return None
 
 
-async def _verify_oauth2_token(access_token: str) -> str | None:
-    """Verify OAuth2 access token and return user_id.
+async def _verify_oauth2_token(access_token: str) -> OAuthGrant | None:
+    """Verify an OAuth2 access token and return what it grants.
 
-    Scope is discarded here because MCP enforces scopes at the tool
-    layer (``auth.mcp_scopes``), not at the transport gate. MCP's
-    transport entry point has no FastAPI-injected session, so this
-    shim opens its own short-lived async session — symmetric with
-    ``_verify_api_key`` above, which also calls a session-managing
-    wrapper.
+    Uses the verifier REST shares (``auth.oauth2_bearer``), reading the
+    token's scope and RFC 8707 ``resource`` as well: the caller checks the
+    audience and records the scopes for the ``tools/call`` scope check. MCP's
+    transport entry point has no FastAPI-injected session, so this shim opens
+    its own short-lived async session — symmetric with ``_verify_api_key``
+    above, which also calls a session-managing wrapper.
     """
-    from auth.oauth2_bearer import verify_oauth_bearer_token
+    from auth.oauth2_bearer import find_active_oauth_token
     from db.base import get_db
 
     async for db in get_db():
-        result = await verify_oauth_bearer_token(access_token, db)
-        if result is None:
+        token = await find_active_oauth_token(access_token, db)
+        if token is None:
             return None
-        user_id, _scope = result
-        return user_id
+        return OAuthGrant(user_id=token.user_id, scope=token.scope, resource=token.resource)
     return None
 
 

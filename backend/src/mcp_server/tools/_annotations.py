@@ -28,8 +28,9 @@ server to an outside system (``setup_connector``, a third-party chat platform).
 The model providers the server calls to process data it already holds
 (embedding, reranking, analysis labelling) do not make a tool open-world.
 
-These are hints for a client's confirmation UI, not authorization: every tool
-keeps its role checks, and a client is free to ignore them.
+These are hints for a client's confirmation UI, and a client is free to ignore
+them. ``readOnlyHint`` also picks the OAuth scope a ``tools/call`` needs
+(``_scopes``); every tool keeps its role checks.
 
 The legacy top-level ``readOnly`` flag predates the standard hints. It stays for
 clients that read it, derived from ``readOnlyHint`` (present and ``true``
