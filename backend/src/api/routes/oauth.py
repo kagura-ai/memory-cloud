@@ -42,6 +42,7 @@ from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth2_server import (
     _OAuthUser,
     create_authorization_server,
+    granted_scope,
     validate_authorization_parameters,
 )
 from auth.starlette_oauth2_request import StarletteOAuth2Payload
@@ -737,7 +738,8 @@ async def dynamic_client_registration(
     Security controls:
     - Provider whitelist: chatgpt, claude, cursor by redirect hostname; for
       RFC 8252 loopback redirects, a ``client_name`` naming ChatGPT, Claude,
-      Cursor, Codex, Hermes Agent or OpenClaw (issue #1657)
+      Cursor, Codex, Hermes Agent or OpenClaw (issue #1657). Every entry of
+      ``redirect_uris`` must pass on its own (#1686)
     - IP-based rate limiting (5 registrations per minute per IP)
     - Redirect URI pattern validation
     - Automatic token_endpoint_auth_method="none" (public clients)
@@ -785,18 +787,25 @@ async def dynamic_client_registration(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
         )
 
-    # Detect provider from redirect_uri (hostname suffix match) with a
+    # Detect the provider of every redirect_uri (hostname suffix match) with a
     # client_name keyword fallback for RFC 8252 loopback redirects. See
-    # ``detect_dcr_provider`` above for the rationale.
-    redirect_uri = data.redirect_uris[0] if data.redirect_uris else ""
-    detected_provider = detect_dcr_provider(redirect_uri, data.client_name)
+    # ``detect_dcr_provider`` above for the rationale. Each redirect_uri must
+    # pass on its own (#1686); the client's provider is the first one's.
+    providers = [detect_dcr_provider(uri, data.client_name) for uri in data.redirect_uris]
+    refused = [
+        uri
+        for uri, provider in zip(data.redirect_uris, providers, strict=True)
+        if provider not in _DCR_ALLOWED_PROVIDERS
+    ]
+    detected_provider = providers[0]
 
-    if detected_provider not in _DCR_ALLOWED_PROVIDERS:
+    if refused:
         logger.warning(
             "dcr_provider_rejected",
             ip=client_ip,
-            redirect_uri=redirect_uri,
-            detected_provider=detected_provider,
+            redirect_uri=_redact_redirect_uri_for_log(refused[0]),
+            refused_redirect_uris=len(refused),
+            redirect_uris=len(data.redirect_uris),
         )
         return rfc6749_error_response(
             error="invalid_client_metadata",
@@ -1571,22 +1580,55 @@ def _render_invalid_redirect_uri_error(
     )
 
 
+def _render_authorization_request_error(
+    request: Request,
+    locale: str,
+    error: OAuth2Error,
+) -> HTMLResponse:
+    """Render the error page for an authorization request refused before consent.
+
+    ``GET /authorize`` shows this page rather than redirecting, so nothing is
+    sent back to the client before the user has acted (#1686). The error code
+    and description are shown for the user to pass on to the app's developer.
+
+    Args:
+        request: FastAPI request, used by Starlette's ``TemplateResponse``.
+        locale: Resolved locale code (``"en"``/``"ja"``).
+        error: The OAuth error the request failed with.
+
+    Returns:
+        ``HTMLResponse`` with ``status_code=400``.
+    """
+    return templates.TemplateResponse(
+        request,
+        "oauth_authorize_error.html",
+        {
+            "messages": get_oauth_messages(locale),
+            "locale": locale,
+            "oauth_error": str(error.error),
+            "oauth_error_description": str(error.description or ""),
+        },
+        status_code=400,
+    )
+
+
 def _authorization_error_redirect(
     redirect_uri: str,
     error: OAuth2Error,
     state: str | None,
-    status_code: int,
+    status_code: int = 303,
 ) -> RedirectResponse:
     """Report an authorization request error to the client (RFC 6749 §4.1.2.1).
 
-    Only for a ``redirect_uri`` already checked against the client's
-    registration; an unregistered one gets the error page instead.
+    Used after the consent submission. Only for a ``redirect_uri`` already
+    checked against the client's registration; an unregistered one gets the
+    error page instead.
 
     Args:
         redirect_uri: The client's registered redirect URI.
         error: The OAuth error to report.
         state: The request's ``state``, echoed back when present.
-        status_code: 302 from GET, 303 from the consent POST.
+        status_code: HTTP status of the redirect (303 from the consent POST).
 
     Returns:
         A redirect carrying ``error``, ``error_description`` and ``state``.
@@ -1630,11 +1672,12 @@ async def oauth_authorize_get(
     """OAuth2 authorization endpoint (consent screen).
 
     Before the consent screen is shown, the request must pass the rules the
-    consent submission applies (#1686): ``code_challenge_method=S256`` (and a
-    ``code_challenge`` from public clients), a grantable ``scope``, and a
-    ``resource`` naming this server's MCP resource. A failing request is
-    redirected to the registered ``redirect_uri`` with the OAuth error. The
-    screen lists the permissions of the granted scope.
+    consent submission applies (#1686): a grantable ``scope``,
+    ``code_challenge_method=S256`` (and a ``code_challenge`` from public
+    clients), and a ``resource`` naming this server's MCP resource. A failing
+    request gets an error page (400) showing the OAuth error; nothing is sent
+    to the client before the user acts. The screen lists the permissions of
+    the granted scope.
 
     Every parameter travels to the consent POST in its query string, and the
     POST validates them again through the grant.
@@ -1693,7 +1736,7 @@ async def oauth_authorize_get(
                 client_id=client_id,
                 error=error.error,
             )
-            return _authorization_error_redirect(redirect_uri, error, state, status_code=302)
+            return _render_authorization_request_error(request, locale, error)
 
         # Get i18n messages
         messages = get_oauth_messages(locale)
@@ -1855,7 +1898,7 @@ async def oauth_authorize_post(
 
         # OAuth2Error → redirect with structured error params.
         if isinstance(e, OAuth2Error):
-            return _authorization_error_redirect(redirect_uri, e, state, status_code=303)
+            return _authorization_error_redirect(redirect_uri, e, state)
 
         # Generic exception → redirect with server_error.
         params = {"error": "server_error", "error_description": str(e)}
@@ -2150,7 +2193,8 @@ _RFC6749_ERROR_CONTENT = {
             "description": (
                 "RFC 6749 §5.2 error: `invalid_request` for a missing or unsupported "
                 "Content-Type, a malformed body or a missing `client_id`; "
-                "`invalid_client` for an unknown `client_id`"
+                "`invalid_client` for an unknown `client_id`; `invalid_scope` for a "
+                "client registered without a memory scope"
             ),
             "content": _RFC6749_ERROR_CONTENT,
         },
@@ -2196,8 +2240,11 @@ async def device_authorize(request: Request) -> DeviceAuthorizationResponse | JS
     refused body still counts. A missing or unsupported Content-Type, a
     malformed body or a missing ``client_id`` returns 400 ``invalid_request``,
     an oversized body returns 413 ``invalid_request``, an unknown ``client_id``
-    returns 400 ``invalid_client`` and a failure to store the grant returns 500
+    returns 400 ``invalid_client``, a client registered without a memory scope
+    returns 400 ``invalid_scope`` and a failure to store the grant returns 500
     ``server_error``, all in the RFC 6749 §5.2 error shape.
+
+    The granted scope follows ``granted_scope`` (#1686), as at ``/authorize``.
     """
     settings = get_settings()
     if await _device_flow_rate_limited(
@@ -2232,10 +2279,17 @@ async def device_authorize(request: Request) -> DeviceAuthorizationResponse | JS
             # unknown client ``invalid_client``.
             return rfc6749_error_response(error="invalid_client", description="Unknown client_id")
 
+        # The /authorize rule (#1686): requested ∩ registered ∩ defined, or the
+        # registered scope when no memory scope is left.
+        scope = granted_scope(body.scope, client.scope)
+        if not scope:
+            return rfc6749_error_response(
+                error="invalid_scope",
+                description="This client is registered without a memory scope.",
+            )
+
         device_code = secrets.token_urlsafe(32)
         user_code = generate_user_code()
-
-        scope = client.get_allowed_scope(body.scope or "")
 
         expires_at_val = utcnow() + timedelta(seconds=settings.oauth_device_code_expires_in)
 

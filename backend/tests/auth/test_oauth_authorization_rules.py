@@ -1,7 +1,8 @@
 """Unit tests for the authorization request rules in ``auth.oauth2_server`` (#1686).
 
 Scope (RFC 6749 §3.3), PKCE with ``S256`` only (RFC 7636) and resource
-indicators (RFC 8707). The end-to-end behaviour through the endpoints is in
+indicators (RFC 8707), including the shared MCP-resource helper in
+``auth.mcp_resource``. The end-to-end behaviour through the endpoints is in
 ``tests/api/test_oauth_authorization_code_flow.py``.
 """
 
@@ -28,6 +29,7 @@ from authlib.oauth2.rfc7636 import create_s256_code_challenge  # noqa: E402
 
 from api.routes.well_known import oauth_protected_resource  # noqa: E402
 from auth import oauth2_server as mod  # noqa: E402
+from auth.mcp_resource import is_same_mcp_resource, mcp_resource_identifier  # noqa: E402
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE  # noqa: E402
 from auth.oauth2_server import (  # noqa: E402
     AuthorizationCodeGrant,
@@ -36,13 +38,14 @@ from auth.oauth2_server import (  # noqa: E402
     S256CodeChallenge,
     check_code_challenge,
     granted_scope,
-    mcp_resource_identifier,
     requested_resource,
-    same_resource,
+    settle_audience,
     validate_authorization_parameters,
 )
 
 MCP = "https://memory.example.test/mcp"
+WORKSPACE_ID = "3f2b8c1e-5d6a-4b7c-9e0f-1a2b3c4d5e6f"
+FOREIGN = "https://other.example/mcp"
 
 
 @pytest.fixture(autouse=True)
@@ -93,9 +96,17 @@ class TestGrantedScope:
                 DCR_DEFAULT_SCOPE,
                 "memory:write memory:read",
             ),
-            # Nothing grantable.
-            ("undefined:scope", DCR_DEFAULT_SCOPE, ""),
+            # No memory scope left: the registered scope is granted.
+            ("claudeai", DCR_DEFAULT_SCOPE, DCR_DEFAULT_SCOPE),
+            ("openid offline_access", DCR_DEFAULT_SCOPE, DCR_DEFAULT_SCOPE),
+            ("openid", "memory:read openid", "memory:read openid"),
+            ("undefined:scope", DCR_DEFAULT_SCOPE, DCR_DEFAULT_SCOPE),
+            ("memory:admin", DCR_DEFAULT_SCOPE, DCR_DEFAULT_SCOPE),
+            ("memory:read", "legacy:scope memory:write", "memory:write"),
+            # Nothing grantable: the registration has no memory scope.
             ("memory:read", "", ""),
+            ("openid", "openid offline_access", ""),
+            (None, "legacy:scope", ""),
         ],
     )
     def test_granted_scope(self, requested: str | None, registered: str, granted: str) -> None:
@@ -107,8 +118,10 @@ class TestGrantedScope:
 # ---------------------------------------------------------------------------
 
 
-class TestResource:
-    async def test_identifier_matches_the_protected_resource_metadata(
+class TestMcpResource:
+    """``auth.mcp_resource``: the published identifier and the matching rule."""
+
+    async def test_identifier_is_the_protected_resource_metadata(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         for frontend, mcp_path in (
@@ -125,42 +138,110 @@ class TestResource:
             assert mcp_resource_identifier() == published
 
     @pytest.mark.parametrize(
-        ("first", "second", "same"),
+        "value",
         [
-            (MCP, MCP, True),
-            (MCP, f"{MCP}/", True),
-            (MCP, "HTTPS://Memory.Example.Test/mcp", True),
-            (MCP, "https://memory.example.test/mcp//", False),
-            (MCP, "https://memory.example.test/mcp/sse", False),
-            (MCP, "https://other.example/mcp", False),
-            (MCP, "https://memory.example.test/mcp#fragment", False),
-            (MCP, "http://memory.example.test/mcp", False),
-            (MCP, "http://[::1", False),
+            MCP,
+            f"{MCP}/",
+            f"{MCP}/w/{WORKSPACE_ID}",
+            f"{MCP}/sse",
+            f"{MCP}?profile=core",
+            f"{MCP}/w/{WORKSPACE_ID}?profile=core&guardrails=off",
+            f"{MCP}#fragment",
+            "HTTPS://Memory.Example.Test/mcp",
+            "https://memory.example.test:443/mcp",
         ],
     )
-    def test_same_resource(self, first: str, second: str, same: bool) -> None:
-        assert same_resource(first, second) is same
+    def test_names_the_mcp_resource(self, value: str) -> None:
+        assert is_same_mcp_resource(value) is True
 
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "http://memory.example.test/mcp",
+            "https://memory.example.test:8443/mcp",
+            FOREIGN,
+            "https://memory.example.test.other.example/mcp",
+            "https://memory.example.test",
+            "https://memory.example.test/",
+            "https://memory.example.test/mcpx",
+            "https://memory.example.test/api/v1/memory",
+            "https://user@memory.example.test/mcp",
+            f"{MCP}/../api",
+            f"{MCP}/%2e%2e/api",
+            "/mcp",
+            "not a url",
+            "",
+            "http://[::1",
+            "https://memory.example.test:port/mcp",
+        ],
+    )
+    def test_does_not_name_the_mcp_resource(self, value: str) -> None:
+        assert is_same_mcp_resource(value) is False
+
+    def test_default_port_in_the_published_identifier(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("FRONTEND_URL", "https://memory.example.test:443")
+        assert is_same_mcp_resource(MCP) is True
+
+    def test_explicit_port_and_base_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FRONTEND_URL", "http://127.0.0.1:8080")
+        monkeypatch.setenv("MCP_BASE_PATH", "/custom-mcp")
+        assert is_same_mcp_resource("http://127.0.0.1:8080/custom-mcp/w/x") is True
+        assert is_same_mcp_resource("http://127.0.0.1/custom-mcp") is False
+        assert is_same_mcp_resource("http://127.0.0.1:8080/mcp") is False
+
+
+class TestRequestedResource:
     def test_absent_or_empty_resource(self) -> None:
         assert requested_resource(_payload()) is None
         assert requested_resource(_payload(resource="")) is None
 
-    @pytest.mark.parametrize("value", [MCP, f"{MCP}/"])
+    @pytest.mark.parametrize(
+        "value",
+        [MCP, f"{MCP}/", f"{MCP}/w/{WORKSPACE_ID}", f"{MCP}?profile=core", f"{MCP}/sse"],
+    )
     def test_mcp_resource_is_returned_as_published(self, value: str) -> None:
         assert requested_resource(_payload(resource=value)) == MCP
 
-    @pytest.mark.parametrize(
-        "value", ["https://other.example/mcp", "https://memory.example.test/api", "not a url"]
-    )
+    @pytest.mark.parametrize("value", [FOREIGN, "https://memory.example.test/api", "not a url"])
     def test_other_resource_is_invalid_target(self, value: str) -> None:
         with pytest.raises(InvalidTargetError) as excinfo:
             requested_resource(_payload(resource=value))
         assert excinfo.value.error == "invalid_target"
 
     def test_every_value_must_name_the_mcp_resource(self) -> None:
-        assert requested_resource(_multi_payload(resource=[MCP, f"{MCP}/"])) == MCP
+        assert requested_resource(_multi_payload(resource=[MCP, f"{MCP}/w/x"])) == MCP
         with pytest.raises(InvalidTargetError):
-            requested_resource(_multi_payload(resource=[MCP, "https://other.example/mcp"]))
+            requested_resource(_multi_payload(resource=[MCP, FOREIGN]))
+
+
+class TestSettleAudience:
+    """Audience of a token from a code or a refresh token (``settle_audience``)."""
+
+    @pytest.mark.parametrize(
+        ("requested", "bound", "audience"),
+        [
+            (None, None, None),
+            (None, "", None),
+            (MCP, None, MCP),
+            (None, MCP, MCP),
+            (MCP, MCP, MCP),
+            # A bound audience stored in another accepted form is normalised.
+            (None, f"{MCP}/w/{WORKSPACE_ID}", MCP),
+            (MCP, f"{MCP}/w/{WORKSPACE_ID}", MCP),
+            (None, f"{MCP}?profile=core", MCP),
+            (MCP, f"{MCP}/", MCP),
+            # A bound foreign audience is kept when the request names none.
+            (None, FOREIGN, FOREIGN),
+        ],
+    )
+    def test_audience(self, requested: str | None, bound: str | None, audience: str | None) -> None:
+        assert settle_audience(requested, bound) == audience
+
+    def test_request_naming_the_mcp_resource_against_a_foreign_audience(self) -> None:
+        with pytest.raises(InvalidTargetError):
+            settle_audience(MCP, FOREIGN)
 
 
 # ---------------------------------------------------------------------------
@@ -323,13 +404,22 @@ class TestValidateAuthorizationParameters:
         )
         assert validate_authorization_parameters(_client(), payload) == "memory:read"
 
-    def test_nothing_grantable_is_invalid_scope(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_memory_scope_requested_gets_the_registered_scope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         self._settings(monkeypatch, True)
         payload = _payload(
-            scope="undefined:scope", code_challenge=_CHALLENGE, code_challenge_method="S256"
+            scope="claudeai", code_challenge=_CHALLENGE, code_challenge_method="S256"
         )
+        assert validate_authorization_parameters(_client(), payload) == DCR_DEFAULT_SCOPE
+
+    def test_registration_without_memory_scope_is_invalid_scope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._settings(monkeypatch, True)
+        payload = _payload(scope="openid", code_challenge=_CHALLENGE, code_challenge_method="S256")
         with pytest.raises(InvalidScopeError):
-            validate_authorization_parameters(_client(), payload)
+            validate_authorization_parameters(_client(scope="openid offline_access"), payload)
 
     def test_pkce_rules_apply_when_enforced(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._settings(monkeypatch, True)
@@ -349,7 +439,7 @@ class TestValidateAuthorizationParameters:
         payload = _payload(
             code_challenge=_CHALLENGE,
             code_challenge_method="S256",
-            resource="https://other.example/mcp",
+            resource=FOREIGN,
         )
         with pytest.raises(InvalidTargetError):
             validate_authorization_parameters(_client(), payload)

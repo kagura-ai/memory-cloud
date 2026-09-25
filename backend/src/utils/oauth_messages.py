@@ -2,6 +2,7 @@
 
 Issue #221: Internationalization support for OAuth authorization page.
 Issue #218: Error page messages for invalid redirect_uri pre-check.
+Issue #1686: Error page messages for an authorization request refused before consent.
 Supports English and Japanese.
 """
 
@@ -35,6 +36,17 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
             "to update the redirect_uri it sends to Kagura."
         ),
         "error_redirect_uri_label": "Attempted redirect_uri",
+        "error_request_heading": "This authorization request cannot be completed",
+        "error_request_body": (
+            "Kagura Memory Cloud cannot accept the authorization request this "
+            "app sent. The consent screen was not shown and nothing was shared "
+            "with the app."
+        ),
+        "error_request_what_to_do": (
+            "Go back to the app and connect again. If this keeps happening, "
+            "send the app's developer the error below."
+        ),
+        "error_code_label": "Error",
     },
     "ja": {
         "title": "認可リクエスト",
@@ -65,6 +77,17 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
             "redirect_uri を修正してもらってください。"
         ),
         "error_redirect_uri_label": "リクエストされた redirect_uri",
+        "error_request_heading": "この認可リクエストは完了できません",
+        "error_request_body": (
+            "このアプリから送られた認可リクエストを Kagura Memory Cloud は"
+            "受け付けられません。認可画面は表示されず、アプリには何も共有"
+            "されていません。"
+        ),
+        "error_request_what_to_do": (
+            "アプリに戻って、もう一度接続してください。繰り返し発生する場合は、"
+            "下のエラーをアプリの開発者に伝えてください。"
+        ),
+        "error_code_label": "エラー",
     },
 }
 

@@ -408,16 +408,17 @@ class TestSaveAuthorizationCode:
 
 class TestAuthorizationCodeQueryDelete:
     def test_query_authorization_code_found(self) -> None:
+        # The row is read with SELECT ... FOR UPDATE (#1686).
         grant = _make_authz_grant()
         code = _make_authz_code()
-        grant.server.db_session.query().filter_by().first.return_value = code
+        grant.server.db_session.query().filter_by().with_for_update().first.return_value = code
 
         result = grant.query_authorization_code("the-code-1234567890", _make_client())
         assert result is code
 
     def test_query_authorization_code_not_found(self) -> None:
         grant = _make_authz_grant()
-        grant.server.db_session.query().filter_by().first.return_value = None
+        grant.server.db_session.query().filter_by().with_for_update().first.return_value = None
 
         result = grant.query_authorization_code("missing", _make_client())
         assert result is None
@@ -425,19 +426,57 @@ class TestAuthorizationCodeQueryDelete:
     def test_query_authorization_code_expired_returns_none(self) -> None:
         grant = _make_authz_grant()
         expired = _make_authz_code(expires_at=utcnow() - timedelta(seconds=1))
-        grant.server.db_session.query().filter_by().first.return_value = expired
+        grant.server.db_session.query().filter_by().with_for_update().first.return_value = expired
 
         result = grant.query_authorization_code("the-code-1234567890", _make_client())
         assert result is None
 
-    def test_delete_authorization_code(self) -> None:
+    def test_delete_authorization_code_is_a_no_op(self) -> None:
+        # save_token consumed the code in the token's transaction (#1686).
         grant = _make_authz_grant()
         code = _make_authz_code()
 
         grant.delete_authorization_code(code)
 
-        grant.server.db_session.delete.assert_called_once_with(code)
-        grant.server.db_session.commit.assert_called_once()
+        grant.server.db_session.delete.assert_not_called()
+        grant.server.db_session.commit.assert_not_called()
+
+    def _exchange_grant(self, deleted_rows: int) -> AuthorizationCodeGrant:
+        grant = _make_authz_grant()
+        grant.request = SimpleNamespace(
+            client=_make_client(),
+            user=SimpleNamespace(user_id="user-abc"),
+            authorization_code=_make_authz_code(id=7),
+        )
+        grant.server.db_session.query().filter_by().delete.return_value = deleted_rows
+        grant.server.db_session.reset_mock()
+        return grant
+
+    def test_save_token_consumes_the_code_with_the_token(self) -> None:
+        grant = self._exchange_grant(deleted_rows=1)
+
+        grant.save_token({"access_token": "at", "refresh_token": "rt", "scope": "memory:read"})
+
+        session = grant.server.db_session
+        session.query.assert_called_once_with(OAuth2AuthorizationCode)
+        session.query().filter_by.assert_called_with(id=7)
+        added = session.add.call_args.args[0]
+        assert isinstance(added, OAuth2Token)
+        session.commit.assert_called_once()
+        session.rollback.assert_not_called()
+
+    def test_save_token_refuses_a_code_already_consumed(self) -> None:
+        from authlib.oauth2.rfc6749.errors import InvalidGrantError
+
+        grant = self._exchange_grant(deleted_rows=0)
+
+        with pytest.raises(InvalidGrantError):
+            grant.save_token({"access_token": "at", "refresh_token": "rt"})
+
+        session = grant.server.db_session
+        session.add.assert_not_called()
+        session.commit.assert_not_called()
+        session.rollback.assert_called_once()
 
     def test_authenticate_user_wraps_user_id(self) -> None:
         grant = _make_authz_grant()

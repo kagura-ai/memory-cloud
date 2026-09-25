@@ -32,11 +32,9 @@ References:
 """
 
 import logging
-import os
 import secrets
 from datetime import timedelta
 from typing import Any, cast
-from urllib.parse import urlsplit
 
 from authlib.oauth2 import OAuth2Request
 from authlib.oauth2.rfc6749 import grants
@@ -55,6 +53,7 @@ from authlib.oauth2.rfc7636.challenge import (
 from authlib.oauth2.rfc8628 import DeviceCodeGrant as _DeviceCodeGrant
 from sqlalchemy.orm import Session
 
+from auth.mcp_resource import is_same_mcp_resource, mcp_resource_identifier
 from auth.mcp_scopes import ALL_ADVERTISED_SCOPES
 from config.settings import get_settings
 from models.auth import (
@@ -93,57 +92,14 @@ class InvalidTargetError(OAuth2Error):
     error = "invalid_target"
 
 
-def mcp_resource_identifier() -> str:
-    """The resource identifier of this server's MCP endpoint.
-
-    Built from the same settings as the ``resource`` field of
-    ``/.well-known/oauth-protected-resource`` (``FRONTEND_URL`` plus
-    ``MCP_BASE_PATH``), so a token's audience is the value clients discover.
-
-    Returns:
-        The published MCP resource URL, e.g. ``https://memory.example.com/mcp``.
-    """
-    base_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
-    return f"{base_url}{os.getenv('MCP_BASE_PATH', '/mcp')}"
-
-
-def same_resource(first: str, second: str) -> bool:
-    """Compare two resource indicators.
-
-    Scheme and host compare case-insensitively and one trailing slash on the
-    path is ignored, so ``.../mcp`` and ``.../mcp/`` name the same resource.
-
-    Args:
-        first: A resource indicator.
-        second: Another resource indicator.
-
-    Returns:
-        True when both name the same resource.
-    """
-
-    def key(value: str) -> tuple[str, str, str, str, str]:
-        parts = urlsplit(value)
-        return (
-            parts.scheme.lower(),
-            parts.netloc.lower(),
-            parts.path.removesuffix("/"),
-            parts.query,
-            parts.fragment,
-        )
-
-    try:
-        return key(first) == key(second)
-    except ValueError:  # e.g. a malformed IPv6 host
-        return False
-
-
 def requested_resource(payload: Any) -> str | None:
     """Read the RFC 8707 ``resource`` of an authorization or token request.
 
-    Every ``resource`` value must name this server's MCP resource. The
-    published identifier (:func:`mcp_resource_identifier`) is returned, so the
-    audience stored on codes and tokens is always the discoverable value. A
-    parameter sent without a value counts as omitted (RFC 6749 §3.1).
+    Every ``resource`` value must name this server's MCP resource
+    (:func:`auth.mcp_resource.is_same_mcp_resource`: the published identifier,
+    a path beneath it, any query). The published identifier is returned, so
+    codes and tokens always store the discoverable value. A parameter sent
+    without a value counts as omitted (RFC 6749 §3.1).
 
     Args:
         payload: The request payload (``data`` and ``datalist``).
@@ -157,24 +113,59 @@ def requested_resource(payload: Any) -> str | None:
     values = [value for value in payload.datalist.get("resource", []) if value]
     if not values:
         return None
-    resource = mcp_resource_identifier()
-    if not all(same_resource(value, resource) for value in values):
+    if not all(is_same_mcp_resource(value) for value in values):
         raise InvalidTargetError(
             description=(
                 "Unknown resource. Use the resource published at "
                 "/.well-known/oauth-protected-resource."
             )
         )
-    return resource
+    return mcp_resource_identifier()
+
+
+def settle_audience(requested: str | None, bound: str | None) -> str | None:
+    """Audience of a token issued for an authorization code or a refresh token.
+
+    Args:
+        requested: The token request's ``resource`` as returned by
+            :func:`requested_resource` (the published identifier or ``None``).
+        bound: The ``resource`` the code or the refreshed token carries. It
+            may have been stored before these rules, in any form.
+
+    Returns:
+        The published identifier when ``bound`` names the MCP resource in any
+        form :func:`auth.mcp_resource.is_same_mcp_resource` accepts;
+        ``requested`` when nothing is bound; otherwise ``bound`` unchanged.
+
+    Raises:
+        InvalidTargetError: ``bound`` names another resource and the request
+            names one too.
+    """
+    if not bound:
+        return requested
+    if is_same_mcp_resource(bound):
+        return mcp_resource_identifier()
+    if requested is not None:
+        raise InvalidTargetError(
+            description="The resource differs from the one this grant is bound to."
+        )
+    return bound
+
+
+def _names_memory_scope(scopes: list[str]) -> bool:
+    return any(scope.startswith("memory:") for scope in scopes)
 
 
 def granted_scope(requested: str | None, registered: str | None) -> str:
     """Scope an authorization request is granted (RFC 6749 §3.3).
 
     The requested scopes that the client registered and that this server
-    defines (``ALL_ADVERTISED_SCOPES``). A request without ``scope`` gets the
-    client's registered scope. Other scopes are dropped rather than refused,
-    which §3.3 allows; the token response carries the granted ``scope``.
+    defines (``ALL_ADVERTISED_SCOPES``); other requested scopes are dropped,
+    which §3.3 allows, and the token response carries the granted ``scope``.
+    When that leaves no ``memory:*`` scope (the request had none the client
+    may have, e.g. only ``openid`` / ``offline_access`` or scopes this server
+    does not define, or no ``scope`` at all), the client's registered scope
+    that this server defines is granted instead.
 
     Args:
         requested: The ``scope`` parameter of the request, if any.
@@ -182,18 +173,25 @@ def granted_scope(requested: str | None, registered: str | None) -> str:
 
     Returns:
         The granted scopes, space-separated, in request (or registration)
-        order without duplicates. Empty when nothing can be granted.
+        order without duplicates. Empty only when the registered scope has
+        no ``memory:*`` scope this server defines.
     """
-    allowed = set((registered or "").split()) & set(ALL_ADVERTISED_SCOPES)
-    source = (requested or "").split() or (registered or "").split()
-    return " ".join(dict.fromkeys(scope for scope in source if scope in allowed))
+    advertised = set(ALL_ADVERTISED_SCOPES)
+    registration = [
+        scope for scope in dict.fromkeys((registered or "").split()) if scope in advertised
+    ]
+    if not _names_memory_scope(registration):
+        return ""
+    allowed = set(registration)
+    granted = [scope for scope in dict.fromkeys((requested or "").split()) if scope in allowed]
+    if _names_memory_scope(granted):
+        return " ".join(granted)
+    return " ".join(registration)
 
 
 def _raise_if_no_scope(scope: str) -> None:
     if not scope:
-        raise InvalidScopeError(
-            description="None of the requested scopes is available to this client."
-        )
+        raise InvalidScopeError(description="This client is registered without a memory scope.")
 
 
 def check_code_challenge(payload: Any, client: OAuth2Client, required: bool) -> None:
@@ -511,21 +509,20 @@ class AuthorizationCodeGrant(_ResourceBoundGrant, grants.AuthorizationCodeGrant)
     def validate_token_request(self) -> None:
         """Validate the code exchange and settle the token's audience.
 
-        The audience is the token request's ``resource`` or else the one the
-        authorization request carried with the code (RFC 8707 §2.2).
+        The audience is the ``resource`` the authorization request carried
+        with the code, or else the token request's (RFC 8707 §2.2); see
+        :func:`settle_audience`.
 
         Raises:
             OAuth2Error: The request is invalid; ``invalid_target`` when the
-                token request names a different resource than the code.
+                token request's ``resource`` is not this server's MCP resource
+                or differs from the code's.
         """
         super().validate_token_request()
         code = cast(OAuth2AuthorizationCode, self.request.authorization_code)
-        resource = requested_resource(self.request.payload)
-        if resource and code.resource and not same_resource(resource, code.resource):
-            raise InvalidTargetError(
-                description="The resource differs from the one in the authorization request."
-            )
-        self.token_resource = resource or code.resource
+        self.token_resource = settle_audience(
+            requested_resource(self.request.payload), code.resource
+        )
 
     def generate_token(
         self,
@@ -605,7 +602,9 @@ class AuthorizationCodeGrant(_ResourceBoundGrant, grants.AuthorizationCodeGrant)
     ) -> OAuth2AuthorizationCode | None:
         """Query authorization code from database.
 
-        Called by Authlib during token exchange.
+        Called by Authlib during token exchange. The row is locked
+        (``SELECT ... FOR UPDATE``) until the exchange commits, so a concurrent
+        exchange of the same code waits for it and then finds no code.
 
         Args:
             code: Authorization code
@@ -617,6 +616,7 @@ class AuthorizationCodeGrant(_ResourceBoundGrant, grants.AuthorizationCodeGrant)
         auth_code = (
             self.server.db_session.query(OAuth2AuthorizationCode)
             .filter_by(code=code, client_id=client.client_id)
+            .with_for_update()
             .first()
         )
 
@@ -629,22 +629,39 @@ class AuthorizationCodeGrant(_ResourceBoundGrant, grants.AuthorizationCodeGrant)
 
         return auth_code
 
-    def delete_authorization_code(self, authorization_code: OAuth2AuthorizationCode) -> None:
-        """Delete authorization code after use.
+    def save_token(self, token: dict[str, Any]) -> None:
+        """Consume the authorization code and store the token in one transaction.
 
-        Called by Authlib after successful token exchange.
-        Codes are single-use only.
+        The code row is deleted first and the delete must remove exactly that
+        row, so of two exchanges of one code only one issues a token.
+
+        Raises:
+            InvalidGrantError: The code was consumed by another exchange.
+        """
+        code = cast(OAuth2AuthorizationCode, self.request.authorization_code)
+        client_id = code.client_id
+        session = self.server.db_session
+        consumed = (
+            session.query(OAuth2AuthorizationCode)
+            .filter_by(id=code.id)
+            .delete(synchronize_session=False)
+        )
+        if consumed != 1:
+            session.rollback()
+            logger.warning("authorization_code_already_consumed", client_id=client_id)
+            raise InvalidGrantError("Invalid 'code' in request.")
+        super().save_token(token)
+        logger.info("authorization_code_consumed", client_id=client_id)
+
+    def delete_authorization_code(self, authorization_code: OAuth2AuthorizationCode) -> None:
+        """Called by Authlib after a successful exchange.
+
+        Nothing is left to do: :meth:`save_token` deleted the code in the
+        transaction that stored the token.
 
         Args:
-            authorization_code: OAuth2AuthorizationCode instance to delete
+            authorization_code: The exchanged code (no longer in the database).
         """
-        self.server.db_session.delete(authorization_code)
-        self.server.db_session.commit()
-
-        logger.info(
-            f"Authorization code deleted: code={authorization_code.code[:8]}..., "
-            f"client={authorization_code.client_id}"
-        )
 
     def authenticate_user(self, authorization_code: OAuth2AuthorizationCode) -> Any:
         """Get user from authorization code.
@@ -691,22 +708,23 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
     def validate_token_request(self) -> None:
         """Validate the refresh request and settle the new token's audience.
 
-        The new token keeps the refreshed token's audience. A token issued
-        without one takes the request's ``resource``, which can only name
-        this server's MCP resource and so narrows it.
+        The new token keeps the refreshed token's audience, stored as the
+        published identifier when it names the MCP resource in any accepted
+        form (a token may carry ``.../mcp/w/<id>`` or ``.../mcp?profile=...``
+        from before). A token issued without one takes the request's
+        ``resource``, which can only name this server's MCP resource and so
+        narrows it. See :func:`settle_audience`.
 
         Raises:
             OAuth2Error: The request is invalid; ``invalid_target`` when the
-                ``resource`` differs from the refreshed token's audience.
+                ``resource`` is not this server's MCP resource or differs from
+                the refreshed token's audience.
         """
         super().validate_token_request()
         credential = cast(OAuth2Token, self.request.refresh_token)
-        resource = requested_resource(self.request.payload)
-        if resource and credential.resource and not same_resource(resource, credential.resource):
-            raise InvalidTargetError(
-                description="The resource differs from the audience of the refresh token."
-            )
-        self.token_resource = credential.resource or resource
+        self.token_resource = settle_audience(
+            requested_resource(self.request.payload), credential.resource
+        )
 
     def generate_token(
         self,

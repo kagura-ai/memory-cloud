@@ -144,6 +144,15 @@ h1 {
     <span class="badge-text">{{ messages.error_badge }}</span>
   </div>
 </div>
+{% if oauth_error %}
+<h1>{{ messages.error_request_heading }}</h1>
+<div class="body-text">{{ messages.error_request_body }}</div>
+<div class="what-to-do">{{ messages.error_request_what_to_do }}</div>
+<div class="detail">
+<div class="detail-label">{{ messages.error_code_label }}</div>
+<div class="detail-value">{{ oauth_error }}{% if oauth_error_description %}: {{ oauth_error_description }}{% endif %}</div>
+</div>
+{% else %}
 <h1>{{ messages.error_invalid_redirect_uri_heading }}</h1>
 <div class="body-text">{{ messages.error_invalid_redirect_uri_body }}</div>
 <div class="what-to-do">{{ messages.error_what_to_do }}</div>
@@ -152,6 +161,7 @@ h1 {
 <div class="detail-label">{{ messages.error_redirect_uri_label }}</div>
 <div class="detail-value">{{ redirect_uri }}</div>
 </div>
+{% endif %}
 {% endif %}
 </div>
 </body>

@@ -6,11 +6,14 @@ holding the OAuth tables (the pattern of ``test_device_code_endpoints.py``),
 and pins the authorization server rules:
 
 - the token endpoint logs the grant type and parameter names, never values;
+- a request refused before consent gets an error page, not a redirect;
 - PKCE accepts ``S256`` only, and a public client must send a challenge;
-- the granted scope is requested ∩ registered ∩ advertised;
+- the granted scope is requested ∩ registered ∩ advertised, or the registered
+  scope when that leaves no ``memory:*`` scope;
 - the authorization request's ``resource`` travels with the code and becomes
-  the token's audience; refresh keeps it; another resource is
-  ``invalid_target``.
+  the token's audience, stored as the published MCP resource; refresh keeps
+  it; another resource is ``invalid_target``;
+- a code is exchanged once.
 """
 
 from __future__ import annotations
@@ -54,7 +57,10 @@ from utils.datetime import utcnow  # noqa: E402
 FRONTEND = "https://memory.example.test"
 MCP_RESOURCE = f"{FRONTEND}/mcp"
 REDIRECT_URI = "http://127.0.0.1:53682/callback"
+WORKSPACE_ID = "3f2b8c1e-5d6a-4b7c-9e0f-1a2b3c4d5e6f"
+FOREIGN_RESOURCE = "https://other.example/mcp"
 PUBLIC_CLIENT = "oauth_flow_public"
+NO_MEMORY_CLIENT = "oauth_flow_no_memory_scope"
 CONFIDENTIAL_CLIENT = "oauth_flow_confidential"
 CONFIDENTIAL_SECRET = "confidential-client-secret-for-the-flow-test"
 USER_ID = "flow-user"
@@ -82,6 +88,16 @@ def db_factory() -> Iterator[sessionmaker]:
                     client_secret_hash="",
                     client_name="Flow Public Client",
                     scope=DCR_DEFAULT_SCOPE,
+                    token_endpoint_auth_method="none",
+                    provider="claude",
+                    **common,
+                ),
+                # A public client registered without any memory scope.
+                OAuth2Client(
+                    client_id=NO_MEMORY_CLIENT,
+                    client_secret_hash="",
+                    client_name="Flow No Memory Scope Client",
+                    scope="openid offline_access",
                     token_endpoint_auth_method="none",
                     provider="claude",
                     **common,
@@ -157,6 +173,24 @@ def _redirect_params(response: Any) -> dict[str, str]:
     location = response.headers["location"]
     assert location.startswith(REDIRECT_URI), location
     return {key: values[0] for key, values in parse_qs(urlsplit(location).query).items()}
+
+
+def _assert_error_page(response: Any, error: str) -> None:
+    """The authorization request was refused before consent: page, no redirect."""
+    assert response.status_code == 400, response.text[:300]
+    assert "location" not in response.headers
+    assert response.headers["content-type"].startswith("text/html")
+    assert error in response.text
+    assert 'name="confirm" value="yes"' not in response.text
+
+
+def _submit_consent(api: TestClient, params: dict[str, str]) -> Any:
+    """POST the consent form directly (without loading the consent page)."""
+    return api.post(
+        f"/api/v1/oauth/authorize?{urlencode(params)}",
+        data={"confirm": "yes"},
+        follow_redirects=False,
+    )
 
 
 def _consent(api: TestClient, params: dict[str, str]) -> dict[str, str]:
@@ -311,23 +345,15 @@ class TestPkceS256Only:
             follow_redirects=False,
         )
 
-        assert response.status_code == 302
-        redirect = _redirect_params(response)
-        assert redirect["error"] == "invalid_request"
-        assert "S256" in redirect["error_description"]
-        assert redirect["state"] == "flow-state"
+        _assert_error_page(response, "invalid_request")
+        assert "S256" in response.text
         assert _codes(db_factory) == 0
 
     def test_plain_method_is_refused_at_consent_submission(
         self, api: TestClient, db_factory: sessionmaker
     ) -> None:
         verifier = secrets.token_urlsafe(48)
-        params = _authorize_params(challenge=verifier, method="plain")
-        response = api.post(
-            f"/api/v1/oauth/authorize?{urlencode(params)}",
-            data={"confirm": "yes"},
-            follow_redirects=False,
-        )
+        response = _submit_consent(api, _authorize_params(challenge=verifier, method="plain"))
 
         assert response.status_code == 303
         redirect = _redirect_params(response)
@@ -344,8 +370,7 @@ class TestPkceS256Only:
             follow_redirects=False,
         )
 
-        assert response.status_code == 302
-        assert _redirect_params(response)["error"] == "invalid_request"
+        _assert_error_page(response, "invalid_request")
 
     def test_public_client_without_challenge_is_refused(
         self, api: TestClient, db_factory: sessionmaker
@@ -356,10 +381,17 @@ class TestPkceS256Only:
             follow_redirects=False,
         )
 
-        assert response.status_code == 302
-        redirect = _redirect_params(response)
-        assert redirect["error"] == "invalid_request"
-        assert "code_challenge" in redirect["error_description"]
+        _assert_error_page(response, "invalid_request")
+        assert "code_challenge" in response.text
+        assert _codes(db_factory) == 0
+
+    def test_public_client_without_challenge_is_refused_at_consent_submission(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        response = _submit_consent(api, _authorize_params(method=None))
+
+        assert response.status_code == 303
+        assert _redirect_params(response)["error"] == "invalid_request"
         assert _codes(db_factory) == 0
 
     def test_confidential_client_without_challenge_is_served(self, api: TestClient) -> None:
@@ -457,16 +489,72 @@ class TestGrantedScope:
         tokens = _public_tokens_with_scope(api, None)
         assert tokens["scope"] == DCR_DEFAULT_SCOPE
 
-    def test_nothing_grantable_is_invalid_scope(self, api: TestClient) -> None:
+    @pytest.mark.parametrize(
+        "scope",
+        ["claudeai", "openid offline_access", "", "memory:admin undefined:scope"],
+    )
+    def test_no_memory_scope_requested_gets_the_registered_scope(
+        self, api: TestClient, scope: str
+    ) -> None:
+        tokens = _public_tokens_with_scope(api, scope)
+        assert tokens["scope"] == DCR_DEFAULT_SCOPE
+
+    def test_client_registered_without_memory_scope_gets_an_error_page(
+        self, api: TestClient
+    ) -> None:
         _, challenge = _pkce()
         response = api.get(
             "/api/v1/oauth/authorize",
-            params=_authorize_params(challenge=challenge, scope="memory:admin undefined:scope"),
+            params=_authorize_params(NO_MEMORY_CLIENT, challenge=challenge, scope="openid"),
             follow_redirects=False,
         )
 
-        assert response.status_code == 302
-        assert _redirect_params(response)["error"] == "invalid_scope"
+        _assert_error_page(response, "invalid_scope")
+
+    def test_consent_submission_checks_the_scope_again(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        _, challenge = _pkce()
+        response = _submit_consent(
+            api, _authorize_params(NO_MEMORY_CLIENT, challenge=challenge, scope="openid")
+        )
+
+        assert response.status_code == 303
+        redirect = _redirect_params(response)
+        assert redirect["error"] == "invalid_scope"
+        assert redirect["state"] == "flow-state"
+        assert _codes(db_factory) == 0
+
+    def test_consent_submission_grants_only_the_granted_scope(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        # A consent POST that did not come from the page asks for memory:admin,
+        # which the public client did not register.
+        verifier, challenge = _pkce()
+        response = _submit_consent(
+            api,
+            _authorize_params(challenge=challenge, scope="memory:read memory:admin"),
+        )
+        code = _redirect_params(response)["code"]
+        with db_factory() as db:
+            assert db.query(OAuth2AuthorizationCode).filter_by(code=code).one().scope == (
+                "memory:read"
+            )
+
+        assert _exchange(api, code, verifier)["scope"] == "memory:read"
+
+    def test_consent_page_for_a_request_without_memory_scope(self, api: TestClient) -> None:
+        _, challenge = _pkce()
+        page = api.get(
+            "/api/v1/oauth/authorize",
+            params=_authorize_params(challenge=challenge, scope="claudeai"),
+            headers={"Accept-Language": "en"},
+        )
+
+        assert page.status_code == 200
+        for line in ("Read your memories", "Write new memories", "Delete memories"):
+            assert line in page.text
+        assert "Manage your memory cloud" not in page.text
 
     def test_consent_page_lists_the_granted_permissions(self, api: TestClient) -> None:
         _, challenge = _pkce()
@@ -550,14 +638,11 @@ class TestResourceBinding:
         _, challenge = _pkce()
         response = api.get(
             "/api/v1/oauth/authorize",
-            params=_authorize_params(challenge=challenge, resource="https://other.example/mcp"),
+            params=_authorize_params(challenge=challenge, resource=FOREIGN_RESOURCE),
             follow_redirects=False,
         )
 
-        assert response.status_code == 302
-        redirect = _redirect_params(response)
-        assert redirect["error"] == "invalid_target"
-        assert redirect["state"] == "flow-state"
+        _assert_error_page(response, "invalid_target")
         assert _codes(db_factory) == 0
 
     def test_foreign_resource_is_refused_at_consent_submission(
@@ -671,3 +756,131 @@ class TestResourceBinding:
         assert narrowed.status_code == 200, narrowed.text
         stored = _stored_token(db_factory, narrowed.json()["access_token"])
         assert stored.resource == MCP_RESOURCE
+
+
+class TestResourceForms:
+    """Every form of the MCP resource is accepted and stored as published."""
+
+    @pytest.mark.parametrize(
+        "resource",
+        [
+            f"{MCP_RESOURCE}/w/{WORKSPACE_ID}",
+            f"{MCP_RESOURCE}?profile=core",
+            f"{MCP_RESOURCE}/w/{WORKSPACE_ID}?profile=core",
+            "HTTPS://Memory.Example.Test:443/mcp",
+        ],
+    )
+    def test_authorization_resource_forms(
+        self, api: TestClient, db_factory: sessionmaker, resource: str
+    ) -> None:
+        verifier, challenge = _pkce()
+        redirect = _consent(api, _authorize_params(challenge=challenge, resource=resource))
+        with db_factory() as db:
+            stored = db.query(OAuth2AuthorizationCode).filter_by(code=redirect["code"]).one()
+            assert stored.resource == MCP_RESOURCE
+
+        tokens = _exchange(api, redirect["code"], verifier, resource=resource)
+        assert _stored_token(db_factory, tokens["access_token"]).resource == MCP_RESOURCE
+
+    @pytest.mark.parametrize("resource", [f"{MCP_RESOURCE}/sse", f"{MCP_RESOURCE}/w/x"])
+    def test_token_request_resource_forms(
+        self, api: TestClient, db_factory: sessionmaker, resource: str
+    ) -> None:
+        verifier, challenge = _pkce()
+        redirect = _consent(api, _authorize_params(challenge=challenge, resource=MCP_RESOURCE))
+        tokens = _exchange(api, redirect["code"], verifier, resource=resource)
+        assert _stored_token(db_factory, tokens["access_token"]).resource == MCP_RESOURCE
+
+    @pytest.mark.parametrize(
+        "stored",
+        [f"{MCP_RESOURCE}/w/{WORKSPACE_ID}", f"{MCP_RESOURCE}?profile=core", f"{MCP_RESOURCE}/"],
+    )
+    @pytest.mark.parametrize("requested", [None, MCP_RESOURCE, f"{MCP_RESOURCE}/w/{WORKSPACE_ID}"])
+    def test_refresh_of_a_token_stored_with_another_form(
+        self,
+        api: TestClient,
+        db_factory: sessionmaker,
+        stored: str,
+        requested: str | None,
+    ) -> None:
+        # A token whose audience was stored in another accepted form.
+        tokens = _public_tokens(api, resource=None)
+        with db_factory() as db:
+            row = db.query(OAuth2Token).filter_by(access_token=tokens["access_token"]).one()
+            row.resource = stored
+            db.commit()
+
+        extra = {"resource": requested} if requested else {}
+        refreshed = _refresh(api, tokens["refresh_token"], **extra)
+
+        assert refreshed.status_code == 200, refreshed.text
+        stored_token = _stored_token(db_factory, refreshed.json()["access_token"])
+        assert stored_token.resource == MCP_RESOURCE
+
+    def test_code_stored_with_another_form(self, api: TestClient, db_factory: sessionmaker) -> None:
+        verifier, challenge = _pkce()
+        with db_factory() as db:
+            db.add(
+                OAuth2AuthorizationCode(
+                    code="workspace-form-code",
+                    client_id=PUBLIC_CLIENT,
+                    user_id=USER_ID,
+                    redirect_uri=REDIRECT_URI,
+                    scope="memory:read",
+                    code_challenge=challenge,
+                    code_challenge_method="S256",
+                    resource=f"{MCP_RESOURCE}/w/{WORKSPACE_ID}",
+                    auth_time=utcnow(),
+                    expires_at=utcnow() + timedelta(seconds=600),
+                )
+            )
+            db.commit()
+
+        tokens = _exchange(api, "workspace-form-code", verifier, resource=MCP_RESOURCE)
+        assert _stored_token(db_factory, tokens["access_token"]).resource == MCP_RESOURCE
+
+    @pytest.mark.parametrize(
+        "resource",
+        [
+            "https://memory.example.test/api/v1",
+            "https://memory.example.test",
+            "http://memory.example.test/mcp",
+            "https://memory.example.test:8443/mcp",
+            f"{MCP_RESOURCE}/../api",
+        ],
+    )
+    def test_other_paths_and_origins_are_refused(self, api: TestClient, resource: str) -> None:
+        _, challenge = _pkce()
+        response = api.get(
+            "/api/v1/oauth/authorize",
+            params=_authorize_params(challenge=challenge, resource=resource),
+            follow_redirects=False,
+        )
+        _assert_error_page(response, "invalid_target")
+
+
+class TestSingleUse:
+    def test_second_exchange_of_a_code_is_invalid_grant(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        verifier, challenge = _pkce()
+        redirect = _consent(api, _authorize_params(challenge=challenge))
+        first = _exchange(api, redirect["code"], verifier)
+
+        second = _token(
+            api,
+            {
+                "grant_type": "authorization_code",
+                "code": redirect["code"],
+                "redirect_uri": REDIRECT_URI,
+                "client_id": PUBLIC_CLIENT,
+                "code_verifier": verifier,
+            },
+        )
+
+        assert second.status_code == 400
+        assert second.json()["error"] == "invalid_grant"
+        with db_factory() as db:
+            assert db.query(OAuth2Token).count() == 1
+            assert db.query(OAuth2Token).one().access_token == first["access_token"]
+        assert _codes(db_factory) == 0
