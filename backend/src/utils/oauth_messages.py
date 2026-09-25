@@ -16,6 +16,7 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
         "permissions": {
             "read": "Read your memories",
             "write": "Write new memories",
+            "delete": "Delete memories",
             "manage": "Manage your memory cloud",
         },
         "error_title": "Authorization Error",
@@ -45,6 +46,7 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
         "permissions": {
             "read": "メモリーの読み取り",
             "write": "新しいメモリーの作成",
+            "delete": "メモリーの削除",
             "manage": "メモリークラウドの管理",
         },
         "error_title": "認可エラー",

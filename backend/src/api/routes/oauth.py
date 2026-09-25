@@ -29,6 +29,7 @@ from datetime import timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
+from authlib.oauth2.rfc6749.errors import OAuth2Error
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -38,7 +39,12 @@ from starlette.requests import ClientDisconnect
 
 from auth.dependencies import SessionUser, require_admin
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
-from auth.oauth2_server import _OAuthUser, create_authorization_server
+from auth.oauth2_server import (
+    _OAuthUser,
+    create_authorization_server,
+    validate_authorization_parameters,
+)
+from auth.starlette_oauth2_request import StarletteOAuth2Payload
 from config.settings import get_settings
 from db.base import get_db, get_sync_session
 from db.redis import increment_counter
@@ -1565,6 +1571,50 @@ def _render_invalid_redirect_uri_error(
     )
 
 
+def _authorization_error_redirect(
+    redirect_uri: str,
+    error: OAuth2Error,
+    state: str | None,
+    status_code: int,
+) -> RedirectResponse:
+    """Report an authorization request error to the client (RFC 6749 §4.1.2.1).
+
+    Only for a ``redirect_uri`` already checked against the client's
+    registration; an unregistered one gets the error page instead.
+
+    Args:
+        redirect_uri: The client's registered redirect URI.
+        error: The OAuth error to report.
+        state: The request's ``state``, echoed back when present.
+        status_code: 302 from GET, 303 from the consent POST.
+
+    Returns:
+        A redirect carrying ``error``, ``error_description`` and ``state``.
+    """
+    params = {"error": str(error.error)}
+    if error.description:
+        params["error_description"] = str(error.description)
+    if state:
+        params["state"] = state
+    return RedirectResponse(_append_query_params(redirect_uri, params), status_code=status_code)
+
+
+# Consent-page line for each granted scope that reaches memories; the other
+# granted scopes (``openid``, ``offline_access``) add no line.
+_CONSENT_PERMISSION_KEYS: dict[str, str] = {
+    "memory:read": "read",
+    "memory:write": "write",
+    "memory:delete": "delete",
+    "memory:admin": "manage",
+}
+
+
+def _consent_permission_keys(scope: str) -> list[str]:
+    """Message keys of the permissions the consent page lists for ``scope``."""
+    granted = set(scope.split())
+    return [key for name, key in _CONSENT_PERMISSION_KEYS.items() if name in granted]
+
+
 @router.get("/authorize", response_class=HTMLResponse)
 async def oauth_authorize_get(
     request: Request,
@@ -1579,13 +1629,20 @@ async def oauth_authorize_get(
 ):
     """OAuth2 authorization endpoint (consent screen).
 
-    Issue #157: Save resource parameter for POST request.
-    PKCE (RFC 7636): Save code_challenge for public clients (ChatGPT/Claude).
+    Before the consent screen is shown, the request must pass the rules the
+    consent submission applies (#1686): ``code_challenge_method=S256`` (and a
+    ``code_challenge`` from public clients), a grantable ``scope``, and a
+    ``resource`` naming this server's MCP resource. A failing request is
+    redirected to the registered ``redirect_uri`` with the OAuth error. The
+    screen lists the permissions of the granted scope.
+
+    Every parameter travels to the consent POST in its query string, and the
+    POST validates them again through the grant.
     """
     logger.info(
         "oauth_authorize_get",
         client_id=client_id,
-        state=state,
+        state_present=bool(state),
         resource=resource,
         pkce_present=bool(code_challenge),
         code_challenge_method=code_challenge_method,
@@ -1600,34 +1657,6 @@ async def oauth_authorize_get(
         return_to = quote(str(request.url), safe="")
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
         return RedirectResponse(f"{frontend_url}/login?return_to={return_to}")
-
-    # Save resource parameter to Redis for POST request (Issue #157)
-    logger.info(
-        f"Checking resource preservation: resource={resource}, state={state}, condition={resource and state}"
-    )
-    if state:
-        from redis import Redis
-
-        from config.database import get_redis_url
-
-        redis_url = get_redis_url()
-        redis = Redis.from_url(redis_url, decode_responses=True)
-
-        # Save resource (RFC 8707)
-        if resource:
-            redis.setex(f"oauth_state:{state}:resource", 300, resource)  # 5 min TTL
-            logger.info(f"Saved resource to Redis: state={state}, resource={resource}")
-
-        # Save PKCE parameters (RFC 7636) for public clients (ChatGPT/Claude)
-        if code_challenge:
-            redis.setex(f"oauth_state:{state}:code_challenge", 300, code_challenge)
-            if code_challenge_method:
-                redis.setex(
-                    f"oauth_state:{state}:code_challenge_method", 300, code_challenge_method
-                )
-            logger.info(f"Saved PKCE to Redis: state={state}, method={code_challenge_method}")
-    else:
-        logger.warning("State not provided, cannot save OAuth params")
 
     db_session = get_sync_session()
     try:
@@ -1653,6 +1682,18 @@ async def oauth_authorize_get(
                 f"redirect_uri={_redact_redirect_uri_for_log(redirect_uri)!r}"
             )
             return _render_invalid_redirect_uri_error(request, locale, redirect_uri)
+
+        try:
+            granted_scope = validate_authorization_parameters(
+                client, StarletteOAuth2Payload(request)
+            )
+        except OAuth2Error as error:
+            logger.info(
+                "oauth_authorize_get_rejected",
+                client_id=client_id,
+                error=error.error,
+            )
+            return _authorization_error_redirect(redirect_uri, error, state, status_code=302)
 
         # Get i18n messages
         messages = get_oauth_messages(locale)
@@ -1691,6 +1732,7 @@ async def oauth_authorize_get(
                 "query_string": query_string,
                 "locale": locale,
                 "messages": messages,
+                "permission_keys": _consent_permission_keys(granted_scope),
             },
         )
     finally:
@@ -1796,8 +1838,6 @@ async def oauth_authorize_post(
     except Exception as e:
         import traceback
 
-        from authlib.oauth2.rfc6749.errors import OAuth2Error
-
         # Log full traceback for debugging
         tb = traceback.format_exc()
         logger.error(f"oauth_authorize_failed: {type(e).__name__}: {e}\n{tb}")
@@ -1815,12 +1855,7 @@ async def oauth_authorize_post(
 
         # OAuth2Error → redirect with structured error params.
         if isinstance(e, OAuth2Error):
-            params = {"error": e.error}
-            if hasattr(e, "description") and e.description:
-                params["error_description"] = e.description
-            if state:
-                params["state"] = state
-            return RedirectResponse(_append_query_params(redirect_uri, params), status_code=303)
+            return _authorization_error_redirect(redirect_uri, e, state, status_code=303)
 
         # Generic exception → redirect with server_error.
         params = {"error": "server_error", "error_description": str(e)}
@@ -1846,16 +1881,20 @@ async def oauth_token(request: Request):
 
     from fastapi.responses import JSONResponse, Response
 
-    # Log incoming request for debugging (Issue #157)
-    logger.info(
-        f"POST /token HIT! Path: {request.url.path}, From: {request.client.host if hasattr(request, 'client') else 'unknown'}"
-    )
-
     # Preload form data manually
     await preload_form(request)
 
-    # Debug: log form data
-    logger.info("token_request_form", form=request.state.form_data)
+    # The form carries credentials (code, code_verifier, refresh_token,
+    # client_secret), so only the grant type and the parameter names are
+    # logged (#1686).
+    form_data = request.state.form_data
+    logger.info(
+        "token_request",
+        path=request.url.path,
+        client_ip=request.client.host if request.client else "unknown",
+        grant_type=form_data.get("grant_type"),
+        params=sorted(form_data),
+    )
 
     # Run Authlib operations in thread pool to avoid blocking event loop.
     # Traceback is captured inside _run_oauth_sync; this wrapper only shapes
@@ -2427,9 +2466,10 @@ async def device_confirm(
 
         db_session.commit()
 
+        # A user_code is logged by its prefix, as /device/audit-unauth does (#779).
         logger.info(
             "device_authorization_" + status_str,
-            user_code=body.user_code,
+            user_code_prefix=body.user_code[:4],
             user_id=device.user_id,
         )
 

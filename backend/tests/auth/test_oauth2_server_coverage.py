@@ -11,13 +11,12 @@ assert against real (un-persisted) ORM model instances.
 
 Covered surfaces:
   * ``query_client`` (found / not-found)
-  * ``save_token`` (authorization-code path, refresh path, resource from
-    credential vs request data, and the missing-user_id ``ValueError`` branch)
+  * ``save_token`` (authorization-code path, refresh path, the audience the
+    grant passes in, and the missing-user_id ``ValueError`` branch)
   * ``_generate_token_with_expiry`` (shape) via the grant ``generate_token``
     overrides
-  * ``AuthorizationCodeGrant``: ``save_authorization_code`` (payload dict /
-    payload.data / request.data / no-data branches, PKCE + resource from
-    request, Redis restore for resource & PKCE, missing user_id error),
+  * ``AuthorizationCodeGrant``: ``save_authorization_code`` (granted scope,
+    PKCE + resource from the validated request, missing user_id error),
     ``query_authorization_code`` (found / not-found / expired),
     ``delete_authorization_code``, ``authenticate_user``
   * ``RefreshTokenGrant``: ``authenticate_refresh_token`` (active / inactive /
@@ -26,7 +25,7 @@ Covered surfaces:
     kill-switch (on / off) and the thin delegating wrapper methods +
     ``create_authorization_server`` factory.
 
-Nothing here touches the network; Redis is replaced with an in-memory fake.
+Nothing here touches the network.
 """
 
 from __future__ import annotations
@@ -43,6 +42,7 @@ if str(_BACKEND_SRC) not in sys.path:
     sys.path.insert(0, str(_BACKEND_SRC))
 
 import pytest  # noqa: E402
+from authlib.oauth2.rfc6749.requests import BasicOAuth2Payload  # noqa: E402
 
 from auth import oauth2_server as mod  # noqa: E402
 from auth.oauth2_server import (  # noqa: E402
@@ -151,27 +151,6 @@ def _make_device(**overrides: Any) -> OAuth2DeviceCode:
     return OAuth2DeviceCode(**kwargs)
 
 
-class _FakeRedis:
-    """In-memory stand-in for ``redis.Redis`` (get/delete + from_url)."""
-
-    _store: dict[str, str] = {}
-
-    def __init__(self, mapping: dict[str, str] | None = None) -> None:
-        # Each instance shares the class-level store wired by the test.
-        if mapping is not None:
-            type(self)._store = dict(mapping)
-
-    @classmethod
-    def from_url(cls, url: str, decode_responses: bool = True) -> _FakeRedis:  # noqa: ARG003
-        return cls()
-
-    def get(self, key: str) -> str | None:
-        return type(self)._store.get(key)
-
-    def delete(self, key: str) -> None:
-        type(self)._store.pop(key, None)
-
-
 # ===========================================================================
 # query_client
 # ===========================================================================
@@ -235,7 +214,7 @@ class TestSaveToken:
     def test_user_id_from_credential_when_request_user_missing(self) -> None:
         session = MagicMock()
         client = _make_client()
-        # Refresh path: no .user, user comes from request.credential.
+        # No .user: the user comes from request.credential.
         credential = SimpleNamespace(user_id="cred-user", resource="https://api.example.com")
         request = SimpleNamespace(client=client, credential=credential)
         token = {"access_token": "at", "refresh_token": "rt"}
@@ -244,17 +223,18 @@ class TestSaveToken:
 
         added = session.add.call_args.args[0]
         assert added.user_id == "cred-user"
-        # Resource taken from the credential (authorization code) branch.
-        assert added.resource == "https://api.example.com"
+        # The audience is only what the grant passes in (#1686).
+        assert added.resource is None
         # Defaults applied for absent token fields.
         assert added.token_type == "Bearer"
         assert added.expires_in == 3600
         assert added.scope == ""
 
-    def test_resource_from_request_data_when_no_credential(self) -> None:
+    def test_resource_is_the_audience_the_grant_passes(self) -> None:
         session = MagicMock()
         client = _make_client()
-        # No credential attribute, but request.data carries the resource param.
+        # A ``resource`` in the request data is not read: the grant settles
+        # the audience while it validates the token request (#1686).
         request = SimpleNamespace(
             client=client,
             user=SimpleNamespace(user_id="u1"),
@@ -262,10 +242,10 @@ class TestSaveToken:
         )
         token = {"access_token": "at", "refresh_token": "rt"}
 
-        save_token(token, request, session)
+        save_token(token, request, session, resource="https://memory.example.test/mcp")
 
         added = session.add.call_args.args[0]
-        assert added.resource == "https://from-data"
+        assert added.resource == "https://memory.example.test/mcp"
 
     def test_raises_value_error_when_user_id_missing(self) -> None:
         session = MagicMock()
@@ -335,14 +315,20 @@ class TestGenerateToken:
 
 
 class TestSaveAuthorizationCode:
-    """Cover every request-data shape + PKCE/resource + Redis restore."""
+    """The code stores what the validated authorization request carried (#1686)."""
 
-    def _request(self, **kw: Any) -> SimpleNamespace:
-        base = {
+    @pytest.fixture(autouse=True)
+    def _frontend_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FRONTEND_URL", "https://memory.example.test")
+        monkeypatch.delenv("MCP_BASE_PATH", raising=False)
+
+    def _request(self, params: dict[str, str], **kw: Any) -> SimpleNamespace:
+        base: dict[str, Any] = {
             "client": _make_client(),
             "user": SimpleNamespace(user_id="user-abc"),
-            "redirect_uri": "https://example.com/cb",
-            "scope": "memory:read",
+            "payload": BasicOAuth2Payload(
+                {"redirect_uri": "https://example.com/cb", "scope": "memory:read", **params}
+            ),
         }
         base.update(kw)
         return SimpleNamespace(**base)
@@ -350,13 +336,13 @@ class TestSaveAuthorizationCode:
     def _added(self, grant: AuthorizationCodeGrant) -> OAuth2AuthorizationCode:
         return grant.server.db_session.add.call_args.args[0]
 
-    def test_payload_dict_branch_with_pkce_and_resource(self) -> None:
+    def test_saves_pkce_resource_and_redirect_uri(self) -> None:
         grant = _make_authz_grant()
         request = self._request(
-            payload={
+            {
                 "code_challenge": "challenge-xyz",
                 "code_challenge_method": "S256",
-                "resource": "https://api.example.com",
+                "resource": "https://memory.example.test/mcp/",
             }
         )
 
@@ -369,127 +355,46 @@ class TestSaveAuthorizationCode:
         assert added.user_id == "user-abc"
         assert added.code_challenge == "challenge-xyz"
         assert added.code_challenge_method == "S256"
-        assert added.resource == "https://api.example.com"
+        # Stored as the published identifier (``/mcp`` and ``/mcp/`` are one).
+        assert added.resource == "https://memory.example.test/mcp"
         assert added.redirect_uri == "https://example.com/cb"
         # 10-minute expiry window stamped.
         assert added.expires_at > added.auth_time
         grant.server.db_session.commit.assert_called_once()
 
-    def test_payload_data_attribute_branch(self) -> None:
+    def test_stores_the_granted_scope(self) -> None:
         grant = _make_authz_grant()
-        # payload is not a dict but exposes ``.data`` (Authlib 1.x form payload).
-        payload = SimpleNamespace(data={"code_challenge": "cc", "resource": "r"})
-        request = self._request(payload=payload)
+        # memory:admin is not registered by the client; the last scope is not
+        # defined by the server. Both are dropped.
+        request = self._request({"scope": "memory:write memory:admin other:scope memory:read"})
 
         grant.save_authorization_code("authcode-2", request)
 
-        added = self._added(grant)
-        assert added.code_challenge == "cc"
-        assert added.resource == "r"
+        assert self._added(grant).scope == "memory:write memory:read"
 
-    def test_payload_data_none_falls_back_to_empty(self) -> None:
+    def test_request_without_scope_gets_registered_scope(self) -> None:
         grant = _make_authz_grant()
-        # payload.data is None → request_data stays {} → no challenge/resource.
-        payload = SimpleNamespace(data=None)
-        request = self._request(payload=payload)
+        request = self._request({})
+        request.payload = BasicOAuth2Payload({"redirect_uri": "https://example.com/cb"})
 
         grant.save_authorization_code("authcode-3", request)
 
-        added = self._added(grant)
-        assert added.code_challenge is None
-        assert added.resource is None
+        assert self._added(grant).scope == "memory:read memory:write"
 
-    def test_payload_unknown_type_branch(self) -> None:
+    def test_request_without_pkce_or_resource(self) -> None:
         grant = _make_authz_grant()
-        # payload is truthy but neither dict nor has ``.data`` → warning branch,
-        # request_data stays {}.
-        request = self._request(payload=12345)
+        request = self._request({})
 
         grant.save_authorization_code("authcode-4", request)
 
         added = self._added(grant)
         assert added.code_challenge is None
-        assert added.resource is None
-
-    def test_request_data_branch_authlib_0x(self) -> None:
-        grant = _make_authz_grant()
-        # No payload attribute at all → fall through to request.data.
-        request = self._request(data={"code_challenge": "old", "resource": "old-res"})
-
-        grant.save_authorization_code("authcode-5", request)
-
-        added = self._added(grant)
-        assert added.code_challenge == "old"
-        assert added.resource == "old-res"
-
-    def test_no_payload_no_data_branch(self) -> None:
-        grant = _make_authz_grant()
-        # payload absent, data absent → final ``else`` warning branch.
-        request = self._request()
-
-        grant.save_authorization_code("authcode-6", request)
-
-        added = self._added(grant)
-        assert added.code_challenge is None
-        assert added.resource is None
-
-    def test_restores_resource_and_pkce_from_redis(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        grant = _make_authz_grant()
-        # request data has only ``state`` → both resource + PKCE come from Redis.
-        request = self._request(payload={"state": "st-1"})
-
-        store = {
-            "oauth_state:st-1:resource": "https://redis-resource",
-            "oauth_state:st-1:code_challenge": "redis-challenge",
-            "oauth_state:st-1:code_challenge_method": "S256",
-        }
-        monkeypatch.setattr(_FakeRedis, "_store", dict(store))
-        monkeypatch.setitem(sys.modules, "redis", SimpleNamespace(Redis=_FakeRedis))
-        monkeypatch.setattr("config.database.get_redis_url", lambda: "redis://localhost:6379/0")
-
-        grant.save_authorization_code("authcode-7", request)
-
-        added = self._added(grant)
-        assert added.resource == "https://redis-resource"
-        assert added.code_challenge == "redis-challenge"
-        assert added.code_challenge_method == "S256"
-        # One-time-use keys deleted on restore.
-        assert _FakeRedis._store.get("oauth_state:st-1:resource") is None
-        assert _FakeRedis._store.get("oauth_state:st-1:code_challenge") is None
-
-    def test_redis_branch_with_no_stored_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        grant = _make_authz_grant()
-        # state present but Redis has nothing → resource/PKCE stay None.
-        request = self._request(payload={"state": "st-empty"})
-        monkeypatch.setattr(_FakeRedis, "_store", {})
-        monkeypatch.setitem(sys.modules, "redis", SimpleNamespace(Redis=_FakeRedis))
-        monkeypatch.setattr("config.database.get_redis_url", lambda: "redis://localhost:6379/0")
-
-        grant.save_authorization_code("authcode-8", request)
-
-        added = self._added(grant)
-        assert added.resource is None
-        assert added.code_challenge is None
-
-    def test_redis_challenge_without_method(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        grant = _make_authz_grant()
-        # Restore a code_challenge from Redis but with no stored method → the
-        # ``if code_challenge_method`` delete branch is skipped.
-        request = self._request(payload={"state": "st-2"})
-        store = {"oauth_state:st-2:code_challenge": "cc-only"}
-        monkeypatch.setattr(_FakeRedis, "_store", dict(store))
-        monkeypatch.setitem(sys.modules, "redis", SimpleNamespace(Redis=_FakeRedis))
-        monkeypatch.setattr("config.database.get_redis_url", lambda: "redis://localhost:6379/0")
-
-        grant.save_authorization_code("authcode-9", request)
-
-        added = self._added(grant)
-        assert added.code_challenge == "cc-only"
         assert added.code_challenge_method is None
+        assert added.resource is None
 
     def test_raises_value_error_when_user_id_missing(self) -> None:
         grant = _make_authz_grant()
-        request = self._request(user=SimpleNamespace(user_id=None), payload={})
+        request = self._request({}, user=SimpleNamespace(user_id=None))
 
         with pytest.raises(ValueError, match="User ID required for authorization"):
             grant.save_authorization_code("authcode-x", request)

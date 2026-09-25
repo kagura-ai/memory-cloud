@@ -206,9 +206,9 @@ button:focus-visible {
 <div class="subtitle">{{ messages.subtitle }}</div>
 <div class="app-info">
 <div class="app-name">{{ client_name }}</div>
-<div class="permission-item">{{ messages.permissions.read }}</div>
-<div class="permission-item">{{ messages.permissions.write }}</div>
-<div class="permission-item">{{ messages.permissions.manage }}</div>
+{% for key in permission_keys %}
+<div class="permission-item">{{ messages.permissions[key] }}</div>
+{% endfor %}
 </div>
 <div class="user-info">
 {{ messages.signing_in_as }} <strong>{{ user_email }}</strong>
