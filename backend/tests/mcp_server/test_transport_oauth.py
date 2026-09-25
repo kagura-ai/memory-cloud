@@ -43,7 +43,7 @@ from mcp_server.auth import (
     get_mcp_oauth_scopes,
 )
 from mcp_server.transport import mcp_asgi_app
-from utils.exceptions import InvalidTokenError
+from utils.exceptions import AuthenticationError, InvalidTokenError
 
 ORIGIN = "https://memory.example.com"
 MODERN = "2026-07-28"
@@ -320,6 +320,66 @@ async def test_missing_and_invalid_credentials_raise_distinct_errors(monkeypatch
         await authenticate_mcp_request("Bearer not-a-token")
 
 
+# ------------------------------------------------------- Authorization header
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "header",
+    ["Bearer tok", "bearer tok", "BEARER tok", "  Bearer   tok  ", b"Bearer tok", "Bearer\ttok"],
+)
+async def test_the_bearer_scheme_is_case_insensitive_and_whitespace_is_trimmed(monkeypatch, header):
+    seen: list[str] = []
+
+    async def verify(token):
+        seen.append(token)
+        return OAuthGrant("user-1", "memory:read", None)
+
+    monkeypatch.setattr(mcp_auth, "_verify_api_key", _none)
+    monkeypatch.setattr(mcp_auth, "_verify_oauth2_token", verify)
+
+    assert await authenticate_mcp_request(header) == ("user-1", None, None)
+    assert seen == ["tok"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("header", "reason"),
+    [
+        ("Bearer", "empty"),
+        ("Bearer ", "empty"),
+        ("Bearer    ", "empty"),
+        ("bearer \t ", "empty"),
+        ("Bearer to k", "whitespace"),
+        ("Bearer tok extra", "whitespace"),
+    ],
+)
+async def test_an_empty_or_split_bearer_token_is_malformed(monkeypatch, header, reason):
+    lookups: list[str] = []
+
+    async def verify(token):  # pragma: no cover - the assertion
+        lookups.append(token)
+        return None
+
+    monkeypatch.setattr(mcp_auth, "_verify_api_key", verify)
+    monkeypatch.setattr(mcp_auth, "_verify_oauth2_token", verify)
+
+    with pytest.raises(AuthenticationError, match=reason) as raised:
+        await authenticate_mcp_request(header)
+    assert not isinstance(raised.value, InvalidTokenError)
+    assert lookups == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", [b"Bearer ", b"Bearer    ", b"Bearer to k"])
+async def test_a_malformed_bearer_header_is_invalid_request_on_the_wire(app, header):
+    send = await app.call(_rpc("initialize"), headers={b"authorization": header}, token=None)
+
+    assert send.status == 401
+    assert send.challenge["error"] == "invalid_request"
+    assert send.challenge["resource_metadata"]
+
+
 # ------------------------------------------------------------ granted scopes
 
 
@@ -399,6 +459,45 @@ async def test_the_client_scope_is_read_only_when_the_token_names_no_memory_scop
     assert grant.user_id == "u-1"
     assert bool(queries) is looked_up
     assert grant.client_scope == ("memory:read" if looked_up else None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["grant", "no_token", "client_lookup_raises"])
+async def test_the_db_session_is_closed_when_the_lookup_returns(monkeypatch, case):
+    """``_verify_oauth2_token`` closes the ``get_db`` generator (and its session)
+    before it returns, whatever the outcome — not at garbage collection."""
+    from sqlalchemy.exc import OperationalError
+
+    import auth.oauth2_bearer as bearer
+    import db.base
+
+    state = {"closed": False}
+    scope = "memory:read" if case == "grant" else "claudeai"
+    row = SimpleNamespace(user_id="u-1", scope=scope, resource=None, client_id="client-1")
+
+    class _Db:
+        async def execute(self, _stmt):
+            raise OperationalError("SELECT", {}, Exception("connection lost"))
+
+    async def get_db():
+        try:
+            yield _Db()
+        finally:
+            state["closed"] = True
+
+    async def find(_token, _db):
+        return None if case == "no_token" else row
+
+    monkeypatch.setattr(db.base, "get_db", get_db)
+    monkeypatch.setattr(bearer, "find_active_oauth_token", find)
+
+    grant = await mcp_auth._verify_oauth2_token("tok")
+
+    assert state["closed"] is True
+    if case == "no_token":
+        assert grant is None
+    else:
+        assert grant.client_scope_unavailable is (case == "client_lookup_raises")
 
 
 @pytest.mark.asyncio
@@ -608,7 +707,38 @@ async def test_a_client_registered_read_only_limits_a_token_without_memory_scope
     assert denied.challenge["scope"] == "openid memory:read memory:write offline_access"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("params", [None, [1], {}, {"name": ""}, {"name": 7}])
+async def test_legacy_tools_call_without_a_name_is_invalid_params_not_a_scope_refusal(app, params):
+    app.grant = OAuthGrant("user-1", "memory:read", None)
+    await _open_session(app)
+    body = {"jsonrpc": "2.0", "id": 4, "method": "tools/call"}
+    if params is not None:
+        body["params"] = params
+    send = await app.call(body, headers={b"mcp-session-id": b"mcp-open"})
+
+    assert send.status == 200
+    assert send.body["error"]["code"] == -32602
+    assert b"www-authenticate" not in send.headers
+    assert app.executed == []
+
+
 # ---------------------------------------------------- tools/call scope, stateless
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [None, "", 7])
+async def test_stateless_tools_call_without_a_name_is_invalid_params_not_a_scope_refusal(app, name):
+    app.grant = OAuthGrant("user-1", "memory:read", None)
+    body, headers = _modern("tools/call", 4)
+    if name is not None:
+        body["params"]["name"] = name
+    send = await app.call(body, headers=headers)
+
+    assert send.status == 400
+    assert send.body["error"]["code"] == -32602
+    assert b"www-authenticate" not in send.headers
+    assert app.executed == []
 
 
 @pytest.mark.asyncio

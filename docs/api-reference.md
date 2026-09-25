@@ -1507,7 +1507,7 @@ Kagura Memory Cloud provides 64 MCP tools for AI assistants across 13 categories
 |---------|--------|--------------------|
 | No credentials | `401` | `Bearer realm="Kagura Memory Cloud", resource_metadata="<origin>/.well-known/oauth-protected-resource"` — no error code (RFC 6750 §3.1) |
 | Unknown, expired or revoked token, or an OAuth token issued for another resource | `401` | `Bearer realm="…", error="invalid_token", error_description="…", resource_metadata="…"` |
-| Malformed `Authorization` header | `401` | `Bearer realm="…", error="invalid_request", error_description="…", resource_metadata="…"` |
+| Malformed `Authorization` header: not `Bearer <token>` (the scheme is case-insensitive), or an empty token or one containing whitespace | `401` | `Bearer realm="…", error="invalid_request", error_description="…", resource_metadata="…"` |
 | OAuth token without the scope a `tools/call` needs | `403` | `Bearer realm="…", error="insufficient_scope", error_description="…", scope="<granted scopes plus the required one>", resource_metadata="…"` |
 
 - **Audience (RFC 8707).** An OAuth access token bound to a resource must be bound to this server's MCP resource. Every form the [resource rule](#authorization-code-grant-mcp-clients) accepts qualifies: `<origin>/mcp`, `<origin>/mcp/` and paths beneath it such as `/mcp/w/{workspace_id}`, the default port given or left out, the host in any case, any query. The rule applies on `/mcp/w/{workspace_id}` too. A token issued without `resource` is accepted.

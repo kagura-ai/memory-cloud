@@ -15,6 +15,7 @@ check (``mcp_server.tools._scopes``).
 Adapted from v4.4.0 mcp_auth.py for memory-cloud architecture.
 """
 
+import contextlib
 import logging
 import re
 from contextvars import ContextVar
@@ -184,10 +185,19 @@ async def authenticate_mcp_request(
     else:
         auth_str = authorization_header
 
-    if not auth_str.startswith("Bearer "):
+    # RFC 7235 §2.1: the scheme is case-insensitive. Whitespace around the
+    # token is tolerated; an empty token or one containing whitespace is a
+    # malformed request (invalid_request), not an invalid token.
+    parts = auth_str.strip().split(None, 1)
+    if not parts or parts[0].lower() != "bearer":
         raise AuthenticationError("Invalid authorization header format. Expected: Bearer {token}")
-
-    token = auth_str[7:]  # Remove "Bearer " prefix
+    token = parts[1].strip() if len(parts) == 2 else ""
+    if not token:
+        raise AuthenticationError("Malformed Authorization header: the Bearer token is empty")
+    if any(ch.isspace() for ch in token):
+        raise AuthenticationError(
+            "Malformed Authorization header: the Bearer token contains whitespace"
+        )
     # Issue #965: log at most an 8-char prefix (repo-wide redaction convention,
     # cf. session_id[:8] / refresh_token[:8] / oauth token_prefix=token[:8]).
     # Enough to correlate log lines without exposing usable key material. For
@@ -298,25 +308,29 @@ async def _verify_oauth2_token(access_token: str) -> OAuthGrant | None:
     from auth.oauth2_bearer import find_active_oauth_token
     from db.base import get_db
 
-    async for db in get_db():
-        token = await find_active_oauth_token(access_token, db)
-        if token is None:
-            return None
-        client_scope = None
-        client_scope_unavailable = False
-        if not names_memory_scope(token.scope):
-            try:
-                client_scope = await _registered_client_scope(token.client_id, db)
-            except Exception as e:  # noqa: BLE001 - fail closed, see granted_scopes
-                logger.warning(f"MCP OAuth client scope lookup failed: {type(e).__name__}")
-                client_scope_unavailable = True
-        return OAuthGrant(
-            user_id=token.user_id,
-            scope=token.scope,
-            resource=token.resource,
-            client_scope=client_scope,
-            client_scope_unavailable=client_scope_unavailable,
-        )
+    # ``aclosing`` closes the ``get_db`` generator — and with it the session,
+    # including one whose client-scope query failed mid-transaction — when
+    # this returns, not whenever the generator is garbage-collected.
+    async with contextlib.aclosing(get_db()) as sessions:
+        async for db in sessions:
+            token = await find_active_oauth_token(access_token, db)
+            if token is None:
+                return None
+            client_scope = None
+            client_scope_unavailable = False
+            if not names_memory_scope(token.scope):
+                try:
+                    client_scope = await _registered_client_scope(token.client_id, db)
+                except Exception as e:  # noqa: BLE001 - fail closed, see granted_scopes
+                    logger.warning(f"MCP OAuth client scope lookup failed: {type(e).__name__}")
+                    client_scope_unavailable = True
+            return OAuthGrant(
+                user_id=token.user_id,
+                scope=token.scope,
+                resource=token.resource,
+                client_scope=client_scope,
+                client_scope_unavailable=client_scope_unavailable,
+            )
     return None
 
 

@@ -164,12 +164,13 @@ async def _get_user_workspace_id(user_id: str) -> "UUID | None":
     from models.auth import User
 
     try:
-        async for db in get_db():
-            result = await db.execute(
-                select(User.current_workspace_id).where(User.user_id == user_id)
-            )
-            workspace_id = result.scalar_one_or_none()
-            return workspace_id
+        async with contextlib.aclosing(get_db()) as sessions:
+            async for db in sessions:
+                result = await db.execute(
+                    select(User.current_workspace_id).where(User.user_id == user_id)
+                )
+                workspace_id = result.scalar_one_or_none()
+                return workspace_id
     except Exception as e:
         logger.warning(f"Failed to get user workspace_id: {e}")
         return None
@@ -862,13 +863,32 @@ async def handle_streamable_http_post(
     elif method == "tools/call":
         logger.info(f"MCP tools/call (Streamable HTTP): session={session.session_id}")
 
+        # Params first (#1686), as the stateless era does: a call without a
+        # tool name is invalid params, whatever the token's scope.
+        call_params = body.get("params")
+        call_name = call_params.get("name") if isinstance(call_params, dict) else None
+        if not isinstance(call_name, str) or not call_name:
+            await _send_json_error(
+                send,
+                200,  # HTTP 200 + JSON-RPC error, like the other errors of this handler
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": -32602,
+                        "message": "Invalid params: 'name' must be a non-empty string",
+                    },
+                },
+                [[b"mcp-session-id", session.session_id.encode()]],
+            )
+            return
+
         # #1686: the OAuth scope check, from this request's token — never the
         # session's, which may have been opened with another one.
-        call_params = body.get("params")
         if await _reject_insufficient_scope(
             send,
             request_id,
-            call_params.get("name") if isinstance(call_params, dict) else None,
+            call_name,
             jsonrpc_code=-32002,  # Custom: Permission denied (see the catch-all below)
         ):
             return
@@ -1183,36 +1203,37 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                     workspace_uuid = UUID(workspace_id_from_url)
 
                     # Check if user is a member of the workspace
-                    async for db in get_db():
-                        from sqlalchemy import select
+                    async with contextlib.aclosing(get_db()) as sessions:
+                        async for db in sessions:
+                            from sqlalchemy import select
 
-                        from models.auth import WorkspaceMember
+                            from models.auth import WorkspaceMember
 
-                        result = await db.execute(
-                            select(WorkspaceMember).where(
-                                WorkspaceMember.workspace_id == workspace_uuid,
-                                WorkspaceMember.user_id == user_id,
+                            result = await db.execute(
+                                select(WorkspaceMember).where(
+                                    WorkspaceMember.workspace_id == workspace_uuid,
+                                    WorkspaceMember.user_id == user_id,
+                                )
                             )
-                        )
-                        member = result.scalar_one_or_none()
+                            member = result.scalar_one_or_none()
 
-                        if member:
-                            workspace_id = workspace_uuid
-                            logger.info(f"MCP OAuth2 workspace switch: {workspace_id_from_url}")
-                        else:
-                            logger.warning(
-                                f"MCP OAuth2 not a member: url={workspace_id_from_url}, user={user_id}"
-                            )
-                            await _send_json_error(
-                                send,
-                                403,
-                                {
-                                    "error": "access_denied",
-                                    "error_description": "You are not a member of this workspace.",
-                                },
-                            )
-                            return
-                        break
+                            if member:
+                                workspace_id = workspace_uuid
+                                logger.info(f"MCP OAuth2 workspace switch: {workspace_id_from_url}")
+                            else:
+                                logger.warning(
+                                    f"MCP OAuth2 not a member: url={workspace_id_from_url}, user={user_id}"
+                                )
+                                await _send_json_error(
+                                    send,
+                                    403,
+                                    {
+                                        "error": "access_denied",
+                                        "error_description": "You are not a member of this workspace.",
+                                    },
+                                )
+                                return
+                            break
 
                 except ValueError:
                     logger.warning(f"MCP invalid workspace UUID in URL: {workspace_id_from_url}")

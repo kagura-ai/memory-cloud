@@ -511,16 +511,25 @@ async def test_tools_call_failure_keeps_exception_detail_in_the_log(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_tools_call_failure_without_params_still_answers():
-    """A body whose ``params`` is not an object fails before the tool name is
-    known; the fallback still answers with the vocabulary, as a write."""
-    send = await _post({"jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": [1]})
+@pytest.mark.parametrize(
+    "params",
+    [[1], None, {}, {"name": ""}, {"name": 5}, {"arguments": {}}],
+)
+async def test_tools_call_without_a_tool_name_is_invalid_params(params):
+    """``params`` must be an object with a non-empty string ``name`` (#1686):
+    validated before anything else, as the stateless era does, and answered
+    like this handler's other errors (HTTP 200 + JSON-RPC ``-32602``)."""
+    body = {"jsonrpc": "2.0", "id": 10, "method": "tools/call"}
+    if params is not None:
+        body["params"] = params
+    with patch("mcp_server.tools.execute_tool_call") as execute:
+        send = await _post(body)
 
-    error = send.body["error"]
-    assert error["code"] == -32603
-    assert error["message"] == "The tool call failed because of an unexpected server error."
-    assert error["data"]["error"] == "internal_error"
-    assert error["data"]["retryable"] is False
+    assert send.status == 200
+    assert send.body["id"] == 10
+    assert send.body["error"]["code"] == -32602
+    assert "name" in send.body["error"]["message"]
+    execute.assert_not_called()
 
 
 # ------------------------------- id-less malformed envelopes (Copilot review)
