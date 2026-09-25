@@ -172,7 +172,6 @@
   },
   {
     "name": "recall",
-    "readOnly": true,
     "inputSchema": {
       "type": "object",
       "required": [
@@ -1886,7 +1885,6 @@
   },
   {
     "name": "get_agent_bootstrap",
-    "readOnly": true,
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -2025,7 +2023,8 @@
         "name"
       ],
       "additionalProperties": false
-    }
+    },
+    "readOnly": true
   },
   {
     "name": "secret_list",
@@ -2033,7 +2032,8 @@
       "type": "object",
       "properties": {},
       "additionalProperties": false
-    }
+    },
+    "readOnly": true
   },
   {
     "name": "secret_revoke_grant",

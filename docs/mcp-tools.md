@@ -10,17 +10,35 @@ See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concep
 
 | Endpoint URL | `tools/list` returns | Approx. size |
 |--------------|----------------------|--------------|
-| `/mcp/w/{workspace_id}` (or `?profile=full`) | All 64 tools — the default, unchanged | ≈ 84k chars |
-| `/mcp/w/{workspace_id}?profile=core` | The 12 core tools: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback` | ≈ 28k chars (about 65% smaller) |
-| `/mcp/w/{workspace_id}?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 14k chars for these three |
+| `/mcp/w/{workspace_id}` (or `?profile=full`) | All 64 tools — the default, unchanged | ≈ 95k chars |
+| `/mcp/w/{workspace_id}?profile=core` | The 12 core tools: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback` | ≈ 32k chars (about 65% smaller) |
+| `/mcp/w/{workspace_id}?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 15k chars for these three |
 
-Sizes are the compact JSON of the `tools` array, measured at v0.73.0 (the descriptions were trimmed in that release; at v0.72.0 the same lists were ≈ 111k / 45k / 23k). Per-client instructions: [MCP Client Setup › List fewer tools](mcp-clients.md#list-fewer-tools).
+Sizes are the compact JSON of the `tools` array, measured at v0.78.0, which added a `title` and [annotations](#tool-annotations) to every tool (≈ 84k / 28k / 14k at v0.73.0, when the descriptions were trimmed; ≈ 111k / 45k / 23k at v0.72.0). Per-client instructions: [MCP Client Setup › List fewer tools](mcp-clients.md#list-fewer-tools).
 
 - Tool names are comma-separated and case-sensitive; surrounding whitespace is trimmed, duplicates collapse, and at most 100 names are read. The result is always in registry order, whatever order the URL uses.
 - Unknown names are ignored (and logged by the server), so a URL keeps working if a tool is later renamed or removed. If **no** name matches, or `profile` is anything other than `full` / `core`, `tools/list` fails with JSON-RPC `-32602` (invalid params) and a message naming the valid values.
 - Both transports honour the parameters — session-based Streamable HTTP and stateless MCP 2026-07-28 — on `/mcp` as well as `/mcp/w/{workspace_id}`.
 
 > **A profile is a view, not an authorization boundary.** It filters `tools/list` and nothing else. `tools/call` never reads it: a tool left out of the list stays callable by anyone whose role allows it. To restrict what a key can do, use workspace and context roles.
+
+## Tool annotations
+
+Every definition in `tools/list` carries a human-readable `title` and the standard MCP `annotations` object: the same `title` plus `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint`, all four sent on every tool (read-only tools send `destructiveHint: false` and `idempotentHint: true`). `annotations` exists since MCP 2025-03-26 and a top-level `title` since 2025-06-18; a client that does not know them ignores them. Together they add about 160 characters per tool, on every profile.
+
+**Classification rule.** A tool is read-only when it changes nothing a user stored or can see. Changing stored memories, contexts, edges, files, secrets and grants, agents and bindings, settings, or learned state that changes later results is a modification. Usage and audit logging, access counters (`access_count`, `reference_count`, `last_used_at`) and sweeping already-expired state are not, although re-ranking and consolidation read those counters later. A tool is destructive when some argument can make it remove or overwrite existing data: soft delete, an overwritten value, a revoked grant and a graph edge reweighted or pruned all count, a tool that only adds rows does not. `idempotentHint` is true only when repeating a call with the same arguments changes nothing further; a call that restarts a relative expiry does not qualify. `openWorldHint` is true only for `setup_connector`, which stores a third-party chat platform's OAuth tokens for a connector that reads from it; the embedding, reranking and analysis model providers the server calls to process data it already holds do not count.
+
+| Class | Tools |
+|-------|-------|
+| Destructive, safe to repeat | `create_edge`, `update_edge`, `delete_edge`, `update_context`, `delete_context`, `update_search_config`, `rollback_sleep_run`, `delete_file`, `update_agent`, `delete_agent`, `update_agent_binding`, `unbind_agent_context`, `secret_revoke_grant` |
+| Destructive, not idempotent | `recall`, `get_agent_bootstrap` (learning writes, below), `update_memory` (`external_id` mode replaces the memory each call), `forget` (`query` mode deletes the next top-k), `merge_contexts`, `ingest_events`, `set_state` (`ttl_seconds` restarts the expiry each call), `secret_put` |
+| Additive writes | `remember`, `feedback`, `record_measurement`, `create_context`, `setup_resource`, `setup_connector`, `analyze_context`, `init_file_upload`, `complete_file_upload` (idempotent), `register_agent`, `bind_agent_context`, `secret_register_pubkey` |
+| Read-only | The other 31 tools |
+
+- **`recall` is destructive.** It runs Hebbian learning over the memories it returns and promotes working memories that reach the promotion threshold; both change later results. The learning pass also overwrites and removes existing edges: it rewrites the weight of each edge it updates, including one you declared with `create_edge`, deletes an edge whose weight decays below the prune threshold, and evicts the weakest automatic edges past the per-memory cap. Under the rule that makes `create_edge` destructive, `recall` is too, and a repeat changes the weights again, so it is not idempotent. `get_agent_bootstrap` runs the same recall when given a `query`. A client that confirms destructive tools asks before these two as well. `reference` and `explore` only bump access counters; `load_pinned`, `load_guardrails`, `recall_upcoming` and `recall_nearby` write only usage and audit rows. All six stay read-only.
+- `create_edge` is destructive because, on a pair that already has an edge, it applies your values over an automatic edge (and over a declared one with `overwrite=true`). `set_state` overwrites the value at its key, and with `ttl_seconds` each call restarts the expiry, so a repeat is not a no-op; `secret_put` revokes the grants the new version does not list. `secret_get` writes an audit entry and nothing else, so it is read-only.
+- **Legacy `readOnly`.** The non-standard top-level `readOnly: true` of earlier releases is still sent for clients that read it, now derived from `readOnlyHint`: present exactly on the read-only tools. It is gone from `recall` and `get_agent_bootstrap` and new on `secret_get` and `secret_list`.
+- **Hints, not authorization.** Annotations tell a client what a call does so it can decide when to ask for confirmation. The server's workspace and context role checks are unchanged, and a client may ignore the hints.
 
 ## Memory (7)
 

@@ -15,7 +15,9 @@ way:
   ``description`` strings removed must equal the committed snapshot, which was
   generated from the registry *before* any text was touched. Names, types,
   ``required``, enums, bounds, ``additionalProperties`` and ``readOnly`` flags
-  are therefore pinned, in order.
+  are therefore pinned, in order. The ``title`` and ``annotations`` of #1683
+  are left out too: they come from one table, ``TOOL_ANNOTATIONS``, which
+  ``test_tool_annotations`` pins.
 
 A deliberate schema change (a new tool or parameter) regenerates the snapshot::
 
@@ -47,11 +49,16 @@ SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 # schema skeleton (21,391), the "Returns:" contracts, one line of meaning per
 # parameter and the rules an agent must not lose (SECURITY, supersedes, trust
 # tier, error codes). Going lower means cutting those, not prose.
-FULL_LIST_BUDGET = 85_500  # #1685: reference() selection/paging params (85,249 measured)
-CORE_LIST_BUDGET = 31_000
-RECALL_BUDGET = 6_500
-REMEMBER_BUDGET = 6_000
-PER_TOOL_BUDGET = 6_500
+#
+# #1683 added a title and the four standard annotations to every definition,
+# about 160 characters each, and #1685 added reference()'s selection and
+# paging parameters: full list 95,445, core list 31,932, recall 6,503,
+# remember 6,092.
+FULL_LIST_BUDGET = 96_000  # (#1683, #1685) was 84,000
+CORE_LIST_BUDGET = 32_500  # (#1683, #1685) was 31,000
+RECALL_BUDGET = 6_600  # (#1683) was 6,500
+REMEMBER_BUDGET = 6_200  # (#1683) was 6,000
+PER_TOOL_BUDGET = 6_600  # (#1683) was 6,500
 
 # A ceiling more than this far above the measured size is a stale constant.
 MAX_SLACK = 0.15
@@ -88,8 +95,18 @@ def _strip_descriptions(node: Any) -> Any:
     return node
 
 
+# Attached at the exit from ``TOOL_ANNOTATIONS`` and pinned by
+# ``test_tool_annotations``; a copy here would be a second place to update.
+_NOT_IN_SKELETON = frozenset({"title", "annotations"})
+
+
 def _skeleton() -> list[dict]:
-    return [_strip_descriptions(tool) for tool in get_tool_definitions()]
+    return [
+        _strip_descriptions(
+            {key: value for key, value in tool.items() if key not in _NOT_IN_SKELETON}
+        )
+        for tool in get_tool_definitions()
+    ]
 
 
 def _assert_within(size: int, budget: int, what: str) -> None:

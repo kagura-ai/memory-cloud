@@ -31,7 +31,9 @@ from mcp_server.tools._profiles import (
 # The budget is that figure plus 10% headroom: a description can grow a little,
 # but a tool quietly joining ``CORE_TOOLS`` cannot. The per-tool and full-list
 # budgets live in ``test_tool_definition_budget``.
-CORE_CHAR_BUDGET = 32_000
+# #1683 (a title and annotations on every tool) and #1685 (reference()'s paging
+# parameters) took it to 32,999; a tool joining ``CORE_TOOLS`` still overshoots.
+CORE_CHAR_BUDGET = 33_500  # (#1683, #1685) was 32,000
 
 REGISTRY = [tool["name"] for tool in get_tool_definitions()]
 
