@@ -176,9 +176,16 @@ services:
   # (or with COMPOSE_BIND_HOST=0.0.0.0) leaves an open, default-credentialed
   # object store (OWASP A05).
   minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    # Chainguard's MinIO build, pinned by digest (#1691): the minio/minio images
+    # on Docker Hub and quay.io are no longer pullable anonymously. Keep in sync
+    # with the "Start MinIO" step in .github/workflows/ci.yml.
+    image: cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1
     container_name: kagura-minio
     profiles: ["minio"]
+    # The image runs as a non-root user by default. The previous image ran as
+    # root, so an existing minio_data volume is root-owned; run as root to keep
+    # those volumes writable.
+    user: "0:0"
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -189,7 +196,13 @@ services:
     volumes:
       - minio_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -fs http://localhost:9000/minio/health/live || exit 1"]
+      # The image ships bash but no curl, wget or grep: probe the liveness
+      # endpoint over bash's /dev/tcp and require an HTTP 200 status line.
+      test:
+        - "CMD"
+        - "bash"
+        - "-c"
+        - "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /minio/health/live HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && read -r status <&3 && [[ $$status == *' 200 '* ]]"
       interval: 10s
       timeout: 5s
       retries: 5
