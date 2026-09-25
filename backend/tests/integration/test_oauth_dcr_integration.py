@@ -459,26 +459,101 @@ class TestDcrLoopbackPersistsNullOwnerId:
         assert fetched.owner_id == "user-integration-test-12345"
 
 
-class TestAuthorizationCodeSingleUse:
-    """#1686: of two exchanges of one authorization code, only one issues a token.
+def _run_concurrently(requests: list) -> list[int]:
+    """Start every request at the same moment; return their status codes."""
+    import threading
 
-    The code row is read ``FOR UPDATE`` and deleted in the transaction that
-    stores the token, so a concurrent exchange waits and then finds no code.
+    start = threading.Barrier(len(requests))
+    statuses: list[int] = []
+
+    def run(send) -> None:
+        start.wait(timeout=10)
+        statuses.append(send().status_code)
+
+    threads = [threading.Thread(target=run, args=(send,)) for send in requests]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    return statuses
+
+
+def _lock_then_release(lock_sql: str, release_sql: str, params: dict, table: str, send):
+    """Hold a row ``FOR UPDATE``, send a request that must wait for it, then release.
+
+    The request runs in a thread. The helper asserts that a ``SELECT`` on
+    ``table`` waited on a lock (seen in ``pg_stat_activity``) before it runs
+    ``release_sql`` in the locking transaction and commits.
+
+    Returns:
+        The request's response.
+    """
+    import threading
+    import time
+
+    import psycopg2
+
+    locker = get_sync_session()
+    observer = psycopg2.connect(
+        os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://"),
+        connect_timeout=3,
+    )
+    observer.autocommit = True
+    result: dict = {}
+    try:
+        locker.execute(text(lock_sql), params)
+        thread = threading.Thread(target=lambda: result.update(response=send()))
+        thread.start()
+
+        waiting = False
+        deadline = time.monotonic() + 10
+        while not waiting and time.monotonic() < deadline:
+            with observer.cursor() as cur:
+                # Only the waiting SELECT counts (the statement text is truncated
+                # at track_activity_query_size, so FOR UPDATE itself may not show).
+                cur.execute(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND wait_event_type = 'Lock' "
+                    "AND query ILIKE 'SELECT%%' AND query ILIKE %s",
+                    (f"%{table}%",),
+                )
+                waiting = cur.fetchone()[0] > 0
+            if not waiting:
+                time.sleep(0.05)
+        assert waiting, f"the request did not wait for the locked {table} row"
+
+        locker.execute(text(release_sql), params)
+        locker.commit()
+        thread.join(timeout=30)
+    finally:
+        locker.close()
+        observer.close()
+    return result["response"]
+
+
+class TestOAuthGrantSingleUse:
+    """#1686: an authorization code, a refresh token and a device code each yield
+    one token, also when two requests use them at the same moment.
+
+    The code and the refresh token are read ``FOR UPDATE``; the code and the
+    device code are deleted, and the refreshed pair revoked, in the transaction
+    that stores the new token, by statements that must affect exactly one row.
     """
 
     _USER_ID = "integration-test-user-689"  # purged by the ``sync_db`` teardown
     _REDIRECT_URI = "http://localhost:54321/callback"
+    _DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 
-    def _register(self, client) -> str:
+    def _register(self, client, grant_types: list[str] | None = None) -> str:
+        body: dict = {
+            "client_name": "IntegrationTest Claude Code Loopback",
+            "redirect_uris": [self._REDIRECT_URI],
+            "token_endpoint_auth_method": "none",
+        }
+        if grant_types:
+            body["grant_types"] = grant_types
         with patch("api.routes.oauth.increment_counter", AsyncMock(return_value=1)):
-            response = client.post(
-                "/api/v1/oauth/register",
-                json={
-                    "client_name": "IntegrationTest Claude Code Loopback",
-                    "redirect_uris": [self._REDIRECT_URI],
-                    "token_endpoint_auth_method": "none",
-                },
-            )
+            response = client.post("/api/v1/oauth/register", json=body)
         assert response.status_code == 201, response.text
         return response.json()["client_id"]
 
@@ -509,6 +584,50 @@ class TestAuthorizationCodeSingleUse:
         sync_db.commit()
         return code, verifier
 
+    def _insert_token(self, sync_db, client_id: str) -> str:
+        import secrets
+
+        from models.auth import OAuth2Token
+
+        refresh_token = secrets.token_urlsafe(32)
+        sync_db.add(
+            OAuth2Token(
+                client_id=client_id,
+                user_id=self._USER_ID,
+                token_type="Bearer",
+                access_token=secrets.token_urlsafe(32),
+                refresh_token=refresh_token,
+                scope="memory:read",
+                expires_in=3600,
+                revoked=False,
+            )
+        )
+        sync_db.commit()
+        return refresh_token
+
+    def _insert_approved_device_code(self, sync_db, client_id: str) -> str:
+        import secrets
+        from datetime import timedelta
+
+        from models.auth import OAuth2DeviceCode, generate_user_code
+        from utils.datetime import utcnow
+
+        device_code = secrets.token_urlsafe(32)
+        sync_db.add(
+            OAuth2DeviceCode(
+                device_code=device_code,
+                user_code=generate_user_code(),
+                client_id=client_id,
+                user_id=self._USER_ID,
+                scope="memory:read",
+                authorized_at=utcnow(),
+                last_polled_at=utcnow() - timedelta(minutes=5),
+                expires_at=utcnow() + timedelta(seconds=600),
+            )
+        )
+        sync_db.commit()
+        return device_code
+
     def _exchange(self, client, client_id: str, code: str, verifier: str):
         return client.post(
             "/api/v1/oauth/token",
@@ -521,6 +640,26 @@ class TestAuthorizationCodeSingleUse:
             },
         )
 
+    def _refresh(self, client, client_id: str, refresh_token: str):
+        return client.post(
+            "/api/v1/oauth/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+            },
+        )
+
+    def _poll(self, client, client_id: str, device_code: str):
+        return client.post(
+            "/api/v1/oauth/token",
+            data={
+                "grant_type": self._DEVICE_GRANT,
+                "device_code": device_code,
+                "client_id": client_id,
+            },
+        )
+
     @staticmethod
     def _token_count(sync_db, client_id: str) -> int:
         return sync_db.execute(
@@ -528,83 +667,71 @@ class TestAuthorizationCodeSingleUse:
             {"client_id": client_id},
         ).scalar()
 
-    def test_concurrent_exchanges_issue_one_token(self, client, sync_db):
-        import threading
+    # -- authorization code ------------------------------------------------
 
+    def test_concurrent_exchanges_issue_one_token(self, client, sync_db):
         client_id = self._register(client)
         code, verifier = self._insert_code(sync_db, client_id)
-        start = threading.Barrier(2)
-        statuses: list[int] = []
 
-        def exchange() -> None:
-            start.wait(timeout=10)
-            statuses.append(self._exchange(client, client_id, code, verifier).status_code)
-
-        threads = [threading.Thread(target=exchange) for _ in range(2)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=30)
+        statuses = _run_concurrently(
+            [lambda: self._exchange(client, client_id, code, verifier)] * 2
+        )
 
         assert sorted(statuses) == [200, 400]
         assert self._token_count(sync_db, client_id) == 1
 
     def test_exchange_waits_for_a_locked_code_and_then_finds_it_consumed(self, client, sync_db):
-        import threading
-        import time
-
-        import psycopg2
-
         client_id = self._register(client)
         code, verifier = self._insert_code(sync_db, client_id)
 
-        locker = get_sync_session()
-        observer = psycopg2.connect(
-            os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://"),
-            connect_timeout=3,
+        response = _lock_then_release(
+            "SELECT id FROM oauth_authorization_codes WHERE code = :code FOR UPDATE",
+            "DELETE FROM oauth_authorization_codes WHERE code = :code",
+            {"code": code},
+            "oauth_authorization_codes",
+            lambda: self._exchange(client, client_id, code, verifier),
         )
-        observer.autocommit = True
-        try:
-            # Another exchange holds the code row.
-            locker.execute(
-                text("SELECT id FROM oauth_authorization_codes WHERE code = :code FOR UPDATE"),
-                {"code": code},
-            )
-            result: dict = {}
-            thread = threading.Thread(
-                target=lambda: result.update(
-                    response=self._exchange(client, client_id, code, verifier)
-                )
-            )
-            thread.start()
 
-            waiting = False
-            deadline = time.monotonic() + 10
-            while not waiting and time.monotonic() < deadline:
-                with observer.cursor() as cur:
-                    # The statement text is truncated at track_activity_query_size,
-                    # so match on the table name, not on the trailing FOR UPDATE.
-                    cur.execute(
-                        "SELECT count(*) FROM pg_stat_activity "
-                        "WHERE datname = current_database() AND wait_event_type = 'Lock' "
-                        "AND query ILIKE '%oauth_authorization_codes%'"
-                    )
-                    waiting = cur.fetchone()[0] > 0
-                if not waiting:
-                    time.sleep(0.05)
-            assert waiting, "the exchange did not wait for the locked code"
-
-            # The other exchange consumes the code and commits.
-            locker.execute(
-                text("DELETE FROM oauth_authorization_codes WHERE code = :code"), {"code": code}
-            )
-            locker.commit()
-            thread.join(timeout=30)
-        finally:
-            locker.close()
-            observer.close()
-
-        response = result["response"]
         assert response.status_code == 400, response.text
         assert response.json()["error"] == "invalid_grant"
         assert self._token_count(sync_db, client_id) == 0
+
+    # -- refresh token -------------------------------------------------------
+
+    def test_concurrent_refreshes_issue_one_token(self, client, sync_db):
+        client_id = self._register(client)
+        refresh_token = self._insert_token(sync_db, client_id)
+
+        statuses = _run_concurrently([lambda: self._refresh(client, client_id, refresh_token)] * 2)
+
+        assert sorted(statuses) == [200, 400]
+        # The refreshed pair and one new pair.
+        assert self._token_count(sync_db, client_id) == 2
+
+    def test_refresh_waits_for_a_locked_token_and_then_finds_it_rotated(self, client, sync_db):
+        client_id = self._register(client)
+        refresh_token = self._insert_token(sync_db, client_id)
+
+        response = _lock_then_release(
+            "SELECT id FROM oauth_tokens WHERE refresh_token = :refresh_token FOR UPDATE",
+            "UPDATE oauth_tokens SET refresh_token_revoked_at = now() "
+            "WHERE refresh_token = :refresh_token",
+            {"refresh_token": refresh_token},
+            "oauth_tokens",
+            lambda: self._refresh(client, client_id, refresh_token),
+        )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == "invalid_grant"
+        assert self._token_count(sync_db, client_id) == 1
+
+    # -- device code -----------------------------------------------------------
+
+    def test_concurrent_device_polls_issue_one_token(self, client, sync_db):
+        client_id = self._register(client, grant_types=[self._DEVICE_GRANT, "refresh_token"])
+        device_code = self._insert_approved_device_code(sync_db, client_id)
+
+        statuses = _run_concurrently([lambda: self._poll(client, client_id, device_code)] * 2)
+
+        assert sorted(statuses) == [200, 400]
+        assert self._token_count(sync_db, client_id) == 1

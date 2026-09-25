@@ -607,7 +607,9 @@ class OAuth2Client(Base):
         - check_token_endpoint_auth_method(method): Validates auth method
         - check_response_type(response_type): Validates response_type
         - check_grant_type(grant_type): Validates grant_type
-        - get_allowed_scope(scope): Returns intersection of requested and allowed scopes
+
+        The granted scope is computed by ``auth.oauth2_server.granted_scope``
+        (#1686), not by the client model.
     """
 
     __tablename__ = "oauth_clients"
@@ -804,24 +806,6 @@ class OAuth2Client(Base):
             True if grant_type is in registered grant_types
         """
         return grant_type in self.grant_types
-
-    def get_allowed_scope(self, scope: str) -> str:
-        """Get intersection of requested and allowed scopes.
-
-        Required by Authlib.
-
-        Args:
-            scope: Requested scope (space-separated)
-
-        Returns:
-            Allowed scope (intersection of requested and registered)
-        """
-        if not scope:
-            return self.scope
-
-        requested = set(scope.split())
-        allowed = set(self.scope.split())
-        return " ".join(requested & allowed)
 
 
 class OAuth2AuthorizationCode(Base):

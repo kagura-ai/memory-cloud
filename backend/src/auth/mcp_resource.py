@@ -37,27 +37,38 @@ def mcp_resource_identifier() -> str:
     return f"{base_url}{mcp_base_path()}"
 
 
+def _normalise_host(host: str) -> str:
+    """A host in comparable form: one trailing dot dropped, IDNA-encoded, lower case.
+
+    Raises:
+        UnicodeError: The host is not a valid IDNA name (e.g. an empty label).
+    """
+    return host.removesuffix(".").encode("idna").decode("ascii").lower()
+
+
 def _origin(parts: SplitResult) -> tuple[str, str, int | None]:
-    """Scheme, lower-case host and port of a URL, the scheme's default port dropped.
+    """Scheme, normalised host and port of a URL, the scheme's default port dropped.
 
     Raises:
         ValueError: The port is not a valid number.
+        UnicodeError: The host is not a valid IDNA name.
     """
     scheme = parts.scheme.lower()
     port = parts.port
     if port == _DEFAULT_PORTS.get(scheme):
         port = None
-    return scheme, (parts.hostname or "").lower(), port
+    return scheme, _normalise_host(parts.hostname or ""), port
 
 
 def is_same_mcp_resource(value: str) -> bool:
     """Whether a resource indicator names this server's MCP resource.
 
-    It does when its origin is the published identifier's (same scheme, host
-    compared case-insensitively, the scheme's default port optional, no user
+    It does when its origin is the published identifier's (same scheme; host
+    compared case-insensitively after dropping one trailing dot and IDNA
+    encoding, on both sides; the scheme's default port optional; no user
     information) and its path is ``MCP_BASE_PATH`` or a path beneath it. Query
-    and fragment are ignored. A path with a ``.`` or ``..`` segment does not
-    match.
+    and fragment are ignored. A path with a ``.`` or ``..`` segment, or a host
+    that is not a valid IDNA name, does not match.
 
     Args:
         value: A resource indicator, e.g. the RFC 8707 ``resource`` parameter
@@ -73,7 +84,7 @@ def is_same_mcp_resource(value: str) -> bool:
             return False
         if not candidate.hostname or _origin(candidate) != _origin(published):
             return False
-    except ValueError:  # an invalid port or a malformed IPv6 host
+    except ValueError:  # an invalid port, a malformed IPv6 host or an invalid IDNA name
         return False
 
     path = candidate.path

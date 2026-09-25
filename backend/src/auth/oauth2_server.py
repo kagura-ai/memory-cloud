@@ -54,7 +54,7 @@ from authlib.oauth2.rfc8628 import DeviceCodeGrant as _DeviceCodeGrant
 from sqlalchemy.orm import Session
 
 from auth.mcp_resource import is_same_mcp_resource, mcp_resource_identifier
-from auth.mcp_scopes import ALL_ADVERTISED_SCOPES
+from auth.mcp_scopes import ALL_ADVERTISED_SCOPES, DCR_DEFAULT_SCOPES
 from config.settings import get_settings
 from models.auth import (
     OAuth2AuthorizationCode,
@@ -189,6 +189,51 @@ def granted_scope(requested: str | None, registered: str | None) -> str:
     return " ".join(registration)
 
 
+def registration_scope(requested: str | None) -> str:
+    """Scope stored for a Dynamic Client Registration (RFC 7591).
+
+    The requested scopes that this server defines. A request without
+    ``scope``, or whose scopes this server defines include no ``memory:*``
+    scope (e.g. ``claudeai`` or ``openid offline_access``), is registered
+    with ``DCR_DEFAULT_SCOPE``, keeping any ``openid`` / ``offline_access`` it
+    asked for.
+
+    Args:
+        requested: The ``scope`` of the registration request, if any.
+
+    Returns:
+        The scope to store, space-separated, without duplicates.
+    """
+    advertised = set(ALL_ADVERTISED_SCOPES)
+    kept = [scope for scope in dict.fromkeys((requested or "").split()) if scope in advertised]
+    if _names_memory_scope(kept):
+        return " ".join(kept)
+    return " ".join(dict.fromkeys([*DCR_DEFAULT_SCOPES, *kept]))
+
+
+def client_registered_scope(client: OAuth2Client) -> str:
+    """The registered scope the scope rule works from.
+
+    A DCR client (``owner_id`` is ``None``) whose stored scope has no
+    ``memory:*`` scope this server defines is treated as registered with
+    :func:`registration_scope` of that scope, the scope ``/register`` stores
+    for such a request. An admin-managed client's scope is used as stored.
+
+    Args:
+        client: The OAuth client.
+
+    Returns:
+        Its registered scope, space-separated.
+    """
+    stored = client.scope or ""
+    if getattr(client, "owner_id", None) is not None:
+        return stored
+    advertised = set(ALL_ADVERTISED_SCOPES)
+    if _names_memory_scope([scope for scope in stored.split() if scope in advertised]):
+        return stored
+    return registration_scope(stored)
+
+
 def _raise_if_no_scope(scope: str) -> None:
     if not scope:
         raise InvalidScopeError(description="This client is registered without a memory scope.")
@@ -248,7 +293,7 @@ def validate_authorization_parameters(client: OAuth2Client, payload: Any) -> str
         OAuth2Error: ``invalid_scope``, ``invalid_request`` or
             ``invalid_target``.
     """
-    scope = granted_scope(payload.data.get("scope"), client.scope)
+    scope = granted_scope(payload.data.get("scope"), client_registered_scope(client))
     _raise_if_no_scope(scope)
     if get_settings().oauth_pkce_required:
         check_code_challenge(payload, client, required=True)
@@ -486,7 +531,9 @@ class AuthorizationCodeGrant(_ResourceBoundGrant, grants.AuthorizationCodeGrant)
             InvalidScopeError: No requested scope can be granted.
         """
         client = cast(OAuth2Client, self.request.client)
-        _raise_if_no_scope(granted_scope(self.request.payload.scope, client.scope))
+        _raise_if_no_scope(
+            granted_scope(self.request.payload.scope, client_registered_scope(client))
+        )
 
     def validate_authorization_request(self) -> str:
         """Validate the authorization request, then its ``resource`` (RFC 8707).
@@ -561,7 +608,7 @@ class AuthorizationCodeGrant(_ResourceBoundGrant, grants.AuthorizationCodeGrant)
         payload = request.payload
         request_data = payload.data
 
-        scope = granted_scope(request_data.get("scope"), client.scope)
+        scope = granted_scope(request_data.get("scope"), client_registered_scope(client))
         code_challenge = request_data.get("code_challenge")
         code_challenge_method = request_data.get("code_challenge_method")
         resource = requested_resource(payload)
@@ -697,6 +744,7 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
         - Refresh tokens can be revoked independently
         - Refresh tokens are long-lived (no automatic expiration)
         - Client secret required for confidential clients
+        - Rotation is atomic: one refresh per refresh token issues a token
         - The requested scope cannot exceed the original grant
         - The new token keeps the audience of the refreshed one (RFC 8707)
     """
@@ -744,7 +792,9 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
     def authenticate_refresh_token(self, refresh_token: str) -> OAuth2Token | None:
         """Query and validate refresh token.
 
-        Called by Authlib during refresh token grant.
+        Called by Authlib during refresh token grant. The row is locked
+        (``SELECT ... FOR UPDATE``) until the refresh commits, so a concurrent
+        refresh with the same token waits for it and then finds it revoked.
 
         Args:
             refresh_token: Refresh token value
@@ -753,7 +803,10 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
             OAuth2Token or None
         """
         token = (
-            self.server.db_session.query(OAuth2Token).filter_by(refresh_token=refresh_token).first()
+            self.server.db_session.query(OAuth2Token)
+            .filter_by(refresh_token=refresh_token)
+            .with_for_update()
+            .first()
         )
 
         # Validate token
@@ -782,26 +835,51 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
 
         return _OAuthUser(user_id=credential.user_id)
 
-    def revoke_old_credential(self, credential: OAuth2Token) -> None:
-        """Revoke old access and refresh tokens.
+    def save_token(self, token: dict[str, Any]) -> None:
+        """Revoke the refreshed pair and store the new one in one transaction.
 
-        Called by Authlib after issuing new token pair.
-        Revokes both the old access token and the old refresh token
-        to enforce refresh token rotation (RFC 6819 Section 5.2.2.3).
+        Refresh token rotation (RFC 6819 §5.2.2.3): the old access and refresh
+        tokens are revoked by an update that must match exactly the unrevoked
+        row, so of two refreshes with one refresh token only one issues a
+        token.
+
+        Raises:
+            InvalidGrantError: The refresh token was rotated by another request.
+        """
+        credential = cast(OAuth2Token, self.request.refresh_token)
+        client_id, user_id = credential.client_id, credential.user_id
+        session = self.server.db_session
+        now = utcnow()
+        revoked = (
+            session.query(OAuth2Token)
+            .filter(
+                OAuth2Token.id == credential.id,
+                OAuth2Token.refresh_token_revoked_at.is_(None),
+            )
+            .update(
+                {
+                    OAuth2Token.access_token_revoked_at: now,
+                    OAuth2Token.refresh_token_revoked_at: now,
+                },
+                synchronize_session=False,
+            )
+        )
+        if revoked != 1:
+            session.rollback()
+            logger.warning("refresh_token_already_rotated", client_id=client_id)
+            raise InvalidGrantError()
+        super().save_token(token)
+        logger.info("oauth_refresh_token_rotated", client_id=client_id, user_id=user_id)
+
+    def revoke_old_credential(self, credential: OAuth2Token) -> None:
+        """Called by Authlib after issuing the new token pair.
+
+        Nothing is left to do: :meth:`save_token` revoked the old pair in the
+        transaction that stored the new one.
 
         Args:
-            credential: Old OAuth2Token instance
+            credential: The refreshed OAuth2Token.
         """
-        now = utcnow()
-        credential.access_token_revoked_at = now
-        credential.refresh_token_revoked_at = now
-        self.server.db_session.commit()
-
-        logger.info(
-            "oauth_refresh_token_rotated: client=%s, user=%s",
-            credential.client_id,
-            credential.user_id,
-        )
 
 
 # ============================================================================
@@ -882,6 +960,31 @@ class DeviceAuthorizationGrant(_ResourceBoundGrant, _DeviceCodeGrant):
                         token["workspace_name"] = workspace.name
 
         return token
+
+    def save_token(self, token: dict[str, Any]) -> None:
+        """Consume the device code and store the token in one transaction.
+
+        A device code yields one token (RFC 8628 §3.5): the row is deleted by
+        a delete that must remove exactly that row, so of two polls that both
+        find the code approved only one issues a token.
+
+        Raises:
+            InvalidGrantError: The device code was used by another request.
+        """
+        credential = cast(OAuth2DeviceCode, self.request.credential)
+        client_id = credential.client_id
+        session = self.server.db_session
+        consumed = (
+            session.query(OAuth2DeviceCode)
+            .filter_by(id=credential.id)
+            .delete(synchronize_session=False)
+        )
+        if consumed != 1:
+            session.rollback()
+            logger.warning("device_code_already_used", client_id=client_id)
+            raise InvalidGrantError("The device code has already been used.")
+        super().save_token(token)
+        logger.info("device_code_consumed", client_id=client_id)
 
     def query_device_credential(self, device_code: str) -> OAuth2DeviceCode | None:
         return (

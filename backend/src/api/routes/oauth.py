@@ -41,8 +41,10 @@ from auth.dependencies import SessionUser, require_admin
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth2_server import (
     _OAuthUser,
+    client_registered_scope,
     create_authorization_server,
     granted_scope,
+    registration_scope,
     validate_authorization_parameters,
 )
 from auth.starlette_oauth2_request import StarletteOAuth2Payload
@@ -588,8 +590,8 @@ _LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 # whose hostname equals one of these (or is a subdomain — ``host.endswith("." + s)``)
 # maps to the provider.
 _PROVIDER_HOSTNAMES: dict[str, tuple[str, ...]] = {
-    "chatgpt": ("chatgpt.com", "chat.openai.com"),
-    "claude": ("claude.ai", "anthropic.com"),
+    "chatgpt": ("chatgpt.com", "chat.openai.com", "platform.openai.com"),
+    "claude": ("claude.ai", "claude.com", "anthropic.com"),
     "cursor": ("cursor.sh", "cursor.com"),
 }
 
@@ -827,7 +829,9 @@ async def dynamic_client_registration(
         # check on the "none" branch (kagura-memory 19adf25b).
         client_id = f"oauth_{secrets.token_urlsafe(16)}"
 
-        scope = data.scope if data.scope else DCR_DEFAULT_SCOPE
+        # The requested scopes this server defines; DCR_DEFAULT_SCOPE when that
+        # holds no memory scope (#1686).
+        scope = registration_scope(data.scope)
 
         client = OAuth2Client(
             client_id=client_id,
@@ -2193,8 +2197,8 @@ _RFC6749_ERROR_CONTENT = {
             "description": (
                 "RFC 6749 §5.2 error: `invalid_request` for a missing or unsupported "
                 "Content-Type, a malformed body or a missing `client_id`; "
-                "`invalid_client` for an unknown `client_id`; `invalid_scope` for a "
-                "client registered without a memory scope"
+                "`invalid_client` for an unknown `client_id`; `invalid_scope` for an "
+                "admin-managed client registered without a memory scope"
             ),
             "content": _RFC6749_ERROR_CONTENT,
         },
@@ -2240,9 +2244,9 @@ async def device_authorize(request: Request) -> DeviceAuthorizationResponse | JS
     refused body still counts. A missing or unsupported Content-Type, a
     malformed body or a missing ``client_id`` returns 400 ``invalid_request``,
     an oversized body returns 413 ``invalid_request``, an unknown ``client_id``
-    returns 400 ``invalid_client``, a client registered without a memory scope
-    returns 400 ``invalid_scope`` and a failure to store the grant returns 500
-    ``server_error``, all in the RFC 6749 §5.2 error shape.
+    returns 400 ``invalid_client``, an admin-managed client registered without a
+    memory scope returns 400 ``invalid_scope`` and a failure to store the grant
+    returns 500 ``server_error``, all in the RFC 6749 §5.2 error shape.
 
     The granted scope follows ``granted_scope`` (#1686), as at ``/authorize``.
     """
@@ -2281,7 +2285,7 @@ async def device_authorize(request: Request) -> DeviceAuthorizationResponse | JS
 
         # The /authorize rule (#1686): requested ∩ registered ∩ defined, or the
         # registered scope when no memory scope is left.
-        scope = granted_scope(body.scope, client.scope)
+        scope = granted_scope(body.scope, client_registered_scope(client))
         if not scope:
             return rfc6749_error_response(
                 error="invalid_scope",

@@ -186,20 +186,21 @@ class TestNarrowedClientScopeRequestRespectsIntersection:
     ``DCR_DEFAULT_SCOPES`` — no admin. If that client later requests
     ``memory:admin`` at the authorization step (which a legacy SDK may do
     if it builds the authz URL from ``scopes_supported`` instead of the
-    DCR-registered scope), the server-side ``OAuth2Client.get_allowed_scope``
-    method returns the intersection of requested-and-registered, so the
-    issued token gets the narrowed scope. The MCP authorization spec
+    DCR-registered scope), the server's scope rule
+    (``auth.oauth2_server.granted_scope``, #1686) grants the intersection of
+    requested-and-registered, so the issued token gets the narrowed scope. The MCP authorization spec
     (SEP-835) explicitly endorses this narrowing as least-privilege
     behavior: "Authorization Servers MAY issue access tokens with narrower
     scopes."
 
-    This test pins that contract at the model layer. An SEP-835-compliant
+    This test pins that contract at the scope rule. An SEP-835-compliant
     SDK will accept the narrowed token. A pre-SEP-835 strict-drift SDK may
     invalidate the token; the rollback path is ``alembic downgrade
     e08_592_oauth_scope_canonicalize`` plus reverting `mcp_scopes.py`.
     """
 
     def test_narrowed_client_requesting_admin_gets_intersection(self) -> None:
+        from auth.oauth2_server import client_registered_scope, granted_scope  # noqa: PLC0415
         from models.auth import OAuth2Client  # noqa: PLC0415
 
         narrowed_client = OAuth2Client(
@@ -214,14 +215,15 @@ class TestNarrowedClientScopeRequestRespectsIntersection:
         )
 
         granted = set(
-            narrowed_client.get_allowed_scope(
-                "memory:read memory:write memory:admin offline_access"
+            granted_scope(
+                "memory:read memory:write memory:admin offline_access",
+                client_registered_scope(narrowed_client),
             ).split()
         )
 
         assert granted == {"memory:read", "memory:write", "offline_access"}, (
             f"Expected intersection to exclude memory:admin, got {sorted(granted)}. "
-            "OAuth2Client.get_allowed_scope must return requested ∩ registered — "
+            "granted_scope must return requested ∩ registered — "
             "a DCR-narrowed client (no admin in registered scope) requesting "
             "admin must receive a token without admin (SEP-835 least-privilege)."
         )
@@ -234,6 +236,7 @@ class TestNarrowedClientScopeRequestRespectsIntersection:
         symmetric — narrowing applies only when the client wasn't granted
         admin in the first place.
         """
+        from auth.oauth2_server import client_registered_scope, granted_scope  # noqa: PLC0415
         from models.auth import OAuth2Client  # noqa: PLC0415
 
         explicit_admin_client = OAuth2Client(
@@ -247,7 +250,11 @@ class TestNarrowedClientScopeRequestRespectsIntersection:
             token_endpoint_auth_method="none",
         )
 
-        granted = set(explicit_admin_client.get_allowed_scope("memory:read memory:admin").split())
+        granted = set(
+            granted_scope(
+                "memory:read memory:admin", client_registered_scope(explicit_admin_client)
+            ).split()
+        )
 
         assert granted == {"memory:read", "memory:admin"}
         assert "memory:admin" in granted

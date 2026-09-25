@@ -497,7 +497,8 @@ class TestRefreshTokenGrant:
     def test_authenticate_refresh_token_active(self) -> None:
         grant = _make_refresh_grant()
         token = _make_token(refresh_token="rt-active", refresh_token_revoked_at=None)
-        grant.server.db_session.query().filter_by().first.return_value = token
+        # The row is read with SELECT ... FOR UPDATE (#1686).
+        grant.server.db_session.query().filter_by().with_for_update().first.return_value = token
 
         result = grant.authenticate_refresh_token("rt-active")
         assert result is token
@@ -506,14 +507,14 @@ class TestRefreshTokenGrant:
         grant = _make_refresh_grant()
         # Revoked refresh token → is_refresh_token_active() False → None + warn.
         token = _make_token(refresh_token="rt-revoked", refresh_token_revoked_at=utcnow())
-        grant.server.db_session.query().filter_by().first.return_value = token
+        grant.server.db_session.query().filter_by().with_for_update().first.return_value = token
 
         result = grant.authenticate_refresh_token("rt-revoked")
         assert result is None
 
     def test_authenticate_refresh_token_not_found(self) -> None:
         grant = _make_refresh_grant()
-        grant.server.db_session.query().filter_by().first.return_value = None
+        grant.server.db_session.query().filter_by().with_for_update().first.return_value = None
 
         result = grant.authenticate_refresh_token("nope")
         assert result is None
@@ -526,15 +527,54 @@ class TestRefreshTokenGrant:
         assert isinstance(user, _OAuthUser)
         assert user.user_id == "refresh-user"
 
-    def test_revoke_old_credential_stamps_both_revocations(self) -> None:
+    def test_revoke_old_credential_is_a_no_op(self) -> None:
+        # save_token revoked the old pair in the new token's transaction (#1686).
         grant = _make_refresh_grant()
         token = _make_token(access_token_revoked_at=None, refresh_token_revoked_at=None)
 
         grant.revoke_old_credential(token)
 
-        assert token.access_token_revoked_at is not None
-        assert token.refresh_token_revoked_at is not None
-        grant.server.db_session.commit.assert_called_once()
+        grant.server.db_session.commit.assert_not_called()
+
+    def _rotation_grant(self, updated_rows: int) -> RefreshTokenGrant:
+        grant = _make_refresh_grant()
+        grant.request = SimpleNamespace(
+            client=_make_client(),
+            user=SimpleNamespace(user_id="user-abc"),
+            refresh_token=_make_token(id=11),
+        )
+        grant.server.db_session.query().filter().update.return_value = updated_rows
+        grant.server.db_session.reset_mock()
+        return grant
+
+    def test_save_token_revokes_the_old_pair_with_the_new_token(self) -> None:
+        grant = self._rotation_grant(updated_rows=1)
+
+        grant.save_token({"access_token": "at-new", "refresh_token": "rt-new"})
+
+        session = grant.server.db_session
+        session.query.assert_called_once_with(OAuth2Token)
+        values = session.query().filter().update.call_args.args[0]
+        assert {column.key for column in values} == {
+            "access_token_revoked_at",
+            "refresh_token_revoked_at",
+        }
+        assert isinstance(session.add.call_args.args[0], OAuth2Token)
+        session.commit.assert_called_once()
+        session.rollback.assert_not_called()
+
+    def test_save_token_refuses_a_refresh_token_already_rotated(self) -> None:
+        from authlib.oauth2.rfc6749.errors import InvalidGrantError
+
+        grant = self._rotation_grant(updated_rows=0)
+
+        with pytest.raises(InvalidGrantError):
+            grant.save_token({"access_token": "at-new", "refresh_token": "rt-new"})
+
+        session = grant.server.db_session
+        session.add.assert_not_called()
+        session.commit.assert_not_called()
+        session.rollback.assert_called_once()
 
 
 # ===========================================================================
@@ -799,6 +839,41 @@ class TestDeviceAuthorizationGrant:
 
         assert "user_email" not in token
         assert "workspace_id" not in token
+
+    def _consuming_grant(self, deleted_rows: int) -> DeviceAuthorizationGrant:
+        grant = _make_device_grant()
+        grant.request = SimpleNamespace(
+            client=_make_client(),
+            user=SimpleNamespace(user_id="user-abc"),
+            credential=_make_device(id=21, user_id="user-abc"),
+        )
+        grant.server.db_session.query().filter_by().delete.return_value = deleted_rows
+        grant.server.db_session.reset_mock()
+        return grant
+
+    def test_save_token_consumes_the_device_code_with_the_token(self) -> None:
+        grant = self._consuming_grant(deleted_rows=1)
+
+        grant.save_token({"access_token": "at", "refresh_token": "rt"})
+
+        session = grant.server.db_session
+        session.query.assert_called_once_with(OAuth2DeviceCode)
+        session.query().filter_by.assert_called_with(id=21)
+        assert isinstance(session.add.call_args.args[0], OAuth2Token)
+        session.commit.assert_called_once()
+
+    def test_save_token_refuses_a_device_code_already_used(self) -> None:
+        from authlib.oauth2.rfc6749.errors import InvalidGrantError
+
+        grant = self._consuming_grant(deleted_rows=0)
+
+        with pytest.raises(InvalidGrantError):
+            grant.save_token({"access_token": "at", "refresh_token": "rt"})
+
+        session = grant.server.db_session
+        session.add.assert_not_called()
+        session.commit.assert_not_called()
+        session.rollback.assert_called_once()
 
     def test_query_device_credential_found(self) -> None:
         grant = _make_device_grant()

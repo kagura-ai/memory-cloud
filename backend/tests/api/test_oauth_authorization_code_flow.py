@@ -26,7 +26,7 @@ from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 _BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
@@ -61,6 +61,7 @@ WORKSPACE_ID = "3f2b8c1e-5d6a-4b7c-9e0f-1a2b3c4d5e6f"
 FOREIGN_RESOURCE = "https://other.example/mcp"
 PUBLIC_CLIENT = "oauth_flow_public"
 NO_MEMORY_CLIENT = "oauth_flow_no_memory_scope"
+LEGACY_DCR_CLIENT = "oauth_flow_dcr_claudeai"
 CONFIDENTIAL_CLIENT = "oauth_flow_confidential"
 CONFIDENTIAL_SECRET = "confidential-client-secret-for-the-flow-test"
 USER_ID = "flow-user"
@@ -92,12 +93,23 @@ def db_factory() -> Iterator[sessionmaker]:
                     provider="claude",
                     **common,
                 ),
-                # A public client registered without any memory scope.
+                # An admin-managed public client registered without a memory scope.
                 OAuth2Client(
                     client_id=NO_MEMORY_CLIENT,
                     client_secret_hash="",
                     client_name="Flow No Memory Scope Client",
                     scope="openid offline_access",
+                    token_endpoint_auth_method="none",
+                    provider="custom",
+                    owner_id="admin-user",
+                    **common,
+                ),
+                # A DCR row stored with the scope the client asked for.
+                OAuth2Client(
+                    client_id=LEGACY_DCR_CLIENT,
+                    client_secret_hash="",
+                    client_name="Flow DCR claudeai Client",
+                    scope="claudeai",
                     token_endpoint_auth_method="none",
                     provider="claude",
                     **common,
@@ -884,3 +896,65 @@ class TestSingleUse:
             assert db.query(OAuth2Token).count() == 1
             assert db.query(OAuth2Token).one().access_token == first["access_token"]
         assert _codes(db_factory) == 0
+
+
+class TestDcrClientsWithoutMemoryScope:
+    """A DCR client that registered only non-memory scopes is served."""
+
+    def test_dcr_row_registered_with_claudeai_authorizes(self, api: TestClient) -> None:
+        verifier, challenge = _pkce()
+        redirect = _consent(
+            api, _authorize_params(LEGACY_DCR_CLIENT, challenge=challenge, scope="claudeai")
+        )
+        tokens = _exchange(api, redirect["code"], verifier, client_id=LEGACY_DCR_CLIENT)
+        assert tokens["scope"] == DCR_DEFAULT_SCOPE
+
+    @pytest.mark.parametrize("scope", ["claudeai", "openid offline_access", "openid profile"])
+    def test_registration_then_authorization(
+        self, api: TestClient, db_factory: sessionmaker, scope: str
+    ) -> None:
+        with patch("api.routes.oauth.increment_counter", AsyncMock(return_value=1)):
+            registered = api.post(
+                "/api/v1/oauth/register",
+                json={
+                    "client_name": "Claude Code",
+                    "redirect_uris": [REDIRECT_URI],
+                    "scope": scope,
+                },
+            )
+        assert registered.status_code == 201, registered.text
+        client_id = registered.json()["client_id"]
+        assert registered.json()["scope"] == DCR_DEFAULT_SCOPE
+        with db_factory() as db:
+            assert db.query(OAuth2Client).filter_by(client_id=client_id).one().scope == (
+                DCR_DEFAULT_SCOPE
+            )
+
+        verifier, challenge = _pkce()
+        redirect = _consent(
+            api,
+            _authorize_params(client_id, challenge=challenge, scope=scope, resource=MCP_RESOURCE),
+        )
+        tokens = _exchange(api, redirect["code"], verifier, client_id=client_id)
+        assert tokens["scope"] == DCR_DEFAULT_SCOPE
+        assert _stored_token(db_factory, tokens["access_token"]).resource == MCP_RESOURCE
+
+
+class TestRefreshSingleUse:
+    def test_second_refresh_with_one_refresh_token_is_invalid_grant(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        tokens = _public_tokens(api, resource=MCP_RESOURCE)
+        first = _refresh(api, tokens["refresh_token"])
+        assert first.status_code == 200, first.text
+
+        second = _refresh(api, tokens["refresh_token"])
+
+        assert second.status_code == 400
+        assert second.json()["error"] == "invalid_grant"
+        with db_factory() as db:
+            # The original pair and the one refresh.
+            assert db.query(OAuth2Token).count() == 2
+            original = db.query(OAuth2Token).filter_by(access_token=tokens["access_token"]).one()
+            assert original.refresh_token_revoked_at is not None
+            assert original.access_token_revoked_at is not None
