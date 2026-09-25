@@ -103,11 +103,26 @@ def _mock_manager(monkeypatch):
 MINT_URL = f"/api/v1/workspaces/{_WS}/members/target-user/credentials/api-keys"
 
 
+def _assert_oauth_refusal(resp, action: str) -> None:
+    """#1693: the purpose-written refusal reaches the user.
+
+    Both SDKs drop any server message containing "bearer" (it could echo a
+    credential), so the sentence says "access tokens" instead.
+    """
+    body = resp.json()
+    assert body["error"] == "AUTH-101"
+    assert body["message"] == (
+        f"OAuth access tokens cannot {action}. Use a workspace-owner API key."
+    )
+    assert "bearer" not in resp.text.lower()
+
+
 class TestOwnerProvisionedMint:
     def test_oauth_rejected(self, client):
         _override(_oauth())
         r = client.post(MINT_URL, json={"name": "k", "expires_days": 30})
         assert r.status_code == 403
+        _assert_oauth_refusal(r, "mint API keys")
 
     def test_success_for_member_target(self, client, owner_gate, monkeypatch):
         fake_db = _override(_api_key_owner())
@@ -237,6 +252,7 @@ class TestOwnerProvisionedList:
         _override(_oauth())
         r = client.get(LIST_URL)
         assert r.status_code == 403
+        _assert_oauth_refusal(r, "view member credentials")
 
 
 class TestOwnerProvisionedRevoke:
@@ -323,6 +339,7 @@ class TestOwnerProvisionedRevoke:
         _override(_oauth())
         r = client.delete(REVOKE_URL)
         assert r.status_code == 403
+        _assert_oauth_refusal(r, "revoke API keys")
 
     def test_programmatic_self_revoke_is_soft(self, client, owner_gate, monkeypatch):
         # #1165 / Copilot #1171: an API-key owner revoking their OWN key is a

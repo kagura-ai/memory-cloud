@@ -57,9 +57,11 @@ class AuthorizedPrincipal:
 
 
 # OAuth bearer tokens are rejected on these surfaces until a dedicated
-# workspace-admin scope is designed (see module docstring).
+# workspace-admin scope is designed (see module docstring). The client-facing
+# sentence avoids the word "bearer": both SDKs drop any server message that
+# contains it (it could echo a credential), which hid this refusal (#1693).
 _OAUTH_REJECTED_MSG = (
-    "OAuth bearer tokens cannot manage workspace members or credentials. "
+    "OAuth access tokens cannot manage workspace members or credentials. "
     "Use a workspace-owner API key."
 )
 
