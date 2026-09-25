@@ -218,7 +218,7 @@ are different layers, not an inconsistency. A flattened bespoke bundle schema wa
 
 ## Sign-off checklist (maps to #1259)
 
-- [x] Response envelope composing context guide + trusted recall + pinned + upcoming +
+- [x] Response envelope composing context info + trusted recall + pinned + upcoming +
       state with per-component fail-soft status
 - [x] Pure composition of existing primitives — no parallel retrieval path, no separate
       scoring; caps/bounds inherited from the composed primitives

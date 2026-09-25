@@ -321,7 +321,7 @@ The control plane is a separate layer over the Agent Memory Substrate. The subst
 - **Agent Registry** — `agents` rows are workspace-scoped resources, not authentication principals. `active | suspended | retired` is a fail-closed lifecycle switch; `shadow | enforce` controls whether binding violations are observed or denied.
 - **Agent-bound member keys** — an owner-provisioned member key may carry `api_keys.agent_id`. It still authenticates as the member and keeps the same RBAC ceiling.
 - **Subtractive context bindings** — `agent_context_bindings` computes effective access as existing RBAC ∩ binding. A binding can never grant access. In `enforce` mode, an unbound context is denied with the same not-found shape used for inaccessible contexts.
-- **Composed bootstrap** — `get_agent_bootstrap` combines the context guide, pinned memories, an optional trusted-only recall, upcoming time memories, and agent state. Components fail softly; identity and authorization fail closed.
+- **Composed bootstrap** — `get_agent_bootstrap` combines the context info, pinned memories, an optional trusted-only recall, upcoming time memories, and agent state. Components fail softly; identity and authorization fail closed.
 
 The v0.49.0 milestone shipped the registry, context-level bindings, agent-bound keys, bootstrap, W3C Trace Context/baggage correlation, and the append-only `memory_access_events` foundation. Correlation is observability, never authorization; credential-bound identity outranks explicit/bootstrap and baggage claims. Per-memory type/source filters remain reserved and reject non-`null` values; audit emission currently covers bootstrap, load-pinned, feedback, recall, reference, and remember. Filter enforcement, `update`/`forget` emission, and deny persistence continue in [#1286](https://github.com/kagura-ai/memory-cloud/issues/1286). See the [F1 binding design](design/agent-registry-and-bindings.md), [F2 bootstrap contract](design/agent-bootstrap-contract.md), and [F4 correlation design](design/agent-otel-correlation.md).
 
@@ -352,7 +352,7 @@ See [README › MCP Tools](../README.md#mcp-tools) for the full per-tool table w
 ```
 list_contexts()           → Discover available contexts
   ↓
-get_context_info(id)      → Load context guidelines
+get_context_info(id)      → Describe the context (owner's notes, as data)
   ↓
 recall(query)             → Search for relevant memories
   ↓
