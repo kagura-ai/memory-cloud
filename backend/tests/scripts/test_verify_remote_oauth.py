@@ -326,7 +326,8 @@ class FakeDeployment:
         *,
         mcp_scope: bool = True,
         challenge_error: str = "invalid_token",
-        adopt_unknown_sessions: bool = False,
+        unknown_sessions: str = "404",
+        delete_status: int = 204,
         writes_succeed: bool = False,
         legacy_tools: Any = None,
     ) -> None:
@@ -334,7 +335,9 @@ class FakeDeployment:
         self.rfc7592 = rfc7592
         self.mcp_scope = mcp_scope  # 403 insufficient_scope for write tools without memory:write
         self.challenge_error = challenge_error
-        self.adopt_unknown_sessions = adopt_unknown_sessions
+        # What an unissued Mcp-Session-Id gets: "404", "adopt" (continue it) or "500".
+        self.unknown_sessions = unknown_sessions
+        self.delete_status = delete_status  # DELETE /mcp; 204 also ends the session
         self.writes_succeed = writes_succeed  # remember stores even into an unknown context
         self.legacy_tools = legacy_tools  # replaces the session-era tools/list value if set
         self.memories: dict[str, str] = {}  # memory_id -> context_id
@@ -530,6 +533,10 @@ class FakeDeployment:
         if token is None:
             challenge = f'Bearer error="{self.challenge_error}", resource_metadata="{prm}"'
             return httpx.Response(401, headers={"www-authenticate": challenge}, json={})
+        if request.method == "DELETE":
+            if self.delete_status == 204:
+                self.sessions.discard(request.headers.get("mcp-session-id", ""))
+            return httpx.Response(self.delete_status)
         body = json.loads(request.content)
         method, request_id = body.get("method"), body.get("id")
         tools = [
@@ -570,8 +577,11 @@ class FakeDeployment:
                 session,
             )
         session = request.headers.get("mcp-session-id")
-        if session is not None and session not in self.sessions and self.adopt_unknown_sessions:
-            self.sessions.add(session)
+        if session is not None and session not in self.sessions:
+            if self.unknown_sessions == "adopt":
+                self.sessions.add(session)
+            elif self.unknown_sessions == "500":
+                return httpx.Response(500, text="Internal Server Error")
         if session not in self.sessions:
             return httpx.Response(
                 404,
@@ -659,8 +669,9 @@ def test_happy_path_run_passes_with_one_consent_and_redacted_evidence(tmp_path: 
     assert report["consent_rounds"] == 1
     for step_id in ("D1", "D2", "D3", "D5", "R1", "R2", "A0", "A2", "T1", "T2", "T3", "T4", "T5"):
         assert by_id[step_id]["status"] == "pass", by_id[step_id]
-    for step_id in ("S1", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "S2", "F1", "F2", "F3", "F4"):
+    for step_id in ("S1", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "S2", "F1", "F2", "F3"):
         assert by_id[step_id]["status"] == "pass", by_id[step_id]
+    assert by_id["F4"]["status"] == "pass", by_id["F4"]
     for step_id in ("S3", "S4", "V1", "V2", "V3", "V4", "V5", "C1"):
         assert by_id[step_id]["status"] == "pass", by_id[step_id]
     s4 = by_id["S4"]["evidence"]
@@ -669,6 +680,9 @@ def test_happy_path_run_passes_with_one_consent_and_redacted_evidence(tmp_path: 
     assert s4["write_challenge_scope"] == "memory:write"
     assert s4["memory_written"] is False
     assert by_id["M7"]["evidence"]["request"] == "POST /mcp"
+    assert by_id["M7"]["evidence"]["outcome"] == "re-initialize"
+    assert by_id["M8"]["evidence"]["termination"] == "terminated"
+    assert by_id["M8"]["evidence"]["after"]["outcome"] == "re-initialize"
     assert by_id["A1a"]["status"] == "skip"  # sign-in comes first on this server
     assert by_id["X1"]["status"] == "skip"  # extended checks are opt-in
     assert by_id["C2"]["status"] == "info"  # no RFC 7592 management URI
@@ -687,17 +701,17 @@ def test_happy_path_run_passes_with_one_consent_and_redacted_evidence(tmp_path: 
     )
 
 
-def test_scope_challenge_and_session_checks_fail_the_run(tmp_path: Path) -> None:
+def test_scope_and_challenge_checks_fail_the_run(tmp_path: Path) -> None:
     # A server that serves writes to a read-only token over MCP, names
-    # invalid_request in its 401 challenge and adopts unknown session ids.
+    # invalid_request in its 401 challenge and continues unknown session ids.
     deployment = FakeDeployment(
-        mcp_scope=False, challenge_error="invalid_request", adopt_unknown_sessions=True
+        mcp_scope=False, challenge_error="invalid_request", unknown_sessions="adopt"
     )
     status, report, _ = _run(tmp_path, deployment)
 
     by_id = {step["id"]: step for step in report["steps"]}
-    assert status == 1  # S4, V5 and M7 are required
-    assert report["summary"]["required_not_passed_ids"] == ["M7", "S4", "V5"]
+    assert status == 1  # S4 and V5 are required
+    assert report["summary"]["required_not_passed_ids"] == ["S4", "V5"]
     assert by_id["S4"]["status"] == "fail"
     assert by_id["S4"]["evidence"]["write_status"] == 200
     assert by_id["S4"]["evidence"]["memory_written"] is False
@@ -707,7 +721,38 @@ def test_scope_challenge_and_session_checks_fail_the_run(tmp_path: Path) -> None
         "V1": "invalid_request",
         "V4": "invalid_request",
     }
-    assert by_id["M7"]["status"] == "fail" and by_id["M7"]["evidence"]["status"] == 200
+    # Continuing an unknown session is one of the two accepted answers.
+    assert by_id["M7"]["status"] == "pass"
+    assert by_id["M7"]["evidence"]["outcome"] == "continued"
+    assert by_id["M8"]["status"] == "pass"
+    assert by_id["M8"]["evidence"]["after"]["outcome"] == "continued"
+
+
+def test_unknown_session_server_error_fails_m7(tmp_path: Path) -> None:
+    status, report, _ = _run(tmp_path, FakeDeployment(unknown_sessions="500"))
+
+    m7 = next(step for step in report["steps"] if step["id"] == "M7")
+    assert status == 1
+    assert m7["status"] == "fail"
+    assert m7["evidence"]["outcome"] == "server-error"
+    assert report["summary"]["required_not_passed_ids"] == ["M7"]
+
+
+@pytest.mark.parametrize(
+    ("delete_status", "m8_status", "termination"),
+    [(405, "pass", "not supported"), (404, "fail", "other")],
+)
+def test_session_termination(
+    tmp_path: Path, delete_status: int, m8_status: str, termination: str
+) -> None:
+    status, report, _ = _run(tmp_path, FakeDeployment(delete_status=delete_status))
+
+    m8 = next(step for step in report["steps"] if step["id"] == "M8")
+    assert status == 0  # M8 is not required
+    assert m8["status"] == m8_status
+    assert m8["evidence"]["termination"] == termination
+    # The session was not ended, so the server carries on with it.
+    assert m8["evidence"]["after"]["outcome"] == "continued"
 
 
 def test_a_write_that_succeeds_fails_s4_and_is_cleaned_up(tmp_path: Path) -> None:

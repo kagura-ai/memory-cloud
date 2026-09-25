@@ -581,6 +581,39 @@ def normalize_base_url(value: str) -> str:
     return f"{parts.scheme}://{parts.netloc}"
 
 
+OUTCOME_CONTINUED = "continued"
+OUTCOME_REINITIALIZE = "re-initialize"
+
+
+def session_outcome(resp: httpx.Response) -> str:
+    """Classify a session-era answer to a request that named a session id.
+
+    ``continued``: 2xx with a JSON-RPC result (the server carries on with the
+    id). ``re-initialize``: 404 with a JSON-RPC error message telling the client
+    to start over. Anything else is ``server-error`` (5xx) or ``other``.
+    """
+    body = json_dict(resp)
+    error = body.get("error")
+    if 200 <= resp.status_code < 300 and isinstance(body.get("result"), dict):
+        return OUTCOME_CONTINUED
+    if resp.status_code == 404 and isinstance(error, dict) and error.get("message"):
+        return OUTCOME_REINITIALIZE
+    return "server-error" if resp.status_code >= 500 else "other"
+
+
+def session_outcome_evidence(resp: httpx.Response, outcome: str) -> dict[str, Any]:
+    """Status, outcome and guidance of a session-era answer (no session id)."""
+    error = json_dict(resp).get("error")
+    error = error if isinstance(error, dict) else {}
+    return {
+        "status": resp.status_code,
+        "outcome": outcome,
+        "jsonrpc_error_code": error.get("code"),
+        "guidance": error.get("message"),
+        "session_id_header_returned": "mcp-session-id" in resp.headers,
+    }
+
+
 def tool_result_json(result: dict[str, Any]) -> dict[str, Any]:
     """The JSON object a tool result's text content carries, else ``{}``."""
     content = result.get("content")
@@ -755,7 +788,8 @@ MCP_FOLLOW_UP_STEPS = (
     ("M4", f"Safe read call ({READ_TOOL})", True),
     ("M5", "Session reuse (ping on the same Mcp-Session-Id)", True),
     ("M6", "Stateless per-request era (MCP 2026-07-28), if supported", False),
-    ("M7", "Unknown Mcp-Session-Id on POST /mcp answers 404 (session era)", True),
+    ("M7", "An Mcp-Session-Id the server never issued: continued or 404, never 5xx", True),
+    ("M8", "DELETE /mcp ends the run's session (204, or 405 if unsupported)", False),
 )
 REFRESH_STEPS = (
     ("S2", "Refresh cannot widen the granted scope", True),
@@ -1692,27 +1726,59 @@ class Verifier:
             )
 
         with self.step("M7", "mcp", MCP_FOLLOW_UP_STEPS[5][1], True) as s:
-            # What a session-era client sends after its session expired: the
-            # base endpoint, a server-shaped session id the server never issued,
-            # and an ordinary request without per-request ``_meta``.
+            # What a session-era client sends after its session expired or the
+            # server restarted: the base endpoint, a server-shaped session id the
+            # server never issued, an ordinary request without ``_meta``.
             unknown = self.secret(f"mcp-{secrets.token_hex(8)}", "mcp_session_id")
             resp = self.mcp_post(
                 token, {"jsonrpc": "2.0", "id": 7, "method": "tools/list"}, session_id=unknown
             )
-            error = json_dict(resp).get("error")
-            error = error if isinstance(error, dict) else {}
+            outcome = session_outcome(resp)
             s.evidence.update(
                 {
                     "request": f"POST {self.cfg.mcp_path}",
                     "jsonrpc_method": "tools/list",
-                    "status": resp.status_code,
-                    "jsonrpc_error_code": error.get("code"),
-                    "guidance": error.get("message"),
-                    "session_id_header_returned": "mcp-session-id" in resp.headers,
+                    **session_outcome_evidence(resp, outcome),
                 }
             )
-            s.check("status 404", resp.status_code == 404)
-            s.summary = f"{resp.status_code}: {error.get('message')}"
+            s.check("no 5xx", resp.status_code < 500)
+            s.check(
+                "session continued (2xx result) or 404 with re-initialize guidance",
+                outcome in (OUTCOME_CONTINUED, OUTCOME_REINITIALIZE),
+            )
+            s.summary = f"{resp.status_code}: {outcome}"
+
+        with self.step("M8", "mcp", MCP_FOLLOW_UP_STEPS[6][1], False) as s:
+            if not self.session_id:
+                s.skip("no session from M1")
+            ended = self.http.delete(
+                self.mcp_url,
+                headers={"Authorization": f"Bearer {token}", "Mcp-Session-Id": self.session_id},
+            )
+            after = self.mcp_post(
+                token,
+                {"jsonrpc": "2.0", "id": 8, "method": "tools/list"},
+                session_id=self.session_id,
+            )
+            outcome = session_outcome(after)
+            s.evidence.update(
+                {
+                    "delete_status": ended.status_code,
+                    "termination": {204: "terminated", 405: "not supported"}.get(
+                        ended.status_code, "other"
+                    ),
+                    "after": session_outcome_evidence(after, outcome),
+                }
+            )
+            s.check("DELETE answers 204 or 405", ended.status_code in (204, 405))
+            s.check(
+                "the id afterwards: continued (2xx result) or 404 with guidance",
+                outcome in (OUTCOME_CONTINUED, OUTCOME_REINITIALIZE),
+            )
+            s.summary = (
+                f"DELETE → {ended.status_code} ({s.evidence['termination']}); "
+                f"then {after.status_code}: {outcome}"
+            )
 
     def instructions_evidence(self, instructions: Any) -> dict[str, Any]:
         """Length of the server ``instructions`` and whether it is the checkout's base text."""
