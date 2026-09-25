@@ -14,7 +14,7 @@ list_contexts()
 
 If this succeeds, MCP is connected. Skip to Step 3.
 
-If this fails, guide the user through setup (Step 2).
+If this fails, guide the user through setup (Step 2) — unless an entry exists and only its sign-in failed: a `401` / `invalid_token` (an expired or revoked token, a new machine), or `/mcp` showing the entry as needing authentication. Then run `/kagura-memory:login`, which re-authenticates the entry in place and verifies it. The same skill handles a `403` / `insufficient_scope` from a write tool, which a token narrowed to `memory:read` gets even when this call succeeds. (Claude Code's built-in `/login` signs in to the Anthropic account, not to Kagura.)
 
 ### 2. MCP connection setup (if not connected)
 
@@ -147,6 +147,7 @@ With the hooks on, the hooks are the guardrail lane for this client: put `?guard
 | `remember` | Save new knowledge |
 | `guide` | This guide |
 | `setup` | Configure and verify the MCP connection and the guardrail hooks (`--check` for a read-only doctor run) |
+| `login` | Sign the MCP connection in again after `invalid_token`, `insufficient_scope` or a new machine, and verify it |
 | `smoke-test` | Verify all MCP tools work |
 
 ### 7. Install in another project / machine

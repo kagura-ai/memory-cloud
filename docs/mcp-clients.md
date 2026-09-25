@@ -135,6 +135,7 @@ The **kagura-memory** plugin adds session management and memory workflow skills 
 | `/kagura-memory:remember` | Save new knowledge |
 | `/kagura-memory:guide` | Usage guide, connection status, and setup help |
 | `/kagura-memory:setup` | Configure and verify the MCP connection and the guardrail hooks (`--check` = read-only doctor) |
+| `/kagura-memory:login` | Sign the MCP connection in again (`invalid_token`, `insufficient_scope`, a new machine) and verify it — [Sign in again](#sign-in-again) |
 | `/kagura-memory:smoke-test` | Verify all MCP tools work |
 
 **Recommended workflow:**
@@ -181,6 +182,19 @@ Quick fixes:
 - **Use the device flow** ([#635 / PR #636](https://github.com/kagura-ai/memory-cloud/pull/636), RFC 8628) if your client supports it.
 
 See [Troubleshooting → WSL2 + Claude Code](troubleshooting.md#wsl2--claude-code--mcp-oauth-callback-fails-default-nat-networking) for the full symptom → diagnosis → fix walkthrough.
+
+## Sign in again
+
+An MCP entry that worked can lose its sign-in: the token expired or was revoked, you moved to a new machine or workspace, or an OAuth token narrowed to `memory:read` reached a write tool. What the client gets:
+
+| Response | Meaning |
+|---|---|
+| `401` with `WWW-Authenticate: Bearer error="invalid_token"` — Claude Code's `/mcp` shows the entry as needing authentication | the token is unknown, expired or revoked, or was issued for another server |
+| `403` with `WWW-Authenticate: Bearer error="insufficient_scope", scope="…"` | an OAuth token without the scope the tool needs ([OAuth scopes](mcp-tools.md#oauth-scopes)). `scope` lists the scopes the token already has plus the missing one: re-authorize with exactly that value, never the missing scope alone |
+
+- **Claude Code:** run `/kagura-memory:login` (plugin skill). It detects how the entry authenticates — Claude Code OAuth, a `kagura-mcp` CLI profile or a Bearer key — names the one step that signs it in again (`/mcp` → the entry → Authenticate; `kagura auth login --profile <name> --server https://<host>` in your own terminal; or a new API key where the entry reads it), and verifies with one `list_contexts` call. It never asks for a token, key or code in the chat. Claude Code's built-in `/login` signs in to your Anthropic account and does not touch the Kagura connection.
+- **Codex CLI:** ask the kagura-memory skill to "log in to Kagura Memory again" (its "Login" section). For an OAuth entry that is `codex mcp login kagura-memory`, with `--scopes memory:read,memory:write` after `insufficient_scope` (checked against codex-cli 0.145.0); a Bearer-key entry gets a new key in the variable its `bearer_token_env_var` names.
+- **Other clients:** reconnect the server in the client and approve access that includes the scope named. API keys carry no OAuth scope, so they never get `insufficient_scope`.
 
 ## Claude Desktop / Claude Chat (Web)
 
