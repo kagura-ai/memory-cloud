@@ -259,7 +259,7 @@ async def run_drift_now(
             .where(Memory.deleted_at.is_(None))
             .where(Memory.context_id.isnot(None))
         )
-        target_context_ids = [r[0] for r in result.all() if r[0] is not None]
+        target_context_ids = [cid for (cid,) in result.all() if cid is not None]
 
     # Keep strong references to the spawned tasks until the response
     # is built. asyncio.create_task returns a Task that is GC-eligible

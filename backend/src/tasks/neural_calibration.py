@@ -589,7 +589,10 @@ async def _pick_largest_context_for_model(
     row = (await db.execute(stmt)).first()
     if row is None:
         return None
-    return (row[0], int(row[1]))
+    context_id, count = row
+    if context_id is None:  # excluded by the WHERE above; narrows the type
+        return None
+    return (context_id, int(count))
 
 
 def _model_dims_where(model_name: str, dimensions: int):

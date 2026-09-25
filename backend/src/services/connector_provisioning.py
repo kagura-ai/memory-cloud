@@ -737,18 +737,25 @@ class ConnectorProvisioningService:
         # Under-reporting is a false alarm; over-reporting hides an outage — so
         # keep the never-under-reporting key and mark the ambiguity instead.
         shared = {ctx for ctx in bound_contexts if bound_contexts.count(ctx) > 1}
-        return [
-            ConnectorListItem(
-                connector=connector,
-                resource_id=resource_id,
-                display_name=resource_name,
-                context_name=context_name,
-                last_memory_at=activity.get(connector.context_id, (None, 0))[0],
-                memories_last_7d=activity.get(connector.context_id, (None, 0))[1],
-                ingest_context_shared=connector.context_id in shared,
+        items: list[ConnectorListItem] = []
+        for connector, resource_id, resource_name, context_name in rows:
+            last_memory_at, memories_last_7d = (
+                activity.get(connector.context_id, (None, 0))
+                if connector.context_id is not None
+                else (None, 0)
             )
-            for connector, resource_id, resource_name, context_name in rows
-        ]
+            items.append(
+                ConnectorListItem(
+                    connector=connector,
+                    resource_id=resource_id,
+                    display_name=resource_name,
+                    context_name=context_name,
+                    last_memory_at=last_memory_at,
+                    memories_last_7d=memories_last_7d,
+                    ingest_context_shared=connector.context_id in shared,
+                )
+            )
+        return items
 
     async def _ingest_activity(
         self, workspace_id: UUID, context_ids: set[UUID]
@@ -801,7 +808,11 @@ class ConnectorProvisioningService:
             )
             .group_by(Memory.context_id)
         )
-        return {row[0]: (row[1], row[2] or 0) for row in result.all() if row[0] is not None}
+        return {
+            context_id: (last_write, recent or 0)
+            for context_id, last_write, recent in result.all()
+            if context_id is not None
+        }
 
     async def _assert_team_unclaimed(
         self,

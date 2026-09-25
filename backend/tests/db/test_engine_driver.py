@@ -11,7 +11,11 @@ and the DBAPI import are what failed, so a mock would hide the regression.
 
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
+
 import pytest
+from packaging.requirements import Requirement
 
 import config.database as config_database
 import db.base as db_base
@@ -46,3 +50,20 @@ def test_async_engine_uses_asyncpg(scheme: str, fresh_engines: pytest.MonkeyPatc
     engine = db_base._get_engine()
     assert engine.dialect.driver == "asyncpg"
     assert engine.url.drivername == "postgresql+asyncpg"
+
+
+def test_asyncio_extra_is_declared() -> None:
+    """The async engine's greenlet comes from ``sqlalchemy[asyncio]``, not by luck.
+
+    SQLAlchemy 2.1 stopped installing greenlet by default; only its
+    ``asyncio`` extra pulls it in. Every CI job installs ``.[dev]``, whose
+    playwright happens to depend on greenlet — so a missing extra would stay
+    green in CI and break ``create_async_engine`` in any install without the
+    dev tools.
+    """
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    dependencies = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
+    (sqlalchemy,) = [
+        req for req in map(Requirement, dependencies) if req.name.lower() == "sqlalchemy"
+    ]
+    assert "asyncio" in sqlalchemy.extras

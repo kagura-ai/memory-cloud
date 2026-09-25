@@ -197,7 +197,7 @@ def build_revoke_update(*, invite_id: uuid.UUID, user_id: str, now: datetime) ->
     )
 
 
-def build_slot_counts_select(*, user_id: str, now: datetime) -> Select[tuple[int, int]]:
+def build_slot_counts_select(*, user_id: str, now: datetime) -> Select[int, int]:
     """Build the one-statement ``(active, redeemed)`` aggregate (#1595).
 
     THE definition of "occupies a quota slot": an unrevoked invite that is either
