@@ -1212,10 +1212,13 @@ class Verifier:
 
     def registration(self) -> None:
         """R1-R2: register a loopback public client and the Claude redirect URI."""
-        self.callback = CallbackServer(self.events, self.cfg.callback_port)
-        self.callback.start()
-        self.redirect_uri = f"http://127.0.0.1:{self.callback.port}/callback"
         with self.step("R1", "registration", "DCR: public client, loopback redirect", True) as s:
+            try:
+                self.callback = CallbackServer(self.events, self.cfg.callback_port)
+            except OSError as e:
+                raise StepFailed(f"cannot listen on 127.0.0.1:{self.cfg.callback_port}: {e}") from e
+            self.callback.start()
+            self.redirect_uri = f"http://127.0.0.1:{self.callback.port}/callback"
             self.client_id = self.register_client(s, self.redirect_uri)
         with self.step("R2", "registration", "DCR: Claude's redirect URI is accepted", True) as s:
             self.register_client(s, CLAUDE_REDIRECT_URI)

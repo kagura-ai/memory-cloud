@@ -638,6 +638,20 @@ def test_expect_version_mismatch_fails(tmp_path: Path) -> None:
     assert report["summary"]["required_not_passed_ids"] == ["D5"]
 
 
+def test_busy_callback_port_fails_r1_and_still_writes_evidence(tmp_path: Path) -> None:
+    import socket
+
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        status, report, _ = _run(tmp_path, FakeDeployment(), "--callback-port", str(port))
+
+    assert status == 1
+    r1 = next(step for step in report["steps"] if step["id"] == "R1")
+    assert r1["status"] == "fail" and "cannot listen" in r1["note"]
+
+
 def test_http_base_url_is_refused_for_a_remote_host() -> None:
     err = io.StringIO()
     assert vro.main(["--base-url", "http://memory.example.test"], stderr=err) == 2
