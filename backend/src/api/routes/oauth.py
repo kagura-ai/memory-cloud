@@ -20,7 +20,9 @@ Security:
 """
 
 import hashlib
+import json
 import os
+import re
 import secrets
 import unicodedata
 from datetime import timedelta
@@ -30,8 +32,9 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.requests import ClientDisconnect
 
 from auth.dependencies import SessionUser, require_admin
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
@@ -103,6 +106,11 @@ _DEVICE_UNAUTH_AUDIT_RATE_LIMIT = 30
 # (#1656). The limits themselves are settings; a 429 tells the caller to retry
 # after one window.
 _DEVICE_FLOW_RATE_WINDOW_SECONDS = 60
+
+# A device authorization request carries ``client_id`` and an optional ``scope``
+# (RFC 8628 §3.1); /device/authorize refuses a larger body without parsing it
+# (#1671).
+_DEVICE_AUTHORIZE_MAX_BODY_BYTES = 4096
 
 
 # ============================================================================
@@ -246,7 +254,10 @@ class OAuth2ProviderResponse(BaseModel):
 
 
 class DeviceAuthorizationRequest(BaseModel):
-    """Device Authorization Request (RFC 8628 Section 3.1)."""
+    """Device Authorization Request (RFC 8628 Section 3.1).
+
+    Sent as application/x-www-form-urlencoded (RFC 8628 §3.1) or application/json.
+    """
 
     client_id: str = Field(..., description="OAuth2 client identifier")
     scope: str | None = Field(None, description="Requested scope (space-separated)")
@@ -1832,7 +1843,6 @@ async def oauth_token(request: Request):
     Returns Authlib response with proper status code and headers.
     """
     import asyncio
-    import json
 
     from fastapi.responses import JSONResponse, Response
 
@@ -1948,14 +1958,190 @@ async def _device_flow_rate_limited(request: Request, endpoint: str, limit: int)
     return True
 
 
+_FORM_MEDIA_TYPE = "application/x-www-form-urlencoded"
+# A "%" that does not start a two-hex-digit escape, which ``parse_qsl`` keeps as text.
+_MALFORMED_PERCENT_ESCAPE = re.compile(rb"%(?![0-9A-Fa-f]{2})")
+
+
+class _DeviceAuthorizationRequestError(Exception):
+    """A /device/authorize body the endpoint refuses (#1671).
+
+    Attributes:
+        description: The RFC 6749 §5.2 ``error_description``.
+        status_code: HTTP status for the ``invalid_request`` response.
+    """
+
+    def __init__(self, description: str, status_code: int = status.HTTP_400_BAD_REQUEST) -> None:
+        super().__init__(description)
+        self.description = description
+        self.status_code = status_code
+
+
+async def _read_bounded_body(request: Request, limit: int) -> bytes:
+    """Read the request body, refusing it once it is larger than ``limit`` bytes.
+
+    A declared ``Content-Length`` over the limit is refused before anything is
+    read; a chunked body is refused as soon as the bytes read pass the limit.
+
+    Raises:
+        _DeviceAuthorizationRequestError: 413 when the body is too large, 400
+            when the client disconnects before the body is complete.
+    """
+
+    def too_large() -> _DeviceAuthorizationRequestError:
+        # A literal 413: Starlette before 0.48, which fastapi>=0.115.0 allows, has
+        # no HTTP_413_CONTENT_TOO_LARGE, and later ones deprecate the old name.
+        return _DeviceAuthorizationRequestError(f"Request body is larger than {limit} bytes", 413)
+
+    declared = request.headers.get("content-length", "")
+    if declared.isascii() and declared.isdigit() and int(declared) > limit:
+        raise too_large()
+    body = bytearray()
+    try:
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > limit:
+                raise too_large()
+    except ClientDisconnect as e:
+        raise _DeviceAuthorizationRequestError("Request body could not be read") from e
+    return bytes(body)
+
+
+def _parse_device_authorization_form(body: bytes) -> dict[str, str]:
+    """Parse the recognised parameters of a form-encoded device request.
+
+    Per RFC 6749 §3.1, a parameter sent without a value is treated as omitted
+    (``parse_qsl`` drops it), unrecognised parameters are ignored and a
+    recognised one sent twice is refused. A body with a malformed
+    percent-escape is refused rather than read with a literal ``%``.
+    """
+    if _MALFORMED_PERCENT_ESCAPE.search(body):
+        raise _DeviceAuthorizationRequestError("Request body has a malformed percent-escape")
+    try:
+        pairs = parse_qsl(body.decode("utf-8"), errors="strict")
+    except ValueError as e:  # UnicodeDecodeError is a ValueError
+        raise _DeviceAuthorizationRequestError("Request body is not UTF-8 form data") from e
+    fields: dict[str, str] = {}
+    for name, value in pairs:
+        if name not in DeviceAuthorizationRequest.model_fields:
+            continue
+        if name in fields:
+            raise _DeviceAuthorizationRequestError(f"Parameter {name} is included more than once")
+        fields[name] = value
+    return fields
+
+
+def _parse_device_authorization_json(body: bytes) -> dict[str, object]:
+    """Parse a JSON device request body, which must be one object."""
+    try:
+        fields = json.loads(body)
+    # JSONDecodeError and UnicodeDecodeError are ValueErrors; RecursionError is
+    # raised for JSON nested deeper than the decoder allows.
+    except (ValueError, RecursionError) as e:
+        raise _DeviceAuthorizationRequestError("Request body is not valid JSON") from e
+    if not isinstance(fields, dict):
+        raise _DeviceAuthorizationRequestError("Request body must be a JSON object")
+    return fields
+
+
+async def _read_device_authorization_request(request: Request) -> DeviceAuthorizationRequest:
+    """Read a device authorization request from a form or JSON body (#1671).
+
+    RFC 8628 §3.1 sends ``client_id`` and ``scope`` as
+    ``application/x-www-form-urlencoded``; the JSON body this endpoint read
+    before keeps working, including ``application/*+json``, as FastAPI's body
+    parsing read it. A request without a Content-Type is refused, as FastAPI's
+    strict content-type check refused it. The media type is matched
+    case-insensitively and its parameters, such as ``charset``, are ignored.
+    Error descriptions never echo request values.
+
+    Raises:
+        _DeviceAuthorizationRequestError: the Content-Type is unsupported, the
+            body is too large or malformed, or ``client_id`` is missing.
+    """
+    content_type = request.headers.get("content-type", "")
+    media_type = content_type.partition(";")[0].strip().lower()
+    is_form = media_type == _FORM_MEDIA_TYPE
+    is_json = media_type == "application/json" or (
+        media_type.startswith("application/") and media_type.endswith("+json")
+    )
+    if not (is_form or is_json):
+        raise _DeviceAuthorizationRequestError(
+            f"Unsupported Content-Type; send {_FORM_MEDIA_TYPE} or application/json"
+        )
+
+    body = await _read_bounded_body(request, _DEVICE_AUTHORIZE_MAX_BODY_BYTES)
+    fields = (
+        _parse_device_authorization_form(body)
+        if is_form
+        else _parse_device_authorization_json(body)
+    )
+    try:
+        return DeviceAuthorizationRequest.model_validate(fields)
+    except ValidationError as e:
+        errors = e.errors(include_input=False)
+        missing = [err for err in errors if err["type"] == "missing"]
+        names = ", ".join(sorted({str(err["loc"][0]) for err in missing or errors}))
+        prefix = "Missing required parameter" if missing else "Invalid parameter"
+        raise _DeviceAuthorizationRequestError(f"{prefix}: {names}") from e
+
+
+# /device/authorize reads its own body (form or JSON, #1671), so FastAPI derives
+# no request body for it; the OpenAPI operation lists both encodings here.
+_DEVICE_AUTHORIZATION_REQUEST_SCHEMA = DeviceAuthorizationRequest.model_json_schema()
+_RFC6749_ERROR_CONTENT = {
+    "application/json": {
+        "schema": {
+            "type": "object",
+            "properties": {
+                "error": {"type": "string"},
+                "error_description": {"type": "string"},
+            },
+            "required": ["error", "error_description"],
+        }
+    }
+}
+
+
 @router.post(
     "/device/authorize",
     response_model=DeviceAuthorizationResponse,
-    responses={429: {"description": "Too many device authorization requests from this address"}},
+    responses={
+        400: {
+            "description": (
+                "RFC 6749 §5.2 error: `invalid_request` for a missing or unsupported "
+                "Content-Type, a malformed body or a missing `client_id`; "
+                "`invalid_client` for an unknown `client_id`"
+            ),
+            "content": _RFC6749_ERROR_CONTENT,
+        },
+        413: {
+            "description": (
+                f"Request body larger than {_DEVICE_AUTHORIZE_MAX_BODY_BYTES} bytes "
+                "(`invalid_request`)"
+            ),
+            "content": _RFC6749_ERROR_CONTENT,
+        },
+        429: {
+            "description": "Too many device authorization requests from this address",
+            "content": _RFC6749_ERROR_CONTENT,
+        },
+        500: {
+            "description": "The device authorization could not be stored (`server_error`)",
+            "content": _RFC6749_ERROR_CONTENT,
+        },
+    },
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                _FORM_MEDIA_TYPE: {"schema": _DEVICE_AUTHORIZATION_REQUEST_SCHEMA},
+                "application/json": {"schema": _DEVICE_AUTHORIZATION_REQUEST_SCHEMA},
+            },
+        }
+    },
 )
-async def device_authorize(
-    request: Request, body: DeviceAuthorizationRequest
-) -> DeviceAuthorizationResponse | JSONResponse:
+async def device_authorize(request: Request) -> DeviceAuthorizationResponse | JSONResponse:
     """Device Authorization endpoint (RFC 8628 Section 3.1).
 
     Called by CLI clients to obtain a device_code + user_code pair.
@@ -1965,6 +2151,14 @@ async def device_authorize(
     requests per minute (#1656). Over the limit it returns 429 in the RFC 6749
     §5.2 error shape (RFC 8628 §3.2) with ``Retry-After``, before any row is
     written.
+
+    The body is ``application/x-www-form-urlencoded`` (RFC 8628 §3.1) or
+    ``application/json`` (#1671). It is read after the limit is counted, so a
+    refused body still counts. A missing or unsupported Content-Type, a
+    malformed body or a missing ``client_id`` returns 400 ``invalid_request``,
+    an oversized body returns 413 ``invalid_request``, an unknown ``client_id``
+    returns 400 ``invalid_client`` and a failure to store the grant returns 500
+    ``server_error``, all in the RFC 6749 §5.2 error shape.
     """
     settings = get_settings()
     if await _device_flow_rate_limited(
@@ -1978,15 +2172,26 @@ async def device_authorize(
         response.headers["Retry-After"] = str(_DEVICE_FLOW_RATE_WINDOW_SECONDS)
         return response
 
+    try:
+        body = await _read_device_authorization_request(request)
+    except _DeviceAuthorizationRequestError as e:
+        logger.info(
+            "device_authorization_request_rejected",
+            status_code=e.status_code,
+            reason=e.description,
+        )
+        return rfc6749_error_response(
+            error="invalid_request", description=e.description, status_code=e.status_code
+        )
+
     db_session = get_sync_session()
 
     try:
         client = db_session.query(OAuth2Client).filter_by(client_id=body.client_id).first()
         if not client:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Unknown client_id",
-            )
+            # RFC 8628 §3.2 answers with RFC 6749 §5.2 errors, which name an
+            # unknown client ``invalid_client``.
+            return rfc6749_error_response(error="invalid_client", description="Unknown client_id")
 
         device_code = secrets.token_urlsafe(32)
         user_code = generate_user_code()
@@ -2023,15 +2228,15 @@ async def device_authorize(
             interval=settings.oauth_device_polling_interval,
         )
 
-    except HTTPException:
-        raise
     except Exception as e:
         db_session.rollback()
         logger.error("device_authorize_failed", error=str(e))
-        raise HTTPException(
+        # RFC 6749 §5.2 shape like every other error here and like /token.
+        return rfc6749_error_response(
+            error="server_error",
+            description="Failed to create device authorization",
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create device authorization",
-        ) from e
+        )
     finally:
         db_session.close()
 
