@@ -51,10 +51,11 @@ SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 # tier, error codes). Going lower means cutting those, not prose.
 #
 # #1683 added a title and the four standard annotations to every definition,
-# about 160 characters each: full list 94,113, core list 30,600, recall 6,504,
+# about 160 characters each, and #1685 added reference()'s selection and
+# paging parameters: full list 95,445, core list 31,932, recall 6,503,
 # remember 6,092.
-FULL_LIST_BUDGET = 95_000  # (#1683) was 84,000
-CORE_LIST_BUDGET = 31_000
+FULL_LIST_BUDGET = 96_000  # (#1683, #1685) was 84,000
+CORE_LIST_BUDGET = 32_500  # (#1683, #1685) was 31,000
 RECALL_BUDGET = 6_600  # (#1683) was 6,500
 REMEMBER_BUDGET = 6_200  # (#1683) was 6,000
 PER_TOOL_BUDGET = 6_600  # (#1683) was 6,500

@@ -116,7 +116,8 @@ Each candidate's score is multiplied by a factor bounded to
 
 - **cold-start recency** — a day-scaled prior (`recency_tau_days`, default 14)
   that favors newer memories that haven't yet earned adoption signal;
-- **adoption** — deliberate `reference()` calls (log-capped);
+- **adoption** — deliberate `reference()` calls (log-capped; a read paged over
+  several calls counts once);
 - **retrieval feedback** — explicit helpful/unhelpful verdicts.
 
 Because the factor is bounded, semantic relevance always dominates: the

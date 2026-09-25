@@ -294,9 +294,11 @@ Returns: {status, results: [{memory_id, summary, context_summary?, type, importa
         {
             "name": "reference",
             "readOnly": True,
-            "description": """Get one memory in full (all 3 layers) by ID. Use it after recall(), which returns summaries only, when you need the complete content, details and provenance of a hit.
+            "description": """Get one memory (all 3 layers, within max_chars) by ID. Use it after recall(), which returns summaries only, when you need the content, details and provenance of a hit.
 
-Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, client, source_uri, source_type, outgoing_links: [{memory_id, summary, type, importance, weight, created_at}], outgoing_has_more, incoming_links: [...], incoming_has_more, supersede_candidate}}. updated_at is a staleness cue. supersede_candidate is null, or {memory_id, summary, similarity, detected_at} of an OLDER near-duplicate this memory likely supersedes — a suggestion only. Accept it with create_edge(source_id=<this memory_id>, target_id=<supersede_candidate.memory_id>, edge_type="supersedes"); reject a deliberate pair with update_memory(dismiss_supersede_candidate=true). Error to branch on: memory_not_found.""",
+Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, client, source_uri, source_type, outgoing_links: [{memory_id, summary, type, importance, weight, created_at}], outgoing_has_more, incoming_links: [...], incoming_has_more, supersede_candidate}}. updated_at is a staleness cue. supersede_candidate is null, or {memory_id, summary, similarity, detected_at} of an OLDER near-duplicate this memory likely supersedes — a suggestion only. Accept it with create_edge(source_id=<this memory_id>, target_id=<supersede_candidate.memory_id>, edge_type="supersedes"); reject a deliberate pair with update_memory(dismiss_supersede_candidate=true).
+
+Large memories: nothing is cut silently, and the response stays within max_chars unless the always-returned fields alone nearly fill it. Oversized content comes back as a slice (content_truncated, content_total_chars, content_next_offset) or, if none fits, as content_omitted; oversized details/context/links are left out, marked <field>_omitted with <field>_total_chars. Continue with content_offset / details_offset / context_offset = the *_next_offset value (one per call); details/context pages arrive as details_json / context_json text: join, then parse. Errors to branch on: memory_not_found, invalid_argument.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["memory_id", "context_id"],
@@ -310,6 +312,35 @@ Returns: {status, memory: {memory_id, summary, context_summary, content, details
                         "type": "string",
                         "format": "uuid",
                         "description": "Context UUID from list_contexts(). Do NOT guess or fabricate IDs.",
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["content", "details", "context", "links"],
+                        },
+                        "description": "Heavy fields to return (default all four; with an offset, only that one). Other fields always return.",
+                    },
+                    "content_offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Start content at this character (content_next_offset).",
+                    },
+                    "details_offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Page details as compact JSON text (details_json) from this character: 0, then details_next_offset.",
+                    },
+                    "context_offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "As details_offset, for context (context_json).",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 10000,
+                        "maximum": 100000,
+                        "description": "Response budget in characters, not tokens (default 20000).",
                     },
                 },
             },

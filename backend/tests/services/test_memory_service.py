@@ -296,6 +296,63 @@ class TestReference:
             memory_id, client="api", count_as_adoption=True
         )
 
+    @pytest.mark.asyncio
+    async def test_reference_without_record_access_leaves_access_stats_alone(self, service):
+        """#1685: a continuation page (record_access=False) is not another adoption.
+
+        The access check still runs and the memory is still returned; only the
+        access_count / reference_count / last_used_at bump and its commit are
+        skipped.
+        """
+        memory_id = uuid4()
+        mock_memory = MagicMock(
+            id=memory_id,
+            user_id="test_user",
+            summary="Test",
+            content="Test content",
+            context_summary="Context",
+            details={},
+            type="code",
+            importance=0.8,
+            tags=[],
+            context=None,
+            scope="working",
+            client="claude",
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+            embedding_status="success",
+            workspace_id=uuid4(),
+            context_id=uuid4(),
+            deleted_at=None,
+            source_uri=None,
+            source_type=None,
+        )
+        service.memory_repo.get = AsyncMock(return_value=mock_memory)
+        service.memory_repo.update_access_stats = AsyncMock()
+        service.db.commit = AsyncMock()
+
+        with (
+            patch("services.permission_service.PermissionService") as mock_perm_cls,
+            patch("repositories.neural_edge.NeuralEdgeRepository") as mock_edge_cls,
+        ):
+            mock_perm = MagicMock()
+            mock_perm.can_access_memory = AsyncMock(return_value=True)
+            mock_perm_cls.return_value = mock_perm
+
+            mock_edge_repo = MagicMock()
+            mock_edge_repo.get_outgoing_edges = AsyncMock(return_value=[])
+            mock_edge_repo.get_incoming_edges = AsyncMock(return_value=[])
+            mock_edge_cls.return_value = mock_edge_repo
+
+            response = await service.reference(
+                memory_id=memory_id, user_id="test_user", record_access=False
+            )
+
+        assert response.memory_id == memory_id
+        mock_perm.can_access_memory.assert_awaited_once()
+        service.memory_repo.update_access_stats.assert_not_awaited()
+        service.db.commit.assert_not_awaited()
+
 
 class TestReferenceWithLinks:
     """Issue #440: reference() exposes outgoing/incoming declared_link refs."""
