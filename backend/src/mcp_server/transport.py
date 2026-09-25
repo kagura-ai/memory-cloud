@@ -221,16 +221,21 @@ TOOLS_LIST_TTL_MS = 5 * 60 * 1000
 SERVER_INFO = {"name": "kagura-memory-cloud", "version": APP_VERSION}
 SERVER_CAPABILITIES: dict[str, dict] = {"tools": {}}
 
-# The static half of the server ``instructions`` (#1621): 240 characters,
-# pinned by ``tests/mcp_server/test_instructions_budget.py``. ChatGPT / Codex
-# read the first 512 characters as the part that matters, and a per-caller
-# guardrail digest (``build_instructions``) is appended after it, so the base
-# must leave room for the digest header and its first entry.
+# The static half of the server ``instructions`` (#1621): at most 240
+# characters, pinned by ``tests/mcp_server/test_instructions_budget.py``.
+# ChatGPT / Codex read the first 512 characters as the part that matters, and a
+# per-caller guardrail digest (``build_instructions``) is appended after it, so
+# the base must leave room for the digest header and its first entry.
+#
+# #1682: a how-to only. It names what get_context_info returns (a description
+# of the context) and never sends the model to fetch rules to follow; what a
+# context's members stored is data, returned by the tools the model calls.
+# ``tests/mcp_server/test_directory_instruction_boundary.py`` guards the wording.
 SERVER_INSTRUCTIONS_BASE = (
     "Kagura Memory Cloud: persistent memory for AI agents. Call list_contexts "
-    "to discover context IDs, then get_context_info(context_id) for a context's "
-    "rules and guardrails, then remember / recall / explore within it. All "
-    "tools take context_id."
+    "to discover context IDs, then work within one context: "
+    "get_context_info(context_id) describes it, and remember / recall / explore "
+    "store and search its memories."
 )
 # Kept as a module attribute for imports that still read the old name.
 SERVER_INSTRUCTIONS = SERVER_INSTRUCTIONS_BASE

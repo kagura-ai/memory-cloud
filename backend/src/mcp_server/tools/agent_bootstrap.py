@@ -1,7 +1,7 @@
 """MCP tool: get_agent_bootstrap (RFC-0002 P0-3, Issue #1276).
 
 Session-start composition tool — resolves the agent + its default (or
-supplied) context, then composes context guide, pinned memories, a
+supplied) context, then composes context info, pinned memories, a
 trusted-only recall (only when a query is supplied), upcoming time memories,
 and the agent-state lane into one fail-soft envelope. Pure composition of
 existing primitives via ``AgentBootstrapService`` — no parallel retrieval
