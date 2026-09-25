@@ -986,8 +986,15 @@ ignored (`/mcp?profile=core` names it). Any other origin or path is
 **Token requests.** Errors use the RFC 6749 §5.2 body
 `{"error": "...", "error_description": "..."}`.
 
+- A parameter the token endpoint reads (`grant_type`, `code`, `redirect_uri`,
+  `client_id`, `client_secret`, `code_verifier`, `refresh_token`, `scope`,
+  `device_code`) may be sent once; a repeated one gets `invalid_request`.
+  `resource` may be repeated (RFC 8707), and every value must name this
+  server's MCP resource.
 - `code_verifier` must match the `S256` challenge (`invalid_grant` otherwise).
-  A public client that leaves it out gets `invalid_request`.
+  A public client that leaves it out gets `invalid_request`. A code issued
+  without a `code_challenge` is not exchanged with a `code_verifier`
+  (`invalid_request`, RFC 9700 §4.8).
 - An authorization code, a refresh token and a device code each yield one
   token. A second exchange of a code, or a second refresh with a refresh
   token, gets `invalid_grant`, also when both are sent at the same moment. A
@@ -1032,7 +1039,10 @@ from the end user. From the terminal, `kagura auth login` does roughly:
    chosen (user × workspace). An optional `resource` on the polling
    request must name this server's MCP resource (the rule above;
    `invalid_target` otherwise, checked before the authorization state)
-   and becomes the token's audience.
+   and becomes the token's audience. The device code is deleted when the
+   token is issued: a later poll is refused, and its `user_code` no longer
+   resolves on the `/device` page or through `POST /api/v1/oauth/device/verify`
+   (`404`).
 5. `kagura auth refresh` exchanges the refresh token for a new pair
    (refresh-token rotation is enforced server-side per RFC 6819
    §5.2.2.3 — the old access/refresh pair is revoked when a new pair
