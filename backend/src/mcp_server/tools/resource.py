@@ -11,7 +11,6 @@ Provides 5 tools for managing resources via MCP:
 - list_resource_tokens: List tokens for a resource
 """
 
-import logging
 import re
 import time
 from typing import Any, NamedTuple
@@ -20,6 +19,7 @@ from uuid import UUID
 from mcp.types import TextContent
 
 import services.resource_ingest_service as resource_ingest_service
+from mcp_server.tools._errors import _tool_exception_response
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
     _context_cap_error_response,
@@ -39,8 +39,6 @@ from utils.exceptions import (
     QuotaExceededError,
     RateLimitError,
 )
-
-logger = logging.getLogger(__name__)
 
 # Resource ID format: lowercase alphanumeric + underscore + hyphen
 _RESOURCE_ID_PATTERN = re.compile(r"^[a-z0-9_-]+$")
@@ -283,7 +281,6 @@ async def handle_get_resource_impact(
 
         except Exception as e:
             await db.rollback()
-            logger.error(f"get_resource_impact_failed: {e}", exc_info=True)
             await _log_tool_usage(
                 db,
                 user_id,
@@ -292,7 +289,9 @@ async def handle_get_resource_impact(
                 500,
                 workspace_id=workspace_id,
             )
-            return _error_response("get_resource_impact_error", str(e))
+            return _tool_exception_response(
+                "get_resource_impact", e, error="get_resource_impact_error"
+            )
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -393,7 +392,6 @@ async def handle_get_resource_schema(
 
         except Exception as e:
             await db.rollback()
-            logger.error(f"get_resource_schema_failed: {e}", exc_info=True)
             await _log_tool_usage(
                 db,
                 user_id,
@@ -402,7 +400,9 @@ async def handle_get_resource_schema(
                 500,
                 workspace_id=workspace_id,
             )
-            return _error_response("get_resource_schema_error", str(e))
+            return _tool_exception_response(
+                "get_resource_schema", e, error="get_resource_schema_error"
+            )
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -525,7 +525,6 @@ async def handle_list_resource_tokens(
 
         except Exception as e:
             await db.rollback()
-            logger.error(f"list_resource_tokens_failed: {e}", exc_info=True)
             await _log_tool_usage(
                 db,
                 user_id,
@@ -534,7 +533,9 @@ async def handle_list_resource_tokens(
                 500,
                 workspace_id=workspace_id,
             )
-            return _error_response("list_resource_tokens_error", str(e))
+            return _tool_exception_response(
+                "list_resource_tokens", e, error="list_resource_tokens_error"
+            )
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -679,7 +680,6 @@ async def handle_ingest_events(
 
         except Exception as e:
             await db.rollback()
-            logger.error(f"ingest_events_failed: {e}", exc_info=True)
             await _log_tool_usage(
                 db,
                 user_id,
@@ -688,7 +688,7 @@ async def handle_ingest_events(
                 500,
                 workspace_id=workspace_id,
             )
-            return _error_response("ingest_events_error", str(e))
+            return _tool_exception_response("ingest_events", e, error="ingest_events_error")
 
     return _error_response("internal_error", "Database session unavailable")
 
@@ -1069,7 +1069,6 @@ async def handle_setup_resource(
                     sanitized_msg,
                     help="Check the context name and resource_id.",
                 )
-            logger.error(f"setup_resource_failed: {e}", exc_info=True)
             await _log_tool_usage(
                 db,
                 user_id,
@@ -1078,7 +1077,7 @@ async def handle_setup_resource(
                 500,
                 workspace_id=workspace_id,
             )
-            return _error_response("setup_resource_error", error_str)
+            return _tool_exception_response("setup_resource", e, error="setup_resource_error")
 
     # #1440: an exhausted ``get_db()`` generator must still produce the declared
     # ``list[TextContent]``. Without this the function fell off the end and
@@ -1249,7 +1248,6 @@ async def handle_setup_connector(
             )
         except Exception as e:
             await db.rollback()
-            logger.error(f"setup_connector_failed: {e}", exc_info=True)
             await _log_tool_usage(
                 db,
                 user_id,
@@ -1258,6 +1256,6 @@ async def handle_setup_connector(
                 500,
                 workspace_id=workspace_id,
             )
-            return _error_response("setup_connector_error", str(e))
+            return _tool_exception_response("setup_connector", e, error="setup_connector_error")
 
     return _error_response("internal_error", "Database session unavailable")

@@ -20,6 +20,7 @@ from pydantic import ValidationError
 
 from mcp_server.tools._arg_coercion import coerce_mcp_arguments
 from mcp_server.tools._definitions import get_tool_definitions  # noqa: F401
+from mcp_server.tools._errors import _tool_exception_response
 from mcp_server.tools._helpers import (
     _error_response,
     _format_validation_error,
@@ -380,7 +381,11 @@ async def execute_tool_call(
     # Validate tool exists before expensive checks (avoids DB query for unknown tools)
     handler = _TOOL_REGISTRY.get(tool_name)
     if handler is None:
-        return _error_response("unknown_tool", f"Unknown tool: {tool_name}")
+        return _error_response(
+            "unknown_tool",
+            f"Unknown tool: {tool_name}",
+            help="Call tools/list to see the tools this server provides.",
+        )
 
     # Issue #196 / #197: some MCP clients serialize arrays / objects / booleans
     # as JSON strings. Coerce them back to their declared types before the
@@ -440,13 +445,13 @@ async def execute_tool_call(
             message = _format_validation_error(e)
             logger.warning(f"mcp_tool_{tool_name}_invalid_argument: {message}")
             return _error_response("invalid_argument", message)
-        logger.error(f"mcp_tool_{tool_name}_failed: {e}", exc_info=True)
-        # #1622: through the helper so the transport flags it ``isError``;
-        # no ``message`` keeps the shape this arm has always shipped.
-        return _error_response(str(e))
+        # #1684: a server fault — error-level log with the traceback and a
+        # correlation_id; the caller gets ``internal_error``, never the dump.
+        return _tool_exception_response(tool_name, e)
     except Exception as e:
-        logger.error(f"mcp_tool_{tool_name}_failed: {e}", exc_info=True)
-        return _error_response(str(e))
+        # #1684: stable code + help + correlation_id + retry advice instead of
+        # ``{"error": str(e)}``; the exception text stays in the server log.
+        return _tool_exception_response(tool_name, e)
 
 
 # Backward-compat re-exports for test_mcp_server_e2e.py

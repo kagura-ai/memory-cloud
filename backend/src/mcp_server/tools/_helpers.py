@@ -204,23 +204,24 @@ class ToolErrorContent(list[TextContent]):
     is_error: bool = True
 
 
-def _error_response(error: str, message: str | None = None, **extra: Any) -> ToolErrorContent:
+def _error_response(error: str, message: str, **extra: Any) -> ToolErrorContent:
     """Create a standardized error response.
 
     Args:
-        error: Error code
-        message: Human-readable error message. Only the dispatch catch-alls
-            omit it (their ``{"status": "error", "error": str(e)}`` shape
-            predates the helper and is frozen); new callers always pass one.
-        **extra: Additional fields to include in response
+        error: Stable error code.
+        message: Human-readable error message. Required: the dispatch
+            catch-alls that used to send ``{"status": "error", "error": str(e)}``
+            without one now go through ``_errors`` (#1684), which never puts
+            exception text in the envelope.
+        **extra: Additional fields to include in response (``help``, and for
+            server failures ``cause`` / ``correlation_id`` / ``retryable`` —
+            see ``_errors``).
 
     Returns:
         List with single TextContent error response, marked ``is_error``
         so the transport flags the ``tools/call`` result with ``isError``.
     """
-    payload: dict[str, Any] = {"status": "error", "error": error}
-    if message is not None:
-        payload["message"] = message
+    payload: dict[str, Any] = {"status": "error", "error": error, "message": message}
     payload.update(extra)
     return ToolErrorContent([TextContent(type="text", text=_dumps(payload))])
 
@@ -339,7 +340,7 @@ class _ContextNotFoundError(Exception):
         self.message = message
         super().__init__(message)
 
-    def to_response(self) -> list[TextContent]:
+    def to_response(self) -> ToolErrorContent:
         return _error_response(
             "context_not_found",
             self.message,
@@ -373,17 +374,18 @@ async def _resolve_context(
         _ContextNotFoundError: If context not found or access denied
     """
     from services.context_service import ContextService
-    from utils.exceptions import NotFoundException
+    from utils.exceptions import AuthorizationError, NotFoundException
 
     context_service = ContextService(db)
     try:
         context = await context_service.get_context(user_id, context_id)
-    except Exception as e:
-        if isinstance(e, NotFoundException):
-            error_msg = "Context not found or you don't have access to it."
-        else:
-            error_msg = str(e)
-        raise _ContextNotFoundError(context_id, error_msg) from e
+    except (NotFoundException, AuthorizationError) as e:
+        raise _ContextNotFoundError(
+            context_id, "Context not found or you don't have access to it."
+        ) from e
+    # Anything else (a database outage, a bug) propagates to the handler's
+    # 500 path. It used to be re-raised as context_not_found carrying
+    # ``str(e)`` — driver text in the envelope, and the wrong code (#1684).
 
     # Issue #963: confine a workspace-scoped API key to its own workspace on the
     # WRITE path too (handle_remember / update_memory / forget resolve via this

@@ -1125,7 +1125,7 @@ def _mcp_payload(result) -> dict:
 async def _mcp_analysis(exc: MemoryCloudException) -> dict:
     from mcp_server.tools.analysis import _gate_error_response
 
-    return _mcp_payload(_gate_error_response(exc))
+    return _mcp_payload(_gate_error_response(exc, "analyze_context"))
 
 
 async def _mcp_files(exc: MemoryCloudException) -> dict:

@@ -16,6 +16,7 @@ from uuid import UUID
 
 from mcp.types import TextContent
 
+from mcp_server.tools._errors import _tool_exception_response
 from mcp_server.tools._helpers import (
     _error_response,
     _log_tool_usage,
@@ -164,9 +165,9 @@ async def handle_get_agent_bootstrap(
             await _log_tool_usage(
                 db, user_id, "get_agent_bootstrap", start_time, 500, None, workspace_id
             )
-            from mcp_server.tools._helpers import logger
-
-            logger.error(f"get_agent_bootstrap_failed: {e}", exc_info=True)
-            return _error_response("internal_error", "Failed to build agent bootstrap.")
+            # #1684: internal_error / timeout / service_unavailable with a
+            # correlation_id; the exception itself (a plain ValueError too —
+            # this arm always returned a fixed message) stays in the server log.
+            return _tool_exception_response("get_agent_bootstrap", e, echo_value_error=False)
 
     return _error_response("internal_error", "Database session unavailable")

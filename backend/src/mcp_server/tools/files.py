@@ -33,7 +33,6 @@ from utils.datetime import to_utc_iso
 from utils.exceptions import (
     AuthorizationError,
     ConflictError,
-    ExternalServiceError,
     NotFoundException,
     QuotaExceededError,
     UnsupportedMediaTypeError,
@@ -85,13 +84,13 @@ def _exc_to_error_response(exc: Exception) -> list[TextContent]:
             str(exc),
             **{k: v for k, v in exc.details.items() if v is not None},
         )
-    if isinstance(exc, ExternalServiceError):
-        # R2 5xx / AccessDenied / throttling — reachable from
-        # ``confirm_upload`` and ``get_presigned_download``. Surface as a
-        # named error so clients can retry with backoff rather than
-        # treating it as an opaque 500.
-        return _error_response("service_unavailable", str(exc))
-    raise exc  # unexpected — let the dispatch layer log a 500
+    # Anything else — including ``ExternalServiceError`` (storage 5xx,
+    # AccessDenied, throttling, missing storage config) — propagates to the
+    # dispatch catch-all. There the #1684 vocabulary reports it as
+    # ``service_unavailable`` with a correlation_id and the tool's retry
+    # advice, and keeps the storage text (object keys, env var names) in the
+    # server log.
+    raise exc
 
 
 async def _resolve_workspace(
@@ -180,7 +179,6 @@ async def handle_init_file_upload(
             ConflictError,
             QuotaExceededError,
             NotFoundException,
-            ExternalServiceError,
         ) as exc:
             return _exc_to_error_response(exc)
     return _success_response(
@@ -236,7 +234,6 @@ async def handle_complete_file_upload(
             AuthorizationError,
             ConflictError,
             NotFoundException,
-            ExternalServiceError,
         ) as exc:
             return _exc_to_error_response(exc)
     return _success_response(
@@ -299,7 +296,6 @@ async def handle_get_file_download_url(
             ValidationError,
             AuthorizationError,
             NotFoundException,
-            ExternalServiceError,
         ) as exc:
             return _exc_to_error_response(exc)
     return _success_response(download_url=url)

@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import CursorResult
 
 from config.constants import TOMBSTONE_PURGER_CLAUSE
+from mcp_server.tools._errors import classify_cause, new_correlation_id
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
     _ContextNotFoundError,
@@ -38,6 +39,17 @@ from utils.logger import get_logger
 # not reversed at all, and #1440's fix made THAT case silent. The helper now
 # returns a tri-state and the two are handled apart, below.
 logger = get_logger(__name__)
+
+# #1684: the next step after ``partial_rollback``. The report is marked
+# 'failed', which the status check in ``handle_rollback_sleep_run`` refuses, so
+# a repeat cannot undo an already-reversed action twice; the outcome itself is
+# known — ``rollback_summary`` lists it.
+_PARTIAL_ROLLBACK_HELP = (
+    "Every action not listed in rollback_summary.errors was handled and saved. "
+    "The report is now 'failed', so calling rollback_sleep_run on it again is refused. "
+    "get_sleep_report lists the run's recorded actions; quote the correlation_id, "
+    "if present, when reporting a failed action."
+)
 
 
 def _report_to_summary(report: Any) -> dict[str, Any]:
@@ -673,6 +685,8 @@ async def handle_rollback_sleep_run(
                 edge_repo=NeuralEdgeRepository(db),
             )
 
+            # One id per run, shared by every failed action's log line (#1684).
+            correlation_id: str | None = None
             for action in actions:
                 handler = _UNDO_HANDLERS.get(action.action_type)
                 if handler is None:
@@ -683,12 +697,25 @@ async def handle_rollback_sleep_run(
                     # Per-action isolation: one failed undo must not abandon the
                     # rest of the run. The error lands in the summary, which is
                     # what flips the report to partial_rollback below.
+                    # #1684: the summary is returned to the caller, so it names
+                    # the action, the failure category and the correlation_id;
+                    # the exception text (SQL, vector-store or model-provider
+                    # messages) stays in the server log under that id.
+                    correlation_id = correlation_id or new_correlation_id()
+                    cause = classify_cause(e)
                     logger.warning(
-                        f"rollback_action_failed: action={action.id} "
-                        f"type={action.action_type} error={e}"
+                        "rollback_action_failed",
+                        action_id=action.id,
+                        action_type=action.action_type,
+                        cause=cause,
+                        correlation_id=correlation_id,
+                        exc_type=type(e).__name__,
+                        exc=str(e),
+                        exc_info=e,
                     )
                     rollback_summary["errors"].append(
-                        f"Action {action.id} ({action.action_type}): {e}"
+                        f"Action {action.id} ({action.action_type}) failed: {cause} "
+                        f"(correlation_id {correlation_id})"
                     )
 
             has_errors = bool(rollback_summary["errors"])
@@ -715,9 +742,12 @@ async def handle_rollback_sleep_run(
                 return _error_response(
                     "partial_rollback",
                     f"Rollback completed with {len(rollback_summary['errors'])} error(s). "
-                    "Report marked as 'failed' — inspect errors and retry if needed.",
+                    "Report marked as 'failed'; rollback_summary shows what was reversed.",
+                    help=_PARTIAL_ROLLBACK_HELP,
+                    retryable=False,
                     report_id=str(report_uuid),
                     rollback_summary=rollback_summary,
+                    **({"correlation_id": correlation_id} if correlation_id else {}),
                 )
 
             return _success_response(

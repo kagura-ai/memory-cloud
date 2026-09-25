@@ -896,3 +896,42 @@ class TestHandleCreateContextPlanRefusal:
 
         assert payload["error"] == "validation_error"
         assert payload["help"] == "Check the context name and try again."
+
+    @pytest.mark.asyncio
+    async def test_duplicate_name_race_returns_a_fixed_message_not_the_driver_text(
+        self, user_id, workspace_id
+    ):
+        """#1684: a unique-constraint race past the service's own name check
+        used to echo the IntegrityError text (SQL and parameters)."""
+        from sqlalchemy.exc import IntegrityError
+
+        exc = IntegrityError(
+            "INSERT INTO contexts (name) VALUES ($1)",
+            {"name": "team-ctx"},
+            Exception('duplicate key value violates unique constraint "uq_ctx" already exists'),
+        )
+        payload, mock_db = await self._create_shared(user_id, workspace_id, exc)
+
+        assert payload["error"] == "validation_error"
+        assert payload["message"] == "A context with this name already exists in this workspace."
+        assert payload["help"] == "Check the context name and try again."
+        rendered = json.dumps(payload)
+        assert "INSERT" not in rendered and "duplicate key" not in rendered
+        mock_db.rollback.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_database_outage_keeps_the_legacy_code_with_the_vocabulary(
+        self, user_id, workspace_id
+    ):
+        from sqlalchemy.exc import OperationalError
+
+        exc = OperationalError(
+            "INSERT INTO contexts", {}, ConnectionRefusedError("postgresql://svc:hunter2@db/x")
+        )
+        payload, _ = await self._create_shared(user_id, workspace_id, exc)
+
+        assert payload["error"] == "create_context_error"
+        assert payload["cause"] == "service_unavailable"
+        assert payload["outcome"] == "unknown"
+        assert "list_contexts" in payload["help"]
+        assert "hunter2" not in json.dumps(payload)

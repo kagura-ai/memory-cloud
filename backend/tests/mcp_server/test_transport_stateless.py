@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import json
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -276,45 +277,85 @@ async def test_unknown_tool_envelope_is_flagged():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("exc", "code"),
+    ("exc", "code", "error_code"),
     [
-        (ValueError("bad arg"), -32602),
-        (PermissionError("nope"), -32603),
-        (TimeoutError(), -32603),
-        (RuntimeError("secret dsn"), -32603),
+        (ValueError("bad arg"), -32602, "validation_error"),
+        # A ValueError *subclass* is a server failure; the code agrees with data.
+        (json.JSONDecodeError("Expecting value", "/srv/app/x.json", 0), -32603, "internal_error"),
+        (PermissionError("nope"), -32603, "permission_denied"),
+        (TimeoutError(), -32603, "timeout"),
+        (RuntimeError("secret dsn"), -32603, "internal_error"),
     ],
 )
-async def test_tools_call_failure_uses_only_standard_jsonrpc_codes(monkeypatch, exc, code):
+async def test_tools_call_failure_uses_only_standard_jsonrpc_codes(
+    monkeypatch, exc, code, error_code
+):
     """-32000..-32019 is the spec's *legacy* sub-range (SHOULD NOT be used by a
     2026-07-28 implementation), so the modern path does not reuse the legacy
-    path's custom -32001 / -32002."""
+    path's custom -32001 / -32002. ``data`` carries the #1684 vocabulary code,
+    never the exception's type or text."""
     import mcp_server.tools as tools_mod
 
     async def boom(**_kwargs):
         raise exc
 
     monkeypatch.setattr(tools_mod, "execute_tool_call", boom)
-    send = await _post(_request("tools/call", {"name": "recall"}, request_id=6))
+    send = await _post(_request("tools/call", {"name": "list_contexts"}, request_id=6))
 
     assert send.status == 200
     _assert_stateless(send)
     error = send.body["error"]
     assert send.body["id"] == 6
     assert error["code"] == code
-    assert error["data"]["exception_type"] == type(exc).__name__
+    assert error["data"]["error"] == error_code
+    assert error["data"]["help"]
+    assert "exception_type" not in error["data"]
+    assert "details" not in error["data"]
 
 
 @pytest.mark.asyncio
 async def test_unexpected_tool_exception_text_is_not_echoed_to_the_client(monkeypatch):
+    """#1684: a DSN / path in the exception reaches the server log (with the
+    correlation_id the client gets), never the JSON-RPC error."""
+    import mcp_server.tools as tools_mod
+
+    exc = RuntimeError("postgresql://user:hunter2@db/prod at /srv/app/secret.py")
+
+    async def boom(**_kwargs):
+        raise exc
+
+    monkeypatch.setattr(tools_mod, "execute_tool_call", boom)
+    with patch("mcp_server.tools._errors.logger") as log:
+        send = await _post(_request("tools/call", {"name": "list_contexts"}))
+
+    wire = json.dumps(send.body)
+    assert "hunter2" not in wire
+    assert "/srv/app" not in wire
+    assert "RuntimeError" not in wire
+    data = send.body["error"]["data"]
+    assert data["error"] == "internal_error"
+    assert data["retryable"] is True  # list_contexts only reads
+    event = log.error.call_args
+    assert event.kwargs["exc_info"] is exc
+    assert event.kwargs["correlation_id"] == data["correlation_id"]
+
+
+@pytest.mark.asyncio
+async def test_transport_failure_on_a_write_tool_is_not_marked_retryable(monkeypatch):
     import mcp_server.tools as tools_mod
 
     async def boom(**_kwargs):
-        raise RuntimeError("postgresql://user:hunter2@db/prod")
+        raise TimeoutError()
 
     monkeypatch.setattr(tools_mod, "execute_tool_call", boom)
-    send = await _post(_request("tools/call", {"name": "recall"}))
+    send = await _post(_request("tools/call", {"name": "forget"}))
 
-    assert "hunter2" not in json.dumps(send.body)
+    data = send.body["error"]["data"]
+    assert data["error"] == "timeout"
+    assert data["retryable"] is False
+    assert data["outcome"] == "unknown"
+    assert "retry_after_seconds" not in data
+    assert "reference" in data["help"]  # the read that shows whether forget took effect
 
 
 @pytest.mark.asyncio

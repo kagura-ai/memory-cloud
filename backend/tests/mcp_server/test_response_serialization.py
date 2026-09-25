@@ -403,23 +403,27 @@ async def test_handler_error_envelope_is_utf8():
 @pytest.mark.asyncio
 async def test_dispatch_crash_envelope_is_utf8():
     """The catch-all in ``execute_tool_call`` builds its own envelope — it must
-    use the shared serializer too."""
+    use the shared serializer too. A plain ``ValueError`` is the service
+    layer's bad-request signal, so its (Japanese) message is the one piece of
+    exception text that reaches the envelope (#1684)."""
     from mcp_server import tools as mcp_tools
 
-    boom = AsyncMock(side_effect=RuntimeError("保存に失敗しました"))
+    boom = AsyncMock(side_effect=ValueError("保存に失敗しました"))
     # workspace_id=None skips the rate-limit lookup, so only the registry needs
     # a stand-in. Patching the attribute restores whatever was there (built or
     # still None) on exit.
-    registry = {**mcp_tools._build_registry(), "recall": boom}
+    registry = {**mcp_tools._build_registry(), "list_contexts": boom}
     with patch.object(mcp_tools, "_TOOL_REGISTRY", registry):
         result = await mcp_tools.execute_tool_call(
-            tool_name="recall",
-            arguments={"query": "q", "context_id": str(uuid4())},
+            tool_name="list_contexts",
+            arguments={},
             user_id="u1",
             workspace_id=None,
         )
     text = result[0].text
-    assert json.loads(text) == {"status": "error", "error": "保存に失敗しました"}
+    envelope = json.loads(text)
+    assert envelope["error"] == "validation_error"
+    assert envelope["message"] == "保存に失敗しました"
     _assert_raw_utf8(text, "保存に失敗しました")
 
 

@@ -9,7 +9,11 @@ Pins these contracts:
   (slug + help) instead of falling through to the generic handler;
 - every ``{"status": "error"}`` envelope under ``mcp_server/tools/`` is built
   by ``_error_response`` and carries the ``is_error`` marker the transports
-  turn into ``CallToolResult.isError`` (#1622).
+  turn into ``CallToolResult.isError`` (#1622);
+- every one of them carries a ``message``, and the dispatch catch-alls return
+  the #1684 vocabulary (stable code, help, correlation_id, retry advice)
+  instead of ``{"error": str(e)}`` — reads are retryable, writes with an
+  unknown outcome are not, and exception text never reaches the envelope.
 """
 
 import ast
@@ -319,13 +323,11 @@ class TestErrorMarker:
         assert not isinstance(result, ToolErrorContent)
         assert getattr(result, "is_error", False) is False
 
-    def test_message_is_omitted_when_not_given(self):
-        """The dispatch catch-alls ship ``{"status":"error","error":str(e)}``
-        without a ``message``; routing them through the helper must not add
-        one (the wire shape is frozen by the acceptance criteria)."""
-        result = _error_response("boom")
-        assert isinstance(result, ToolErrorContent)
-        assert json.loads(result[0].text) == {"status": "error", "error": "boom"}
+    def test_message_is_required(self):
+        """#1684: the message-less ``{"status":"error","error":str(e)}`` shape of
+        the old dispatch catch-alls is gone; every envelope has a message."""
+        with pytest.raises(TypeError):
+            _error_response("boom")  # type: ignore[call-arg]
 
 
 def _hand_built_error_envelopes(path: Path) -> list[tuple[str, int]]:
@@ -386,3 +388,223 @@ def test_envelope_guard_detects_a_hand_built_literal(tmp_path):
         '    return [dict(text=_dumps({"status": "error"}))]\n'
     )
     assert _hand_built_error_envelopes(sample) == [("handler", 2), ("nested", 6)]
+
+
+def _error_response_calls_without_message(path: Path) -> list[int]:
+    """Line numbers of ``_error_response(...)`` calls in ``path`` that pass no
+    message (fewer than two positional args and no ``message=``)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    missing = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_error_response"
+            and len(node.args) < 2
+            and not any(kw.arg in ("message", None) for kw in node.keywords)
+        ):
+            missing.append(node.lineno)
+    return missing
+
+
+def test_every_error_envelope_in_tools_package_has_a_message():
+    """#1684: ``message`` is required, so a call without one is a TypeError on
+    exactly the failure path it was meant to report. Catch it statically."""
+    offenders = [
+        f"{path.relative_to(TOOLS_DIR)}:{lineno}"
+        for path in sorted(TOOLS_DIR.rglob("*.py"))
+        for lineno in _error_response_calls_without_message(path)
+    ]
+    assert not offenders, "_error_response(...) without a message: " + ", ".join(offenders)
+
+
+def test_message_guard_detects_a_bare_code(tmp_path):
+    sample = tmp_path / "sample.py"
+    sample.write_text(
+        "def a():\n"
+        "    return _error_response(str(e))\n"
+        "def b():\n"
+        '    return _error_response("x", "m")\n'
+        "def c():\n"
+        '    return _error_response("x", message="m")\n'
+    )
+    assert _error_response_calls_without_message(sample) == [2]
+
+
+# ============================================================================
+# #1684: the dispatch catch-alls
+# ============================================================================
+
+# A DSN and a server path, standing in for driver text an exception can carry.
+_LEAKY = "connection to postgresql://svc:hunter2@10.0.0.5/kagura failed; see /srv/app/db.py"
+
+
+async def _dispatch_raising(tool: str, exc: BaseException, args: dict | None = None):
+    import mcp_server.tools as tools_mod
+    from mcp_server.tools import execute_tool_call
+
+    async def broken_handler(_args, _user_id, _workspace_id):
+        raise exc
+
+    registry = {**tools_mod._build_registry(), tool: broken_handler}
+    with patch.object(tools_mod, "_TOOL_REGISTRY", registry):
+        # workspace_id=None skips the rate-limit lookup.
+        return await execute_tool_call(tool, args or {}, "test_user", None)
+
+
+class TestDispatchCatchAll:
+    @pytest.mark.asyncio
+    async def test_unexpected_error_on_a_read_is_safe_and_retryable(self):
+        exc = RuntimeError(_LEAKY)
+        with patch("mcp_server.tools._errors.logger") as log:
+            result = await _dispatch_raising("list_contexts", exc)
+
+        assert isinstance(result, ToolErrorContent)
+        text = result[0].text
+        payload = json.loads(text)
+        assert payload["error"] == "internal_error"
+        assert payload["cause"] == "internal_error"
+        assert payload["message"] == "list_contexts failed because of an unexpected server error."
+        assert payload["retryable"] is True
+        assert "outcome" not in payload
+        assert "report the correlation_id" in payload["help"]
+        for fragment in ("hunter2", "postgresql://", "10.0.0.5", "/srv/app", "RuntimeError"):
+            assert fragment not in text
+        # The exception itself went to the error log, keyed by the same id.
+        log.error.assert_called_once()
+        event = log.error.call_args
+        assert event.args == ("mcp_tool_failed",)
+        assert event.kwargs["exc_info"] is exc
+        assert event.kwargs["correlation_id"] == payload["correlation_id"]
+        assert event.kwargs["tool"] == "list_contexts"
+        assert "hunter2" in event.kwargs["exc"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool", ["forget", "remember"])
+    async def test_unexpected_error_on_a_write_asks_to_verify_before_retrying(self, tool):
+        result = await _dispatch_raising(tool, RuntimeError(_LEAKY), {"context_id": str(uuid4())})
+
+        payload = json.loads(result[0].text)
+        assert payload["error"] == "internal_error"
+        assert payload["retryable"] is False
+        assert payload["outcome"] == "unknown"
+        assert "may or may not have been applied" in payload["help"]
+        assert "hunter2" not in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_timeout_on_a_read_suggests_a_wait(self):
+        result = await _dispatch_raising("list_contexts", TimeoutError())
+
+        payload = json.loads(result[0].text)
+        assert payload["error"] == "timeout"
+        assert payload["retryable"] is True
+        assert payload["retry_after_seconds"] == 5
+        assert "time limit" in payload["message"]
+
+    @pytest.mark.asyncio
+    async def test_database_outage_on_a_write_is_service_unavailable_and_not_retryable(self):
+        from sqlalchemy.exc import OperationalError
+
+        exc = OperationalError("SELECT 1", {}, ConnectionRefusedError(_LEAKY))
+        result = await _dispatch_raising("forget", exc, {"context_id": str(uuid4())})
+
+        payload = json.loads(result[0].text)
+        assert payload["error"] == "service_unavailable"
+        assert payload["retryable"] is False
+        assert payload["outcome"] == "unknown"
+        assert "retry_after_seconds" not in payload
+        assert "hunter2" not in result[0].text
+        assert "SELECT" not in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_response_model_validation_error_is_internal_error_without_the_dump(self):
+        """The non-Request pydantic arm (a server data-integrity bug) shares the
+        vocabulary — no pydantic model names or URLs in the envelope."""
+        from models.schemas import ReferenceResponse
+
+        try:
+            ReferenceResponse(memory_id="not-a-uuid")
+        except ValidationError as exc:
+            validation_error = exc
+        result = await _dispatch_raising("list_contexts", validation_error)
+
+        payload = json.loads(result[0].text)
+        assert payload["error"] == "internal_error"
+        assert "ReferenceResponse" not in result[0].text
+        assert "pydantic" not in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_service_bad_request_value_error_keeps_its_message(self):
+        """A plain ``ValueError`` is the services' bad-request signal (handlers
+        return its text as validation_error); the dispatch does the same."""
+        result = await _dispatch_raising(
+            "forget", ValueError("Provide memory_id or query."), {"context_id": str(uuid4())}
+        )
+
+        payload = json.loads(result[0].text)
+        assert payload["error"] == "validation_error"
+        assert payload["message"] == "Provide memory_id or query."
+        assert payload["help"]
+        assert "correlation_id" not in payload
+
+    @pytest.mark.asyncio
+    async def test_value_error_subclass_is_not_echoed(self):
+        exc = UnicodeDecodeError("utf-8", b"\xff/srv/app", 0, 1, "invalid start byte")
+        result = await _dispatch_raising("list_contexts", exc)
+
+        payload = json.loads(result[0].text)
+        assert payload["error"] == "internal_error"
+        assert "/srv/app" not in result[0].text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("exc_factory", "code"),
+        [
+            (lambda: _exc("NotFoundException", "Memory", "m-1"), "not_found"),
+            (lambda: _exc("ConflictError", "Context is locked."), "conflict"),
+            (
+                lambda: _exc("ValidationError", "limit must be positive", field="limit"),
+                "validation_error",
+            ),
+        ],
+    )
+    async def test_designed_refusals_map_to_stable_codes(self, exc_factory, code):
+        exc = exc_factory()
+        result = await _dispatch_raising("forget", exc, {"context_id": str(uuid4())})
+
+        payload = json.loads(result[0].text)
+        assert payload["error"] == code
+        assert payload["message"] == exc.message
+        assert payload["help"]
+        assert "retryable" not in payload
+
+    @pytest.mark.asyncio
+    async def test_authorization_refusal_never_forwards_details(self):
+        from utils.exceptions import AuthorizationError
+
+        exc = AuthorizationError(reason="not_a_member", workspace_id="ws-secret")
+        result = await _dispatch_raising("forget", exc, {"context_id": str(uuid4())})
+
+        payload = json.loads(result[0].text)
+        assert payload["error"] == "permission_denied"
+        assert payload["message"] == "Insufficient permissions"
+        assert "ws-secret" not in result[0].text
+        assert "not_a_member" not in result[0].text
+
+    @pytest.mark.asyncio
+    async def test_quota_refusal_forwards_its_structured_details(self):
+        from utils.exceptions import QuotaExceededError
+
+        exc = QuotaExceededError("Daily limit reached.", quota_type="memories_per_day", limit=50)
+        result = await _dispatch_raising("remember", exc, {"context_id": str(uuid4())})
+
+        payload = json.loads(result[0].text)
+        assert payload["error"] == "quota_exceeded"
+        assert payload["quota_type"] == "memories_per_day"
+        assert payload["limit"] == 50
+
+
+def _exc(name: str, *args, **kwargs):
+    import utils.exceptions as exceptions
+
+    return getattr(exceptions, name)(*args, **kwargs)

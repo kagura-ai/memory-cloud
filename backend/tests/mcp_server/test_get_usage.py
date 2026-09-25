@@ -185,4 +185,8 @@ class TestGetUsage:
 
         data = json.loads(result[0].text)
         assert data["status"] == "error"
-        assert "connection lost" in data["message"]
+        # #1684: the legacy code stays; the exception text stays in the log.
+        assert data["error"] == "get_usage_error"
+        assert data["cause"] == "internal_error"
+        assert data["correlation_id"]
+        assert "connection lost" not in result[0].text

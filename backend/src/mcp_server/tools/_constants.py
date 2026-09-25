@@ -129,6 +129,12 @@ Then pass context_id to other tools: remember(), recall(), forget(), reference()
 
 Response includes context_id, context_name, context_display_name to confirm which context was used.
 
+## Errors
+A failed call returns {status: "error", error, message, help}. Branch on error; do what help says.
+- retryable: true: calling again is safe (wait retry_after_seconds when given).
+- outcome: "unknown": a write may have been applied; check with the read help names first.
+- Quote correlation_id when reporting a failure.
+
 ## Security
 Never store: passwords, API keys, PII, secrets
 """

@@ -3,8 +3,10 @@
 Unexpected exceptions inside the analysis MCP handlers used to place
 ``str(e)`` — which can carry SQL / driver / BYOK-key internals — directly
 into the error envelope returned to the caller. These tests pin the
-hardened behavior: the envelope message is a fixed generic string and the
-sensitive marker planted in the raised exception never reaches the caller.
+hardened behavior: the envelope carries the shared #1684 server-failure
+fields (fixed message, ``cause``, ``correlation_id``) and the sensitive
+marker planted in the raised exception never reaches the caller — a plain
+``ValueError`` included, since these handlers always returned a fixed message.
 """
 
 from __future__ import annotations
@@ -15,10 +17,7 @@ from uuid import uuid4
 
 import pytest
 
-from mcp_server.tools.analysis import (
-    _GENERIC_ANALYSIS_ERROR,
-    handle_get_analysis,
-)
+from mcp_server.tools.analysis import handle_get_analysis
 
 # A marker string standing in for the kind of raw driver/SQL/credential
 # detail an unexpected exception can carry. It must never surface in the
@@ -49,8 +48,14 @@ def db_mock():
     return m
 
 
+# A plain ValueError is a refusal on the dispatch path; here it must not be
+# echoed (``echo_value_error=False``, #1684).
+_RAISED = pytest.mark.parametrize("exc_type", [RuntimeError, ValueError])
+
+
 @pytest.mark.asyncio
-async def test_unexpected_service_error_envelope_is_generic(db_mock):
+@_RAISED
+async def test_unexpected_service_error_envelope_is_generic(db_mock, exc_type):
     """A service raising an exception must yield a generic envelope, never
     the raw exception text."""
     with (
@@ -61,7 +66,7 @@ async def test_unexpected_service_error_envelope_is_generic(db_mock):
         ),
         patch(
             "services.analysis.query_service.get_analysis",
-            AsyncMock(side_effect=RuntimeError(_SECRET_MARKER)),
+            AsyncMock(side_effect=exc_type(_SECRET_MARKER)),
         ),
         patch("mcp_server.tools.analysis._log_tool_usage", AsyncMock()),
     ):
@@ -74,7 +79,9 @@ async def test_unexpected_service_error_envelope_is_generic(db_mock):
     body = _envelope(result)
     assert body["status"] == "error"
     assert body["error"] == "get_analysis_error"
-    assert body["message"] == _GENERIC_ANALYSIS_ERROR
+    assert body["cause"] == "internal_error"
+    assert body["message"] == "get_analysis failed because of an unexpected server error."
+    assert body["correlation_id"]
     # The raw exception detail (and its sensitive fragments) must be absent.
     serialized = json.dumps(body)
     assert "SUPERSECRET" not in serialized
@@ -84,14 +91,15 @@ async def test_unexpected_service_error_envelope_is_generic(db_mock):
 
 
 @pytest.mark.asyncio
-async def test_gate_unexpected_error_envelope_is_generic(db_mock):
+@_RAISED
+async def test_gate_unexpected_error_envelope_is_generic(db_mock, exc_type):
     """An unmapped exception from the gate chain routes through
     ``_gate_error_response`` and must also produce the generic envelope."""
     with (
         patch("db.base.get_db", _fake_get_db(db_mock)),
         patch(
             "auth.analysis_gates.check_memory_analysis_access_mcp",
-            AsyncMock(side_effect=RuntimeError(_SECRET_MARKER)),
+            AsyncMock(side_effect=exc_type(_SECRET_MARKER)),
         ),
         patch("mcp_server.tools.analysis._log_tool_usage", AsyncMock()),
     ):
@@ -104,5 +112,6 @@ async def test_gate_unexpected_error_envelope_is_generic(db_mock):
     body = _envelope(result)
     assert body["status"] == "error"
     assert body["error"] == "internal_error"
-    assert body["message"] == _GENERIC_ANALYSIS_ERROR
+    assert body["message"] == "get_analysis failed because of an unexpected server error."
+    assert body["correlation_id"]
     assert "SUPERSECRET" not in json.dumps(body)
