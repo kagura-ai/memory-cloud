@@ -33,6 +33,19 @@ HTTP status comes from `exc.status_code` (per-class; see catalogue). Notable hea
 - Rate-limit middleware (`backend/src/api/middleware/rate_limit.py:121-163`) returns the **same 3-field shape inline** (not via the handler): `RATE-001` 429 with `X-RateLimit-Limit/Remaining/Reset` + `Retry-After: 60`; `QUOTA-001` 429 with `Retry-After: 86400`. Since #1644 that inline body merges the exception's own `details` (so the gate annotation and `quota_type` survive) instead of replacing them with `{retry_after}`.
 - Deprecated `/api/v1/attachments/*` returns the same 3-field shape inline as `RES-004` 410 with RFC 8594 `Sunset` / `Deprecation` / `Link` headers (`backend/src/api/routes/attachments.py:29-54`) — emitted inline precisely because the global handler does not propagate those headers.
 
+**One body adds a fourth key — the files dedup 409 (#1693).** `POST /api/v1/files/reserve` answers a sha256 the workspace already holds (an active or in-flight file) with `DuplicateFileError` (`RES-002`, 409). When that file is in the **same context** as the request — both unbound counts as the same — the body also carries it as a top-level `existing_file`, in the same shape the files API returns for a file (`FileObjectOut`: `id`, `workspace_id`, `context_id`, `filename`, `content_type`, `size_bytes`, `sha256`, `status`, `created_at`, `uploaded_at`), and the message ends with `; reuse file_id=<id>`:
+
+```json
+{
+  "error": "RES-002",
+  "message": "file with sha256=<sha256> already exists in workspace; reuse file_id=<id>",
+  "details": {},
+  "existing_file": { "id": "<id>", "workspace_id": "<workspace>", "context_id": null, "filename": "report.pdf", "content_type": "application/pdf", "size_bytes": 1024, "sha256": "<sha256>", "status": "uploaded", "created_at": "2026-01-01T00:00:00Z", "uploaded_at": "2026-01-01T00:00:05Z" }
+}
+```
+
+A duplicate bound to **another** context gets the plain three-key body, with no `existing_file` and no file id in the message, so a caller cannot learn about a file in a context it cannot read (#1136). `status` may be `reserved` when an earlier upload of the same bytes was not confirmed yet. Clients return `existing_file` as the upload result instead of failing; both SDKs read it from this top-level key. No other exception adds keys to the body. The MCP `init_file_upload` tool reports the same case as its `conflict` error, whose message carries the same `reuse file_id=<id>` suffix.
+
 > ⚠ Note vs. intent: issues #401/#602/#603/#604 standardized on this `{error, message, details}` shape (confirmed in the #602 PR body: callers read `exc.reason` instead of `exc.detail`; frontend consumes the uniform shape). The shape is **not** `{detail, error_code}` — `detail` is the *non-conforming* FastAPI default, below.
 
 ### 2. REST — raw `HTTPException` → canonical via the global handler (since #992 Phase 2)
@@ -175,7 +188,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `AUTH-203` | `APIKeyExpiredError` — exceptions.py:146 | 401 | API key expired. |
 | `ADMIN-001` | `AdminProtectionError` — exceptions.py:117 | 403 | System-admin invariant blocks operation (initial/last admin); `details` always stripped. |
 | `RES-001` | `NotFoundException` — exceptions.py:159 | 404 | Resource not found. |
-| `RES-002` | `ConflictError` — exceptions.py:188 | 409 | Resource conflict. |
+| `RES-002` | `ConflictError` — exceptions.py:188; `DuplicateFileError` (subclass) | 409 | Resource conflict. `DuplicateFileError` is the files dedup on `POST /files/reserve`: for a same-context duplicate the body adds a top-level `existing_file` (see [the note above](#1-rest--structured-errors-memorycloudexception-family), #1693). |
 | `RES-003` | `MemoryGoneError` — exceptions.py:174; `BetaInviteGoneError` — exceptions.py:595 | 410 | Resource soft-deleted (distinct from 404 so clients stop retrying). Since #1581 also a closed-beta invite link that existed but is expired or already redeemed (`GET /beta-invites/{token}/preview`) — one message for both reasons. |
 | `RES-004` | *(no class — inline `JSONResponse`)* — api/routes/attachments.py:30 | 410 | Deprecated `/api/v1/attachments/*` retired; carries Sunset/Deprecation/Link headers. |
 | `VAL-001` | `ValidationError` — exceptions.py:195 | 422 | Service-layer validation error (shape/format). ⚠ Coexists with the non-conforming FastAPI 422. Since #1644 the shared-context refusal is **no longer** here — it moved to `FEAT-001` at 403, matching what the REST route already answered for the same condition. The managed-LLM refusal stays `VAL-001`/422 and gains a [gate annotation](#gate-refusals-1644) (`plan` when the deployment has a managed model, `deployment` when it has none). |

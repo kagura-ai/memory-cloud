@@ -24,6 +24,7 @@ from utils.exceptions import (
     AdminProtectionError,
     AuthorizationError,
     DatabaseConnectionError,
+    DuplicateFileError,
     MemoryCloudException,
 )
 from utils.logger import get_logger, setup_logger
@@ -456,14 +457,18 @@ async def memory_cloud_exception_handler(
     # on either type cannot reopen the workspace-enumeration vector.
     details = {} if isinstance(exc, (AuthorizationError, AdminProtectionError)) else exc.details
 
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "error": exc.error_code,
-            "message": exc.message,
-            "details": details,
-        },
-    )
+    content = {
+        "error": exc.error_code,
+        "message": exc.message,
+        "details": details,
+    }
+    # #1693: the files dedup 409 carries the existing file as a top-level key,
+    # where the released SDKs read it. Only set for a same-context duplicate
+    # (#1136); every other exception keeps the three-key body.
+    if isinstance(exc, DuplicateFileError) and exc.existing_file is not None:
+        content["existing_file"] = exc.existing_file
+
+    return JSONResponse(status_code=exc.status_code, content=content)
 
 
 @app.exception_handler(RequestValidationError)

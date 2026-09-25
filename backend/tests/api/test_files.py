@@ -17,10 +17,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import app
+from api.routes.files import FileObjectOut
 from auth.dependencies import get_user_from_api_key_or_session
 from db.base import get_db
 from services.file_storage_service import ReserveResult
-from utils.exceptions import UnsupportedMediaTypeError
+from utils.exceptions import ConflictError, DuplicateFileError, UnsupportedMediaTypeError
 
 VALID_SHA = "a" * 64
 OTHER_SHA = "b" * 64
@@ -164,6 +165,110 @@ class TestReserveUpload:
         assert body["details"]["content_type"] == "application/x-msdownload"
         # ``allowed`` is sorted in the exception ctor for stable client UI.
         assert body["details"]["allowed"] == ["application/pdf", "image/png"]
+
+
+# The keys both released SDKs require to read ``existing_file`` as a file:
+# Python ``kagura_memory.models.FileObject`` and TypeScript ``FILE_OBJECT``
+# (``src/pyModels.ts``) — every field without a default. ``uploaded_at`` and
+# ``context_id`` are optional there.
+_SDK_FILE_OBJECT_REQUIRED = {
+    "id",
+    "workspace_id",
+    "filename",
+    "content_type",
+    "size_bytes",
+    "sha256",
+    "status",
+    "created_at",
+}
+
+
+def _reserve(client, ws, *, context_id=None):
+    body = {
+        "workspace_id": str(ws),
+        "filename": "x.pdf",
+        "content_type": "application/pdf",
+        "size_bytes": 1024,
+        "sha256": VALID_SHA,
+    }
+    if context_id is not None:
+        body["context_id"] = str(context_id)
+    return client.post("/api/v1/files/reserve", json=body)
+
+
+class TestReserveDuplicate409:
+    """``POST /files/reserve`` dedup 409 (#1693, #1136)."""
+
+    def test_same_context_duplicate_carries_existing_file_at_top_level(self, client):
+        ws = uuid4()
+        existing = _file_object_mock(
+            workspace_id=ws,
+            status="uploaded",
+            # The DB stores naive UTC; the wire form must still end in Z.
+            created_at=datetime(2026, 5, 5, 12, 0, 0),
+            uploaded_at=datetime(2026, 5, 5, 12, 0, 1),
+        )
+        msg = (
+            f"file with sha256={VALID_SHA} already exists in workspace; reuse file_id={existing.id}"
+        )
+        with patch(
+            "api.routes.files.FileStorageService.reserve_upload",
+            AsyncMock(side_effect=DuplicateFileError(msg, existing=existing)),
+        ):
+            r = _reserve(client, ws)
+
+        assert r.status_code == 409, r.text
+        body = r.json()
+        assert set(body) == {"error", "message", "details", "existing_file"}
+        assert body["error"] == "RES-002"
+        assert body["message"] == msg
+        assert body["details"] == {}
+        # Same serializer as every other files response (confirm / list).
+        assert body["existing_file"] == FileObjectOut.model_validate(existing).model_dump(
+            mode="json"
+        )
+        assert body["existing_file"]["id"] == str(existing.id)
+        assert body["existing_file"]["created_at"] == "2026-05-05T12:00:00Z"
+
+    def test_existing_file_has_every_sdk_required_key(self, client):
+        ws = uuid4()
+        existing = _file_object_mock(workspace_id=ws, context_id=uuid4())
+        with patch(
+            "api.routes.files.FileStorageService.reserve_upload",
+            AsyncMock(side_effect=DuplicateFileError("dup", existing=existing)),
+        ):
+            r = _reserve(client, ws, context_id=existing.context_id)
+
+        existing_file = r.json()["existing_file"]
+        missing = _SDK_FILE_OBJECT_REQUIRED - existing_file.keys()
+        assert not missing, f"SDK FileObject would reject existing_file: missing {missing}"
+        for key in ("id", "workspace_id", "filename", "content_type", "sha256", "status"):
+            assert isinstance(existing_file[key], str), key
+        assert isinstance(existing_file["size_bytes"], int)
+        assert datetime.fromisoformat(existing_file["created_at"])
+        assert existing_file["context_id"] == str(existing.context_id)
+
+    def test_cross_context_duplicate_has_no_existing_file(self, client):
+        # #1136: the service found no row the caller may learn about.
+        msg = f"file with sha256={VALID_SHA} already exists in workspace"
+        with patch(
+            "api.routes.files.FileStorageService.reserve_upload",
+            AsyncMock(side_effect=DuplicateFileError(msg, existing=None)),
+        ):
+            r = _reserve(client, uuid4(), context_id=uuid4())
+
+        assert r.status_code == 409, r.text
+        assert r.json() == {"error": "RES-002", "message": msg, "details": {}}
+
+    def test_other_conflicts_keep_the_three_key_body(self, client):
+        with patch(
+            "api.routes.files.FileStorageService.reserve_upload",
+            AsyncMock(side_effect=ConflictError("storage object missing")),
+        ):
+            r = _reserve(client, uuid4())
+
+        assert r.status_code == 409, r.text
+        assert r.json() == {"error": "RES-002", "message": "storage object missing", "details": {}}
 
 
 # ---------------------------------------------------------------------------

@@ -52,6 +52,7 @@ from utils.datetime import utcnow
 from utils.exceptions import (
     AuthorizationError,
     ConflictError,
+    DuplicateFileError,
     NotFoundException,
     UnsupportedMediaTypeError,
     ValidationError,
@@ -209,8 +210,10 @@ class FileStorageService:
                 but is not in ``settings.allowed_file_content_types_set``.
                 415 at REST; ``unsupported_media_type`` vocab at MCP.
             QuotaExceededError: workspace storage cap would be exceeded.
-            ConflictError: same ``(workspace_id, sha256)`` already has an
-                active or in-flight row (partial unique violation).
+            DuplicateFileError: same ``(workspace_id, sha256)`` already has an
+                active or in-flight row (partial unique violation). A
+                ``ConflictError``; carries that row as ``existing`` only when
+                it is in the same context as this upload (#1136).
             NotFoundException: workspace (or a given ``context_id``) missing.
         """
         # Issue #1136 (authz-first): a context-bound upload requires WRITE access
@@ -366,38 +369,43 @@ class FileStorageService:
             )
             # Detect the partial unique violation without depending on a
             # specific dialect class — the index name surfaces in the
-            # message. Look up the existing row and include its file_id
-            # in the error so SDK callers can switch to it directly
-            # instead of running a separate dedup query (the docstring
-            # of this method advertises this idempotent-retry path).
+            # message. Look up the existing row and attach it to the error
+            # so SDK callers can switch to it directly instead of running a
+            # separate dedup query (the docstring of this method advertises
+            # this idempotent-retry path; REST sends it as ``existing_file``).
             if "uq_file_objects_workspace_sha256_active" in str(exc):
-                existing_id = None
+                existing_row: FileObject | None = None
                 try:
-                    existing = await self.db.execute(
-                        select(FileObject.id, FileObject.context_id).where(
+                    # The failed flush leaves the session refusing every
+                    # statement until it is rolled back (PendingRollbackError),
+                    # so without this the lookup below always failed and the
+                    # existing file was never reported (#1693). The INSERT is
+                    # already undone; nothing else in this call is pending.
+                    await self.db.rollback()
+                    result = await self.db.execute(
+                        select(FileObject).where(
                             FileObject.workspace_id == workspace_id,
                             FileObject.sha256 == sha256,
                             FileObject.deleted_at.is_(None),
                             FileObject.status != "failed",
                         )
                     )
-                    row = existing.first()
+                    row = result.scalars().first()
                     # #1136: dedup is workspace-scoped but access is context-
-                    # scoped. Only surface the existing file_id when the prior
+                    # scoped. Only surface the existing file when the prior
                     # row is in the SAME context the caller is uploading to
                     # (including both NULL) — they already passed the write check
-                    # for that context. A cross-context conflict omits the id so
+                    # for that context. A cross-context conflict omits it so
                     # the caller cannot learn the file_id of a file bound to a
                     # context they cannot access.
                     if row is not None and row.context_id == context_id:
-                        existing_id = row.id
+                        existing_row = row
                 except Exception:  # noqa: BLE001 — best-effort enrichment
                     pass
                 msg = f"file with sha256={sha256} already exists in workspace"
-                if existing_id is not None:
-                    msg += f"; reuse file_id={existing_id}"
-                conflict = ConflictError(msg)
-                raise conflict from exc
+                if existing_row is not None:
+                    msg += f"; reuse file_id={existing_row.id}"
+                raise DuplicateFileError(msg, existing=existing_row) from exc
             raise
 
         logger.info(

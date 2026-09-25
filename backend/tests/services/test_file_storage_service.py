@@ -19,6 +19,7 @@ from services.file_storage_service import FileStorageService, ReserveResult
 from tests.storage._fakes import FakeBlobStorage
 from utils.exceptions import (
     ConflictError,
+    DuplicateFileError,
     NotFoundException,
     QuotaExceededError,
     UnsupportedMediaTypeError,
@@ -81,6 +82,7 @@ def db():
     db.execute = AsyncMock()
     db.flush = AsyncMock()
     db.commit = AsyncMock()
+    db.rollback = AsyncMock()
     db.refresh = AsyncMock()
     db.add = MagicMock()
     return db
@@ -973,3 +975,141 @@ class TestPurgeFilesForContexts:
         released = await service.purge_files_for_contexts([uuid4(), uuid4()])
 
         assert released == {ws_a: 40, ws_b: 7}
+
+
+_UNIQUE_VIOLATION = (
+    'duplicate key value violates unique constraint "uq_file_objects_workspace_sha256_active"'
+)
+
+
+class TestReserveUploadDuplicate:
+    """The dedup 409 names the existing file only within one context (#1136, #1693)."""
+
+    @pytest.fixture(autouse=True)
+    def _canonical_allowlist(self, monkeypatch):
+        from config.settings import get_settings
+
+        monkeypatch.setattr(get_settings(), "allowed_file_content_types", "application/pdf")
+
+    @staticmethod
+    def _lookup_result(row):
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = row
+        return result
+
+    def _arrange(self, db, workspace_id, existing_row):
+        ws_result = MagicMock()
+        ws_result.scalar_one_or_none = MagicMock(return_value=_make_workspace(workspace_id))
+        db.execute.side_effect = [ws_result, self._lookup_result(existing_row)]
+        db.flush.side_effect = Exception(_UNIQUE_VIOLATION)
+
+    async def _reserve(self, service, workspace_id, *, context_id=None):
+        with _patch_quota_reserve(succeed=True), _patch_quota_release():
+            await service.reserve_upload(
+                workspace_id=workspace_id,
+                created_by="u",
+                filename="x.pdf",
+                content_type="application/pdf",
+                size_bytes=1024,
+                sha256=VALID_SHA,
+                context_id=context_id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_same_null_context_carries_the_existing_row(self, service, db, workspace_id):
+        existing = _make_file_object(workspace_id, status="uploaded")
+        self._arrange(db, workspace_id, existing)
+
+        with pytest.raises(DuplicateFileError) as exc_info:
+            await self._reserve(service, workspace_id)
+
+        err = exc_info.value
+        assert isinstance(err, ConflictError)
+        assert err.status_code == 409
+        assert err.error_code == "RES-002"
+        assert err.details == {}
+        assert err.existing is existing
+        assert err.message == (
+            f"file with sha256={VALID_SHA} already exists in workspace; reuse file_id={existing.id}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_session_is_rolled_back_before_the_lookup(self, service, db, workspace_id):
+        # After a failed flush the session refuses every statement until it is
+        # rolled back (PendingRollbackError), so without the rollback the
+        # best-effort lookup always failed and the id was never reported.
+        existing = _make_file_object(workspace_id)
+        self._arrange(db, workspace_id, existing)
+
+        with pytest.raises(DuplicateFileError):
+            await self._reserve(service, workspace_id)
+
+        names = [c[0] for c in db.mock_calls if c[0] in ("rollback", "execute")]
+        assert names == ["execute", "rollback", "execute"]
+
+    @pytest.mark.asyncio
+    async def test_same_bound_context_carries_the_existing_row(self, service, db, workspace_id):
+        ctx_id = uuid4()
+        existing = _make_file_object(workspace_id)
+        existing.context_id = ctx_id
+        self._arrange(db, workspace_id, existing)
+
+        perm = MagicMock()
+        perm.check_context_write = AsyncMock(return_value=MagicMock(workspace_id=workspace_id))
+        with patch("services.file_storage_service.PermissionService", return_value=perm):
+            with pytest.raises(DuplicateFileError) as exc_info:
+                await self._reserve(service, workspace_id, context_id=ctx_id)
+
+        assert exc_info.value.existing is existing
+        assert f"reuse file_id={existing.id}" in exc_info.value.message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("existing_ctx", ["other", None], ids=["other-context", "null"])
+    async def test_cross_context_duplicate_names_no_file(
+        self, service, db, workspace_id, existing_ctx
+    ):
+        # #1136: the caller writes to ctx_id; the existing row is bound to a
+        # different context (or to none), so neither its id nor its metadata
+        # may be disclosed. Still a 409.
+        ctx_id = uuid4()
+        existing = _make_file_object(workspace_id)
+        existing.context_id = uuid4() if existing_ctx == "other" else None
+        self._arrange(db, workspace_id, existing)
+
+        perm = MagicMock()
+        perm.check_context_write = AsyncMock(return_value=MagicMock(workspace_id=workspace_id))
+        with patch("services.file_storage_service.PermissionService", return_value=perm):
+            with pytest.raises(DuplicateFileError) as exc_info:
+                await self._reserve(service, workspace_id, context_id=ctx_id)
+
+        err = exc_info.value
+        assert err.existing is None
+        assert err.message == f"file with sha256={VALID_SHA} already exists in workspace"
+        assert str(existing.id) not in err.message
+
+    @pytest.mark.asyncio
+    async def test_bound_row_is_not_disclosed_to_a_null_context_upload(
+        self, service, db, workspace_id
+    ):
+        existing = _make_file_object(workspace_id)
+        existing.context_id = uuid4()
+        self._arrange(db, workspace_id, existing)
+
+        with pytest.raises(DuplicateFileError) as exc_info:
+            await self._reserve(service, workspace_id)
+
+        assert exc_info.value.existing is None
+        assert "reuse file_id" not in exc_info.value.message
+
+    @pytest.mark.asyncio
+    async def test_lookup_failure_still_answers_409_without_a_file(self, service, db, workspace_id):
+        ws_result = MagicMock()
+        ws_result.scalar_one_or_none = MagicMock(return_value=_make_workspace(workspace_id))
+        db.execute.side_effect = [ws_result, RuntimeError("db gone")]
+        db.flush.side_effect = Exception(_UNIQUE_VIOLATION)
+
+        with pytest.raises(DuplicateFileError) as exc_info:
+            await self._reserve(service, workspace_id)
+
+        assert exc_info.value.existing is None
+        assert "reuse file_id" not in exc_info.value.message
