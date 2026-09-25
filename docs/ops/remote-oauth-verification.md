@@ -45,7 +45,8 @@ required step passed. The others add evidence and never fail the run.
 | M1 | yes | MCP `initialize` with the OAuth token: protocol version, server version, `Mcp-Session-Id` presence, and the `instructions` length and whether it equals the static text in the checkout. |
 | M2-M5 | yes | `notifications/initialized`, `tools/list` (a list of objects; every tool has a `title` and the four annotation hints; counts of read-only, destructive and open-world tools), one read call (`list_contexts`), and reuse of the session. |
 | M6 | no | The stateless per-request era (MCP 2026-07-28): `server/discover` and `tools/list` without a session. |
-| M7 | yes | A session-era request (`tools/list` to `POST /mcp`) carrying an `Mcp-Session-Id` the server never issued, as a client sends after its session expired, is answered `404` with re-initialize guidance. |
+| M7 | yes | A session-era request (`tools/list` to `POST /mcp`) carrying an `Mcp-Session-Id` the server never issued, as a client sends after its session expired or a deploy, does not fail: the server either continues the session (`2xx` with a JSON-RPC result) or answers `404` with re-initialize guidance, never `5xx`. The evidence records which of the two happened. |
+| M8 | no | `DELETE /mcp` with the run's own session answers `204` (ended) or `405` (termination not supported); a request with that id afterwards is either continued or answered `404`. |
 | F1-F4 | yes (F3 no) | The refresh grant issues a new pair; the previous refresh token no longer works (rotation); what the previous access token gets; `initialize` works with the refreshed token. |
 | V1-V2 | yes | After RFC 7009 revocation, `/mcp` answers `401` with the discovery challenge (the signal a client acts on to reconnect), and the revoked refresh token is refused. |
 | V3 | no | Revoking an unknown token answers `200`. |
