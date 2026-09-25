@@ -12,6 +12,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine, text
 
 from alembic import command
+from config.database import to_sync_database_url
 
 ALEMBIC_INI = "alembic.ini"
 
@@ -32,17 +33,16 @@ def _get_alembic_config() -> Config:
     # Override with test database URL if available
     test_url = os.getenv("TEST_DATABASE_URL")
     if test_url:
-        # Alembic needs sync URL (not asyncpg)
-        sync_url = test_url.replace("+asyncpg", "")
-        config.set_main_option("sqlalchemy.url", sync_url)
+        # Explicit driver: a bare ``postgresql://`` means psycopg v3 on
+        # SQLAlchemy 2.1, which is not installed (#1695).
+        config.set_main_option("sqlalchemy.url", to_sync_database_url(test_url))
     return config
 
 
 def _sync_engine():
     """Sync SQLAlchemy engine pointing to the test database."""
     test_url = os.getenv("TEST_DATABASE_URL", _DEFAULT_TEST_URL)
-    sync_url = test_url.replace("+asyncpg", "")
-    return create_engine(sync_url)
+    return create_engine(to_sync_database_url(test_url))
 
 
 @contextmanager
@@ -94,8 +94,7 @@ def _reset_alembic_state():
     if not db_name.endswith("_test"):
         raise RuntimeError(f"Refusing to reset non-test database: {db_name}")
 
-    sync_url = test_url.replace("+asyncpg", "")
-    engine = create_engine(sync_url)
+    engine = create_engine(to_sync_database_url(test_url))
     with engine.begin() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE"))
         conn.execute(text("CREATE SCHEMA public"))

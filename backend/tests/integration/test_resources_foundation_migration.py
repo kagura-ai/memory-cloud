@@ -73,11 +73,13 @@ def _test_url() -> str:
 def _sync_engine() -> sa.Engine:
     """Build a synchronous engine for raw seed/assert SQL (Alembic sync).
 
-    Normalizes whichever async driver the env specifies down to plain
-    ``postgresql`` so psycopg2 handles the test connection regardless of
-    whether TEST_DATABASE_URL names asyncpg, aiopg, or no driver at all.
+    Replaces whichever driver the env specifies with ``postgresql+psycopg2``
+    so psycopg2 handles the test connection regardless of whether
+    TEST_DATABASE_URL names asyncpg, aiopg, or no driver at all. The driver
+    is named explicitly: a bare ``postgresql`` means psycopg v3 on
+    SQLAlchemy 2.1, which is not installed (#1695).
     """
-    url = make_url(_test_url()).set(drivername="postgresql")
+    url = make_url(_test_url()).set(drivername="postgresql+psycopg2")
     return create_engine(url)
 
 

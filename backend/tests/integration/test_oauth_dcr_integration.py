@@ -118,7 +118,11 @@ def _reset_alembic_state() -> None:
     """
     from sqlalchemy import create_engine, text
 
-    sync_url = os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://")
+    from config.database import to_sync_database_url
+
+    # Explicit driver (#1695): SQLAlchemy 2.1 maps a bare ``postgresql://`` to
+    # psycopg v3, which is not installed.
+    sync_url = to_sync_database_url(os.environ["DATABASE_URL"])
     db_name = sync_url.rsplit("/", 1)[-1].split("?")[0]
     if not db_name.endswith("_test"):
         raise RuntimeError(

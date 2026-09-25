@@ -26,7 +26,7 @@ import models.resource  # noqa: F401
 import models.secrets  # noqa: F401  # Issue #1128: zero-knowledge secret store
 import models.sleep  # noqa: F401  # Issue #471: SleepReportLLMUsage child added
 from alembic import context
-from config.database import get_database_url
+from config.database import get_database_url, to_async_database_url
 
 # Import all models so autogenerate can detect them
 from db.base import Base  # noqa: F401
@@ -34,11 +34,9 @@ from db.base import Base  # noqa: F401
 # Alembic Config object
 config = context.config
 
-# Set sqlalchemy.url dynamically from environment
-# Ensure async driver (asyncpg) is used
-db_url = get_database_url()
-if db_url.startswith("postgresql://"):
-    db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+# Set sqlalchemy.url dynamically from environment, naming the async driver
+# (asyncpg) explicitly — never SQLAlchemy's default PostgreSQL driver (#1695).
+db_url = to_async_database_url(get_database_url())
 config.set_main_option("sqlalchemy.url", db_url)
 
 # Setup Python logging from ini file

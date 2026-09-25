@@ -57,10 +57,13 @@ def _get_engine():
     global engine
 
     if engine is None:
-        from config.database import DATABASE_URL
+        from config.database import DATABASE_URL, to_async_database_url
 
+        # Name asyncpg explicitly: a bare ``postgresql://`` would resolve to
+        # SQLAlchemy's default driver (#1695).
+        url = to_async_database_url(DATABASE_URL)
         engine = create_async_engine(
-            DATABASE_URL,
+            url,
             echo=False,
             # #1331 privacy invariant: bound parameters carry user memory
             # content, details JSONB, and (now) location coordinates — a
@@ -77,7 +80,7 @@ def _get_engine():
             # three-layer UTC policy.
             connect_args={"server_settings": {"timezone": "UTC"}},
         )
-        logger.info("database_engine_created", url=redact_db_url(DATABASE_URL))
+        logger.info("database_engine_created", url=redact_db_url(url))
 
     return engine
 
@@ -106,13 +109,12 @@ def _get_sync_engine():
     global sync_engine
 
     if sync_engine is None:
-        from config.database import DATABASE_URL
+        from config.database import DATABASE_URL, to_sync_database_url
 
-        # Convert async URL (postgresql+asyncpg) to sync URL (postgresql+psycopg2)
-        sync_url = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
-
+        # Name psycopg2 explicitly: SQLAlchemy 2.1 maps a bare ``postgresql://``
+        # to psycopg (v3), which is not installed (#1695).
         sync_engine = create_engine(
-            sync_url,
+            to_sync_database_url(DATABASE_URL),
             echo=False,
             # #1331: same bound-parameter log hygiene as the async engine.
             hide_parameters=True,
