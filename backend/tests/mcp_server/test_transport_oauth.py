@@ -9,10 +9,13 @@
 * ``tools/call`` scope (``mcp_server.tools._scopes``) on both eras: HTTP 403
   with an ``insufficient_scope`` challenge and a JSON-RPC error in the
   tool-error vocabulary. OAuth tokens only; ``initialize`` / ``tools/list`` /
-  ``ping`` are not gated.
-* Sessions: a session-era request naming a session this server does not hold
-  for the caller gets 404 on ``/mcp`` and ``/mcp/``; a POST never opens a
-  session under a client-supplied id.
+  ``ping`` / ``server/discover`` are not gated. A token whose stored scope
+  names no ``memory:*`` scope gets its client's registered ``memory:*``
+  scopes, else the DCR default.
+* Sessions on ``/mcp`` and ``/mcp/``: an unknown ``Mcp-Session-Id`` is
+  re-adopted for the caller, another user's or workspace's session is 404,
+  ``DELETE`` ends the caller's own session (204). Other methods and paths
+  never open a session.
 
 ``mcp_asgi_app`` runs with the real ``authenticate_mcp_request``; only the
 token lookups, the workspace lookup, the session store and the tool dispatch
@@ -109,6 +112,10 @@ class _Sessions:
     async def get_session(self, session_id):
         self.calls.append(("get_session", session_id))
         return self._sessions.get(session_id)
+
+    async def remove_session(self, session_id):
+        self.calls.append(("remove_session", session_id))
+        self._sessions.pop(session_id, None)
 
 
 @pytest.fixture
@@ -295,28 +302,93 @@ async def test_missing_and_invalid_credentials_raise_distinct_errors(monkeypatch
 # ------------------------------------------------------------ granted scopes
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("stored", [None, "", "   "])
-async def test_a_token_stored_without_scope_gets_the_dcr_default(monkeypatch, caplog, stored):
-    monkeypatch.setattr(mcp_auth, "_verify_api_key", _none)
-    monkeypatch.setattr(mcp_auth, "_verify_oauth2_token", _returning(OAuthGrant("u", stored, None)))
+@pytest.mark.parametrize(
+    ("stored", "client", "expected"),
+    [
+        ("memory:read", "memory:read memory:write", {"memory:read"}),
+        ("memory:read offline_access", None, {"memory:read", "offline_access"}),
+        ("memory:read,memory:write", None, {"memory:read", "memory:write"}),
+        # No memory:* scope on the token: the client's registered memory:* scopes.
+        (
+            "claudeai",
+            "openid memory:read memory:write",
+            {"claudeai", "memory:read", "memory:write"},
+        ),
+        ("openid offline_access", "memory:read", {"openid", "offline_access", "memory:read"}),
+        (None, "memory:read,memory:write", {"memory:read", "memory:write"}),
+        ("", "memory:write", {"memory:write"}),
+    ],
+)
+def test_effective_scopes(stored, client, expected):
+    assert mcp_auth.granted_scopes(stored, client) == expected
 
+
+@pytest.mark.parametrize("stored", [None, "", "   ", "claudeai", "openid offline_access"])
+@pytest.mark.parametrize("client", [None, "", "openid offline_access"])
+def test_without_memory_scopes_anywhere_the_dcr_default_applies(caplog, stored, client):
     with caplog.at_level(logging.DEBUG, logger="mcp_server.auth"):
-        await authenticate_mcp_request("Bearer tok")
+        granted = mcp_auth.granted_scopes(stored, client)
 
-    assert get_mcp_oauth_scopes() == set(DCR_DEFAULT_SCOPE.split())
-    fallbacks = [r for r in caplog.records if "without stored scope" in r.getMessage()]
+    dcr_memory = {s for s in DCR_DEFAULT_SCOPE.split() if s.startswith("memory:")}
+    assert {s for s in granted if s.startswith("memory:")} == dcr_memory
+    fallbacks = [r for r in caplog.records if "names no memory scope" in r.getMessage()]
     assert len(fallbacks) == 1
     assert fallbacks[0].levelno == logging.DEBUG
+    assert "DCR default" in fallbacks[0].getMessage()
+
+
+class _ScalarResult:
+    def __init__(self, value):
+        self._value = value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored", "looked_up"),
+    [("memory:read", False), ("claudeai", True), ("", True), (None, True)],
+)
+async def test_the_client_scope_is_read_only_when_the_token_names_no_memory_scope(
+    monkeypatch, stored, looked_up
+):
+    import auth.oauth2_bearer as bearer
+    import db.base
+
+    row = SimpleNamespace(user_id="u-1", scope=stored, resource=None, client_id="client-1")
+    queries: list = []
+
+    class _Db:
+        async def execute(self, stmt):
+            queries.append(stmt)
+            return _ScalarResult("memory:read")
+
+    async def get_db():
+        yield _Db()
+
+    async def find(_token, _db):
+        return row
+
+    monkeypatch.setattr(db.base, "get_db", get_db)
+    monkeypatch.setattr(bearer, "find_active_oauth_token", find)
+
+    grant = await mcp_auth._verify_oauth2_token("tok")
+
+    assert grant.user_id == "u-1"
+    assert bool(queries) is looked_up
+    assert grant.client_scope == ("memory:read" if looked_up else None)
 
 
 @pytest.mark.asyncio
 async def test_api_keys_carry_no_oauth_scope(monkeypatch):
     """A previous OAuth request's scopes never leak into an API-key request."""
-    monkeypatch.setattr(mcp_auth, "_verify_oauth2_token", _returning(OAuthGrant("u", "x", None)))
+    monkeypatch.setattr(
+        mcp_auth, "_verify_oauth2_token", _returning(OAuthGrant("u", "memory:read", None))
+    )
     monkeypatch.setattr(mcp_auth, "_verify_api_key", _none)
     await authenticate_mcp_request("Bearer oauth")
-    assert get_mcp_oauth_scopes() == {"x"}
+    assert get_mcp_oauth_scopes() == {"memory:read"}
 
     monkeypatch.setattr(mcp_auth, "_verify_api_key", _returning(("u", None, None)))
     await authenticate_mcp_request("Bearer kagura_key")
@@ -328,6 +400,13 @@ async def test_api_keys_carry_no_oauth_scope(monkeypatch):
 
 async def _open_session(app) -> None:
     app.sessions.add("mcp-open")
+
+
+async def _initialize(app) -> dict[bytes, bytes]:
+    """A real ``initialize``: the session the rest of the calls ride on."""
+    opened = await app.call(_rpc("initialize", protocolVersion="2025-03-26"))
+    assert opened.status == 200
+    return {b"mcp-session-id": opened.headers[b"mcp-session-id"]}
 
 
 @pytest.mark.asyncio
@@ -386,36 +465,55 @@ async def test_a_write_only_token_cannot_read(app):
 
 @pytest.mark.asyncio
 async def test_handshake_listing_and_ping_are_not_scope_gated(app):
-    app.grant = OAuthGrant("user-1", "openid", None)
-    opened = await app.call(_rpc("initialize", protocolVersion="2025-03-26"))
-    assert opened.status == 200
-    session = {b"mcp-session-id": opened.headers[b"mcp-session-id"]}
+    app.grant = OAuthGrant("user-1", "memory:read", None)
+    session = await _initialize(app)
 
     assert (await app.call(_rpc("tools/list", 2), headers=session)).status == 200
     assert (await app.call(_rpc("ping", 3), headers=session)).status == 200
-    call = await app.call(_rpc("tools/call", 4, name="list_contexts"), headers=session)
+    call = await app.call(_rpc("tools/call", 4, name="forget", arguments={}), headers=session)
     assert call.status == 403
 
 
 @pytest.mark.asyncio
 async def test_the_scope_comes_from_the_request_token_not_the_session(app):
     """A session opened with a read-write token does not lend its scope."""
-    await _open_session(app)
+    app.grant = OAuthGrant("user-1", "memory:read memory:write", None)
+    session = await _initialize(app)
+
     app.grant = OAuthGrant("user-1", "memory:read", None)
     send = await app.call(
         _rpc("tools/call", 3, name="forget", arguments={"context_id": "c", "memory_id": "m"}),
-        headers={b"mcp-session-id": b"mcp-open"},
+        headers=session,
     )
     assert send.status == 403
+    assert app.executed == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("credential", ["api_key", "unscoped_oauth"])
-async def test_api_keys_and_unscoped_tokens_can_write(app, credential):
+async def test_a_session_opened_read_only_serves_a_read_write_token(app):
+    """…and a session opened with a read-only token does not withhold it."""
+    app.grant = OAuthGrant("user-1", "memory:read", None)
+    session = await _initialize(app)
+
+    app.grant = OAuthGrant("user-1", "memory:read memory:write", None)
+    send = await app.call(_rpc("tools/call", 3, name="remember", arguments={}), headers=session)
+    assert send.status == 200
+    assert app.executed == ["remember"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "credential", ["api_key", "unscoped_oauth", "client_specific_scope", "comma_separated"]
+)
+async def test_api_keys_and_tokens_without_memory_scopes_can_write(app, credential):
     if credential == "api_key":
         app.api_key = True
-    else:
+    elif credential == "unscoped_oauth":
         app.grant = OAuthGrant("user-1", None, None)  # the DCR default applies
+    elif credential == "client_specific_scope":
+        app.grant = OAuthGrant("user-1", "claudeai", None, "memory:read memory:write")
+    else:
+        app.grant = OAuthGrant("user-1", "memory:read,memory:write", None)
     await _open_session(app)
     send = await app.call(
         _rpc("tools/call", 3, name="remember", arguments={}),
@@ -424,6 +522,20 @@ async def test_api_keys_and_unscoped_tokens_can_write(app, credential):
 
     assert send.status == 200
     assert app.executed == ["remember"]
+
+
+@pytest.mark.asyncio
+async def test_a_client_registered_read_only_limits_a_token_without_memory_scopes(app):
+    app.grant = OAuthGrant("user-1", "openid offline_access", None, "openid memory:read")
+    await _open_session(app)
+    headers = {b"mcp-session-id": b"mcp-open"}
+
+    assert (
+        await app.call(_rpc("tools/call", 3, name="list_contexts"), headers=headers)
+    ).status == 200
+    denied = await app.call(_rpc("tools/call", 4, name="remember", arguments={}), headers=headers)
+    assert denied.status == 403
+    assert denied.challenge["scope"] == "openid memory:read memory:write offline_access"
 
 
 # ---------------------------------------------------- tools/call scope, stateless
@@ -446,15 +558,19 @@ async def test_stateless_write_call_without_write_scope_is_403_insufficient_scop
 
 
 @pytest.mark.asyncio
-async def test_stateless_read_call_and_listing_run_with_a_read_only_token(app):
+async def test_stateless_read_only_token_lists_discovers_and_reads(app):
     app.grant = OAuthGrant("user-1", "memory:read", None)
+
+    for method in ("tools/list", "server/discover"):
+        body, headers = _modern(method, 6)
+        send = await app.call(body, headers=headers)
+        assert send.status == 200, method
+        assert "result" in send.body, method
+
     body, headers = _modern("tools/call", 5, name="recall", arguments={"query": "q"})
     send = await app.call(body, headers=headers)
     assert send.status == 200
     assert app.executed == ["recall"]
-
-    body, headers = _modern("tools/list", 6)
-    assert (await app.call(body, headers=headers)).status == 200
 
 
 # ------------------------------------------------------------------ sessions
@@ -463,26 +579,59 @@ async def test_stateless_read_call_and_listing_run_with_a_read_only_token(app):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["/mcp/", "/mcp"])
 @pytest.mark.parametrize("method", ["POST", "GET"])
-async def test_an_unknown_session_id_is_404_and_never_created(app, path, method):
-    body = _rpc("tools/list", 7) if method == "POST" else None
+async def test_an_unknown_session_id_is_re_adopted_for_the_caller(app, path, method):
+    """A client that cannot re-initialize after a 404 keeps working across a
+    restart, a deploy or the idle timeout."""
+    body = _rpc("ping", 7) if method == "POST" else None
     send = await app.call(body, headers={b"mcp-session-id": b"mcp-gone"}, path=path, method=method)
 
+    assert send.status == 200
+    assert send.headers[b"mcp-session-id"] == b"mcp-gone"
+    assert ("get_or_create_session", "mcp-gone") in app.sessions.calls
+    adopted = app.sessions._sessions["mcp-gone"]
+    assert (adopted.user_id, adopted.workspace_id) == ("user-1", None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["POST", "GET", "DELETE"])
+@pytest.mark.parametrize("owner", [("user-2", None), ("user-1", "ws-other")])
+async def test_another_users_or_workspaces_session_is_404(app, owner, method):
+    app.sessions.add("mcp-theirs", *owner)
+    body = _rpc("ping", 7) if method == "POST" else None
+    send = await app.call(body, headers={b"mcp-session-id": b"mcp-theirs"}, method=method)
+
     assert send.status == 404
-    error = send.body["error"]
-    assert "re-initialize" in error["message"]
-    assert "initialize" in error["data"]["action"]
-    assert ("get_or_create_session", "mcp-gone") not in app.sessions.calls
+    assert "re-initialize" in send.body["error"]["message"]
+    assert "initialize" in send.body["error"]["data"]["action"]
+    assert "mcp-theirs" in app.sessions._sessions  # untouched
+    assert not any(call[0] == "get_or_create_session" for call in app.sessions.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/mcp/", "/mcp"])
+async def test_delete_ends_the_callers_own_session(app, path):
+    await _open_session(app)
+    send = await app.call(
+        None, headers={b"mcp-session-id": b"mcp-open"}, path=path, method="DELETE"
+    )
+
+    assert send.status == 204
+    assert "mcp-open" not in app.sessions._sessions
+
+
+@pytest.mark.asyncio
+async def test_delete_of_an_unknown_session_is_404_and_creates_nothing(app):
+    send = await app.call(None, headers={b"mcp-session-id": b"mcp-gone"}, method="DELETE")
+
+    assert send.status == 404
     assert "mcp-gone" not in app.sessions._sessions
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("owner", [("user-2", None), ("user-1", "ws-other")])
-async def test_another_users_or_workspaces_session_is_answered_like_an_unknown_one(app, owner):
-    app.sessions.add("mcp-theirs", *owner)
-    send = await app.call(_rpc("ping", 7), headers={b"mcp-session-id": b"mcp-theirs"})
-
-    assert send.status == 404
-    assert "re-initialize" in send.body["error"]["message"]
+async def test_delete_without_a_session_id_is_400(app):
+    send = await app.call(None, method="DELETE")
+    assert send.status == 400
+    assert app.sessions.calls == []
 
 
 @pytest.mark.asyncio
@@ -504,12 +653,24 @@ async def test_initialize_without_a_session_id_gets_a_server_minted_one(app):
 
 
 @pytest.mark.asyncio
-async def test_a_post_to_another_path_opens_no_session(app):
+@pytest.mark.parametrize(
+    ("method", "path", "status"),
+    [
+        ("POST", "/mcp/elsewhere", 404),
+        ("GET", "/mcp/elsewhere", 404),
+        ("PUT", "/mcp/", 405),
+        ("PATCH", "/mcp", 405),
+        ("GET", "/mcp/sse", 410),
+    ],
+)
+async def test_other_methods_and_paths_open_no_session(app, method, path, status):
     send = await app.call(
-        _rpc("ping", 7), headers={b"mcp-session-id": b"mcp-chosen"}, path="/mcp/elsewhere"
+        _rpc("ping", 7), headers={b"mcp-session-id": b"mcp-chosen"}, path=path, method=method
     )
 
-    assert send.status == 404
+    assert send.status == status
+    if status == 405:
+        assert send.headers[b"allow"] == b"GET, POST, DELETE"
     assert app.sessions.calls == []
 
 
