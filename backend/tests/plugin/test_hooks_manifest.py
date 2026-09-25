@@ -80,12 +80,14 @@ DOCS_TOUCHED = [
     "claude-skills/remember.md",
     "claude-skills/session-summary.md",
     "claude-skills/setup.md",
+    "claude-skills/login.md",
     "plugins/kagura-memory/skills/kagura-memory/SKILL.md",
     "docs/mcp-clients.md",
     "docs/mcp-tools.md",
     "docs/getting-started.md",
     "docs/troubleshooting.md",
     "README.md",
+    "README.ja.md",
 ]
 
 
