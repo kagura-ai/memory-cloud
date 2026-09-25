@@ -4,6 +4,29 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.78.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.78.0) — 2026-09-25
+
+MCP tool quality. Every tool now declares a title and the standard MCP annotations; a tool failure returns a stable error code, the next step and a correlation id instead of exception text; `reference` responses have a size budget and a way to page the rest; and `/device/authorize` accepts the form-encoded body RFC 8628 specifies.
+
+### Added
+- **Tool titles and annotations** ([#1683](https://github.com/kagura-ai/memory-cloud/issues/1683)): every tool in `tools/list` (every profile, both transports) carries a human-readable `title` and the standard `annotations` object with all four hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`): 31 read-only tools, 12 additive writes, 21 destructive tools, and `setup_connector` as the only open-world tool. `recall` and `get_agent_bootstrap` (with a `query`) are marked not read-only and destructive, because recall's Hebbian learning reweights and prunes graph edges; a client that confirms destructive tools will now ask before them. The legacy `readOnly` flag stays and is derived from `readOnlyHint`, so it is no longer sent on `recall` / `get_agent_bootstrap` and is now sent on `secret_get` / `secret_list`. The metadata adds about 160 characters per tool. See [Tool annotations](docs/mcp-tools.md#tool-annotations).
+- **Selective, bounded `reference`** ([#1685](https://github.com/kagura-ai/memory-cloud/issues/1685)): new optional `fields` (`content`, `details`, `context`, `links`), `max_chars` (10,000–100,000 characters, default 20,000) and `content_offset` / `details_offset` / `context_offset`. A memory whose response fits comes back exactly as before. A larger one is bounded: `content` is sliced with `content_truncated` / `content_next_offset`, and a field that does not fit is left out with `<field>_omitted` and its size, never cut silently; following the offsets returns the complete data. A paged read counts as one access. REST `POST /api/v1/memory/reference` is unchanged.
+- **Form-encoded `/device/authorize`** ([#1671](https://github.com/kagura-ai/memory-cloud/issues/1671)): `POST /api/v1/oauth/device/authorize` accepts `application/x-www-form-urlencoded` (`client_id`, optional `scope`, RFC 8628 §3.1) as well as JSON, so RFC-conformant device flows such as Hermes Agent's work. Every error from the endpoint now uses the RFC 6749 §5.2 body: an unknown client is 400 `invalid_client`; a missing `client_id`, a malformed body or an unsupported or missing `Content-Type` is 400 `invalid_request` (was 422 `VAL-001`); a body over 4,096 bytes is 413. The per-IP limit is counted before the body is read.
+- **Official MCP Registry metadata** ([#1679](https://github.com/kagura-ai/memory-cloud/issues/1679)): `server.json` describes the Remote MCP server for the registry.
+
+### Changed
+- **Actionable MCP tool errors** ([#1684](https://github.com/kagura-ai/memory-cloud/issues/1684)): tool failures share one vocabulary. A refusal keeps its message and gains a stable code and a `help` line. A server failure returns `cause` (`timeout`, `service_unavailable` or `internal_error`), a fixed `message`, `help`, a `correlation_id` (the request's trace id) and retry advice: `retryable: true` for reads, and for a write whose outcome is unknown `retryable: false` with `outcome: "unknown"` and the read that shows whether it took effect. Exception text, stack traces and driver details stay in the server log under the same `correlation_id`. The JSON-RPC fallbacks of both transports follow the same classification. The server instructions returned by `get_context_info` / `get_agent_bootstrap` gain a short Errors section; the code table is in [Errors](docs/mcp-tools.md#errors).
+
+### Fixed
+- **CI MinIO image** ([#1691](https://github.com/kagura-ai/memory-cloud/issues/1691)): `minio/minio` is no longer pullable anonymously from Docker Hub or quay.io, so CI and the `minio` compose profile use Chainguard's MinIO build, pinned by digest. The compose healthcheck no longer needs `curl`, and the service runs as root so existing `minio_data` volumes stay writable.
+- **SQLAlchemy pinned below 2.1** ([#1694](https://github.com/kagura-ai/memory-cloud/issues/1694)): SQLAlchemy 2.1.0 changes the default PostgreSQL driver for a bare `postgresql://` URL and its typing, which broke CI. `sqlalchemy>=2.0.0,<2.1` keeps installs and image builds on the 2.0 series; moving to 2.1 is [#1695](https://github.com/kagura-ai/memory-cloud/issues/1695).
+
+### Notes
+- No migration, no new environment variables.
+- **MCP clients:** a client that displayed `error` from a tool failure should show `message`; one that matched on exception text should branch on `error` or `cause`. A tool guardrail with `on: "result"` that matched raw exception text should match the `error` code instead. Migration notes are in `docs/mcp-tools.md` › Errors.
+- **SDKs:** `reference` on a memory whose response is over 20,000 characters may now return a `content` slice or omit a field; small memories are unchanged.
+- **Plugins:** the Claude Code and Codex plugin manifests are bumped in lockstep.
+
 ## [v0.77.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.77.0) — 2026-09-24
 
 Sign-in and client reach. The server can record which terms-of-service version each person accepted and ask again when it changes; three more native MCP clients can register over loopback DCR; `list_tags` gains the drill-down the SDKs already send; and `/kagura-memory:setup` understands the `kagura-mcp` query flags.
