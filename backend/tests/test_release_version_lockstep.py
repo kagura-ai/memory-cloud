@@ -1,6 +1,6 @@
 """Guard tests for #1625: every version string a release bumps equals ``APP_VERSION``.
 
-``/release`` (``.claude/commands/release.md``) bumps seven files and prepends a
+``/release`` (``.claude/commands/release.md``) bumps eight files and prepends a
 ``CHANGELOG.md`` entry in one commit. Two guards already cover part of that set:
 
 * ``tests/test_codex_plugin_manifest.py`` — Codex plugin manifest ==
@@ -13,8 +13,9 @@ fails in CI instead of shipping a mixed version:
 
 1. ``backend/pyproject.toml`` ``[project].version``, ``backend/src/__init__.py``
    ``__version__``, ``frontend/package.json``, both version fields of
-   ``frontend/package-lock.json`` and both plugin manifests equal
-   ``APP_VERSION`` (the canonical runtime source in ``config.constants``).
+   ``frontend/package-lock.json``, both plugin manifests and the Official MCP
+   Registry ``server.json`` (#1679) equal ``APP_VERSION`` (the canonical
+   runtime source in ``config.constants``).
 2. The first ``## `` heading in ``CHANGELOG.md`` is a well-formed release heading
    that names ``v{APP_VERSION}`` and carries an ISO ``YYYY-MM-DD`` date. The first
    heading is taken literally (not the first one that happens to match), so a
@@ -103,6 +104,7 @@ _VERSION_SOURCES: list[tuple[str, Callable[[], str]]] = [
         "plugins/kagura-memory/.codex-plugin/plugin.json .version",
         lambda: _json_field("plugins/kagura-memory/.codex-plugin/plugin.json", "version"),
     ),
+    ("server.json .version", lambda: _json_field("server.json", "version")),
 ]
 
 
