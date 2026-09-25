@@ -312,9 +312,11 @@ def _s256(verifier: str) -> str:
 class FakeDeployment:
     """Just enough of the OAuth + MCP surface for the step sequence."""
 
-    def __init__(self, accept_missing_verifier: bool = False) -> None:
+    def __init__(self, accept_missing_verifier: bool = False, rfc7592: bool = False) -> None:
         self.accept_missing_verifier = accept_missing_verifier
+        self.rfc7592 = rfc7592
         self.clients: dict[str, dict[str, Any]] = {}
+        self.management: dict[str, str] = {}  # client_id -> registration access token
         self.codes: dict[str, dict[str, Any]] = {}
         self.tokens: dict[str, dict[str, Any]] = {}
         self.refresh: dict[str, str] = {}
@@ -396,14 +398,29 @@ class FakeDeployment:
             body = json.loads(request.content)
             client_id = "oauth_" + secrets.token_urlsafe(16)
             self.clients[client_id] = body
+            extra = {}
+            if self.rfc7592:
+                self.management[client_id] = secrets.token_urlsafe(32)
+                self.issued.append(self.management[client_id])
+                extra = {
+                    "registration_client_uri": f"{BASE}/api/v1/oauth/register/{client_id}",
+                    "registration_access_token": self.management[client_id],
+                }
             return httpx.Response(
                 201,
                 json={
                     **body,
+                    **extra,
                     "client_id": client_id,
                     "scope": "memory:read memory:write offline_access",
                 },
             )
+        if path.startswith("/api/v1/oauth/register/") and request.method == "DELETE":
+            client_id = path.rsplit("/", 1)[1]
+            if request.headers.get("authorization") != f"Bearer {self.management.get(client_id)}":
+                return httpx.Response(401)
+            del self.clients[client_id]
+            return httpx.Response(204)
         if path == "/api/v1/oauth/authorize":
             return httpx.Response(307, headers={"location": f"{BASE}/login?return_to=x"})
         if path == "/api/v1/oauth/token":
@@ -619,6 +636,39 @@ def test_run_fails_when_a_verifier_is_not_required(tmp_path: Path) -> None:
     assert "T1" in report["summary"]["required_not_passed_ids"]
     # The token issued by the faulty T1 exchange was still revoked by cleanup.
     assert deployment.tokens and all(t["revoked"] for t in deployment.tokens.values())
+
+
+def test_rfc7592_registrations_are_deleted(tmp_path: Path) -> None:
+    deployment = FakeDeployment(rfc7592=True)
+    status, report, emitted = _run(tmp_path, deployment)
+
+    c2 = next(step for step in report["steps"] if step["id"] == "C2")
+    assert status == 0
+    assert c2["status"] == "pass"
+    assert all(entry["deleted"] for entry in c2["evidence"]["registrations"])
+    assert deployment.clients == {}
+    for token in deployment.management.values():
+        assert token not in emitted
+
+
+def test_extended_checks_record_post_sign_in_behaviour(tmp_path: Path) -> None:
+    # The fake redirects anywhere it is asked to (X1 must catch that), refuses
+    # codes without a matching S256 challenge (X2, X3 pass) and grants any
+    # requested scope (X4 is an observation).
+    deployment = FakeDeployment()
+    status, report, emitted = _run(tmp_path, deployment, "--extended-authorize-checks")
+
+    by_id = {step["id"]: step for step in report["steps"]}
+    assert status == 0  # the extended checks are never required
+    assert by_id["X1"]["status"] == "fail" and by_id["X1"]["evidence"]["redirected"] is True
+    assert by_id["X2"]["status"] == "pass" and by_id["X2"]["evidence"]["token_issued_by"] == []
+    assert by_id["X3"]["status"] == "pass"
+    assert by_id["X4"]["status"] == "info"
+    assert by_id["X4"]["evidence"]["undefined_scope_granted"] is True
+    assert report["consent_rounds"] == 4
+    for value in deployment.issued:
+        assert value not in emitted
+    assert all(token["revoked"] for token in deployment.tokens.values())
 
 
 def test_discovery_only_registers_nothing(tmp_path: Path) -> None:
