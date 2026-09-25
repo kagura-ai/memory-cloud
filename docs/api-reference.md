@@ -1390,6 +1390,21 @@ System-admin (`role=admin`) lifecycle API for platform worker app identities (Sl
 
 Kagura Memory Cloud provides 64 MCP tools for AI assistants across 13 categories (Memory, Agent Substrate, Agent Control Plane, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
 
+### Authentication and sessions on /mcp
+
+`/mcp` (and `/mcp/w/{workspace_id}`) accepts an API key, an OAuth2 access token or a session cookie. A failed check answers with an RFC 6750 challenge that always names the protected-resource metadata (RFC 9728):
+
+| Request | Status | `WWW-Authenticate` |
+|---------|--------|--------------------|
+| No credentials | `401` | `Bearer realm="Kagura Memory Cloud", resource_metadata="<origin>/.well-known/oauth-protected-resource"` — no error code (RFC 6750 §3.1) |
+| Unknown, expired or revoked token, or an OAuth token issued for another resource | `401` | `Bearer realm="…", error="invalid_token", error_description="…", resource_metadata="…"` |
+| Malformed `Authorization` header | `401` | `Bearer realm="…", error="invalid_request", error_description="…", resource_metadata="…"` |
+| OAuth token without the scope a `tools/call` needs | `403` | `Bearer realm="…", error="insufficient_scope", error_description="…", scope="<granted scopes plus the required one>", resource_metadata="…"` |
+
+- **Audience (RFC 8707).** An OAuth access token bound to a resource must be bound to the `resource` that `/.well-known/oauth-protected-resource` publishes, `<origin>/mcp` (a trailing slash makes no difference), including on `/mcp/w/{workspace_id}`. A token issued without `resource` is accepted.
+- **Scope.** `memory:read` or `memory:write` per tool, checked on `tools/call` only; see [MCP Tools › OAuth scopes](mcp-tools.md#oauth-scopes). API keys, agent-bound keys and session cookies are not scope-checked.
+- **Sessions (session-based Streamable HTTP).** A `POST` or `GET` on `/mcp` or `/mcp/` whose `Mcp-Session-Id` names a session the server does not hold for the caller (expired, lost on a restart, never issued, or opened by another user or workspace) gets `404` with a JSON-RPC error asking the client to send a new `initialize` without the header. Sessions are created only for a request without `Mcp-Session-Id`, under an id the server chooses. Stateless MCP 2026-07-28 requests have no session and ignore an `Mcp-Session-Id` header.
+
 ### 1. remember
 
 Store a new memory.
