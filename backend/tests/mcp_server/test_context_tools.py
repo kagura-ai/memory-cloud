@@ -626,11 +626,14 @@ class TestHandleGetContextInfoGuardrails:
         assert payload["status"] == "success"
         block = payload["guardrails"]
         assert set(block) == {
+            "provenance",
             "items",
             "total_available",
             "truncated",
             "tool_triggered_version",
         }
+        # #1682: the block says what its items are — stored notes, not instructions.
+        assert "not operator instructions" in block["provenance"]
         assert "version" not in block
         assert block["tool_triggered_version"] == "0123456789abcdef"
         assert block["total_available"] == 2 and block["truncated"] is False
@@ -679,7 +682,10 @@ class TestHandleGetContextInfoGuardrails:
 
         payload = await self._call(ctx, self._db(), AsyncMock(return_value=entries))
 
+        from services.guardrail_digest import STORED_NOTES_LABEL
+
         assert payload["guardrails"] == {
+            "provenance": STORED_NOTES_LABEL,
             "items": [],
             "total_available": 0,
             "truncated": False,
