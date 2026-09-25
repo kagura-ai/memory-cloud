@@ -617,7 +617,7 @@ Update a context. All fields are optional.
 | `display_name` | string | No | Human-readable display name |
 | `description` | string | No | Context description |
 | `summary` | string | No | LLM-oriented context summary |
-| `usage_guide` | string | No | LLM-oriented usage guidelines |
+| `usage_guide` | string | No | The owner's notes on what the context holds and how it is organised (returned to AI clients as data, not instructions) |
 | `is_private` | boolean | No | Privacy setting (owner-only) |
 | `is_public` | boolean | No | Public API access flag (owner-only) |
 | `resource_id` | string | No | Resource ID for public contexts (owner-only) |
@@ -661,7 +661,7 @@ Agents are workspace-scoped registry resources, not principals. Registry and bin
 | `GET /api/v1/agents/{agent_id}/bindings` | List bindings |
 | `PATCH /api/v1/agents/{agent_id}/bindings/{binding_id}` | Update read/write/default policy |
 | `DELETE /api/v1/agents/{agent_id}/bindings/{binding_id}` | Remove a binding |
-| `POST /api/v1/agents/{agent_id}/bootstrap` | Compose context guide, pinned, optional trusted recall, upcoming, and state for session start |
+| `POST /api/v1/agents/{agent_id}/bootstrap` | Compose context info, pinned, optional trusted recall, upcoming, and state for session start |
 
 Owner-provisioned member keys are minted through `POST /api/v1/workspaces/{workspace_id}/members/{user_id}/credentials/api-keys`; supplying `agent_id` attaches the registered agent. Agent-bound keys for `suspended` or `retired` agents fail verification. In `enforce` mode, requests to unbound contexts use the same not-found shape as inaccessible contexts.
 
@@ -1589,7 +1589,7 @@ These tools back the [Agent Memory Substrate](concepts.md#agent-memory-substrate
 
 #### 8. load_pinned
 
-Deterministically load a context's always-load memories (`delivery_mode="always"`) — the complete, unranked set, every call. The deterministic counterpart to probabilistic `recall()`; use it for an agent's Goal / Guardrail / critical policy.
+Deterministically load a context's always-load memories (`delivery_mode="always"`) — the complete, unranked set, every call. The deterministic counterpart to probabilistic `recall()`; use it for notes that stay relevant every turn, such as an agent's goal or a standing decision.
 
 ```python
 {
@@ -1684,7 +1684,7 @@ Record whether a recalled memory was helpful (read-adjacent; any `Viewer` may ca
 |---|---|
 | `register_agent` / `list_agents` / `get_agent` / `update_agent` / `delete_agent` | Workspace Agent Registry CRUD (Owner/Admin) |
 | `bind_agent_context` / `list_agent_bindings` / `update_agent_binding` / `unbind_agent_context` | Purely subtractive context policy (Owner/Admin) |
-| `get_agent_bootstrap` | Fail-soft composition of context guide + pinned + optional trusted recall + upcoming + state; identity and authorization fail closed |
+| `get_agent_bootstrap` | Fail-soft composition of context info + pinned + optional trusted recall + upcoming + state; identity and authorization fail closed |
 
 The control-plane tools use the same JSON-RPC shape as the examples above. Their REST companions and the current preview limitations are documented in [Agent Control Plane APIs](#agent-control-plane-apis-v0490-preview).
 
