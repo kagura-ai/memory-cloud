@@ -919,6 +919,60 @@ Delete an OAuth2 client.
 
 ---
 
+### Authorization Code Grant (MCP clients)
+
+Remote MCP clients register through Dynamic Client Registration
+(`POST /api/v1/oauth/register`, always a public client) and sign in with the
+authorization code grant and PKCE:
+
+1. `GET /api/v1/oauth/authorize` with `response_type=code`, `client_id`,
+   `redirect_uri`, `state`, `scope`, `code_challenge`,
+   `code_challenge_method=S256` and `resource`. A signed-in user gets the
+   consent page; anyone else is sent to sign in first.
+2. Approving redirects to `redirect_uri` with `code` and `state`.
+3. `POST /api/v1/oauth/token` with `grant_type=authorization_code`, `code`,
+   `redirect_uri`, `client_id`, `code_verifier` and `resource`.
+4. `POST /api/v1/oauth/token` with `grant_type=refresh_token` issues a new
+   pair and revokes the old one.
+
+**Authorization request rules.** They are checked before the consent page is
+shown and again when it is submitted. A request that breaks one is redirected
+to its registered `redirect_uri` with `error`, `error_description` and `state`
+(RFC 6749 §4.1.2.1). An unregistered `redirect_uri` gets an error page and no
+redirect.
+
+| Rule | `error` |
+|---|---|
+| `code_challenge_method` must be `S256`, the only value in `code_challenge_methods_supported`. `plain`, or a `code_challenge` sent without a method (which means `plain`, RFC 7636 §4.3), is refused. | `invalid_request` |
+| A public client (`token_endpoint_auth_method=none`, which includes every DCR client) must send a `code_challenge`. A confidential client may leave PKCE out; if it sends one, the rule above applies. | `invalid_request` |
+| The granted scope is the requested scopes that the client registered and that the server defines (`scopes_supported`); any other requested scope is dropped (RFC 6749 §3.3). A request without `scope` is granted the client's registered scope. `memory:admin` is granted only to a client that registered it, and DCR registers the default scope, which leaves it out. | `invalid_scope` when no scope is left |
+| `resource` (RFC 8707), when sent, must be this server's MCP resource: the `resource` of `/.well-known/oauth-protected-resource`, with or without a trailing slash. | `invalid_target` |
+
+The consent page lists the permissions of the granted scope.
+
+**Token requests.** Errors use the RFC 6749 §5.2 body
+`{"error": "...", "error_description": "..."}`.
+
+- The token response's `scope` is the granted scope.
+- `code_verifier` must match the `S256` challenge (`invalid_grant` otherwise).
+  A public client that leaves it out gets `invalid_request`.
+- The authorization code carries the `resource` of the authorization request.
+  The token's audience (`aud` in `POST /api/v1/oauth/introspect`) is
+  the `resource` of the token request, or else the code's. A token request
+  whose `resource` is another resource than the code's, or not this server's
+  MCP resource, gets `invalid_target`. When neither request sends `resource`,
+  the token has no audience.
+- Refresh: the requested `scope` cannot go beyond the original grant
+  (`invalid_scope`). The new token keeps the audience of the refreshed one; a
+  `resource` naming another resource gets `invalid_target`. A token without an
+  audience, refreshed with this server's MCP resource as `resource`, gets that
+  audience.
+
+The token endpoint logs the grant type and the names of the parameters it
+receives, not their values.
+
+---
+
 ### Device Authorization Grant (CLI / SDK login)
 
 The Kagura Memory Python SDK (and any future first-party CLI) uses the
@@ -935,7 +989,9 @@ from the end user. From the terminal, `kagura auth login` does roughly:
 4. The SDK polls `POST /api/v1/oauth/token` (with
    `grant_type=urn:ietf:params:oauth:grant-type:device_code`) and
    receives an `access_token` plus a `refresh_token` scoped to the
-   chosen (user × workspace).
+   chosen (user × workspace). An optional `resource` on the polling
+   request must be this server's MCP resource (`invalid_target`
+   otherwise) and becomes the token's audience.
 5. `kagura auth refresh` exchanges the refresh token for a new pair
    (refresh-token rotation is enforced server-side per RFC 6819
    §5.2.2.3 — the old access/refresh pair is revoked when a new pair
