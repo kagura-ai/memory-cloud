@@ -529,9 +529,11 @@ class AgentBootstrapService:
             if config
             else settings.embedding_dimensions,
         }
-        # instructions = context usage_guide, blank line, standard instructions
-        # (the get_context_info precedent — usage_guide first).
-        instructions = f"{usage_guide}\n\n{KAGURA_MEMORY_INSTRUCTIONS}"
+        # #1682: ``instructions`` is the static quick reference only — the same
+        # string get_context_info returns. The owner-written usage_guide is data
+        # and stays in context_block["usage_guide"]; it used to be prefixed here,
+        # which put stored text inside the ``instructions`` field.
+        instructions = KAGURA_MEMORY_INSTRUCTIONS
         return context_block, instructions
 
     async def _pinned(

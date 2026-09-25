@@ -668,14 +668,14 @@ class TestEnvelope:
                 patch.object(
                     AgentBootstrapService,
                     "_context_and_instructions",
-                    new=AsyncMock(return_value=({"id": str(CONTEXT_ID)}, "guide\n\ninstr")),
+                    new=AsyncMock(return_value=({"id": str(CONTEXT_ID)}, "instr")),
                 )
             )
             env = await self._build(svc, BootstrapParams(agent_id=AGENT_ID, query=None))
         assert env["components"]["recall"]["status"] == STATUS_SKIPPED
         assert env["components"]["recall"]["reason"] == "no_query"
         assert env["degraded"] is False
-        assert env["instructions"] == "guide\n\ninstr"
+        assert env["instructions"] == "instr"
 
     @pytest.mark.asyncio
     async def test_query_present_but_rate_limited_degrades_recall_only(self):
@@ -779,3 +779,40 @@ class TestTransactionOwningComponentFailSoft:
         result = await svc._transaction_owning_component("recall", boom)
         assert result == {"status": STATUS_ERROR, "error": "component_error"}
         db.rollback.assert_awaited_once()
+
+
+class TestContextAndInstructions:
+    """#1682: ``instructions`` is the static quick reference alone — the same
+    string get_context_info returns — and the owner-written usage_guide stays
+    in the context block as data."""
+
+    @staticmethod
+    def _db() -> MagicMock:
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: None))
+        return db
+
+    @pytest.mark.asyncio
+    async def test_instructions_is_the_static_text_without_the_usage_guide(self):
+        from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
+
+        context_block, instructions = await AgentBootstrapService(
+            self._db()
+        )._context_and_instructions(_context())
+
+        assert instructions == KAGURA_MEMORY_INSTRUCTIONS
+        assert "use me" not in instructions
+        assert context_block["usage_guide"] == "use me"
+
+    @pytest.mark.asyncio
+    async def test_empty_usage_guide_keeps_the_placeholder_in_the_context_block_only(self):
+        from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
+
+        context = _context()
+        context.usage_guide = None
+        context_block, instructions = await AgentBootstrapService(
+            self._db()
+        )._context_and_instructions(context)
+
+        assert instructions == KAGURA_MEMORY_INSTRUCTIONS
+        assert context_block["usage_guide"].startswith("No usage guide provided.")
