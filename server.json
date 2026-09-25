@@ -3,7 +3,7 @@
   "name": "io.github.kagura-ai/memory-cloud",
   "title": "Kagura Memory Cloud",
   "description": "Persistent memory for AI assistants: store, search, and connect knowledge across conversations.",
-  "version": "0.78.0",
+  "version": "0.79.0",
   "websiteUrl": "https://memory.kagura-ai.com",
   "repository": {
     "url": "https://github.com/kagura-ai/memory-cloud",
