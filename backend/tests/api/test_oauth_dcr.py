@@ -636,3 +636,88 @@ class TestOAuth2ClientResponseOwnerIdSerialization:
         )
         assert response.owner_id is None
         assert response.model_dump()["owner_id"] is None
+
+
+# --- Issue #1686: every redirect_uri is checked -------------------------------
+
+
+class TestDcrEveryRedirectUri:
+    """Each entry of ``redirect_uris`` must pass provider detection on its own."""
+
+    @pytest.fixture
+    def client(self):
+        with TestClient(app) as c:
+            yield c
+
+    def _register(self, client, body: dict):
+        rate_limit, fake_session, fake_encryptor = _patch_dcr_dependencies()
+        with (
+            patch("api.routes.oauth.increment_counter", rate_limit),
+            patch("api.routes.oauth.get_sync_session", return_value=fake_session),
+            patch("utils.encryption.get_encryptor", return_value=fake_encryptor),
+        ):
+            response = client.post("/api/v1/oauth/register", json=body)
+        return response, fake_session
+
+    @pytest.mark.parametrize(
+        ("client_name", "redirect_uris", "expected_provider"),
+        [
+            # Claude's connector callback.
+            ("Claude", ["https://claude.ai/api/mcp/auth_callback"], "claude"),
+            (
+                "ChatGPT",
+                [
+                    "https://chatgpt.com/connector_platform_oauth_redirect",
+                    "https://chat.openai.com/connector_platform_oauth_redirect",
+                ],
+                "chatgpt",
+            ),
+            ("Claude Code", ["http://localhost:53682/callback"], "claude"),
+            (
+                "Claude Code",
+                ["http://localhost:53682/callback", "http://127.0.0.1:53682/callback"],
+                "claude",
+            ),
+            # Entries of different allowed providers: the first one's is stored.
+            (
+                "Claude",
+                ["https://claude.ai/api/mcp/auth_callback", "http://localhost:9000/callback"],
+                "claude",
+            ),
+        ],
+    )
+    def test_every_entry_allowed_is_registered(
+        self, client, client_name: str, redirect_uris: list[str], expected_provider: str
+    ):
+        response, fake_session = self._register(
+            client, {"client_name": client_name, "redirect_uris": redirect_uris}
+        )
+
+        assert response.status_code == 201, response.text
+        assert response.json()["provider"] == expected_provider
+        assert response.json()["redirect_uris"] == redirect_uris
+        fake_session.add.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("client_name", "redirect_uris"),
+        [
+            ("Claude", ["https://claude.ai/api/mcp/auth_callback", "https://attacker.example/cb"]),
+            ("Claude Code", ["http://localhost:53682/callback", "https://attacker.example/cb"]),
+            # The loopback entry needs a recognized client_name of its own.
+            ("Anthropic", ["https://claude.ai/api/mcp/auth_callback", "http://localhost:9/cb"]),
+            (
+                "ChatGPT",
+                ["https://chatgpt.com/cb", "https://attacker.example/?fake=chatgpt.com"],
+            ),
+        ],
+    )
+    def test_any_refused_entry_rejects_the_registration(
+        self, client, client_name: str, redirect_uris: list[str]
+    ):
+        response, fake_session = self._register(
+            client, {"client_name": client_name, "redirect_uris": redirect_uris}
+        )
+
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == "invalid_client_metadata"
+        fake_session.add.assert_not_called()

@@ -919,6 +919,90 @@ Delete an OAuth2 client.
 
 ---
 
+### Authorization Code Grant (MCP clients)
+
+Remote MCP clients register through Dynamic Client Registration
+(`POST /api/v1/oauth/register`, always a public client) and sign in with the
+authorization code grant and PKCE:
+
+1. `GET /api/v1/oauth/authorize` with `response_type=code`, `client_id`,
+   `redirect_uri`, `state`, `scope`, `code_challenge`,
+   `code_challenge_method=S256` and `resource`. A signed-in user gets the
+   consent page; anyone else is sent to sign in first.
+2. Approving redirects to `redirect_uri` with `code` and `state`.
+3. `POST /api/v1/oauth/token` with `grant_type=authorization_code`, `code`,
+   `redirect_uri`, `client_id`, `code_verifier` and `resource`.
+4. `POST /api/v1/oauth/token` with `grant_type=refresh_token` issues a new
+   pair and revokes the old one.
+
+**Registration.** Every entry of `redirect_uris` must be accepted on its own:
+its host is `claude.ai`, `anthropic.com`, `chatgpt.com`, `chat.openai.com`,
+`cursor.sh` or `cursor.com` (or a subdomain of one), or it is a loopback
+`http://localhost` / `127.0.0.1` / `[::1]` URI and the `client_name` names a
+supported client. A registration with any other entry is refused with
+`invalid_client_metadata`. A registration that omits `scope` gets the default
+scope, which leaves out `memory:admin`; a registration may name
+`memory:admin` in its `scope`.
+
+**Authorization request rules.** They are checked before the consent page is
+shown and again when it is submitted. A request that breaks one gets an error
+page naming the `error` (HTTP 400) instead of the consent page, and nothing is
+sent to the client. If the submitted consent breaks one, the response
+redirects to the registered `redirect_uri` with `error`, `error_description`
+and `state` (RFC 6749 §4.1.2.1). An unregistered `redirect_uri` always gets an
+error page and no redirect.
+
+| Rule | `error` |
+|---|---|
+| `code_challenge_method` must be `S256`, the only value in `code_challenge_methods_supported`. `plain`, or a `code_challenge` sent without a method (which means `plain`, RFC 7636 §4.3), is refused. | `invalid_request` |
+| A public client (`token_endpoint_auth_method=none`, which includes every DCR client) must send a `code_challenge`. A confidential client may leave PKCE out; if it sends one, the rule above applies. | `invalid_request` |
+| Scope, see below. | `invalid_scope` when the client's registered scope has no `memory:*` scope |
+| `resource` (RFC 8707), when sent, must name this server's MCP resource, see below. | `invalid_target` |
+
+**Scope.** The granted scope is the requested scopes that the client
+registered and that the server defines (`scopes_supported`); any other
+requested scope is dropped (RFC 6749 §3.3). When that leaves no `memory:*`
+scope (the request named none the client registered, for example only
+`openid` / `offline_access` or scopes the server does not define, or had no
+`scope`), the client's registered scope that the server defines is granted
+instead. `memory:admin` is granted only to a client that registered it. The
+consent page lists the permissions of the granted scope, and the token
+response's `scope` carries it.
+
+**Resource.** The MCP resource is the `resource` published at
+`/.well-known/oauth-protected-resource` (`FRONTEND_URL` plus `MCP_BASE_PATH`,
+for example `https://<your-domain>/mcp`). A `resource` names it when it has the
+same scheme and host (compared case-insensitively; the default port may be
+given or left out) and its path is `MCP_BASE_PATH` or a path beneath it, such
+as `/mcp/`, `/mcp/w/<workspace-id>` or `/mcp/sse`. Its query and fragment are
+ignored (`/mcp?profile=core` names it). Any other origin or path is
+`invalid_target`. Codes and tokens store the published value.
+
+**Token requests.** Errors use the RFC 6749 §5.2 body
+`{"error": "...", "error_description": "..."}`.
+
+- `code_verifier` must match the `S256` challenge (`invalid_grant` otherwise).
+  A public client that leaves it out gets `invalid_request`.
+- An authorization code is exchanged once. A second exchange, including one
+  sent at the same moment, gets `invalid_grant`.
+- The authorization code carries the `resource` of the authorization request.
+  The token's audience (`aud` in `POST /api/v1/oauth/introspect`) is that
+  `resource`, or else the token request's. A token request whose `resource`
+  does not name this server's MCP resource gets `invalid_target`. When
+  neither request sends `resource`, the token has no audience.
+- Refresh: the requested `scope` cannot go beyond the original grant
+  (`invalid_scope`). The new token keeps the audience of the refreshed one; an
+  audience stored in another form of the MCP resource (for example
+  `.../mcp/w/<workspace-id>`) is stored as the published value. A `resource`
+  on the refresh request must name the MCP resource (`invalid_target`
+  otherwise). A token without an audience, refreshed with the MCP resource as
+  `resource`, gets that audience.
+
+The token endpoint logs the grant type and the names of the parameters it
+receives, not their values.
+
+---
+
 ### Device Authorization Grant (CLI / SDK login)
 
 The Kagura Memory Python SDK (and any future first-party CLI) uses the
@@ -935,7 +1019,10 @@ from the end user. From the terminal, `kagura auth login` does roughly:
 4. The SDK polls `POST /api/v1/oauth/token` (with
    `grant_type=urn:ietf:params:oauth:grant-type:device_code`) and
    receives an `access_token` plus a `refresh_token` scoped to the
-   chosen (user × workspace).
+   chosen (user × workspace). An optional `resource` on the polling
+   request must name this server's MCP resource (the rule above;
+   `invalid_target` otherwise, checked before the authorization state)
+   and becomes the token's audience.
 5. `kagura auth refresh` exchanges the refresh token for a new pair
    (refresh-token rotation is enforced server-side per RFC 6819
    §5.2.2.3 — the old access/refresh pair is revoked when a new pair
@@ -945,7 +1032,8 @@ from the end user. From the terminal, `kagura auth login` does roughly:
 
 **Device authorization request.** `POST /api/v1/oauth/device/authorize`
 takes `client_id` (required) and `scope` (optional, space-separated) in
-either body encoding:
+either body encoding. The scope is granted by the rule of the authorization
+code grant above:
 
 ```bash
 # RFC 8628 §3.1 form encoding
@@ -968,6 +1056,7 @@ malformed. Errors use the RFC 6749 §5.2 body
 | Condition | Status | `error` |
 |---|---|---|
 | Unknown `client_id` | `400` | `invalid_client` |
+| The client's registered scope has no `memory:*` scope | `400` | `invalid_scope` |
 | Missing `client_id`, malformed body, `client_id` or `scope` sent twice | `400` | `invalid_request` |
 | No `Content-Type`, or any other one (for example `text/plain` or `multipart/form-data`) | `400` | `invalid_request` |
 | Body larger than 4096 bytes | `413` | `invalid_request` |

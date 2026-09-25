@@ -457,3 +457,154 @@ class TestDcrLoopbackPersistsNullOwnerId:
         ).first()
         assert fetched is not None
         assert fetched.owner_id == "user-integration-test-12345"
+
+
+class TestAuthorizationCodeSingleUse:
+    """#1686: of two exchanges of one authorization code, only one issues a token.
+
+    The code row is read ``FOR UPDATE`` and deleted in the transaction that
+    stores the token, so a concurrent exchange waits and then finds no code.
+    """
+
+    _USER_ID = "integration-test-user-689"  # purged by the ``sync_db`` teardown
+    _REDIRECT_URI = "http://localhost:54321/callback"
+
+    def _register(self, client) -> str:
+        with patch("api.routes.oauth.increment_counter", AsyncMock(return_value=1)):
+            response = client.post(
+                "/api/v1/oauth/register",
+                json={
+                    "client_name": "IntegrationTest Claude Code Loopback",
+                    "redirect_uris": [self._REDIRECT_URI],
+                    "token_endpoint_auth_method": "none",
+                },
+            )
+        assert response.status_code == 201, response.text
+        return response.json()["client_id"]
+
+    def _insert_code(self, sync_db, client_id: str) -> tuple[str, str]:
+        import secrets
+        from datetime import timedelta
+
+        from authlib.oauth2.rfc7636 import create_s256_code_challenge
+
+        from models.auth import OAuth2AuthorizationCode
+        from utils.datetime import utcnow
+
+        verifier = secrets.token_urlsafe(48)
+        code = secrets.token_urlsafe(32)
+        sync_db.add(
+            OAuth2AuthorizationCode(
+                code=code,
+                client_id=client_id,
+                user_id=self._USER_ID,
+                redirect_uri=self._REDIRECT_URI,
+                scope="memory:read",
+                code_challenge=create_s256_code_challenge(verifier),
+                code_challenge_method="S256",
+                auth_time=utcnow(),
+                expires_at=utcnow() + timedelta(seconds=600),
+            )
+        )
+        sync_db.commit()
+        return code, verifier
+
+    def _exchange(self, client, client_id: str, code: str, verifier: str):
+        return client.post(
+            "/api/v1/oauth/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "code_verifier": verifier,
+                "redirect_uri": self._REDIRECT_URI,
+                "client_id": client_id,
+            },
+        )
+
+    @staticmethod
+    def _token_count(sync_db, client_id: str) -> int:
+        return sync_db.execute(
+            text("SELECT count(*) FROM oauth_tokens WHERE client_id = :client_id"),
+            {"client_id": client_id},
+        ).scalar()
+
+    def test_concurrent_exchanges_issue_one_token(self, client, sync_db):
+        import threading
+
+        client_id = self._register(client)
+        code, verifier = self._insert_code(sync_db, client_id)
+        start = threading.Barrier(2)
+        statuses: list[int] = []
+
+        def exchange() -> None:
+            start.wait(timeout=10)
+            statuses.append(self._exchange(client, client_id, code, verifier).status_code)
+
+        threads = [threading.Thread(target=exchange) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        assert sorted(statuses) == [200, 400]
+        assert self._token_count(sync_db, client_id) == 1
+
+    def test_exchange_waits_for_a_locked_code_and_then_finds_it_consumed(self, client, sync_db):
+        import threading
+        import time
+
+        import psycopg2
+
+        client_id = self._register(client)
+        code, verifier = self._insert_code(sync_db, client_id)
+
+        locker = get_sync_session()
+        observer = psycopg2.connect(
+            os.environ["DATABASE_URL"].replace("postgresql+asyncpg://", "postgresql://"),
+            connect_timeout=3,
+        )
+        observer.autocommit = True
+        try:
+            # Another exchange holds the code row.
+            locker.execute(
+                text("SELECT id FROM oauth_authorization_codes WHERE code = :code FOR UPDATE"),
+                {"code": code},
+            )
+            result: dict = {}
+            thread = threading.Thread(
+                target=lambda: result.update(
+                    response=self._exchange(client, client_id, code, verifier)
+                )
+            )
+            thread.start()
+
+            waiting = False
+            deadline = time.monotonic() + 10
+            while not waiting and time.monotonic() < deadline:
+                with observer.cursor() as cur:
+                    # The statement text is truncated at track_activity_query_size,
+                    # so match on the table name, not on the trailing FOR UPDATE.
+                    cur.execute(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = current_database() AND wait_event_type = 'Lock' "
+                        "AND query ILIKE '%oauth_authorization_codes%'"
+                    )
+                    waiting = cur.fetchone()[0] > 0
+                if not waiting:
+                    time.sleep(0.05)
+            assert waiting, "the exchange did not wait for the locked code"
+
+            # The other exchange consumes the code and commits.
+            locker.execute(
+                text("DELETE FROM oauth_authorization_codes WHERE code = :code"), {"code": code}
+            )
+            locker.commit()
+            thread.join(timeout=30)
+        finally:
+            locker.close()
+            observer.close()
+
+        response = result["response"]
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == "invalid_grant"
+        assert self._token_count(sync_db, client_id) == 0
