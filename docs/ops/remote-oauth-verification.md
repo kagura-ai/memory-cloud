@@ -41,16 +41,16 @@ required step passed. The others add evidence and never fail the run.
 | S1 | no | Introspection (RFC 7662): the token is active, its audience is the requested resource, it belongs to the registered client. |
 | S2 | yes | A refresh cannot widen the granted scope. |
 | S3 | no | The REST API enforces scope: a token narrowed to `memory:read` by a refresh is refused on a `POST` with `insufficient_scope`. The probe (`POST /api/v1/memory/recall` without a context) reads and writes nothing even if it were let through. |
-| S4 | no | MCP applies the same token's scope: `list_contexts` succeeds, and a `remember` call answers `403` with `WWW-Authenticate: Bearer error="insufficient_scope"` naming `memory:write`. The call targets a context id that cannot exist, so it never stores anything; if a memory were stored anyway, the step fails and deletes it. |
+| S4 | yes | MCP applies the same token's scope: `list_contexts` succeeds, and a `remember` call answers `403` with `WWW-Authenticate: Bearer error="insufficient_scope"` naming `memory:write`. The call targets a context id that cannot exist, so it never stores anything; if a memory were stored anyway, the step fails and deletes it. |
 | M1 | yes | MCP `initialize` with the OAuth token: protocol version, server version, `Mcp-Session-Id` presence, and the `instructions` length and whether it equals the static text in the checkout. |
-| M2-M5 | yes | `notifications/initialized`, `tools/list` (every tool has a `title` and the four annotation hints; counts of read-only, destructive and open-world tools), one read call (`list_contexts`), and reuse of the session. |
+| M2-M5 | yes | `notifications/initialized`, `tools/list` (a list of objects; every tool has a `title` and the four annotation hints; counts of read-only, destructive and open-world tools), one read call (`list_contexts`), and reuse of the session. |
 | M6 | no | The stateless per-request era (MCP 2026-07-28): `server/discover` and `tools/list` without a session. |
-| M7 | no | A session-era request (`tools/list` to `POST /mcp`) carrying an `Mcp-Session-Id` the server never issued, as a client sends after its session expired, is answered `404` with re-initialize guidance. |
+| M7 | yes | A session-era request (`tools/list` to `POST /mcp`) carrying an `Mcp-Session-Id` the server never issued, as a client sends after its session expired, is answered `404` with re-initialize guidance. |
 | F1-F4 | yes (F3 no) | The refresh grant issues a new pair; the previous refresh token no longer works (rotation); what the previous access token gets; `initialize` works with the refreshed token. |
 | V1-V2 | yes | After RFC 7009 revocation, `/mcp` answers `401` with the discovery challenge (the signal a client acts on to reconnect), and the revoked refresh token is refused. |
 | V3 | no | Revoking an unknown token answers `200`. |
 | V4 | yes | A bogus bearer token gets `401` with the discovery challenge. |
-| V5 | no | The challenges recorded by V1 (revoked token) and V4 (bogus token) carry `error="invalid_token"` (RFC 6750 §3.1). |
+| V5 | yes | The challenges recorded by V1 (revoked token) and V4 (bogus token) carry `error="invalid_token"` (RFC 6750 §3.1). |
 | X1-X4 | no | Only with `--extended-authorize-checks`, signed in: an unregistered `redirect_uri` is not redirected to (operator-observed); a code issued without `code_challenge`, or with `plain`, yields no token; what happens to an undefined scope. |
 | C1 | no | Every token the run obtained is revoked before exit. |
 | C2 | no | DCR registrations are deleted through RFC 7592 when the server offers it; otherwise the step records that they remain (see [Cleanup](#cleanup-after-a-run)). |
