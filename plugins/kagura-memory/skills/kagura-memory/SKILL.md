@@ -1,6 +1,6 @@
 ---
 name: kagura-memory
-description: Use Kagura Memory Cloud from Codex for long-term project memory. Trigger when the user asks to start or restore a session, recall past decisions or bug fixes, save session knowledge, remember a decision or troubleshooting note, inspect memory contexts, or verify the kagura-memory MCP connection.
+description: Use Kagura Memory Cloud from Codex for long-term project memory. Trigger when the user asks to start or restore a session, recall past decisions or bug fixes, save session knowledge, remember a decision or troubleshooting note, inspect memory contexts, verify the kagura-memory MCP connection, or log in to it again (a Kagura tool failing with invalid_token or insufficient_scope, a new machine or workspace).
 ---
 
 # Kagura Memory
@@ -14,6 +14,7 @@ Claude Code slash commands map to natural-language Codex requests:
 - `/kagura-memory:recall` -> "recall from Kagura Memory ..."
 - `/kagura-memory:remember` -> "remember this in Kagura Memory ..."
 - `/kagura-memory:guide` -> "show the Kagura Memory guide"
+- `/kagura-memory:login` -> "log in to Kagura Memory again" or "re-authenticate Kagura Memory"
 - `/kagura-memory:smoke-test` -> "smoke test Kagura Memory"
 
 ## Tool Availability
@@ -46,6 +47,31 @@ If the MCP tools are not available:
 5. Restart Codex so the tools are loaded.
 
 Never print API keys or bearer tokens. When showing config, redact secrets.
+
+<!-- SYNC: keep "Login" in step with claude-skills/login.md (detect → re-authenticate → insufficient_scope → verify, and its credential rules). When one changes, change both. -->
+
+## Login
+
+When a Kagura tool fails with `401` / `invalid_token` or `403` / `insufficient_scope`, when `codex mcp list` shows the entry `Not logged in`, or after a move to a new machine or workspace, sign the connection in again. The Codex commands here are checked against codex-cli 0.145.0.
+
+Never print, ask for or store a token, an API key, a device-flow code or an OAuth redirect URL. Every sign-in runs in the user's own terminal, not through you and not with `!`: it waits for a browser, and the output of a `!` command (a one-time code, an approval URL) joins this conversation. If the user pastes a secret anyway, do not repeat it; tell them to replace it.
+
+1. **Detect.** Run `codex mcp list` (or `codex mcp get kagura-memory`); both print secret values as `*****`. Never add `--json`: the JSON form prints `http_headers` and `env` values in clear. The entry's form:
+   - **OAuth** — a `url` with no `bearer_token_env_var`, `http_headers` or `env_http_headers`; Auth `Not logged in`, or `OAuth` once signed in.
+   - **Bearer key** — `bearer_token_env_var`, or an `Authorization` in `http_headers` / `env_http_headers`; Auth `Bearer token` (`Unsupported` for `env_http_headers`).
+   - **CLI profile** — `command` `kagura-mcp` (what `kagura setup codex` writes); the profile is `--profile <name>` in `args`.
+
+   A `404` / `405`, a `5xx`, an unreachable server or no entry at all is not a sign-in problem: see "Tool Availability" above.
+2. **Re-authenticate.** The user runs the command, then restarts Codex:
+   - OAuth: `codex mcp login kagura-memory`. It opens the browser and waits for Codex's callback on this machine. Codex keys the token on the entry's `url`, so a changed URL needs this again; `codex mcp logout kagura-memory` removes the stored token.
+   - CLI profile: `kagura auth login --profile <name> --server https://<host>`. `--server` is the site root, not the `/mcp` URL (Python SDK `kagura-memory` 0.31.0 or later).
+   - Bearer key: there is nothing to sign in to. Where OAuth is not available, this is the key path of "Tool Availability" (steps 4–5): a new key from Workspace → Integrations → API Keys, exported in the shell that starts Codex and never pasted here.
+3. **After `insufficient_scope`.** Request exactly the challenge's `scope` (`WWW-Authenticate: Bearer error="insufficient_scope", scope="…"`): the scopes the token already has plus the missing one. Never request the missing scope alone — scopes do not imply one another, so a token re-issued for `memory:write` only loses `memory:read`. With only `required_scope` in view, add it to the current scopes: `memory:read memory:write` for a read-only token. Put only names the server advertises into a command (`openid`, `memory:read`, `memory:write`, `memory:delete`, `memory:admin`, `offline_access`):
+   - OAuth: `codex mcp login kagura-memory --scopes memory:read,memory:write` (comma-separated).
+   - CLI profile: the login above with `--scope "memory:read memory:write"` (space-separated).
+
+   API keys carry no OAuth scope. Contract: `docs/mcp-tools.md#oauth-scopes`.
+4. **Verify.** Make one read call, `list_contexts()`, and report the contexts it lists and the workspace (the `/mcp/w/<workspace-id>` in the URL, else the account's current workspace). It proves the connection, not the scope — a read-only token passes it too: after `insufficient_scope`, offer to retry the refused call, and ask first. If the tools are still missing after the restart, say so and name the step; never call the server with a credential yourself.
 
 ## Resolve Context
 
