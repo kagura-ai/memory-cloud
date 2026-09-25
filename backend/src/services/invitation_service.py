@@ -132,7 +132,7 @@ class InvitationService:
         result = await self.db.execute(stmt)
         workspace = result.scalar_one_or_none()
         if not workspace:
-            raise NotFoundException(f"Workspace {workspace_id} not found")
+            raise NotFoundException("Workspace", str(workspace_id))
 
         # Migration 042: Validate context selection for member/viewer
         if role in ("member", "viewer"):
@@ -327,7 +327,7 @@ class InvitationService:
         invitation = result.scalar_one_or_none()
 
         if not invitation:
-            raise NotFoundException("Invitation not found or invalid")
+            raise NotFoundException("Invitation")
 
         return invitation
 
@@ -425,7 +425,7 @@ class InvitationService:
         workspace = result.scalar_one_or_none()
 
         if not workspace:
-            raise NotFoundException("Workspace not found")
+            raise NotFoundException("Workspace")
 
         # Check member quota (Issue #229 - race condition protection)
         from services.quota_service import QuotaService
@@ -510,7 +510,7 @@ class InvitationService:
         invitation = result.scalar_one_or_none()
 
         if not invitation:
-            raise NotFoundException("Invitation not found")
+            raise NotFoundException("Invitation")
 
         await self.db.delete(invitation)
         await self.db.flush()

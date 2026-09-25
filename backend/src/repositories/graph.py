@@ -114,7 +114,7 @@ class GraphRepository(BaseRepository[GraphMemory]):
 
         existing = await self.get(id)
         if not existing:
-            raise NotFoundException(f"Graph with id={id} not found")
+            raise NotFoundException("Graph", str(id))
 
         # Update fields
         existing.graph_data = graph.graph_data
@@ -154,7 +154,7 @@ class GraphRepository(BaseRepository[GraphMemory]):
         """
         existing = await self.get_by_user_id(user_id)
         if not existing:
-            raise NotFoundException(f"Graph for user_id={user_id} not found")
+            raise NotFoundException("Graph for user", user_id)
 
         # Update graph data
         existing.graph_data = graph_data

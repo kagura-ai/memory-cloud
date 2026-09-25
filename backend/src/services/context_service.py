@@ -384,22 +384,22 @@ class ContextService:
         context = result.scalar_one_or_none()
 
         if not context:
-            raise NotFoundException(f"Context not found: {context_id}")
+            raise NotFoundException("Context", str(context_id))
 
         # Get workspace membership
         workspace_member = await self._get_workspace_member(user_id, context.workspace_id)
         if not workspace_member:
-            raise NotFoundException(f"Context not found: {context_id}")
+            raise NotFoundException("Context", str(context_id))
 
         # Issue #165: Privacy check - private contexts are creator-only
         if context.is_private and context.created_by != user_id:
-            raise NotFoundException(f"Context not found: {context_id}")
+            raise NotFoundException("Context", str(context_id))
 
         # Issue #234: Check allowed_context_ids whitelist for member/viewer
         if workspace_member.role in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER):
             if workspace_member.allowed_context_ids is not None:
                 if context_id not in workspace_member.allowed_context_ids:
-                    raise NotFoundException(f"Context not found: {context_id}")
+                    raise NotFoundException("Context", str(context_id))
 
         return context
 
@@ -1355,9 +1355,7 @@ class ContextService:
         """
         # Issue #213: All users must create contexts manually (including default_user)
         logger.warning("context_creation_required", user_id=user_id)
-        raise NotFoundException(
-            "No context found. Please create a context in the web interface at /contexts"
-        )
+        raise NotFoundException("Context", "create a context in the web interface at /contexts")
 
     # ========================================================================
     # Collection Resolution (DEPRECATED - Single Collection Migration)
@@ -1770,7 +1768,7 @@ class ContextService:
         user = result.scalar_one_or_none()
 
         if not user:
-            raise NotFoundException(f"User not found: {user_id}")
+            raise NotFoundException("User", user_id)
 
         # Check if user already has an workspace (just not set as current)
         member_result = await self.db.execute(

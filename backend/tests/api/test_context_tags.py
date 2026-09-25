@@ -88,9 +88,7 @@ class TestListContextTagsRoute:
     @pytest.mark.asyncio
     async def test_not_found_maps_to_404(self, mock_service, context_id):
         """NotFoundException → HTTP 404 (uniform disclosure for not-found/no-access)."""
-        mock_service.aggregate_tags.side_effect = NotFoundException(
-            f"Context {context_id} not found"
-        )
+        mock_service.aggregate_tags.side_effect = NotFoundException("Context", str(context_id))
 
         with pytest.raises(HTTPException) as exc:
             await list_context_tags(

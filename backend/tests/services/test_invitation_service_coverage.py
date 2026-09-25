@@ -488,7 +488,7 @@ class TestGetInvitation:
     async def test_not_found_raises(self, db_session):
         """An unknown token raises NotFoundException."""
         svc = _service(db_session)
-        with pytest.raises(NotFoundException, match="not found or invalid"):
+        with pytest.raises(NotFoundException, match="^Invitation not found$"):
             await svc.get_invitation("nonexistent-token-value")
 
 

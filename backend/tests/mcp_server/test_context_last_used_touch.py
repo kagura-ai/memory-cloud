@@ -418,7 +418,7 @@ async def test_reference_bumps_context_but_not_on_memory_miss():
         db.execute.reset_mock()
         from utils.exceptions import NotFoundException
 
-        service.reference = AsyncMock(side_effect=NotFoundException("Memory not found"))
+        service.reference = AsyncMock(side_effect=NotFoundException("Memory"))
         result = await handle_reference(
             {"memory_id": str(uuid4()), "context_id": str(uuid4())},
             user_id="u1",
