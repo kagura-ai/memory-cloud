@@ -334,7 +334,9 @@ class UpdateMemberContextAccessRequest(BaseModel):
     Issue #234: Context access restriction for member/viewer.
     """
 
-    allowed_context_ids: list[str] | None = Field(
+    # #1693: UUID-typed, so a malformed entry is a canonical 422 (VAL-001) at the
+    # request boundary instead of a 500 from an unguarded ``UUID(...)``.
+    allowed_context_ids: list[UUID] | None = Field(
         None,
         description=(
             "List of context IDs the member can access. "
@@ -872,7 +874,7 @@ async def update_member_context_access(
     # Check admin access
     await perm_service.check_workspace_admin(current_user["user_id"], workspace_id)
 
-    # Convert string UUIDs to UUID objects
+    # The request model already parsed the ids as UUIDs (#1693).
     allowed_context_ids = None
     if body.allowed_context_ids is not None:
         # Validate that all context IDs exist in this workspace
@@ -880,20 +882,22 @@ async def update_member_context_access(
             context_result = await db.execute(
                 select(Context.id).where(
                     Context.workspace_id == workspace_id,
-                    Context.id.in_([UUID(ctx_id) for ctx_id in body.allowed_context_ids]),
+                    Context.id.in_(body.allowed_context_ids),
                     Context.deleted_at.is_(None),
                 )
             )
             valid_ids = {row[0] for row in context_result.all()}
-            invalid_ids = set(body.allowed_context_ids) - {str(id) for id in valid_ids}
+            # Compared as UUIDs, not strings: an uppercase / braced spelling of
+            # a context that exists is the same id (#1693).
+            invalid_ids = set(body.allowed_context_ids) - valid_ids
 
             if invalid_ids:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Invalid context IDs: {list(invalid_ids)}",
+                    detail=f"Invalid context IDs: {sorted(str(i) for i in invalid_ids)}",
                 )
 
-            allowed_context_ids = [UUID(ctx_id) for ctx_id in body.allowed_context_ids]
+            allowed_context_ids = list(body.allowed_context_ids)
         else:
             allowed_context_ids = []  # Empty list = no access
 
