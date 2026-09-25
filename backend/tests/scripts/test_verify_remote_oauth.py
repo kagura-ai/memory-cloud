@@ -312,9 +312,23 @@ def _s256(verifier: str) -> str:
 class FakeDeployment:
     """Just enough of the OAuth + MCP surface for the step sequence."""
 
-    def __init__(self, accept_missing_verifier: bool = False, rfc7592: bool = False) -> None:
+    def __init__(
+        self,
+        accept_missing_verifier: bool = False,
+        rfc7592: bool = False,
+        *,
+        mcp_scope: bool = True,
+        challenge_error: str = "invalid_token",
+        adopt_unknown_sessions: bool = False,
+        writes_succeed: bool = False,
+    ) -> None:
         self.accept_missing_verifier = accept_missing_verifier
         self.rfc7592 = rfc7592
+        self.mcp_scope = mcp_scope  # 403 insufficient_scope for write tools without memory:write
+        self.challenge_error = challenge_error
+        self.adopt_unknown_sessions = adopt_unknown_sessions
+        self.writes_succeed = writes_succeed  # remember stores even into an unknown context
+        self.memories: dict[str, str] = {}  # memory_id -> context_id
         self.clients: dict[str, dict[str, Any]] = {}
         self.management: dict[str, str] = {}  # client_id -> registration access token
         self.codes: dict[str, dict[str, Any]] = {}
@@ -502,8 +516,10 @@ class FakeDeployment:
         return self.issue(token["client_id"], scope, token["resource"])
 
     def mcp(self, request: httpx.Request) -> httpx.Response:
-        if self.bearer(request) is None:
-            challenge = f'Bearer error="invalid_token", resource_metadata="{BASE}/.well-known/oauth-protected-resource"'
+        prm = f"{BASE}/.well-known/oauth-protected-resource"
+        token = self.bearer(request)
+        if token is None:
+            challenge = f'Bearer error="{self.challenge_error}", resource_metadata="{prm}"'
             return httpx.Response(401, headers={"www-authenticate": challenge}, json={})
         body = json.loads(request.content)
         method, request_id = body.get("method"), body.get("id")
@@ -545,6 +561,8 @@ class FakeDeployment:
                 session,
             )
         session = request.headers.get("mcp-session-id")
+        if session is not None and session not in self.sessions and self.adopt_unknown_sessions:
+            self.sessions.add(session)
         if session not in self.sessions:
             return httpx.Response(
                 404,
@@ -559,6 +577,32 @@ class FakeDeployment:
         if method == "tools/list":
             return result({"tools": tools}, session)
         if method == "tools/call":
+            name, args = body["params"]["name"], body["params"].get("arguments") or {}
+            if name != "list_contexts":
+                if self.mcp_scope and "memory:write" not in token["scope"].split():
+                    challenge = (
+                        f'Bearer error="insufficient_scope", scope="memory:write", '
+                        f'resource_metadata="{prm}"'
+                    )
+                    return httpx.Response(
+                        403,
+                        headers={"www-authenticate": challenge},
+                        json={
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "error": {"code": -32003, "message": "insufficient scope"},
+                        },
+                    )
+                if name == "remember" and not self.writes_succeed:
+                    text = json.dumps({"error": "context not found"})
+                    return result({"content": [{"type": "text", "text": text}], "isError": True})
+                if name == "remember":
+                    memory_id = secrets.token_hex(16)
+                    self.memories[memory_id] = args["context_id"]
+                    text = json.dumps({"memory_id": memory_id, "context_id": args["context_id"]})
+                    return result({"content": [{"type": "text", "text": text}]}, session)
+                self.memories.pop(args.get("memory_id", ""), None)
+                return result({"content": [{"type": "text", "text": "{}"}]}, session)
             text = json.dumps({"contexts": [{"name": "verification-sample"}]})
             return result({"content": [{"type": "text", "text": text}]}, session)
         return result({}, session)
@@ -607,8 +651,14 @@ def test_happy_path_run_passes_with_one_consent_and_redacted_evidence(tmp_path: 
         assert by_id[step_id]["status"] == "pass", by_id[step_id]
     for step_id in ("S1", "M1", "M2", "M3", "M4", "M5", "M6", "M7", "S2", "F1", "F2", "F3", "F4"):
         assert by_id[step_id]["status"] == "pass", by_id[step_id]
-    for step_id in ("S3", "V1", "V2", "V3", "V4", "C1"):
+    for step_id in ("S3", "S4", "V1", "V2", "V3", "V4", "V5", "C1"):
         assert by_id[step_id]["status"] == "pass", by_id[step_id]
+    s4 = by_id["S4"]["evidence"]
+    assert (s4["read_status"], s4["write_status"]) == (200, 403)
+    assert s4["write_challenge_error"] == "insufficient_scope"
+    assert s4["write_challenge_scope"] == "memory:write"
+    assert s4["memory_written"] is False
+    assert by_id["M7"]["evidence"]["request"] == "POST /mcp"
     assert by_id["A1a"]["status"] == "skip"  # sign-in comes first on this server
     assert by_id["X1"]["status"] == "skip"  # extended checks are opt-in
     assert by_id["C2"]["status"] == "info"  # no RFC 7592 management URI
@@ -625,6 +675,43 @@ def test_happy_path_run_passes_with_one_consent_and_redacted_evidence(tmp_path: 
     assert all(
         token["revoked"] and token["refresh_revoked"] for token in deployment.tokens.values()
     )
+
+
+def test_scope_challenge_and_session_checks_fail_without_changing_the_result(
+    tmp_path: Path,
+) -> None:
+    # A server that serves writes to a read-only token over MCP, names
+    # invalid_request in its 401 challenge and adopts unknown session ids.
+    deployment = FakeDeployment(
+        mcp_scope=False, challenge_error="invalid_request", adopt_unknown_sessions=True
+    )
+    status, report, _ = _run(tmp_path, deployment)
+
+    by_id = {step["id"]: step for step in report["steps"]}
+    assert status == 0  # S4, V5 and M7 are not required
+    assert report["summary"]["required_not_passed"] == 0
+    assert by_id["S4"]["status"] == "fail"
+    assert by_id["S4"]["evidence"]["write_status"] == 200
+    assert by_id["S4"]["evidence"]["memory_written"] is False
+    assert by_id["V1"]["status"] == by_id["V4"]["status"] == "pass"
+    assert by_id["V5"]["status"] == "fail"
+    assert by_id["V5"]["evidence"]["challenge_errors"] == {
+        "V1": "invalid_request",
+        "V4": "invalid_request",
+    }
+    assert by_id["M7"]["status"] == "fail" and by_id["M7"]["evidence"]["status"] == 200
+
+
+def test_a_write_that_succeeds_fails_s4_and_is_cleaned_up(tmp_path: Path) -> None:
+    deployment = FakeDeployment(mcp_scope=False, writes_succeed=True)
+    status, report, emitted = _run(tmp_path, deployment)
+
+    s4 = next(step for step in report["steps"] if step["id"] == "S4")
+    assert status == 0
+    assert s4["status"] == "fail"
+    assert s4["evidence"]["memory_written"] is True
+    assert s4["evidence"]["cleanup_status"] == 200
+    assert deployment.memories == {}
 
 
 def test_run_fails_when_a_verifier_is_not_required(tmp_path: Path) -> None:

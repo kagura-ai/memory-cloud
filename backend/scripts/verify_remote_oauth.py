@@ -57,6 +57,16 @@ READ_ONLY_SCOPE = "memory:read"
 REST_SCOPE_PROBE_PATH = "/api/v1/memory/recall"
 SYSTEM_INFO_PATH = "/api/v1/system/info"
 READ_TOOL = "list_contexts"
+# S4's write probe: a schema-valid ``remember`` aimed at a context id that
+# cannot exist, so the call can never store anything whatever the server does.
+WRITE_TOOL = "remember"
+NIL_CONTEXT_ID = "00000000-0000-0000-0000-000000000000"
+WRITE_PROBE_ARGUMENTS = {
+    "context_id": NIL_CONTEXT_ID,
+    "summary": "OAuth verification scope probe; never stored",
+    "content": "Scope probe sent by verify_remote_oauth.py with a read-only token.",
+    "type": "note",
+}
 
 LEGACY_PROTOCOL_VERSION = "2025-03-26"
 MODERN_PROTOCOL_VERSION = "2026-07-28"
@@ -567,6 +577,18 @@ def normalize_base_url(value: str) -> str:
     return f"{parts.scheme}://{parts.netloc}"
 
 
+def tool_result_json(result: dict[str, Any]) -> dict[str, Any]:
+    """The JSON object a tool result's text content carries, else ``{}``."""
+    content = result.get("content")
+    content = content if isinstance(content, list) else []
+    text = "".join(c.get("text", "") for c in content if isinstance(c, dict))
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def count_contexts(text: str) -> int | None:
     """Number of contexts in a ``list_contexts`` result, if it parses."""
     try:
@@ -729,7 +751,7 @@ MCP_FOLLOW_UP_STEPS = (
     ("M4", f"Safe read call ({READ_TOOL})", True),
     ("M5", "Session reuse (ping on the same Mcp-Session-Id)", True),
     ("M6", "Stateless per-request era (MCP 2026-07-28), if supported", False),
-    ("M7", "Unknown Mcp-Session-Id answers 404 with re-initialize guidance", False),
+    ("M7", "Unknown Mcp-Session-Id on POST /mcp answers 404 (session era)", False),
 )
 REFRESH_STEPS = (
     ("S2", "Refresh cannot widen the granted scope", True),
@@ -738,6 +760,7 @@ REFRESH_STEPS = (
     ("F3", "The previous access token after refresh", False),
     ("F4", "MCP initialize with the refreshed token", True),
     ("S3", "REST API enforces scope (a read-only token cannot POST)", False),
+    ("S4", "MCP applies token scope: read-only token reads, a write tool call gets 403", False),
 )
 REVOKE_STEPS = (
     ("V1", "Revoked access token → 401 with the discovery challenge", True),
@@ -792,6 +815,7 @@ class Verifier:
         self.current: TokenPair | None = None
         self.session_id: str | None = None
         self.legacy_tool_count: int | None = None
+        self.narrowed: TokenPair | None = None
         src = checkout_src
         self.instructions_base = (
             read_module_constant(src / "mcp_server" / "transport.py", "SERVER_INSTRUCTIONS_BASE")
@@ -1656,18 +1680,23 @@ class Verifier:
             )
 
         with self.step("M7", "mcp", MCP_FOLLOW_UP_STEPS[5][1], False) as s:
+            # What a session-era client sends after its session expired: the
+            # base endpoint, a server-shaped session id the server never issued,
+            # and an ordinary request without per-request ``_meta``.
+            unknown = self.secret(f"mcp-{secrets.token_hex(8)}", "mcp_session_id")
             resp = self.mcp_post(
-                token,
-                {"jsonrpc": "2.0", "id": 7, "method": "ping"},
-                session_id="verification-unknown-session",
+                token, {"jsonrpc": "2.0", "id": 7, "method": "tools/list"}, session_id=unknown
             )
             error = json_dict(resp).get("error")
             error = error if isinstance(error, dict) else {}
             s.evidence.update(
                 {
+                    "request": f"POST {self.cfg.mcp_path}",
+                    "jsonrpc_method": "tools/list",
                     "status": resp.status_code,
                     "jsonrpc_error_code": error.get("code"),
                     "guidance": error.get("message"),
+                    "session_id_header_returned": "mcp-session-id" in resp.headers,
                 }
             )
             s.check("status 404", resp.status_code == 404)
@@ -1772,6 +1801,7 @@ class Verifier:
             c = self.adopt(resp, "narrowed")
             if c is None:
                 raise StepFailed(f"the narrowing refresh answered {resp.status_code}")
+            self.narrowed = c
             probe = self.post(
                 self.base + REST_SCOPE_PROBE_PATH,
                 json={"query": "oauth verification probe", "k": 1},
@@ -1796,6 +1826,78 @@ class Verifier:
                 f"narrowed to '{c.scope}': REST POST → {probe.status_code} "
                 f"{challenge.get('error')}; MCP initialize → {mcp.status_code}"
             )
+
+        with self.step("S4", "resource-scope", REFRESH_STEPS[6][1], False) as s:
+            if self.narrowed is None:
+                s.skip(f"no token narrowed to {READ_ONLY_SCOPE} (S3)")
+            self.mcp_scope_probe(s, self.narrowed)
+
+    def tool_call(
+        self, token: str, name: str, arguments: dict[str, Any], request_id: int, session: str | None
+    ) -> httpx.Response:
+        """A session-era ``tools/call``."""
+        body = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        }
+        return self.mcp_post(token, body, session_id=session)
+
+    def mcp_scope_probe(self, s: Step, pair: TokenPair) -> None:
+        """S4: a read tool call and a write tool call with a ``memory:read`` token."""
+        opened = self.initialize(pair.access_token, 14)
+        session = self.secret(opened.headers.get("mcp-session-id"), "mcp_session_id")
+        read = self.tool_call(pair.access_token, READ_TOOL, {}, 15, session)
+        read_result = rpc_result(read)
+        write = self.tool_call(pair.access_token, WRITE_TOOL, WRITE_PROBE_ARGUMENTS, 16, session)
+        challenge = parse_www_authenticate(write.headers.get("www-authenticate"))
+        write_result = rpc_result(write)
+        error = json_dict(write).get("error")
+        stored = tool_result_json(write_result)
+        memory_id = stored.get("memory_id")
+        s.evidence.update(
+            {
+                "token_scope": pair.scope,
+                "initialize_status": opened.status_code,
+                "read_tool": READ_TOOL,
+                "read_status": read.status_code,
+                "read_is_error": read_result.get("isError", False),
+                "write_tool": WRITE_TOOL,
+                "write_target": "a context id that does not exist",
+                "write_status": write.status_code,
+                "write_challenge_error": challenge.get("error"),
+                "write_challenge_scope": challenge.get("scope"),
+                "write_jsonrpc_error_code": error.get("code") if isinstance(error, dict) else None,
+                "write_is_error": write_result.get("isError"),
+                "memory_written": memory_id is not None,
+            }
+        )
+        if memory_id is not None:
+            # Should never happen (the probe targets no real context); remove it.
+            cleanup = self.tool_call(
+                pair.access_token,
+                "forget",
+                {"context_id": stored.get("context_id") or NIL_CONTEXT_ID, "memory_id": memory_id},
+                17,
+                session,
+            )
+            s.evidence["cleanup_status"] = cleanup.status_code
+            s.evidence["cleanup_is_error"] = rpc_result(cleanup).get("isError")
+        s.check(
+            "read tool call succeeds",
+            read.status_code == 200
+            and bool(read_result)
+            and read_result.get("isError") is not True,
+        )
+        s.check("write tool call 403", write.status_code == 403)
+        s.check("insufficient_scope challenge", challenge.get("error") == "insufficient_scope")
+        s.check("memory:write named", "memory:write" in (challenge.get("scope") or "").split())
+        s.check("nothing written", memory_id is None)
+        s.summary = (
+            f"{READ_TOOL} → {read.status_code}; {WRITE_TOOL} → {write.status_code} "
+            f"error={challenge.get('error')} scope={challenge.get('scope')}"
+        )
 
     def revocation(self) -> None:
         """V1-V4: revocation, the expired-token challenge, a bogus token."""
@@ -1848,6 +1950,23 @@ class Verifier:
             s.evidence.update(self.challenge_evidence(resp))
             s.check("401 with the discovery challenge", self.is_discovery_challenge(resp))
             s.summary = f"{resp.status_code}, error={s.evidence['challenge_error']}"
+
+        with self.step(
+            "V5", "revoke", "The 401 challenges of V1 and V4 carry error=invalid_token", False
+        ) as s:
+            observed = {
+                step.id: step.evidence.get("challenge_error")
+                for step in self.steps
+                if step.id in ("V1", "V4") and "challenge_scheme" in step.evidence
+            }
+            if not observed:
+                s.skip("neither V1 nor V4 recorded a challenge")
+            s.evidence["challenge_errors"] = observed
+            for step_id, error in observed.items():
+                s.check(f"{step_id} error=invalid_token (RFC 6750 §3.1)", error == "invalid_token")
+            s.summary = ", ".join(
+                f"{step_id}: error={error}" for step_id, error in observed.items()
+            )
 
     # ------------------------------------------------- extended (post-login)
 
