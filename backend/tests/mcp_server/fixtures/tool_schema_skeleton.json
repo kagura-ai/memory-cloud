@@ -239,6 +239,35 @@
         "context_id": {
           "type": "string",
           "format": "uuid"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "content",
+              "details",
+              "context",
+              "links"
+            ]
+          }
+        },
+        "content_offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "details_offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "context_offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 100000
         }
       },
       "additionalProperties": false

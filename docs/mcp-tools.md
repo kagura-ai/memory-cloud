@@ -525,6 +525,45 @@ The embedding is generated asynchronously after `remember` returns, so a new mem
 
 1. `recall()` to find relevant memories. 2. Read the summaries and pick the interesting ones. 3. `reference()` for the full content, structured context, provenance (`source_uri`, `source_type`, `client`) and declared links of each. 4. Present the complete picture.
 
+**Response budget.** A `reference()` response is at most `max_chars` **characters** — not tokens, not bytes: Python string characters (Unicode code points) of the compact JSON text the tool returns, escapes included. The default is 20,000. The light fields always come back whole, so the one exception is a memory whose light fields alone take nearly all of `max_chars`: at their write-side limits they take about 6,000 characters (about 9,000 if the summaries are all quotes or newlines, which escape to two characters), and only control characters (six each when escaped) or a very long tag list push them further. The response then goes over `max_chars`, and a page you ask for still carries at least 500 characters. Claude Code warns when a tool result passes about 10k tokens and caps it at 25k tokens by default; English runs about four characters per token, but Japanese and other CJK text can come close to one token per character, so 20,000 characters stays under the cap in either case. A memory whose full response fits comes back exactly as before, with no extra keys.
+
+| Parameter | Guidance |
+|-----------|----------|
+| `fields` | Heavy fields to return: any of `content`, `details`, `context`, `links` (`links` = `outgoing_links`, `incoming_links` and their `*_has_more` flags). Default: all four — or, when an offset is set and `fields` is omitted, only the paged field. The light fields (`memory_id`, `summary`, `context_summary`, `type`, `scope`, `importance`, `tags`, timestamps, provenance, `supersede_candidate`) always come back and are counted first. `fields=[]` returns only them |
+| `max_chars` | Response budget, 10,000–100,000 characters (default 20,000). Raise it to fetch fewer, larger pages when the reader is not a model with an output limit |
+| `content_offset` | Return `content` from this character — `0`, then each `content_next_offset` |
+| `details_offset` / `context_offset` | Return `details` / `context` as compact JSON **text** (`details_json` / `context_json`) from this character — `0`, then each `*_next_offset`. Join the pages and parse the result |
+
+Pass at most one offset per call. An offset past the end of its field, a negative or non-integer offset, an unknown field, or an offset for a field excluded by `fields` returns `invalid_argument` (the past-the-end case also carries `<field>_total_chars`).
+
+**When something does not fit, it is marked, never cut silently.** `details`, `context` and `links` cannot be sliced, so they are placed first and come back whole when they fit (room for the other fields' markers and for the page you asked for is kept back first); the page you asked for, then `content` from the start, fill what is left. A large `details` that fits therefore comes back whole while `content` continues with `content_next_offset`.
+
+- `content` too long → a slice from the start, with `content_offset`, `content_total_chars`, `content_truncated: true` and `content_next_offset`. If no slice fits — for example next to a `details` page — the `content` key is left out instead, with `content_omitted: true`, `content_total_chars` and `content_next_offset: 0`. Check `<field>_omitted` before reading any heavy field.
+- `details` or `context` too large → the key is left out, and `details_omitted: true`, `details_total_chars` (length of its compact JSON) and `details_next_offset: 0` say so. They are never sliced mid-structure; page them as text instead.
+- `links` too large → left out with `links_omitted: true` and `links_total_chars`. The server caps links at 50 per direction, so in practice `fields=["links"]` with a larger `max_chars` returns them whole; if `links_omitted` persists at `max_chars=100000`, read them with `list_edges`.
+
+Every page carries `<field>_offset`, `<field>_total_chars`, `<field>_truncated` and `<field>_next_offset` (`null` on the last page). `updated_at` comes back on every call: if it changes between pages, the memory was edited — start again from offset 0.
+
+```text
+# 524,288 characters of plain-ASCII content plus details {"raw": <524,288 characters>};
+# the unbounded response was 1,049,291 characters, the bounded one is 19,998.
+reference(memory_id=M, context_id=C)
+  → {…, "content": "<first 19,127 characters>", "content_offset": 0, "content_total_chars": 524288,
+     "content_truncated": true, "content_next_offset": 19127,
+     "details_omitted": true, "details_total_chars": 524298, "details_next_offset": 0, …}
+
+reference(memory_id=M, context_id=C, content_offset=19127)      # only content comes back
+  → {…, "content": "<next slice>", "content_offset": 19127, …, "content_next_offset": 38616}
+  … repeat until content_next_offset is null; the slices joined are the full content.
+
+reference(memory_id=M, context_id=C, details_offset=0)          # only details comes back
+  → {…, "details_json": "{\"raw\":\"xxxx…", "details_offset": 0, "details_total_chars": 524298,
+     "details_truncated": true, "details_next_offset": 19485}
+  … repeat until details_next_offset is null; json.loads("".join(pages)) == details.
+```
+
+Every page is a full `reference()` call: context access and the memory-level permission check run again each time, so a page of a memory you cannot read is refused exactly like the first call (`context_not_found` / `memory_not_found`). Only a call without an offset that selects `content`, `details` or `context` counts as a use of the memory (its access and adoption counts, which feed recall ranking and sleep promotion); continuation pages and `fields=[]` / `fields=["links"]` calls do not, so reading a large memory in many pages counts once.
+
 ### `forget`
 
 Always verify before deleting: show the memory's summary, warn when `importance > 0.8`, and get explicit approval. For bulk deletion: `recall()` to find candidates → review the list with the user → confirm → loop `forget(memory_id)`; query mode (top-k matches of a query) is for cleanup where that review is not needed. A target that was already deleted, has a wrong ID, or belongs to someone else is skipped silently — `deleted_count` is 0 — so check the ID with `recall()`. Deletion is soft; retention is bounded by the deployment's cleanup window (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days), and the memory's graph edges are cleaned up with it.

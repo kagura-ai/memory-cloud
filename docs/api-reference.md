@@ -1425,7 +1425,7 @@ Search memories.
 
 ### 3. reference
 
-Get full memory details.
+Get full memory details. The response is bounded to `max_chars` characters (default 20,000); a larger memory comes back with explicit truncation markers and is read in pages via `content_offset` / `details_offset` / `context_offset` — see [MCP Tools › reference](mcp-tools.md#reference).
 
 ```python
 {
