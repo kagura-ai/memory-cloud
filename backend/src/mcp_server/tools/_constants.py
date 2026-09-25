@@ -67,6 +67,32 @@ def get_tool_timeout(tool_name: str) -> float:
     return TOOL_TIMEOUTS.get(tool_name, DEFAULT_TOOL_TIMEOUT)
 
 
+# Issue #1685: reference() response budget. The unit is CHARACTERS (Python str
+# code points) of the serialized tool result — the compact JSON text the model
+# reads, escapes included — not tokens and not UTF-8 bytes.
+#
+# Claude Code warns when an MCP tool result passes ~10k tokens and caps it at
+# 25k tokens by default. English prose runs about 4 characters per token,
+# but CJK text can approach one token per character, so 40,000 characters of
+# Japanese could reach that cap. 20,000 keeps an English response near 5k
+# tokens and a Japanese one under the cap. Callers may lower the budget, or
+# raise it up to the hard limit (for SDKs and other non-model readers).
+#
+# The light fields always come back whole. At their write-side limits (summary
+# 500, context_summary 2,000, source_uri 2,048, a supersede_candidate summary
+# 500, 20 tags) they take about 6,000 characters, or about 9,000 when every
+# summary character is a quote or newline (escaped to two), so the minimum
+# still leaves room for a page.
+REFERENCE_DEFAULT_MAX_CHARS = 20_000
+REFERENCE_MIN_MAX_CHARS = 10_000
+REFERENCE_MAX_CHARS_LIMIT = 100_000
+# A page the caller asks for carries at least this many serialized characters
+# of its field (or the rest of it), so a continuation makes real progress even
+# when the light fields crowd the budget — only then can a response pass
+# max_chars (control characters escape to six, and tags have no count limit).
+REFERENCE_MIN_PAGE_CHARS = 500
+
+
 # Issue #215, #240: Instructions for AI clients
 # Returned by get_context_info() to help AI clients use memory tools effectively
 KAGURA_MEMORY_INSTRUCTIONS = """# Kagura Memory Cloud - Quick Reference

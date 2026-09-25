@@ -57,7 +57,8 @@ bootstrap service — the `AgentStateService` dual-surface pattern (`tools/state
 
 ## Request contract
 
-MCP tool (`readOnly: True`; strict schema — `additionalProperties: false` is centrally
+MCP tool (destructive, not read-only, since #1683: a `query` runs recall, whose Hebbian
+learning reweights and prunes graph edges — see [Tool annotations](../mcp-tools.md#tool-annotations); strict schema — `additionalProperties: false` is centrally
 stamped, and every read param must be declared per the schema policy test
 `backend/tests/mcp_server/test_tool_schema_policy.py`):
 
