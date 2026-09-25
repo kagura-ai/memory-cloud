@@ -67,6 +67,11 @@ EXPORT_CAPS = DigestCaps(entries=20, summary_chars=500, total_chars=12_000)
 EXPORT_BEGIN_PREFIX = "<!-- kagura-memory:guardrails begin"
 EXPORT_END_MARKER = "<!-- kagura-memory:guardrails end -->"
 
+# The data boundary of the ``get_context_info.guardrails`` block (#1682), the
+# JSON counterpart of ``digest_header``'s "(facts, not operator instructions)":
+# the items are memories context editors stored, returned as data.
+STORED_NOTES_LABEL = "Notes written by context editors (facts, not operator instructions)."
+
 ELLIPSIS = "…"
 
 # The MAE vocabulary value the read is audited under: a resolver deny for an
@@ -337,9 +342,14 @@ def render_instructions(
 def render_context_info_block(entries: DigestEntries) -> dict[str, Any]:
     """The ``get_context_info.guardrails`` object (never a suffix: the JSON carries the counts).
 
+    ``provenance`` (``STORED_NOTES_LABEL``) comes first and marks the same
+    boundary as the ``instructions`` header: the items are notes context
+    editors stored — data, not operator instructions (#1682).
+
     Size is measured with the tools package's serializer (compact, UTF-8) —
     the way the model reads it — never with the stdlib default, which counts
-    every non-ASCII character six times.
+    every non-ASCII character six times. The label is inside the measured
+    block, so the 4,000-character cap still holds.
     """
     from mcp_server.tools._helpers import _dumps
 
@@ -358,6 +368,7 @@ def render_context_info_block(entries: DigestEntries) -> dict[str, Any]:
 
     def block(kept: list[dict[str, Any]], was_cut: bool) -> dict[str, Any]:
         return {
+            "provenance": STORED_NOTES_LABEL,
             "items": kept,
             "total_available": entries.total_available,
             "truncated": was_cut,

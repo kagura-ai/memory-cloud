@@ -233,10 +233,12 @@ async def _guardrails_field(db: Any, user_id: str, context: Any) -> dict[str, An
     endpoint URL carries ``?guardrails=off`` (a hook client that already gets
     guardrails at the call); it is **``null``** when no context resolved or the
     read failed (``get_context_info_guardrails_failed`` warning); otherwise it
-    is the object ``{items, total_available, truncated, tool_triggered_version}``
-    — the context's trusted-only, binding-filtered tool-triggered set, 10
-    entries × 300 characters, ≤ 4,000 characters of compact JSON. The block is
-    per call (the ``context_id`` argument), never per URL.
+    is the object ``{provenance, items, total_available, truncated,
+    tool_triggered_version}`` — the context's trusted-only, binding-filtered
+    tool-triggered set, 10 entries × 300 characters, ≤ 4,000 characters of
+    compact JSON; ``provenance`` labels the items as notes context editors
+    stored, not operator instructions (#1682). The block is per call (the
+    ``context_id`` argument), never per URL.
 
     Reuses the resolved ``Context`` (no second permission read) and one
     indexed SQL read; never the embedding client or the vector store. Fails

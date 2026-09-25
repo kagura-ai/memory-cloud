@@ -2,13 +2,17 @@
 
 ChatGPT and Codex read the first 512 characters of ``instructions`` as the
 part that matters, and the whole string is paid for at every connect / refresh
-(ChatGPT) or handshake (Codex). The base text is pinned at 240 characters so
+(ChatGPT) or handshake (Codex). The base text is capped at 240 characters so
 that, with the 150-character digest header, the first 512 characters always
 hold the base, the header and the whole first guardrail entry; the full string
 never exceeds 1,200 characters with the worst-case fixture.
 
 The tool definitions are NOT touched by #1621: ``test_tool_definition_budget``
 and ``test_tool_profiles`` pass without regenerating the skeleton fixture.
+
+#1682 reworded the base text (233 characters) so it describes what
+get_context_info returns instead of sending the model there for "rules and
+guardrails"; ``test_directory_instruction_boundary`` guards that wording.
 """
 
 from __future__ import annotations
@@ -50,8 +54,9 @@ def _worst_case(context_id: UUID) -> DigestEntries:
 
 def test_base_text_is_at_most_240_characters_and_points_at_get_context_info():
     assert len(SERVER_INSTRUCTIONS_BASE) <= BASE_BUDGET
-    assert "get_context_info(context_id)" in SERVER_INSTRUCTIONS_BASE
+    assert "get_context_info(context_id) describes it" in SERVER_INSTRUCTIONS_BASE
     assert "list_contexts" in SERVER_INSTRUCTIONS_BASE
+    assert "rules and guardrails" not in SERVER_INSTRUCTIONS_BASE  # #1682
     assert SERVER_INSTRUCTIONS == SERVER_INSTRUCTIONS_BASE  # legacy import name
 
 

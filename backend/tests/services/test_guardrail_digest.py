@@ -23,6 +23,7 @@ from services.guardrail_digest import (
     EXPORT_CAPS,
     EXPORT_END_MARKER,
     INSTRUCTIONS_CAPS,
+    STORED_NOTES_LABEL,
     DigestEntries,
     DigestEntry,
     cut_summary,
@@ -337,7 +338,16 @@ def test_instructions_keep_repo_order_and_never_resort():
 def test_context_info_block_shape_and_field_names():
     entries = _entries("one", "two")
     block = render_context_info_block(entries)
-    assert set(block) == {"items", "total_available", "truncated", "tool_triggered_version"}
+    assert list(block) == [
+        "provenance",
+        "items",
+        "total_available",
+        "truncated",
+        "tool_triggered_version",
+    ]
+    # #1682: the JSON counterpart of the instructions header's boundary.
+    assert block["provenance"] == STORED_NOTES_LABEL
+    assert "not operator instructions" in STORED_NOTES_LABEL
     assert "version" not in block
     assert block["total_available"] == 2 and block["truncated"] is False
     assert block["tool_triggered_version"] == "0123456789abcdef"
@@ -363,6 +373,7 @@ def test_context_info_block_empty_set():
         )
     )
     assert block == {
+        "provenance": STORED_NOTES_LABEL,
         "items": [],
         "total_available": 0,
         "truncated": False,
@@ -383,11 +394,13 @@ def test_context_info_block_caps_ten_items_and_300_chars():
 def test_context_info_block_size_is_measured_with_dumps_not_json_dumps():
     """10 × 300 all-Japanese summaries: ``json.dumps`` would count each
     character as 6 (``\\uXXXX``); ``_dumps`` counts it once. The block stays
-    <= 4,000 by the compact UTF-8 measure and drops at most one item."""
+    <= 4,000 by the compact UTF-8 measure and drops at most two items (one
+    before #1682; the ``provenance`` label, 83 characters of JSON, costs the
+    second at this worst case). The wrong ruler would keep only one item."""
     entries = _entries(*["漢" * 300 for _ in range(10)])
     block = render_context_info_block(entries)
     assert len(_dumps(block)) <= CONTEXT_INFO_CAPS.total_chars
-    assert len(block["items"]) >= 9
+    assert len(block["items"]) >= 8
     assert len(json.dumps(block)) > CONTEXT_INFO_CAPS.total_chars  # the wrong ruler
     if len(block["items"]) < 10:
         assert block["truncated"] is True
