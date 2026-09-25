@@ -4,6 +4,42 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.79.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.79.0) — 2026-09-25
+
+Remote MCP boundaries and OAuth. Tool descriptions and server instructions describe what a context's stored text is instead of telling the model to follow it; the authorization server applies the scope, PKCE and resource rules its metadata advertises; `/mcp` checks an OAuth token's scope and audience; and a new script verifies the whole OAuth + MCP flow against a deployment.
+
+### Added
+- **Remote OAuth verification script** ([#1686](https://github.com/kagura-ai/memory-cloud/issues/1686)): `backend/scripts/verify_remote_oauth.py` checks discovery, DCR, S256 consent, token-endpoint negatives, refresh and revocation, `initialize` / `tools/list` / a read call in both MCP eras, and scope, audience and session handling against `--base-url`. The operator only performs the browser consent. Evidence is written as JSON and Markdown, with every token, code, verifier and session id recorded by presence and length only. See [Remote OAuth Verification](docs/ops/remote-oauth-verification.md).
+- **Directory scope and data boundaries** ([#1682](https://github.com/kagura-ai/memory-cloud/issues/1682)): [docs/remote-mcp-directory-scope.md](docs/remote-mcp-directory-scope.md) describes the Remote MCP submission scope, where data comes from and goes, how stored notes are delivered, and how the Software Directory Policy clauses map onto the code. One clause (§1.F) is marked unresolved.
+- **OAuth scopes on MCP tool calls** ([#1686](https://github.com/kagura-ai/memory-cloud/issues/1686)): with an OAuth access token, read-only tools (plus `recall` and `get_agent_bootstrap`) need `memory:read` and every other tool needs `memory:write`. A missing scope answers 403 with an `insufficient_scope` challenge. A token that names no `memory:*` scope uses its client's registered scope. API keys, agent-bound keys and session cookies are unchanged. See [OAuth scopes](docs/mcp-tools.md#oauth-scopes).
+
+### Changed
+- **Stored context text is described as data** ([#1682](https://github.com/kagura-ai/memory-cloud/issues/1682)): the `get_context_info`, `load_pinned`, `load_guardrails`, `get_agent_bootstrap` and `recall` descriptions, the static server instructions and the quick reference describe `usage_guide`, pinned memories and guardrails as notes written by context members, not instructions. `get_context_info.guardrails` gains a `provenance` label. `get_agent_bootstrap`'s `instructions` is now the static quick reference only; read `context.usage_guide` for the context's guide.
+- **Authorization rules** ([#1686](https://github.com/kagura-ai/memory-cloud/issues/1686)):
+  - PKCE accepts `S256` only, and a public client must send a `code_challenge`.
+  - The granted scope is requested ∩ registered ∩ advertised, falling back to the client's registered scope when a request names no memory scope. `/register` stores the scopes the server defines, or the default scope when they include no memory scope.
+  - A `resource` must name this server's MCP resource (any `/mcp` form) and is bound to the token as its audience.
+  - A request that fails these rules gets an error page before consent.
+  - DCR checks every `redirect_uris` entry; `claude.com` and `platform.openai.com` are accepted Claude and ChatGPT hosts.
+  - An authorization code, a refresh token and a device code each yield one token, also under concurrent requests.
+  - A repeated token-request parameter is refused.
+  - See [Authorization Code Grant (MCP clients)](docs/api-reference.md#authorization-code-grant-mcp-clients).
+- **`/mcp` authentication and sessions** ([#1686](https://github.com/kagura-ai/memory-cloud/issues/1686)): a token whose audience is not this server's MCP resource, or an invalid, expired or revoked token, answers 401 with `error="invalid_token"`. An unknown `Mcp-Session-Id` is continued for the caller; an id held by another user or workspace answers 404; `DELETE /mcp` ends the caller's session (204). See [Authentication and sessions on /mcp](docs/api-reference.md#authentication-and-sessions-on-mcp).
+
+### Fixed
+- **Authlib 1.8** ([#1686](https://github.com/kagura-ai/memory-cloud/issues/1686)): the OAuth server works with Authlib 1.8.0, which fresh installs now resolve.
+
+### Migration
+- **OAuth clients:** use PKCE `S256` (`plain` is refused), and send a `code_challenge` from a public client. Send `resource` as this server's MCP URL (any `/mcp` form), or leave it out. Send each token-request parameter once. At registration, every `redirect_uris` entry must be one the server accepts on its own.
+- **MCP clients with OAuth tokens:** a token narrowed to `memory:read` gets `403 insufficient_scope` on write tools. Re-authorize requesting the `scope` the challenge names (it includes `memory:write`). Tokens issued through the default registration carry both scopes.
+- **`get_agent_bootstrap`:** read `context.usage_guide` for the context's guide; `instructions` no longer starts with it.
+- **Legacy SSE endpoints:** `GET /mcp/sse` and `POST /mcp/messages/…` answer `410` regardless of the session id; connect with Streamable HTTP on `/mcp`.
+
+### Notes
+- No database migration, no new environment variables.
+- **Device flow:** a device code no longer resolves on `/device` after its token has been issued.
+- **Plugins:** the Claude Code and Codex plugin manifests are bumped in lockstep.
+
 ## [v0.78.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.78.0) — 2026-09-25
 
 MCP tool quality. Every tool now declares a title and the standard MCP annotations; a tool failure returns a stable error code, the next step and a correlation id instead of exception text; `reference` responses have a size budget and a way to page the rest; and `/device/authorize` accepts the form-encoded body RFC 8628 specifies.
