@@ -8,20 +8,21 @@ Provides unified authentication for MCP over HTTP/SSE:
 Authentication is always required. No anonymous access is allowed.
 
 OAuth2 access tokens (#1686): a token bound to an RFC 8707 resource must be
-bound to this server's MCP resource, and its granted scopes are recorded per
-request for the ``tools/call`` scope check (``mcp_server.tools._scopes``).
+bound to this server's MCP resource (``auth.mcp_resource.is_same_mcp_resource``),
+and its granted scopes are recorded per request for the ``tools/call`` scope
+check (``mcp_server.tools._scopes``).
 
 Adapted from v4.4.0 mcp_auth.py for memory-cloud architecture.
 """
 
 import logging
-import os
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from auth.mcp_resource import is_same_mcp_resource
 from utils.exceptions import AuthenticationError, InvalidTokenError
 
 if TYPE_CHECKING:
@@ -59,17 +60,6 @@ _mcp_oauth_scopes: ContextVar[frozenset[str] | None] = ContextVar("mcp_oauth_sco
 def get_mcp_oauth_scopes() -> frozenset[str] | None:
     """The current request's OAuth scopes, or ``None`` for a non-OAuth credential."""
     return _mcp_oauth_scopes.get()
-
-
-def mcp_resource_url() -> str:
-    """This server's MCP resource: what ``/.well-known/oauth-protected-resource`` publishes."""
-    base_url = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
-    return base_url + os.getenv("MCP_BASE_PATH", "/mcp")
-
-
-def is_mcp_resource(resource: str) -> bool:
-    """Whether an RFC 8707 ``resource`` names this server's MCP resource (``/mcp`` == ``/mcp/``)."""
-    return resource.rstrip("/") == mcp_resource_url().rstrip("/")
 
 
 _SCOPE_SEPARATORS = re.compile(r"[\s,]+")
@@ -206,9 +196,10 @@ async def authenticate_mcp_request(
     # Try OAuth2 token verification (Issue #33)
     grant = await _verify_oauth2_token(token)
     if grant:
-        # #1686: RFC 8707 audience. A token issued without ``resource`` carries
-        # no audience and is accepted.
-        if grant.resource and not is_mcp_resource(grant.resource):
+        # #1686: RFC 8707 audience — any form of this server's MCP resource
+        # (``/mcp``, ``/mcp/w/<id>``, default port, host case; query ignored).
+        # A token issued without ``resource`` carries no audience and is accepted.
+        if grant.resource and not is_same_mcp_resource(grant.resource):
             logger.warning(
                 f"MCP auth failed: method=oauth2, audience {grant.resource[:200]!r} "
                 f"is not this server's MCP resource, token={token[:8]}..."

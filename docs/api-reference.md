@@ -1490,7 +1490,7 @@ Kagura Memory Cloud provides 64 MCP tools for AI assistants across 13 categories
 | Malformed `Authorization` header | `401` | `Bearer realm="…", error="invalid_request", error_description="…", resource_metadata="…"` |
 | OAuth token without the scope a `tools/call` needs | `403` | `Bearer realm="…", error="insufficient_scope", error_description="…", scope="<granted scopes plus the required one>", resource_metadata="…"` |
 
-- **Audience (RFC 8707).** An OAuth access token bound to a resource must be bound to the `resource` that `/.well-known/oauth-protected-resource` publishes, `<origin>/mcp` (a trailing slash makes no difference), including on `/mcp/w/{workspace_id}`. A token issued without `resource` is accepted.
+- **Audience (RFC 8707).** An OAuth access token bound to a resource must be bound to this server's MCP resource. Every form the [resource rule](#authorization-code-grant-mcp-clients) accepts qualifies: `<origin>/mcp`, `<origin>/mcp/` and paths beneath it such as `/mcp/w/{workspace_id}`, the default port given or left out, the host in any case, any query. The rule applies on `/mcp/w/{workspace_id}` too. A token issued without `resource` is accepted.
 - **Scope.** `memory:read` or `memory:write` per tool, checked on `tools/call` only; see [MCP Tools › OAuth scopes](mcp-tools.md#oauth-scopes). API keys, agent-bound keys and session cookies are not scope-checked.
 - **Sessions (session-based Streamable HTTP)** on `/mcp`, `/mcp/` and `/mcp/w/{workspace_id}`:
   - `POST` / `GET` without `Mcp-Session-Id` opens a session under an id the server chooses (returned in `Mcp-Session-Id`).

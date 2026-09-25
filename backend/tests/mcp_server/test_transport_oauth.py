@@ -1,8 +1,9 @@
 """OAuth access tokens on ``/mcp``: audience, challenges, scope and sessions (#1686).
 
 * Audience (RFC 8707): a token bound to a resource must be bound to this
-  server's MCP resource — what ``/.well-known/oauth-protected-resource``
-  publishes, ``/mcp`` and ``/mcp/`` alike. A token without one is accepted.
+  server's MCP resource — every form ``auth.mcp_resource.is_same_mcp_resource``
+  accepts (``/mcp``, ``/mcp/``, ``/mcp/w/<id>``, default port, host case, any
+  query). A token without one is accepted.
 * 401 challenges (RFC 6750 §3.1): ``error="invalid_token"`` for an invalid,
   expired, revoked or other-audience token; no error code without credentials;
   ``resource_metadata`` on every one.
@@ -33,13 +34,13 @@ import pytest
 import mcp_server.auth as mcp_auth
 import mcp_server.tools as tools_mod
 import mcp_server.transport as transport
+from auth.mcp_resource import mcp_resource_identifier
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from mcp_server.auth import (
     MissingCredentialsError,
     OAuthGrant,
     authenticate_mcp_request,
     get_mcp_oauth_scopes,
-    mcp_resource_url,
 )
 from mcp_server.transport import mcp_asgi_app
 from utils.exceptions import InvalidTokenError
@@ -203,11 +204,23 @@ async def test_the_mcp_resource_is_what_the_well_known_document_publishes():
     from api.routes.well_known import oauth_protected_resource
 
     published = (await oauth_protected_resource())["resource"]
-    assert mcp_resource_url() == published == f"{ORIGIN}/mcp"
+    assert mcp_resource_identifier() == published == f"{ORIGIN}/mcp"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("resource", [None, "", f"{ORIGIN}/mcp", f"{ORIGIN}/mcp/"])
+@pytest.mark.parametrize(
+    "resource",
+    [
+        None,
+        "",
+        f"{ORIGIN}/mcp",
+        f"{ORIGIN}/mcp/",
+        f"{ORIGIN}/mcp/w/0b7f2c1e-4d3a-4e5f-9a8b-1c2d3e4f5a6b",
+        f"{ORIGIN}/mcp?profile=core",
+        "https://memory.example.com:443/mcp",
+        "https://Memory.Example.COM/mcp",
+    ],
+)
 async def test_a_token_for_this_resource_or_without_one_is_accepted(monkeypatch, resource):
     grant = OAuthGrant("user-1", "memory:read", resource)
     monkeypatch.setattr(mcp_auth, "_verify_api_key", _none)
@@ -223,9 +236,11 @@ async def test_a_token_for_this_resource_or_without_one_is_accepted(monkeypatch,
     [
         "https://other.example.com/mcp",
         f"{ORIGIN}/api/v1",
-        f"{ORIGIN}/mcp/w/0b7f",
         f"{ORIGIN}/mcpx",
+        f"{ORIGIN}/mcp/../api",
         "http://memory.example.com/mcp",
+        "https://memory.example.com:8443/mcp",
+        "https://user@memory.example.com/mcp",
     ],
 )
 async def test_a_token_for_another_resource_is_an_invalid_token(monkeypatch, resource):
