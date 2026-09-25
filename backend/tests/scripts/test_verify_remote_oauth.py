@@ -242,7 +242,14 @@ def test_normalize_base_url_accepts(value: str, expected: str) -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["http://memory.example.test", "https://memory.example.test/mcp", "ftp://h.test", "h.test"],
+    [
+        "http://memory.example.test",
+        "https://memory.example.test/mcp",
+        "ftp://h.test",
+        "h.test",
+        "https://user:secret-pass@memory.example.test",
+        "https://user@memory.example.test",
+    ],
 )
 def test_normalize_base_url_rejects(value: str) -> None:
     with pytest.raises(ValueError):
@@ -321,6 +328,7 @@ class FakeDeployment:
         challenge_error: str = "invalid_token",
         adopt_unknown_sessions: bool = False,
         writes_succeed: bool = False,
+        legacy_tools: Any = None,
     ) -> None:
         self.accept_missing_verifier = accept_missing_verifier
         self.rfc7592 = rfc7592
@@ -328,6 +336,7 @@ class FakeDeployment:
         self.challenge_error = challenge_error
         self.adopt_unknown_sessions = adopt_unknown_sessions
         self.writes_succeed = writes_succeed  # remember stores even into an unknown context
+        self.legacy_tools = legacy_tools  # replaces the session-era tools/list value if set
         self.memories: dict[str, str] = {}  # memory_id -> context_id
         self.clients: dict[str, dict[str, Any]] = {}
         self.management: dict[str, str] = {}  # client_id -> registration access token
@@ -575,7 +584,8 @@ class FakeDeployment:
         if request_id is None:
             return httpx.Response(202)
         if method == "tools/list":
-            return result({"tools": tools}, session)
+            listed = tools if self.legacy_tools is None else self.legacy_tools
+            return result({"tools": listed}, session)
         if method == "tools/call":
             name, args = body["params"]["name"], body["params"].get("arguments") or {}
             if name != "list_contexts":
@@ -677,9 +687,7 @@ def test_happy_path_run_passes_with_one_consent_and_redacted_evidence(tmp_path: 
     )
 
 
-def test_scope_challenge_and_session_checks_fail_without_changing_the_result(
-    tmp_path: Path,
-) -> None:
+def test_scope_challenge_and_session_checks_fail_the_run(tmp_path: Path) -> None:
     # A server that serves writes to a read-only token over MCP, names
     # invalid_request in its 401 challenge and adopts unknown session ids.
     deployment = FakeDeployment(
@@ -688,8 +696,8 @@ def test_scope_challenge_and_session_checks_fail_without_changing_the_result(
     status, report, _ = _run(tmp_path, deployment)
 
     by_id = {step["id"]: step for step in report["steps"]}
-    assert status == 0  # S4, V5 and M7 are not required
-    assert report["summary"]["required_not_passed"] == 0
+    assert status == 1  # S4, V5 and M7 are required
+    assert report["summary"]["required_not_passed_ids"] == ["M7", "S4", "V5"]
     assert by_id["S4"]["status"] == "fail"
     assert by_id["S4"]["evidence"]["write_status"] == 200
     assert by_id["S4"]["evidence"]["memory_written"] is False
@@ -707,7 +715,7 @@ def test_a_write_that_succeeds_fails_s4_and_is_cleaned_up(tmp_path: Path) -> Non
     status, report, emitted = _run(tmp_path, deployment)
 
     s4 = next(step for step in report["steps"] if step["id"] == "S4")
-    assert status == 0
+    assert status == 1
     assert s4["status"] == "fail"
     assert s4["evidence"]["memory_written"] is True
     assert s4["evidence"]["cleanup_status"] == 200
@@ -787,6 +795,48 @@ def test_busy_callback_port_fails_r1_and_still_writes_evidence(tmp_path: Path) -
     assert status == 1
     r1 = next(step for step in report["steps"] if step["id"] == "R1")
     assert r1["status"] == "fail" and "cannot listen" in r1["note"]
+
+
+def test_tool_evidence_counts_malformed_entries() -> None:
+    evidence = vro.tool_evidence([None, "text", {"name": "ok", "title": "Ok", "annotations": {}}])
+    assert evidence["tool_count"] == 3
+    assert evidence["malformed_entries"] == 2
+    assert evidence["tools_missing_hints"] == ["ok"]
+
+
+@pytest.mark.parametrize(
+    "listed", [[None], {"not": "a list"}, "tools"], ids=["null-entry", "object", "string"]
+)
+def test_malformed_tools_list_fails_m3(tmp_path: Path, listed: Any) -> None:
+    status, report, _ = _run(tmp_path, FakeDeployment(legacy_tools=listed))
+
+    m3 = next(step for step in report["steps"] if step["id"] == "M3")
+    assert status == 1
+    assert m3["status"] == "fail"
+    if isinstance(listed, list):
+        assert m3["evidence"]["malformed_entries"] == 1
+    else:
+        assert m3["evidence"]["tools_is_list"] is False
+
+
+def test_base_url_with_credentials_is_refused_before_any_request() -> None:
+    requests: list[httpx.Request] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    err = io.StringIO()
+    status = vro.main(
+        ["--base-url", "https://user:secret-pass@memory.example.test"],
+        transport=httpx.MockTransport(transport),
+        events=vro.EventSource(),
+        stderr=err,
+    )
+    assert status == 2
+    assert "credentials" in err.getvalue()
+    assert "secret-pass" not in err.getvalue()
+    assert requests == []
 
 
 def test_http_base_url_is_refused_for_a_remote_host() -> None:

@@ -566,10 +566,14 @@ def is_loopback_host(host: str) -> bool:
 
 
 def normalize_base_url(value: str) -> str:
-    """Validate ``--base-url``: http(s) origin only; plain http only on loopback."""
+    """Validate ``--base-url``: http(s) origin only, no credentials; http only on loopback."""
     parts = urlsplit(value.strip())
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise ValueError("--base-url must be an absolute http(s) URL")
+    # The origin ends up in requests and logs: refuse ``user:password@`` outright
+    # (the message never echoes it).
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("--base-url must not carry credentials (user:password@host)")
     if parts.path not in ("", "/") or parts.query or parts.fragment:
         raise ValueError("--base-url must not carry a path, query or fragment")
     if parts.scheme == "http" and not is_loopback_host(parts.hostname):
@@ -751,7 +755,7 @@ MCP_FOLLOW_UP_STEPS = (
     ("M4", f"Safe read call ({READ_TOOL})", True),
     ("M5", "Session reuse (ping on the same Mcp-Session-Id)", True),
     ("M6", "Stateless per-request era (MCP 2026-07-28), if supported", False),
-    ("M7", "Unknown Mcp-Session-Id on POST /mcp answers 404 (session era)", False),
+    ("M7", "Unknown Mcp-Session-Id on POST /mcp answers 404 (session era)", True),
 )
 REFRESH_STEPS = (
     ("S2", "Refresh cannot widen the granted scope", True),
@@ -760,7 +764,7 @@ REFRESH_STEPS = (
     ("F3", "The previous access token after refresh", False),
     ("F4", "MCP initialize with the refreshed token", True),
     ("S3", "REST API enforces scope (a read-only token cannot POST)", False),
-    ("S4", "MCP applies token scope: read-only token reads, a write tool call gets 403", False),
+    ("S4", "MCP applies token scope: read-only token reads, a write tool call gets 403", True),
 )
 REVOKE_STEPS = (
     ("V1", "Revoked access token → 401 with the discovery challenge", True),
@@ -1605,12 +1609,20 @@ class Verifier:
 
         with self.step("M3", "mcp", MCP_FOLLOW_UP_STEPS[1][1], True) as s:
             resp = self.rpc(token, "tools/list", 2)
-            tools = rpc_result(resp).get("tools")
-            tools = tools if isinstance(tools, list) else []
+            listed = rpc_result(resp).get("tools")
+            tools = listed if isinstance(listed, list) else []
             self.legacy_tool_count = len(tools)
-            s.evidence.update({"status": resp.status_code, **tool_evidence(tools)})
+            s.evidence.update(
+                {
+                    "status": resp.status_code,
+                    "tools_is_list": isinstance(listed, list),
+                    **tool_evidence(tools),
+                }
+            )
             s.check("status 200", resp.status_code == 200)
+            s.check("tools is a list", isinstance(listed, list))
             s.check("tools listed", bool(tools))
+            s.check("every entry is an object", s.evidence["malformed_entries"] == 0)
             s.check("every tool has a title", not s.evidence["tools_missing_title"])
             s.check("every tool has the four hints", not s.evidence["tools_missing_hints"])
             s.summary = (
@@ -1679,7 +1691,7 @@ class Verifier:
                 f"tools/list {listed.status_code} with {len(tools)} tools"
             )
 
-        with self.step("M7", "mcp", MCP_FOLLOW_UP_STEPS[5][1], False) as s:
+        with self.step("M7", "mcp", MCP_FOLLOW_UP_STEPS[5][1], True) as s:
             # What a session-era client sends after its session expired: the
             # base endpoint, a server-shaped session id the server never issued,
             # and an ordinary request without per-request ``_meta``.
@@ -1827,7 +1839,7 @@ class Verifier:
                 f"{challenge.get('error')}; MCP initialize → {mcp.status_code}"
             )
 
-        with self.step("S4", "resource-scope", REFRESH_STEPS[6][1], False) as s:
+        with self.step("S4", "resource-scope", REFRESH_STEPS[6][1], True) as s:
             if self.narrowed is None:
                 s.skip(f"no token narrowed to {READ_ONLY_SCOPE} (S3)")
             self.mcp_scope_probe(s, self.narrowed)
@@ -1952,7 +1964,7 @@ class Verifier:
             s.summary = f"{resp.status_code}, error={s.evidence['challenge_error']}"
 
         with self.step(
-            "V5", "revoke", "The 401 challenges of V1 and V4 carry error=invalid_token", False
+            "V5", "revoke", "The 401 challenges of V1 and V4 carry error=invalid_token", True
         ) as s:
             observed = {
                 step.id: step.evidence.get("challenge_error")
@@ -2180,13 +2192,18 @@ class Verifier:
 
 
 def tool_evidence(tools: list[Any]) -> dict[str, Any]:
-    """Title / annotation coverage and hint counts of a ``tools/list`` result."""
+    """Title / annotation coverage and hint counts of a ``tools/list`` result.
+
+    ``malformed_entries`` counts entries that are not JSON objects.
+    """
     missing_title: list[str] = []
     missing_hints: list[str] = []
     counts = dict.fromkeys(("readOnlyHint", "destructiveHint", "openWorldHint"), 0)
     max_len = 0
+    malformed = 0
     for tool in tools:
         if not isinstance(tool, dict):
+            malformed += 1
             continue
         name = str(tool.get("name", ""))
         max_len = max(max_len, len(name))
@@ -2200,6 +2217,7 @@ def tool_evidence(tools: list[Any]) -> dict[str, Any]:
             counts[hint] += annotations.get(hint) is True
     return {
         "tool_count": len(tools),
+        "malformed_entries": malformed,
         "tools_missing_title": missing_title[:20],
         "tools_missing_hints": missing_hints[:20],
         "read_only": counts["readOnlyHint"],
