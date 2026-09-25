@@ -37,11 +37,16 @@ from auth.oauth2_server import (  # noqa: E402
     OAuth2AuthorizationServer,
     S256CodeChallenge,
     check_code_challenge,
-    granted_scope,
     requested_resource,
     settle_audience,
     validate_authorization_parameters,
 )
+from auth.oauth_scope import (  # noqa: E402
+    client_registered_scope,
+    granted_scope,
+    registration_scope,
+)
+from models.auth import OAuth2Client  # noqa: E402
 
 MCP = "https://memory.example.test/mcp"
 WORKSPACE_ID = "3f2b8c1e-5d6a-4b7c-9e0f-1a2b3c4d5e6f"
@@ -65,8 +70,11 @@ def _multi_payload(**params: list[str]) -> SimpleNamespace:
     )
 
 
-def _client(auth_method: str = "none", scope: str = DCR_DEFAULT_SCOPE) -> SimpleNamespace:
-    return SimpleNamespace(token_endpoint_auth_method=auth_method, scope=scope)
+def _client(
+    auth_method: str = "none", scope: str = DCR_DEFAULT_SCOPE, owner_id: str | None = None
+) -> SimpleNamespace:
+    """A client stand-in; ``owner_id=None`` is a DCR registration."""
+    return SimpleNamespace(token_endpoint_auth_method=auth_method, scope=scope, owner_id=owner_id)
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +121,99 @@ class TestGrantedScope:
         assert granted_scope(requested, registered) == granted
 
 
+class TestRegistrationScope:
+    """Scope ``/register`` stores (``registration_scope``)."""
+
+    @pytest.mark.parametrize(
+        ("requested", "stored"),
+        [
+            (None, DCR_DEFAULT_SCOPE),
+            ("", DCR_DEFAULT_SCOPE),
+            ("memory:read memory:write", "memory:read memory:write"),
+            ("memory:read claudeai", "memory:read"),
+            ("memory:admin memory:read", "memory:admin memory:read"),
+            # No memory scope this server defines: the default scope.
+            ("claudeai", DCR_DEFAULT_SCOPE),
+            ("openid offline_access", DCR_DEFAULT_SCOPE),
+            ("openid profile", DCR_DEFAULT_SCOPE),
+            ("offline_access openid", DCR_DEFAULT_SCOPE),
+        ],
+    )
+    def test_registration_scope(self, requested: str | None, stored: str) -> None:
+        assert registration_scope(requested) == stored
+
+
+class TestClientRegisteredScope:
+    """The registered scope the rule starts from (``client_registered_scope``)."""
+
+    @pytest.mark.parametrize("stored", ["claudeai", "openid offline_access", "openid profile", ""])
+    def test_dcr_client_without_memory_scope_gets_the_default(self, stored: str) -> None:
+        assert client_registered_scope(_client(scope=stored)) == DCR_DEFAULT_SCOPE
+
+    def test_dcr_client_with_memory_scope_keeps_it(self) -> None:
+        assert client_registered_scope(_client(scope="memory:read claudeai")) == (
+            "memory:read claudeai"
+        )
+
+    def test_admin_managed_client_keeps_its_scope(self) -> None:
+        client = _client(scope="openid offline_access", owner_id="admin-user")
+        assert client_registered_scope(client) == "openid offline_access"
+        assert granted_scope("openid", client_registered_scope(client)) == ""
+
+    def test_dcr_client_registered_with_claudeai_is_granted_the_default(self) -> None:
+        assert granted_scope("claudeai", client_registered_scope(_client(scope="claudeai"))) == (
+            DCR_DEFAULT_SCOPE
+        )
+
+
+class TestModelGetAllowedScope:
+    """``OAuth2Client.get_allowed_scope``, which Authlib calls while it validates
+    an authorization request, grants what the endpoints' scope rule grants."""
+
+    @staticmethod
+    def _model(scope: str, owner_id: str | None) -> OAuth2Client:
+        return OAuth2Client(
+            client_id="oauth_scope_rule",
+            client_secret_hash="",
+            client_name="Scope Rule Client",
+            redirect_uris=["http://localhost:8080/callback"],
+            grant_types=["authorization_code"],
+            response_types=["code"],
+            scope=scope,
+            token_endpoint_auth_method="none",
+            owner_id=owner_id,
+        )
+
+    @pytest.mark.parametrize(
+        ("scope", "owner_id"),
+        [
+            (DCR_DEFAULT_SCOPE, None),
+            ("claudeai", None),
+            ("memory:read memory:admin", "admin-user"),
+            ("openid offline_access", "admin-user"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "requested",
+        [None, "", "memory:read", "memory:admin", "claudeai", "openid offline_access", "x y"],
+    )
+    def test_matches_the_scope_rule(
+        self, scope: str, owner_id: str | None, requested: str | None
+    ) -> None:
+        client = self._model(scope, owner_id)
+        expected = granted_scope(requested, client_registered_scope(client)) or None
+        assert client.get_allowed_scope(requested) == expected
+
+    def test_nothing_grantable_is_none(self) -> None:
+        # Authlib answers invalid_scope for None.
+        assert (
+            self._model("openid offline_access", "admin-user").get_allowed_scope("openid") is None
+        )
+
+    def test_dcr_row_with_claudeai_is_granted_the_default(self) -> None:
+        assert self._model("claudeai", None).get_allowed_scope("claudeai") == DCR_DEFAULT_SCOPE
+
+
 # ---------------------------------------------------------------------------
 # resource
 # ---------------------------------------------------------------------------
@@ -149,6 +250,9 @@ class TestMcpResource:
             f"{MCP}#fragment",
             "HTTPS://Memory.Example.Test/mcp",
             "https://memory.example.test:443/mcp",
+            # One trailing dot on the host, and IDNA-equivalent hosts.
+            "https://memory.example.test./mcp",
+            "https://ｍｅｍｏｒｙ.example.test/mcp",
         ],
     )
     def test_names_the_mcp_resource(self, value: str) -> None:
@@ -173,6 +277,10 @@ class TestMcpResource:
             "",
             "http://[::1",
             "https://memory.example.test:port/mcp",
+            # Another host: an empty label is not dropped.
+            "https://memory..example.test/mcp",
+            # Two trailing dots is a different host: only one is dropped.
+            "https://memory.example.test../mcp",
         ],
     )
     def test_does_not_name_the_mcp_resource(self, value: str) -> None:
@@ -183,6 +291,28 @@ class TestMcpResource:
     ) -> None:
         monkeypatch.setenv("FRONTEND_URL", "https://memory.example.test:443")
         assert is_same_mcp_resource(MCP) is True
+
+    def test_published_host_is_normalised_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("FRONTEND_URL", "https://Bücher.example.")
+        assert is_same_mcp_resource("https://xn--bcher-kva.example/mcp") is True
+        assert is_same_mcp_resource("https://bücher.example/mcp/w/x") is True
+        assert is_same_mcp_resource("https://buecher.example/mcp") is False
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            # An empty label and a label longer than 63 characters are not
+            # valid IDNA names. The same text on both sides would match
+            # without the IDNA check.
+            "memory..example.test",
+            f"{'a' * 64}.example.test",
+        ],
+    )
+    def test_invalid_idna_host_matches_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, host: str
+    ) -> None:
+        monkeypatch.setenv("FRONTEND_URL", f"https://{host}")
+        assert is_same_mcp_resource(f"https://{host}/mcp") is False
 
     def test_explicit_port_and_base_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("FRONTEND_URL", "http://127.0.0.1:8080")
@@ -336,6 +466,17 @@ class TestS256CodeVerifier:
         with pytest.raises(InvalidGrantError):
             S256CodeChallenge(required=True).validate_code_verifier(grant, None)
 
+    def test_verifier_for_a_code_without_challenge_is_invalid_request(self) -> None:
+        # RFC 9700 §4.8, as Authlib's CodeChallenge does from 1.8.
+        grant = self._grant(
+            verifier=secrets.token_urlsafe(48),
+            challenge=None,
+            method=None,
+            auth_method="client_secret_post",
+        )
+        with pytest.raises(InvalidRequestError, match="no 'code_challenge'"):
+            S256CodeChallenge(required=True).validate_code_verifier(grant, None)
+
     def test_public_client_without_verifier_is_invalid_request(self) -> None:
         grant = self._grant(verifier=None, challenge=None, method=None)
         with pytest.raises(InvalidRequestError, match="code_verifier"):
@@ -413,13 +554,26 @@ class TestValidateAuthorizationParameters:
         )
         assert validate_authorization_parameters(_client(), payload) == DCR_DEFAULT_SCOPE
 
-    def test_registration_without_memory_scope_is_invalid_scope(
+    def test_dcr_registration_without_memory_scope_gets_the_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._settings(monkeypatch, True)
+        payload = _payload(
+            scope="claudeai", code_challenge=_CHALLENGE, code_challenge_method="S256"
+        )
+        assert validate_authorization_parameters(_client(scope="claudeai"), payload) == (
+            DCR_DEFAULT_SCOPE
+        )
+
+    def test_admin_client_without_memory_scope_is_invalid_scope(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         self._settings(monkeypatch, True)
         payload = _payload(scope="openid", code_challenge=_CHALLENGE, code_challenge_method="S256")
         with pytest.raises(InvalidScopeError):
-            validate_authorization_parameters(_client(scope="openid offline_access"), payload)
+            validate_authorization_parameters(
+                _client(scope="openid offline_access", owner_id="admin-user"), payload
+            )
 
     def test_pkce_rules_apply_when_enforced(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._settings(monkeypatch, True)

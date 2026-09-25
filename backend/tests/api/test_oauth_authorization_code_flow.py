@@ -26,7 +26,7 @@ from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 _BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
@@ -61,6 +61,7 @@ WORKSPACE_ID = "3f2b8c1e-5d6a-4b7c-9e0f-1a2b3c4d5e6f"
 FOREIGN_RESOURCE = "https://other.example/mcp"
 PUBLIC_CLIENT = "oauth_flow_public"
 NO_MEMORY_CLIENT = "oauth_flow_no_memory_scope"
+LEGACY_DCR_CLIENT = "oauth_flow_dcr_claudeai"
 CONFIDENTIAL_CLIENT = "oauth_flow_confidential"
 CONFIDENTIAL_SECRET = "confidential-client-secret-for-the-flow-test"
 USER_ID = "flow-user"
@@ -92,12 +93,23 @@ def db_factory() -> Iterator[sessionmaker]:
                     provider="claude",
                     **common,
                 ),
-                # A public client registered without any memory scope.
+                # An admin-managed public client registered without a memory scope.
                 OAuth2Client(
                     client_id=NO_MEMORY_CLIENT,
                     client_secret_hash="",
                     client_name="Flow No Memory Scope Client",
                     scope="openid offline_access",
+                    token_endpoint_auth_method="none",
+                    provider="custom",
+                    owner_id="admin-user",
+                    **common,
+                ),
+                # A DCR row stored with the scope the client asked for.
+                OAuth2Client(
+                    client_id=LEGACY_DCR_CLIENT,
+                    client_secret_hash="",
+                    client_name="Flow DCR claudeai Client",
+                    scope="claudeai",
                     token_endpoint_auth_method="none",
                     provider="claude",
                     **common,
@@ -884,3 +896,223 @@ class TestSingleUse:
             assert db.query(OAuth2Token).count() == 1
             assert db.query(OAuth2Token).one().access_token == first["access_token"]
         assert _codes(db_factory) == 0
+
+
+class TestDcrClientsWithoutMemoryScope:
+    """A DCR client that registered only non-memory scopes is served."""
+
+    def test_dcr_row_registered_with_claudeai_authorizes(self, api: TestClient) -> None:
+        verifier, challenge = _pkce()
+        redirect = _consent(
+            api, _authorize_params(LEGACY_DCR_CLIENT, challenge=challenge, scope="claudeai")
+        )
+        tokens = _exchange(api, redirect["code"], verifier, client_id=LEGACY_DCR_CLIENT)
+        assert tokens["scope"] == DCR_DEFAULT_SCOPE
+
+    @pytest.mark.parametrize("scope", ["claudeai", "openid offline_access", "openid profile"])
+    def test_registration_then_authorization(
+        self, api: TestClient, db_factory: sessionmaker, scope: str
+    ) -> None:
+        with patch("api.routes.oauth.increment_counter", AsyncMock(return_value=1)):
+            registered = api.post(
+                "/api/v1/oauth/register",
+                json={
+                    "client_name": "Claude Code",
+                    "redirect_uris": [REDIRECT_URI],
+                    "scope": scope,
+                },
+            )
+        assert registered.status_code == 201, registered.text
+        client_id = registered.json()["client_id"]
+        assert registered.json()["scope"] == DCR_DEFAULT_SCOPE
+        with db_factory() as db:
+            assert db.query(OAuth2Client).filter_by(client_id=client_id).one().scope == (
+                DCR_DEFAULT_SCOPE
+            )
+
+        verifier, challenge = _pkce()
+        redirect = _consent(
+            api,
+            _authorize_params(client_id, challenge=challenge, scope=scope, resource=MCP_RESOURCE),
+        )
+        tokens = _exchange(api, redirect["code"], verifier, client_id=client_id)
+        assert tokens["scope"] == DCR_DEFAULT_SCOPE
+        assert _stored_token(db_factory, tokens["access_token"]).resource == MCP_RESOURCE
+
+
+class TestRefreshSingleUse:
+    def test_second_refresh_with_one_refresh_token_is_invalid_grant(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        tokens = _public_tokens(api, resource=MCP_RESOURCE)
+        first = _refresh(api, tokens["refresh_token"])
+        assert first.status_code == 200, first.text
+
+        second = _refresh(api, tokens["refresh_token"])
+
+        assert second.status_code == 400
+        assert second.json()["error"] == "invalid_grant"
+        with db_factory() as db:
+            # The original pair and the one refresh.
+            assert db.query(OAuth2Token).count() == 2
+            original = db.query(OAuth2Token).filter_by(access_token=tokens["access_token"]).one()
+            assert original.refresh_token_revoked_at is not None
+            assert original.access_token_revoked_at is not None
+
+
+def _form(api: TestClient, pairs: list[tuple[str, str]]) -> Any:
+    """POST a token request whose form may repeat a parameter."""
+    return api.post(
+        "/api/v1/oauth/token",
+        content=urlencode(pairs),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+
+
+_RESOURCE_ORDERS = pytest.mark.parametrize(
+    "resources",
+    [[FOREIGN_RESOURCE, MCP_RESOURCE], [MCP_RESOURCE, FOREIGN_RESOURCE]],
+    ids=["foreign-then-valid", "valid-then-foreign"],
+)
+
+
+class TestRepeatedParameters:
+    """Every value of a repeated ``resource`` is checked; other parameters the
+    token endpoint reads may be sent once (RFC 6749 §3.1)."""
+
+    @_RESOURCE_ORDERS
+    def test_authorization_request_with_two_resources(
+        self, api: TestClient, resources: list[str]
+    ) -> None:
+        _, challenge = _pkce()
+        pairs = [*_authorize_params(challenge=challenge).items()]
+        pairs += [("resource", resource) for resource in resources]
+        response = api.get(f"/api/v1/oauth/authorize?{urlencode(pairs)}", follow_redirects=False)
+        _assert_error_page(response, "invalid_target")
+
+    @_RESOURCE_ORDERS
+    def test_consent_submission_with_two_resources(
+        self, api: TestClient, db_factory: sessionmaker, resources: list[str]
+    ) -> None:
+        _, challenge = _pkce()
+        pairs = [*_authorize_params(challenge=challenge).items()]
+        pairs += [("resource", resource) for resource in resources]
+        response = api.post(
+            f"/api/v1/oauth/authorize?{urlencode(pairs)}",
+            data={"confirm": "yes"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert _redirect_params(response)["error"] == "invalid_target"
+        assert _codes(db_factory) == 0
+
+    @_RESOURCE_ORDERS
+    def test_code_exchange_with_two_resources(self, api: TestClient, resources: list[str]) -> None:
+        verifier, challenge = _pkce()
+        redirect = _consent(api, _authorize_params(challenge=challenge, resource=MCP_RESOURCE))
+        pairs = [
+            ("grant_type", "authorization_code"),
+            ("code", redirect["code"]),
+            ("redirect_uri", REDIRECT_URI),
+            ("client_id", PUBLIC_CLIENT),
+            ("code_verifier", verifier),
+        ]
+        response = _form(api, pairs + [("resource", resource) for resource in resources])
+
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_target"
+        # The refused request did not consume the code.
+        assert _exchange(api, redirect["code"], verifier)["access_token"]
+
+    @_RESOURCE_ORDERS
+    def test_refresh_with_two_resources(self, api: TestClient, resources: list[str]) -> None:
+        tokens = _public_tokens(api, resource=MCP_RESOURCE)
+        pairs = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", tokens["refresh_token"]),
+            ("client_id", PUBLIC_CLIENT),
+        ]
+        response = _form(api, pairs + [("resource", resource) for resource in resources])
+
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_target"
+        # The refresh token is still usable.
+        assert _refresh(api, tokens["refresh_token"]).status_code == 200
+
+    def test_two_valid_resources_are_accepted(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        verifier, challenge = _pkce()
+        redirect = _consent(api, _authorize_params(challenge=challenge))
+        response = _form(
+            api,
+            [
+                ("grant_type", "authorization_code"),
+                ("code", redirect["code"]),
+                ("redirect_uri", REDIRECT_URI),
+                ("client_id", PUBLIC_CLIENT),
+                ("code_verifier", verifier),
+                ("resource", MCP_RESOURCE),
+                ("resource", f"{MCP_RESOURCE}/w/{WORKSPACE_ID}"),
+            ],
+        )
+        assert response.status_code == 200, response.text
+        stored = _stored_token(db_factory, response.json()["access_token"])
+        assert stored.resource == MCP_RESOURCE
+
+    @pytest.mark.parametrize("repeated", ["code", "code_verifier", "grant_type", "client_id"])
+    def test_repeated_single_valued_parameter_is_invalid_request(
+        self, api: TestClient, repeated: str
+    ) -> None:
+        verifier, challenge = _pkce()
+        redirect = _consent(api, _authorize_params(challenge=challenge))
+        pairs = [
+            ("grant_type", "authorization_code"),
+            ("code", redirect["code"]),
+            ("redirect_uri", REDIRECT_URI),
+            ("client_id", PUBLIC_CLIENT),
+            ("code_verifier", verifier),
+        ]
+        pairs.append(next(pair for pair in pairs if pair[0] == repeated))
+        response = _form(api, pairs)
+
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_request"
+        assert repeated in response.json()["error_description"]
+        # The refused request did not consume the code.
+        assert _exchange(api, redirect["code"], verifier)["access_token"]
+
+    def test_repeated_refresh_token_is_invalid_request(self, api: TestClient) -> None:
+        tokens = _public_tokens(api, resource=None)
+        response = _form(
+            api,
+            [
+                ("grant_type", "refresh_token"),
+                ("refresh_token", tokens["refresh_token"]),
+                ("refresh_token", tokens["refresh_token"]),
+                ("client_id", PUBLIC_CLIENT),
+            ],
+        )
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_request"
+
+
+class TestVerifierWithoutChallenge:
+    def test_code_issued_without_challenge_is_not_exchanged_with_a_verifier(
+        self, api: TestClient
+    ) -> None:
+        # RFC 9700 §4.8.
+        redirect = _consent(api, _authorize_params(CONFIDENTIAL_CLIENT, method=None))
+        response = _token(
+            api,
+            {
+                "grant_type": "authorization_code",
+                "code": redirect["code"],
+                "redirect_uri": REDIRECT_URI,
+                "client_id": CONFIDENTIAL_CLIENT,
+                "client_secret": CONFIDENTIAL_SECRET,
+                "code_verifier": secrets.token_urlsafe(48),
+            },
+        )
+        assert response.status_code == 400
+        assert response.json()["error"] == "invalid_request"
