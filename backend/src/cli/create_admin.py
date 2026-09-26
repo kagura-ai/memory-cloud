@@ -23,7 +23,11 @@ from sqlalchemy import create_engine, func, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from auth.api_keys import APIKeyManager  # noqa: E402
-from auth.password import hash_password  # noqa: E402
+from auth.password import (  # noqa: E402
+    PASSWORD_TOO_LONG_MESSAGE,
+    hash_password,
+    is_password_too_long,
+)
 from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import APIKey, ExternalAPIKey, User, Workspace, WorkspaceMember  # noqa: E402
@@ -294,6 +298,11 @@ def create_admin(skip_mcp_json: bool = False):
                 errors.append("1 special character")
             if errors:
                 print(f"  ✗ Missing: {', '.join(errors)}. Try again.")
+                continue
+
+            # bcrypt hashes at most 72 bytes; refuse before the confirmation prompt (#1707).
+            if is_password_too_long(password):
+                print(f"  ✗ {PASSWORD_TOO_LONG_MESSAGE} Try again.")
                 continue
 
             password_confirm = getpass.getpass("  Confirm:  ")

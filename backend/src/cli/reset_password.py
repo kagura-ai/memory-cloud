@@ -17,7 +17,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
-from auth.password import hash_password  # noqa: E402
+from auth.password import (  # noqa: E402
+    PASSWORD_TOO_LONG_MESSAGE,
+    hash_password,
+    is_password_too_long,
+)
 from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import User  # noqa: E402
 
@@ -96,6 +100,11 @@ def reset_password():
                     errors.append("1 special character")
                 if errors:
                     print(f"  ✗ Missing: {', '.join(errors)}. Try again.")
+                    continue
+
+                # bcrypt hashes at most 72 bytes; refuse before the confirmation prompt (#1707).
+                if is_password_too_long(password):
+                    print(f"  ✗ {PASSWORD_TOO_LONG_MESSAGE} Try again.")
                     continue
 
                 password_confirm = getpass.getpass("  Confirm:      ")
