@@ -58,6 +58,7 @@ from utils.encryption import get_encryptor
 from utils.exceptions import AuthenticationError, ConflictError, InvalidCredentialsError
 from utils.hashing import SHA256_HEX_PATTERN, sha256_hex
 from utils.logger import get_logger
+from utils.utf8 import is_utf8_encodable
 
 # auth.py historically bound logger via stdlib ``logging.getLogger``
 # while every other module in the project uses ``utils.logger.get_logger``
@@ -2310,6 +2311,12 @@ async def password_login(
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Session manager not initialized")
 
+    # #1718: a login id that cannot be UTF-8 encoded (a "\\ud800" JSON escape)
+    # matches no stored login id, and it would raise as a Redis key or a query
+    # parameter. Same answer as an unknown login id, before either lookup.
+    if not is_utf8_encodable(body.login_id):
+        raise InvalidCredentialsError()
+
     # Brute-force protection
     _check_login_rate_limit(body.login_id)
 
@@ -2373,6 +2380,12 @@ async def mfa_verify(
     """Verify TOTP code and create session."""
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Session manager not initialized")
+
+    # #1718: a token that cannot be UTF-8 encoded was never issued, and it
+    # would raise as a Redis key. A wrong ``totp_code`` of that kind is handled
+    # by ``verify_totp`` (a wrong code, so the pending token is deleted).
+    if not is_utf8_encodable(body.mfa_session_token):
+        raise AuthenticationError("Invalid or expired MFA session")
 
     user_id = _session_manager._redis.get(f"mfa_pending:{body.mfa_session_token}")
     if not user_id:
