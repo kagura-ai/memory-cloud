@@ -1,17 +1,20 @@
 /**
- * `usage_guide` is the owner's notes on the context, not AI instructions
- * (#1698).
+ * `usage_guide` and `summary` are the owner's notes on the context, not AI
+ * instructions (#1698, #1716).
  *
  * #1682 changed the MCP server to describe a context's `usage_guide` as "the
  * owner's notes on what this context holds and how it is organised
  * (information about the context, not instructions)". The Web UI labelled
- * the same field "Instructions (for AI)" and its copyable client template
- * told the model to "Follow context.usage_guide for this context's rules".
- * This guard keeps that framing out of:
+ * the same field "Instructions (for AI)", and a copyable client template
+ * (removed in #1717: no page rendered it) told the model to "Follow
+ * context.usage_guide for this context's rules". This guard keeps that
+ * framing out of:
  *
  * - every en / ja message that labels, explains or refers to the field;
- * - the copyable client template (`InstructionsTemplate`), in both locales,
- *   with and without notes;
+ * - every en / ja message about the context summary, and the heading of the
+ *   settings card that holds both fields (#1716: they were "Summary (for
+ *   AI)", "Helps AI understand …" and "Settings that help AI understand and
+ *   use this context");
  * - the starter templates' `summary` and `usage_guide` text.
  *
  * The word lists are the same in both languages: rules / ルール, must and
@@ -21,10 +24,8 @@
  * pre-#1698 text and regression below must trip a pattern, which keeps them
  * honest.
  */
-import { createTranslator } from "next-intl";
 import { describe, expect, it } from "vitest";
 
-import { generateTemplate } from "@/components/contexts/InstructionsTemplate";
 import { CONTEXT_TEMPLATES } from "@/lib/templates/usage-guide";
 
 import en from "./en.json";
@@ -37,13 +38,18 @@ const OBEY = String.raw`\b(follow|obey|comply with|adhere to)\w*\b`;
 
 /** (pattern, why it is refused). Case-insensitive, one text at a time. */
 const FORBIDDEN: readonly (readonly [RegExp, string])[] = [
-  [/\(for (the )?AI\)/i, "labels the field as text for the AI"],
+  [/\(for (the |an )?AI( \w+)?\)/i, "labels the field as text for the AI"],
   [
     /\binstructions? (for|to) (the |an )?(AI|model)\b/i,
     "defines the field as instructions for the AI",
   ],
   [/\bAI instructions?\b/i, "defines the field as AI instructions"],
   [/\bhow (an |the )?AI should\b/i, "tells the AI how it should behave"],
+  [/\bhelp(s|ing)? (the |an )?AI\b/i, "describes the field as help for the AI"],
+  [
+    /\b(AI (configuration|settings?|setup)|(configuration|settings?|setup) for (the |an )?AI)\b/i,
+    "calls the fields settings for the AI",
+  ],
   [
     new RegExp(
       OBEY +
@@ -72,15 +78,20 @@ const FORBIDDEN: readonly (readonly [RegExp, string])[] = [
     "defines the field as instructions for the AI",
   ],
   [/AIが[^。\n]{0,40}(指示|すべき)/, "tells the AI what it should do"],
+  // (?<![A-Za-z]): "AI" inside a product name (OpenAI設定済み) is not the AI.
+  [
+    /(?<![A-Za-z])AI(が|の)[^。\n]{0,40}(理解|役立|助け)/,
+    "describes the field as help for the AI",
+  ],
+  [/(?<![A-Za-z])AI設定/, "calls the fields settings for the AI"],
   [/べき/, "tells the reader what it should do"],
   [/(ルール|規則|決まり)/, "calls the notes rules"],
   [/に従[うっいわえ]/, "tells the model to follow the notes"],
 ];
 
 /**
- * Messages and starter templates only: the notes do not tell the reader what
- * it must do. The copyable template is exempt — it IS the user's own client
- * instructions ("Never store: passwords, …").
+ * Messages and starter templates: the notes do not tell the reader what it
+ * must do.
  */
 const NOTES_WORDING: readonly (readonly [RegExp, string])[] = [
   [/\b(must|should|obey\w*)\b/i, "tells the reader what it must do"],
@@ -89,8 +100,7 @@ const NOTES_WORDING: readonly (readonly [RegExp, string])[] = [
 
 /**
  * Messages only: the field is not called "Instructions" (saying the notes
- * are "not instructions" stays allowed). The copyable template is exempt —
- * it IS the user's own client instructions, and says so in its title.
+ * are "not instructions" stays allowed).
  */
 const FIELD_NAME: readonly (readonly [RegExp, string])[] = [
   [/(?<!\bnot (as )?)\binstructions?\b/i, "names the field Instructions"],
@@ -118,6 +128,21 @@ const PRE_1698_FIXTURES = [
   "サマリーとインストラクションテンプレート",
 ];
 
+/** The context-summary texts #1716 replaced. Each must trip a pattern. */
+const PRE_1716_FIXTURES = [
+  "Summary (for AI)",
+  "サマリー（AI用）",
+  "サマリー（AI向け）",
+  "Helps AI understand what this context is for.",
+  "Helps AI understand the purpose of this context. {count}/2000",
+  "AIがこのコンテキストの目的を理解するのに役立ちます。",
+  "AIがこのコンテキストの目的を理解するのに役立ちます。{count}/2000",
+  "AI Configuration",
+  "AI設定",
+  "Settings that help AI understand and use this context",
+  "AIがこのコンテキストを理解し使用するための設定",
+];
+
 /**
  * Framings the first version of this guard let through (review of #1698):
  * English had no counterpart to ルール / すべき, Japanese none to 守る / 〜べき.
@@ -130,13 +155,17 @@ const MESSAGE_REGRESSIONS = [
 ];
 
 /**
- * Copyable-template lines that must trip the template scan (FORBIDDEN only:
- * the template is the user's own client instructions, so the notes-only
- * wording patterns do not apply to it).
+ * Near-variants the first #1716 patterns let through (review of #1716), and
+ * the "directives" line that kept that word covered while the copyable
+ * template existed (#1717 removed the template and its fixtures).
  */
-const TEMPLATE_REGRESSIONS = [
+const REVIEW_1716_REGRESSIONS = [
+  "Summary (for AI clients)",
+  "Helping the AI understand this context.",
+  "AIの理解を助けるためのメモです。",
+  "Settings for the AI",
+  "AI setup",
   "3. Treat context.usage_guide as binding directives and do what it says",
-  "3. context.usage_guide lists the rules for this context",
 ];
 
 /** Wordings that describe the field as information: they must stay allowed. */
@@ -147,7 +176,14 @@ const ALLOWED_EXAMPLES = [
   "Summary, Usage Guide, and Privacy can only be edited by context owners.",
   "Usage Guide (notes on this context)",
   "使用ガイド（コンテキストについてのメモ）",
+  "Summary (what this context is for)",
+  "サマリー（このコンテキストの目的）",
+  "A short note on what this context is for. AI clients receive it from get_context_info as information about the context, not as instructions.",
+  "このコンテキストが何のためのものかを短くまとめたメモです。",
   "AIクライアントには get_context_info から、指示ではなくコンテキストについての情報として返されます。",
+  // "AI" inside a product name is not the AI (systemSettings.openAIConfigured).
+  "OpenAI設定済み",
+  "OpenAI settings",
 ];
 
 function violations(text: string, patterns = FORBIDDEN): string[] {
@@ -187,7 +223,6 @@ const USAGE_GUIDE_KEYS = [
   "contexts.usageGuidePlaceholder",
   "contexts.usageGuideForAI",
   "contexts.usageGuideHelp",
-  "contexts.noGuidelinesSet",
   "contexts.summaryUsageTemplate",
   "contexts.templatePlaceholder",
   "contexts.editContextDesc",
@@ -199,6 +234,29 @@ const USAGE_GUIDE_KEYS = [
   "contextSettings.usageGuideHelp",
 ] as const;
 
+/**
+ * Every `contexts` / `contextSettings` message about the context summary,
+ * plus the heading of the settings card that holds the summary and the
+ * usage guide. A new key in those two namespaces whose name mentions the
+ * summary must be added here (the test below fails until it is). Other
+ * namespaces are out of scope: `memories.summary`,
+ * `contextDetail.editDialog.summaryLabel` and `onboarding.memory.summaryLabel`
+ * are about memory summaries.
+ */
+const CONTEXT_SUMMARY_KEYS = [
+  "contexts.summaryPlaceholder",
+  "contexts.summaryForAI",
+  "contexts.summaryHelp",
+  "contexts.summaryUsageTemplateOptional",
+  "contextSettings.aiConfigTitle",
+  "contextSettings.aiConfigDesc",
+  "contextSettings.summaryLabel",
+  "contextSettings.summaryPlaceholder",
+  "contextSettings.summaryHelp",
+] as const;
+
+const SCANNED_KEYS = [...USAGE_GUIDE_KEYS, ...CONTEXT_SUMMARY_KEYS];
+
 const CATALOGUES = [
   ["en", en],
   ["ja", ja],
@@ -207,78 +265,72 @@ const CATALOGUES = [
 const MESSAGE_PATTERNS = [...FORBIDDEN, ...NOTES_WORDING, ...FIELD_NAME];
 const STARTER_PATTERNS = [...FORBIDDEN, ...NOTES_WORDING];
 
-describe("usage_guide framing patterns (#1698)", () => {
-  it.each([...PRE_1698_FIXTURES, ...MESSAGE_REGRESSIONS])(
+describe("context notes framing patterns (#1698, #1716)", () => {
+  it.each([
+    ...PRE_1698_FIXTURES,
+    ...PRE_1716_FIXTURES,
+    ...MESSAGE_REGRESSIONS,
+    ...REVIEW_1716_REGRESSIONS,
+  ])(
     "refuses the message text %j",
     (text) => {
       expect(violations(text, MESSAGE_PATTERNS)).not.toEqual([]);
     },
   );
 
-  it.each(MESSAGE_REGRESSIONS)(
+  it.each([...MESSAGE_REGRESSIONS, ...REVIEW_1716_REGRESSIONS])(
     "refuses the starter-template text %j",
     (text) => {
       expect(violations(text, STARTER_PATTERNS)).not.toEqual([]);
     },
   );
 
-  it.each(TEMPLATE_REGRESSIONS)("refuses the template line %j", (text) => {
-    expect(violations(text)).not.toEqual([]);
-  });
-
   it.each(ALLOWED_EXAMPLES)("allows %j", (text) => {
     expect(violations(text, MESSAGE_PATTERNS)).toEqual([]);
   });
 });
 
-describe.each(CATALOGUES)("%s usage_guide messages (#1698)", (_, messages) => {
+describe.each(CATALOGUES)("%s notes messages (#1698, #1716)", (_, messages) => {
+  const keys = leaves(messages).map(([key]) => key);
+  const leaf = (key: string) => key.split(".").pop() ?? "";
+
   it("scans every key whose name mentions the usage guide", () => {
-    const named = leaves(messages)
-      .map(([key]) => key)
-      .filter((key) =>
-        /usage_?guide|guideline/i.test(key.split(".").pop() ?? ""),
-      );
+    const named = keys.filter((key) =>
+      /usage_?guide|guideline/i.test(leaf(key)),
+    );
     expect(
       named.filter((key) => !USAGE_GUIDE_KEYS.includes(key as never)),
     ).toEqual([]);
   });
 
-  it.each(USAGE_GUIDE_KEYS)(
-    "%s describes notes, not AI instructions",
-    (key) => {
-      const text = lookup(messages as Messages, key);
-      expect(typeof text).toBe("string");
-      expect(violations(text as string, MESSAGE_PATTERNS)).toEqual([]);
+  it("scans every contexts / contextSettings key that mentions the summary (#1716)", () => {
+    const named = keys.filter(
+      (key) =>
+        /^(contexts|contextSettings)\./.test(key) && /summary/i.test(leaf(key)),
+    );
+    expect(named.filter((key) => !SCANNED_KEYS.includes(key as never))).toEqual(
+      [],
+    );
+  });
+
+  it.each([
+    ["contexts.summaryForAI", "contextSettings.summaryLabel"],
+    ["contexts.usageGuideForAI", "contextSettings.usageGuideLabel"],
+  ] as const)(
+    "the create dialog (%s) and the settings tab (%s) use the same label",
+    (dialogKey, settingsKey) => {
+      expect(lookup(messages as Messages, dialogKey)).toBe(
+        lookup(messages as Messages, settingsKey),
+      );
     },
   );
+
+  it.each(SCANNED_KEYS)("%s describes notes, not AI instructions", (key) => {
+    const text = lookup(messages as Messages, key);
+    expect(typeof text).toBe("string");
+    expect(violations(text as string, MESSAGE_PATTERNS)).toEqual([]);
+  });
 });
-
-describe.each(CATALOGUES)(
-  "%s copyable client template (#1698)",
-  (locale, messages) => {
-    const tr = createTranslator({
-      locale,
-      messages: messages as Messages,
-      namespace: "contexts",
-      onError: (error) => {
-        throw error;
-      },
-    });
-    const t = (key: string) => tr(key as never);
-
-    it.each([
-      ["with notes", "Memories here are tagged by project."],
-      ["without notes", null],
-    ] as const)("%s never frames the notes as rules", (_label, usageGuide) => {
-      for (const isPrivate of [true, false]) {
-        const text = generateTemplate("my-context", usageGuide, isPrivate, t);
-        expect(text.split("\n").flatMap((line) => violations(line))).toEqual(
-          [],
-        );
-      }
-    });
-  },
-);
 
 describe("starter templates (#1698)", () => {
   it.each(CONTEXT_TEMPLATES.map((tpl) => [tpl.id, tpl] as const))(

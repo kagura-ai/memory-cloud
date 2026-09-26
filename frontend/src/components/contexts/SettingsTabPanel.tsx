@@ -2,7 +2,8 @@
  * SettingsTabPanel
  *
  * Self-contained panel for the Settings tab in the consolidated context detail page.
- * Contains basic info, AI config, privacy with sticky save bar.
+ * Contains basic info, the notes about the context (summary, usage guide) and
+ * privacy, with a sticky save bar.
  * Extracted from contexts/[id]/settings/page.tsx (#232).
  */
 
@@ -538,7 +539,7 @@ export function SettingsTabPanel({
           </CardContent>
         </Card>
 
-        {/* AI Configuration */}
+        {/* About this context: summary and usage guide notes (#1716) */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
