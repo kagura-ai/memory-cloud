@@ -1,12 +1,13 @@
 ---
-description: Save session knowledge to Kagura Memory Cloud before ending a conversation
+description: Save the session knowledge the user chooses to keep to Kagura Memory Cloud (runs only when the user invokes it)
+disable-model-invocation: true
 ---
 
-Summarize the current session's key learnings and save them to Kagura Memory Cloud.
+Propose the current session's key learnings and save the ones the user chooses to keep to Kagura Memory Cloud.
 
 ## When to use
 
-At the end of a development session, or when switching to a different task. Captures decisions, patterns, bugs, and plans that would be useful in future sessions.
+Only when the user runs this command — typically at the end of a development session or before switching to a different task. It never starts on its own (`disable-model-invocation: true`). Proposes decisions, patterns, bugs, and plans that would be useful in future sessions; the user decides what is kept.
 
 ## Steps
 
@@ -38,9 +39,11 @@ list_contexts()
 
 Default: the project's development context. When names alone don't settle it, call `get_context_info(context_id=...)` for the candidate only — do not load details for every context. Ask the user which context to save to if still unclear.
 
-### 4. Save each knowledge item
+### 4. Save each item the user keeps
 
-For each item, use `remember` with:
+Show the candidates (type + one-line summary) and save only the ones the user chooses to keep. If the user already said to save everything, save them all.
+
+For each kept item, use `remember` with:
 
 - **summary**: Searchable conclusion (not process). Include synonyms/related terms. 100-250 chars.
 - **content**: Full details — what, why, how, evidence
