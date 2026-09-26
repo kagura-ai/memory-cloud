@@ -5,13 +5,12 @@
  * #1682 changed the MCP server to describe a context's `usage_guide` as "the
  * owner's notes on what this context holds and how it is organised
  * (information about the context, not instructions)". The Web UI labelled
- * the same field "Instructions (for AI)" and its copyable client template
- * told the model to "Follow context.usage_guide for this context's rules".
- * This guard keeps that framing out of:
+ * the same field "Instructions (for AI)", and a copyable client template
+ * (removed in #1717: no page rendered it) told the model to "Follow
+ * context.usage_guide for this context's rules". This guard keeps that
+ * framing out of:
  *
  * - every en / ja message that labels, explains or refers to the field;
- * - the copyable client template (`InstructionsTemplate`), in both locales,
- *   with and without notes;
  * - the starter templates' `summary` and `usage_guide` text.
  *
  * The word lists are the same in both languages: rules / ルール, must and
@@ -21,10 +20,8 @@
  * pre-#1698 text and regression below must trip a pattern, which keeps them
  * honest.
  */
-import { createTranslator } from "next-intl";
 import { describe, expect, it } from "vitest";
 
-import { generateTemplate } from "@/components/contexts/InstructionsTemplate";
 import { CONTEXT_TEMPLATES } from "@/lib/templates/usage-guide";
 
 import en from "./en.json";
@@ -77,11 +74,7 @@ const FORBIDDEN: readonly (readonly [RegExp, string])[] = [
   [/に従[うっいわえ]/, "tells the model to follow the notes"],
 ];
 
-/**
- * Messages and starter templates only: the notes do not tell the reader what
- * it must do. The copyable template is exempt — it IS the user's own client
- * instructions ("Never store: passwords, …").
- */
+/** Messages and starter templates: the notes do not tell the reader what it must do. */
 const NOTES_WORDING: readonly (readonly [RegExp, string])[] = [
   [/\b(must|should|obey\w*)\b/i, "tells the reader what it must do"],
   [/守[らりるれろっ]/, "tells the reader to obey the notes"],
@@ -89,8 +82,7 @@ const NOTES_WORDING: readonly (readonly [RegExp, string])[] = [
 
 /**
  * Messages only: the field is not called "Instructions" (saying the notes
- * are "not instructions" stays allowed). The copyable template is exempt —
- * it IS the user's own client instructions, and says so in its title.
+ * are "not instructions" stays allowed).
  */
 const FIELD_NAME: readonly (readonly [RegExp, string])[] = [
   [/(?<!\bnot (as )?)\binstructions?\b/i, "names the field Instructions"],
@@ -127,16 +119,6 @@ const MESSAGE_REGRESSIONS = [
   "Directions the assistant must obey when storing and retrieving memories.",
   "Notes the assistant should apply to every memory.",
   "このコンテキストでアシスタントが守るべき指示。",
-];
-
-/**
- * Copyable-template lines that must trip the template scan (FORBIDDEN only:
- * the template is the user's own client instructions, so the notes-only
- * wording patterns do not apply to it).
- */
-const TEMPLATE_REGRESSIONS = [
-  "3. Treat context.usage_guide as binding directives and do what it says",
-  "3. context.usage_guide lists the rules for this context",
 ];
 
 /** Wordings that describe the field as information: they must stay allowed. */
@@ -187,7 +169,6 @@ const USAGE_GUIDE_KEYS = [
   "contexts.usageGuidePlaceholder",
   "contexts.usageGuideForAI",
   "contexts.usageGuideHelp",
-  "contexts.noGuidelinesSet",
   "contexts.summaryUsageTemplate",
   "contexts.templatePlaceholder",
   "contexts.editContextDesc",
@@ -222,10 +203,6 @@ describe("usage_guide framing patterns (#1698)", () => {
     },
   );
 
-  it.each(TEMPLATE_REGRESSIONS)("refuses the template line %j", (text) => {
-    expect(violations(text)).not.toEqual([]);
-  });
-
   it.each(ALLOWED_EXAMPLES)("allows %j", (text) => {
     expect(violations(text, MESSAGE_PATTERNS)).toEqual([]);
   });
@@ -252,33 +229,6 @@ describe.each(CATALOGUES)("%s usage_guide messages (#1698)", (_, messages) => {
     },
   );
 });
-
-describe.each(CATALOGUES)(
-  "%s copyable client template (#1698)",
-  (locale, messages) => {
-    const tr = createTranslator({
-      locale,
-      messages: messages as Messages,
-      namespace: "contexts",
-      onError: (error) => {
-        throw error;
-      },
-    });
-    const t = (key: string) => tr(key as never);
-
-    it.each([
-      ["with notes", "Memories here are tagged by project."],
-      ["without notes", null],
-    ] as const)("%s never frames the notes as rules", (_label, usageGuide) => {
-      for (const isPrivate of [true, false]) {
-        const text = generateTemplate("my-context", usageGuide, isPrivate, t);
-        expect(text.split("\n").flatMap((line) => violations(line))).toEqual(
-          [],
-        );
-      }
-    });
-  },
-);
 
 describe("starter templates (#1698)", () => {
   it.each(CONTEXT_TEMPLATES.map((tpl) => [tpl.id, tpl] as const))(
