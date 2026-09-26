@@ -12,7 +12,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine, text
 
 from alembic import command
-from config.database import to_sync_database_url
+from config.database import to_async_database_url, to_sync_database_url
 
 ALEMBIC_INI = "alembic.ini"
 
@@ -33,9 +33,10 @@ def _get_alembic_config() -> Config:
     # Override with test database URL if available
     test_url = os.getenv("TEST_DATABASE_URL")
     if test_url:
-        # Explicit driver: a bare ``postgresql://`` means psycopg v3 on
-        # SQLAlchemy 2.1, which is not installed (#1695).
-        config.set_main_option("sqlalchemy.url", to_sync_database_url(test_url))
+        # env.py replaces this with its own URL (see docstring). If it ever
+        # kept it, the value would reach ``async_engine_from_config``, so it
+        # names the same async driver env.py uses (#1695).
+        config.set_main_option("sqlalchemy.url", to_async_database_url(test_url))
     return config
 
 
