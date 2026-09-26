@@ -35,23 +35,35 @@ AUTH_CRITICAL = frozenset(
 _UPPER_BOUND_OPERATORS = frozenset({"<", "<=", "==", "===", "~="})
 
 
+def _project() -> dict:
+    return tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))["project"]
+
+
+def _runtime_requirements() -> list[Requirement]:
+    """``[project].dependencies``: what a plain ``pip install .`` installs, with no extra."""
+    return [Requirement(line) for line in _project()["dependencies"]]
+
+
 def _declared_requirements() -> list[Requirement]:
     """Every requirement in ``[project].dependencies`` and each optional group."""
-    project = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))["project"]
-    lines = list(project["dependencies"])
-    for group in project.get("optional-dependencies", {}).values():
+    lines: list[str] = []
+    for group in _project().get("optional-dependencies", {}).values():
         lines.extend(group)
-    return [Requirement(line) for line in lines]
+    return _runtime_requirements() + [Requirement(line) for line in lines]
 
 
 def _auth_critical() -> list[Requirement]:
     return [r for r in _declared_requirements() if canonicalize_name(r.name) in AUTH_CRITICAL]
 
 
-def test_every_auth_critical_dependency_is_declared() -> None:
-    """A renamed or dropped line must fail here, not silently skip the bound check."""
-    declared = {canonicalize_name(r.name) for r in _auth_critical()}
-    assert declared == AUTH_CRITICAL
+def test_every_auth_critical_dependency_is_a_runtime_dependency() -> None:
+    """A renamed or dropped line must fail here, not silently skip the bound check.
+
+    Runtime code imports every one of these, so a declaration that only an
+    optional group (e.g. ``dev``) carries does not count.
+    """
+    runtime = {canonicalize_name(r.name) for r in _runtime_requirements()}
+    assert AUTH_CRITICAL <= runtime, sorted(AUTH_CRITICAL - runtime)
 
 
 @pytest.mark.parametrize("requirement", _auth_critical(), ids=lambda r: r.name)
@@ -77,5 +89,5 @@ def test_auth_critical_dependency_has_upper_bound(requirement: Requirement) -> N
     ],
 )
 def test_authlib_is_pinned_to_the_verified_minor(version: str, allowed: bool) -> None:
-    (authlib,) = [r for r in _declared_requirements() if canonicalize_name(r.name) == "authlib"]
+    (authlib,) = [r for r in _runtime_requirements() if canonicalize_name(r.name) == "authlib"]
     assert authlib.specifier.contains(version, prereleases=True) is allowed
