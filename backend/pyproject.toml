@@ -14,8 +14,9 @@ dependencies = [
     # No upper bound on fastapi on purpose: its breaking changes ship in 0.x
     # minor releases, so the only useful bound is the minor, which would need a
     # manual bump every few weeks; a tracked lockfile (#1706) is the planned
-    # control.
-    "fastapi>=0.115.0",
+    # control. The floor is 0.133.0 because older releases cap starlette below
+    # 1.0, which the starlette floor below excludes.
+    "fastapi>=0.133.0",
     # Imported directly on the auth path (the Authlib request adapter in
     # auth/starlette_oauth2_request.py, BaseHTTPMiddleware in the session
     # middleware) and not capped by fastapi or mcp. Semver, and 1.x already
