@@ -2,7 +2,7 @@
 
 Issue #51: Password + MFA login for initial admin.
 Issue #1707: passwords longer than 72 bytes under bcrypt 5.
-Issue #1718: passwords that cannot be UTF-8 encoded (a lone surrogate).
+Issue #1718: passwords that cannot be UTF-8 encoded (a surrogate code point).
 """
 
 import bcrypt
@@ -35,8 +35,9 @@ class PasswordTooLongError(ValueError):
 class PasswordNotEncodableError(ValueError):
     """Raised by ``hash_password`` for a password that cannot be UTF-8 encoded.
 
-    Such a ``str`` holds a lone surrogate: a ``"\\ud800"`` JSON escape, or a
-    non-UTF-8 byte read through ``os.environ`` / ``getpass`` on a pipe.
+    Such a ``str`` holds a surrogate code point: a ``"\\ud800"`` JSON escape,
+    raw surrogate bytes in a JSON body, or a non-UTF-8 byte read through
+    ``os.environ`` / ``getpass`` on a pipe (see ``utils.utf8``).
     """
 
     def __init__(self, message: str = PASSWORD_NOT_ENCODABLE_MESSAGE) -> None:
@@ -47,7 +48,7 @@ class PasswordNotEncodableError(ValueError):
 def is_password_too_long(password: str) -> bool:
     """Return whether ``password`` exceeds bcrypt's 72-byte input limit.
 
-    Never raises: a lone surrogate counts as the 3 bytes ``surrogatepass``
+    Never raises: a surrogate code point counts as the 3 bytes ``surrogatepass``
     gives it. Check ``is_utf8_encodable`` separately (``hash_password`` does).
 
     Args:
