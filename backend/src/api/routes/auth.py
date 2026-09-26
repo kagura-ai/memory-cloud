@@ -2311,7 +2311,7 @@ async def password_login(
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Session manager not initialized")
 
-    # #1718: a login id that cannot be UTF-8 encoded (a "\\ud800" JSON escape)
+    # #1718: a login id that cannot be UTF-8 encoded (a "\ud800" JSON escape)
     # matches no stored login id, and it would raise as a Redis key or a query
     # parameter. Same answer as an unknown login id, before either lookup.
     if not is_utf8_encodable(body.login_id):
