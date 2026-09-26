@@ -53,21 +53,33 @@ logger = get_logger(__name__)
 # and decode so the signer can never be downgraded to a weaker alg by a
 # permissive default, and so the wire name stays the "EdDSA" the billing
 # service verifies.
-_ALGORITHMS = ("EdDSA",)
 _ALG = "EdDSA"
+_ALGORITHMS = (_ALG,)
 _TOKEN_TYP = "JWT"
 
-# joserfc warns on every "EdDSA" sign and verify: RFC 9864 deprecates that name
-# because it does not say which curve is in use, and registers "Ed25519" and
-# "Ed448" instead. The billing service verifies alg="EdDSA", so the wire name
-# stays until both sides move together (#1727). The curve is not ambiguous
-# here — the signing key is Ed25519 PEM material — so the one message is
-# filtered process-wide, once, rather than logged on every token.
-warnings.filterwarnings(
-    "ignore",
-    message=r"^EdDSA is deprecated via RFC 9864$",
-    category=SecurityWarning,
-)
+
+def _silence_eddsa_name_warning() -> None:
+    """Ignore joserfc's RFC 9864 warning about the ``"EdDSA"`` algorithm name.
+
+    joserfc warns on every ``"EdDSA"`` sign and verify: RFC 9864 deprecates
+    that name because it does not say which curve is in use, and registers
+    ``"Ed25519"`` and ``"Ed448"`` instead. The billing service verifies
+    ``alg="EdDSA"``, so the wire name stays until both sides move together
+    (#1727). The curve is not ambiguous here — the signing key is Ed25519 PEM
+    material — so the one message is ignored process-wide.
+
+    pytest gives every test its own filter list, so ``pyproject.toml`` repeats
+    the entry; ``tests/auth/test_billing_handoff_joserfc.py`` re-installs this
+    filter under ``error`` to check it still matches joserfc's message.
+    """
+    warnings.filterwarnings(
+        "ignore",
+        message=r"^EdDSA is deprecated via RFC 9864",
+        category=SecurityWarning,
+    )
+
+
+_silence_eddsa_name_warning()
 # The handoff token always asserts the owner role — the route only mints after a
 # successful owner gate, so the claim is a constant, not caller-supplied.
 _ROLE_OWNER = "owner"

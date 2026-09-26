@@ -10,17 +10,12 @@ is the security-critical invariant.
 
 from __future__ import annotations
 
-import base64
 import calendar
-import json
 from datetime import datetime
-from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from joserfc import jwt
 from joserfc.errors import BadSignatureError
 from joserfc.jwk import OKPKey
@@ -34,6 +29,13 @@ from auth.billing_handoff import (
     verify_handoff_token,
 )
 
+from ._billing_handoff_helpers import (
+    ed25519_keypair,
+    handoff_settings,
+    token_header,
+    token_payload,
+)
+
 _ALGORITHMS = ["EdDSA"]
 
 
@@ -42,59 +44,10 @@ def _decode(token: str, public_pem: str) -> dict:
     return jwt.decode(token, OKPKey.import_key(public_pem), algorithms=_ALGORITHMS).claims
 
 
-def _keypair() -> tuple[str, str]:
-    """Return ``(private_pem, public_pem)`` for a fresh Ed25519 key."""
-    priv = Ed25519PrivateKey.generate()
-    private_pem = priv.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode()
-    public_pem = (
-        priv.public_key()
-        .public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        .decode()
-    )
-    return private_pem, public_pem
-
-
-def _settings(
-    signing_key: str,
-    *,
-    kid: str = "kid-1",
-    iss: str = "kagura-memory-cloud",
-    aud: str = "kagura-billing",
-    ttl: int = 120,
-) -> SimpleNamespace:
-    """A minimal settings stand-in carrying only the fields the signer reads."""
-    return SimpleNamespace(
-        billing_handoff_signing_key=signing_key,
-        billing_handoff_key_id=kid,
-        billing_handoff_issuer=iss,
-        billing_handoff_audience=aud,
-        billing_handoff_ttl_seconds=ttl,
-    )
-
-
-def _b64url_json(segment: str) -> dict:
-    return json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
-
-
-def _header(token: str) -> dict:
-    return _b64url_json(token.split(".")[0])
-
-
-def _payload(token: str) -> dict:
-    return _b64url_json(token.split(".")[1])
-
-
 class TestBillingHandoffSigner:
     def test_mint_produces_eddsa_jwt_verifiable_with_public_key(self) -> None:
-        private_pem, public_pem = _keypair()
-        signer = BillingHandoffSigner(settings=_settings(private_pem))
+        private_pem, public_pem = ed25519_keypair()
+        signer = BillingHandoffSigner(settings=handoff_settings(private_pem))
         workspace_id = uuid4()
 
         minted = signer.mint(user_id="user-123", workspace_id=workspace_id)
@@ -112,9 +65,9 @@ class TestBillingHandoffSigner:
         assert claims["exp"] > claims["iat"]
 
     def test_wrong_public_key_rejects_signature(self) -> None:
-        private_pem, _ = _keypair()
-        _, other_public = _keypair()
-        signer = BillingHandoffSigner(settings=_settings(private_pem))
+        private_pem, _ = ed25519_keypair()
+        _, other_public = ed25519_keypair()
+        signer = BillingHandoffSigner(settings=handoff_settings(private_pem))
 
         minted = signer.mint(user_id="u", workspace_id=uuid4())
 
@@ -122,20 +75,20 @@ class TestBillingHandoffSigner:
             _decode(minted.token, other_public)
 
     def test_header_carries_alg_and_kid(self) -> None:
-        private_pem, _ = _keypair()
-        signer = BillingHandoffSigner(settings=_settings(private_pem, kid="rotate-2026"))
+        private_pem, _ = ed25519_keypair()
+        signer = BillingHandoffSigner(settings=handoff_settings(private_pem, kid="rotate-2026"))
 
         minted = signer.mint(user_id="u", workspace_id=uuid4())
 
-        header = _header(minted.token)
+        header = token_header(minted.token)
         assert header["alg"] == "EdDSA"
         assert header["typ"] == "JWT"
         assert header["kid"] == "rotate-2026"
         assert minted.kid == "rotate-2026"
 
     def test_exp_is_short_lived(self) -> None:
-        private_pem, _ = _keypair()
-        signer = BillingHandoffSigner(settings=_settings(private_pem, ttl=120))
+        private_pem, _ = ed25519_keypair()
+        signer = BillingHandoffSigner(settings=handoff_settings(private_pem, ttl=120))
 
         minted = signer.mint(user_id="u", workspace_id=uuid4())
 
@@ -151,26 +104,26 @@ class TestBillingHandoffSigner:
         # the old time.time() +/-2s window on a UTC CI runner could not.
         fixed = datetime(2026, 6, 27, 12, 0, 0)  # naive UTC
         monkeypatch.setattr("auth.billing_handoff.utcnow", lambda: fixed)
-        private_pem, _ = _keypair()
-        signer = BillingHandoffSigner(settings=_settings(private_pem, ttl=120))
+        private_pem, _ = ed25519_keypair()
+        signer = BillingHandoffSigner(settings=handoff_settings(private_pem, ttl=120))
 
         minted = signer.mint(user_id="u", workspace_id=uuid4())
 
-        payload = _payload(minted.token)
+        payload = token_payload(minted.token)
         expected_iat = calendar.timegm(fixed.timetuple())
         assert payload["iat"] == expected_iat
         assert payload["exp"] == expected_iat + 120
 
     def test_jti_is_unique_per_mint(self) -> None:
-        private_pem, _ = _keypair()
-        signer = BillingHandoffSigner(settings=_settings(private_pem))
+        private_pem, _ = ed25519_keypair()
+        signer = BillingHandoffSigner(settings=handoff_settings(private_pem))
 
         jtis = {signer.mint(user_id="u", workspace_id=uuid4()).jti for _ in range(25)}
         assert len(jtis) == 25
 
     def test_workspace_id_accepts_uuid_and_str_equivalently(self) -> None:
-        private_pem, public_pem = _keypair()
-        signer = BillingHandoffSigner(settings=_settings(private_pem))
+        private_pem, public_pem = ed25519_keypair()
+        signer = BillingHandoffSigner(settings=handoff_settings(private_pem))
         workspace_id = uuid4()
 
         from_uuid = signer.mint(user_id="u", workspace_id=workspace_id)
@@ -180,7 +133,7 @@ class TestBillingHandoffSigner:
             assert _decode(minted.token, public_pem)["workspace_id"] == str(workspace_id)
 
     def test_fail_closed_when_signing_key_unset(self) -> None:
-        signer = BillingHandoffSigner(settings=_settings(""))
+        signer = BillingHandoffSigner(settings=handoff_settings(""))
 
         with pytest.raises(BillingHandoffNotConfigured) as exc_info:
             signer.mint(user_id="u", workspace_id=uuid4())
@@ -191,8 +144,8 @@ class TestBillingHandoffSigner:
     def test_fail_closed_when_kid_unset(self) -> None:
         # A signing key without a kid breaks verifier-side rotation — fail closed
         # rather than mint an unrotatable token.
-        private_pem, _ = _keypair()
-        signer = BillingHandoffSigner(settings=_settings(private_pem, kid=""))
+        private_pem, _ = ed25519_keypair()
+        signer = BillingHandoffSigner(settings=handoff_settings(private_pem, kid=""))
 
         with pytest.raises(BillingHandoffNotConfigured):
             signer.mint(user_id="u", workspace_id=uuid4())
@@ -201,7 +154,9 @@ class TestBillingHandoffSigner:
         # A non-PEM / garbage key passes the non-blank is_configured check but
         # must fail closed (503) on import rather than raising a raw 500.
         signer = BillingHandoffSigner(
-            settings=_settings("-----BEGIN PRIVATE KEY-----\nnot-base64\n-----END PRIVATE KEY-----")
+            settings=handoff_settings(
+                "-----BEGIN PRIVATE KEY-----\nnot-base64\n-----END PRIVATE KEY-----"
+            )
         )
         with pytest.raises(BillingHandoffNotConfigured):
             signer.mint(user_id="u", workspace_id=uuid4())
@@ -210,16 +165,16 @@ class TestBillingHandoffSigner:
         # A PUBLIC-key PEM imports cleanly (kty=OKP) but cannot sign — the failure
         # surfaces at encode() time, NOT import. Must still fail closed (503),
         # never a raw 500. (Regression guard for the encode-outside-try bug.)
-        _, public_pem = _keypair()
-        signer = BillingHandoffSigner(settings=_settings(public_pem))
+        _, public_pem = ed25519_keypair()
+        signer = BillingHandoffSigner(settings=handoff_settings(public_pem))
         with pytest.raises(BillingHandoffNotConfigured):
             signer.mint(user_id="u", workspace_id=uuid4())
 
     def test_different_workspaces_produce_distinct_claims(self) -> None:
         # Guard against a memoized/closed-over workspace_id binding every token to
         # the first workspace.
-        private_pem, public_pem = _keypair()
-        signer = BillingHandoffSigner(settings=_settings(private_pem))
+        private_pem, public_pem = ed25519_keypair()
+        signer = BillingHandoffSigner(settings=handoff_settings(private_pem))
         ws1, ws2 = uuid4(), uuid4()
 
         c1 = _decode(signer.mint(user_id="u", workspace_id=ws1).token, public_pem)
@@ -232,8 +187,8 @@ class TestBillingHandoffSigner:
     def test_token_string_is_never_logged(self) -> None:
         # The token is a bearer credential — it must never reach a log sink. jti/kid
         # are non-secret identifiers and may be logged; the raw token must not be.
-        private_pem, _ = _keypair()
-        signer = BillingHandoffSigner(settings=_settings(private_pem))
+        private_pem, _ = ed25519_keypair()
+        signer = BillingHandoffSigner(settings=handoff_settings(private_pem))
 
         with patch("auth.billing_handoff.logger") as mock_logger:
             minted = signer.mint(user_id="u", workspace_id=uuid4())
@@ -243,13 +198,16 @@ class TestBillingHandoffSigner:
         assert minted.jti in logged  # sanity: the audit breadcrumb did fire
 
     def test_is_configured_reflects_key_and_kid(self) -> None:
-        private_pem, _ = _keypair()
-        assert BillingHandoffSigner(settings=_settings(private_pem)).is_configured is True
-        assert BillingHandoffSigner(settings=_settings("")).is_configured is False
-        assert BillingHandoffSigner(settings=_settings(private_pem, kid="")).is_configured is False
+        private_pem, _ = ed25519_keypair()
+        assert BillingHandoffSigner(settings=handoff_settings(private_pem)).is_configured is True
+        assert BillingHandoffSigner(settings=handoff_settings("")).is_configured is False
+        assert (
+            BillingHandoffSigner(settings=handoff_settings(private_pem, kid="")).is_configured
+            is False
+        )
 
     def test_whitespace_only_key_is_treated_as_unset(self) -> None:
-        signer = BillingHandoffSigner(settings=_settings("   \n  "))
+        signer = BillingHandoffSigner(settings=handoff_settings("   \n  "))
         assert signer.is_configured is False
         with pytest.raises(BillingHandoffNotConfigured):
             signer.mint(user_id="u", workspace_id=uuid4())
@@ -261,8 +219,8 @@ class TestOwnershipEpochClaim:
     ownership transfer bumps the epoch."""
 
     def test_mint_embeds_ownership_epoch_claim(self) -> None:
-        private_pem, public_pem = _keypair()
-        signer = BillingHandoffSigner(settings=_settings(private_pem))
+        private_pem, public_pem = ed25519_keypair()
+        signer = BillingHandoffSigner(settings=handoff_settings(private_pem))
 
         minted = signer.mint(user_id="u", workspace_id=uuid4(), ownership_epoch=7)
 
@@ -273,8 +231,8 @@ class TestOwnershipEpochClaim:
     def test_mint_defaults_epoch_to_zero(self) -> None:
         # Omitting ownership_epoch is the fail-safe floor (0): valid only while the
         # workspace is still at epoch 0 (never transferred).
-        private_pem, public_pem = _keypair()
-        signer = BillingHandoffSigner(settings=_settings(private_pem))
+        private_pem, public_pem = ed25519_keypair()
+        signer = BillingHandoffSigner(settings=handoff_settings(private_pem))
 
         minted = signer.mint(user_id="u", workspace_id=uuid4())
 
@@ -282,8 +240,8 @@ class TestOwnershipEpochClaim:
         assert minted.ownership_epoch == 0
 
     def test_verify_accepts_equal_epoch(self) -> None:
-        private_pem, public_pem = _keypair()
-        s = _settings(private_pem)
+        private_pem, public_pem = ed25519_keypair()
+        s = handoff_settings(private_pem)
         signer = BillingHandoffSigner(settings=s)
         minted = signer.mint(user_id="u", workspace_id=uuid4(), ownership_epoch=3)
 
@@ -300,8 +258,8 @@ class TestOwnershipEpochClaim:
     def test_verify_rejects_stale_epoch_after_transfer(self) -> None:
         # The acceptance criterion: a token minted at epoch N is rejected once the
         # workspace epoch advances to N+1 (ownership transferred away).
-        private_pem, public_pem = _keypair()
-        s = _settings(private_pem)
+        private_pem, public_pem = ed25519_keypair()
+        s = handoff_settings(private_pem)
         minted = BillingHandoffSigner(settings=s).mint(
             user_id="u", workspace_id=uuid4(), ownership_epoch=3
         )
@@ -320,8 +278,8 @@ class TestOwnershipEpochClaim:
     def test_verify_missing_epoch_claim_treated_as_zero(self) -> None:
         # Backward-compat: a token minted before #1100 (no epoch claim) is treated
         # as epoch 0 — valid pre-transfer, rejected once any transfer bumps to >=1.
-        private_pem, public_pem = _keypair()
-        s = _settings(private_pem)
+        private_pem, public_pem = ed25519_keypair()
+        s = handoff_settings(private_pem)
         payload = {
             "iss": s.billing_handoff_issuer,
             "aud": s.billing_handoff_audience,
@@ -357,8 +315,8 @@ class TestOwnershipEpochClaim:
 
     def test_verify_rejects_wrong_audience(self) -> None:
         # The reference verifier still enforces the standard binding, not just epoch.
-        private_pem, public_pem = _keypair()
-        s = _settings(private_pem)
+        private_pem, public_pem = ed25519_keypair()
+        s = handoff_settings(private_pem)
         minted = BillingHandoffSigner(settings=s).mint(
             user_id="u", workspace_id=uuid4(), ownership_epoch=1
         )
@@ -375,8 +333,8 @@ class TestOwnershipEpochClaim:
     def test_mint_logs_ownership_epoch(self) -> None:
         # The epoch is the field the staleness gate keys on — it must be in the
         # issuance audit breadcrumb so a transfer dispute is reconstructable.
-        private_pem, _ = _keypair()
-        signer = BillingHandoffSigner(settings=_settings(private_pem))
+        private_pem, _ = ed25519_keypair()
+        signer = BillingHandoffSigner(settings=handoff_settings(private_pem))
 
         with patch("auth.billing_handoff.logger") as mock_logger:
             signer.mint(user_id="u", workspace_id=uuid4(), ownership_epoch=9)
@@ -414,8 +372,8 @@ class TestVerifierHardening:
     def test_verify_rejects_token_missing_exp_claim(self) -> None:
         # exp is essential — a token with no exp would otherwise never expire,
         # and the epoch gate does not compensate within the same generation.
-        private_pem, public_pem = _keypair()
-        s = _settings(private_pem)
+        private_pem, public_pem = ed25519_keypair()
+        s = handoff_settings(private_pem)
         payload = _base_payload(s)
         payload.pop("exp")
 
@@ -429,8 +387,8 @@ class TestVerifierHardening:
             )
 
     def test_verify_rejects_expired_token(self) -> None:
-        private_pem, public_pem = _keypair()
-        s = _settings(private_pem)
+        private_pem, public_pem = ed25519_keypair()
+        s = handoff_settings(private_pem)
         past = calendar.timegm(datetime(2020, 1, 1).timetuple())
 
         with pytest.raises(BillingHandoffInvalid):
@@ -445,8 +403,8 @@ class TestVerifierHardening:
     def test_verify_rejects_non_numeric_epoch_as_invalid_not_500(self) -> None:
         # A validly-signed but cross-impl token with a non-numeric epoch must
         # surface as BILLING-004, never an unhandled coercion error (500).
-        private_pem, public_pem = _keypair()
-        s = _settings(private_pem)
+        private_pem, public_pem = ed25519_keypair()
+        s = handoff_settings(private_pem)
 
         with pytest.raises(BillingHandoffInvalid):
             verify_handoff_token(
@@ -460,8 +418,8 @@ class TestVerifierHardening:
     def test_verify_rejects_tampered_signature(self) -> None:
         # The verifier's core promise: a tampered token raises BillingHandoffInvalid
         # (not a raw authlib error) — regression guard for the decode try/except.
-        private_pem, public_pem = _keypair()
-        s = _settings(private_pem)
+        private_pem, public_pem = ed25519_keypair()
+        s = handoff_settings(private_pem)
         minted = BillingHandoffSigner(settings=s).mint(
             user_id="u", workspace_id=uuid4(), ownership_epoch=1
         )

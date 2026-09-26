@@ -21,36 +21,36 @@ discarded after minting.
 
 from __future__ import annotations
 
-import base64
 import calendar
-import json
 import re
 import warnings
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, generate_private_key
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from joserfc import jwt
-from joserfc.errors import UnsupportedAlgorithmError
-from joserfc.jwk import ECKey, OKPKey
+from joserfc.errors import SecurityWarning, UnsupportedAlgorithmError
+from joserfc.jwk import OKPKey
 
 from auth.billing_handoff import (
     BillingHandoffInvalid,
     BillingHandoffSigner,
     BillingHandoffStale,
+    _silence_eddsa_name_warning,
     verify_handoff_token,
+)
+
+from ._billing_handoff_helpers import (
+    AUDIENCE,
+    ISSUER,
+    ed25519_keypair,
+    handoff_settings,
+    token_header,
 )
 
 # backend/tests/auth/test_billing_handoff_joserfc.py -> auth -> tests -> backend
 _SRC = Path(__file__).resolve().parents[2] / "src"
-
-_ISSUER = "kagura-memory-cloud"
-_AUDIENCE = "kagura-billing"
 
 # Minted by the authlib.jose implementation (commit before #1708) with
 # utcnow() pinned to 2026-06-27T12:00:00Z, jti pinned, exp = 2099-01-01.
@@ -65,8 +65,8 @@ _GOLDEN_TOKEN = (
 )
 _GOLDEN_HEADER = {"alg": "EdDSA", "typ": "JWT", "kid": "golden-2026"}
 _GOLDEN_CLAIMS = {
-    "iss": _ISSUER,
-    "aud": _AUDIENCE,
+    "iss": ISSUER,
+    "aud": AUDIENCE,
     "sub": "user-golden",
     "workspace_id": "0d3f6a2e-1b4c-4e8f-9a7d-2c5e8f1a3b6c",
     "role": "owner",
@@ -77,40 +77,7 @@ _GOLDEN_CLAIMS = {
 }
 
 
-def _ed25519_keypair() -> tuple[str, str]:
-    priv = Ed25519PrivateKey.generate()
-    private_pem = priv.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode()
-    public_pem = (
-        priv.public_key()
-        .public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        .decode()
-    )
-    return private_pem, public_pem
-
-
-def _settings(signing_key: str, *, kid: str = "kid-1", ttl: int = 120) -> SimpleNamespace:
-    return SimpleNamespace(
-        billing_handoff_signing_key=signing_key,
-        billing_handoff_key_id=kid,
-        billing_handoff_issuer=_ISSUER,
-        billing_handoff_audience=_AUDIENCE,
-        billing_handoff_ttl_seconds=ttl,
-    )
-
-
-def _segment(token: str, index: int) -> dict:
-    segment = token.split(".")[index]
-    return json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4)))
-
-
-def _authlib_jose():
+def _authlib_jose() -> tuple[type, type]:
     """Import the deprecated module without tripping the suite-wide error filter.
 
     The whole point of #1708 is that nothing in ``backend/src`` imports
@@ -129,11 +96,11 @@ class TestGoldenVector:
             _GOLDEN_TOKEN,
             _GOLDEN_PUBLIC_PEM,
             current_epoch=2,
-            issuer=_ISSUER,
-            audience=_AUDIENCE,
+            issuer=ISSUER,
+            audience=AUDIENCE,
         )
         assert claims == _GOLDEN_CLAIMS
-        assert _segment(_GOLDEN_TOKEN, 0) == _GOLDEN_HEADER
+        assert token_header(_GOLDEN_TOKEN) == _GOLDEN_HEADER
 
     def test_token_minted_by_authlib_still_goes_stale(self) -> None:
         # The epoch gate runs after signature/claims on the old token too.
@@ -142,8 +109,8 @@ class TestGoldenVector:
                 _GOLDEN_TOKEN,
                 _GOLDEN_PUBLIC_PEM,
                 current_epoch=3,
-                issuer=_ISSUER,
-                audience=_AUDIENCE,
+                issuer=ISSUER,
+                audience=AUDIENCE,
             )
 
     def test_token_minted_by_authlib_rejects_wrong_audience(self) -> None:
@@ -152,7 +119,7 @@ class TestGoldenVector:
                 _GOLDEN_TOKEN,
                 _GOLDEN_PUBLIC_PEM,
                 current_epoch=2,
-                issuer=_ISSUER,
+                issuer=ISSUER,
                 audience="someone-else",
             )
 
@@ -163,12 +130,15 @@ class TestCrossImplementation:
     @staticmethod
     def _mint_both(private_pem: str) -> tuple[str, str]:
         fixed = datetime(2026, 6, 27, 12, 0, 0)  # naive UTC, as utcnow() returns
+        # secrets.token_urlsafe is patched on the stdlib module itself (the
+        # signer has no local alias), so it is process-wide for this block;
+        # nothing else mints inside it.
         with (
             patch("auth.billing_handoff.utcnow", lambda: fixed),
-            patch("auth.billing_handoff.secrets.token_urlsafe", lambda _nbytes: "fixed-jti"),
+            patch("secrets.token_urlsafe", lambda nbytes: "fixed-jti"),
         ):
             ours = (
-                BillingHandoffSigner(settings=_settings(private_pem, kid="rotate-1"))
+                BillingHandoffSigner(settings=handoff_settings(private_pem, kid="rotate-1"))
                 .mint(user_id="user-1", workspace_id="ws-1", ownership_epoch=5)
                 .token
             )
@@ -176,8 +146,8 @@ class TestCrossImplementation:
         iat = calendar.timegm(fixed.timetuple())
         header = {"alg": "EdDSA", "typ": "JWT", "kid": "rotate-1"}
         payload = {
-            "iss": _ISSUER,
-            "aud": _AUDIENCE,
+            "iss": ISSUER,
+            "aud": AUDIENCE,
             "sub": "user-1",
             "workspace_id": "ws-1",
             "role": "owner",
@@ -191,7 +161,7 @@ class TestCrossImplementation:
         return ours, theirs.decode() if isinstance(theirs, bytes) else theirs
 
     def test_joserfc_minter_reproduces_authlib_bytes(self) -> None:
-        private_pem, _ = _ed25519_keypair()
+        private_pem, _ = ed25519_keypair()
 
         ours, theirs = self._mint_both(private_pem)
 
@@ -200,7 +170,7 @@ class TestCrossImplementation:
         assert ours == theirs
 
     def test_joserfc_minted_token_verifies_under_authlib(self) -> None:
-        private_pem, public_pem = _ed25519_keypair()
+        private_pem, public_pem = ed25519_keypair()
         JsonWebKey, JsonWebToken = _authlib_jose()
 
         ours, _ = self._mint_both(private_pem)
@@ -209,43 +179,56 @@ class TestCrossImplementation:
         claims.validate(now=calendar.timegm(datetime(2026, 6, 27, 12, 0, 30).timetuple()))
         assert claims["sub"] == "user-1"
         assert claims["epoch"] == 5
-        assert _segment(ours, 0) == {"alg": "EdDSA", "typ": "JWT", "kid": "rotate-1"}
+        assert token_header(ours) == {"alg": "EdDSA", "typ": "JWT", "kid": "rotate-1"}
 
 
 class TestAlgorithmAllowList:
     def test_verifier_rejects_a_valid_signature_under_another_algorithm(self) -> None:
-        # A token correctly signed with ES256, presented with its own EC public
-        # key, must still be refused: the verifier accepts EdDSA only, whatever
-        # the header says (#183 algorithm-confusion guard, carried over).
-        ec_private = generate_private_key(SECP256R1())
-        ec_public_pem = (
-            ec_private.public_key()
-            .public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo,
-            )
-            .decode()
-        )
-        claims = dict(_GOLDEN_CLAIMS)
+        # The same Ed25519 key signs a token whose header says alg="Ed25519"
+        # (the RFC 9864 name, which joserfc also implements). The signature is
+        # valid for the key, so only the verifier's allow-list can refuse it
+        # (#183 algorithm-confusion guard, carried over).
+        private_pem, public_pem = ed25519_keypair()
         token = jwt.encode(
-            {"alg": "ES256", "typ": "JWT", "kid": "ec"},
-            claims,
-            ECKey.import_key(ec_private),
-            algorithms=["ES256"],
+            {"alg": "Ed25519", "typ": "JWT", "kid": "kid-1"},
+            dict(_GOLDEN_CLAIMS),
+            OKPKey.import_key(private_pem),
+            algorithms=["Ed25519"],
         )
 
         with pytest.raises(BillingHandoffInvalid):
             verify_handoff_token(
                 token,
-                ec_public_pem,
+                public_pem,
                 current_epoch=2,
-                issuer=_ISSUER,
-                audience=_AUDIENCE,
+                issuer=ISSUER,
+                audience=AUDIENCE,
+            )
+
+    def test_eddsa_name_warning_is_silenced(self) -> None:
+        # The module installs the filter at import, but pytest gives every test
+        # a fresh filter list. Re-install it under "error" and prove a mint and
+        # a verify raise nothing: if joserfc rewords the message, the module
+        # regex stops matching and this test fails instead of the API process
+        # starting to warn.
+        private_pem, public_pem = ed25519_keypair()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SecurityWarning)
+            _silence_eddsa_name_warning()
+            minted = BillingHandoffSigner(settings=handoff_settings(private_pem)).mint(
+                user_id="u", workspace_id="w"
+            )
+            verify_handoff_token(
+                minted.token,
+                public_pem,
+                current_epoch=0,
+                issuer=ISSUER,
+                audience=AUDIENCE,
             )
 
     def test_minted_token_verifies_only_as_eddsa(self) -> None:
-        private_pem, public_pem = _ed25519_keypair()
-        minted = BillingHandoffSigner(settings=_settings(private_pem)).mint(
+        private_pem, public_pem = ed25519_keypair()
+        minted = BillingHandoffSigner(settings=handoff_settings(private_pem)).mint(
             user_id="u", workspace_id="w"
         )
 
@@ -264,7 +247,12 @@ class TestNoAuthlibJoseInSource:
         # Acceptance for #1708. The suite-wide filterwarnings entry in
         # pyproject.toml turns the deprecation into an error as well, but a
         # lazily imported module would only trip that when its test runs.
-        pattern = re.compile(r"^\s*(from|import)\s+authlib\.jose\b", re.MULTILINE)
+        pattern = re.compile(
+            r"^\s*(from|import)\s+authlib\.jose\b"
+            r"|^\s*from\s+authlib\s+import\b.*\bjose\b"
+            r"|(import_module|__import__)\(\s*[\"']authlib\.jose",
+            re.MULTILINE,
+        )
         offenders = [
             str(path.relative_to(_SRC))
             for path in sorted(_SRC.rglob("*.py"))
