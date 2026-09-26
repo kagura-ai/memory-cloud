@@ -119,7 +119,9 @@ _FIXED_POINT = (
             r"\b(?:every|each|per)\s+(?:\d+\s+|other\s+)?" + _EVENT,
             # after each task, before ending the session, at the end of your session
             r"\b(?:after|before|(?:at|by|near|towards?) the (?:end|start|close|conclusion) of"
-            r"|end of)\s+(?:(?:ending|closing|finishing|completing|leaving)\s+)?" + _DET + _EVENT,
+            + r"|end of)\s+(?:(?:ending|closing|finishing|completing|leaving)\s+)?"
+            + _DET
+            + _EVENT,
             # at session end
             r"\b(?:at|by)\s+" + _EVENT + r"\s+(?:end|close|exit)\b",
             # when the session ends, once the task is done
@@ -127,10 +129,10 @@ _FIXED_POINT = (
             + _DET
             + _EVENT
             + r"\s+(?:ends|is (?:over|done|finished|complete|closing|ending)|finishes|closes"
-            r"|completes)",
+            + r"|completes)",
             # whenever you finish, before you finish
             r"\b(?:when|whenever|once|after|before)\s+you(?:'re| are)?\s+"
-            r"(?:finish|complete|end|close|leave|wrap up|done)",
+            + r"(?:finish|complete|end|close|leave|wrap up|done)",
             # as you go, along the way
             r"\bas you (?:go|work)\b|\balong the way\b",
             # after recall(), after every recall()
