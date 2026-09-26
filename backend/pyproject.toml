@@ -31,7 +31,7 @@ dependencies = [
     "pydantic-settings>=2.6.0",
 
     # Database (PostgreSQL)
-    "sqlalchemy>=2.0.0,<2.1",  # 2.1 changes the default PostgreSQL driver and typing (#1695)
+    "sqlalchemy[asyncio]>=2.1.0,<2.2",  # 2.1 verified (#1695), bump deliberately; [asyncio] = greenlet
     "asyncpg>=0.29.0",         # Async PostgreSQL driver
     "psycopg2-binary>=2.9.0",  # Sync PostgreSQL driver (OAuth2 server only)
     "alembic>=1.13.0",

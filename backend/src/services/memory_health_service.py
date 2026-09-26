@@ -444,7 +444,10 @@ class MemoryHealthService:
             )
             .group_by(NeuralMemoryEdge.context_id)
         )
-        violations = {cid: int(count or 0) for cid, count in violation_rows.all()}
+        # Same key space as ``edges_by_scope`` / ``memories`` (``None`` = unscoped).
+        violations: dict[uuid.UUID | None, int] = {
+            cid: int(count or 0) for cid, count in violation_rows.all()
+        }
 
         memory_rows = await self.db.execute(
             select(Memory.context_id, func.count(Memory.id))

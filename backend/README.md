@@ -121,13 +121,13 @@ backend/
 
 ## Technology Stack
 
-- **Web Framework**: FastAPI 0.115+
+- **Web Framework**: FastAPI 0.133+
 - **ASGI Server**: Uvicorn
-- **Database**: PostgreSQL 18+ (SQLAlchemy + asyncpg; CI/local/production all run the digest-pinned 18.4 — the 15→18 migration record lives in `docs/ops/postgres-18-migration-runbook.md`)
+- **Database**: PostgreSQL 18+ (SQLAlchemy 2.1 + asyncpg; CI/local/production all run the digest-pinned 18.4 — the 15→18 migration record lives in `docs/ops/postgres-18-migration-runbook.md`)
 - **Vector DB**: Qdrant 1.15+
 - **Cache**: Redis 7+
 - **Graph Memory**: NetworkX 3.0+
-- **Authentication**: OAuth2 (Authlib) + JWT (python-jose)
+- **Authentication**: OAuth2 and JWT (Authlib 1.8)
 - **LLM APIs**: OpenAI (embeddings), Cohere (reranking)
 - **Testing**: pytest, pytest-asyncio, pytest-cov
 - **Type Checking**: Pyright

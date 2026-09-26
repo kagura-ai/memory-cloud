@@ -1053,8 +1053,9 @@ class NeuralEdgeRepository:
         if context_id:
             conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
 
-        # Union of src_id and dst_id with counts
-        stmt = (
+        # Union of src_id and dst_id with counts, as an explicit subquery: the
+        # implicit ``CompoundSelect.c`` shortcut is gone in SQLAlchemy 2.1 (#1695).
+        degrees = (
             select(
                 NeuralMemoryEdge.src_id.label("node_id"),
                 func.count().label("degree"),
@@ -1069,15 +1070,15 @@ class NeuralEdgeRepository:
                 .where(and_(*conditions))
                 .group_by(NeuralMemoryEdge.dst_id)
             )
-        )
+        ).subquery()
 
         # Aggregate union results
         final_stmt = (
             select(
-                stmt.c.node_id,
-                func.sum(stmt.c.degree).label("total_degree"),
+                degrees.c.node_id,
+                func.sum(degrees.c.degree).label("total_degree"),
             )
-            .group_by(stmt.c.node_id)
+            .group_by(degrees.c.node_id)
             .order_by(desc("total_degree"))
             .limit(limit)
         )

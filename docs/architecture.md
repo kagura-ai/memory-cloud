@@ -510,13 +510,13 @@ The admin-configurable signup gate (`backend/src/services/signup_gate_service.py
 
 | Layer | Technology | Version |
 |-------|-----------|---------|
-| **Backend** | FastAPI | 0.115+ |
+| **Backend** | FastAPI | 0.133+ |
 | **Database** | PostgreSQL | 18+ |
 | **Vector DB** | Qdrant | 1.15+ |
 | **Cache** | Redis | 7+ |
 | **Frontend** | Next.js | 16 |
-| **ORM** | SQLAlchemy | 2.0+ (async) |
-| **Auth** | Authlib | 1.3+ |
+| **ORM** | SQLAlchemy | 2.1 (async) |
+| **Auth** | Authlib | 1.8 |
 | **AI** | OpenAI API | Latest |
 | **Reranking** | Cohere API | Latest |
 | **Graph** | NetworkX | 3.0+ |

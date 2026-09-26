@@ -1391,7 +1391,7 @@ class DedupMergePhase:
                 NeuralMemoryEdge.dst_id.in_(all_ids),
             )
         )
-        settled = {tuple(sorted((src, dst), key=str)) for src, dst in rows.all()}
+        settled = {_pair_key(src, dst) for src, dst in rows.all()}
         # #1232: remember WHICH pairs are settled, not just how many were
         # filtered — the judge can re-nominate a settled pair via
         # third-party co-clustering, and the merge loop must recognize it
@@ -1399,9 +1399,7 @@ class DedupMergePhase:
         self._settled_pair_keys = settled
         if not settled:
             return pairs, 0
-        remaining = [
-            (a, b, s) for a, b, s in pairs if tuple(sorted((a, b), key=str)) not in settled
-        ]
+        remaining = [(a, b, s) for a, b, s in pairs if _pair_key(a, b) not in settled]
         return remaining, len(pairs) - len(remaining)
 
     async def _execute_merge(
