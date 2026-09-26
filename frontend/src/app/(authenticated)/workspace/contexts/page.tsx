@@ -792,7 +792,7 @@ export default function ContextsPage() {
               </p>
             </div>
 
-            {/* Summary for AI */}
+            {/* Summary: a short note on what the context is for (#1716) */}
             <div className="space-y-2">
               <label className={cn(typography.bodySmall, "font-medium")}>
                 {t("summaryForAI")}{" "}

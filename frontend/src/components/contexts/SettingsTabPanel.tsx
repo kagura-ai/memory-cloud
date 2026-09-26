@@ -538,7 +538,7 @@ export function SettingsTabPanel({
           </CardContent>
         </Card>
 
-        {/* AI Configuration */}
+        {/* About this context: summary and usage guide notes (#1716) */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
