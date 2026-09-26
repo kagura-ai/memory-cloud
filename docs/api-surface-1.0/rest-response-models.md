@@ -1681,7 +1681,7 @@ Notes:
 
 ### UpdateMemberContextAccessRequest (BaseModel, L299) (request model)
 > Request model for updating member's context access.
-- `allowed_context_ids: list[str] | None` — optional
+- `allowed_context_ids: list[UUID] | None` — optional (#1693: was `list[str]`; an entry that is not a UUID is a 422 `VAL-001` instead of a 500. `POST /workspaces/{id}/invitations` — `WorkspaceInvitationCreate` in `models/schemas.py` — types its `allowed_context_ids` the same way.)
 
 ## Follow-up candidates
 

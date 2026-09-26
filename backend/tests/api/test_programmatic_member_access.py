@@ -78,6 +78,7 @@ class TestOAuthRejected:
         _override_user(_oauth_user())
         r = client.get(f"/api/v1/workspaces/{_WS}/members")
         assert r.status_code == 403
+        _assert_oauth_refusal(r)
 
     def test_create_invitation_oauth_403(self, client):
         _override_user(_oauth_user())
@@ -86,6 +87,17 @@ class TestOAuthRejected:
             json={"email": "x@example.com", "role": "member"},
         )
         assert r.status_code == 403
+        _assert_oauth_refusal(r)
+
+
+def _assert_oauth_refusal(resp) -> None:
+    # #1693: both SDKs drop any server message containing "bearer" (it could
+    # echo a credential), so the refusal says "access tokens" to reach users.
+    assert resp.json()["message"] == (
+        "OAuth access tokens cannot manage workspace members or credentials. "
+        "Use a workspace-owner API key."
+    )
+    assert "bearer" not in resp.text.lower()
 
 
 class TestApiKeyConfinement:

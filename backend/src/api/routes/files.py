@@ -24,6 +24,7 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from services.file_storage_service import FileStorageService
 from services.permission_service import PermissionService
+from utils.exceptions import DuplicateFileError
 from utils.hashing import SHA256_HEX_PATTERN
 from utils.logger import get_logger
 
@@ -153,7 +154,22 @@ async def _enforce_workspace_membership(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/reserve", response_model=FileReserveResponse, status_code=201)
+@router.post(
+    "/reserve",
+    response_model=FileReserveResponse,
+    status_code=201,
+    responses={
+        409: {
+            "description": (
+                "The workspace already holds an active file with this sha256 "
+                "(`RES-002`). When that file is in the same context as the request "
+                "(both unbound counts as the same) and its upload has completed "
+                "(`status` `uploaded`), the body also carries it as a top-level "
+                "`existing_file` object; otherwise it is omitted."
+            ),
+        },
+    },
+)
 async def reserve_upload(
     body: FileReserveRequest,
     user: APIKeyOrSessionUser,
@@ -163,20 +179,31 @@ async def reserve_upload(
 
     The client computes the sha256 ahead of time so the server can dedup
     against the active set on this workspace. Repeated calls with the
-    same sha256 from the same workspace return 409 with the existing
-    ``file_id`` (idempotent — the SDK can use the existing one).
+    same sha256 from the same workspace return 409; when the existing file
+    is in the same context as the request and is ``uploaded``, the 409 body
+    carries it as a top-level ``existing_file`` (``FileObjectOut``) so the
+    SDK can use it instead of uploading again (#1693). An earlier upload
+    that has not completed (``reserved``) is not handed out, and a
+    duplicate in another context names no file (#1136).
     """
     await _enforce_workspace_membership(db, user, body.workspace_id)
     service = FileStorageService(db)
-    result = await service.reserve_upload(
-        workspace_id=body.workspace_id,
-        created_by=str(user.get("user_id", "")),
-        filename=body.filename,
-        content_type=body.content_type,
-        size_bytes=body.size_bytes,
-        sha256=body.sha256.lower(),
-        context_id=body.context_id,
-    )
+    try:
+        result = await service.reserve_upload(
+            workspace_id=body.workspace_id,
+            created_by=str(user.get("user_id", "")),
+            filename=body.filename,
+            content_type=body.content_type,
+            size_bytes=body.size_bytes,
+            sha256=body.sha256.lower(),
+            context_id=body.context_id,
+        )
+    except DuplicateFileError as exc:
+        # Serialized here, with the model every other files response uses;
+        # the global handler adds it to the 409 body.
+        if exc.existing is not None:
+            exc.existing_file = FileObjectOut.model_validate(exc.existing).model_dump(mode="json")
+        raise
     return FileReserveResponse(
         file_id=result.file_id,
         upload_url=result.upload_url,

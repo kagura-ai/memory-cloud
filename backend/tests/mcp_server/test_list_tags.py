@@ -172,9 +172,7 @@ class TestHandleListTagsErrorSurface:
         """NotFoundException from the service → context_not_found error response."""
         _, mock_get_db = _mock_db_context()
         mock_service = MagicMock(
-            aggregate_tags=AsyncMock(
-                side_effect=NotFoundException(f"Context not found: {context_id}")
-            )
+            aggregate_tags=AsyncMock(side_effect=NotFoundException("Context", str(context_id)))
         )
 
         with (

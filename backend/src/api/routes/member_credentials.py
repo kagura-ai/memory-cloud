@@ -64,11 +64,13 @@ def _reject_oauth(user: dict, action: str) -> None:
     Every ``kagura auth login`` device token carries ``memory:read
     memory:write``, so accepting OAuth here would silently turn every user's
     MCP token into a credential-management credential. One helper keeps the
-    policy message consistent across the three credential endpoints.
+    policy message consistent across the three credential endpoints. The
+    message says "access tokens", not "bearer": both SDKs drop any server
+    message containing that word, which hid this refusal (#1693).
     """
     if is_oauth_principal(user):
         raise AuthorizationError(
-            message=f"OAuth bearer tokens cannot {action}. Use a workspace-owner API key."
+            message=f"OAuth access tokens cannot {action}. Use a workspace-owner API key."
         )
 
 

@@ -190,6 +190,29 @@ class ConflictError(MemoryCloudException):
         super().__init__(message, status_code=409, error_code="RES-002", **details)
 
 
+class DuplicateFileError(ConflictError):
+    """The workspace already holds an active file with this sha256 (409, ``RES-002``).
+
+    Raised by ``FileStorageService.reserve_upload`` on the per-workspace dedup
+    conflict. ``existing`` is the conflicting ``FileObject`` row, or ``None``
+    when the caller may not learn about it or may not reuse it: #1136 discloses
+    only a row bound to the SAME context as the upload (both unbound counts as
+    the same), and only an ``uploaded`` row is reusable — a ``reserved`` row
+    has no stored bytes yet.
+
+    ``existing_file`` is that row in the files API's JSON shape, filled in by
+    ``POST /files/reserve`` (#1693). The global handler sends it as a TOP-LEVEL
+    ``existing_file`` key beside ``error`` / ``message`` / ``details`` — where
+    the released SDKs read a dedup hit — and ``details`` stays empty, so no
+    other 409 body changes. ``existing`` itself is never serialized.
+    """
+
+    def __init__(self, message: str, *, existing: Any | None = None) -> None:
+        super().__init__(message)
+        self.existing = existing
+        self.existing_file: dict[str, Any] | None = None
+
+
 class ConfigReadOnlyError(MemoryCloudException):
     """A write to the environment console was refused (409).
 

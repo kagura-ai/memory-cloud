@@ -166,7 +166,7 @@ async def plan_context_migration(
     )
     context = result.scalar_one_or_none()
     if context is None:
-        raise NotFoundException(f"Context not found: {context_id}")
+        raise NotFoundException("Context", str(context_id))
 
     current_model, current_dimensions = await resolve_context_embedding(db, context_id)
     if source_model is None:

@@ -216,7 +216,7 @@ async def revoke_share_key(
     user_id = get_user_id(user)
     revoked = await manager.revoke_key(key_id=key_id, user_id=user_id)
     if not revoked:
-        raise NotFoundException("Share key not found or not owned by you")
+        raise NotFoundException("Share key")
     await db.commit()
 
 

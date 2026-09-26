@@ -1483,7 +1483,11 @@ class WorkspaceInvitationCreate(BaseModel):
         le=365,
         description="Days until expiration (7/30/90/365 or null=never)",
     )
-    allowed_context_ids: list[str] | None = Field(
+    # #1693: typed as UUIDs so an entry that is not one is a canonical 422
+    # (VAL-001) at the request boundary instead of a 500 from an unguarded
+    # ``UUID(...)`` in the route. Every spelling ``uuid.UUID`` accepts
+    # (uppercase, braced, dashless, urn:uuid:) parses to the same id.
+    allowed_context_ids: list[UUID] | None = Field(
         None,
         description="Context IDs to allow (required for member/viewer, minimum 1)",
     )

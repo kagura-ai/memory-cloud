@@ -409,7 +409,7 @@ class WorkspaceService:
         workspace = result.scalar_one_or_none()
 
         if not workspace:
-            raise NotFoundException(f"Workspace not found: {workspace_id}")
+            raise NotFoundException("Workspace", str(workspace_id))
 
         return workspace
 
@@ -647,7 +647,7 @@ class WorkspaceService:
         member = result.scalar_one_or_none()
 
         if not member and raise_if_not_found:
-            raise NotFoundException(f"Member not found: {user_id} in workspace {workspace_id}")
+            raise NotFoundException("Member", f"{user_id} in workspace {workspace_id}")
 
         return member
 
@@ -700,7 +700,7 @@ class WorkspaceService:
         if member is None:
             # get_member raises by default; narrow for pyright + any future
             # call site that passes raise_if_not_found=False.
-            raise NotFoundException(f"Member not found: {user_id} in workspace {workspace_id}")
+            raise NotFoundException("Member", f"{user_id} in workspace {workspace_id}")
 
         # #1102: a role change that ADDS or REMOVES an OWNER must serialize on the
         # workspace row with the other owner-mutating paths (transfer_ownership,
@@ -805,7 +805,7 @@ class WorkspaceService:
         if member is None:
             # get_member raises by default; narrow for pyright + any future
             # call site that passes raise_if_not_found=False.
-            raise NotFoundException(f"Member not found: {user_id} in workspace {workspace_id}")
+            raise NotFoundException("Member", f"{user_id} in workspace {workspace_id}")
 
         # Warn if setting on owner/admin (no effect)
         if (
@@ -1160,7 +1160,7 @@ class WorkspaceService:
         )
         context = context_result.scalar_one_or_none()
         if not context:
-            raise NotFoundException(f"Context {context_id} not found")
+            raise NotFoundException("Context", str(context_id))
 
         # Aggregate daily usage
         daily_stats_stmt = (
@@ -1233,7 +1233,7 @@ class WorkspaceService:
         )
         context = context_result.scalar_one_or_none()
         if not context:
-            raise NotFoundException(f"Context {context_id} not found")
+            raise NotFoundException("Context", str(context_id))
 
         # Aggregate per-user activity
         user_stats_stmt = (
@@ -1318,7 +1318,7 @@ class WorkspaceService:
         )
         workspace = workspace_result.scalar_one_or_none()
         if not workspace:
-            raise NotFoundException(f"Workspace {workspace_id} not found")
+            raise NotFoundException("Workspace", str(workspace_id))
 
         # Workspace boundary via the workspace's own contexts (Issue #822).
         # Scoping by membership (``Memory.user_id.in_(member_ids)``) leaked

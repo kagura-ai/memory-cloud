@@ -723,7 +723,7 @@ Call it at session start and after switching contexts. `context.usage_guide` is 
 
 ### Files
 
-Uploads go to platform-managed object storage (Cloudflare R2) in three steps: `init_file_upload` reserves quota atomically and returns a presigned PUT URL; the client PUTs the bytes; `complete_file_upload` verifies the stored object against the declared sha256 and size and moves the file from `reserved` to `uploaded`. The per-file cap is 100 MiB. Sending the same sha256 twice in one workspace returns a `conflict` that names the existing `file_id`. `delete_file` releases the quota immediately; the binary lingers for 7 days before the nightly sweeper removes it, with no client-visible effect.
+Uploads go to platform-managed object storage (Cloudflare R2) in three steps: `init_file_upload` reserves quota atomically and returns a presigned PUT URL; the client PUTs the bytes; `complete_file_upload` verifies the stored object against the declared sha256 and size and moves the file from `reserved` to `uploaded`. The per-file cap is 100 MiB. Sending the same sha256 twice in one workspace returns a `conflict`; its message names the existing `file_id` (`reuse file_id=<id>`) when that file is in the same context as the upload (both unbound counts as the same) and its upload has completed, says `an earlier upload of this file has not completed yet` when it is in the same context but still `reserved`, and names no file when it is bound to another context. Over REST, the 409 that names the file also carries it as a top-level `existing_file` object. `delete_file` releases the quota immediately; the binary lingers for 7 days before the nightly sweeper removes it, with no client-visible effect.
 
 ### Resources and connectors
 

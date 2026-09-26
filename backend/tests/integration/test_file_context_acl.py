@@ -33,7 +33,12 @@ from models.auth import Context, Workspace, WorkspaceMember
 from models.file_objects import FileObject
 from services.file_storage_service import FileStorageService
 from tests.storage._fakes import FakeBlobStorage
-from utils.exceptions import AuthorizationError, NotFoundException, ValidationError
+from utils.exceptions import (
+    AuthorizationError,
+    DuplicateFileError,
+    NotFoundException,
+    ValidationError,
+)
 
 OWNER = "owner-1136"
 MEMBER = "member-1136"  # creator of the private context
@@ -244,6 +249,75 @@ async def test_reserve_rejects_context_from_another_workspace(scenario, db_sessi
             text("DELETE FROM workspace_members WHERE workspace_id = :w"), {"w": str(other_ws)}
         )
         await db_session.execute(text("DELETE FROM workspaces WHERE id = :w"), {"w": str(other_ws)})
+
+
+async def test_duplicate_reserve_names_the_existing_file_only_in_its_context(db_session):
+    """#1693: a duplicate reserve raises ``DuplicateFileError`` carrying the existing
+    row when it is in the same context as the upload, and no row across contexts
+    (#1136).
+
+    This needs the real database: the unique violation fails the INSERT, after
+    which the session refuses every statement until it is rolled back — the
+    mocked unit tests cannot show that the lookup still works. The seed rows are
+    committed because that failed INSERT aborts the whole transaction.
+    """
+    ws_id, ctx_a, ctx_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    sha = "f" * 64
+    db_session.add(Workspace(id=ws_id, name=f"dup-{ws_id}", owner_user_id=OWNER))
+    await db_session.flush()
+    db_session.add(WorkspaceMember(workspace_id=ws_id, user_id=OWNER, role=WorkspaceRole.OWNER))
+    db_session.add_all(
+        [
+            Context(id=ctx_a, workspace_id=ws_id, name="dup-a", created_by=OWNER, is_private=False),
+            Context(id=ctx_b, workspace_id=ws_id, name="dup-b", created_by=OWNER, is_private=False),
+        ]
+    )
+    await db_session.flush()
+    existing = _file(workspace_id=ws_id, context_id=ctx_a, sha=sha)
+    existing_id = existing.id
+    db_session.add(existing)
+    await db_session.commit()
+
+    svc = FileStorageService(db_session, storage=FakeBlobStorage())
+    common = {
+        "workspace_id": ws_id,
+        "created_by": OWNER,
+        "filename": "f.pdf",
+        "content_type": "application/pdf",
+        "size_bytes": 1024,
+        "sha256": sha,
+    }
+    try:
+        with (
+            patch(
+                "services.file_storage_service.storage_quota_service.reserve_storage_bytes",
+                AsyncMock(),
+            ),
+            patch(
+                "services.file_storage_service.storage_quota_service.release_storage_bytes",
+                AsyncMock(),
+            ),
+        ):
+            with pytest.raises(DuplicateFileError) as same:
+                await svc.reserve_upload(context_id=ctx_a, **common)
+            with pytest.raises(DuplicateFileError) as other:
+                await svc.reserve_upload(context_id=ctx_b, **common)
+
+        assert same.value.existing is not None
+        assert same.value.existing.id == existing_id
+        assert same.value.message.endswith(f"; reuse file_id={existing_id}")
+        assert other.value.existing is None
+        assert "reuse file_id" not in other.value.message
+    finally:
+        await db_session.rollback()
+        params = {"w": str(ws_id)}
+        await db_session.execute(text("DELETE FROM file_objects WHERE workspace_id = :w"), params)
+        await db_session.execute(text("DELETE FROM contexts WHERE workspace_id = :w"), params)
+        await db_session.execute(
+            text("DELETE FROM workspace_members WHERE workspace_id = :w"), params
+        )
+        await db_session.execute(text("DELETE FROM workspaces WHERE id = :w"), params)
+        await db_session.commit()
 
 
 # --- delete (write) ------------------------------------------------------------

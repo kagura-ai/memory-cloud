@@ -52,13 +52,21 @@ def perm(monkeypatch):
 
 class TestOAuthRejected:
     async def test_oauth_always_403(self, perm):
-        with pytest.raises(AuthorizationError):
+        with pytest.raises(AuthorizationError) as exc_info:
             await authorize_workspace_management(
                 _oauth_user(), _WS, db=None, session_required_role=WorkspaceRole.MEMBER
             )
         # OAuth is rejected before any permission lookup.
         perm.check_workspace_owner.assert_not_called()
         perm.check_workspace_access.assert_not_called()
+        # #1693: both SDKs drop any server message containing "bearer" (it could
+        # echo a credential), so the refusal must not use the word to reach users.
+        message = exc_info.value.message
+        assert message == (
+            "OAuth access tokens cannot manage workspace members or credentials. "
+            "Use a workspace-owner API key."
+        )
+        assert "bearer" not in message.lower()
 
 
 class TestApiKeyPrincipal:

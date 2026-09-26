@@ -116,18 +116,23 @@ async def create_invitation(
 
         # Create invitation
         invitation_service = InvitationService(db)
-        # Migration 042: Convert string UUIDs to UUID objects
-        allowed_context_ids = None
-        if request.allowed_context_ids:
-            allowed_context_ids = [UUID(ctx_id) for ctx_id in request.allowed_context_ids]
-
+        # Migration 042. The request model parses the ids as UUIDs (#1693), so a
+        # malformed entry is a 422 before this handler runs, and two spellings of
+        # one id (upper/lower case) parse equal — dedupe, keeping order. An empty
+        # list is passed on as None, as before (the service then refuses
+        # member/viewer).
+        allowed_context_ids = (
+            list(dict.fromkeys(request.allowed_context_ids))
+            if request.allowed_context_ids
+            else None
+        )
         invitation = await invitation_service.create_invitation(
             workspace_id=workspace_id,
             invited_by=user_id,
             role=request.role,
             email=request.email,
             expires_in_days=request.expires_in_days,
-            allowed_context_ids=allowed_context_ids,  # Migration 042
+            allowed_context_ids=allowed_context_ids,
         )
 
         # Issue #1164: audit programmatic invitation creation (no-op for session).
