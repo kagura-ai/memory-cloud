@@ -897,7 +897,8 @@ async def update_member_context_access(
                     detail=f"Invalid context IDs: {sorted(str(i) for i in invalid_ids)}",
                 )
 
-            allowed_context_ids = list(body.allowed_context_ids)
+            # Two spellings of one id parse equal; store it once, in order.
+            allowed_context_ids = list(dict.fromkeys(body.allowed_context_ids))
         else:
             allowed_context_ids = []  # Empty list = no access
 

@@ -77,11 +77,17 @@ class TestInvitationContextIds:
         _assert_canonical_422(resp, "allowed_context_ids")
 
     @pytest.mark.parametrize(
-        "spelling",
-        [str(_CTX).upper(), "{" + str(_CTX) + "}", _CTX.hex],
-        ids=["uppercase", "braced", "dashless"],
+        "spellings",
+        [
+            [str(_CTX).upper()],
+            ["{" + str(_CTX) + "}"],
+            [_CTX.hex],
+            # Two spellings of one id are one entry, not two.
+            [str(_CTX), str(_CTX).upper(), str(_CTX)],
+        ],
+        ids=["uppercase", "braced", "dashless", "repeated-spellings"],
     )
-    def test_valid_spellings_reach_the_service_as_the_same_uuid(self, client, spelling):
+    def test_valid_spellings_reach_the_service_as_the_same_uuid(self, client, spellings):
         async def _user():
             return _session_user()
 
@@ -130,7 +136,7 @@ class TestInvitationContextIds:
                 json={
                     "email": "x@example.com",
                     "role": "member",
-                    "allowed_context_ids": [spelling],
+                    "allowed_context_ids": spellings,
                 },
             )
 
@@ -182,17 +188,23 @@ class TestMemberContextAccessIds:
         assert locs == [["body", "allowed_context_ids", 1]]
 
     @pytest.mark.parametrize(
-        "spelling",
-        [str(_CTX).upper(), "{" + str(_CTX) + "}", _CTX.hex],
-        ids=["uppercase", "braced", "dashless"],
+        "spellings",
+        [
+            [str(_CTX).upper()],
+            ["{" + str(_CTX) + "}"],
+            [_CTX.hex],
+            # Two spellings of one id are one entry, not two.
+            [str(_CTX), str(_CTX).upper(), str(_CTX)],
+        ],
+        ids=["uppercase", "braced", "dashless", "repeated-spellings"],
     )
     def test_other_spellings_of_a_valid_id_are_not_reported_invalid(
-        self, client, access_route, spelling
+        self, client, access_route, spellings
     ):
         # The old code compared the raw strings with str(<db uuid>), so an
         # uppercase / braced spelling of a context that exists was answered
         # "Invalid context IDs". Ids are now compared as UUIDs.
-        resp = client.put(ACCESS_URL, json={"allowed_context_ids": [spelling]})
+        resp = client.put(ACCESS_URL, json={"allowed_context_ids": spellings})
         assert resp.status_code == 200, resp.text
         kwargs = access_route.update_member_context_access.await_args.kwargs
         assert kwargs["allowed_context_ids"] == [_CTX]
