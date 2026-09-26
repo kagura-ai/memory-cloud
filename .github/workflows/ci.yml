@@ -16,11 +16,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: backend/pyproject.toml
 
-      - name: Install ruff
-        run: pip install ruff
+      # uv is pinned in lockstep with backend/pyproject.toml [tool.uv]
+      # required-version, backend/Dockerfile and setup.sh (#1706);
+      # tests/test_uv_version_lockstep.py enforces it. The cache is keyed on
+      # backend/uv.lock, so a lock change is the only thing that refills it.
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.11.19"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      # The gate for (#1706): a pyproject.toml change without a matching
+      # uv.lock update fails here, before anything is installed.
+      - name: Lockfile is current
+        run: cd backend && uv lock --check
+
+      # Only the `lint` dependency group of the lock (one wheel), so lint and
+      # format checks run the same ruff release a contributor gets from
+      # `uv sync` without installing the runtime tree.
+      - name: Install ruff (from the lock)
+        run: |
+          cd backend
+          uv sync --locked --only-group lint --no-install-project
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Lint
         run: cd backend && ruff check src/ tests/
@@ -100,8 +119,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: backend/pyproject.toml
+
+      # uv is pinned in lockstep with backend/pyproject.toml [tool.uv]
+      # required-version, backend/Dockerfile and setup.sh (#1706);
+      # tests/test_uv_version_lockstep.py enforces it. The cache is keyed on
+      # backend/uv.lock, so a lock change is the only thing that refills it.
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.11.19"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
 
       # EVERY optional extra, not just dev. This is load-bearing, not
       # thoroughness for its own sake: pyright silently stops analysing a module
@@ -112,7 +139,10 @@ jobs:
       # missed on the first attempt at this job and CI caught it.
       # If a new extra is added to pyproject.toml, add it here too.
       - name: Install dependencies
-        run: cd backend && pip install -e ".[dev,llm_providers,neural,lite]"
+        run: |
+          cd backend
+          uv sync --locked --extra dev --extra llm_providers --extra neural --extra lite
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Type check
         run: cd backend && pyright src/ ../plugins/kagura-memory/hooks/
@@ -165,11 +195,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: backend/pyproject.toml
+
+      # uv is pinned in lockstep with backend/pyproject.toml [tool.uv]
+      # required-version, backend/Dockerfile and setup.sh (#1706);
+      # tests/test_uv_version_lockstep.py enforces it. The cache is keyed on
+      # backend/uv.lock, so a lock change is the only thing that refills it.
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.11.19"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
 
       - name: Install dependencies
-        run: cd backend && pip install -e ".[dev]"
+        # From the lock, never a fresh resolution: --locked fails when uv.lock
+        # is out of date with pyproject.toml (#1706). The venv goes on PATH so
+        # the pytest / alembic / python steps below run unchanged.
+        run: |
+          cd backend
+          uv sync --locked --extra dev
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Run unit tests
         env:
@@ -271,6 +315,7 @@ jobs:
               - 'backend/tests/integration/**'
               - 'backend/tests/smoke/test_all_routes.py'
               - 'backend/pyproject.toml'
+              - 'backend/uv.lock'
               - '.github/workflows/ci.yml'
             frontend-a11y-authed:
               # Broad on purpose: this lane installs + runs the full stack, so any
@@ -286,6 +331,7 @@ jobs:
               - 'backend/src/**'
               - 'backend/alembic/versions/**'
               - 'backend/pyproject.toml'
+              - 'backend/uv.lock'
               - '.github/workflows/ci.yml'
               - '.github/scripts/**'
 
@@ -338,11 +384,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: backend/pyproject.toml
+
+      # uv is pinned in lockstep with backend/pyproject.toml [tool.uv]
+      # required-version, backend/Dockerfile and setup.sh (#1706);
+      # tests/test_uv_version_lockstep.py enforces it. The cache is keyed on
+      # backend/uv.lock, so a lock change is the only thing that refills it.
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.11.19"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
 
       - name: Install dependencies
-        run: cd backend && pip install -e ".[dev]"
+        # From the lock, never a fresh resolution: --locked fails when uv.lock
+        # is out of date with pyproject.toml (#1706). The venv goes on PATH so
+        # the pytest / alembic / python steps below run unchanged.
+        run: |
+          cd backend
+          uv sync --locked --extra dev
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       # MinIO for the #994 S3-compatible storage integration test. Started as a
       # plain container (not a GHA `services:` entry) so we control the
@@ -450,8 +510,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: backend/pyproject.toml
+
+      # uv is pinned in lockstep with backend/pyproject.toml [tool.uv]
+      # required-version, backend/Dockerfile and setup.sh (#1706);
+      # tests/test_uv_version_lockstep.py enforces it. The cache is keyed on
+      # backend/uv.lock, so a lock change is the only thing that refills it.
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.11.19"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
 
       - uses: actions/setup-node@v4
         with:
@@ -460,7 +528,13 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install backend dependencies
-        run: cd backend && pip install -e ".[dev]"
+        # From the lock, never a fresh resolution: --locked fails when uv.lock
+        # is out of date with pyproject.toml (#1706). The venv goes on PATH so
+        # the pytest / alembic / python steps below run unchanged.
+        run: |
+          cd backend
+          uv sync --locked --extra dev
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Install frontend dependencies
         run: cd frontend && npm ci
@@ -598,8 +672,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: backend/pyproject.toml
+
+      # uv is pinned in lockstep with backend/pyproject.toml [tool.uv]
+      # required-version, backend/Dockerfile and setup.sh (#1706);
+      # tests/test_uv_version_lockstep.py enforces it. The cache is keyed on
+      # backend/uv.lock, so a lock change is the only thing that refills it.
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          version: "0.11.19"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
 
       - uses: actions/setup-node@v4
         with:
@@ -608,7 +690,13 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install backend dependencies
-        run: cd backend && pip install -e ".[dev]"
+        # From the lock, never a fresh resolution: --locked fails when uv.lock
+        # is out of date with pyproject.toml (#1706). The venv goes on PATH so
+        # the pytest / alembic / python steps below run unchanged.
+        run: |
+          cd backend
+          uv sync --locked --extra dev
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Install frontend dependencies
         run: cd frontend && npm ci

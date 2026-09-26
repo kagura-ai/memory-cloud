@@ -1,0 +1,12 @@
+# Keep the build context small: the image installs from uv.lock, never from a
+# local environment (#1706). backend/.venv alone is >1 GB after `uv sync`.
+.venv/
+.uv-bin/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+coverage.xml
+.coverage

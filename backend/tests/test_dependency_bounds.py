@@ -1,11 +1,11 @@
 """Guard test for #1705: auth-critical dependencies carry an upper bound.
 
-CI (``pip install -e ".[dev]"``) and the Docker image (``uv pip install``)
-resolve ``backend/pyproject.toml`` afresh on every build — there is no tracked
-lockfile — so an unbounded range lets every new release of these libraries
-reach CI and the image unreviewed. Each one below sits on an authentication,
-token, session or crypto path; the reason for each bound is next to it in
-``pyproject.toml``.
+CI and the Docker image install the tracked ``backend/uv.lock`` (#1706), so a
+new release reaches them only through a lock refresh — Renovate's weekly
+lock-maintenance PR or a manual ``uv lock``. The bound is what such a refresh
+may move within: without it, a refresh could pull the next major of a library
+that sits on an authentication, token, session or crypto path without anyone
+deciding to. The reason for each bound is next to it in ``pyproject.toml``.
 """
 
 import tomllib
