@@ -21,7 +21,7 @@ jobs:
       # required-version, backend/Dockerfile and setup.sh (#1706);
       # tests/test_uv_version_lockstep.py enforces it. The cache is keyed on
       # backend/uv.lock, so a lock change is the only thing that refills it.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "0.11.19"
           enable-cache: true
@@ -123,7 +123,7 @@ jobs:
       # required-version, backend/Dockerfile and setup.sh (#1706);
       # tests/test_uv_version_lockstep.py enforces it. The cache is keyed on
       # backend/uv.lock, so a lock change is the only thing that refills it.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "0.11.19"
           enable-cache: true
@@ -199,7 +199,7 @@ jobs:
       # required-version, backend/Dockerfile and setup.sh (#1706);
       # tests/test_uv_version_lockstep.py enforces it. The cache is keyed on
       # backend/uv.lock, so a lock change is the only thing that refills it.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "0.11.19"
           enable-cache: true
@@ -388,7 +388,7 @@ jobs:
       # required-version, backend/Dockerfile and setup.sh (#1706);
       # tests/test_uv_version_lockstep.py enforces it. The cache is keyed on
       # backend/uv.lock, so a lock change is the only thing that refills it.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "0.11.19"
           enable-cache: true
@@ -514,7 +514,7 @@ jobs:
       # required-version, backend/Dockerfile and setup.sh (#1706);
       # tests/test_uv_version_lockstep.py enforces it. The cache is keyed on
       # backend/uv.lock, so a lock change is the only thing that refills it.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "0.11.19"
           enable-cache: true
@@ -676,7 +676,7 @@ jobs:
       # required-version, backend/Dockerfile and setup.sh (#1706);
       # tests/test_uv_version_lockstep.py enforces it. The cache is keyed on
       # backend/uv.lock, so a lock change is the only thing that refills it.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           version: "0.11.19"
           enable-cache: true
