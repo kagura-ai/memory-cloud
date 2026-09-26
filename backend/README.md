@@ -5,35 +5,38 @@ FastAPI + MCP Server for Universal AI Memory Platform
 ## Requirements
 
 - Python 3.11+
-- uv (recommended) or pip
+- uv 0.11.19 — the exact version `[tool.uv] required-version` in `pyproject.toml` names (`curl -LsSf https://astral.sh/uv/0.11.19/install.sh | sh`, or `pip install "uv==0.11.19"` inside a venv); a different uv refuses to run here
 
 ## Installation
 
-### Using uv (recommended)
+Dependencies are installed from the tracked lock, `uv.lock`, so every checkout,
+CI job and the Docker image run the same releases:
 
 ```bash
-# Install basic dependencies
-uv pip install -e .
+# Dev dependencies (tests, ruff, pyright) — creates ./.venv
+uv sync --locked --extra dev
 
-# Install with dev dependencies
-uv pip install -e ".[dev]"
+# With neural memory support
+uv sync --locked --extra dev --extra neural
 
-# Install with neural memory support
-uv pip install -e ".[dev,neural]"
+# Then either activate the environment or prefix commands with `uv run`
+source .venv/bin/activate
+uv run pytest
 ```
 
-### Using pip
+### Updating dependencies
+
+`pyproject.toml` holds the version ranges (what the code supports); `uv.lock`
+holds what is tested and shipped. After editing `pyproject.toml`, regenerate
+the lock and commit both — CI's `uv lock --check` fails otherwise:
 
 ```bash
-# Install basic dependencies
-pip install -e .
-
-# Install with dev dependencies
-pip install -e ".[dev]"
-
-# Install with neural memory support
-pip install -e ".[dev,neural]"
+uv lock                          # re-resolve after a pyproject.toml change
+uv lock --upgrade-package NAME   # move one package inside its range
 ```
+
+Renovate opens a weekly lock-maintenance PR that refreshes every package inside
+its range; it runs the full CI like any other change.
 
 ## Development
 

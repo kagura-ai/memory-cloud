@@ -13,8 +13,9 @@ dependencies = [
     # Web Framework
     # No upper bound on fastapi on purpose: its breaking changes ship in 0.x
     # minor releases, so the only useful bound is the minor, which would need a
-    # manual bump every few weeks; a tracked lockfile (#1706) is the planned
-    # control. The floor is 0.133.0 because older releases cap starlette below
+    # manual bump every few weeks; the tracked uv.lock (#1706) is the control —
+    # a new release reaches CI and the image only through a reviewed lock
+    # update. The floor is 0.133.0 because older releases cap starlette below
     # 1.0, which the starlette floor below excludes.
     "fastapi>=0.133.0",
     # Imported directly on the auth path (the Authlib request adapter in
@@ -52,10 +53,11 @@ dependencies = [
     "voyageai>=0.3.0",      # Reranking (Issue #105: Voyage AI alternative)
 
     # Authentication
-    # Auth-critical dependencies carry an upper bound (#1705): CI and the image
-    # resolve these ranges afresh on each build, so a release past a bound
-    # arrives only when someone raises the bound and re-runs tests/auth and
-    # tests/api/test_*oauth*. The set is authlib, google-auth,
+    # Auth-critical dependencies carry an upper bound (#1705). CI and the image
+    # install the tracked uv.lock (#1706), so the bound is what a lock refresh
+    # (Renovate's weekly lock-maintenance PR, or `uv lock`) may move within: a
+    # release past it arrives only when someone raises the bound and re-runs
+    # tests/auth and tests/api/test_*oauth*. The set is authlib, google-auth,
     # google-auth-oauthlib, bcrypt and pyotp here, plus starlette above and mcp
     # and cryptography below; tests/test_dependency_bounds.py enforces it.
     # Authlib changes behaviour in minor releases (1.8.0 changed
@@ -173,6 +175,16 @@ lite = [
     "lancedb>=0.13.0",
     "pyarrow>=14.0.0",
 ]
+
+[tool.uv]
+# uv.lock is tracked (#1706); CI, backend/Dockerfile and setup.sh install from
+# it with `uv sync --locked`. The uv version is pinned in lockstep here, in
+# .github/workflows/ci.yml + eval-nightly.yml (setup-uv `version:`), in
+# backend/Dockerfile (the ghcr.io/astral-sh/uv image tag) and in setup.sh;
+# tests/test_uv_version_lockstep.py enforces it. A different uv refuses to run
+# here, so the lock is only ever written by this version. Bump every site
+# together and regenerate the lock with `uv lock`.
+required-version = "==0.11.19"
 
 [build-system]
 requires = ["hatchling"]

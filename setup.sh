@@ -40,11 +40,21 @@ echo "==> Step 1/5: Configure environment"
 cd backend && python3 -m src.cli.setup_env
 cd ..
 
-# Step 2: Install Python dependencies
+# Step 2: Install Python dependencies from the tracked lock (backend/uv.lock).
+# uv is pinned in lockstep with backend/pyproject.toml [tool.uv]
+# required-version, CI and backend/Dockerfile (#1706); a different uv refuses
+# to run in backend/, so install exactly this one when none is present.
 echo ""
-echo "==> Step 2/5: Install Python dependencies"
-cd backend && pip install -e ".[dev]"
+echo "==> Step 2/5: Install Python dependencies (uv sync --locked)"
+UV_REQUIRED="0.11.19"
+if ! command -v uv >/dev/null 2>&1 || [ "$(uv --version 2>/dev/null | awk '{print $2}')" != "$UV_REQUIRED" ]; then
+  echo "Installing uv ${UV_REQUIRED} (the pinned version) with the standalone installer..."
+  curl -LsSf "https://astral.sh/uv/${UV_REQUIRED}/install.sh" | sh
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+cd backend && uv sync --locked --extra dev
 cd ..
+echo "Backend dependencies are in backend/.venv (activate it, or run commands with 'uv run')."
 echo "Installing kagura-memory SDK..."
 pip install kagura-memory
 

@@ -18,6 +18,10 @@ help:
 	@echo "  make rebuild     - Rebuild API (no cache) and restart"
 	@echo "  make ps          - Show running containers"
 	@echo ""
+	@echo "Dependencies:"
+	@echo "  make lock        - Regenerate backend/uv.lock after editing pyproject.toml"
+	@echo "  make lock-check  - Fail if uv.lock is out of date (the CI gate)"
+	@echo ""
 	@echo "Backend Testing:"
 	@echo "  make test            - Run all tests (Docker, default)"
 	@echo "  make test-local      - Run unit tests (local, fast; excludes e2e/integration)"
@@ -254,6 +258,17 @@ test-neural-cov:
 test-watch:
 	@echo "Running tests in watch mode (local)..."
 	cd $(BACKEND_DIR) && pytest-watch
+
+# Dependency lock (#1706): pyproject.toml holds the ranges, uv.lock what CI
+# and the image install. `make lock` after editing pyproject.toml; `make
+# lock-check` is the same gate CI runs.
+.PHONY: lock
+lock:
+	cd $(BACKEND_DIR) && uv lock
+
+.PHONY: lock-check
+lock-check:
+	cd $(BACKEND_DIR) && uv lock --check
 
 .PHONY: lint
 lint: lint-models-no-column

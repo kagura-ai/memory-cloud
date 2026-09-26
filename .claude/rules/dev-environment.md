@@ -34,7 +34,7 @@ For local backend tests: `cd backend && pytest tests/api/ -v`
 - Backend source: `backend/src/`
 - `PYTHONPATH=src` is required when running scripts outside pytest (pytest configures this via `pyproject.toml`)
 - Virtual env: `backend/.venv/` (not committed)
-- Dependencies: `backend/requirements.txt`
+- Dependencies: `backend/pyproject.toml` holds the ranges; `backend/uv.lock` (tracked, #1706) is what CI and the image install. Install with `cd backend && uv sync --locked --extra dev`; after editing `pyproject.toml` run `uv lock` and commit the lock (CI's `uv lock --check` fails otherwise). uv is pinned by `[tool.uv] required-version`.
 
 ## Key Makefile Targets
 

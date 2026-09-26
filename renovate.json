@@ -1,11 +1,16 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
-  "enabledManagers": ["docker-compose", "github-actions"],
+  "enabledManagers": ["docker-compose", "github-actions", "pep621"],
   "timezone": "Asia/Tokyo",
   "schedule": ["before 8am on monday"],
   "prConcurrentLimit": 2,
   "labels": ["dependencies"],
+  "lockFileMaintenance": {
+    "description": "The lock refresh (#1706): once a week, re-resolve backend/uv.lock inside the ranges of backend/pyproject.toml and open one PR that runs the full CI. The ranges themselves are not touched — they state what the code supports; the lock states what is tested and shipped.",
+    "enabled": true,
+    "schedule": ["before 8am on monday"]
+  },
   "packageRules": [
     {
       "description": "Default-deny (#1310): nothing rides this config unless a later rule explicitly re-enables it. Structural on purpose — enumerating the managers' non-docker datasources would silently leak when Renovate adds one (e.g. github-digest for SHA-pinned actions).",
@@ -19,6 +24,17 @@
       "matchUpdateTypes": ["minor", "patch", "digest", "pin"],
       "groupName": "postgres image",
       "pinDigests": true,
+      "enabled": true
+    },
+    {
+      "description": "Python ranges stay hand-edited (#1706): pep621 range bumps in backend/pyproject.toml are denied — a bound is raised by a person, with the reason next to it (#1705). Only the lock-maintenance update type below rides this manager.",
+      "matchManagers": ["pep621"],
+      "enabled": false
+    },
+    {
+      "description": "Re-enable exactly the weekly uv.lock refresh (#1706) for the pep621 manager; the rule above keeps every other pep621 update off.",
+      "matchManagers": ["pep621"],
+      "matchUpdateTypes": ["lockFileMaintenance"],
       "enabled": true
     }
   ]

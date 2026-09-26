@@ -35,6 +35,28 @@ open http://localhost:3000          # Frontend
 ### Manual Setup (without Docker)
 
 See the [README](README.md) for platform-specific instructions (WSL, macOS, Linux).
+Backend dependencies come from the tracked lock: `cd backend && uv sync --locked --extra dev`
+(see [Dependencies and the lockfile](#dependencies-and-the-lockfile)).
+
+### Dependencies and the lockfile
+
+`backend/pyproject.toml` holds the version ranges — what the code supports.
+`backend/uv.lock` holds what is tested and shipped: every CI job,
+`backend/Dockerfile` and `setup.sh` install from it with `uv sync --locked`,
+which fails when the lock is out of date, and the `lint` job runs
+`uv lock --check` so a `pyproject.toml` edit without a lock update fails CI.
+
+- After editing `pyproject.toml`: `cd backend && uv lock` (or `make lock`) and
+  commit `uv.lock` with the change. `make lock-check` is the CI gate.
+- Move one package inside its range: `uv lock --upgrade-package NAME`.
+- Renovate opens a weekly lock-maintenance PR that re-resolves every package
+  inside its range; the ranges are edited by hand, with the reason next to the
+  bound (`#1705`).
+- uv itself is pinned in lockstep: `[tool.uv] required-version` in
+  `pyproject.toml`, `astral-sh/setup-uv` in `.github/workflows/*.yml`, the
+  `ghcr.io/astral-sh/uv` stage in `backend/Dockerfile` and `setup.sh`.
+  `backend/tests/test_uv_version_lockstep.py` fails when they disagree; bump
+  all of them together and regenerate the lock with the new uv.
 
 ## Code Style
 
