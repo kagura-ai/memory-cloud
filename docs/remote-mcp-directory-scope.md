@@ -1,6 +1,6 @@
 # Remote MCP: Directory Scope and Data Boundaries
 
-This page describes the Remote MCP server as it would be submitted to the Anthropic Software Directory: what is in scope, where data comes from, how stored notes are delivered, and how each relevant policy clause maps onto the code. It is a technical description written from the code ([#1682](https://github.com/kagura-ai/memory-cloud/issues/1682)). **It makes no compliance claim.** One policy question (§1.F) is open and stays open until it is confirmed with Anthropic.
+This page describes the Remote MCP server as it would be submitted to the Anthropic Software Directory: what is in scope, where data comes from, how stored notes are delivered, and how each relevant policy clause maps onto the code. It is a technical description written from the code ([#1682](https://github.com/kagura-ai/memory-cloud/issues/1682)). **It makes no compliance claim.** For policy 1.F it states the project's position and its evidence ([§4](#4-policy-mapping)); how the clause applies is to be confirmed in Directory review.
 
 Policy version referred to: Anthropic Software Directory Policy, 2026-04-15.
 
@@ -112,15 +112,20 @@ Tests pin this:
 |---|---|---|---|
 | 2.F | "must not direct Claude to dynamically pull behavioral instructions from external sources for Claude to execute" | Addressed by #1682 | The audit found "follow context.usage_guide over generic defaults" in `get_context_info`, and "for a context's rules and guardrails" in the server instructions. Both are gone. Stored text is described as data, and the guard test keeps the wording out. |
 | 2.G | "must not contain hidden, obfuscated, or encoded instructions. All behavioral guidance must be human-readable and clearly presented" | Addressed by #1682 | All guidance is in plain-text tool descriptions and the static instructions shown above. Stored-note lanes carry a visible provenance label. |
-| 1.D | "must only collect data from the user's context that is necessary to perform their function" | Facts documented (§2) | Data enters only as arguments of a tool call. Every input schema is strict (`additionalProperties: false`), and the server makes no requests back to the client. |
-| 1.F | "must not query or extract data from Claude's memory, chat history, conversation summaries, or user-generated or uploaded files" | **UNRESOLVED** | See below. |
+| 1.D | "must only collect data from the user's context that is necessary to perform their function" (also "even for logging purposes") | Facts documented (§2); logs addressed by [#1721](https://github.com/kagura-ai/memory-cloud/issues/1721) | Data enters only as arguments of a tool call. Every input schema is strict (`additionalProperties: false`), and the server makes no requests back to the client. INFO-level logs of `recall`, `forget` by query, REST recall and public search carry the query's length and a keyed hash (the `memory_access_events.query_hash` HMAC), never its text (`utils/query_log.py`). |
+| 1.F | "must not query or extract data from Claude's memory, chat history, conversation summaries, or user-generated or uploaded files" | Position stated below; to be confirmed in Directory review | Memories and files are client-authored and user-directed. |
 
-**Why 1.F is unresolved.** The server never fetches data from Claude or Anthropic (§2). But `remember` stores what the user asks Claude to save, and that content may be derived from the conversation. The file upload tools store a file the user asks to keep. Both are user-directed writes that the client initiates. The policy text has no consent exception, and it does not say whether a write the user directs counts as extraction. How the clause applies to these two flows must be confirmed with Anthropic before any compliance claim is made. It would be settled by:
+**1.F position.** Memories and files are client-authored and user-directed: the client composes the content and submits it with `remember` (or uploads a file the user asks to keep), and the server never queries or reads Claude's or the client's data. Evidence, all in §2:
 
-- a written answer from Anthropic on whether user-directed `remember` of conversation-derived content, and user-directed file upload, fall under 1.F for a server that behaves as §2 describes; or
-- the outcome of a Directory review of this exact scope.
+- The server advertises `capabilities: {"tools": {}}` and sends no request to the client — no sampling, `roots/list` or elicitation — so it has no channel to ask for conversation, memory or files.
+- Data enters only as the arguments of a `tools/call` the client makes; nothing is pulled from Claude or any Anthropic API.
+- Uploaded bytes go from the client straight to object storage through a presigned URL; the server never opens, parses or indexes them.
 
-If either says these writes are covered, the scope has to change. For example, the write tools could be left out of the submission. That is a separate decision.
+The model-facing text keeps writes user-directed ([#1721](https://github.com/kagura-ai/memory-cloud/issues/1721)). No server instruction, quick-reference line, tool or parameter description tells the model to save, store or send conversation content on its own or at fixed points (every turn, after a task, at the end of a session). Examples: the quick reference says "remember() - Store what the user asks to keep"; `feedback` is "Optional: record whether a recalled memory was useful"; `delivery_mode` says pinned memories are "returned by load_pinned()" (only a client hook loads them every turn). `tests/mcp_server/test_directory_instruction_boundary.py` enforces these wording rules over the full static surface.
+
+The companion plugins are not part of the connector submission (§1). Their session-summary command (`claude-skills/session-summary.md`) sets `disable-model-invocation: true`, so only the user can start it, and it and the Codex skill save what the user chooses to keep.
+
+This is the project's position, not a compliance claim. How 1.F applies to user-directed `remember` of conversation-derived content and to user-directed file upload is to be confirmed in Directory review (or by a written answer from Anthropic). If either says these writes are covered, the scope has to change — for example, the write tools could be left out of the submission. That is a separate decision.
 
 ## 5. Compatibility for existing clients
 
