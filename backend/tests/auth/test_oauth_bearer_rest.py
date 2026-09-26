@@ -257,6 +257,19 @@ class TestRequireSessionAuthRejectsOAuth:
         )
         assert resp.status_code == 403
 
+    @pytest.mark.parametrize("token", ["kagura_anykey", "randomoauth"], ids=["api_key", "oauth"])
+    def test_message_survives_sdk_sanitizers(self, app_with_session_only_route, token):
+        # Both SDKs drop a message containing any of these (#1719) and
+        # show an owner-API-key hint, which is wrong for session-only routes.
+        resp = TestClient(app_with_session_only_route).get(
+            "/_t/web_ui", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 403
+        assert "www-authenticate" not in resp.headers
+        detail = resp.json()["detail"].lower()
+        for marker in ("bearer", "authorization", "api_key="):
+            assert marker not in detail
+
 
 # ---------------------------------------------------------------------------
 # MCP verify_oauth2_token shim — relocation regression guard
