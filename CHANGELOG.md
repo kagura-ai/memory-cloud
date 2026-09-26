@@ -4,6 +4,67 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.80.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.80.0) — 2026-09-26
+
+Client-facing corrections and dependency control. The API answers a malformed context id with 422 instead of 500, says "not found" once, gives SDKs the existing file on a duplicate upload, and now shows them the OAuth refusal. Passwords over 72 bytes no longer fail with 500. The Web UI describes a context's usage guide as notes, and `/kagura-memory:login` signs an MCP connection in again. Auth-critical dependencies now have upper bounds, and the backend moves to SQLAlchemy 2.1.
+
+### Added
+- **`/kagura-memory:login`** ([#1704](https://github.com/kagura-ai/memory-cloud/issues/1704)): a plugin command that signs an existing Kagura MCP connection in again after `401` `invalid_token` (the token expired or was revoked, or you are on a new machine) or `403` `insufficient_scope`.
+  - It finds how the entry authenticates: Claude Code OAuth, a `kagura-mcp` CLI profile or a Bearer API key.
+  - It names the one step that signs that entry in again. You run that step in your own terminal and never paste a token, key or code into the chat.
+  - After `insufficient_scope`, it re-authorizes with exactly the `scope` the challenge names.
+  - It checks the result with one `list_contexts` call.
+  - The Codex kagura-memory skill gains a matching Login section: `codex mcp login kagura-memory`, plus `--scopes` after `insufficient_scope`.
+  - Claude Code's built-in `/login` signs in to the Anthropic account and does not touch the Kagura connection.
+  - See [Sign in again](docs/mcp-clients.md#sign-in-again).
+- **`existing_file` on the files dedup 409** ([#1693](https://github.com/kagura-ai/memory-cloud/issues/1693)): `POST /api/v1/files/reserve` with a sha256 the workspace already holds can now return the existing file.
+  - When that file is in the same context as the request and its upload has completed, the 409 (`RES-002`) carries it as a top-level `existing_file`. It has the same shape as the other files responses, and the message ends with `; reuse file_id=<id>`.
+  - Both released SDKs already read this key. Uploading an identical file again now returns the existing file instead of failing, without an SDK upgrade.
+  - A same-context file whose earlier upload has not completed is not returned. The message says `an earlier upload of this file has not completed yet`.
+  - A duplicate bound to another context still names no file, and every other 409 keeps its three-key body.
+  - The MCP `init_file_upload` `conflict` follows the same rules.
+  - Before this release the lookup failed after the rejected insert, so a conflict never named the existing file.
+  - See [Files](docs/mcp-tools.md#files) and [error responses](docs/api-surface-1.0/error-responses.md#1-rest--structured-errors-memorycloudexception-family).
+
+### Changed
+- **Usage guide described as notes in the Web UI** ([#1698](https://github.com/kagura-ai/memory-cloud/issues/1698)):
+  - The context create and edit forms label the field "Usage Guide (notes on this context)" / 「使用ガイド（コンテキストについてのメモ）」 instead of "Instructions (for AI)".
+  - The placeholder and help text say AI clients receive it from `get_context_info` as information about the context, not as instructions. This matches how the MCP server has described it since v0.79.0.
+  - The 11 starter templates are rewritten from directives into descriptions. Their types, tags and importance ranges are unchanged.
+  - Existing contexts keep their stored text.
+- **SQLAlchemy 2.1** ([#1695](https://github.com/kagura-ai/memory-cloud/issues/1695)): the backend now runs on SQLAlchemy 2.1, replacing the v0.78.0 pin below 2.1.
+  - Every engine names its PostgreSQL driver: asyncpg for the application and Alembic, psycopg2 for the OAuth server and the admin CLIs.
+  - A `DATABASE_URL` with the bare `postgresql://` scheme, or with `postgresql+psycopg2://`, now also works for the application engine.
+  - Only the scheme is rewritten; the rest of the URL is passed on byte for byte. Any other scheme is used as given.
+
+### Fixed
+- **Passwords longer than 72 bytes** ([#1707](https://github.com/kagura-ai/memory-cloud/issues/1707)): under bcrypt 5, a password over 72 bytes (UTF-8) at sign-in or at account-erasure confirmation answered 500, and the failed sign-in was not counted toward the login rate limit.
+  - The check now compares the first 72 bytes, as bcrypt 4 did.
+  - A wrong over-long password answers 401 and counts toward the limit.
+  - Erasure confirmation answers "Incorrect password".
+  - Accounts whose password was set under bcrypt 4 with more than 72 bytes can sign in again with it.
+  - The admin CLIs (`create_admin`, `reset_password`, `seed_e2e_admin`) refuse a new password over 72 bytes with "Password must be at most 72 bytes when UTF-8 encoded." instead of crashing.
+- **Malformed context ids** ([#1693](https://github.com/kagura-ai/memory-cloud/issues/1693)): an `allowed_context_ids` entry that is not a UUID answers 422 (`VAL-001`) instead of 500, and the value is not echoed.
+  - This applies to `POST /api/v1/workspaces/{workspace_id}/invitations` and `PUT /api/v1/workspaces/{workspace_id}/members/{user_id}/context-access`.
+  - Uppercase, braced or dashless spellings of an existing context are the same id. The context-access route refused them with 400 before.
+  - An id listed twice is stored once, and the 400 for unknown ids lists them in canonical form.
+- **"not found" said once** ([#1693](https://github.com/kagura-ai/memory-cloud/issues/1693)): 404 (`RES-001`) messages no longer read "… not found not found". Examples are `Invitation not found`, `Workspace not found: <id>` and `Member not found: <user> in workspace <workspace>`. A user with no context yet gets "Context not found: create a context in the web interface at /contexts".
+- **OAuth refusal shown in the SDKs** ([#1693](https://github.com/kagura-ai/memory-cloud/issues/1693)): the 403 an OAuth access token gets on the workspace member and credential routes now reads "OAuth access tokens cannot …. Use a workspace-owner API key."
+  - Both SDKs drop any server message that contains "bearer", so users saw no reason for this refusal before.
+  - Error codes and `WWW-Authenticate` headers are unchanged.
+
+### Notes
+- **No action needed:** no database migration, no new environment variables and no operator action beyond installing the release. Rebuilding the image or reinstalling the backend picks up SQLAlchemy 2.1.
+- **Dependency bounds** ([#1705](https://github.com/kagura-ai/memory-cloud/issues/1705)): the auth-critical dependencies now have upper bounds, so a release past a bound is installed only after the bound is raised.
+  - `authlib>=1.8.0,<1.9` (the floor was 1.3.0)
+  - `google-auth<3`, `google-auth-oauthlib<2`, `bcrypt<6`, `pyotp<3`, `mcp<3` and `cryptography<53`
+  - `starlette>=1.0.0,<2` is now a direct dependency.
+  - The `fastapi` floor rises from 0.115.0 to 0.133.0, with no upper bound.
+  - An environment still on an older authlib, fastapi or starlette is upgraded on install.
+- **SQLAlchemy** ([#1695](https://github.com/kagura-ai/memory-cloud/issues/1695)): the requirement is now `sqlalchemy[asyncio]>=2.1.0,<2.2`, and the `[asyncio]` extra installs greenlet, which 2.1 no longer pulls in. A fresh install resolves the same versions as v0.79.0 except SQLAlchemy (2.0.x → 2.1.x).
+- **Clients matching message text:** the 404 messages, the OAuth refusal on the member and credential routes, and the files dedup 409 message have new wording. Branch on the `error` code, not on `message`.
+- **Plugins:** the Claude Code and Codex plugin manifests are bumped in lockstep.
+
 ## [v0.79.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.79.0) — 2026-09-25
 
 Remote MCP boundaries and OAuth. Tool descriptions and server instructions describe what a context's stored text is instead of telling the model to follow it; the authorization server applies the scope, PKCE and resource rules its metadata advertises; `/mcp` checks an OAuth token's scope and audience; and a new script verifies the whole OAuth + MCP flow against a deployment.
