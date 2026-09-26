@@ -9,7 +9,8 @@ must say what is refused without those words.
 - the guard scans every ``HTTPException(status_code=403, detail=...)`` under
   ``src/`` and fails if the literal parts of ``detail`` contain a marker;
   ``headers=`` (``WWW-Authenticate``), comments and docstrings are not
-  messages and are not scanned;
+  messages and are not scanned; 403s raised through custom exception
+  classes (e.g. ``AuthorizationError``) or ``JSONResponse`` are not covered;
 - the wire test pins what a client sees on a real ``SessionUser`` route.
 """
 

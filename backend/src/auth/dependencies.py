@@ -446,7 +446,7 @@ async def require_session_auth(
     Raises:
         HTTPException:
             - 401 if not authenticated
-            - 403 if API key is provided (not allowed for Web UI)
+            - 403 if an API key or OAuth access token is provided (not accepted for Web UI)
 
     Example:
         @router.get("/contexts")
