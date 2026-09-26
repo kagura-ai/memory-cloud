@@ -1,13 +1,12 @@
 ---
-description: Save the session knowledge the user chooses to keep to Kagura Memory Cloud (runs only when the user invokes it)
-disable-model-invocation: true
+description: Save the session knowledge the user chooses to keep to Kagura Memory Cloud
 ---
 
 Propose the current session's key learnings and save the ones the user chooses to keep to Kagura Memory Cloud.
 
 ## When to use
 
-Only when the user runs this command — typically at the end of a development session or before switching to a different task. It never starts on its own (`disable-model-invocation: true`). Proposes decisions, patterns, bugs, and plans that would be useful in future sessions; the user decides what is kept.
+When the user asks for it — by running this command, or through a workflow the user started (for example `/gh-issue-driven:ship`, which runs it at the end) — typically at the end of a development session or before switching to a different task. Proposes decisions, patterns, bugs, and plans that would be useful in future sessions; the user decides what is kept.
 
 ## Steps
 
