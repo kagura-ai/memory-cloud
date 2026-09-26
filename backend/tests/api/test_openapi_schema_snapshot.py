@@ -9,10 +9,12 @@ pre-1.0 enumeration (#622).
 
 ``skeleton`` keeps what a client can observe — paths, methods, parameters,
 request and response schemas, status codes, ``operationId``, ``required``,
-enums, bounds, types, formats and ``$ref`` targets — and drops prose and
-examples (``description`` and ``summary`` strings, ``example``, ``examples``),
-which may change freely, plus ``info.version``, which every release bumps.
-Keys are sorted so the fixture diff shows the change, not a reordering.
+enums, bounds, types, formats and ``$ref`` targets — and drops what is not a
+surface change: prose and labels (``description``, ``summary`` and ``title``
+strings), ``example`` and ``examples``, and ``info.version``, which every
+release bumps. Keys are sorted, ``required`` lists are sorted and the
+top-level ``tags`` are sorted by name, so the fixture diff shows the change,
+not a reordering. ``enum`` keeps its order.
 
 A deliberate surface change regenerates the snapshot::
 
@@ -26,6 +28,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -36,11 +39,13 @@ from api.main import app
 SNAPSHOT_PATH = Path(__file__).parent / "fixtures" / "openapi_schema_snapshot.json"
 REGENERATE = "UPDATE_OPENAPI_SNAPSHOT=1 pytest tests/api/test_openapi_schema_snapshot.py"
 
-# Keys whose values are prose or illustrations: free to change without a
-# fixture update. ``description`` and ``summary`` are only prose when the
-# value is a string — a model field named ``description`` maps to a schema
-# object and is part of the surface.
-_PROSE_STRING_KEYS = frozenset({"description", "summary"})
+# Keys whose values are prose, labels or illustrations: free to change without
+# a fixture update. ``description``, ``summary`` and ``title`` are only prose
+# when the value is a string — a model field named ``description`` maps to a
+# schema object and is part of the surface. ``title`` is pydantic's label
+# derived from the field or class name (``"Api Key"`` for ``api_key``): the
+# name itself is already the key the schema sits under.
+_PROSE_STRING_KEYS = frozenset({"description", "summary", "title"})
 _EXAMPLE_KEYS = frozenset({"example", "examples"})
 
 # Maps whose keys are user-chosen names (fields, models, paths, status codes,
@@ -65,6 +70,8 @@ _NAME_MAPS = frozenset(
 # How many changed entries the failure message lists per section.
 _REPORT_LIMIT = 25
 
+Mutator = Callable[[dict], None]
+
 
 def _is_prose(key: str, value: Any) -> bool:
     if key in _PROSE_STRING_KEYS:
@@ -82,8 +89,9 @@ def normalize(node: Any, *, keys_are_names: bool = False) -> Any:
             than OpenAPI keywords, so none of them is treated as prose.
 
     Returns:
-        The normalized copy. Lists keep their order: ``required`` and ``enum``
-        are ordered in the document a client reads.
+        The normalized copy. ``required`` lists are sorted (JSON Schema treats
+        them as sets); every other list, ``enum`` included, keeps the order of
+        the document a client reads.
     """
     if isinstance(node, dict):
         out: dict[str, Any] = {}
@@ -91,7 +99,15 @@ def normalize(node: Any, *, keys_are_names: bool = False) -> Any:
             value = node[key]
             if not keys_are_names and _is_prose(key, value):
                 continue
-            out[key] = normalize(value, keys_are_names=(not keys_are_names) and key in _NAME_MAPS)
+            child = normalize(value, keys_are_names=(not keys_are_names) and key in _NAME_MAPS)
+            if (
+                not keys_are_names
+                and key == "required"
+                and isinstance(child, list)
+                and all(isinstance(item, str) for item in child)
+            ):
+                child = sorted(child)
+            out[key] = child
         return out
     if isinstance(node, list):
         return [normalize(item) for item in node]
@@ -101,42 +117,76 @@ def normalize(node: Any, *, keys_are_names: bool = False) -> Any:
 def skeleton(document: dict) -> dict:
     """The comparable shape of an OpenAPI document.
 
-    ``normalize`` minus ``info.version``: the release ceremony bumps
+    ``normalize`` minus ``info.version`` — the release ceremony bumps
     ``APP_VERSION`` on every release, and a version string is not a route,
-    parameter, field, status code or enum, so it must not move the fixture.
+    parameter, field, status code or enum — with the top-level ``tags`` sorted
+    by name, since their order only groups the docs UI.
     """
     shape = normalize(document)
     if isinstance(shape.get("info"), dict):
         shape["info"].pop("version", None)
+    if isinstance(shape.get("tags"), list):
+        shape["tags"] = sorted(shape["tags"], key=_tag_name)
     return shape
+
+
+def _tag_name(tag: Any) -> str:
+    return str(tag.get("name", "")) if isinstance(tag, dict) else ""
 
 
 def _render(shape: dict) -> str:
     return json.dumps(shape, ensure_ascii=False, indent=2) + "\n"
 
 
-def _changed_entries(expected: dict, actual: dict) -> list[str]:
-    """Name the paths, component schemas and other top-level keys that differ."""
-    changed: list[str] = []
-    for section, label in (("paths", "path"), ("components", "component")):
-        exp, act = expected.get(section, {}), actual.get(section, {})
-        if section == "components":
-            exp, act = exp.get("schemas", {}), act.get("schemas", {})
-            label = "schema"
-        keys = sorted(exp.keys() | act.keys())
-        changed += [f"{label} {key}" for key in keys if exp.get(key) != act.get(key)]
-    for key in sorted(expected.keys() | actual.keys()):
-        if key == "paths":
-            continue
-        if key == "components":
-            exp_rest = {k: v for k, v in expected.get(key, {}).items() if k != "schemas"}
-            act_rest = {k: v for k, v in actual.get(key, {}).items() if k != "schemas"}
-            if exp_rest != act_rest:
-                changed.append("components (other than schemas)")
-            continue
-        if expected.get(key) != actual.get(key):
-            changed.append(f"top-level {key}")
-    return changed
+def _schemas(doc: dict) -> dict:
+    return doc.get("components", {}).get("schemas", {})
+
+
+def _paths(doc: dict) -> dict:
+    return doc.get("paths", {})
+
+
+def _rest(doc: dict) -> dict:
+    """Everything except paths and component schemas, as one name → value map."""
+    rest = {key: value for key, value in doc.items() if key not in ("paths", "components")}
+    rest["components (other than schemas)"] = {
+        key: value for key, value in doc.get("components", {}).items() if key != "schemas"
+    }
+    return rest
+
+
+# Reported in this order: a renamed model explains the routes that use it, so
+# the few schema entries come before the many path entries.
+_SECTIONS: tuple[tuple[str, Callable[[dict], dict]], ...] = (
+    ("schema", _schemas),
+    ("path", _paths),
+    ("top-level", _rest),
+)
+
+
+def _changed_entries(expected: dict, actual: dict, *, limit: int = _REPORT_LIMIT) -> list[str]:
+    """Name the schemas, paths and other top-level keys that differ, capped per section."""
+    report: list[str] = []
+    for label, section in _SECTIONS:
+        exp, act = section(expected), section(actual)
+        changed = [key for key in sorted(exp.keys() | act.keys()) if exp.get(key) != act.get(key)]
+        report += [f"{label} {key}" for key in changed[:limit]]
+        if len(changed) > limit:
+            report.append(f"(+{len(changed) - limit} more {label} entries)")
+    return report
+
+
+def _fail_mismatch(committed: str, current: str, *, what: str) -> None:
+    changed = _changed_entries(json.loads(committed), json.loads(current))
+    if changed:
+        pytest.fail(
+            f"{what}: {changed}. If that is intended, regenerate the snapshot with "
+            f"`{REGENERATE}` and review the fixture diff."
+        )
+    pytest.fail(
+        f"{what}: same content, different formatting. Regenerate the snapshot with "
+        f"`{REGENERATE}` instead of editing it."
+    )
 
 
 # ------------------------------------------------------------------- snapshot
@@ -147,23 +197,18 @@ def test_rest_schema_matches_the_committed_snapshot():
     current = _render(skeleton(app.openapi()))
     if os.environ.get("UPDATE_OPENAPI_SNAPSHOT") == "1":
         SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SNAPSHOT_PATH.write_text(current, encoding="utf-8")
+        SNAPSHOT_PATH.write_text(current, encoding="utf-8", newline="\n")
     committed = SNAPSHOT_PATH.read_text(encoding="utf-8")
     if current != committed:
-        changed = _changed_entries(json.loads(committed), json.loads(current))
-        shown = changed[:_REPORT_LIMIT]
-        more = f" (+{len(changed) - len(shown)} more)" if len(changed) > len(shown) else ""
-        pytest.fail(
-            f"the REST OpenAPI schema changed structurally: {shown}{more}. If that is "
-            f"intended, regenerate the snapshot with `{REGENERATE}` and review the "
-            "fixture diff."
-        )
+        _fail_mismatch(committed, current, what="the REST OpenAPI schema changed structurally")
 
 
 def test_snapshot_is_normalized_and_sorted():
     """The committed file must be what ``skeleton`` produces, not a hand edit."""
     committed = SNAPSHOT_PATH.read_text(encoding="utf-8")
-    assert _render(skeleton(json.loads(committed))) == committed
+    current = _render(skeleton(json.loads(committed)))
+    if current != committed:
+        _fail_mismatch(committed, current, what="the committed snapshot is not normalized")
 
 
 # ------------------------------------------------------------------ normalize
@@ -218,7 +263,7 @@ _SAMPLE: dict = {
 }
 
 
-def _sample(mutate) -> dict:
+def _sample(mutate: Mutator) -> dict:
     """A deep copy of ``_SAMPLE`` after ``mutate`` has edited it in place."""
     doc = copy.deepcopy(_SAMPLE)
     mutate(doc)
@@ -227,6 +272,7 @@ def _sample(mutate) -> dict:
 
 def _reword(doc: dict) -> None:
     doc["info"]["description"] = "new prose"
+    doc["info"]["title"] = "Sample API"
     get = doc["paths"]["/items"]["get"]
     get["summary"] = "List all the items"
     get["description"] = "new prose"
@@ -234,8 +280,10 @@ def _reword(doc: dict) -> None:
     get["parameters"][0]["schema"]["examples"] = ["b", "c"]
     get["responses"]["200"]["description"] = "Success"
     get["responses"]["200"]["content"]["application/json"]["example"] = {"id": 2}
+    doc["components"]["schemas"]["Item"]["title"] = "An item"
     item = doc["components"]["schemas"]["Item"]["properties"]
     item["id"]["description"] = "new prose"
+    item["id"]["title"] = "Identifier"
     item["description"]["description"] = "new prose"
 
 
@@ -249,7 +297,6 @@ def test_a_version_bump_does_not_change_the_skeleton():
 
     assert skeleton(_sample(bump)) == skeleton(_SAMPLE)
     assert "version" not in skeleton(_SAMPLE)["info"]
-    assert skeleton(_SAMPLE)["info"]["title"] == "Sample"
 
 
 def test_a_field_named_description_stays_but_loses_its_own_prose():
@@ -258,13 +305,32 @@ def test_a_field_named_description_stays_but_loses_its_own_prose():
     assert fields["id"] == {"type": "integer"}
 
 
-def test_normalize_sorts_keys_but_keeps_list_order():
+def test_normalize_sorts_keys_and_required_but_keeps_enum_order():
     reordered = {"paths": {}, "openapi": "3.1.0", "info": {"version": "1", "title": "S"}}
     assert _render(normalize(reordered)) == _render(normalize(dict(reversed(reordered.items()))))
-    assert normalize(_SAMPLE)["components"]["schemas"]["Item"]["properties"]["kind"]["enum"] == [
-        "a",
-        "b",
-    ]
+
+    def swap_required(doc: dict) -> None:
+        doc["components"]["schemas"]["Item"]["required"] = ["kind", "id"]
+
+    def swap_enum(doc: dict) -> None:
+        doc["components"]["schemas"]["Item"]["properties"]["kind"]["enum"] = ["b", "a"]
+
+    with_two_required = _sample(
+        lambda doc: doc["components"]["schemas"]["Item"].update(required=["id", "kind"])
+    )
+    assert normalize(_sample(swap_required)) == normalize(with_two_required)
+    assert normalize(_sample(swap_enum)) != normalize(_SAMPLE)
+
+
+def test_top_level_tags_are_sorted_by_name():
+    def tags(doc: dict) -> None:
+        doc["tags"] = [{"name": "items", "description": "prose"}, {"name": "auth"}]
+
+    def tags_reversed(doc: dict) -> None:
+        doc["tags"] = [{"name": "auth"}, {"name": "items", "description": "other prose"}]
+
+    assert skeleton(_sample(tags)) == skeleton(_sample(tags_reversed))
+    assert skeleton(_sample(tags))["tags"] == [{"name": "auth"}, {"name": "items"}]
 
 
 def _add_response(doc: dict) -> None:
@@ -300,6 +366,11 @@ def _change_tag(doc: dict) -> None:
     doc["paths"]["/items"]["get"]["tags"] = ["inventory"]
 
 
+def _add_path_and_rename_field(doc: dict) -> None:
+    _add_path(doc)
+    _rename_field(doc)
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -314,11 +385,31 @@ def _change_tag(doc: dict) -> None:
     ],
     ids=lambda fn: fn.__name__.lstrip("_"),
 )
-def test_structural_changes_are_visible_after_normalization(mutate):
+def test_structural_changes_are_visible_after_normalization(mutate: Mutator):
     assert normalize(_sample(mutate)) != normalize(_SAMPLE)
 
 
-def test_failure_message_names_the_changed_entries():
+def test_failure_message_names_the_changed_entries_schemas_first():
     expected = normalize(_SAMPLE)
-    actual = normalize(_sample(lambda doc: (_add_path(doc), _rename_field(doc))))
-    assert _changed_entries(expected, actual) == ["path /items/{id}", "schema Item"]
+    actual = normalize(_sample(_add_path_and_rename_field))
+    assert _changed_entries(expected, actual) == ["schema Item", "path /items/{id}"]
+
+
+def test_failure_message_caps_each_section_separately():
+    def many_paths(doc: dict) -> None:
+        for n in range(4):
+            doc["paths"][f"/p{n}"] = {"get": {"operationId": f"p{n}", "responses": {}}}
+
+    expected = normalize(_SAMPLE)
+
+    def many_paths_and_rename_field(doc: dict) -> None:
+        many_paths(doc)
+        _rename_field(doc)
+
+    actual = normalize(_sample(many_paths_and_rename_field))
+    assert _changed_entries(expected, actual, limit=2) == [
+        "schema Item",
+        "path /p0",
+        "path /p1",
+        "(+2 more path entries)",
+    ]
