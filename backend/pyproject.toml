@@ -145,6 +145,7 @@ dev = [
     "fakeredis>=2.20.0",
     "playwright>=1.44.0",
     "pytest-playwright>=0.5.0",
+    "packaging>=22.0",  # tests/test_dependency_bounds.py parses requirements
 
     # Type Checking
     "pyright>=1.1.0",
