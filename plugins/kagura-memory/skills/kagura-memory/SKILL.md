@@ -52,19 +52,19 @@ Never print API keys or bearer tokens. When showing config, redact secrets.
 
 ## Login
 
-When a Kagura tool fails with `401` / `invalid_token` or `403` / `insufficient_scope`, when `codex mcp list` shows the entry `Not logged in`, or after a move to a new machine or workspace, sign the connection in again. The Codex commands here are checked against codex-cli 0.145.0.
+When a Kagura tool fails with `401` / `invalid_token` or `403` / `insufficient_scope`, when `codex mcp list` shows the entry `Not logged in`, or after a move to a new machine or workspace, sign the connection in again. The Codex commands here were run against codex-cli 0.145.0; the `rust-v0.155.1` in "Tool Availability" is the Codex source tag its config keys were read from.
 
 Never print, ask for or store a token, an API key, a device-flow code or an OAuth redirect URL. Every sign-in runs in the user's own terminal, not through you and not with `!`: it waits for a browser, and the output of a `!` command (a one-time code, an approval URL) joins this conversation. If the user pastes a secret anyway, do not repeat it; tell them to replace it.
 
 1. **Detect.** Run `codex mcp list` (or `codex mcp get kagura-memory`); both print secret values as `*****`. Never add `--json`: the JSON form prints `http_headers` and `env` values in clear. The entry's form:
-   - **OAuth** — a `url` with no `bearer_token_env_var`, `http_headers` or `env_http_headers`; Auth `Not logged in`, or `OAuth` once signed in.
+   - **OAuth** — a `url` with no `bearer_token_env_var`, `http_headers` or `env_http_headers`; Auth `Not logged in`, or `OAuth` once signed in. `Unsupported` on an entry with only a `url` means Codex got no OAuth metadata from the server — it is unreachable or advertises no OAuth, which is not a sign-in problem.
    - **Bearer key** — `bearer_token_env_var`, or an `Authorization` in `http_headers` / `env_http_headers`; Auth `Bearer token` (`Unsupported` for `env_http_headers`).
-   - **CLI profile** — `command` `kagura-mcp` (what `kagura setup codex` writes); the profile is `--profile <name>` in `args`.
+   - **CLI profile** — a `command` that runs `kagura-mcp`: a path ending in `kagura-mcp` (`kagura setup codex` writes its absolute path) or a launcher that runs it. The profile is `--profile <name>` in `args`; without one, the row `kagura auth list` marks `default` (the literal `default` only when there are no rows).
 
    A `404` / `405`, a `5xx`, an unreachable server or no entry at all is not a sign-in problem: see "Tool Availability" above.
 2. **Re-authenticate.** The user runs the command, then restarts Codex:
    - OAuth: `codex mcp login kagura-memory`. It opens the browser and waits for Codex's callback on this machine. Codex keys the token on the entry's `url`, so a changed URL needs this again; `codex mcp logout kagura-memory` removes the stored token.
-   - CLI profile: `kagura auth login --profile <name> --server https://<host>`. `--server` is the site root, not the `/mcp` URL (Python SDK `kagura-memory` 0.31.0 or later).
+   - CLI profile: `kagura auth login --profile <name> --server https://<host>`, with the profile name from step 1 — a login to `default` while another profile is the default writes a second profile and leaves the proxy's own signed out. `--server` is the site root, not the `/mcp` URL (Python SDK `kagura-memory` 0.31.0 or later).
    - Bearer key: there is nothing to sign in to. Where OAuth is not available, this is the key path of "Tool Availability" (steps 4–5): a new key from Workspace → Integrations → API Keys, exported in the shell that starts Codex and never pasted here.
 3. **After `insufficient_scope`.** Request exactly the challenge's `scope` (`WWW-Authenticate: Bearer error="insufficient_scope", scope="…"`): the scopes the token already has plus the missing one. Never request the missing scope alone — scopes do not imply one another, so a token re-issued for `memory:write` only loses `memory:read`. With only `required_scope` in view, add it to the current scopes: `memory:read memory:write` for a read-only token. Put only names the server advertises into a command (`openid`, `memory:read`, `memory:write`, `memory:delete`, `memory:admin`, `offline_access`):
    - OAuth: `codex mcp login kagura-memory --scopes memory:read,memory:write` (comma-separated).

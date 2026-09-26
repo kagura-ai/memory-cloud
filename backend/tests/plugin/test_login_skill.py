@@ -31,13 +31,20 @@ CLAUDE_MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 
 # The versions the commands were checked against (help output / source), named in the text.
 CODEX_CLI_VERSION = "codex-cli 0.145.0"
-CLAUDE_CODE_VERSION = "Claude Code 2.1.282"
+CLAUDE_CODE_VERSION = "Claude Code 2.1.283"
 PYTHON_SDK_VERSION = "`kagura-memory` 0.41.3"
 
 CLI_PROFILE_LOGIN = "kagura auth login --profile <name> --server https://<host>"
 
 # Every file that talks about signing the Kagura connection in.
-LOGIN_DOCS = [LOGIN_SKILL, CODEX_SKILL, GUIDE, CLIENT_DOCS, README_JA, SETUP_SKILL]
+LOGIN_DOCS = [
+    LOGIN_SKILL,
+    CODEX_SKILL,
+    GUIDE,
+    CLIENT_DOCS,
+    README_JA,
+    SETUP_SKILL,
+]
 
 
 def _read(path: Path) -> str:
@@ -169,6 +176,53 @@ def test_login_skill_reauthenticates_every_entry_form() -> None:
     assert "Workspace → Integrations → API Keys" in flat
     assert "never pasted here" in flat
     assert "`api_key`" in flat, "the hooks' key is a separate credential"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [lambda: _section(_login(), "### CLI profile (`kagura-mcp`)"), _codex_login],
+    ids=["claude", "codex"],
+)
+def test_cli_profile_login_names_the_profile_the_proxy_reads(text) -> None:
+    """``kagura-mcp`` without ``--profile`` reads the credentials file's ``default_profile``;
+    ``kagura auth login`` without ``--profile`` writes one literally named ``default``
+    (Python SDK 0.41.3: ``mcp_proxy.py`` ``--profile`` default ``None``, ``auth/cli.py``
+    ``--profile`` default ``"default"``). Logging in to ``default`` then leaves the proxy on
+    its dead profile, so the name must come from the row ``kagura auth list`` marks default.
+    """
+    flat = _flat(text())
+    assert "marks `default`" in flat
+    assert "`default` when `Args` name none" not in flat
+
+
+def test_codex_detects_the_cli_profile_by_the_path_setup_writes() -> None:
+    """``kagura setup codex`` names ``kagura-mcp`` by absolute path (SDK ``setup_harness.py``)."""
+    flat = _flat(_codex_login())
+    assert "a path ending in `kagura-mcp`" in flat
+    assert "absolute path" in flat
+
+
+def test_codex_explains_unsupported_on_a_url_only_entry() -> None:
+    """A ``url``-only entry whose server gives Codex no OAuth metadata shows ``Unsupported``."""
+    flat = _flat(_codex_login())
+    assert "`Unsupported` on an entry with only a `url`" in flat
+    assert "rust-v0.155.1" in flat, "the two Codex versions in the file are told apart"
+
+
+def test_bearer_fallback_keeps_the_key_out_of_shell_history() -> None:
+    bearer = _flat(_section(_login(), "### Bearer key"))
+    assert "Bearer <new key>" not in bearer, "a key typed on the command line lands in history"
+    assert "`read -rs KAGURA_NEW_KEY`" in bearer
+    assert '--header "Authorization: Bearer $KAGURA_NEW_KEY"' in bearer
+    assert "`unset KAGURA_NEW_KEY`" in bearer
+    assert "shell history" in bearer
+
+
+def test_login_skill_makes_and_removes_the_values_directory() -> None:
+    detect = _flat(_section(_login(), "## 1. Detect"))
+    assert "`entry_name`" in detect
+    assert "`mktemp -d`" in detect
+    assert '`rm -rf "<values dir>"`' in detect
 
 
 @pytest.mark.parametrize("text", [_login, _codex_login], ids=["claude", "codex"])

@@ -90,8 +90,10 @@ settings on claude.ai.
 
 When `claude mcp list` shows `[Conflicting scopes]`, a sign-in may land on an entry that is not the
 one in effect: report the shadowed entries as B1 does, and let the user remove the stray one first.
-An entry under another name than `kagura-memory`: write the name to B0's values directory as
-`entry_name`, run the check, and use `"$(cat "<values dir>/entry_name")"` in place of the name.
+An entry under another name than `kagura-memory`: make B0's values directory (`mktemp -d`), write
+the name to it as `entry_name` with the file-writing tool, run the check, and use
+`"$(cat "<values dir>/entry_name")"` in place of the name. Remove the directory
+(`rm -rf "<values dir>"`) once the user has run the last command that reads it.
 
 ## 2. Re-authenticate
 
@@ -102,7 +104,7 @@ Claude Code's own sign-in; the skill can only instruct. Tell the user:
 > Run `/mcp`, choose **kagura-memory**, then **Authenticate**. Sign in in the browser that opens
 > and approve the consent screen.
 
-From a terminal instead (checked against Claude Code 2.1.282): the user runs
+From a terminal instead (checked against Claude Code 2.1.283): the user runs
 `claude mcp login kagura-memory` in their own terminal. `--no-browser` — SSH, headless, or WSL2,
 where the browser's callback cannot reach Claude Code under the default NAT networking — prints the
 authorization URL and asks for the redirect URL at its own prompt: paste it there, never here, since
@@ -121,7 +123,10 @@ The proxy refreshes its token by itself, so this form needs a login only when th
 kagura auth login --profile <name> --server https://<host>
 ```
 
-- `<name>` is the profile from `Args` (`default` when `Args` name none).
+- `<name>` is `--profile <name>` from `Args`. Without one, the proxy reads the credentials file's
+  default profile: use the name of the row the projection above marks `default`, and the literal
+  `default` only when there are no rows. A login to `default` while another row is the default
+  writes a second profile, and the proxy stays on its own, still signed-out one.
 - `--server` is the **site root**: the profile's MCP URL from the projection above without its
   `/mcp`. Passing the MCP URL ends in `/mcp/mcp`.
 - It prints a one-time code and an approval URL and opens the browser (`--no-browser` on SSH or
@@ -141,9 +146,10 @@ replaces the old one where the entry reads it — in their own editor or termina
 - a `.mcp.json` (project root or `~/.claude/.mcp.json`): the `Authorization` header's value, or the
   environment variable it names (`Bearer ${VAR}`) in the environment that starts Claude Code;
 - `~/.claude.json` (`local` / `user` scope), which is never hand-edited: the user runs
-  `claude mcp remove kagura-memory -s <scope>`, then
-  `claude mcp add --transport http kagura-memory <its URL> -s <scope> --header "Authorization: Bearer <new key>"`
-  themselves.
+  `claude mcp remove kagura-memory -s <scope>`, then `read -rs KAGURA_NEW_KEY` (it takes the key at
+  a silent prompt, so the key stays out of the shell history), then
+  `claude mcp add --transport http kagura-memory <its URL> -s <scope> --header "Authorization: Bearer $KAGURA_NEW_KEY"`
+  and `unset KAGURA_NEW_KEY`, all themselves.
 
 Then restart Claude Code. The plugin hooks' `api_key` (`/plugin` → kagura-memory → Configure) is a
 separate credential: replace it too if it was the same key. API keys carry no OAuth scope, so
@@ -172,7 +178,8 @@ command — `openid`, `memory:read`, `memory:write`, `memory:delete`, `memory:ad
   refused: clear the grant first (`claude mcp logout kagura-memory` in the user's terminal), then
   `/mcp` → **kagura-memory** → **Authenticate**. If the client never asks for that scope, switch the
   entry to a CLI profile (`/kagura-memory:setup`, A1).
-- **CLI profile** — the user runs, in their own terminal, with the scope names space-separated:
+- **CLI profile** — the user runs, in their own terminal, with `<name>` as in step 2 and the scope
+  names space-separated:
 
   ```bash
   kagura auth login --profile <name> --server https://<host> --scope "<scope>"
