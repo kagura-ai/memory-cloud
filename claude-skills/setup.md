@@ -285,6 +285,8 @@ When the run is over — after the user ran any line from B2 that reads the dire
 
 ### B1. Detect the effective MCP entry
 
+<!-- SYNC: claude-skills/login.md (step 1) runs two read-only blocks of this section verbatim: the redacted claude mcp get and the kagura auth list projection. backend/tests/plugin/test_login_skill.py pins them equal; change both together. -->
+
 ```bash
 claude mcp list
 # claude mcp get prints configured headers AND environment variables WITH their values, so
