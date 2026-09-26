@@ -5,6 +5,8 @@ Issue #51: Password + MFA login for initial admin.
 
 import pyotp
 
+from utils.utf8 import is_utf8_encodable
+
 
 def generate_totp_secret() -> str:
     """Generate a new TOTP secret key."""
@@ -18,6 +20,12 @@ def get_provisioning_uri(secret: str, login_id: str, issuer: str = "Kagura Memor
 
 
 def verify_totp(secret: str, code: str) -> bool:
-    """Verify a TOTP code (allows 1 period of clock skew)."""
+    """Verify a TOTP code (allows 1 period of clock skew).
+
+    A code that cannot be UTF-8 encoded is a wrong code (#1718); pyotp would
+    raise ``UnicodeEncodeError`` on it.
+    """
+    if not is_utf8_encodable(code):
+        return False
     totp = pyotp.TOTP(secret)
     return totp.verify(code, valid_window=1)

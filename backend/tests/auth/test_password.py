@@ -22,6 +22,8 @@ import pytest
 
 from auth.password import (
     PASSWORD_MAX_BYTES,
+    PASSWORD_NOT_ENCODABLE_MESSAGE,
+    PasswordNotEncodableError,
     PasswordTooLongError,
     hash_password,
     is_password_too_long,
@@ -136,3 +138,40 @@ class TestIsPasswordTooLong:
     )
     def test_measures_utf8_bytes(self, password: str, expected: bool) -> None:
         assert is_password_too_long(password) is expected
+
+
+class TestUnencodablePassword:
+    """Issue #1718: a password holding a lone surrogate cannot be UTF-8 encoded.
+
+    ``"\\ud800"`` is a legal JSON escape. It must be a wrong password, never a
+    ``UnicodeEncodeError`` (a 500 on the login route).
+    """
+
+    LONE = "Abc-123\ud800"
+
+    def test_verify_password_is_a_mismatch_not_an_error(self) -> None:
+        stored = bcrypt.hashpw(b"Abc-123", bcrypt.gensalt(rounds=4)).decode()
+        assert verify_password(self.LONE, stored) is False
+
+    def test_hash_password_refuses_with_a_clear_error(self) -> None:
+        with pytest.raises(PasswordNotEncodableError, match="UTF-8"):
+            hash_password(self.LONE)
+
+    def test_error_never_echoes_the_password_nor_chains_the_encode_error(self) -> None:
+        with pytest.raises(PasswordNotEncodableError) as exc_info:
+            hash_password(self.LONE)
+        assert self.LONE not in str(exc_info.value)
+        # A UnicodeEncodeError holds the whole input as ``.object``.
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None
+
+    def test_error_is_a_value_error_and_survives_pickle(self) -> None:
+        assert issubclass(PasswordNotEncodableError, ValueError)
+        error = PasswordNotEncodableError()
+        clone = pickle.loads(pickle.dumps(error))
+        assert type(clone) is PasswordNotEncodableError
+        assert str(clone) == PASSWORD_NOT_ENCODABLE_MESSAGE
+
+    def test_is_password_too_long_does_not_raise(self) -> None:
+        assert is_password_too_long(self.LONE) is False
+        assert is_password_too_long("x" * 72 + "\ud800") is True

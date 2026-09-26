@@ -92,6 +92,7 @@ from utils.exceptions import (
 )
 from utils.hashing import sha256_hex
 from utils.logger import get_logger
+from utils.utf8 import is_utf8_encodable
 
 logger = get_logger(__name__)
 
@@ -393,6 +394,12 @@ class AccountErasureService:
             ErasureRequestNotFoundError: No pending request exists.
         """
         target = await self._load_user_or_404(user_id)
+
+        # #1718: a token that cannot be UTF-8 encoded was never issued, and it
+        # would raise as a Redis key. (Such a password is simply a mismatch in
+        # ``verify_password``.)
+        if not is_utf8_encodable(token):
+            raise ErasureTokenInvalidError()
 
         # Resolve and validate token via Redis (raw token never on disk).
         redis = get_redis_client()
