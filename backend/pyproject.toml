@@ -176,6 +176,12 @@ lite = [
     "pyarrow>=14.0.0",
 ]
 
+# The CI lint job installs only this group (`uv sync --only-group lint`), so
+# it gets the locked ruff without the runtime tree. Keep the range equal to
+# the ruff entry in the dev extra above.
+[dependency-groups]
+lint = ["ruff>=0.7.0"]
+
 [tool.uv]
 # uv.lock is tracked (#1706); CI, backend/Dockerfile and setup.sh install from
 # it with `uv sync --locked`. The uv version is pinned in lockstep here, in

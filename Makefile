@@ -271,7 +271,7 @@ lock-check:
 	cd $(BACKEND_DIR) && uv lock --check
 
 .PHONY: lint
-lint: lint-models-no-column
+lint: lint-models-no-column lock-check
 	@echo "Running linter..."
 	cd $(BACKEND_DIR) && ruff check src/ tests/
 	ruff check plugins/kagura-memory/hooks/ && ruff format --check plugins/kagura-memory/hooks/

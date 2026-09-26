@@ -1941,6 +1941,11 @@ neural = [
     { name = "sentence-transformers" },
 ]
 
+[package.dev-dependencies]
+lint = [
+    { name = "ruff" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "aioboto3", specifier = ">=13.0.0" },
@@ -2002,6 +2007,9 @@ requires-dist = [
     { name = "xxhash", specifier = ">=3.4.0" },
 ]
 provides-extras = ["dev", "llm-providers", "neural", "lite"]
+
+[package.metadata.requires-dev]
+lint = [{ name = "ruff", specifier = ">=0.7.0" }]
 
 [[package]]
 name = "lance-namespace"

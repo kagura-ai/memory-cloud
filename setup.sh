@@ -48,9 +48,15 @@ echo ""
 echo "==> Step 2/5: Install Python dependencies (uv sync --locked)"
 UV_REQUIRED="0.11.19"
 if ! command -v uv >/dev/null 2>&1 || [ "$(uv --version 2>/dev/null | awk '{print $2}')" != "$UV_REQUIRED" ]; then
-  echo "Installing uv ${UV_REQUIRED} (the pinned version) with the standalone installer..."
-  curl -LsSf "https://astral.sh/uv/${UV_REQUIRED}/install.sh" | sh
-  export PATH="$HOME/.local/bin:$PATH"
+  # Project-local install: a machine-wide uv of another version is left alone
+  # (no silent downgrade, no shell rc edits), and this script uses the pinned
+  # one from backend/.uv-bin. backend/.dockerignore and .gitignore skip it.
+  echo "Installing uv ${UV_REQUIRED} (the pinned version) into backend/.uv-bin..."
+  curl -LsSf "https://astral.sh/uv/${UV_REQUIRED}/install.sh" \
+    | env UV_INSTALL_DIR="$PWD/backend/.uv-bin" UV_NO_MODIFY_PATH=1 sh
+  export PATH="$PWD/backend/.uv-bin:$PATH"
+  echo "Later 'uv' commands in backend/ need this version too: put backend/.uv-bin on PATH,"
+  echo "or install uv ${UV_REQUIRED} for your user (curl -LsSf https://astral.sh/uv/${UV_REQUIRED}/install.sh | sh)."
 fi
 cd backend && uv sync --locked --extra dev
 cd ..

@@ -12,24 +12,27 @@ across machines. So every site must carry the one version that
 2. the ``ghcr.io/astral-sh/uv:<version>`` image stage in ``backend/Dockerfile``,
 3. the ``UV_REQUIRED="<version>"`` the standalone installer pins in ``setup.sh``.
 
-The lock itself must be tracked (not ignored by ``.gitignore``) and resolved
-for the same ``requires-python`` as ``pyproject.toml``.
+Every workflow job that sets up Python must also set up the pinned uv, every
+``uv sync`` must be ``--locked``, and the lock itself must be tracked (git does
+not ignore it) and resolved for the same ``requires-python`` as
+``pyproject.toml``.
 """
 
 import re
+import subprocess
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+import yaml
 
 # backend/tests/test_uv_version_lockstep.py -> tests -> backend -> repo root
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-_SETUP_UV_VERSION = re.compile(
-    r"uses:\s*astral-sh/setup-uv@[^\n]*\n(?:[ \t]*if:[^\n]*\n)?\s*with:\s*\n\s*version:\s*\"([^\"]+)\"",
-    re.MULTILINE,
-)
+_WORKFLOWS = [".github/workflows/ci.yml", ".github/workflows/eval-nightly.yml"]
+_INSTALL_SITES = [*_WORKFLOWS, "backend/Dockerfile", "setup.sh"]
+
 _DOCKER_UV_IMAGE = re.compile(r"ghcr\.io/astral-sh/uv:([0-9][^\s/]*)")
 _SETUP_SH_PIN = re.compile(r'^UV_REQUIRED="([0-9][^"]*)"', re.MULTILINE)
 
@@ -49,9 +52,24 @@ def required_uv_version() -> str:
     return spec[2:]
 
 
+def _jobs(rel: str) -> dict[str, list[dict]]:
+    """``job name -> steps`` for a workflow file."""
+    workflow = yaml.safe_load(_read(rel))
+    return {name: job.get("steps") or [] for name, job in workflow["jobs"].items()}
+
+
+def _uses(step: dict, action: str) -> bool:
+    return str(step.get("uses", "")).split("@")[0] == action
+
+
 def setup_uv_versions(rel: str) -> list[str]:
     """Every ``version:`` given to ``astral-sh/setup-uv`` in a workflow file."""
-    return _SETUP_UV_VERSION.findall(_read(rel))
+    return [
+        str((step.get("with") or {}).get("version", ""))
+        for steps in _jobs(rel).values()
+        for step in steps
+        if _uses(step, "astral-sh/setup-uv")
+    ]
 
 
 def dockerfile_uv_version() -> str:
@@ -65,8 +83,6 @@ def setup_sh_uv_version() -> str:
     assert match, 'setup.sh does not pin the uv it installs (UV_REQUIRED="<version>")'
     return match.group(1)
 
-
-_WORKFLOWS = [".github/workflows/ci.yml", ".github/workflows/eval-nightly.yml"]
 
 _VERSION_SITES: list[tuple[str, Callable[[], list[str]]]] = [
     *[(f"{rel} setup-uv version", (lambda rel=rel: setup_uv_versions(rel))) for rel in _WORKFLOWS],
@@ -89,36 +105,46 @@ def test_uv_pin_matches_required_version(
     )
 
 
-def test_every_python_job_pins_uv() -> None:
-    """A workflow job that sets up Python also sets up the pinned uv (no unpinned installs)."""
+def test_every_python_job_sets_up_the_pinned_uv() -> None:
+    """Per job: a step that sets up Python is paired with a pinned setup-uv step."""
     for rel in _WORKFLOWS:
-        text = _read(rel)
-        assert "pip install -e" not in text, f"{rel} still installs from ranges (pip install -e)"
-        assert text.count("actions/setup-python@") == len(setup_uv_versions(rel)), (
-            f"{rel}: every actions/setup-python step needs a pinned astral-sh/setup-uv step"
-        )
+        for name, steps in _jobs(rel).items():
+            has_python = any(_uses(step, "actions/setup-python") for step in steps)
+            has_uv = any(_uses(step, "astral-sh/setup-uv") for step in steps)
+            assert has_uv or not has_python, f"{rel}: job {name!r} sets up Python without setup-uv"
+            for step in steps:
+                run = str(step.get("run", ""))
+                assert "pip install -e" not in run, (
+                    f"{rel}: job {name!r} still installs from ranges (pip install -e)"
+                )
 
 
-def test_lock_is_tracked_and_current_python() -> None:
-    """uv.lock exists, is not ignored, and was resolved for pyproject's requires-python."""
-    lock_path = _REPO_ROOT / "backend" / "uv.lock"
-    assert lock_path.is_file(), "backend/uv.lock is missing — run `cd backend && uv lock`"
-    ignored = [
-        line.strip()
-        for line in _read(".gitignore").splitlines()
-        if line.strip() in {"backend/uv.lock", "uv.lock", "*.lock"}
+def _command_lines(rel: str) -> list[str]:
+    """Non-comment lines of a file (a ``# ... uv sync`` remark is prose, not a command)."""
+    return [
+        line
+        for line in _read(rel).splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
     ]
-    assert ignored == [], f".gitignore ignores the lock: {ignored}"
-    lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
-    assert lock["requires-python"] == _pyproject()["project"]["requires-python"]
 
 
 def test_locked_installs_everywhere() -> None:
     """CI and the image never resolve afresh: every uv sync is --locked."""
-    for rel in [*_WORKFLOWS, "backend/Dockerfile", "setup.sh"]:
-        text = _read(rel)
-        # Command lines only: a backticked `uv sync` in a comment is prose.
-        syncs = re.findall(r"(?<!`)uv sync[^\n`]*(?!`)", text)
+    for rel in _INSTALL_SITES:
+        syncs = [line for line in _command_lines(rel) if re.search(r"\buv sync\b", line)]
         assert syncs, f"{rel}: no `uv sync` found"
-        unlocked = [line for line in syncs if "--locked" not in line]
+        unlocked = [line.strip() for line in syncs if "--locked" not in line]
         assert unlocked == [], f"{rel}: uv sync without --locked: {unlocked}"
+
+
+def test_lock_is_tracked_and_current_python() -> None:
+    """uv.lock exists, git does not ignore it, and it matches pyproject's requires-python."""
+    lock_path = _REPO_ROOT / "backend" / "uv.lock"
+    assert lock_path.is_file(), "backend/uv.lock is missing — run `cd backend && uv lock`"
+    # git is the authority on ignore rules; exit 1 means "not ignored".
+    check = subprocess.run(
+        ["git", "check-ignore", "-q", "backend/uv.lock"], cwd=_REPO_ROOT, check=False
+    )
+    assert check.returncode == 1, "git ignores backend/uv.lock — the lock must be tracked"
+    lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
+    assert lock["requires-python"] == _pyproject()["project"]["requires-python"]

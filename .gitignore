@@ -260,6 +260,7 @@ next-env.d.ts
 .claude/launch.json
 *.bak.*
 backend/=*
+backend/.uv-bin/
 .playwright-mcp/
 .superpowers/
 docs/superpowers/

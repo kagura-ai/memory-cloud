@@ -32,12 +32,13 @@ jobs:
       - name: Lockfile is current
         run: cd backend && uv lock --check
 
-      # ruff comes from the dev extra of the lock, so lint and format checks
-      # run the same ruff release a contributor gets from `uv sync`.
+      # Only the `lint` dependency group of the lock (one wheel), so lint and
+      # format checks run the same ruff release a contributor gets from
+      # `uv sync` without installing the runtime tree.
       - name: Install ruff (from the lock)
         run: |
           cd backend
-          uv sync --locked --extra dev --no-install-project
+          uv sync --locked --only-group lint --no-install-project
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Lint
