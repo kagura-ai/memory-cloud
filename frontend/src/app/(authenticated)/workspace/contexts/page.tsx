@@ -813,7 +813,7 @@ export default function ContextsPage() {
               </p>
             </div>
 
-            {/* Usage Guide for AI */}
+            {/* Usage Guide: the owner's notes on the context (#1698) */}
             <div className="space-y-2">
               <label className={cn(typography.bodySmall, "font-medium")}>
                 {t("usageGuideForAI")}{" "}
