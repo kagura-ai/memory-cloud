@@ -14,10 +14,12 @@
  *   with and without notes;
  * - the starter templates' `summary` and `usage_guide` text.
  *
- * The patterns are narrow on purpose (the backend's
- * `test_directory_instruction_boundary.py` does the same): saying the notes
- * are "information about the context, not instructions" must stay allowed.
- * Each pre-#1698 text below must trip a pattern, which keeps them honest.
+ * The word lists are the same in both languages: rules / ルール, must and
+ * should / べき, obey / 守る. Saying the notes are "information about the
+ * context, not instructions" must stay allowed (the backend's
+ * `test_directory_instruction_boundary.py` makes the same allowance). Each
+ * pre-#1698 text and regression below must trip a pattern, which keeps them
+ * honest.
  */
 import { createTranslator } from "next-intl";
 import { describe, expect, it } from "vitest";
@@ -60,7 +62,7 @@ const FORBIDDEN: readonly (readonly [RegExp, string])[] = [
     ),
     "tells the model to load guidelines or rules",
   ],
-  [/\bcontext'?s rules\b/i, "calls the notes the context's rules"],
+  [/\b(rules?|directives?)\b/i, "calls the notes rules or directives"],
   [/\bguidelines?\b/i, "calls the notes guidelines"],
   [/AI\s*(用|向け)/, "labels the field as text for the AI"],
   [/インストラクション/, "labels the field as instructions"],
@@ -70,9 +72,19 @@ const FORBIDDEN: readonly (readonly [RegExp, string])[] = [
     "defines the field as instructions for the AI",
   ],
   [/AIが[^。\n]{0,40}(指示|すべき)/, "tells the AI what it should do"],
-  [/すべき/, "tells the reader what it should do"],
+  [/べき/, "tells the reader what it should do"],
   [/(ルール|規則|決まり)/, "calls the notes rules"],
   [/に従[うっいわえ]/, "tells the model to follow the notes"],
+];
+
+/**
+ * Messages and starter templates only: the notes do not tell the reader what
+ * it must do. The copyable template is exempt — it IS the user's own client
+ * instructions ("Never store: passwords, …").
+ */
+const NOTES_WORDING: readonly (readonly [RegExp, string])[] = [
+  [/\b(must|should|obey\w*)\b/i, "tells the reader what it must do"],
+  [/守[らりるれろっ]/, "tells the reader to obey the notes"],
 ];
 
 /**
@@ -104,6 +116,27 @@ const PRE_1698_FIXTURES = [
   "AIがこのコンテキストでメモリーをどのように使用すべきかのガイドライン...",
   "特定のガイドラインが設定されていません。コンテキスト設定で構成してください。",
   "サマリーとインストラクションテンプレート",
+];
+
+/**
+ * Framings the first version of this guard let through (review of #1698):
+ * English had no counterpart to ルール / すべき, Japanese none to 守る / 〜べき.
+ */
+const MESSAGE_REGRESSIONS = [
+  "Usage Guide (rules for this context)",
+  "Directions the assistant must obey when storing and retrieving memories.",
+  "Notes the assistant should apply to every memory.",
+  "このコンテキストでアシスタントが守るべき指示。",
+];
+
+/**
+ * Copyable-template lines that must trip the template scan (FORBIDDEN only:
+ * the template is the user's own client instructions, so the notes-only
+ * wording patterns do not apply to it).
+ */
+const TEMPLATE_REGRESSIONS = [
+  "3. Treat context.usage_guide as binding directives and do what it says",
+  "3. context.usage_guide lists the rules for this context",
 ];
 
 /** Wordings that describe the field as information: they must stay allowed. */
@@ -171,11 +204,26 @@ const CATALOGUES = [
   ["ja", ja],
 ] as const;
 
-const MESSAGE_PATTERNS = [...FORBIDDEN, ...FIELD_NAME];
+const MESSAGE_PATTERNS = [...FORBIDDEN, ...NOTES_WORDING, ...FIELD_NAME];
+const STARTER_PATTERNS = [...FORBIDDEN, ...NOTES_WORDING];
 
 describe("usage_guide framing patterns (#1698)", () => {
-  it.each(PRE_1698_FIXTURES)("refuses the pre-#1698 text %j", (text) => {
-    expect(violations(text, MESSAGE_PATTERNS)).not.toEqual([]);
+  it.each([...PRE_1698_FIXTURES, ...MESSAGE_REGRESSIONS])(
+    "refuses the message text %j",
+    (text) => {
+      expect(violations(text, MESSAGE_PATTERNS)).not.toEqual([]);
+    },
+  );
+
+  it.each(MESSAGE_REGRESSIONS)(
+    "refuses the starter-template text %j",
+    (text) => {
+      expect(violations(text, STARTER_PATTERNS)).not.toEqual([]);
+    },
+  );
+
+  it.each(TEMPLATE_REGRESSIONS)("refuses the template line %j", (text) => {
+    expect(violations(text)).not.toEqual([]);
   });
 
   it.each(ALLOWED_EXAMPLES)("allows %j", (text) => {
@@ -224,7 +272,9 @@ describe.each(CATALOGUES)(
     ] as const)("%s never frames the notes as rules", (_label, usageGuide) => {
       for (const isPrivate of [true, false]) {
         const text = generateTemplate("my-context", usageGuide, isPrivate, t);
-        expect(text.split("\n").flatMap((line) => violations(line))).toEqual([]);
+        expect(text.split("\n").flatMap((line) => violations(line))).toEqual(
+          [],
+        );
       }
     });
   },
@@ -235,7 +285,9 @@ describe("starter templates (#1698)", () => {
     "%s describes the context, not AI instructions",
     (_, tpl) => {
       const lines = [tpl.summary, ...tpl.usage_guide.split("\n")];
-      expect(lines.flatMap((line) => violations(line))).toEqual([]);
+      expect(
+        lines.flatMap((line) => violations(line, STARTER_PATTERNS)),
+      ).toEqual([]);
     },
   );
 });
