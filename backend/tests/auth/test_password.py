@@ -14,6 +14,9 @@ Pinned here:
 
 from __future__ import annotations
 
+import copy
+import pickle
+
 import bcrypt
 import pytest
 
@@ -96,6 +99,12 @@ class TestHashPassword:
         with pytest.raises(PasswordTooLongError) as exc_info:
             hash_password(secret)
         assert secret not in str(exc_info.value)
+
+    def test_error_survives_pickle_and_copy(self) -> None:
+        error = PasswordTooLongError()
+        for clone in (pickle.loads(pickle.dumps(error)), copy.copy(error)):
+            assert type(clone) is PasswordTooLongError
+            assert str(clone) == str(error)
 
     def test_multibyte_counts_in_bytes_not_characters(self) -> None:
         # 25 characters, 75 bytes

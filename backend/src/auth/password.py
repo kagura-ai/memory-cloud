@@ -20,8 +20,9 @@ PASSWORD_TOO_LONG_MESSAGE = (
 class PasswordTooLongError(ValueError):
     """Raised by ``hash_password`` for a password bcrypt cannot hash in full."""
 
-    def __init__(self) -> None:
-        super().__init__(PASSWORD_TOO_LONG_MESSAGE)
+    def __init__(self, message: str = PASSWORD_TOO_LONG_MESSAGE) -> None:
+        # The message is an argument so pickle / copy can rebuild the error.
+        super().__init__(message)
 
 
 def is_password_too_long(password: str) -> bool:
