@@ -133,7 +133,7 @@ Show result summaries with `memory_id`, type, importance, and tags when the user
 
 ## Remember
 
-When saving new knowledge, decisions, bug fixes, troubleshooting notes, or session lessons:
+When the user asks to save new knowledge, decisions, bug fixes, troubleshooting notes, or session lessons:
 
 1. Resolve the context. Ask before writing if the context is ambiguous.
 2. Store reusable conclusions, not process narration. Write the summary (best 100-250 characters) with the terms a later search would use — good: "JWT expiry caused 401. Fixed with refresh token rotation and clock skew handling."; bad: "Discussed auth errors in today's meeting." Split long material (over ~2,000 characters) into one memory per topic linked by shared tags, never "part 1/3". Call `list_tags` first and reuse stored tag spellings.
@@ -164,11 +164,11 @@ Never store passwords, API keys, bearer tokens, private customer data, or unnece
 
 ## Session Summary
 
-At the end of a development session or before switching tasks:
+Only when the user asks for a session summary (typically at the end of a development session or before switching tasks) — never on your own:
 
 1. Review the conversation and local work.
 2. Identify durable items only: decisions, patterns, bug fixes, troubleshooting notes, learnings, and roadmap notes.
-3. Save separate memories for separate reusable conclusions. Avoid one large transcript-style dump.
+3. Show the candidates and save what the user chooses to keep, as separate memories for separate reusable conclusions. Avoid one large transcript-style dump.
 4. Include issue tags and a `Related issues:` line in content where relevant.
 5. Report what was saved: context, count, type, summary, and importance.
 

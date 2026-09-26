@@ -224,7 +224,9 @@ class LLMService:
                 "llm_json_parse_failed_retrying",
                 provider=resolved_provider,
                 model=resolved_model,
-                content_preview=content[:200],
+                # #1721 (Directory 1.D): the output is built from stored
+                # memory text, so log its length, never a preview of it.
+                content_len=len(content),
             )
 
         except Exception as e:

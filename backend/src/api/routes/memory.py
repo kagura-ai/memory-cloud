@@ -41,6 +41,7 @@ from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import MemoryCloudException, NotFoundException
 from utils.logger import get_logger
+from utils.query_log import query_log_fields
 
 logger = get_logger(__name__)
 
@@ -229,7 +230,10 @@ async def recall(
         POST /api/v1/memory/recall
         Authorization: Bearer <session_token>
     """
-    logger.info("recall_request", user_id=user["user_id"], query=request.query, k=request.k)
+    # #1721 (Directory 1.D): length + keyed hash, never the query text.
+    logger.info(
+        "recall_request", user_id=user["user_id"], k=request.k, **query_log_fields(request.query)
+    )
 
     # Issue #82: Pass current context ID for context-based collection
     # Issue #146: Pass current workspace ID for workspace-scoped API keys

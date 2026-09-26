@@ -15,6 +15,15 @@ Two guards:
   patterns are narrow on purpose: ``recall``'s "Omit to follow the context's
   search config" and ``explore``'s "Follow only these edge types" describe
   server behaviour and stay allowed.
+* **User-directed writes** (#1721, policy 1.F) — memories are client-authored:
+  the client composes content and submits it with ``remember`` when the user
+  asks. No static text may tell the model to save, store or send conversation
+  content (or the conversation itself) on its own or at fixed points (every
+  turn, after a task, at the end of a session, when the session ends, as you
+  go), to call a tool "after recall()" by habit, or claim pinned memories load
+  every turn (only a client hook does that). ``AUTO_SAVE`` holds those
+  patterns; the pre-#1721 texts and the auto-save shapes they stand for are
+  its fixtures.
 * **Delivery** — a Directory connector (OAuth user token, the plain ``/mcp``
   URL, no ``?guardrails=``) gets exactly the static base text from both
   ``initialize`` and ``server/discover``, with public cache hints and no
@@ -74,6 +83,179 @@ FORBIDDEN: list[tuple[str, str]] = [
     ),
 ]
 
+# #1721 (policy 1.F): writes are user-directed. A save verb and a fixed point
+# (every / each / per / after / before / at the end of a turn, task, session,
+# conversation ...; "when the session ends", "whenever you finish", "as you go")
+# in one sentence, in either order, tells the model to save on its own
+# schedule.
+#
+# Only the base and -ing forms count ("save", "store", "call remember()",
+# "saving"): that is how an instruction to the model reads. A description of
+# what the server does uses the third-person or past form ("stores", "is
+# recorded", "records each step"), which stays allowed. "record", "log" and
+# "store" right after a determiner are nouns ("one record", "the audit log").
+_NOUN_BEFORE = "".join(
+    rf"(?<!\b{word} )"
+    for word in ("a", "an", "the", "one", "each", "every", "per", "this", "that", "audit")
+)
+_SAVE = (
+    r"(?:"
+    + _NOUN_BEFORE
+    + r"\b(?:sav(?:e|ing)|stor(?:e|ing)|remember(?:ing)?|record(?:ing)?|persist(?:ing)?"
+    r"|send(?:ing)?|upload(?:ing)?|log(?:ging)?|captur(?:e|ing))\b"
+    r"|\b(?:be|get) (?:saved|stored|remembered|recorded|persisted|sent|uploaded|logged"
+    r"|captured)\b)"
+)
+_DET = (
+    r"(?:(?:the|a|an|each|every|any|this|that|your|our|its|the current|the whole"
+    r"|the entire)\s+)?"
+)
+_EVENT = r"(?:turn|task|session|conversation|chat|response|message|reply|exchange|step)s?\b"
+_FIXED_POINT = (
+    "(?:"
+    + "|".join(
+        [
+            # every turn, each task, per session, every 10 turns
+            r"\b(?:every|each|per)\s+(?:\d+\s+|other\s+)?" + _EVENT,
+            # after each task, before ending the session, at the end of your session
+            r"\b(?:after|before|(?:at|by|near|towards?) the (?:end|start|close|conclusion) of"
+            + r"|end of)\s+(?:(?:ending|closing|finishing|completing|leaving)\s+)?"
+            + _DET
+            + _EVENT,
+            # at session end
+            r"\b(?:at|by)\s+" + _EVENT + r"\s+(?:end|close|exit)\b",
+            # when the session ends, once the task is done
+            r"\b(?:when|whenever|once|after|before|until)\s+"
+            + _DET
+            + _EVENT
+            + r"\s+(?:ends|is (?:over|done|finished|complete|closing|ending)|finishes|closes"
+            + r"|completes)",
+            # whenever you finish, before you finish
+            r"\b(?:when|whenever|once|after|before)\s+you(?:'re| are)?\s+"
+            + r"(?:finish|complete|end|close|leave|wrap up|done)",
+            # as you go, along the way
+            r"\bas you (?:go|work)\b|\balong the way\b",
+            # after recall(), after every recall()
+            r"\bafter\s+(?:(?:each|every|any)\s+)?recall\(\)",
+        ]
+    )
+    + ")"
+)
+AUTO_SAVE: list[tuple[str, str]] = [
+    (
+        _SAVE + _SAME_SENTENCE + r"{0,160}" + _FIXED_POINT,
+        "tells the model to save at fixed points instead of when the user asks",
+    ),
+    (
+        _FIXED_POINT + _SAME_SENTENCE + r"{0,160}" + _SAVE,
+        "tells the model to save at fixed points instead of when the user asks",
+    ),
+    (
+        r"\bcall (?:it|this|them)(?: once| again| always)? after\b"
+        r"|\bafter (?:each|every|any) (?:recall|search|tool call)",
+        "tells the model to call a tool by habit after another one",
+    ),
+    (
+        r"\bsummari[sz](?:e|ing)\b" + _SAME_SENTENCE + r"{0,40}"
+        r"\b(?:session|conversation|chat|transcript|thread|discussion)s?\b",
+        "tells the model to summarise the conversation for storage",
+    ),
+    (
+        _SAVE + _SAME_SENTENCE + r"{0,30}"
+        r"\b(?:conversation|chat|transcript|dialog(?:ue)?)s?\b",
+        "tells the model to save the conversation itself",
+    ),
+    (
+        r"\b(?:proactively|automatically|on your own|always)\s+"
+        + _SAVE
+        + r"|"
+        + _SAVE
+        + _SAME_SENTENCE
+        + r"{0,60}\b(?:proactively|automatically|on your own)\b",
+        "tells the model to save on its own initiative",
+    ),
+    (
+        _SAVE + r"\s+(?:(?:all|any|anything|everything|the|whatever(?: is| seems)?)\s+)?"
+        r"(?:important|relevant|notable|significant|useful|interesting)\b",
+        "leaves what to save to the model's judgement, not the user's",
+    ),
+    (
+        r"\bsearch before starting\b",
+        "tells the model to search at a fixed point, not when the task needs it",
+    ),
+    (
+        r"loaded every turn by load_pinned",
+        "claims pinned memories load every turn; only a client hook does that",
+    ),
+]
+FORBIDDEN += AUTO_SAVE
+
+# The texts #1721 replaced, plus the auto-save shapes the patterns exist for.
+PRE_1721_FIXTURES = [
+    "1. recall() - Search before starting tasks",
+    "2. remember() - Store important decisions/code",
+    (
+        "Record whether a recalled memory was useful for a query — call it after "
+        "recall() to teach the ranking which results were on target."
+    ),
+    (
+        "'always': pinned — loaded every turn by load_pinned() and persistent on write; "
+        "ONLY for always-relevant notes, e.g. an agent's goal or a standing decision."
+    ),
+    "'always' pins the memory (loaded every turn by load_pinned; made persistent)",
+    "Save a summary with remember() at the end of every session.",
+    "At the end of the conversation, store the key decisions.",
+    "Remember what you learned after each task.",
+    "Store important context after every turn.",
+    "Send the conversation to remember() before ending the session.",
+    "Summarise the session and save it to Kagura Memory.",
+    "Proactively save decisions as you work.",
+    # Fixed points phrased as "this / your session", "session end", "when the
+    # session ends", "whenever you finish", "as you go", "every N turns".
+    "Save a summary at the end of this conversation.",
+    "Store what you learned at the end of your session.",
+    "Call remember() at session end.",
+    "Always save a summary when the session ends.",
+    "When the conversation ends, remember the key decisions.",
+    "Remember key decisions whenever you finish a task.",
+    "After completing a task, call remember() with the outcome.",
+    "Once the task is done, store the outcome with remember().",
+    "Before you finish, store what you learned.",
+    "Store the important decisions as you go.",
+    "Save decisions every 10 turns.",
+    "Store notes per session.",
+    "Persist a digest of every conversation.",
+    "Upload the transcript at the end of the session.",
+    (
+        "Remember decisions, patterns, bug fixes, troubleshooting notes and roadmap "
+        "items that you discover along the way, at the end of every session."
+    ),
+    # The conversation itself as the thing to save, and summarising it.
+    "Use remember() to capture the conversation.",
+    "Save the chat history with remember().",
+    "Summarize the conversation and store it.",
+    "Summarize our conversation and store it.",
+    "Save anything important from the chat.",
+    # A tool called by habit after recall().
+    "Call remember() after recall() to keep what you found.",
+    "Call it once after recall() to teach the ranking.",
+    "Use it after every recall() to teach the ranking.",
+]
+
+# User-directed wordings #1721 introduced or kept: they must stay allowed.
+USER_DIRECTED_EXAMPLES = [
+    "1. recall() - Search when the task needs past decisions",
+    "2. remember() - Store what the user asks to keep",
+    (
+        "Optional: record whether a recalled memory was useful for a query; the "
+        "ranking learns which results were on target."
+    ),
+    "'always': pinned — returned by load_pinned() (a client hook can load it every turn)",
+    "Get a context's purpose. Call it at session start and after switching contexts.",
+    "Use it after recall(), which returns summaries only, when you need the content.",
+    "Upsert ephemeral agent run-state at (context_id, key): the current task, step.",
+]
+
 # Wordings that describe server behaviour, not stored content: they must stay
 # allowed, so a pattern above that starts matching them is too broad.
 ALLOWED_EXAMPLES = [
@@ -82,6 +264,18 @@ ALLOWED_EXAMPLES = [
     "later read / download / list / delete access follows that context's ACL.",
     "a recall() that omits use_rerank follows this context's use_rerank.",
     "lint is advisory — the memory is stored; act on a hint with update_memory().",
+    # #1721: the save verbs and fixed-point words in a description of what the
+    # server does (third-person / past forms, or "record" / "log" as nouns).
+    "Returns one record for each message in the thread.",
+    "Upload each file separately; the server stores it as-is.",
+    "The server logs each request with a correlation id.",
+    "Stored memories are returned for each task-scoped context.",
+    "Each response includes context_id; the memory is stored before the call returns.",
+    "Sleep consolidation records each step of the run.",
+    "The feedback is stored with each query as a time series.",
+    "set_state stores the current task, step and scratch flags.",
+    "Rehydrate an agent's working state at session start in ONE call.",
+    "per-phase results, cost tracking and the audit log of every action.",
 ]
 
 # The texts #1682 replaced. Each must trip at least one pattern, which is what
@@ -156,6 +350,23 @@ def test_every_replaced_wording_is_caught(text):
 @pytest.mark.parametrize("text", ALLOWED_EXAMPLES)
 def test_server_behaviour_wordings_stay_allowed(text):
     assert _hits(text) == []
+
+
+@pytest.mark.parametrize("text", PRE_1721_FIXTURES)
+def test_every_auto_save_wording_is_caught(text):
+    hits = [why for pattern, why in AUTO_SAVE if re.search(pattern, text, re.IGNORECASE)]
+    assert hits, f"no auto-save pattern catches: {text!r}"
+
+
+@pytest.mark.parametrize("text", USER_DIRECTED_EXAMPLES)
+def test_user_directed_wordings_stay_allowed(text):
+    assert _hits(text) == []
+
+
+def test_quick_reference_core_workflow_is_user_directed():
+    workflow = KAGURA_MEMORY_INSTRUCTIONS.split("## Core Workflow", 1)[1].split("##", 1)[0]
+    assert "remember() - Store what the user asks to keep" in workflow
+    assert "recall() - Search when the task needs past decisions" in workflow
 
 
 def test_no_static_text_tells_the_model_to_follow_stored_content():

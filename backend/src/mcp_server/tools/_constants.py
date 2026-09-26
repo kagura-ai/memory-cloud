@@ -108,8 +108,8 @@ Call get_context_info() once per context to see:
 - instructions: General best practices (this guide)
 
 ## Core Workflow
-1. recall() - Search before starting tasks
-2. remember() - Store important decisions/code
+1. recall() - Search when the task needs past decisions
+2. remember() - Store what the user asks to keep
 3. update_memory() - Modify existing memories (in-place or upsert)
 4. explore() - Find related memories via graph traversal
 

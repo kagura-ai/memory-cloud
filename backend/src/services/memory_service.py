@@ -90,6 +90,7 @@ from utils.exceptions import (
     ValidationError,
 )
 from utils.logger import get_logger
+from utils.query_log import query_log_fields
 
 logger = get_logger(__name__)
 
@@ -4138,7 +4139,8 @@ class MemoryService:
         logger.info(
             "recall_request",
             user_id=user_id,
-            query=request.query,
+            # #1721 (Directory 1.D): length + keyed hash, never the query text.
+            **query_log_fields(request.query),
             k=request.k,
             use_rerank=request.use_rerank,
         )
@@ -4911,7 +4913,7 @@ class MemoryService:
 
             logger.info(
                 "memories_soft_deleted_by_query",
-                query=request.query,
+                **query_log_fields(request.query),  # #1721: no query text
                 count=len(deleted_ids),
                 user_id=user_id,
             )

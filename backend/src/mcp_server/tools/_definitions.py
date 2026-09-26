@@ -110,7 +110,7 @@ Returns: {status, memory_id, scope, persistence?: {scope, committed, promotes_vi
                     "delivery_mode": {
                         "type": "string",
                         "enum": ["always", "on_recall", "on_trigger"],
-                        "description": "When the memory is surfaced (orthogonal to type). 'on_recall' (default): only via recall(). 'always': pinned — loaded every turn by load_pinned() and persistent on write; ONLY for always-relevant notes, e.g. an agent's goal or a standing decision. 'on_trigger': time-windowed (set by type='time').",
+                        "description": "When the memory is surfaced (orthogonal to type). 'on_recall' (default): only via recall(). 'always': pinned — returned by load_pinned() (a client hook can load it every turn) and persistent on write; ONLY for always-relevant notes, e.g. an agent's goal or a standing decision. 'on_trigger': time-windowed (set by type='time').",
                     },
                     "context_id": {
                         "type": "string",
@@ -208,7 +208,7 @@ Returns: {status, memory_id, operation: 'updated'|'created'|'replaced', re_embed
                     "delivery_mode": {
                         "type": "string",
                         "enum": ["always", "on_recall", "on_trigger"],
-                        "description": "'always' pins the memory (loaded every turn by load_pinned; made persistent); 'on_recall' unpins it (it stays persistent). Omit to leave unchanged.",
+                        "description": "'always' pins the memory (returned by load_pinned(); made persistent); 'on_recall' unpins it (it stays persistent). Omit to leave unchanged.",
                     },
                     "context_id": {
                         "type": "string",
@@ -1736,7 +1736,7 @@ Returns: {status, files: [{id, context_id, filename, content_type, size_bytes, s
         },
         {
             "name": "feedback",
-            "description": """Record whether a recalled memory was useful for a query — call it after recall() to teach the ranking which results were on target. Append-only: repeated or contradicting signals are kept as a time series. Feedback is not a memory: never embedded, never returned by recall(). Anyone who can read the context may record it.
+            "description": """Optional: record whether a recalled memory was useful for a query; the ranking learns which results were on target. Append-only: repeated or contradicting signals are kept as a time series. Feedback is not a memory: never embedded, never returned by recall(). Anyone who can read the context may record it.
 
 Returns: {status, feedback_id, memory_id, helpful}.""",
             "inputSchema": {
@@ -1757,7 +1757,7 @@ Returns: {status, feedback_id, memory_id, helpful}.""",
                     },
                     "query": {
                         "type": "string",
-                        "description": "The recall query this feedback is about (max 1024 chars).",
+                        "description": "The recall query this feedback is about, stored with it (max 1024 chars).",
                     },
                     "note": {
                         "type": "string",

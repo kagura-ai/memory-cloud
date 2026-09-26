@@ -54,6 +54,10 @@ SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 # about 160 characters each, and #1685 added reference()'s selection and
 # paging parameters: full list 95,445, core list 31,932, recall 6,503,
 # remember 6,092.
+#
+# #1721 reworded delivery_mode and feedback to user-directed text: full list
+# 95,522, core list 31,954, recall 6,479, remember 6,143. Every ceiling still
+# sits within MAX_SLACK of its measure, so none moved.
 FULL_LIST_BUDGET = 96_000  # (#1683, #1685) was 84,000
 CORE_LIST_BUDGET = 32_500  # (#1683, #1685) was 31,000
 RECALL_BUDGET = 6_600  # (#1683) was 6,500
