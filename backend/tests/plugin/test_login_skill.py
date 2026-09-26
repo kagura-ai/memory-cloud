@@ -27,6 +27,8 @@ GUIDE = COMMANDS_DIR / "guide.md"
 CLIENT_DOCS = REPO_ROOT / "docs" / "mcp-clients.md"
 MCP_TOOLS_DOCS = REPO_ROOT / "docs" / "mcp-tools.md"
 README_JA = REPO_ROOT / "README.ja.md"
+TROUBLESHOOTING = REPO_ROOT / "docs" / "troubleshooting.md"
+DEV_GUIDE = REPO_ROOT / "CLAUDE.md"
 CLAUDE_MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 
 # The versions the commands were checked against (help output / source), named in the text.
@@ -44,6 +46,8 @@ LOGIN_DOCS = [
     CLIENT_DOCS,
     README_JA,
     SETUP_SKILL,
+    TROUBLESHOOTING,
+    DEV_GUIDE,
 ]
 
 
@@ -122,6 +126,9 @@ def test_every_command_is_listed_where_the_commands_are_listed() -> None:
     assert _listed(GUIDE, r"^\| `([a-z-]+)` \|") == commands
     assert _listed(CLIENT_DOCS, r"^\| `/kagura-memory:([a-z-]+)` \|") == commands
     assert _listed(README_JA, r"^\| `/kagura-memory:([a-z-]+)` \|") == commands
+    # The development guide lists them on one line, under the plugin's directory.
+    (dev_line,) = _listed(DEV_GUIDE, r"^  - Commands: (.*)$")
+    assert set(re.findall(r"`/kagura-memory:([a-z-]+)`", dev_line)) == commands
 
 
 def test_codex_skill_maps_the_login_command_and_triggers_on_it() -> None:
@@ -424,3 +431,20 @@ def test_guide_points_to_the_login_skill() -> None:
     step1 = _flat(_section(guide, "### 1. Check MCP connection"))
     for needle in ("`/kagura-memory:login`", "invalid_token", "insufficient_scope"):
         assert needle in step1, needle
+
+
+def test_troubleshooting_points_to_the_login_skill() -> None:
+    section = _flat(
+        _section(
+            _read(TROUBLESHOOTING),
+            "## A Kagura tool fails with `invalid_token` or `insufficient_scope`",
+        )
+    )
+    for needle in (
+        "`/kagura-memory:login`",
+        "codex mcp login kagura-memory",
+        "(mcp-clients.md#sign-in-again)",
+        "(mcp-tools.md#oauth-scopes)",
+        "Anthropic",
+    ):
+        assert needle in section, needle

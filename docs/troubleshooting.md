@@ -16,6 +16,17 @@ Look at the endpoint URL your client stores — `"url"` in `.mcp.json` / `.gemin
 
 The missing tool is still **callable** — a profile filters the list, not access — but most clients only offer what they list. To see it, switch back to the default URL (or add its name to `?tools=`), then restart or reconnect the client so it lists tools again. Background: [Tool Profiles](mcp-tools.md#tool-profiles).
 
+## A Kagura tool fails with `invalid_token` or `insufficient_scope`
+
+An MCP entry that worked now answers `401` with `WWW-Authenticate: Bearer error="invalid_token"` (the token expired, was revoked, or was issued for another server; Claude Code's `/mcp` shows the entry as needing authentication), or a write tool answers `403` with `error="insufficient_scope"` (an OAuth token without `memory:write` — see [OAuth scopes](mcp-tools.md#oauth-scopes)).
+
+**Sign the connection in again; nothing is wrong with the server.**
+
+- **Claude Code:** run `/kagura-memory:login`. It finds how the entry authenticates (Claude Code OAuth, a `kagura-mcp` CLI profile or a Bearer API key), names the one step that signs it in again, and checks the result with one `list_contexts` call. Claude Code's built-in `/login` is your Anthropic account sign-in and does not touch the Kagura connection.
+- **Codex CLI:** `codex mcp login kagura-memory` for an OAuth entry (add `--scopes memory:read,memory:write` after `insufficient_scope`), or ask the kagura-memory skill to log in again.
+
+After `insufficient_scope`, re-authorize with exactly the `scope` the challenge names — the token's scopes plus the missing one — never the missing scope alone. Details for every client: [Sign in again](mcp-clients.md#sign-in-again).
+
 ## Codex CLI — `bearer_token is not supported for streamable_http`
 
 Codex fails to start, or `codex mcp list` fails, with:
