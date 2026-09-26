@@ -30,6 +30,7 @@ from sqlalchemy import create_engine, func, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from auth.password import (  # noqa: E402
+    PASSWORD_NOT_ENCODABLE_MESSAGE,
     PASSWORD_TOO_LONG_MESSAGE,
     hash_password,
     is_password_too_long,
@@ -37,6 +38,7 @@ from auth.password import (  # noqa: E402
 from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import User, Workspace, WorkspaceMember  # noqa: E402
 from utils.datetime import utcnow  # noqa: E402
+from utils.utf8 import is_utf8_encodable  # noqa: E402
 
 
 def seed_e2e_admin() -> None:
@@ -44,6 +46,10 @@ def seed_e2e_admin() -> None:
     password = os.environ.get("E2E_ADMIN_PASSWORD", "")
     if not login_id or not password:
         print("✗ E2E_ADMIN_LOGIN_ID and E2E_ADMIN_PASSWORD must be set.")
+        sys.exit(1)
+    if not is_utf8_encodable(password):
+        # A non-UTF-8 byte in the environment reads as a lone surrogate (#1718).
+        print(f"✗ E2E_ADMIN_PASSWORD: {PASSWORD_NOT_ENCODABLE_MESSAGE}")
         sys.exit(1)
     if is_password_too_long(password):
         # bcrypt hashes at most 72 bytes (#1707); fail before touching the DB.

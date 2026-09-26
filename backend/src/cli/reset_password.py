@@ -19,12 +19,14 @@ from sqlalchemy.orm import Session  # noqa: E402
 
 from auth.password import (  # noqa: E402
     PASSWORD_MAX_BYTES,
+    PASSWORD_NOT_ENCODABLE_MESSAGE,
     PASSWORD_TOO_LONG_MESSAGE,
     hash_password,
     is_password_too_long,
 )
 from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import User  # noqa: E402
+from utils.utf8 import is_utf8_encodable  # noqa: E402
 
 _project_root = Path(__file__).parent.parent.parent.parent
 
@@ -102,6 +104,11 @@ def reset_password():
                     errors.append("1 special character")
                 if errors:
                     print(f"  ✗ Missing: {', '.join(errors)}. Try again.")
+                    continue
+
+                # getpass on a pipe can return a lone surrogate (#1718).
+                if not is_utf8_encodable(password):
+                    print(f"  ✗ {PASSWORD_NOT_ENCODABLE_MESSAGE} Try again.")
                     continue
 
                 # bcrypt hashes at most 72 bytes; refuse before the confirmation prompt (#1707).

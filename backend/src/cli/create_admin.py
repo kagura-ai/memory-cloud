@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session  # noqa: E402
 from auth.api_keys import APIKeyManager  # noqa: E402
 from auth.password import (  # noqa: E402
     PASSWORD_MAX_BYTES,
+    PASSWORD_NOT_ENCODABLE_MESSAGE,
     PASSWORD_TOO_LONG_MESSAGE,
     hash_password,
     is_password_too_long,
@@ -33,6 +34,7 @@ from auth.totp import generate_totp_secret, get_provisioning_uri, verify_totp  #
 from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import APIKey, ExternalAPIKey, User, Workspace, WorkspaceMember  # noqa: E402
 from utils.datetime import utcnow  # noqa: E402
+from utils.utf8 import is_utf8_encodable  # noqa: E402
 
 # Project root for docker compose commands (always the repo root on host).
 # Inside the Docker container this resolves to "/" (WORKDIR=/app, code at
@@ -300,6 +302,11 @@ def create_admin(skip_mcp_json: bool = False):
                 errors.append("1 special character")
             if errors:
                 print(f"  ✗ Missing: {', '.join(errors)}. Try again.")
+                continue
+
+            # getpass on a pipe can return a lone surrogate (#1718).
+            if not is_utf8_encodable(password):
+                print(f"  ✗ {PASSWORD_NOT_ENCODABLE_MESSAGE} Try again.")
                 continue
 
             # bcrypt hashes at most 72 bytes; refuse before the confirmation prompt (#1707).
