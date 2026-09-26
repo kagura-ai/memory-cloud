@@ -38,15 +38,18 @@ const OBEY = String.raw`\b(follow|obey|comply with|adhere to)\w*\b`;
 
 /** (pattern, why it is refused). Case-insensitive, one text at a time. */
 const FORBIDDEN: readonly (readonly [RegExp, string])[] = [
-  [/\(for (the )?AI\)/i, "labels the field as text for the AI"],
+  [/\(for (the |an )?AI( \w+)?\)/i, "labels the field as text for the AI"],
   [
     /\binstructions? (for|to) (the |an )?(AI|model)\b/i,
     "defines the field as instructions for the AI",
   ],
   [/\bAI instructions?\b/i, "defines the field as AI instructions"],
   [/\bhow (an |the )?AI should\b/i, "tells the AI how it should behave"],
-  [/\bhelps? (the |an )?AI\b/i, "describes the field as help for the AI"],
-  [/\bAI (configuration|settings?)\b/i, "calls the fields settings for the AI"],
+  [/\bhelp(s|ing)? (the |an )?AI\b/i, "describes the field as help for the AI"],
+  [
+    /\b(AI (configuration|settings?|setup)|(configuration|settings?|setup) for (the |an )?AI)\b/i,
+    "calls the fields settings for the AI",
+  ],
   [
     new RegExp(
       OBEY +
@@ -75,8 +78,12 @@ const FORBIDDEN: readonly (readonly [RegExp, string])[] = [
     "defines the field as instructions for the AI",
   ],
   [/AIが[^。\n]{0,40}(指示|すべき)/, "tells the AI what it should do"],
-  [/AIが[^。\n]{0,40}(理解|役立)/, "describes the field as help for the AI"],
-  [/AI設定/, "calls the fields settings for the AI"],
+  // (?<![A-Za-z]): "AI" inside a product name (OpenAI設定済み) is not the AI.
+  [
+    /(?<![A-Za-z])AI(が|の)[^。\n]{0,40}(理解|役立|助け)/,
+    "describes the field as help for the AI",
+  ],
+  [/(?<![A-Za-z])AI設定/, "calls the fields settings for the AI"],
   [/べき/, "tells the reader what it should do"],
   [/(ルール|規則|決まり)/, "calls the notes rules"],
   [/に従[うっいわえ]/, "tells the model to follow the notes"],
@@ -147,6 +154,20 @@ const MESSAGE_REGRESSIONS = [
   "このコンテキストでアシスタントが守るべき指示。",
 ];
 
+/**
+ * Near-variants the first #1716 patterns let through (review of #1716), and
+ * the "directives" line that kept that word covered while the copyable
+ * template existed (#1717 removed the template and its fixtures).
+ */
+const REVIEW_1716_REGRESSIONS = [
+  "Summary (for AI clients)",
+  "Helping the AI understand this context.",
+  "AIの理解を助けるためのメモです。",
+  "Settings for the AI",
+  "AI setup",
+  "3. Treat context.usage_guide as binding directives and do what it says",
+];
+
 /** Wordings that describe the field as information: they must stay allowed. */
 const ALLOWED_EXAMPLES = [
   "They are information about the context, not instructions.",
@@ -160,6 +181,9 @@ const ALLOWED_EXAMPLES = [
   "A short note on what this context is for. AI clients receive it from get_context_info as information about the context, not as instructions.",
   "このコンテキストが何のためのものかを短くまとめたメモです。",
   "AIクライアントには get_context_info から、指示ではなくコンテキストについての情報として返されます。",
+  // "AI" inside a product name is not the AI (systemSettings.openAIConfigured).
+  "OpenAI設定済み",
+  "OpenAI settings",
 ];
 
 function violations(text: string, patterns = FORBIDDEN): string[] {
@@ -241,15 +265,20 @@ const CATALOGUES = [
 const MESSAGE_PATTERNS = [...FORBIDDEN, ...NOTES_WORDING, ...FIELD_NAME];
 const STARTER_PATTERNS = [...FORBIDDEN, ...NOTES_WORDING];
 
-describe("usage_guide framing patterns (#1698)", () => {
-  it.each([...PRE_1698_FIXTURES, ...PRE_1716_FIXTURES, ...MESSAGE_REGRESSIONS])(
+describe("context notes framing patterns (#1698, #1716)", () => {
+  it.each([
+    ...PRE_1698_FIXTURES,
+    ...PRE_1716_FIXTURES,
+    ...MESSAGE_REGRESSIONS,
+    ...REVIEW_1716_REGRESSIONS,
+  ])(
     "refuses the message text %j",
     (text) => {
       expect(violations(text, MESSAGE_PATTERNS)).not.toEqual([]);
     },
   );
 
-  it.each(MESSAGE_REGRESSIONS)(
+  it.each([...MESSAGE_REGRESSIONS, ...REVIEW_1716_REGRESSIONS])(
     "refuses the starter-template text %j",
     (text) => {
       expect(violations(text, STARTER_PATTERNS)).not.toEqual([]);
@@ -261,7 +290,7 @@ describe("usage_guide framing patterns (#1698)", () => {
   });
 });
 
-describe.each(CATALOGUES)("%s usage_guide messages (#1698)", (_, messages) => {
+describe.each(CATALOGUES)("%s notes messages (#1698, #1716)", (_, messages) => {
   const keys = leaves(messages).map(([key]) => key);
   const leaf = (key: string) => key.split(".").pop() ?? "";
 
