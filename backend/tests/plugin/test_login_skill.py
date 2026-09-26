@@ -16,7 +16,12 @@ from pathlib import Path
 import pytest
 
 from auth.mcp_scopes import ALL_ADVERTISED_SCOPES
-from mcp_server.tools._scopes import READ_SCOPE, WRITE_SCOPE, required_scope_for_tool
+from mcp_server.tools._scopes import (
+    READ_SCOPE,
+    WRITE_SCOPE,
+    challenge_scope,
+    required_scope_for_tool,
+)
 from tests.plugin.conftest import CLAUDE_PLUGIN_JSON, REPO_ROOT
 
 COMMANDS_DIR = REPO_ROOT / "claude-skills"
@@ -380,12 +385,50 @@ def test_codex_login_section_names_its_commands_and_version() -> None:
     assert CODEX_CLI_VERSION in flat
     assert "codex mcp list" in flat and "`Not logged in`" in flat
     assert "codex mcp login kagura-memory" in flat
-    assert f"codex mcp login kagura-memory --scopes {READ_SCOPE},{WRITE_SCOPE}" in flat
+    assert "codex mcp login kagura-memory --scopes <scopes>" in flat
     assert "codex mcp logout kagura-memory" in flat
     assert CLI_PROFILE_LOGIN in flat
     # Where OAuth is not available: the Bearer-key path of the existing setup section.
     assert '"Tool Availability"' in flat and "\n## Tool Availability\n" in text
     assert "```toml" not in section, "test_codex_config_snippets scans every toml fence"
+
+
+def test_codex_scope_commands_carry_the_whole_challenge() -> None:
+    """The challenge can hold ``openid`` / ``offline_access`` / ``memory:delete`` too
+    (``challenge_scope`` keeps every advertised scope the token has), so a fixed
+    ``memory:read,memory:write`` would drop them (PR #1712 review).
+    """
+    assert challenge_scope(frozenset({READ_SCOPE, "offline_access"}), WRITE_SCOPE) == (
+        f"{READ_SCOPE} {WRITE_SCOPE} offline_access"
+    )
+    step3 = _flat(_codex_login().split("3. **After `insufficient_scope`.**", 1)[1])
+    assert "--scopes <scopes>" in step3 and '--scope "<scope>"' in step3
+    assert "--scopes memory:read,memory:write,offline_access" in step3, "worked example"
+    for path in (CLIENT_DOCS, TROUBLESHOOTING, CODEX_SKILL):
+        assert "--scopes memory:read,memory:write`" not in _read(path), path.name
+
+
+@pytest.mark.parametrize(
+    ("text", "needle"),
+    [
+        (_login, "in place of `kagura-memory` in every instruction and command you hand the user"),
+        (_codex_login, "in place of `kagura-memory` in every command below"),
+    ],
+    ids=["claude", "codex"],
+)
+def test_both_skills_use_the_detected_entry_name(text, needle: str) -> None:
+    """An entry under another name must be the one signed in (PR #1712 review)."""
+    assert needle in _flat(text())
+
+
+def test_cli_profile_login_without_a_profile_row_takes_the_entry_server() -> None:
+    step2 = _flat(_section(_login(), "### CLI profile (`kagura-mcp`)"))
+    assert "the entry's `--server` argument" in step2
+
+
+def test_bearer_rotation_keeps_the_entry_other_headers() -> None:
+    bearer = _flat(_section(_login(), "### Bearer key"))
+    assert "every other `--header` the old entry had" in bearer
 
 
 # ---------------------------------------------------------------------------

@@ -92,8 +92,10 @@ When `claude mcp list` shows `[Conflicting scopes]`, a sign-in may land on an en
 one in effect: report the shadowed entries as B1 does, and let the user remove the stray one first.
 An entry under another name than `kagura-memory`: make B0's values directory (`mktemp -d`), write
 the name to it as `entry_name` with the file-writing tool, run the check, and use
-`"$(cat "<values dir>/entry_name")"` in place of the name. Remove the directory
-(`rm -rf "<values dir>"`) once the user has run the last command that reads it.
+`"$(cat "<values dir>/entry_name")"` in place of the name in the commands you run. After `ok`, put
+that name in place of `kagura-memory` in every instruction and command you hand the user in steps 2
+and 3 — `/mcp` lists the entry under it. Remove the directory (`rm -rf "<values dir>"`) once the
+user has run the last command that reads it.
 
 ## 2. Re-authenticate
 
@@ -128,7 +130,8 @@ kagura auth login --profile <name> --server https://<host>
   `default` only when there are no rows. A login to `default` while another row is the default
   writes a second profile, and the proxy stays on its own, still signed-out one.
 - `--server` is the **site root**: the profile's MCP URL from the projection above without its
-  `/mcp`. Passing the MCP URL ends in `/mcp/mcp`.
+  `/mcp`. Passing the MCP URL ends in `/mcp/mcp`. No row for the profile: the scheme and host of
+  the entry's `--server` argument when it has one, else ask the user which server they use.
 - It prints a one-time code and an approval URL and opens the browser (`--no-browser` on SSH or
   headless).
 - Without `--read-only` or `--scope` it asks for `memory:read memory:write`, which covers every MCP
@@ -149,7 +152,8 @@ replaces the old one where the entry reads it — in their own editor or termina
   `claude mcp remove kagura-memory -s <scope>`, then `read -rs KAGURA_NEW_KEY` (it takes the key at
   a silent prompt, so the key stays out of the shell history), then
   `claude mcp add --transport http kagura-memory <its URL> -s <scope> --header "Authorization: Bearer $KAGURA_NEW_KEY"`
-  and `unset KAGURA_NEW_KEY`, all themselves.
+  with every other `--header` the old entry had (step 1's redacted output lists their names), and
+  `unset KAGURA_NEW_KEY`, all themselves.
 
 Then restart Claude Code. The plugin hooks' `api_key` (`/plugin` → kagura-memory → Configure) is a
 separate credential: replace it too if it was the same key. API keys carry no OAuth scope, so
