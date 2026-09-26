@@ -169,10 +169,10 @@ class TestPkceCodeVerifierEnforcement:
     cost.
 
     Authlib 1.3.x had ``validate_code_verifier(self, grant)``; 1.4+ added a
-    ``result`` parameter (``self, grant, result``). The pyproject.toml floor
-    is ``authlib>=1.3.0`` and CI installs latest, so the test must work
-    across both signatures — ``_invoke_validate_code_verifier`` introspects
-    the live signature and passes a ``MagicMock`` for ``result`` when needed.
+    ``result`` parameter (``self, grant, result``).
+    ``_invoke_validate_code_verifier`` introspects the live signature and
+    passes a ``MagicMock`` for ``result`` when needed. pyproject.toml pins
+    authlib to 1.8.x since #1705, so only the 1.4+ signature is installed.
     """
 
     @staticmethod
