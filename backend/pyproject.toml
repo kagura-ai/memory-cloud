@@ -55,13 +55,19 @@ dependencies = [
     # Auth-critical dependencies carry an upper bound (#1705): CI and the image
     # resolve these ranges afresh on each build, so a release past a bound
     # arrives only when someone raises the bound and re-runs tests/auth and
-    # tests/api/test_*oauth*. The set is authlib, google-auth,
+    # tests/api/test_*oauth*. The set is authlib, joserfc, google-auth,
     # google-auth-oauthlib, bcrypt and pyotp here, plus starlette above and mcp
     # and cryptography below; tests/test_dependency_bounds.py enforces it.
     # Authlib changes behaviour in minor releases (1.8.0 changed
     # get_allowed_scope and PKCE handling), and auth/oauth2_server.py overrides
     # its PKCE and grant hooks, verified on 1.8 (#1701): pin the minor.
-    "authlib>=1.8.0,<1.9",  # OAuth2 server + JWT (authlib.jose)
+    "authlib>=1.8.0,<1.9",  # OAuth2 server (authlib.jose is no longer used, #1708)
+    # Billing hand-off JWT (auth/billing_handoff.py): the successor of
+    # authlib.jose, which Authlib 2.0 removes. The signer needs the
+    # jwt.encode(default_type=) parameter from 1.5.0, and Authlib 1.8 itself
+    # requires >=1.6.1, so that is the floor; verified on 1.7.5 (#1708).
+    # Semver: stop at the next major.
+    "joserfc>=1.6.1,<2",
     # Semver, used through stable API only: take minors, stop at the next major.
     "google-auth>=2.35.0,<3",  # Google OAuth2
     "google-auth-oauthlib>=1.2.0,<2",  # Google OAuth2 helpers
@@ -193,6 +199,15 @@ addopts = [
 ]
 testpaths = ["tests"]
 pythonpath = ["src"]
+filterwarnings = [
+    # Nothing under src/ imports authlib.jose any more (#1708); Authlib 2.0
+    # removes the module, so a new import fails the suite instead of warning.
+    # Matched on the message: other Authlib deprecations stay warnings.
+    "error:authlib.jose module is deprecated:authlib.deprecate.AuthlibDeprecationWarning",
+    # auth/billing_handoff.py installs this filter at import; pytest gives
+    # every test its own filter list, so the suite repeats it here.
+    "ignore:EdDSA is deprecated via RFC 9864:joserfc.errors.SecurityWarning",
+]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
