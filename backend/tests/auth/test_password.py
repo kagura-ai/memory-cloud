@@ -38,11 +38,16 @@ def test_limit_is_bcrypts_72_bytes() -> None:
     assert PASSWORD_MAX_BYTES == 72
 
 
+@pytest.mark.skipif(
+    int(bcrypt.__version__.split(".")[0]) < 5,
+    reason="bcrypt < 5 truncates > 72 bytes silently; verify_password is correct either way",
+)
 def test_installed_bcrypt_rejects_long_passwords() -> None:
     """Guard the premise: this suite runs against a bcrypt that refuses > 72 bytes.
 
-    If a future bcrypt truncates again this test fails and the workaround can
-    be revisited; either way ``verify_password`` stays correct.
+    Skipped on bcrypt 4 (``pyproject`` still allows it). If a future bcrypt 5+
+    truncates again this test fails and the workaround can be revisited; either
+    way ``verify_password`` stays correct.
     """
     salt = bcrypt.gensalt(rounds=4)
     with pytest.raises(ValueError):
