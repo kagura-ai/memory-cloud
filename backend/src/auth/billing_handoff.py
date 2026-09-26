@@ -17,19 +17,26 @@ Design boundaries (kept deliberately narrow — the rest is the verifier's job):
   :class:`BillingHandoffNotConfigured` (503, ``BILLING-002``) — a misconfigured
   deployment never mints an unsigned or unrotatable token. Mirrors
   ``internal_billing.verify_billing_service_token``'s unset-token 503.
-- **EdDSA via authlib.jose** — the same JWT toolkit the OAuth2 server uses; no
-  new crypto dependency (``cryptography`` already ships Ed25519 for the keypair).
+- **EdDSA via joserfc** — Authlib's successor JWT toolkit (``authlib.jose`` is
+  deprecated and removed in Authlib 2.0, #1708); it needs only ``cryptography``,
+  which already ships Ed25519 for the keypair. The compact serialization is
+  unchanged: the same key, header and claims give the same token string as the
+  ``authlib.jose`` implementation did (``tests/auth/test_billing_handoff_joserfc.py``).
 """
 
 from __future__ import annotations
 
 import secrets
+import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from authlib.jose import JsonWebKey, JsonWebToken
+from joserfc import jwt
+from joserfc.errors import SecurityWarning
+from joserfc.jwk import OKPKey
+from joserfc.jwt import JWTClaimsRegistry
 
 from config.settings import get_settings
 from utils.datetime import utcnow
@@ -41,11 +48,26 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# EdDSA is opt-in per authlib's JsonWebToken allow-list — pin it explicitly so
-# the signer can never be downgraded to a weaker alg by a permissive default.
-_JWT = JsonWebToken(["EdDSA"])
+# EdDSA is opt-in per joserfc's algorithm allow-list (its default set leaves it
+# out since RFC 9864 renamed it "Ed25519") — pass it explicitly on every encode
+# and decode so the signer can never be downgraded to a weaker alg by a
+# permissive default, and so the wire name stays the "EdDSA" the billing
+# service verifies.
+_ALGORITHMS = ("EdDSA",)
 _ALG = "EdDSA"
 _TOKEN_TYP = "JWT"
+
+# joserfc warns on every "EdDSA" sign and verify: RFC 9864 deprecates that name
+# because it does not say which curve is in use, and registers "Ed25519" and
+# "Ed448" instead. The billing service verifies alg="EdDSA", so the wire name
+# stays until both sides move together (#1727). The curve is not ambiguous
+# here — the signing key is Ed25519 PEM material — so the one message is
+# filtered process-wide, once, rather than logged on every token.
+warnings.filterwarnings(
+    "ignore",
+    message=r"^EdDSA is deprecated via RFC 9864$",
+    category=SecurityWarning,
+)
 # The handoff token always asserts the owner role — the route only mints after a
 # successful owner gate, so the claim is a constant, not caller-supplied.
 _ROLE_OWNER = "owner"
@@ -181,7 +203,7 @@ class BillingHandoffSigner:
 
         settings = self._settings
         try:
-            key = JsonWebKey.import_key(key_pem)
+            key = OKPKey.import_key(key_pem)
         except Exception as exc:
             # Malformed key material is a configuration failure, not a runtime
             # bug — fail closed (503) like the unset case rather than 500-leaking
@@ -212,15 +234,17 @@ class BillingHandoffSigner:
         }
 
         try:
-            token = _JWT.encode(header, payload, key)
+            # default_type=None keeps the header exactly as built ({alg, typ,
+            # kid}); joserfc would otherwise put its own "typ" first, which
+            # changes the signed bytes and so the token string for the same key
+            # and claims.
+            token = jwt.encode(header, payload, key, algorithms=_ALGORITHMS, default_type=None)
         except Exception as exc:
             # A well-formed key of the WRONG type (e.g. a PUBLIC key, or a
             # non-Ed25519 OKP key) imports cleanly but cannot sign — also a
             # configuration failure, so fail closed (503) rather than 500-leaking.
             logger.error("billing_handoff_signing_failed", error=str(exc))
             raise BillingHandoffNotConfigured() from exc
-        if isinstance(token, bytes):
-            token = token.decode("ascii")
 
         logger.info(
             "billing_handoff_minted",
@@ -291,19 +315,17 @@ def verify_handoff_token(
         BillingHandoffStale: 401 (BILLING-003) — the ownership epoch advanced.
     """
     try:
-        claims = _JWT.decode(
-            token,
-            JsonWebKey.import_key(verifying_key),
-            claims_options={
-                "iss": {"essential": True, "value": issuer},
-                "aud": {"essential": True, "value": audience},
-                # exp essential: authlib's exp validator is a no-op when the claim
-                # is ABSENT, so without this a token minted with no exp would never
-                # expire — defeating the short-TTL replay window. Reject it instead.
-                "exp": {"essential": True},
-            },
-        )
-        claims.validate()  # exp/iat/iss/aud — raises on any mismatch
+        decoded = jwt.decode(token, OKPKey.import_key(verifying_key), algorithms=_ALGORITHMS)
+        claims = decoded.claims
+        # jwt.decode() checks the signature only; the claims are validated here.
+        JWTClaimsRegistry(
+            iss={"essential": True, "value": issuer},
+            aud={"essential": True, "value": audience},
+            # exp essential: the exp check is a no-op when the claim is ABSENT, so
+            # without this a token minted with no exp would never expire —
+            # defeating the short-TTL replay window. Reject it instead.
+            exp={"essential": True},
+        ).validate(claims)  # exp/iat/iss/aud — raises on any mismatch
         # Coerce the epoch INSIDE the guarded region: a validly-signed token from a
         # cross-impl minter could carry a non-numeric / null ``epoch``, and that
         # must surface as BILLING-004, not an unhandled 500. Missing / null → 0.

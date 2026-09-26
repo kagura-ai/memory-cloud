@@ -19,9 +19,12 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
-from authlib.jose import JsonWebKey, JsonWebToken
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from joserfc import jwt
+from joserfc.errors import BadSignatureError
+from joserfc.jwk import OKPKey
+from joserfc.jwt import JWTClaimsRegistry
 
 from auth.billing_handoff import (
     BillingHandoffInvalid,
@@ -31,7 +34,12 @@ from auth.billing_handoff import (
     verify_handoff_token,
 )
 
-_JWT = JsonWebToken(["EdDSA"])
+_ALGORITHMS = ["EdDSA"]
+
+
+def _decode(token: str, public_pem: str) -> dict:
+    """Verify the signature with the PUBLIC key only, as the billing service does."""
+    return jwt.decode(token, OKPKey.import_key(public_pem), algorithms=_ALGORITHMS).claims
 
 
 def _keypair() -> tuple[str, str]:
@@ -92,8 +100,8 @@ class TestBillingHandoffSigner:
         minted = signer.mint(user_id="user-123", workspace_id=workspace_id)
 
         # Verify exactly as the billing service would: with the public key only.
-        claims = _JWT.decode(minted.token, JsonWebKey.import_key(public_pem))
-        claims.validate()  # exp/iat are sane
+        claims = _decode(minted.token, public_pem)
+        JWTClaimsRegistry().validate(claims)  # exp/iat are sane
 
         assert claims["sub"] == "user-123"
         assert claims["workspace_id"] == str(workspace_id)
@@ -110,8 +118,8 @@ class TestBillingHandoffSigner:
 
         minted = signer.mint(user_id="u", workspace_id=uuid4())
 
-        with pytest.raises(Exception):  # noqa: B017 - authlib BadSignatureError
-            _JWT.decode(minted.token, JsonWebKey.import_key(other_public)).validate()
+        with pytest.raises(BadSignatureError):
+            _decode(minted.token, other_public)
 
     def test_header_carries_alg_and_kid(self) -> None:
         private_pem, _ = _keypair()
@@ -169,8 +177,7 @@ class TestBillingHandoffSigner:
         from_str = signer.mint(user_id="u", workspace_id=str(workspace_id))
 
         for minted in (from_uuid, from_str):
-            claims = _JWT.decode(minted.token, JsonWebKey.import_key(public_pem))
-            assert claims["workspace_id"] == str(workspace_id)
+            assert _decode(minted.token, public_pem)["workspace_id"] == str(workspace_id)
 
     def test_fail_closed_when_signing_key_unset(self) -> None:
         signer = BillingHandoffSigner(settings=_settings(""))
@@ -215,12 +222,8 @@ class TestBillingHandoffSigner:
         signer = BillingHandoffSigner(settings=_settings(private_pem))
         ws1, ws2 = uuid4(), uuid4()
 
-        c1 = _JWT.decode(
-            signer.mint(user_id="u", workspace_id=ws1).token, JsonWebKey.import_key(public_pem)
-        )
-        c2 = _JWT.decode(
-            signer.mint(user_id="u", workspace_id=ws2).token, JsonWebKey.import_key(public_pem)
-        )
+        c1 = _decode(signer.mint(user_id="u", workspace_id=ws1).token, public_pem)
+        c2 = _decode(signer.mint(user_id="u", workspace_id=ws2).token, public_pem)
 
         assert c1["workspace_id"] == str(ws1)
         assert c2["workspace_id"] == str(ws2)
@@ -263,7 +266,7 @@ class TestOwnershipEpochClaim:
 
         minted = signer.mint(user_id="u", workspace_id=uuid4(), ownership_epoch=7)
 
-        claims = _JWT.decode(minted.token, JsonWebKey.import_key(public_pem))
+        claims = _decode(minted.token, public_pem)
         assert claims["epoch"] == 7
         assert minted.ownership_epoch == 7
 
@@ -275,7 +278,7 @@ class TestOwnershipEpochClaim:
 
         minted = signer.mint(user_id="u", workspace_id=uuid4())
 
-        assert _JWT.decode(minted.token, JsonWebKey.import_key(public_pem))["epoch"] == 0
+        assert _decode(minted.token, public_pem)["epoch"] == 0
         assert minted.ownership_epoch == 0
 
     def test_verify_accepts_equal_epoch(self) -> None:
@@ -319,8 +322,6 @@ class TestOwnershipEpochClaim:
         # as epoch 0 — valid pre-transfer, rejected once any transfer bumps to >=1.
         private_pem, public_pem = _keypair()
         s = _settings(private_pem)
-        key = JsonWebKey.import_key(private_pem)
-        header = {"alg": "EdDSA", "typ": "JWT", "kid": s.billing_handoff_key_id}
         payload = {
             "iss": s.billing_handoff_issuer,
             "aud": s.billing_handoff_audience,
@@ -331,9 +332,7 @@ class TestOwnershipEpochClaim:
             "exp": calendar.timegm(datetime(2099, 1, 1).timetuple()),
             "jti": "legacy",
         }
-        legacy_token = _JWT.encode(header, payload, key)
-        if isinstance(legacy_token, bytes):
-            legacy_token = legacy_token.decode()
+        legacy_token = _sign(private_pem, payload, kid=s.billing_handoff_key_id)
 
         # epoch 0 vs current 0 → accepted
         assert (
@@ -388,8 +387,7 @@ class TestOwnershipEpochClaim:
 def _sign(private_pem: str, payload: dict, *, kid: str = "kid-1") -> str:
     """Sign an arbitrary payload with the EdDSA private key (cross-impl minter sim)."""
     header = {"alg": "EdDSA", "typ": "JWT", "kid": kid}
-    tok = _JWT.encode(header, payload, JsonWebKey.import_key(private_pem))
-    return tok.decode() if isinstance(tok, bytes) else tok
+    return jwt.encode(header, payload, OKPKey.import_key(private_pem), algorithms=_ALGORITHMS)
 
 
 def _base_payload(s, **overrides) -> dict:
