@@ -4,6 +4,42 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.80.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.80.1) — 2026-09-26
+
+Fixes from the v0.80.0 reviews. Sign-in, MFA and account erasure answer input that cannot be UTF-8 encoded as a wrong credential instead of 500, the Web UI refusal for API keys reaches SDK users, the context summary is described as a note, and the MCP server's text and logs follow the client-authored, user-directed write model.
+
+### Changed
+- **Context summary described as a note** ([#1716](https://github.com/kagura-ai/memory-cloud/issues/1716)):
+  - The create dialog and the context settings tab label the field "Summary (what this context is for)" / 「サマリー（このコンテキストの目的）」, the same label in both places.
+  - The help text says AI clients receive it from `get_context_info` as information about the context, not instructions, as the usage-guide field already does.
+  - The settings card is renamed from "AI Configuration" to "About this context" / 「このコンテキストについて」.
+- **Unused client-instructions template removed** ([#1717](https://github.com/kagura-ai/memory-cloud/issues/1717)): the `InstructionsTemplate` component, which no page rendered, is removed with its test and its message keys.
+- **Memory writes stay user-directed** ([#1721](https://github.com/kagura-ai/memory-cloud/issues/1721)):
+  - The MCP quick reference says `remember()` stores what the user asks to keep.
+  - `feedback` is optional; its description no longer says to call it after `recall()`.
+  - Pinned memories are "returned by `load_pinned()`" rather than "loaded every turn".
+  - A guard test keeps auto-save wording out of the server instructions, the quick reference and every tool and parameter description.
+  - `/kagura-memory:session-summary` and the Codex skill propose candidates and save what the user chooses to keep.
+  - The [Remote MCP Directory scope](docs/remote-mcp-directory-scope.md) document states the policy 1.F position: memories are client-authored, and the server never reads Claude's or the client's data.
+- **No query text in logs** ([#1721](https://github.com/kagura-ai/memory-cloud/issues/1721)): the INFO recall (MCP and REST), forget-by-query and public-search log lines record `query_len` and a keyed `query_hash` instead of the query. The LLM JSON-retry warning records `content_len` instead of a content preview.
+
+### Fixed
+- **Input that cannot be UTF-8 encoded** ([#1718](https://github.com/kagura-ai/memory-cloud/issues/1718)): a JSON escape such as `"\ud800"` in a password, login id, MFA code, MFA session token or erasure token used to end in a bare 500.
+  - Password sign-in answers 401 (`AUTH-002`), and the attempt counts toward the login rate limit.
+  - `/api/v1/auth/mfa/verify` answers 401 and deletes the pending sign-in on a bad code.
+  - Erasure confirmation answers 403 (`ERASURE-003`) for the password and 400 (`ERASURE-002`) for the token.
+  - The `create_admin`, `reset_password` and `seed_e2e_admin` CLIs refuse such a password with a clear message instead of a traceback.
+- **Web UI refusal shown in the SDKs** ([#1719](https://github.com/kagura-ai/memory-cloud/issues/1719)): session-only (Web UI) endpoints refuse an API key or OAuth access token with "API keys and OAuth access tokens are not accepted on Web UI endpoints. Sign in with a browser session."
+  - The old sentence contained "Bearer", which both SDKs drop, so users saw an unrelated owner-key hint.
+  - Status 403 and error code `HTTP-403` are unchanged.
+  - A test guard now fails the build if a 403 detail in the backend contains "bearer", "authorization" or "api_key=".
+
+### Notes
+- No migration and no new environment variables.
+- **Operators:** the new `query_hash` log field is keyed by the existing `AUDIT_HMAC_KEY`. Set it in production (`openssl rand -hex 32`) if you have not, otherwise short queries can be recovered from the default key.
+- **Clients matching message text:** the Web UI refusal sentence changed. Branch on the `error` code, not on `message`.
+- **Plugins:** the Claude Code and Codex plugin manifests are bumped in lockstep.
+
 ## [v0.80.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.80.0) — 2026-09-26
 
 Client-facing corrections and dependency control. The API answers a malformed context id with 422 instead of 500, says "not found" once, gives SDKs the existing file on a duplicate upload, and now shows them the OAuth refusal. Passwords over 72 bytes no longer fail with 500. The Web UI describes a context's usage guide as notes, and `/kagura-memory:login` signs an MCP connection in again. Auth-critical dependencies now have upper bounds, and the backend moves to SQLAlchemy 2.1.
