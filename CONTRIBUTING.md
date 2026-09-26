@@ -103,6 +103,27 @@ cd backend && pytest --cov=src --cov-report=html
 - Mock auth with `app.dependency_overrides[get_current_user]`
 - Target coverage: 90%+
 
+### Schema snapshots
+
+Two tests pin the shape of the public surface, minus prose, against a
+committed fixture so that a surface change shows up as a reviewed diff:
+
+| Surface | Test | Fixture | Regenerate |
+|---------|------|---------|------------|
+| MCP tool definitions | `tests/mcp_server/test_tool_definition_budget.py` | `tests/mcp_server/fixtures/tool_schema_skeleton.json` | `UPDATE_TOOL_SKELETON=1 pytest tests/mcp_server/test_tool_definition_budget.py` |
+| REST OpenAPI schema | `tests/api/test_openapi_schema_snapshot.py` | `tests/api/fixtures/openapi_schema_snapshot.json` | `UPDATE_OPENAPI_SNAPSHOT=1 pytest tests/api/test_openapi_schema_snapshot.py` |
+
+Neither snapshot contains prose, so wording changes need no regeneration: the
+MCP skeleton drops `description` strings (`title` and `annotations` are pinned
+separately by `test_tool_annotations`), and the REST skeleton drops
+`description`, `summary` and `title` strings, examples and `info.version`.
+Each module's docstring lists exactly what it keeps. A new route, parameter,
+field, status code or enum value does need a regeneration: run the command
+from `backend/`, commit the fixture with the change, and review its diff like
+code. When a FastAPI or pydantic upgrade moves the OpenAPI fixture everywhere
+at once, judge the change by the failure message, which lists the schemas and
+paths that differ, rather than by the raw fixture diff.
+
 ## Continuous Integration
 
 CI runs via `.github/workflows/ci.yml` on pull requests against `main`, on tag pushes (`v*`), and via manual `workflow_dispatch`.
