@@ -228,7 +228,7 @@ Insights:
 - type='learning', tags=['insight', 'personal-growth']
 - Breakthrough moments carry importance 0.8+
 
-Entries here are personal; sensitive topics carry higher importance.`,
+Entries here are personal; sensitive topics carry an importance that fits them.`,
   },
   {
     id: 'health-wellness',
