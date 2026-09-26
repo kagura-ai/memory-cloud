@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
+import bcrypt
 import pytest
 
 from auth.workspace_roles import WorkspaceRole
@@ -1284,3 +1285,40 @@ class TestErasureResiduals1365:
         assert actor_params["actor_user_id"] != target.user_id  # pseudonymized
         recipient_params = captured[1].compile().params
         assert recipient_params["recipient_identity"] != target.user_id
+
+
+class TestConfirmSelfServiceLongPassword:
+    """Issue #1707: a > 72-byte password is a refusal, never a bcrypt 5 ValueError."""
+
+    @staticmethod
+    def _pending(svc: AccountErasureService, token: str) -> ErasureRequest:
+        request = ErasureRequest(
+            user_id="u-1",
+            user_email_hash="x",
+            initiated_by="u-1",
+            is_self_service=True,
+            reason_code=REASON_SELF_SERVICE,
+            status=STATUS_PENDING,
+            confirm_token_hash=_sha256_hex(token),
+        )
+        request.id = uuid4()
+        svc._load_request_or_404 = AsyncMock(return_value=request)
+        return request
+
+    @pytest.mark.asyncio
+    async def test_over_long_wrong_password_is_incorrect_password(self):
+        svc = _service()
+        stored = bcrypt.hashpw(b"Correct-Horse-1!", bcrypt.gensalt(rounds=4)).decode()
+        svc._load_user_or_404 = AsyncMock(
+            return_value=_user(auth_method="password", password_hash=stored)
+        )
+        token = "tok"
+        request = self._pending(svc, token)
+
+        with patch("services.account_erasure_service.get_redis_client") as mock_redis:
+            mock_redis.return_value = MagicMock(
+                get=AsyncMock(return_value=str(request.id)),
+                delete=AsyncMock(),
+            )
+            with pytest.raises(ErasureForbiddenError, match="Incorrect password"):
+                await svc.confirm_self_service(user_id="u-1", token=token, password="y" * 100)
