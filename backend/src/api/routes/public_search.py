@@ -25,6 +25,7 @@ from services.search_service import SearchService
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import APIKeyError, AuthorizationError, NotFoundException, RateLimitError
 from utils.logger import get_logger
+from utils.query_log import query_log_fields
 from utils.usage_logger import log_usage
 
 logger = get_logger(__name__)
@@ -401,7 +402,7 @@ async def public_search(
     logger.info(
         "public_search_request",
         context_id=context_id,
-        query=request.query,
+        **query_log_fields(request.query),  # #1721 (Directory 1.D): no query text
         limit=request.limit,
         has_user=user is not None,
         has_bound_key=bound_key is not None,
