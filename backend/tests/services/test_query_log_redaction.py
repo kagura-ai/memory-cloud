@@ -178,32 +178,155 @@ async def test_public_search_log_has_no_raw_query():
     _assert_redacted(entry, SECRET_QUERY)
 
 
+# -------------------------------------------------------------------- LLM
+
+
+@pytest.mark.asyncio
+async def test_llm_json_parse_retry_log_has_length_not_content():
+    """The sleep / analysis LLM output is built from stored memory text; the
+    parse-failure warning logs its length, never a preview of it."""
+    from services.llm_providers.base import ProviderResponse, Usage
+    from services.llm_service import LLMService
+
+    usage = Usage(total=1, input=1, output=0, cached=0, cache_write=0)
+    bad = ProviderResponse(content=f"not json: {SECRET_QUERY}", usage=usage)
+    good = ProviderResponse(content='{"ok": true}', usage=usage)
+    provider = AsyncMock()
+    provider.complete_json.side_effect = [bad, good]
+    service = LLMService(AsyncMock())
+
+    with (
+        patch.object(service, "_get_provider", AsyncMock(return_value=provider)),
+        structlog.testing.capture_logs() as logs,
+    ):
+        await service.complete_json(user_id="user-1", prompt="p", model="m", provider="openai")
+
+    entry = _event(logs, "llm_json_parse_failed_retrying")
+    assert entry["log_level"] == "warning"
+    assert entry["content_len"] == len(bad.content)
+    assert "content_preview" not in entry
+    assert SECRET_QUERY not in repr(entry)
+
+
 # ------------------------------------------------------------------- guard
 
 
-def test_no_info_or_higher_log_call_passes_query_summary_or_content():
+# Name parts that mark a text-bearing log field, and parts that mark a field
+# derived from the text without carrying it (a length, count or hash).
+_TEXT_PARTS = {
+    "query",
+    "queries",
+    "summary",
+    "summaries",
+    "content",
+    "contents",
+    "text",
+    "prompt",
+    "preview",
+    "snippet",
+    "excerpt",
+    "transcript",
+}
+_DERIVED_PARTS = {"len", "length", "hash", "count", "size", "chars", "tokens", "revision"}
+
+
+def _is_text_name(name: str) -> bool:
+    parts = set(name.lower().split("_"))
+    return bool(parts & _TEXT_PARTS) and not parts & _DERIVED_PARTS
+
+
+def _carries_text(value) -> bool:
+    """The value is a text-named variable or attribute, sliced or put in an
+    f-string (``content[:200]``, ``request.query``, ``f"q={query}"``). A call
+    (``len(query)``, ``query_log_fields(query)``) derives from it and is fine."""
+    import ast
+
+    if isinstance(value, ast.Subscript):
+        return _carries_text(value.value)
+    if isinstance(value, ast.Name):
+        return _is_text_name(value.id)
+    if isinstance(value, ast.Attribute):
+        return _is_text_name(value.attr)
+    if isinstance(value, ast.JoinedStr):
+        return any(
+            isinstance(part, ast.FormattedValue) and _carries_text(part.value)
+            for part in value.values
+        )
+    return False
+
+
+def _info_or_higher_text_fields(tree) -> list[tuple[int, str]]:
+    import ast
+
+    levels = {"info", "warning", "warn", "error", "exception", "critical"}
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in levels
+            and "log" in ast.unparse(node.func.value).lower()
+        ):
+            continue
+        for kw in node.keywords:
+            if kw.arg is not None and (_is_text_name(kw.arg) or _carries_text(kw.value)):
+                found.append((node.lineno, f"{kw.arg}={ast.unparse(kw.value)}"))
+        for arg in node.args:
+            if _carries_text(arg):
+                found.append((node.lineno, ast.unparse(arg)))
+    return found
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        'logger.info("e", query=request.query)',
+        'logger.warning("e", content_preview=content[:200])',
+        'logger.error("e", raw_query=q)',
+        'logger.info("e", q=request.query)',
+        'logger.info("e", summary_text=memory.summary[:80])',
+        'logger.info(f"searching {query}")',
+        'self.logger.exception("e", prompt=prompt)',
+    ],
+)
+def test_log_guard_catches_text_fields(call):
+    import ast
+
+    assert _info_or_higher_text_fields(ast.parse(call))
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        'logger.info("e", query_len=len(q), query_hash=h)',
+        'logger.info("e", **query_log_fields(request.query))',
+        'logger.error("e", query_length=len(query))',
+        'logger.info("e", prompt_revision=EDGE_DISCOVERY_PROMPT_REVISION)',
+        'logger.warning("e", content_len=len(content))',
+        'logger.debug("e", query=query[:50])',
+        'logger.info("e", message=exc.message)',
+    ],
+)
+def test_log_guard_allows_derived_fields_and_debug(call):
+    import ast
+
+    assert _info_or_higher_text_fields(ast.parse(call)) == []
+
+
+def test_no_info_or_higher_log_call_carries_query_summary_or_content_text():
     """Static guard over ``src``: no ``logger.info|warning|error|exception|
-    critical(...)`` call passes a ``query=``, ``summary=`` or ``content=``
-    keyword. DEBUG is off in production and stays allowed."""
+    critical(...)`` call passes query, summary, content, prompt or preview
+    text — by field name (``query=``, ``content_preview=``, ``raw_query=``)
+    or by value (``request.query``, ``content[:200]``, an f-string over them).
+    Lengths, counts and keyed hashes are fine. DEBUG is off in production and
+    stays allowed."""
     import ast
     from pathlib import Path
 
-    levels = {"info", "warning", "warn", "error", "exception", "critical"}
-    text_fields = {"query", "summary", "content"}
     src = Path(__file__).resolve().parents[2] / "src"
-    offenders = []
-    for path in sorted(src.rglob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in levels
-                and "log" in ast.unparse(node.func.value).lower()
-            ):
-                continue
-            offenders += [
-                f"{path.relative_to(src)}:{node.lineno} {kw.arg}="
-                for kw in node.keywords
-                if kw.arg in text_fields
-            ]
+    offenders = [
+        f"{path.relative_to(src)}:{line} {field}"
+        for path in sorted(src.rglob("*.py"))
+        for line, field in _info_or_higher_text_fields(ast.parse(path.read_text(encoding="utf-8")))
+    ]
     assert offenders == []
