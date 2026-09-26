@@ -469,9 +469,12 @@ async def require_session_auth(
         )
         raise HTTPException(
             status_code=403,
+            # No "bearer" / "authorization" / "api_key=" in this message:
+            # both SDKs drop a message containing them and show an
+            # owner-API-key hint, which is wrong here (#1719).
             detail=(
-                "Bearer tokens (API keys or OAuth) are not allowed for Web UI endpoints. "
-                "Use browser session authentication."
+                "API keys and OAuth access tokens are not accepted on Web UI endpoints. "
+                "Sign in with a browser session."
             ),
         )
 
