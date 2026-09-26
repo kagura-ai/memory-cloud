@@ -230,6 +230,16 @@ def test_bearer_fallback_keeps_the_key_out_of_shell_history() -> None:
     assert "shell history" in bearer
 
 
+def test_codex_key_export_keeps_the_key_out_of_shell_history() -> None:
+    """The Codex Bearer path (Login → Tool Availability step 4) matches the Claude one."""
+    step = _read(CODEX_SKILL).split("\n4. Export the key", 1)[1].split("\n5. ", 1)[0]
+    flat = _flat(step)
+    assert 'export KAGURA_API_KEY="<your API key>"' not in flat, "a typed key lands in history"
+    assert "`read -rs KAGURA_API_KEY`" in flat
+    assert "shell history" in flat
+    assert "add it to your shell profile" not in flat, "never write the key into a profile"
+
+
 def test_login_skill_makes_and_removes_the_values_directory() -> None:
     detect = _flat(_section(_login(), "## 1. Detect"))
     assert "`entry_name`" in detect
