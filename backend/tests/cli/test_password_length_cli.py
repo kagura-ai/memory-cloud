@@ -17,11 +17,12 @@ _BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_BACKEND_SRC) not in sys.path:
     sys.path.insert(0, str(_BACKEND_SRC))
 
-from auth.password import PASSWORD_TOO_LONG_MESSAGE  # noqa: E402
+from auth.password import PASSWORD_MAX_BYTES, PASSWORD_TOO_LONG_MESSAGE  # noqa: E402
 from cli import create_admin, reset_password, seed_e2e_admin  # noqa: E402
 
 LONG = "Aa1!" + "x" * 96  # passes the complexity rules, 100 bytes
 VALID = "Valid-Pass-123!"
+BANNER_LIMIT = f"Maximum {PASSWORD_MAX_BYTES} bytes"
 
 
 class _StopAfterPasswordLoop(Exception):
@@ -63,6 +64,9 @@ class TestResetPassword:
         assert user.password_hash == "new-hash"
         out = capsys.readouterr().out
         assert PASSWORD_TOO_LONG_MESSAGE in out
+        # The limit is stated in the requirements banner, before any refusal.
+        assert BANNER_LIMIT in out
+        assert out.index(BANNER_LIMIT) < out.index(PASSWORD_TOO_LONG_MESSAGE)
         assert LONG not in out
 
 
@@ -91,6 +95,9 @@ class TestCreateAdmin:
         assert prompts == ["Password:", "Password:", "Confirm:"]
         out = capsys.readouterr().out
         assert PASSWORD_TOO_LONG_MESSAGE in out
+        # The limit is stated in the requirements banner, before any refusal.
+        assert BANNER_LIMIT in out
+        assert out.index(BANNER_LIMIT) < out.index(PASSWORD_TOO_LONG_MESSAGE)
         assert LONG not in out
 
 

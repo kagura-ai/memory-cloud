@@ -18,6 +18,7 @@ from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from auth.password import (  # noqa: E402
+    PASSWORD_MAX_BYTES,
     PASSWORD_TOO_LONG_MESSAGE,
     hash_password,
     is_password_too_long,
@@ -85,6 +86,7 @@ def reset_password():
                 print("  - At least 1 lowercase letter (a-z)")
                 print("  - At least 1 digit (0-9)")
                 print("  - At least 1 special character (!@#$%^&*...)")
+                print(f"  - Maximum {PASSWORD_MAX_BYTES} bytes when UTF-8 encoded")
                 password = getpass.getpass("\n  New Password: ")
 
                 errors = []
