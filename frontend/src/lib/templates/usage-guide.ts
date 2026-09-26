@@ -1,7 +1,13 @@
 /**
  * Context Templates for Context Creation
  *
- * Issue #160: Provides pre-defined templates for context summary and usage guidelines
+ * Issue #160: Provides pre-defined templates for context summary and usage guide
+ * Issue #1698: the server returns summary and usage_guide as the owner's notes
+ * on what the context holds and how it is organized — information about the
+ * context, not instructions (#1682). The starter text is written the same
+ * way: it describes how memories here are typed and tagged ("Bug fixes:
+ * type='bug-fix', importance 0.8+"), it does not direct the AI ("Always …",
+ * "Store …"). Users edit it freely after picking a template.
  */
 
 export interface ContextTemplate {
@@ -20,95 +26,98 @@ export const CONTEXT_TEMPLATES: ContextTemplate[] = [
     name: 'Personal Development',
     description: 'For individual coding projects and learning',
     category: 'development',
-    summary: 'Personal coding projects and development notes. Track code snippets, bug fixes, and learning progress.',
-    usage_guide: `Store code snippets with type='code' and tags=['language', 'framework'].
-Bug fixes should use type='bug-fix' with high importance (0.8+).
-Design decisions use type='decision' with clear reasoning.
-Learning notes use type='learning' with importance 0.5-0.7.
+    summary: 'Personal coding projects and development notes: code snippets, bug fixes, and learning progress.',
+    usage_guide: `Personal coding projects and development notes.
 
-Tagging guidelines:
-- Include programming language (e.g., 'python', 'typescript')
-- Add framework/library (e.g., 'react', 'fastapi')
-- Use project-specific tags for workspace
+Memory types:
+- Code snippets: type='code', tagged with language and framework
+- Bug fixes: type='bug-fix', importance 0.8+
+- Design decisions: type='decision', with the reasoning behind them
+- Learning notes: type='learning', importance 0.5-0.7
 
-Keep summaries concise (100-250 chars) for optimal search quality.`,
+Tags:
+- Programming language (e.g., 'python', 'typescript')
+- Framework or library (e.g., 'react', 'fastapi')
+- Project name for project-specific memories
+
+Summaries are 100-250 characters.`,
   },
   {
     id: 'team-collab',
     name: 'Team Collaboration',
     description: 'For shared team knowledge base',
     category: 'team',
-    summary: 'Team shared knowledge base. Store meeting notes, decisions, and collaborative documentation.',
+    summary: 'Team shared knowledge base: meeting notes, decisions, and collaborative documentation.',
     usage_guide: `Team shared knowledge base.
 
 Meeting notes:
 - type='note', tags=['meeting', 'YYYY-MM-DD', 'team-name']
-- Include action items and decisions
+- Each carries its action items and decisions
 
 API documentation:
 - type='code', tags=['api', 'docs', 'endpoint-name']
-- Include request/response examples
+- Request/response examples included
 
 Design decisions:
-- type='decision', importance=0.9+
-- Tag with affected components
+- type='decision', importance 0.9+
+- Tagged with the affected components
 
-Best practices:
-- Keep summaries under 200 chars for better search
-- Use consistent tagging across team members
-- Mark critical information with importance 0.8+`,
+Across the team:
+- Summaries are under 200 characters
+- The same tag names are used across the team
+- Critical information carries importance 0.8+`,
   },
   {
     id: 'project-docs',
     name: 'Project Documentation',
     description: 'For technical documentation and architecture',
     category: 'development',
-    summary: 'Technical documentation and architectural decisions. Track design patterns, implementations, and system knowledge.',
+    summary: 'Technical documentation and architectural decisions: design patterns, implementations, and system knowledge.',
     usage_guide: `Project documentation context.
 
 Architecture decisions:
 - type='decision', tags=['architecture', 'design']
-- Include trade-offs and alternatives considered
+- Trade-offs and alternatives considered are recorded with each decision
 
 Implementation notes:
-- type='code', include file paths in context field
-- Reference related issues/PRs
-- Tag with component names
+- type='code', file paths in the context field
+- Related issues/PRs referenced
+- Tagged with component names
 
 Bug fixes:
-- type='bug-fix', reference issue number in summary
-- Include root cause analysis
-- Tag with severity level
+- type='bug-fix', issue number in the summary
+- Root cause analysis included
+- Tagged with a severity level
 
 Code reviews:
 - type='note', tags=['review', 'pr-number']
-- Include feedback and recommendations`,
+- Feedback and recommendations included`,
   },
   {
     id: 'learning',
     name: 'Learning & Study Notes',
     description: 'For study notes and knowledge accumulation',
     category: 'personal',
-    summary: 'Learning and knowledge base. Store study notes, concepts, and educational materials.',
+    summary: 'Learning and knowledge base: study notes, concepts, and educational materials.',
     usage_guide: `Learning and knowledge base.
 
 Study notes:
 - type='learning', tags=['topic', 'subject']
-- Importance based on relevance (0.3-0.7)
+- Importance reflects relevance (0.3-0.7)
 
 Key concepts:
 - type='note', tags=['concept', 'category']
-- Use clear, searchable summaries
+- Summaries name the concept plainly, so it is easy to search
 
 Code examples:
 - type='code', tags=['example', 'pattern']
-- Include context about when to use
+- Each notes when the pattern applies
 
 Resources:
 - type='note', tags=['resource', 'reference']
-- Link to external materials in details field
+- Links to external materials are in the details field
 
-Review regularly and update importance as knowledge solidifies.`,
+Importance rises as knowledge solidifies.`,
   },
 
   // Personal Life Templates
@@ -117,167 +126,167 @@ Review regularly and update importance as knowledge solidifies.`,
     name: 'Daily Journal & Diary',
     description: 'For daily reflections and personal diary',
     category: 'personal',
-    summary: 'Daily journal and personal diary. Record thoughts, experiences, and daily reflections.',
+    summary: 'Daily journal and personal diary: thoughts, experiences, and daily reflections.',
     usage_guide: `Daily journal and diary.
 
 Daily entries:
 - type='note', tags=['diary', 'YYYY-MM-DD']
-- Importance based on significance (0.3-0.8)
+- Importance reflects significance (0.3-0.8)
 
 Reflections:
 - type='note', tags=['reflection', 'personal-growth']
-- Include what you learned
+- Each notes what was learned
 
 Memories:
 - type='note', tags=['memory', 'experience']
-- High importance (0.8+) for special moments
+- Special moments carry importance 0.8+
 
-Mood tracking:
-- Add mood in tags ['happy', 'thoughtful', 'stressed']
-- Use context field for emotional context
+Mood:
+- A mood tag such as 'happy', 'thoughtful' or 'stressed'
+- Emotional background in the context field
 
-Keep summaries short (50-150 chars) for easy browsing.`,
+Summaries are short (50-150 characters) for easy browsing.`,
   },
   {
     id: 'schedule-planner',
     name: 'Schedule & Planning',
     description: 'For schedules, tasks, and time management',
     category: 'personal',
-    summary: 'Schedule management and task planning. Track appointments, deadlines, and time-based activities.',
+    summary: 'Schedule management and task planning: appointments, deadlines, and time-based activities.',
     usage_guide: `Schedule and planning context.
 
 Appointments:
 - type='note', tags=['appointment', 'YYYY-MM-DD', 'HH:MM']
-- Include location in context field
-- Importance based on priority (0.6-0.9)
+- Location in the context field
+- Importance reflects priority (0.6-0.9)
 
 Deadlines:
 - type='note', tags=['deadline', 'YYYY-MM-DD']
-- High importance (0.8+) for critical deadlines
+- Critical deadlines carry importance 0.8+
 
 Recurring events:
 - type='note', tags=['recurring', 'frequency']
-- Include recurrence pattern in details
+- Recurrence pattern in the details
 
 Task lists:
 - type='note', tags=['task', 'project-name']
-- Update as tasks complete
+- Updated as tasks complete
 
-Use date tags consistently: YYYY-MM-DD format for easy filtering.`,
+Date tags use the YYYY-MM-DD format.`,
   },
   {
     id: 'travel-planning',
     name: 'Travel & Trip Planning',
     description: 'For travel plans, itineraries, and trip memories',
     category: 'personal',
-    summary: 'Travel planning and trip memories. Store itineraries, bookings, and travel experiences.',
+    summary: 'Travel planning and trip memories: itineraries, bookings, and travel experiences.',
     usage_guide: `Travel and trip planning.
 
-Trip planning:
+Trip plans:
 - type='note', tags=['travel', 'destination', 'YYYY-MM']
-- Include dates and budget in details
+- Dates and budget in the details
 
 Bookings:
 - type='note', tags=['booking', 'hotel/flight/etc']
-- Importance 0.8+ for confirmation numbers
-- Store booking details in context field
+- Booking details in the context field
+- Bookings with confirmation numbers carry importance 0.8+
 
 Itineraries:
 - type='note', tags=['itinerary', 'day-X']
-- Include activities and timings
+- Activities and timings included
 
 Travel memories:
 - type='note', tags=['memory', 'destination']
-- Add photos in details field (URLs)
+- Photo URLs in the details field
 
 Recommendations:
 - type='note', tags=['recommendation', 'restaurant/attraction']
-- Include ratings and notes`,
+- Ratings and notes included`,
   },
   {
     id: 'personal-advice',
     name: 'Personal Advice & Consultation',
     description: 'For personal concerns, advice, and problem-solving',
     category: 'personal',
-    summary: 'Personal advice and consultation. Record concerns, advice received, and problem-solving insights.',
+    summary: 'Personal advice and consultation: concerns, advice received, and problem-solving insights.',
     usage_guide: `Personal advice and consultation.
 
-Concerns/Questions:
+Concerns and questions:
 - type='note', tags=['question', 'topic']
-- Describe the situation clearly
+- Each describes the situation
 
 Advice received:
 - type='note', tags=['advice', 'source']
-- Include who gave the advice
-- Importance based on helpfulness (0.6-0.9)
+- Each names who gave the advice
+- Importance reflects how helpful it was (0.6-0.9)
 
 Solutions tried:
 - type='note', tags=['solution', 'outcome']
-- Record what worked and what didn't
+- What worked and what didn't
 
 Insights:
 - type='learning', tags=['insight', 'personal-growth']
-- High importance (0.8+) for breakthrough moments
+- Breakthrough moments carry importance 0.8+
 
-Keep this private and mark sensitive topics with appropriate importance.`,
+Entries here are personal; sensitive topics carry higher importance.`,
   },
   {
     id: 'health-wellness',
     name: 'Health & Wellness',
     description: 'For health tracking, fitness, and wellness notes',
     category: 'personal',
-    summary: 'Health and wellness tracking. Record fitness progress, health notes, and wellness activities.',
+    summary: 'Health and wellness tracking: fitness progress, health notes, and wellness activities.',
     usage_guide: `Health and wellness tracking.
 
 Workouts:
 - type='note', tags=['workout', 'exercise-type', 'YYYY-MM-DD']
-- Include sets/reps/duration in details
+- Sets/reps/duration in the details
 
 Health notes:
 - type='note', tags=['health', 'symptom/condition']
-- Importance based on severity
-- Track patterns over time
+- Importance reflects severity
+- Tracked over time to show patterns
 
 Meal planning:
 - type='note', tags=['meal', 'nutrition']
-- Include recipes in details
+- Recipes in the details
 
 Goals:
 - type='note', tags=['goal', 'target-date']
-- Update progress regularly
+- Progress updated as it happens
 
 Medical information:
-- type='note', importance=0.9+
-- Keep private and secure`,
+- type='note', importance 0.9+
+- Private and sensitive`,
   },
   {
     id: 'finance-budget',
     name: 'Finance & Budgeting',
     description: 'For financial planning and expense tracking',
     category: 'personal',
-    summary: 'Financial planning and budget management. Track expenses, savings goals, and financial decisions.',
+    summary: 'Financial planning and budget management: expenses, savings goals, and financial decisions.',
     usage_guide: `Finance and budgeting.
 
 Expenses:
 - type='note', tags=['expense', 'category', 'YYYY-MM']
-- Include amount in summary
-- Importance based on significance
+- Amount in the summary
+- Importance reflects significance
 
 Budget plans:
 - type='note', tags=['budget', 'period']
-- Track planned vs actual
+- Planned and actual amounts side by side
 
 Financial goals:
 - type='note', tags=['goal', 'target']
-- Importance 0.8+ for major goals
+- Major goals carry importance 0.8+
 
 Investment notes:
 - type='decision', tags=['investment', 'asset-type']
-- Include reasoning and research
+- Reasoning and research included
 
-Receipts/Records:
+Receipts and records:
 - type='note', tags=['receipt', 'vendor']
-- Store details in context field`,
+- Details in the context field`,
   },
 
   // Kagura Development
@@ -286,30 +295,30 @@ Receipts/Records:
     name: 'Kagura Memory Cloud Development',
     description: 'Template for Kagura Memory Cloud contributors',
     category: 'development',
-    summary: 'Kagura Memory Cloud development. Track code changes, bug fixes, design decisions, and implementation notes.',
+    summary: 'Kagura Memory Cloud development: code changes, bug fixes, design decisions, and implementation notes.',
     usage_guide: `Kagura Memory Cloud development context.
 
 Code changes:
-- type='code', include file paths in context
-- Tag with component: ['backend', 'frontend', 'mcp', 'database']
-- Reference issue numbers
+- type='code', file paths in the context field
+- Tagged by component: 'backend', 'frontend', 'mcp', 'database'
+- Issue numbers referenced
 
 Bug fixes:
-- type='bug-fix', reference issue number in summary
-- Include reproduction steps and solution
-- Importance 0.8+ for critical fixes
+- type='bug-fix', issue number in the summary
+- Reproduction steps and the solution included
+- Critical fixes carry importance 0.8+
 
 Design decisions:
-- type='decision', importance=0.9+
-- Include alternatives considered and rationale
-- Tag with affected areas
+- type='decision', importance 0.9+
+- Alternatives considered and the rationale included
+- Tagged with the affected areas
 
 Implementation notes:
-- type='note', importance=0.5-0.7
-- Tag with feature/issue number
+- type='note', importance 0.5-0.7
+- Tagged with the feature or issue number
 
-Use tags: ['issue-XXX', 'backend', 'frontend', 'mcp', 'api', 'ui', 'database', 'testing']
-Keep summaries 100-250 chars for optimal search.`,
+Tags in use: 'issue-XXX', 'backend', 'frontend', 'mcp', 'api', 'ui', 'database', 'testing'
+Summaries are 100-250 characters.`,
   },
 
   {
