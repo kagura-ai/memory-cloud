@@ -213,7 +213,9 @@ class FileStorageService:
             DuplicateFileError: same ``(workspace_id, sha256)`` already has an
                 active or in-flight row (partial unique violation). A
                 ``ConflictError``; carries that row as ``existing`` only when
-                it is in the same context as this upload (#1136).
+                it is in the same context as this upload (#1136) and is
+                ``uploaded`` — an unconfirmed ``reserved`` row is never
+                handed out as a file (#1693).
             NotFoundException: workspace (or a given ``context_id``) missing.
         """
         # Issue #1136 (authz-first): a context-bound upload requires WRITE access
@@ -374,7 +376,7 @@ class FileStorageService:
             # separate dedup query (the docstring of this method advertises
             # this idempotent-retry path; REST sends it as ``existing_file``).
             if "uq_file_objects_workspace_sha256_active" in str(exc):
-                existing_row: FileObject | None = None
+                same_context_row: FileObject | None = None
                 try:
                     # The failed flush leaves the session refusing every
                     # statement until it is rolled back (PendingRollbackError),
@@ -399,12 +401,22 @@ class FileStorageService:
                     # the caller cannot learn the file_id of a file bound to a
                     # context they cannot access.
                     if row is not None and row.context_id == context_id:
-                        existing_row = row
+                        same_context_row = row
                 except Exception:  # noqa: BLE001 — best-effort enrichment
                     pass
                 msg = f"file with sha256={sha256} already exists in workspace"
-                if existing_row is not None:
-                    msg += f"; reuse file_id={existing_row.id}"
+                existing_row: FileObject | None = None
+                if same_context_row is not None:
+                    # Only a confirmed file is handed out for reuse: both SDKs
+                    # return ``existing_file`` as the finished upload without
+                    # checking its status, and a ``reserved`` row has no bytes
+                    # behind it yet (an earlier PUT / confirm failed or is still
+                    # running) — list_files does not show it either (#1693).
+                    if same_context_row.status == "uploaded":
+                        existing_row = same_context_row
+                        msg += f"; reuse file_id={existing_row.id}"
+                    else:
+                        msg += "; an earlier upload of this file has not completed yet"
                 raise DuplicateFileError(msg, existing=existing_row) from exc
             raise
 

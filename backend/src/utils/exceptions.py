@@ -195,8 +195,10 @@ class DuplicateFileError(ConflictError):
 
     Raised by ``FileStorageService.reserve_upload`` on the per-workspace dedup
     conflict. ``existing`` is the conflicting ``FileObject`` row, or ``None``
-    when the caller may not learn about it: #1136 discloses only a row bound to
-    the SAME context as the upload (both unbound counts as the same).
+    when the caller may not learn about it or may not reuse it: #1136 discloses
+    only a row bound to the SAME context as the upload (both unbound counts as
+    the same), and only an ``uploaded`` row is reusable — a ``reserved`` row
+    has no stored bytes yet.
 
     ``existing_file`` is that row in the files API's JSON shape, filled in by
     ``POST /files/reserve`` (#1693). The global handler sends it as a TOP-LEVEL

@@ -1050,7 +1050,7 @@ class TestReserveUploadDuplicate:
     @pytest.mark.asyncio
     async def test_same_bound_context_carries_the_existing_row(self, service, db, workspace_id):
         ctx_id = uuid4()
-        existing = _make_file_object(workspace_id)
+        existing = _make_file_object(workspace_id, status="uploaded")
         existing.context_id = ctx_id
         self._arrange(db, workspace_id, existing)
 
@@ -1062,6 +1062,35 @@ class TestReserveUploadDuplicate:
 
         assert exc_info.value.existing is existing
         assert f"reuse file_id={existing.id}" in exc_info.value.message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bound", [False, True], ids=["null-context", "bound-context"])
+    async def test_same_context_unconfirmed_row_is_not_returned_as_the_file(
+        self, service, db, workspace_id, bound
+    ):
+        # A ``reserved`` row has no bytes behind it yet (the PUT or the confirm
+        # of an earlier upload failed, or is still running). Both SDKs return
+        # ``existing_file`` as the finished upload without checking its status,
+        # so handing this row out would report a file that was never stored.
+        # The 409 stays plain; the message says the earlier upload is unfinished.
+        ctx_id = uuid4() if bound else None
+        existing = _make_file_object(workspace_id, status="reserved")
+        existing.context_id = ctx_id
+        self._arrange(db, workspace_id, existing)
+
+        perm = MagicMock()
+        perm.check_context_write = AsyncMock(return_value=MagicMock(workspace_id=workspace_id))
+        with patch("services.file_storage_service.PermissionService", return_value=perm):
+            with pytest.raises(DuplicateFileError) as exc_info:
+                await self._reserve(service, workspace_id, context_id=ctx_id)
+
+        err = exc_info.value
+        assert err.existing is None
+        assert err.message == (
+            f"file with sha256={VALID_SHA} already exists in workspace; "
+            "an earlier upload of this file has not completed yet"
+        )
+        assert str(existing.id) not in err.message
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("existing_ctx", ["other", None], ids=["other-context", "null"])

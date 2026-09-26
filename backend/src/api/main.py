@@ -463,8 +463,8 @@ async def memory_cloud_exception_handler(
         "details": details,
     }
     # #1693: the files dedup 409 carries the existing file as a top-level key,
-    # where the released SDKs read it. Only set for a same-context duplicate
-    # (#1136); every other exception keeps the three-key body.
+    # where the released SDKs read it. Only set for a same-context (#1136),
+    # uploaded duplicate; every other exception keeps the three-key body.
     if isinstance(exc, DuplicateFileError) and exc.existing_file is not None:
         content["existing_file"] = exc.existing_file
 

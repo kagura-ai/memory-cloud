@@ -163,8 +163,9 @@ async def _enforce_workspace_membership(
             "description": (
                 "The workspace already holds an active file with this sha256 "
                 "(`RES-002`). When that file is in the same context as the request "
-                "(both unbound counts as the same), the body also carries it as a "
-                "top-level `existing_file` object; otherwise it is omitted."
+                "(both unbound counts as the same) and its upload has completed "
+                "(`status` `uploaded`), the body also carries it as a top-level "
+                "`existing_file` object; otherwise it is omitted."
             ),
         },
     },
@@ -179,10 +180,11 @@ async def reserve_upload(
     The client computes the sha256 ahead of time so the server can dedup
     against the active set on this workspace. Repeated calls with the
     same sha256 from the same workspace return 409; when the existing file
-    is in the same context as the request, the 409 body carries it as a
-    top-level ``existing_file`` (``FileObjectOut``) so the SDK can use it
-    instead of uploading again (#1693). A duplicate in another context
-    names no file (#1136).
+    is in the same context as the request and is ``uploaded``, the 409 body
+    carries it as a top-level ``existing_file`` (``FileObjectOut``) so the
+    SDK can use it instead of uploading again (#1693). An earlier upload
+    that has not completed (``reserved``) is not handed out, and a
+    duplicate in another context names no file (#1136).
     """
     await _enforce_workspace_membership(db, user, body.workspace_id)
     service = FileStorageService(db)
