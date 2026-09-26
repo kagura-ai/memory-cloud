@@ -157,12 +157,20 @@ class TestForbiddenDetailGuard:
             'raise HTTPException(status_code=HTTPStatus.FORBIDDEN, detail="Bearer refused")',
             'raise HTTPException(http.HTTPStatus.FORBIDDEN, "Bearer tokens are refused")',
             'raise HTTPException(status_code=403, detail=f"Bearer {x} " "rejected")',
-            '_MSG = "Bearer tokens are refused"\n'
-            "def f():\n"
-            "    raise HTTPException(403, detail=_MSG)",
-            '_PREFIX: str = "Bearer"\n'
-            "def f(x):\n"
-            '    raise HTTPException(403, detail=f"{_PREFIX} {x} refused")',
+            "\n".join(
+                [
+                    '_MSG = "Bearer tokens are refused"',
+                    "def f():",
+                    "    raise HTTPException(403, detail=_MSG)",
+                ]
+            ),
+            "\n".join(
+                [
+                    '_PREFIX: str = "Bearer"',
+                    "def f(x):",
+                    '    raise HTTPException(403, detail=f"{_PREFIX} {x} refused")',
+                ]
+            ),
         ],
         ids=[
             "positional",
@@ -185,8 +193,7 @@ class TestForbiddenDetailGuard:
         "source",
         [
             # 401 challenges legitimately name the scheme.
-            'raise HTTPException(401, "Bearer token required", '
-            'headers={"WWW-Authenticate": "Bearer"})',
+            'raise HTTPException(401, "Bearer token required", headers={"WWW-Authenticate": "Bearer"})',
             'raise HTTPException(HTTPStatus.UNAUTHORIZED, detail="Bearer token required")',
             # Headers on a 403 are not the message.
             'raise HTTPException(403, "Not allowed", headers={"WWW-Authenticate": "Bearer"})',
