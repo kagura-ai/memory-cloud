@@ -109,6 +109,13 @@ CONFIRM_TOKEN_TTL_SECONDS = 3600
 # column stores SHA256(token); the raw token only ever lives here.
 _CONFIRM_TOKEN_KEY_PREFIX = "erasure_token:"
 
+# #1678: appended to the Redis value (``<request_id><suffix>``) when the token
+# was delivered by email. The emailed link is then the second factor by
+# itself, decided at request time: setting a password before clicking it must
+# not make the link demand one. A bare request id (a password request, or a
+# key written before this change) keeps the confirm-time password check.
+_EMAIL_LINK_SUFFIX = ":email-link"
+
 # Timeout for the OAuth confirmation-email dispatch. Chosen so a stalled
 # email provider cannot hold a DB transaction open and exhaust the
 # connection pool: Resend p99 latency is well under 5s in practice;
@@ -242,22 +249,22 @@ class AccountErasureService:
             await self.db.rollback()
             raise ErasureAlreadyInProgressError("active") from exc
 
-        redis = get_redis_client()
-        try:
-            await redis.setex(
-                f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}",
-                CONFIRM_TOKEN_TTL_SECONDS,
-                str(request.id),
-            )
-        except Exception:
-            await self.db.rollback()
-            raise
-
         # #1678: the channel follows whether the account HAS a password, not
         # its original sign-in method — an OAuth account that added a password
         # re-enters it like any password user, and only a passwordless account
         # needs the emailed link as its second factor.
         is_oauth = target.password_hash is None
+
+        redis = get_redis_client()
+        try:
+            await redis.setex(
+                f"{_CONFIRM_TOKEN_KEY_PREFIX}{token}",
+                CONFIRM_TOKEN_TTL_SECONDS,
+                f"{request.id}{_EMAIL_LINK_SUFFIX}" if is_oauth else str(request.id),
+            )
+        except Exception:
+            await self.db.rollback()
+            raise
 
         if is_oauth:
             try:
@@ -411,6 +418,10 @@ class AccountErasureService:
         request_id_str = await redis.get(redis_key)
         if not request_id_str:
             raise ErasureTokenInvalidError()
+        # The token was emailed: the link is the proof (see _EMAIL_LINK_SUFFIX).
+        via_email_link = request_id_str.endswith(_EMAIL_LINK_SUFFIX)
+        if via_email_link:
+            request_id_str = request_id_str.removesuffix(_EMAIL_LINK_SUFFIX)
 
         try:
             request_id = UUID(request_id_str)
@@ -437,8 +448,10 @@ class AccountErasureService:
 
         # Password re-confirm for password users (Q5 design). OAuth users
         # rely on the email-link click as the second factor; the active
-        # session cookie was the first.
-        if target.password_hash is not None:
+        # session cookie was the first. Which one applies was decided when
+        # the erasure was requested (#1678): an emailed link stays enough even
+        # if a password was set since.
+        if not via_email_link and target.password_hash is not None:
             if not password:
                 raise ErasureForbiddenError("Password required to confirm erasure")
             from auth.password import verify_password

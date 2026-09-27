@@ -375,7 +375,9 @@ never for `@local` addresses. `users.auth_method` is unchanged and still means
 the *original* sign-in method; whether an account has a password is
 `password_hash IS NOT NULL` (`GET /api/v1/auth/me` reports it as
 `has_password`). Unlinking a provider, removing the password and the account
-erasure flow (password re-entry vs emailed link) all follow `has_password`.
+erasure flow (password re-entry vs emailed link) all follow `has_password`. For
+erasure it is read when the erasure is requested: an emailed confirmation link
+stays valid on its own even if a password is set before it is clicked.
 
 Every sign-in failure is the same 401, and an unknown identifier costs the same
 bcrypt work as a wrong password. Failures are counted per account (5 per 5

@@ -1364,3 +1364,61 @@ class TestErasureFollowsHasPassword1678:
             )
             with pytest.raises(ErasureForbiddenError):
                 await svc.confirm_self_service(user_id="u-1", token=token, password=None)
+
+
+class TestEmailLinkErasureStaysConfirmable1678:
+    """#1678: the second factor is decided when the erasure is REQUESTED.
+
+    An emailed link is the proof for an account that had no password then;
+    setting a password before clicking it must not break the link. A request
+    made with a password (token in the response) still needs the password.
+    """
+
+    class _Redis:
+        def __init__(self) -> None:
+            self.store: dict[str, str] = {}
+
+        async def setex(self, key: str, ttl: int, value: str) -> None:
+            self.store[key] = value
+
+        async def get(self, key: str) -> str | None:
+            return self.store.get(key)
+
+        async def delete(self, key: str) -> None:
+            self.store.pop(key, None)
+
+    async def _request_then_confirm(
+        self, *, password_at_request: str | None, password_at_confirm: str | None, **confirm
+    ) -> tuple[AccountErasureService, ErasureRequest]:
+        svc = _service()
+        target = _user(auth_method="oauth", password_hash=password_at_request)
+        added = TestRequestSelfServiceErasure._wire_typical_path(svc, target)
+        redis = self._Redis()
+        with patch("services.account_erasure_service.get_redis_client", return_value=redis):
+            _, response_token = await svc.request_self_service_erasure(user_id="u-1")
+            request = added[0]
+            token = (
+                response_token
+                or (svc.email_service.send_erasure_confirmation.await_args.kwargs["confirm_token"])
+            )
+            # Between the request and the click the password state changes.
+            target.password_hash = password_at_confirm
+            request.status = STATUS_PENDING
+            svc._load_request_or_404 = AsyncMock(return_value=request)
+            svc._check_no_blocking_workspace_transfers = AsyncMock()
+            await svc.confirm_self_service(user_id="u-1", token=token, **confirm)
+        return svc, request
+
+    @pytest.mark.asyncio
+    async def test_email_link_confirms_after_a_password_was_set(self):
+        _, request = await self._request_then_confirm(
+            password_at_request=None, password_at_confirm="hashed-since"
+        )
+        assert request.status == STATUS_COOLING_OFF
+
+    @pytest.mark.asyncio
+    async def test_password_request_still_needs_the_password(self):
+        with pytest.raises(ErasureForbiddenError):
+            await self._request_then_confirm(
+                password_at_request="hashed", password_at_confirm="hashed", password=None
+            )
