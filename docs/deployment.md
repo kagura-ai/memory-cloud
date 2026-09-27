@@ -614,8 +614,8 @@ in-process **LanceDB** backend — "Kagura Lite". This is a **preview**.
 ### Enabling
 
 ```bash
-# 1. Install the optional backend extra (adds lancedb + pyarrow)
-pip install '.[lite]'
+# 1. Install the optional backend extra from the lock (adds lancedb + pyarrow)
+cd backend && uv sync --locked --extra lite
 
 # 2. Configure the backend (env)
 KAGURA_VECTOR_BACKEND=lance

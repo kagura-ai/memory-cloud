@@ -32,8 +32,8 @@ PREVIEW limitations (documented, not silently dropped):
   (``delete_user_points`` — GDPR cross-collection erasure — IS implemented
   as of #1336.)
 * Cosine ``_distance`` is converted to a similarity score via ``1 - distance``.
-* End-to-end behavior requires ``lancedb`` installed (``pip install
-  'kagura-memory[lite]'``) and is pending live validation; the SQL filter
+* End-to-end behavior requires ``lancedb`` installed (``uv sync --locked
+  --extra lite``) and is pending live validation; the SQL filter
   builder is unit-tested independently of LanceDB.
 """
 

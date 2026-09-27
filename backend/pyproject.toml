@@ -178,7 +178,7 @@ neural = [
 lite = [
     # "Kagura Lite" — embedded LanceDB vector backend (vector_backend=lance).
     # Optional: the default (qdrant) install does NOT pull these. Install with
-    # `pip install '.[lite]'` for single-process self-hosted / CLI deployments.
+    # `uv sync --locked --extra lite` for single-process self-hosted / CLI deployments.
     "lancedb>=0.13.0",
     "pyarrow>=14.0.0",
 ]
