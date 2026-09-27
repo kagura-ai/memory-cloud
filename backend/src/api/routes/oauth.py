@@ -37,6 +37,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Res
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, ValidationError, field_validator
+from sqlalchemy.orm import Session
 from starlette.requests import ClientDisconnect
 
 from auth.dependencies import SessionUser, require_admin
@@ -2632,7 +2633,7 @@ def _basic_client_credentials(header: str) -> tuple[str, str] | None:
 
 def _authenticate_endpoint_client(
     request: Request,
-    db_session,
+    db_session: Session,
     form_client_id: str | None,
     form_client_secret: str | None,
     *,
