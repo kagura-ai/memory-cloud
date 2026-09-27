@@ -4,7 +4,9 @@ import pytest
 
 from utils.redirect_uri import (
     any_redirect_uri_matches,
+    is_loopback_redirect_uri,
     is_valid_redirect_uri_pattern,
+    redirect_uri_display_host,
     redirect_uri_matches,
 )
 
@@ -211,3 +213,110 @@ class TestAnyMatch:
             )
             is False
         )
+
+
+class TestLoopbackRedirectUri:
+    """RFC 8252 §7.3: the port of a loopback redirect may vary (#1741)."""
+
+    @pytest.mark.parametrize(
+        ("pattern", "incoming"),
+        [
+            ("http://localhost:3118/callback", "http://localhost:51234/callback"),
+            ("http://localhost:3118/callback", "http://localhost/callback"),
+            ("http://localhost/callback", "http://localhost:51234/callback"),
+            ("http://127.0.0.1:8989/oauth/callback", "http://127.0.0.1:40000/oauth/callback"),
+            ("http://[::1]:3000/cb", "http://[::1]:61000/cb"),
+            ("http://LOCALHOST:3118/callback", "http://localhost:51234/callback"),
+            ("http://localhost:3118/callback?x=1", "http://localhost:9/callback?x=1"),
+            ("http://localhost:3000/cb/*", "http://localhost:4000/cb/abc"),
+        ],
+    )
+    def test_port_is_ignored(self, pattern, incoming):
+        assert redirect_uri_matches(pattern, incoming) is True
+
+    @pytest.mark.parametrize(
+        ("pattern", "incoming"),
+        [
+            # Host must still match: RFC 8252 treats these as distinct hosts.
+            ("http://localhost:3118/callback", "http://127.0.0.1:51234/callback"),
+            ("http://127.0.0.1:3118/callback", "http://localhost:3118/callback"),
+            ("http://127.0.0.1:3118/callback", "http://[::1]:3118/callback"),
+            # Path, query and scheme stay exact.
+            ("http://localhost:3118/callback", "http://localhost:51234/other"),
+            ("http://localhost:3118/callback", "http://localhost:51234/callback/"),
+            ("http://localhost:3118/callback", "http://localhost:51234/callback?x=1"),
+            ("http://localhost:3118/callback?x=1", "http://localhost:51234/callback?x=2"),
+            ("http://localhost:3118/callback", "https://localhost:3118/callback"),
+            ("https://localhost:3118/callback", "https://localhost:51234/callback"),
+            ("http://localhost:3118/callback", "http://localhost:51234/callback#f"),
+            # Userinfo and malformed ports are refused.
+            ("http://localhost:3118/callback", "http://evil@localhost:51234/callback"),
+            ("http://localhost:3118/callback", "http://localhost:99999/callback"),
+            ("http://localhost:3118/callback", "http://localhost:12ab/callback"),
+            # Not loopback: a look-alike host keeps exact matching.
+            ("http://localhost:3118/callback", "http://localhost.evil.com:3118/callback"),
+            ("http://localhost:3118/callback", "http://localhost:3118@evil.com/callback"),
+            # Wildcard still needs exactly one more segment.
+            ("http://localhost:3000/cb/*", "http://localhost:4000/cb/a/b"),
+        ],
+    )
+    def test_other_parts_stay_exact(self, pattern, incoming):
+        assert redirect_uri_matches(pattern, incoming) is False
+
+    @pytest.mark.parametrize(
+        ("pattern", "incoming"),
+        [
+            (
+                "https://claude.ai/api/mcp/auth_callback",
+                "https://claude.ai:8443/api/mcp/auth_callback",
+            ),
+            ("http://example.com:3000/cb", "http://example.com:4000/cb"),
+            ("https://chatgpt.com/connector/oauth/*", "https://chatgpt.com:444/connector/oauth/x"),
+        ],
+    )
+    def test_non_loopback_port_is_exact(self, pattern, incoming):
+        assert redirect_uri_matches(pattern, incoming) is False
+
+
+class TestIsLoopbackRedirectUri:
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "http://localhost:3118/callback",
+            "http://127.0.0.1/cb",
+            "http://[::1]:8000/cb",
+            "http://localhost:3000/cb/*",
+        ],
+    )
+    def test_loopback(self, uri):
+        assert is_loopback_redirect_uri(uri) is True
+
+    @pytest.mark.parametrize(
+        "uri",
+        [
+            "https://localhost:3118/callback",
+            "https://claude.ai/api/mcp/auth_callback",
+            "http://localhost.evil.com/cb",
+            "http://127.0.0.2/cb",
+            "not a url",
+            "",
+        ],
+    )
+    def test_not_loopback(self, uri):
+        assert is_loopback_redirect_uri(uri) is False
+
+
+class TestRedirectUriDisplayHost:
+    @pytest.mark.parametrize(
+        ("uri", "expected"),
+        [
+            ("https://claude.ai/api/mcp/auth_callback", "claude.ai"),
+            ("https://Claude.AI/api/mcp/auth_callback", "claude.ai"),
+            ("https://example.com:8443/cb", "example.com:8443"),
+            ("http://localhost:51234/callback", "localhost:51234"),
+            ("http://127.0.0.1/callback", "127.0.0.1"),
+            ("http://[::1]:3000/cb", "[::1]:3000"),
+        ],
+    )
+    def test_host(self, uri, expected):
+        assert redirect_uri_display_host(uri) == expected

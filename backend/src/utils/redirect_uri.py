@@ -19,12 +19,81 @@ The wildcard is intentionally limited to a single trailing path segment to
 prevent open-redirect attacks where an attacker could pivot to a different
 endpoint or append ``?next=evil`` tricks.
 
+Loopback redirects (RFC 8252 §7.3, #1741): native clients such as Claude
+Code listen on an ephemeral port, so when the stored and the incoming URI are
+both ``http`` on a loopback host (``localhost``, ``127.0.0.1``, ``::1``), the
+port is not compared. Scheme, host, path and query still are, and the host
+must be the same one: RFC 8252 treats ``localhost`` and ``127.0.0.1`` as
+different hosts.
+
 Issue #207.
 """
 
-from urllib.parse import unquote, urlparse
+from urllib.parse import ParseResult, unquote, urlparse
 
 WILDCARD_SUFFIX = "/*"
+
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _loopback_parts(uri: str) -> ParseResult | None:
+    """Parse ``uri`` when it is an ``http`` loopback URI, else return None.
+
+    A URI with userinfo or an unparsable port is not treated as loopback, so
+    it falls back to exact matching.
+    """
+    try:
+        parsed = urlparse(uri)
+        if parsed.scheme != "http" or (parsed.hostname or "") not in LOOPBACK_HOSTS:
+            return None
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        _ = parsed.port  # raises ValueError on a non-integer or out-of-range port
+    except ValueError:
+        return None
+    return parsed
+
+
+def is_loopback_redirect_uri(uri: str) -> bool:
+    """Return True when ``uri`` is an ``http`` redirect to a loopback host.
+
+    Args:
+        uri: A redirect URI or a stored pattern (a trailing ``/*`` is fine).
+
+    Returns:
+        True for ``http://localhost``, ``http://127.0.0.1`` and ``http://[::1]``
+        URIs with any port, False otherwise.
+    """
+    return _loopback_parts(uri) is not None
+
+
+def redirect_uri_display_host(uri: str) -> str:
+    """Return the host a user is sent to, as shown on the consent page.
+
+    The host is lowercased and keeps an explicit port (always present on a
+    loopback redirect, which is what tells two local apps apart). IPv6
+    addresses keep their brackets.
+
+    Args:
+        uri: A redirect URI that already matched a registered pattern.
+
+    Returns:
+        ``host`` or ``host:port``; an empty string if ``uri`` has no host.
+    """
+    try:
+        parsed = urlparse(uri)
+        host = parsed.hostname or ""
+        port = parsed.port
+    except ValueError:
+        return ""
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{host}:{port}" if port is not None else host
+
+
+def _loopback_authority_matches(stored: ParseResult, incoming: ParseResult) -> bool:
+    """Compare two loopback URIs' hosts, ignoring the port (RFC 8252 §7.3)."""
+    return stored.hostname == incoming.hostname
 
 
 def is_valid_redirect_uri_pattern(pattern: str) -> bool:
@@ -84,7 +153,8 @@ def redirect_uri_matches(pattern: str, redirect_uri: str) -> bool:
 
     The pattern may be either an exact URI or a wildcard pattern with a
     trailing ``/*``. Matching is strict on scheme and host; the wildcard only
-    accepts exactly one additional path segment.
+    accepts exactly one additional path segment. When both URIs are ``http``
+    on the same loopback host, the port is not compared (RFC 8252 §7.3).
 
     Args:
         pattern: Stored pattern (exact URI or trailing-wildcard URI).
@@ -105,15 +175,30 @@ def redirect_uri_matches(pattern: str, redirect_uri: str) -> bool:
     if pattern == redirect_uri:
         return True
 
+    incoming_loopback = _loopback_parts(redirect_uri)
+
     if not pattern.endswith(WILDCARD_SUFFIX):
-        return False
+        stored_loopback = _loopback_parts(pattern)
+        if stored_loopback is None or incoming_loopback is None:
+            return False
+        return (
+            _loopback_authority_matches(stored_loopback, incoming_loopback)
+            and stored_loopback.path == incoming_loopback.path
+            and stored_loopback.params == incoming_loopback.params
+            and stored_loopback.query == incoming_loopback.query
+            and stored_loopback.fragment == incoming_loopback.fragment
+        )
 
     stored = urlparse(pattern[: -len(WILDCARD_SUFFIX)])
     incoming = urlparse(redirect_uri)
 
     if stored.scheme != incoming.scheme:
         return False
-    if stored.netloc != incoming.netloc:
+    stored_loopback = _loopback_parts(pattern[: -len(WILDCARD_SUFFIX)])
+    if stored_loopback is not None and incoming_loopback is not None:
+        if not _loopback_authority_matches(stored_loopback, incoming_loopback):
+            return False
+    elif stored.netloc != incoming.netloc:
         return False
     if incoming.query or incoming.fragment:
         return False
