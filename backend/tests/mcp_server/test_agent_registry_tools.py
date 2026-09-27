@@ -182,6 +182,7 @@ class TestListAndGet:
                 )
             )
         assert first["count"] == 50 and first["has_more"] is True
+        assert first["total_available"] == 120
         assert first["next_cursor"] == "50"
         assert [a["name"] for a in last["agents"]] == [f"a{i}" for i in range(100, 120)]
         assert last["has_more"] is False and last["next_cursor"] is None

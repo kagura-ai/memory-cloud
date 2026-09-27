@@ -183,6 +183,7 @@ async def handle_list_agents(
         return _success_response(
             agents=[_serialize_agent_list_item(a) for a in page],
             count=len(page),
+            total_available=len(agents),
             has_more=has_more,
             next_cursor=str(offset + len(page)) if has_more else None,
         )
