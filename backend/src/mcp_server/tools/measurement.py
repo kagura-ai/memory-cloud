@@ -17,6 +17,7 @@ from uuid import UUID
 
 from mcp.types import TextContent
 
+from mcp_server.tools._errors import _tool_exception_response, is_caller_value_error
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
     _ContextNotFoundError,
@@ -140,6 +141,10 @@ async def handle_record_measurement(
                 details=details,
             )
         except ValueError as exc:
+            # #1742: only the service's own ValueError is the caller's; a
+            # subclass from server code is a server failure (outcome unknown).
+            if not is_caller_value_error(exc):
+                return _tool_exception_response("record_measurement", exc)
             return _error_response("validation_error", str(exc))
         return _success_response(
             measurement_id=str(row.id),
@@ -201,6 +206,8 @@ async def handle_recall_series(
                 end=end,
             )
         except ValueError as exc:
+            if not is_caller_value_error(exc):  # #1742: see handle_record_measurement
+                return _tool_exception_response("recall_series", exc)
             return _error_response("validation_error", str(exc))
         return _success_response(
             metric=metric,

@@ -12,7 +12,7 @@ from uuid import UUID
 from mcp.types import TextContent
 
 from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
-from mcp_server.tools._errors import _tool_exception_response
+from mcp_server.tools._errors import _tool_exception_response, is_caller_value_error
 from mcp_server.tools._helpers import (
     _context_cap_error_response,
     _context_response_fields,
@@ -703,7 +703,12 @@ async def handle_update_context(
                     ),
                 )
             ]
-        except ValueError:
+        except ValueError as e:
+            if not is_caller_value_error(e):
+                # #1742: a pydantic / JSON / Unicode error from server code is
+                # not a malformed context_id.
+                await db.rollback()
+                return _tool_exception_response("update_context", e, error="update_context_error")
             return _error_response(
                 "invalid_context_id",
                 f"Invalid context_id format: {args['context_id']}",
@@ -1032,8 +1037,16 @@ async def handle_delete_context(
             )
         except (AuthorizationError, Exception) as e:
             await db.rollback()
-            if isinstance(e, (AuthorizationError, ValidationError)):
+            if isinstance(e, AuthorizationError):
                 return _error_response("permission_denied", str(e))
+            if isinstance(e, ValidationError):
+                # #1742: a business-rule refusal ("Cannot delete default
+                # context"), not a role problem.
+                return _error_response(
+                    "validation_error",
+                    e.message,
+                    help="Nothing was deleted. The message says why this context cannot be deleted.",
+                )
             await _log_tool_usage(
                 db,
                 user_id,

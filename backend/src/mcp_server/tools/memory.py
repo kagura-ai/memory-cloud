@@ -16,6 +16,7 @@ from mcp_server.tools._constants import (
     REFERENCE_MIN_MAX_CHARS,
     REFERENCE_MIN_PAGE_CHARS,
 )
+from mcp_server.tools._errors import _tool_exception_response, is_caller_value_error
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
     _context_response_fields,
@@ -67,10 +68,13 @@ async def handle_remember(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
     """Store a new memory."""
-    if "summary" not in args or "content" not in args or "type" not in args:
+    # #1742: name only the fields that are actually missing.
+    missing = [name for name in ("summary", "content", "type") if name not in args]
+    if missing:
         return _error_response(
             "missing_fields",
-            "Missing required fields: summary, content, type",
+            f"Missing required fields: {', '.join(missing)}",
+            missing_fields=missing,
         )
 
     from db.base import get_db
@@ -171,6 +175,13 @@ async def handle_remember(
             # an invalid type="time" details.trigger). Return a structured
             # validation_error rather than re-raising as an opaque tool crash.
             await db.rollback()
+            if not is_caller_value_error(e):
+                # #1742: a pydantic / JSON / Unicode error from server code is a
+                # server failure (outcome unknown), not the caller's argument.
+                await _log_tool_usage(
+                    db, user_id, "remember", start_time, 500, args.get("context_id"), workspace_id
+                )
+                return _tool_exception_response("remember", e)
             await _log_tool_usage(
                 db, user_id, "remember", start_time, 422, args.get("context_id"), workspace_id
             )
@@ -331,6 +342,18 @@ async def handle_update_memory(
             # validation_error rather than re-raising as an opaque tool crash
             # (mirrors handle_remember).
             await db.rollback()
+            if not is_caller_value_error(e):
+                # #1742: see handle_remember.
+                await _log_tool_usage(
+                    db,
+                    user_id,
+                    "update_memory",
+                    start_time,
+                    500,
+                    args.get("context_id"),
+                    workspace_id,
+                )
+                return _tool_exception_response("update_memory", e)
             await _log_tool_usage(
                 db, user_id, "update_memory", start_time, 422, args.get("context_id"), workspace_id
             )
@@ -596,6 +619,12 @@ async def handle_load_pinned(
             )
             return e.to_response()
         except ValueError as e:
+            if not is_caller_value_error(e):
+                # #1742: server-side library error, not the caller's argument.
+                await _log_tool_usage(
+                    db, user_id, "load_pinned", start_time, 500, current_context_id, workspace_id
+                )
+                return _tool_exception_response("load_pinned", e)
             await _log_tool_usage(
                 db, user_id, "load_pinned", start_time, 422, current_context_id, workspace_id
             )
@@ -699,6 +728,18 @@ async def handle_load_guardrails(
             )
             return e.to_response()
         except ValueError as e:
+            if not is_caller_value_error(e):
+                # #1742: server-side library error, not the caller's argument.
+                await _log_tool_usage(
+                    db,
+                    user_id,
+                    "load_guardrails",
+                    start_time,
+                    500,
+                    current_context_id,
+                    workspace_id,
+                )
+                return _tool_exception_response("load_guardrails", e)
             await _log_tool_usage(
                 db, user_id, "load_guardrails", start_time, 422, current_context_id, workspace_id
             )
@@ -1017,6 +1058,12 @@ async def handle_recall(
             # structured validation_error envelope (the REST route's 422
             # mirror), not an opaque 500-shaped tool crash.
             await db.rollback()
+            if not is_caller_value_error(e):
+                # #1742: server-side library error, not the caller's filters.
+                await _log_tool_usage(
+                    db, user_id, "recall", start_time, 500, current_context_id, workspace_id
+                )
+                return _tool_exception_response("recall", e)
             await _log_tool_usage(
                 db, user_id, "recall", start_time, 422, current_context_id, workspace_id
             )

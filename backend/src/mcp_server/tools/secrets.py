@@ -30,7 +30,7 @@ from uuid import UUID
 from mcp.types import TextContent
 
 from db.base import get_db
-from mcp_server.tools._errors import _tool_exception_response
+from mcp_server.tools._errors import _tool_exception_response, is_caller_value_error
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
     _error_response,
@@ -95,11 +95,12 @@ async def handle_secret_register_pubkey(
             return _success_response(
                 pubkey_id=str(row.id), fingerprint=row.fingerprint, status=row.status
             )
-        except ValueError as e:
-            await db.rollback()
-            return _error_response("invalid_arguments", str(e))
         except Exception as e:
             await db.rollback()
+            # #1742: only a plain ValueError is the service's refusal; a
+            # subclass (JSON, Unicode, pydantic) is a server failure.
+            if is_caller_value_error(e):
+                return _error_response("invalid_arguments", str(e))
             await _log_tool_usage(
                 db, user_id, "secret_register_pubkey", start_time, 500, None, workspace_id
             )
@@ -166,11 +167,11 @@ async def handle_secret_put(
                 status=secret.status,
                 rotation_needed=secret.rotation_needed,
             )
-        except ValueError as e:
-            await db.rollback()
-            return _error_response("invalid_arguments", str(e))
         except Exception as e:
             await db.rollback()
+            # #1742: see handle_secret_register_pubkey.
+            if is_caller_value_error(e):
+                return _error_response("invalid_arguments", str(e))
             await _log_tool_usage(db, user_id, "secret_put", start_time, 500, None, workspace_id)
             return _tool_exception_response(
                 "secret_put", e, error="secret_put_error", echo_value_error=False

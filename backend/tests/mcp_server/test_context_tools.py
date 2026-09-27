@@ -140,6 +140,40 @@ class TestHandleDeleteContextErrorSurface:
         mock_db.rollback.assert_awaited()
 
 
+class TestHandleDeleteContextBusinessRule:
+    @pytest.mark.asyncio
+    async def test_a_validation_error_is_validation_error_not_permission_denied(self):
+        """#1742: "Cannot delete default context" is a business-rule refusal,
+        not a role problem — ``validation_error`` with the service's message."""
+        mock_db = AsyncMock()
+        mock_db.rollback = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        mock_perm = MagicMock()
+        mock_perm.check_context_owner = AsyncMock(return_value=None)
+        mock_service = MagicMock()
+        mock_service.delete_context = AsyncMock(
+            side_effect=ValidationError("Cannot delete default context")
+        )
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch("services.permission_service.PermissionService", return_value=mock_perm),
+            patch("services.context_service.ContextService", return_value=mock_service),
+            patch("mcp_server.tools.context._log_tool_usage", new_callable=AsyncMock),
+        ):
+            result = await handle_delete_context(
+                args={"context_id": str(uuid4())}, user_id="u", workspace_id=uuid4()
+            )
+
+        payload = json.loads(result[0].text)
+        assert payload["error"] == "validation_error"
+        assert payload["message"] == "Cannot delete default context"
+        assert "Nothing was deleted" in payload["help"]
+
+
 class TestHandleMergeContextsWorkspaceBoundary:
     """Issue #966: ``handle_merge_contexts`` must apply the workspace-boundary
     guard at the MCP boundary (mirror of ``handle_recall``), resolving both

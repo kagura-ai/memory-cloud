@@ -7,9 +7,11 @@ keep their ``<tool>_error`` codes) and the JSON-RPC fallbacks of both
 transports. An exception is one of two kinds:
 
 * A **refusal** — a ``MemoryCloudException`` below 500, a plain
-  ``ValueError`` (the service layer's bad-request signal) or a
-  ``PermissionError``. Its message was written for the caller (REST returns
-  the same text), so it is kept, with a ``help`` line for the next step.
+  ``ValueError`` (the service layer's bad-request signal) or one of the
+  ``ValueError`` subclasses the services raise by design
+  (``is_caller_value_error``), or a ``PermissionError``. Its message was
+  written for the caller (REST returns the same text), so it is kept, with a
+  ``help`` line for the next step.
 * A **server failure** — everything else. The caller gets a stable ``cause``
   (``timeout`` / ``service_unavailable`` / ``internal_error``), a fixed
   message, ``help``, a ``correlation_id`` and retry advice. The exception's
@@ -46,7 +48,10 @@ from utils.exceptions import (
     QuotaExceededError,
     RateLimitError,
 )
+from utils.geo_location import LocationValidationError
 from utils.logger import get_logger
+from utils.time_trigger import TriggerValidationError
+from utils.tool_trigger import ToolTriggerValidationError
 
 logger = get_logger(__name__)
 
@@ -78,6 +83,16 @@ _DEPENDENCY_TYPES: tuple[type[BaseException], ...] = (
     httpx.TransportError,
     ResponseHandlingException,
     redis.exceptions.ConnectionError,
+)
+
+# ``ValueError`` subclasses the services raise by design, with a message written
+# for the caller (#1742). Any other subclass — pydantic's ``ValidationError``,
+# ``JSONDecodeError``, ``UnicodeDecodeError`` … — is library detail from server
+# code, never a message for the caller.
+_CALLER_VALUE_ERRORS: tuple[type[ValueError], ...] = (
+    TriggerValidationError,
+    LocationValidationError,
+    ToolTriggerValidationError,
 )
 
 # Envelope keys a forwarded ``details`` block must not overwrite.
@@ -244,14 +259,25 @@ def classify_cause(exc: BaseException) -> str:
     return CAUSE_INTERNAL_ERROR
 
 
+def is_caller_value_error(exc: BaseException) -> bool:
+    """Whether a ``ValueError`` carries a message written for the caller (#1742).
+
+    True for the exact ``ValueError`` (the service layer's bad-request signal)
+    and the validation subclasses in ``_CALLER_VALUE_ERRORS``. A handler's
+    ``except ValueError`` arm echoes ``str(e)`` as ``validation_error`` only
+    when this holds; anything else goes through ``_tool_exception_response``.
+    """
+    return type(exc) is ValueError or isinstance(exc, _CALLER_VALUE_ERRORS)
+
+
 def _is_refusal(exc: BaseException, *, echo_value_error: bool) -> bool:
     if isinstance(exc, MemoryCloudException):
         return exc.status_code < 500
     if isinstance(exc, PermissionError):
         return True
-    # Exact type: a ValueError *subclass* (UnicodeDecodeError, JSONDecodeError,
+    # Any other ValueError *subclass* (UnicodeDecodeError, JSONDecodeError,
     # pydantic's ValidationError …) is library detail, not a message for the caller.
-    return echo_value_error and type(exc) is ValueError
+    return echo_value_error and is_caller_value_error(exc)
 
 
 def _refusal(exc: BaseException) -> tuple[str, str, dict[str, Any]]:
@@ -425,6 +451,65 @@ def describe_tool_exception(
     if not repeat_safe:
         fields["outcome"] = "unknown"
     return ToolFailure(error or cause, _server_failure_message(tool_name, cause), fields)
+
+
+_TRANSPORT_FAILURE_MESSAGES: dict[str, str] = {
+    CAUSE_TIMEOUT: "The server did not finish the request within its time limit.",
+    CAUSE_SERVICE_UNAVAILABLE: (
+        "The server could not reach a service it depends on "
+        "(database, search index, file storage or model provider)."
+    ),
+    CAUSE_INTERNAL_ERROR: "The server could not complete the request because of an unexpected error.",
+}
+
+
+def describe_transport_exception(
+    exc: BaseException, *, method: object, tool_name: object = None
+) -> ToolFailure:
+    """Classify an exception raised by the transport, outside tool dispatch (#1742).
+
+    Opening a session, ``initialize``, ``tools/list`` and the other plumbing
+    used to answer a bare HTTP 500. The caller now gets the server-failure
+    fields (``cause``, ``correlation_id``, ``help``, retry advice) as JSON-RPC
+    ``error.data``; the exception goes to the log only.
+
+    Args:
+        exc: The exception.
+        method: The JSON-RPC method being served (client-supplied, may be
+            missing), or ``None`` when no request was parsed.
+        tool_name: ``params.name`` of a ``tools/call``. A ``tools/call`` gets
+            the tool's own advice: the tool may have run, so a write's outcome
+            is unknown.
+
+    Returns:
+        The failure, for ``.jsonrpc_data()``.
+    """
+    if method == "tools/call":
+        return describe_tool_exception(tool_name, exc, echo_value_error=False)
+    if _is_refusal(exc, echo_value_error=False):
+        return describe_tool_exception(None, exc, echo_value_error=False)
+
+    cause = classify_cause(exc)
+    correlation_id = new_correlation_id()
+    logger.error(
+        "mcp_transport_failed",
+        method=_shown(method),
+        cause=cause,
+        correlation_id=correlation_id,
+        exc_type=type(exc).__name__,
+        exc=str(exc),
+        exc_info=exc,
+    )
+    retry = _RETRY_INTERNAL if cause == CAUSE_INTERNAL_ERROR else _RETRY_TRANSIENT
+    fields: dict[str, Any] = {
+        "cause": cause,
+        "help": f"No tool ran and nothing was changed, so {retry}",
+        "correlation_id": correlation_id,
+        "retryable": True,
+    }
+    if cause != CAUSE_INTERNAL_ERROR:
+        fields["retry_after_seconds"] = RETRY_AFTER_SECONDS
+    return ToolFailure(cause, _TRANSPORT_FAILURE_MESSAGES[cause], fields)
 
 
 def insufficient_scope_failure(tool_name: object, required_scope: str) -> ToolFailure:
