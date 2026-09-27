@@ -4,6 +4,26 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.80.2](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.80.2) — 2026-09-27
+
+Build and supply-chain hardening. CI, the Docker image and the local setup install from a tracked `uv.lock`, the billing hand-off JWT moves off the deprecated `authlib.jose`, and the REST OpenAPI schema is pinned by a snapshot test so surface changes arrive as reviewed diffs.
+
+### Changed
+- **Installs from a tracked lockfile** ([#1706](https://github.com/kagura-ai/memory-cloud/issues/1706)):
+  - `backend/uv.lock` is tracked. Every CI job, `backend/Dockerfile` and `setup.sh` install with `uv sync --locked`, which fails when the lock is out of date; the `lint` job runs `uv lock --check`, so a `pyproject.toml` change without a lock update fails CI.
+  - uv is pinned to 0.11.19 in lockstep: `[tool.uv] required-version` (a different uv refuses to run in `backend/`), both workflows, the Dockerfile and `setup.sh`; `tests/test_uv_version_lockstep.py` enforces it.
+  - The image builds a dependencies-only layer from the lock before copying the source, runs as the non-root user from the start (no `chown -R` layer duplicating the environment) and keeps `/app/.venv/bin` first on `PATH`. `backend/.dockerignore` keeps local environments out of the build context.
+  - Renovate opens a weekly lock-maintenance PR that re-resolves inside the ranges; the ranges themselves stay hand-edited.
+  - `setup.sh` installs the pinned uv project-locally when needed and the SDK with `uv tool install`.
+- **Billing hand-off JWT on joserfc** ([#1708](https://github.com/kagura-ai/memory-cloud/issues/1708)): signing and the reference verifier use `joserfc` (>=1.7.3,<2) instead of `authlib.jose`, which Authlib 2.0 removes. Tokens are byte-identical to the previous implementation; the `EdDSA` allow-list, `iss`/`aud` matching, required `exp` and the fail-closed paths are unchanged, and wrongly typed `iss`/`sub` claims are refused. The rename of the algorithm to `Ed25519` (RFC 9864) is coordinated with the billing service in [#1727](https://github.com/kagura-ai/memory-cloud/issues/1727).
+
+### Added
+- **REST OpenAPI schema snapshot** ([#1720](https://github.com/kagura-ai/memory-cloud/issues/1720)): `tests/api/test_openapi_schema_snapshot.py` compares the normalized schema (paths, methods, parameters, request/response schemas, status codes, `operationId`, enums, bounds — no prose, no version) with a committed fixture. Regenerate with `UPDATE_OPENAPI_SNAPSHOT=1 pytest tests/api/test_openapi_schema_snapshot.py`; `CONTRIBUTING.md` documents both snapshot switches.
+
+### Notes
+- No migration and no new environment variables. Operators building the image from source get the lock-based build automatically; the API process is unchanged.
+- Contributors: install with `cd backend && uv sync --locked --extra dev` using uv 0.11.19; after editing `pyproject.toml`, run `uv lock` (or `make lock`) and commit the lock. A release now also refreshes the project's own version in `uv.lock`.
+
 ## [v0.80.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.80.1) — 2026-09-26
 
 Fixes from the v0.80.0 reviews. Sign-in, MFA and account erasure answer input that cannot be UTF-8 encoded as a wrong credential instead of 500, the Web UI refusal for API keys reaches SDK users, the context summary is described as a note, and the MCP server's text and logs follow the client-authored, user-directed write model.

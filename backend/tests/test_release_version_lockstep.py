@@ -1,6 +1,6 @@
 """Guard tests for #1625: every version string a release bumps equals ``APP_VERSION``.
 
-``/release`` (``.claude/commands/release.md``) bumps eight files and prepends a
+``/release`` (``.claude/commands/release.md``) bumps nine files and prepends a
 ``CHANGELOG.md`` entry in one commit. Two guards already cover part of that set:
 
 * ``tests/test_codex_plugin_manifest.py`` — Codex plugin manifest ==
@@ -12,7 +12,8 @@ This module pins the rest, so a release that bumps one file and forgets another
 fails in CI instead of shipping a mixed version:
 
 1. ``backend/pyproject.toml`` ``[project].version``, ``backend/src/__init__.py``
-   ``__version__``, ``frontend/package.json``, both version fields of
+   ``__version__``, the project's own entry in ``backend/uv.lock`` (#1706),
+   ``frontend/package.json``, both version fields of
    ``frontend/package-lock.json``, both plugin manifests and the Official MCP
    Registry ``server.json`` (#1679) equal ``APP_VERSION`` (the canonical
    runtime source in ``config.constants``).
@@ -76,6 +77,12 @@ def _pyproject_version() -> str:
     return tomllib.loads(_read("backend/pyproject.toml"))["project"]["version"]
 
 
+def _uv_lock_project_version() -> str:
+    lock = tomllib.loads(_read("backend/uv.lock"))
+    (project,) = [pkg for pkg in lock["package"] if pkg["name"] == "kagura-memory-cloud"]
+    return project["version"]
+
+
 def _dunder_version() -> str:
     # ``backend/src/__init__.py`` is not importable under ``pythonpath = src``
     # (it is the directory's own init), so read the assignment textually.
@@ -87,6 +94,7 @@ def _dunder_version() -> str:
 _VERSION_SOURCES: list[tuple[str, Callable[[], str]]] = [
     ("backend/pyproject.toml [project].version", _pyproject_version),
     ("backend/src/__init__.py __version__", _dunder_version),
+    ("backend/uv.lock kagura-memory-cloud version", _uv_lock_project_version),
     ("frontend/package.json .version", lambda: _json_field("frontend/package.json", "version")),
     (
         "frontend/package-lock.json .version",

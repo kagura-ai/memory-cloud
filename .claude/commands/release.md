@@ -18,7 +18,7 @@ deleted and redone).
 This command is the whole ceremony for this repo. `/gh-issue-driven:tag` is not run
 here end-to-end: it commits and pushes on `main`, bumps only the plugin manifests
 (and aborts on the `version` field that `.claude-plugin/marketplace.json` does not
-have), so it would leave the eight version files below out of lockstep. At most
+have), so it would leave the nine version files below out of lockstep. At most
 use it in `dry-run` to draft notes.
 
 ## Prerequisites
@@ -73,6 +73,7 @@ The canonical runtime version is `APP_VERSION` in `backend/src/config/constants.
 - `.claude-plugin/plugin.json` — `"version": "X.Y.Z"` (kagura-memory Claude Code plugin manifest; kept in lockstep so marketplace consumers see the same version as the backend)
 - `plugins/kagura-memory/.codex-plugin/plugin.json` — `"version": "X.Y.Z"` (kagura-memory Codex plugin manifest; kept in lockstep with the Claude plugin manifest)
 - `server.json` — `"version": "X.Y.Z"` (Official MCP Registry metadata, #1679; publishing it to the registry is a separate manual step)
+- `backend/uv.lock` — run `cd backend && uv lock` after the `pyproject.toml` bump. The tracked lock records the project's own version (#1706), so without this the `lint` job's `uv lock --check` fails the release PR. Only the `kagura-memory-cloud` version line should change; anything more means the lock was stale on `main`.
 
 ### 6. Add the CHANGELOG entry
 
@@ -112,7 +113,7 @@ Fix any drift before committing — a missed file fails CI on the PR anyway.
 ### 8. Commit, push the branch, open the PR
 
 ```bash
-git add backend/pyproject.toml backend/src/config/constants.py backend/src/__init__.py frontend/package.json frontend/package-lock.json .claude-plugin/plugin.json plugins/kagura-memory/.codex-plugin/plugin.json server.json CHANGELOG.md
+git add backend/pyproject.toml backend/uv.lock backend/src/config/constants.py backend/src/__init__.py frontend/package.json frontend/package-lock.json .claude-plugin/plugin.json plugins/kagura-memory/.codex-plugin/plugin.json server.json CHANGELOG.md
 git commit -m "chore(release): vX.Y.Z"
 git push -u origin release/vX.Y.Z
 git ls-remote --heads origin release/vX.Y.Z   # confirm the push landed
@@ -126,7 +127,7 @@ PR body shape (same as every release PR):
 
 Release vX.Y.Z (milestone vX.Y.Z).
 
-- Bumps the eight version files to X.Y.Z (`backend/pyproject.toml`, `backend/src/config/constants.py`, `backend/src/__init__.py`, `frontend/package.json`, `frontend/package-lock.json`, `.claude-plugin/plugin.json`, `plugins/kagura-memory/.codex-plugin/plugin.json`, `server.json`).
+- Bumps the nine version files to X.Y.Z (`backend/pyproject.toml`, `backend/uv.lock`, `backend/src/config/constants.py`, `backend/src/__init__.py`, `frontend/package.json`, `frontend/package-lock.json`, `.claude-plugin/plugin.json`, `plugins/kagura-memory/.codex-plugin/plugin.json`, `server.json`).
 - Adds the vX.Y.Z entry to `CHANGELOG.md` (dated in UTC).
 
 Included since vPREV:
