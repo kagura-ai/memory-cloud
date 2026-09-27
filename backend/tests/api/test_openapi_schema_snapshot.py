@@ -49,14 +49,17 @@ _PROSE_STRING_KEYS = frozenset({"description", "summary", "title"})
 _EXAMPLE_KEYS = frozenset({"example", "examples"})
 
 # Maps whose keys are user-chosen names (fields, models, paths, status codes,
-# header names, reusable components) rather than OpenAPI keywords. Nothing is
-# stripped at that level, so a field or a model called ``summary`` or
-# ``examples`` stays in the skeleton.
+# header names, media types, discriminator values, reusable components) rather
+# than OpenAPI keywords. Nothing is stripped at that level, so a field, a model
+# or a discriminator value called ``summary`` or ``examples`` stays in the
+# skeleton.
 _NAME_MAPS = frozenset(
     {
         "properties",
         "patternProperties",
+        "dependentSchemas",
         "$defs",
+        "definitions",
         "schemas",
         "paths",
         "responses",
@@ -64,8 +67,20 @@ _NAME_MAPS = frozenset(
         "headers",
         "requestBodies",
         "securitySchemes",
+        "content",
+        "encoding",
+        "mapping",
+        "links",
+        "callbacks",
+        "variables",
+        "scopes",
     }
 )
+
+# Keywords whose value is a JSON literal a client receives or must send, not a
+# schema: nothing inside it is prose, whatever its keys are called. A default
+# of ``{"description": "v"}`` is data.
+_LITERAL_KEYS = frozenset({"default", "const", "enum"})
 
 # How many changed entries the failure message lists per section.
 _REPORT_LIMIT = 25
@@ -79,6 +94,15 @@ def _is_prose(key: str, value: Any) -> bool:
     return key in _EXAMPLE_KEYS
 
 
+def _literal(node: Any) -> Any:
+    """Copy a JSON literal with sorted keys and nothing removed."""
+    if isinstance(node, dict):
+        return {key: _literal(node[key]) for key in sorted(node)}
+    if isinstance(node, list):
+        return [_literal(item) for item in node]
+    return node
+
+
 def normalize(node: Any, *, keys_are_names: bool = False) -> Any:
     """Copy ``node`` without prose or examples, with every object's keys sorted.
 
@@ -89,7 +113,8 @@ def normalize(node: Any, *, keys_are_names: bool = False) -> Any:
             than OpenAPI keywords, so none of them is treated as prose.
 
     Returns:
-        The normalized copy. ``required`` lists are sorted (JSON Schema treats
+        The normalized copy. The values of ``default``, ``const`` and ``enum``
+        are JSON literals and are kept whole. ``required`` lists are sorted (JSON Schema treats
         them as sets); every other list, ``enum`` included, keeps the order of
         the document a client reads.
     """
@@ -98,6 +123,9 @@ def normalize(node: Any, *, keys_are_names: bool = False) -> Any:
         for key in sorted(node):
             value = node[key]
             if not keys_are_names and _is_prose(key, value):
+                continue
+            if not keys_are_names and key in _LITERAL_KEYS:
+                out[key] = _literal(value)
                 continue
             child = normalize(value, keys_are_names=(not keys_are_names) and key in _NAME_MAPS)
             if (
@@ -320,6 +348,54 @@ def test_normalize_sorts_keys_and_required_but_keeps_enum_order():
     )
     assert normalize(_sample(swap_required)) == normalize(with_two_required)
     assert normalize(_sample(swap_enum)) != normalize(_SAMPLE)
+
+
+def test_literal_values_keep_keys_that_look_like_prose():
+    """``default`` / ``const`` / ``enum`` hold data: a key named like prose is not prose."""
+    schema = {
+        "type": "object",
+        "description": "prose",
+        "default": {"description": "v", "title": "t", "example": 1, "b": 2, "a": 1},
+        "const": {"summary": "s"},
+        "enum": [{"description": "first"}, {"description": "second"}],
+    }
+    assert normalize(schema) == {
+        "type": "object",
+        "default": {"a": 1, "b": 2, "description": "v", "example": 1, "title": "t"},
+        "const": {"summary": "s"},
+        "enum": [{"description": "first"}, {"description": "second"}],
+    }
+
+    changed = copy.deepcopy(schema)
+    changed["default"]["description"] = "other"
+    assert normalize(changed) != normalize(schema)
+
+
+def test_a_field_named_default_is_a_schema_not_a_literal():
+    fields = normalize(
+        {"properties": {"default": {"type": "string", "description": "prose", "default": "x"}}}
+    )["properties"]
+    assert fields == {"default": {"type": "string", "default": "x"}}
+
+
+@pytest.mark.parametrize(
+    ("name_map", "entry"),
+    [
+        ("mapping", "summary"),
+        ("content", "description"),
+        ("securitySchemes", "title"),
+        ("headers", "example"),
+        ("links", "examples"),
+    ],
+)
+def test_name_map_entries_survive_whatever_they_are_called(name_map: str, entry: str):
+    """A discriminator value, media type or component named like a prose key stays."""
+    with_entry = {name_map: {entry: "#/components/schemas/A", "other": "#/components/schemas/B"}}
+    assert normalize(with_entry) == {
+        name_map: dict(sorted(with_entry[name_map].items())),
+    }
+    without = {name_map: {"other": "#/components/schemas/B"}}
+    assert normalize(with_entry) != normalize(without)
 
 
 def test_top_level_tags_are_sorted_by_name():
