@@ -31,6 +31,14 @@ from services.edge_service import (
 from services.edge_service import (
     edge_to_dict as _edge_to_dict,
 )
+from utils.response_budget import BudgetArgumentError, parse_limit
+
+# #1743: list_edges pages each direction. A hub memory can hold thousands of
+# edges (~290 characters each), so an unbounded read ran past MCP clients'
+# tool-result limits. 50 per direction keeps a default call near 30k
+# characters; 200 per direction stays under ~120k.
+LIST_EDGES_DEFAULT_LIMIT = 50
+LIST_EDGES_MAX_LIMIT = 200
 
 # The declared-edge write core (`create_declared_edge`), the DB-accepted
 # `VALID_EDGE_TYPES` set, the `_edge_to_dict` serializer, and the #1403
@@ -117,7 +125,12 @@ async def handle_list_edges(
         return error
 
     edge_types = args.get("edge_types")
-    limit = args.get("limit")
+    try:
+        limit = parse_limit(
+            args.get("limit"), default=LIST_EDGES_DEFAULT_LIMIT, maximum=LIST_EDGES_MAX_LIMIT
+        )
+    except BudgetArgumentError as e:
+        return _error_response("validation_error", e.message, received=e.received)
 
     start_time = time.time()
     current_context_id = None
@@ -138,7 +151,8 @@ async def handle_list_edges(
                     src_id=memory_uuid,
                     min_weight=min_weight,
                     edge_types=edge_types,
-                    limit=limit,
+                    # One extra row tells whether more exist past the page.
+                    limit=limit + 1,
                     workspace_id=ws_id,
                     context_id=ctx_id,
                 ),
@@ -150,12 +164,15 @@ async def handle_list_edges(
                     dst_id=memory_uuid,
                     min_weight=min_weight,
                     edge_types=edge_types,
-                    limit=limit,
+                    limit=limit + 1,
                     workspace_id=ws_id,
                     context_id=ctx_id,
                 ),
                 operation_name="list_edges_incoming",
             )
+            outgoing_has_more = len(outgoing) > limit
+            incoming_has_more = len(incoming) > limit
+            outgoing, incoming = outgoing[:limit], incoming[:limit]
 
             seen_ids: set[int] = set()
             edges = []
@@ -173,6 +190,8 @@ async def handle_list_edges(
                 memory_id=str(memory_uuid),
                 edges=edges,
                 count=len(edges),
+                outgoing_has_more=outgoing_has_more,
+                incoming_has_more=incoming_has_more,
             )
         except _ContextNotFoundError as e:
             await db.rollback()

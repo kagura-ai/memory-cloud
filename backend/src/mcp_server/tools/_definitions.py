@@ -538,7 +538,7 @@ Returns: {status, exploration: {seed_memory: {memory_id, summary, type}, related
             "readOnly": True,
             "description": """List the graph edges connected to a memory, outgoing and incoming — to inspect its connections, audit edges created by Sleep Maintenance, or find a noisy edge before delete_edge().
 
-Returns: {status, memory_id, edges: [{source_id, target_id, edge_type, weight, confidence, origin, created_at, last_updated}], count}.""",
+Returns: {status, memory_id, edges: [{source_id, target_id, edge_type, weight, confidence, origin, created_at, last_updated}], count, outgoing_has_more, incoming_has_more}. Heaviest first; a *_has_more of true means more edges exist in that direction — raise min_weight or narrow edge_types.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["memory_id", "context_id"],
@@ -560,7 +560,8 @@ Returns: {status, memory_id, edges: [{source_id, target_id, edge_type, weight, c
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max edges per direction (outgoing / incoming).",
+                        "description": "Max edges per direction (outgoing / incoming), 1-200.",
+                        "default": 50,
                     },
                     "context_id": {
                         "type": "string",
