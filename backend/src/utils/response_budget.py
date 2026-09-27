@@ -140,3 +140,40 @@ def omit_field_to_fit(items: list[dict[str, Any]], field: str, budget: int) -> l
         total += json_chars(replaced) - json_chars(item)
         out[index] = replaced
     return out
+
+
+def _items_chars(items: Sequence[Any]) -> int:
+    return sum(json_chars(item) + 1 for item in items)
+
+
+def fit_lanes(
+    lanes: Sequence[list[dict[str, Any]]], budget: int, *, droppable: str | None = None
+) -> tuple[list[list[dict[str, Any]]], list[bool], bool]:
+    """Fit several item lists (``lanes``, highest priority first) into ``budget``.
+
+    ``budget`` is what the lanes' items may take together — the caller has
+    already subtracted the rest of its envelope. When everything fits nothing
+    changes. Otherwise ``droppable`` (a per-item field worth less than the
+    items themselves, e.g. ``context_summary``) is left out of every item
+    first; then each lane keeps the prefix that fits what the lanes before it
+    left.
+
+    Returns:
+        The bounded lanes, whether each lane lost items, and whether
+        ``droppable`` was left out.
+    """
+    out = [list(lane) for lane in lanes]
+    if sum(_items_chars(lane) for lane in out) <= budget:
+        return out, [False] * len(out), False
+    dropped = False
+    if droppable is not None and any(droppable in item for lane in out for item in lane):
+        out = [drop_key(lane, droppable) for lane in out]
+        dropped = True
+    cut: list[bool] = []
+    remaining = budget
+    for index, lane in enumerate(out):
+        kept = fit_items(lane, remaining)
+        cut.append(kept < len(lane))
+        out[index] = lane[:kept]
+        remaining -= _items_chars(out[index])
+    return out, cut, dropped

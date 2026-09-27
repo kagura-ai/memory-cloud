@@ -350,6 +350,11 @@
         },
         "cap": {
           "type": "integer"
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 100000
         }
       },
       "additionalProperties": false
@@ -370,6 +375,11 @@
         },
         "cap": {
           "type": "integer"
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 100000
         }
       },
       "additionalProperties": false

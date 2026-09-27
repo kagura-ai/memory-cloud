@@ -659,7 +659,7 @@ def test_bearer_token_env_var_sends_one_post(
     assert request.headers["User-Agent"].startswith("kagura-memory-plugin-hooks/")
     assert request.headers["User-Agent"].endswith("(codex)")
     assert request.json["params"]["name"] == "load_guardrails"
-    assert request.json["params"]["arguments"] == {"context_id": CONTEXT_ID}
+    assert request.json["params"]["arguments"] == {"context_id": CONTEXT_ID, "max_chars": 100_000}
     context = result.specific["additionalContext"]
     assert context.startswith(
         f"Kagura Memory: 1 tool guardrails active for context {CONTEXT_ID} (fetched)"

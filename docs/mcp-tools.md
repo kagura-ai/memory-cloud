@@ -229,7 +229,7 @@ The grammar guarantees that a pattern *compiles* on both sides; it does not make
 
 ### `load_guardrails` — the deterministic read
 
-MCP `load_guardrails(context_id, cap?)` and the REST twin `POST /api/v1/memory/guardrails` with body `{"context_id": "<uuid>", "cap"?: 1..1000}`. Read-only, rate-limit exempt, plain SQL — no search, no ranking, no embedding, no vector-store call, no Hebbian write.
+MCP `load_guardrails(context_id, cap?, max_chars?)` and the REST twin `POST /api/v1/memory/guardrails` with body `{"context_id": "<uuid>", "cap"?: 1..1000}`. Read-only, rate-limit exempt, plain SQL — no search, no ranking, no embedding, no vector-store call, no Hebbian write.
 
 ```json
 {
@@ -252,6 +252,7 @@ MCP `load_guardrails(context_id, cap?)` and the REST twin `POST /api/v1/memory/g
 - **Order** inside each list: `importance DESC, created_at ASC, id ASC` — deterministic down to the id, so the cap and every consumer cut the same entries. Consumers keep this order and must not re-sort.
 - **Both lists.** A memory that is both pinned and tool-triggered appears in both lists; its `pinned` entry has `tool_trigger: null`, its `tool_triggered` entry carries the object. Clients dedupe by `memory_id` and inject once.
 - `total_available` = `pinned_total_available + tool_triggered_total_available`; `truncated` = either lane truncated; `cap` = the tool-triggered cap. The per-lane fields say which protection is incomplete. Totals are the context's set sizes before the binding filter.
+- **Reply budget (MCP only).** The MCP reply is held to `max_chars` characters (default 20,000, range 10,000–100,000; see [Response bounds](#response-bounds)). When the lists do not fit, `context_summary` is left out of every item first (`context_summary_omitted: true`), then pinned items are cut from the end, then tool-triggered items; a cut sets that lane's `*_truncated` and `truncated`, and the `*_total_available` counts stay real. `version` still describes the whole served set. The plugin hook asks for `max_chars: 100000`. The REST twin is not budgeted.
 - **Trusted only, unconditionally.** Both lanes apply `Context.trust_tier == "trusted"` AND `source_type != "connector"`. There is no parameter to turn this off from any surface.
 - **Layers.** Pinned items carry L1 + L2 (`summary`, `context_summary`); tool-triggered items are L1 only (`context_summary` is `null`). Never `content`, never `details` beyond `tool_trigger`, never tags or scores.
 - **Provenance.** `source_type` and `authored_by_caller` (the caller wrote this row) let a client label a foreign-authored guardrail; `updated_at` falls back to `created_at`.

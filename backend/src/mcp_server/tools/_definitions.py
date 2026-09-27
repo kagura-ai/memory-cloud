@@ -422,7 +422,7 @@ Returns: {status, results: [{memory_id, summary, type, location, distance_m}], c
             "readOnly": True,
             "description": """Load a context's pinned memories (delivery_mode='always'): notes context members marked as always relevant, e.g. goals or standing decisions. The deterministic counterpart to recall(): the complete, unranked set on every call — no search, no ranking. Pin with remember(delivery_mode='always') or update_memory(delivery_mode='always'); unpin with update_memory(delivery_mode='on_recall'). Items are Layers 1-2 only; use reference(memory_id) for full content.
 
-Returns: {status, memories: [{memory_id, summary, context_summary, type, importance, delivery_mode}], total_available, truncated, cap, context_id, context_name, context_display_name, context_is_private, context_is_locked}. If more pinned memories exist than cap, truncated is true and total_available is the real count (never silently dropped).""",
+Returns: {status, memories: [{memory_id, summary, context_summary, type, importance, delivery_mode}], total_available, truncated, cap, context_id, context_name, context_display_name, context_is_private, context_is_locked}. If more pinned memories exist than cap, or than fit max_chars, truncated is true and total_available is the real count (never silently dropped). Over max_chars, context_summary is left out first (context_summary_omitted: true).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -436,6 +436,12 @@ Returns: {status, memories: [{memory_id, summary, context_summary, type, importa
                         "type": "integer",
                         "description": "Max memories returned (1-1000). Omit for the server default.",
                     },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 10000,
+                        "maximum": 100000,
+                        "description": "Response budget in characters, not tokens (default 20000).",
+                    },
                 },
             },
         },
@@ -444,7 +450,7 @@ Returns: {status, memories: [{memory_id, summary, context_summary, type, importa
             "readOnly": True,
             "description": """Load a context's guardrail set — stored notes by context members — for a client-side hook: pinned memories (delivery_mode='always') plus memories marked with details.tool_trigger = {tool, on, match?, action}. Deterministic and cheap — no search, no ranking — trusted-tier rows only (connector-ingested memories are never returned). Each list is ordered importance DESC, created_at ASC, id ASC and capped on its own; cap bounds tool_triggered only, so a large pinned set never crowds guardrails out. The server validates tool_trigger patterns on write and never runs them; matching happens in the client hook. Contract and cache format: the 'Tool guardrails' section of the MCP tools docs.
 
-Returns: {status, format, version, pinned: [item], tool_triggered: [item], total_available, truncated, cap, pinned_cap, pinned_total_available, pinned_truncated, tool_triggered_total_available, tool_triggered_truncated, context_id, context_name, context_display_name, context_is_private, context_is_locked}. item = {memory_id, summary, context_summary (pinned only), type, importance, delivery_mode, tool_trigger|null, source_type, authored_by_caller, created_at, updated_at}. A memory that is both pinned and tool-triggered appears in both lists.""",
+Returns: {status, format, version, pinned: [item], tool_triggered: [item], total_available, truncated, cap, pinned_cap, pinned_total_available, pinned_truncated, tool_triggered_total_available, tool_triggered_truncated, context_id, context_name, context_display_name, context_is_private, context_is_locked}. item = {memory_id, summary, context_summary (pinned only), type, importance, delivery_mode, tool_trigger|null, source_type, authored_by_caller, created_at, updated_at}. A memory that is both pinned and tool-triggered appears in both lists. Over max_chars, context_summary is left out first (context_summary_omitted: true), then pinned items, then tool_triggered items, each flagged by its *_truncated.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -457,6 +463,12 @@ Returns: {status, format, version, pinned: [item], tool_triggered: [item], total
                     "cap": {
                         "type": "integer",
                         "description": "Max tool-triggered memories returned (1-1000). Omit for the server default (50).",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 10000,
+                        "maximum": 100000,
+                        "description": "Response budget in characters, not tokens (default 20000).",
                     },
                 },
             },

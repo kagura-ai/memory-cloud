@@ -102,7 +102,7 @@ def test_request_shape_and_cache_bytes(
     body = req.json
     assert body["jsonrpc"] == "2.0" and body["method"] == "tools/call"
     assert body["params"]["name"] == "load_guardrails"
-    assert body["params"]["arguments"] == {"context_id": CONTEXT_ID}
+    assert body["params"]["arguments"] == {"context_id": CONTEXT_ID, "max_chars": 100_000}
     assert body["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"] == "2026-07-28"
     assert set(body["params"]) == {"name", "arguments", "_meta"}
 

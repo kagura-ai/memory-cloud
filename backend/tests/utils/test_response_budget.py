@@ -74,3 +74,32 @@ def test_omit_field_to_fit_cuts_from_the_end():
     assert len(out) == 5
     # Under the budget nothing changes.
     assert omit_field_to_fit(items, "details", 10_000) == items
+
+
+def test_fit_lanes_keeps_everything_that_fits():
+    from utils.response_budget import fit_lanes
+
+    lanes = [[{"a": 1, "cs": "x"}], [{"b": 2, "cs": "y"}]]
+    out, cut, dropped = fit_lanes(lanes, 10_000, droppable="cs")
+    assert out == lanes and cut == [False, False] and dropped is False
+
+
+def test_fit_lanes_drops_the_droppable_field_before_items():
+    from utils.response_budget import fit_lanes
+
+    lanes = [[{"id": i, "cs": "x" * 50} for i in range(3)]]
+    lean = [{"id": i} for i in range(3)]
+    budget = sum(json_chars(item) + 1 for item in lean)
+    out, cut, dropped = fit_lanes(lanes, budget, droppable="cs")
+    assert out == [lean] and cut == [False] and dropped is True
+
+
+def test_fit_lanes_gives_the_first_lane_priority():
+    from utils.response_budget import fit_lanes
+
+    first = [{"id": i, "v": "x" * 20} for i in range(5)]
+    second = [{"id": i, "v": "y" * 20} for i in range(5)]
+    budget = sum(json_chars(item) + 1 for item in first) + json_chars(second[0]) + 1
+    out, cut, dropped = fit_lanes([first, second], budget)
+    assert out[0] == first and out[1] == second[:1]
+    assert cut == [False, True] and dropped is False

@@ -36,7 +36,14 @@ from mcp_server.tools._helpers import (
 )
 from utils.datetime import to_utc_iso
 from utils.exceptions import AuthorizationError, NotFoundException, QuotaExceededError
-from utils.response_budget import DEFAULT_MAX_CHARS, omit_field_to_fit
+from utils.response_budget import (
+    DEFAULT_MAX_CHARS,
+    BudgetArgumentError,
+    fit_lanes,
+    json_chars,
+    omit_field_to_fit,
+    parse_max_chars,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +52,41 @@ logger = logging.getLogger(__name__)
 # details_omitted + details_total_chars until the results fit this many
 # characters (read those with reference()).
 _DETAILS_RESULTS_BUDGET = DEFAULT_MAX_CHARS - 1_000
+
+
+def _bound_pinned_envelope(
+    envelope: dict[str, Any], lanes: tuple[str, ...], max_chars: int
+) -> tuple[dict[str, Any], dict[str, bool]]:
+    """Fit the item lists of a load_pinned / load_guardrails reply into ``max_chars``.
+
+    #1743: at the default caps (100 pinned + 50 tool-triggered, each with a
+    context_summary of up to 2,000 characters) the reply could pass 300k
+    characters. When it does not fit, ``context_summary`` is left out of every
+    item first (``context_summary_omitted: true`` — reference() has it), then
+    each lane keeps the prefix that fits, in ``lanes`` order. The caller turns
+    a lane cut into its ``*_truncated`` flag; ``total_available`` keeps the
+    real count.
+
+    Returns:
+        The bounded envelope and, per lane key, whether items were cut.
+    """
+    shell = {**envelope, **{lane: [] for lane in lanes}}
+    budget = max_chars - json_chars(shell) - len('"context_summary_omitted":true,')
+    bounded, cut, dropped = fit_lanes(
+        [envelope[lane] for lane in lanes], budget, droppable="context_summary"
+    )
+    out = {**envelope, **dict(zip(lanes, bounded, strict=True))}
+    if dropped:
+        out["context_summary_omitted"] = True
+    return out, dict(zip(lanes, cut, strict=True))
+
+
+def _parse_pinned_max_chars(args: dict[str, Any]) -> tuple[int, list[TextContent] | None]:
+    try:
+        return parse_max_chars(args.get("max_chars")), None
+    except BudgetArgumentError as e:
+        return 0, _error_response("validation_error", e.message, received=e.received)
+
 
 # #1228: server-side cap for cross-context recall — MUST stay in sync with
 # the recall inputSchema's context_ids maxItems in _definitions.py.
@@ -560,6 +602,9 @@ async def handle_load_pinned(
     from services.memory_service import MemoryService
 
     cap = args.get("cap")
+    max_chars, arg_error = _parse_pinned_max_chars(args)
+    if arg_error:
+        return arg_error
     start_time = time.time()
     async for db in get_db():
         current_context_id: UUID | None = None
@@ -585,31 +630,30 @@ async def handle_load_pinned(
             await _log_tool_usage(
                 db, user_id, "load_pinned", start_time, 200, current_context_id, workspace_id
             )
-            return [
-                TextContent(
-                    type="text",
-                    text=_dumps(
+            envelope, cut = _bound_pinned_envelope(
+                {
+                    "status": "success",
+                    "memories": [
                         {
-                            "status": "success",
-                            "memories": [
-                                {
-                                    "memory_id": str(m.memory_id),
-                                    "summary": m.summary,
-                                    "context_summary": m.context_summary,
-                                    "type": m.type,
-                                    "importance": m.importance,
-                                    "delivery_mode": m.delivery_mode,
-                                }
-                                for m in result.memories
-                            ],
-                            "total_available": result.total_available,
-                            "truncated": result.truncated,
-                            "cap": result.cap,
-                            **_context_response_fields(current_context),
+                            "memory_id": str(m.memory_id),
+                            "summary": m.summary,
+                            "context_summary": m.context_summary,
+                            "type": m.type,
+                            "importance": m.importance,
+                            "delivery_mode": m.delivery_mode,
                         }
-                    ),
-                )
-            ]
+                        for m in result.memories
+                    ],
+                    "total_available": result.total_available,
+                    "truncated": result.truncated,
+                    "cap": result.cap,
+                    **_context_response_fields(current_context),
+                },
+                ("memories",),
+                max_chars,
+            )
+            envelope["truncated"] = result.truncated or cut["memories"]
+            return [TextContent(type="text", text=_dumps(envelope))]
         except _ContextNotFoundError as e:
             await _log_tool_usage(
                 db, user_id, "load_pinned", start_time, 404, current_context_id, workspace_id
@@ -661,6 +705,9 @@ async def handle_load_guardrails(
     from services.memory_service import MemoryService
 
     cap = args.get("cap")
+    max_chars, arg_error = _parse_pinned_max_chars(args)
+    if arg_error:
+        return arg_error
     start_time = time.time()
     async for db in get_db():
         current_context_id: UUID | None = None
@@ -686,33 +733,36 @@ async def handle_load_guardrails(
             await _log_tool_usage(
                 db, user_id, "load_guardrails", start_time, 200, current_context_id, workspace_id
             )
-            return [
-                TextContent(
-                    type="text",
-                    text=_dumps(
-                        {
-                            "status": "success",
-                            "format": result.format,
-                            "version": result.version,
-                            "pinned": [_guardrail_item_payload(i) for i in result.pinned],
-                            "tool_triggered": [
-                                _guardrail_item_payload(i) for i in result.tool_triggered
-                            ],
-                            "total_available": result.total_available,
-                            "truncated": result.truncated,
-                            "cap": result.cap,
-                            "pinned_cap": result.pinned_cap,
-                            "pinned_total_available": result.pinned_total_available,
-                            "pinned_truncated": result.pinned_truncated,
-                            "tool_triggered_total_available": (
-                                result.tool_triggered_total_available
-                            ),
-                            "tool_triggered_truncated": result.tool_triggered_truncated,
-                            **_context_response_fields(current_context),
-                        }
-                    ),
-                )
-            ]
+            # The tool-triggered lane goes first: a client hook enforces it,
+            # while the pinned lane is advisory context (#1743).
+            envelope, cut = _bound_pinned_envelope(
+                {
+                    "status": "success",
+                    "format": result.format,
+                    "version": result.version,
+                    "pinned": [_guardrail_item_payload(i) for i in result.pinned],
+                    "tool_triggered": [_guardrail_item_payload(i) for i in result.tool_triggered],
+                    "total_available": result.total_available,
+                    "truncated": result.truncated,
+                    "cap": result.cap,
+                    "pinned_cap": result.pinned_cap,
+                    "pinned_total_available": result.pinned_total_available,
+                    "pinned_truncated": result.pinned_truncated,
+                    "tool_triggered_total_available": result.tool_triggered_total_available,
+                    "tool_triggered_truncated": result.tool_triggered_truncated,
+                    **_context_response_fields(current_context),
+                },
+                ("tool_triggered", "pinned"),
+                max_chars,
+            )
+            envelope["pinned_truncated"] = result.pinned_truncated or cut["pinned"]
+            envelope["tool_triggered_truncated"] = (
+                result.tool_triggered_truncated or cut["tool_triggered"]
+            )
+            envelope["truncated"] = (
+                envelope["pinned_truncated"] or envelope["tool_triggered_truncated"]
+            )
+            return [TextContent(type="text", text=_dumps(envelope))]
         except _ContextNotFoundError as e:
             await _log_tool_usage(
                 db, user_id, "load_guardrails", start_time, 404, current_context_id, workspace_id
