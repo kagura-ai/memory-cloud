@@ -28,7 +28,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +51,7 @@ from db.base import get_db
 from models.auth import User
 from services.account_linking_service import AccountLinkingService
 from services.beta_invite_service import BETA_INVITE_TOKEN_PATTERN
+from services.password_account_service import find_password_user_by_email
 from services.signup_gate_service import check_signup_access
 from services.terms_service import TermsService, current_terms_version
 from services.workspace_service import WorkspaceService
@@ -2341,30 +2342,7 @@ async def resolve_password_login_user(db: AsyncSession, identifier: str) -> User
     user = result.scalar_one_or_none()
     if user is not None or "@" not in identifier:
         return user
-
-    email = identifier.strip().lower()
-    if not email or email.endswith("@local"):
-        return None
-    rows = (
-        (
-            await db.execute(
-                select(User)
-                .where(
-                    func.lower(User.email) == email,
-                    User.email_verified_at.is_not(None),
-                    User.password_hash.is_not(None),
-                )
-                .limit(2)
-            )
-        )
-        .scalars()
-        .all()
-    )
-    if len(rows) != 1:
-        if rows:
-            logger.warning("password_login_email_collision", matches=len(rows))
-        return None
-    return rows[0]
+    return await find_password_user_by_email(db, identifier)
 
 
 # #1665: a password login that stops at the MFA step carries its terms

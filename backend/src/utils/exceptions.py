@@ -1004,6 +1004,43 @@ class ErasureRequestNotFoundError(NotFoundException):
         self.error_code = "ERASURE-001"
 
 
+# Email + password sign-in (Issue #1678)
+
+
+class PasswordLinkInvalidError(MemoryCloudException):
+    """A password reset / set-up link is unknown, expired or used (400).
+
+    One message for every cause, so a probe cannot tell them apart.
+    """
+
+    def __init__(self, message: str = "This link is invalid or has expired") -> None:
+        super().__init__(message, status_code=400, error_code="AUTH-301")
+
+
+class CurrentPasswordMismatchError(MemoryCloudException):
+    """The current password re-entered to change or remove it is wrong (403).
+
+    403 rather than 401: the session is valid, and web clients treat a 401 as
+    "signed out".
+    """
+
+    def __init__(self, message: str = "Current password is incorrect") -> None:
+        super().__init__(message, status_code=403, error_code="AUTH-302")
+
+
+class PasswordSetupNotAllowedError(MemoryCloudException):
+    """This account cannot receive a set-a-password link (400).
+
+    Raised for local CLI accounts (``@local`` addresses), which have no
+    mailbox to prove.
+    """
+
+    def __init__(
+        self, message: str = "A password cannot be set up by email for this account"
+    ) -> None:
+        super().__init__(message, status_code=400, error_code="AUTH-303")
+
+
 class ErasureTokenInvalidError(MemoryCloudException):
     """Confirmation token is missing, expired, or does not match (400)."""
 

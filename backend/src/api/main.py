@@ -198,6 +198,13 @@ openapi_tags = [
             "accepts the current TERMS_VERSION. 404s unless the deployment sets it."
         ),
     },
+    {
+        "name": "account-password",
+        "description": (
+            "Set up, change or remove the signed-in account's password (Issue #1678). "
+            "Session-only auth (no API keys)."
+        ),
+    },
     # Workspace
     {"name": "workspace", "description": "Workspace dashboard and stats"},
     {"name": "workspaces", "description": "Workspace CRUD operations"},
@@ -664,6 +671,7 @@ from api.routes import (  # noqa: E402
     memory,
     neural_config,
     oauth,
+    password,  # Issue #1678: self-service password endpoints
     public_search,  # Issue #238: Public Search API
     referrals,  # Issue #1470: user-facing referral code + redeem
     resource_indexer,  # Issue #326: Indexer status visibility API
@@ -700,6 +708,10 @@ app.include_router(me_oauth.router, prefix="/api/v1")
 
 # Terms-of-service re-acceptance (Issue #1665)
 app.include_router(me_terms.router, prefix="/api/v1")
+
+# Email + password sign-in: reset / set up / change / remove (Issue #1678)
+app.include_router(password.router, prefix="/api/v1")
+app.include_router(password.me_router, prefix="/api/v1")
 
 # OAuth2 Server routes (Issue #33 - OAuth2 client management)
 app.include_router(oauth.router, prefix="/api/v1")

@@ -1,0 +1,478 @@
+"""Self-service password management for existing accounts (Issue #1678).
+
+Existing accounts can sign in with a verified email and a password. This
+service owns every change to ``users.password_hash`` made outside the admin
+CLIs:
+
+- **Reset** (public): a verified-email account with a password asks for a
+  link; following it sets a new password.
+- **Set up** (signed in): an account without a password asks for a link to
+  its own address; following it sets the first password and, because it
+  proves the mailbox, marks the email verified.
+- **Change** / **remove** (signed in): both re-verify the current password;
+  removing refuses when no OAuth provider would remain.
+
+No method here creates a ``User``: password sign-in and recovery never create
+accounts. Session revocation is the caller's job (it needs the session manager
+and the request's cookie); each method returns the ``user_id`` to revoke for.
+
+Raw tokens, reset URLs and passwords are never logged or placed in exceptions.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+from typing import Any
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from auth.password import hash_password, verify_password
+from auth.password_policy import PasswordPolicyError, validate_password_policy
+from config.settings import get_settings
+from models.auth import AuditLog, User, UserOAuthProvider
+from services.email_action_token_service import EmailActionTokenService, token_ttl
+from services.email_service import EmailService, get_email_service
+from utils.datetime import utcnow
+from utils.exceptions import (
+    ConflictError,
+    CurrentPasswordMismatchError,
+    EmailDispatchError,
+    NotFoundException,
+    PasswordLinkInvalidError,
+    PasswordSetupNotAllowedError,
+    ValidationError,
+)
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+# Same bound as the erasure confirmation email: a stuck provider must not hold
+# the request (and its transaction) open indefinitely.
+_EMAIL_TIMEOUT_SECONDS = 10.0
+
+# ``audit_logs.user_email`` carries an actor label, not the subject's mutable
+# email: the subject is identified by ``user_id``, which erasure pseudonymizes.
+_AUDIT_ACTOR_SELF = "self-service"
+_AUDIT_ACTOR_LINK = "email-link"
+
+
+def normalize_email(email: str) -> str:
+    """Return the comparison form of an email address (``lower(trim())``)."""
+    return email.strip().lower()
+
+
+def is_local_address(email: str) -> bool:
+    """Return whether ``email`` is a local CLI account address (``@local``)."""
+    return normalize_email(email).endswith("@local")
+
+
+async def find_password_user_by_email(db: AsyncSession, email: str) -> User | None:
+    """Find the one account that may sign in (or reset) with ``email``.
+
+    The account must have a verified email and a password; ``@local``
+    addresses never match. Accounts whose emails differ only by case make the
+    lookup ambiguous, and it fails closed.
+
+    Args:
+        db: The async session.
+        email: The address as typed.
+
+    Returns:
+        The user, or ``None`` when zero or several accounts match.
+    """
+    normalized = normalize_email(email)
+    if not normalized or "@" not in normalized or is_local_address(normalized):
+        return None
+    rows = (
+        (
+            await db.execute(
+                select(User)
+                .where(
+                    func.lower(User.email) == normalized,
+                    User.email_verified_at.is_not(None),
+                    User.password_hash.is_not(None),
+                )
+                .limit(2)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(rows) != 1:
+        if rows:
+            logger.warning("password_email_lookup_collision", matches=len(rows))
+        return None
+    return rows[0]
+
+
+def _frontend_link(path: str, raw_token: str) -> str:
+    """Build the front-end URL a password email points at."""
+    base_url = get_settings().frontend_url.strip().rstrip("/")
+    return f"{base_url}{path}?token={raw_token}"
+
+
+def _validated_hash(new_password: str) -> str:
+    """Validate ``new_password`` against the policy and hash it.
+
+    Raises:
+        ValidationError: 422 with the policy message (never the password).
+    """
+    try:
+        validate_password_policy(new_password)
+    except PasswordPolicyError as exc:
+        raise ValidationError(str(exc), field="new_password") from None
+    return hash_password(new_password)
+
+
+@dataclass(frozen=True)
+class PendingResetEmail:
+    """A reset email to send after the response (see ``request_reset``).
+
+    Attributes:
+        to_email: The account's address. **Personal data** — do not log.
+        reset_url: The link. **Sensitive** — do not log.
+        expires_in_minutes: Link lifetime for the body.
+    """
+
+    to_email: str
+    reset_url: str
+    expires_in_minutes: int
+
+
+class PasswordAccountService:
+    """Reset, set up, change and remove a user's password."""
+
+    def __init__(self, db: AsyncSession, email_service: EmailService | None = None) -> None:
+        """Bind the service to a session.
+
+        Args:
+            db: The request's async session.
+            email_service: Override for tests; defaults to the configured one.
+        """
+        self.db = db
+        self.email_service = email_service or get_email_service()
+
+    # ------------------------------------------------------------------
+    # Reset (public)
+    # ------------------------------------------------------------------
+
+    async def request_reset(
+        self,
+        *,
+        email: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> PendingResetEmail | None:
+        """Issue a reset link when ``email`` names an eligible account.
+
+        The token is committed here and the email is returned for the caller
+        to send AFTER responding, so the response takes the same time whether
+        or not an account matched. A failed send strands nothing: the link just
+        expires, and a new request invalidates it.
+
+        Args:
+            email: The address as typed.
+            ip_address: Client IP for the audit row.
+            user_agent: Client user agent for the audit row.
+
+        Returns:
+            The email to send, or ``None`` when no eligible account matched.
+        """
+        user = await find_password_user_by_email(self.db, email)
+        if user is None:
+            return None
+        issued = await EmailActionTokenService(self.db).issue(
+            user_id=user.user_id, email=user.email, purpose="reset_password"
+        )
+        self._audit(
+            user.user_id, _AUDIT_ACTOR_SELF, "password_reset_requested", ip_address, user_agent
+        )
+        await self.db.commit()
+        return PendingResetEmail(
+            to_email=user.email,
+            reset_url=_frontend_link("/password/reset", issued.raw_token),
+            expires_in_minutes=int(token_ttl("reset_password").total_seconds() // 60),
+        )
+
+    async def send_reset_email(self, pending: PendingResetEmail) -> None:
+        """Send a reset email; never raises (runs after the response).
+
+        Args:
+            pending: What ``request_reset`` returned.
+        """
+        try:
+            sent = await asyncio.wait_for(
+                self.email_service.send_password_reset(
+                    to_email=pending.to_email,
+                    reset_url=pending.reset_url,
+                    expires_in_minutes=pending.expires_in_minutes,
+                ),
+                timeout=_EMAIL_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            logger.error("password_reset_email_dispatch_failed", **_error_fields(exc))
+            return
+        if not sent:
+            logger.error("password_reset_email_dispatch_failed", error_type="send_returned_false")
+
+    async def complete_reset(
+        self,
+        *,
+        raw_token: str,
+        new_password: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> str:
+        """Set a new password from a reset link.
+
+        The policy is checked before the token is consumed, so a rejected
+        password does not burn the link.
+
+        Args:
+            raw_token: The token from the link.
+            new_password: The new password.
+            ip_address: Client IP for the audit row.
+            user_agent: Client user agent for the audit row.
+
+        Returns:
+            The user_id whose sessions the caller must revoke.
+
+        Raises:
+            ValidationError: The password breaks the policy (422).
+            PasswordLinkInvalidError: The link is unknown, expired, used, or
+                was sent to an address the account no longer has (400).
+        """
+        password_hash = _validated_hash(new_password)
+        user = await self._consume_for_user(raw_token, "reset_password")
+        user.password_hash = password_hash
+        self._audit(user.user_id, _AUDIT_ACTOR_LINK, "password_reset", ip_address, user_agent)
+        await self.db.commit()
+        logger.info("password_reset_completed", user_id=user.user_id)
+        return user.user_id
+
+    # ------------------------------------------------------------------
+    # Set up (signed in, then link)
+    # ------------------------------------------------------------------
+
+    async def request_setup(
+        self,
+        *,
+        user_id: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> None:
+        """Email a set-a-password link to a signed-in user without a password.
+
+        Pre-commit dispatch (#469): the token row is flushed, the email is
+        sent, and only a successful send commits. A failed send rolls the row
+        back and raises, so the user can simply retry.
+
+        Args:
+            user_id: The signed-in user.
+            ip_address: Client IP for the audit row.
+            user_agent: Client user agent for the audit row.
+
+        Raises:
+            NotFoundException: The user row is gone (404).
+            ConflictError: The account already has a password (409).
+            PasswordSetupNotAllowedError: A local CLI account (400).
+            EmailDispatchError: The email could not be sent (503).
+        """
+        user = await self._load_user(user_id)
+        if user.password_hash is not None:
+            raise ConflictError("This account already has a password")
+        if is_local_address(user.email):
+            raise PasswordSetupNotAllowedError()
+
+        issued = await EmailActionTokenService(self.db).issue(
+            user_id=user.user_id, email=user.email, purpose="set_password"
+        )
+        self._audit(
+            user.user_id, _AUDIT_ACTOR_SELF, "password_setup_requested", ip_address, user_agent
+        )
+        try:
+            sent = await asyncio.wait_for(
+                self.email_service.send_password_setup(
+                    to_email=user.email,
+                    setup_url=_frontend_link("/password/setup", issued.raw_token),
+                    expires_in_minutes=int(token_ttl("set_password").total_seconds() // 60),
+                ),
+                timeout=_EMAIL_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            logger.error(
+                "password_setup_email_dispatch_failed", user_id=user_id, **_error_fields(exc)
+            )
+            await self.db.rollback()
+            raise EmailDispatchError() from None
+        if not sent:
+            logger.error(
+                "password_setup_email_dispatch_failed",
+                user_id=user_id,
+                error_type="send_returned_false",
+            )
+            await self.db.rollback()
+            raise EmailDispatchError()
+        await self.db.commit()
+
+    async def complete_setup(
+        self,
+        *,
+        raw_token: str,
+        new_password: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> str:
+        """Set the first password from a set-up link and verify the email.
+
+        Args:
+            raw_token: The token from the link.
+            new_password: The new password.
+            ip_address: Client IP for the audit row.
+            user_agent: Client user agent for the audit row.
+
+        Returns:
+            The user_id whose other sessions the caller must revoke.
+
+        Raises:
+            ValidationError: The password breaks the policy (422).
+            PasswordLinkInvalidError: The link is unknown, expired, used, or
+                was sent to an address the account no longer has (400).
+        """
+        password_hash = _validated_hash(new_password)
+        user = await self._consume_for_user(raw_token, "set_password")
+        user.password_hash = password_hash
+        if user.email_verified_at is None:
+            user.email_verified_at = utcnow()
+        self._audit(user.user_id, _AUDIT_ACTOR_LINK, "password_set", ip_address, user_agent)
+        await self.db.commit()
+        logger.info("password_setup_completed", user_id=user.user_id)
+        return user.user_id
+
+    # ------------------------------------------------------------------
+    # Change / remove (signed in)
+    # ------------------------------------------------------------------
+
+    async def change(
+        self,
+        *,
+        user_id: str,
+        current_password: str,
+        new_password: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> None:
+        """Replace the password after re-verifying the current one.
+
+        Raises:
+            NotFoundException: The user row is gone (404).
+            ConflictError: The account has no password to change (409).
+            CurrentPasswordMismatchError: ``current_password`` is wrong (403).
+            ValidationError: The new password breaks the policy (422).
+        """
+        user = await self._load_user(user_id)
+        self._verify_current(user, current_password)
+        user.password_hash = _validated_hash(new_password)
+        self._audit(user.user_id, _AUDIT_ACTOR_SELF, "password_changed", ip_address, user_agent)
+        await self.db.commit()
+        logger.info("password_changed", user_id=user_id)
+
+    async def remove(
+        self,
+        *,
+        user_id: str,
+        current_password: str,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
+    ) -> None:
+        """Remove the password, never the last sign-in method.
+
+        Raises:
+            NotFoundException: The user row is gone (404).
+            ConflictError: No password to remove, or no OAuth provider would
+                remain (409).
+            CurrentPasswordMismatchError: ``current_password`` is wrong (403).
+        """
+        user = await self._load_user(user_id)
+        self._verify_current(user, current_password)
+        linked = await self.db.scalar(
+            select(func.count())
+            .select_from(UserOAuthProvider)
+            .where(UserOAuthProvider.user_id == user_id)
+        )
+        if not linked:
+            raise ConflictError("Cannot remove the only remaining sign-in method")
+        user.password_hash = None
+        self._audit(user.user_id, _AUDIT_ACTOR_SELF, "password_removed", ip_address, user_agent)
+        await self.db.commit()
+        logger.info("password_removed", user_id=user_id)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    async def _load_user(self, user_id: str) -> User:
+        user = (
+            await self.db.execute(select(User).where(User.user_id == user_id))
+        ).scalar_one_or_none()
+        if user is None:
+            raise NotFoundException("User", resource_id=user_id)
+        return user
+
+    @staticmethod
+    def _verify_current(user: User, current_password: str) -> None:
+        if user.password_hash is None:
+            raise ConflictError("This account has no password")
+        if not verify_password(current_password, user.password_hash):
+            raise CurrentPasswordMismatchError()
+
+    async def _consume_for_user(self, raw_token: str, purpose: Any) -> User:
+        consumed = await EmailActionTokenService(self.db).consume(
+            raw_token=raw_token, purpose=purpose
+        )
+        if consumed is None:
+            await self.db.rollback()
+            raise PasswordLinkInvalidError()
+        user = (
+            await self.db.execute(select(User).where(User.user_id == consumed.user_id))
+        ).scalar_one_or_none()
+        # A link sent to an address the account no longer has proves nothing
+        # about the current mailbox.
+        if user is None or normalize_email(user.email) != normalize_email(consumed.email):
+            await self.db.commit()  # keep the link burned
+            raise PasswordLinkInvalidError()
+        return user
+
+    def _audit(
+        self,
+        user_id: str,
+        actor: str,
+        action: str,
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> None:
+        self.db.add(
+            AuditLog(
+                user_email=actor,
+                user_id=user_id,
+                action=action,
+                resource="user:password",
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
+        )
+
+
+def _error_fields(exc: BaseException) -> dict[str, Any]:
+    """Log-safe description of a send failure: type and status code only.
+
+    ``str(exc)`` is never logged — an SDK error can echo the request body,
+    which carries the link.
+    """
+    fields: dict[str, Any] = {"error_type": type(exc).__name__}
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if isinstance(status, int):
+        fields["status_code"] = status
+    return fields
