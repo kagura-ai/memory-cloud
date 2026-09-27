@@ -4,6 +4,49 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.82.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.82.0) — 2026-09-27
+
+MCP spec and connector-directory hardening. The Streamable HTTP transport validates `Origin` and follows the session, version and header rules; OAuth accepts any loopback port, shows the redirect host on the consent page and authenticates revocation and introspection; authentication outages answer 503 instead of "invalid token"; and every tool reply that still grew with stored data is bounded.
+
+### Changed
+- **Streamable HTTP transport** ([#1740](https://github.com/kagura-ai/memory-cloud/issues/1740)):
+  - `Origin` is checked before authentication on every `/mcp` request. A request without `Origin` (server-side clients such as the Claude and ChatGPT backends, CLI clients) is served; one whose `Origin` is not in `CORS_ORIGINS`, the `FRONTEND_URL` origin or the new `MCP_ALLOWED_ORIGINS` — including `null` — gets 403 with JSON-RPC `-32600`.
+  - A session ended with `DELETE /mcp` is remembered for the idle timeout, and later requests naming it get 404. Unknown ids are re-adopted after an idle cleanup or a restart (#1686) only when they have the server-issued format (`mcp-` + 16 hex); any other unknown id gets 404.
+  - A client asking for an unsupported or newer protocol version is answered `2025-03-26` (was `2024-11-05`); `2024-11-05` is still echoed to clients that ask for it. Sessions on `2025-03-26` accept JSON-RPC batches (up to 50 messages; 202 for notification-only arrays; an array containing `initialize` is refused).
+  - 2026-07-28 requests missing `MCP-Protocol-Version`, `Mcp-Method` or (for `tools/call`) `Mcp-Name` get 400 `-32020` (`server/discover` is exempt). `MCP_REQUIRE_MIRRORED_HEADERS=false` restores the earlier served-and-logged behaviour.
+  - The protected-resource metadata replaces `mcp_sse_endpoint` (it pointed at the removed `/mcp/sse`) with `mcp_endpoint`.
+- **OAuth** ([#1741](https://github.com/kagura-ai/memory-cloud/issues/1741)):
+  - Loopback redirect URIs (`http` on `localhost`, `127.0.0.1` or `::1`) match on any port (RFC 8252 §7.3); scheme, host, path and query must still match. Non-loopback URIs are matched exactly as before.
+  - The consent page names the host the browser is sent to after approval, and warns when every registered redirect URI is loopback.
+  - Revocation (RFC 7009) requires `client_id` (confidential clients also their secret); a token issued to another client is left alone and answered like an unknown token, and revoking a refresh token also revokes its access token.
+  - Introspection (RFC 7662) requires a confidential client with its secret and only reports that client's own tokens. The discovery documents advertise the real methods.
+  - New `OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS`: callers in these ranges skip the 5/min per-IP limit on `/register`.
+- **Bounded tool responses** ([#1743](https://github.com/kagura-ai/memory-cloud/issues/1743)), following the `reference` conventions (`max_chars` 10,000–100,000, default 20,000; `*_truncated`, `*_has_more`, `<field>_omitted`):
+  - Paged with cursors: `list_edges` (50 per direction), `get_state` list mode, `get_sleep_report` actions, `list_contexts` (100), `list_files` (50, max 100), `list_agents` (50, with a 200-character description preview). `get_cluster` pages default to 25 (max 100); `list_tags` returns at most 200 per page.
+  - `recall`, `load_pinned`, `load_guardrails` and `get_agent_bootstrap` take `max_chars` and drop `context_summary` before cutting items. `get_agent_bootstrap` loads 20 pinned memories by default (was 100).
+  - `recall_nearby` items carry `location` instead of the full `details` unless `include_details=true`; with `include_details`, `recall_nearby` and `recall_upcoming` omit details past the budget.
+  - New writes are capped: 50 tags of 100 characters (`remember`, `update_memory`), a `set_state` value of 16,384 characters, a workspace description of 1,000 characters. Stored rows still read back.
+
+### Fixed
+- **Actionable errors on the remaining paths** ([#1742](https://github.com/kagura-ai/memory-cloud/issues/1742)):
+  - A failure while verifying MCP credentials (for example the database is unreachable) answers 503 `temporarily_unavailable` with `Retry-After` and a correlation id, instead of 401 with the raw exception text. A bad token still gets 401.
+  - Undeclared tool arguments are refused with `invalid_argument`, the allowed names and suggestions (the `merge_contexts` aliases and `_meta` are still accepted); a non-object `arguments` is refused on both eras.
+  - Server-side `ValueError` subclasses (validation of stored rows, JSON or Unicode decoding) are no longer echoed as `validation_error`; writes report `outcome: "unknown"` with verify-before-retry advice.
+  - Unexpected transport failures and session-creation failures return a JSON-RPC error with `cause`, `correlation_id` and `help` instead of a plain-text 500; a failing batch element gets its own error.
+  - Smaller: `ingest_events` per-event errors carry a cause or the violated constraint and resend advice; `setup_connector` names the field that failed to parse; `remember` lists only the missing fields; `delete_context` reports a business-rule refusal as `validation_error`.
+
+### Migration
+- **MCP clients:**
+  - Stop sending undeclared tool arguments; they are now refused.
+  - Follow `has_more` / `next_cursor` on the paged tools above, and pass `include_details=true` to `recall_nearby` for full details.
+  - Browser-based MCP clients that send `Origin` must be allow-listed in `MCP_ALLOWED_ORIGINS`.
+- **OAuth clients:** send `client_id` when revoking a token. Introspection is no longer available to public clients.
+
+### Notes
+- No database migration.
+- New optional environment variables: `MCP_ALLOWED_ORIGINS` (default empty), `MCP_REQUIRE_MIRRORED_HEADERS` (default `true`), `OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS` (default empty). See `.env.example` and `docs/api-reference.md`.
+- Session tombstones are held in process memory; a restart forgets them.
+
 ## [v0.81.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.81.0) — 2026-09-27
 
 Email and password sign-in for existing accounts. People who signed up with Google or GitHub can add a password and sign in with their verified email, recover it by email, and manage it from their profile. The login entry is renamed to a sign-in method, the billing hand-off JWT moves to the RFC 9864 algorithm name, and the stale plan price leaves the API.
