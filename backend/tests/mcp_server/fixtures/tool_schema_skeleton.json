@@ -1494,6 +1494,9 @@
         "limit": {
           "type": "integer"
         },
+        "cursor": {
+          "type": "string"
+        },
         "workspace_id": {
           "type": "string"
         }

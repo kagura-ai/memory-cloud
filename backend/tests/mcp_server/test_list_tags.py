@@ -140,12 +140,42 @@ class TestHandleListTagsHappyPath:
         mock_service.aggregate_tags.assert_awaited_once_with(
             user_id,
             context_id,
-            limit=100,
+            limit=101,  # #1743: one extra row tells whether more matched
             min_count=3,
             sort="recent",
             prefix="auth",
             with_tags=["python", "backend"],
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("limit", "asked", "served"), [(50, 51, 50), (500, 201, 200)])
+    async def test_page_holds_at_most_200_tags_with_has_more(
+        self, user_id, workspace_id, context_id, limit, asked, served
+    ):
+        """#1743: 1-500 is still accepted; a page holds at most 200 tags."""
+        from datetime import UTC, datetime
+
+        _, mock_get_db = _mock_db_context()
+        rows = [
+            {"tag": f"tag-{i:03d}", "count": 1, "last_used_at": datetime(2026, 9, 1, tzinfo=UTC)}
+            for i in range(asked)
+        ]
+        mock_service = MagicMock(
+            aggregate_tags=AsyncMock(return_value={"context_name": "ctx", "rows": rows})
+        )
+        with (
+            patch("db.base.get_db", mock_get_db),
+            patch("services.context_service.ContextService", return_value=mock_service),
+            patch("mcp_server.tools.context._log_tool_usage", AsyncMock()),
+        ):
+            result = await handle_list_tags(
+                {"context_id": str(context_id), "limit": limit}, user_id, workspace_id
+            )
+        payload = json.loads(result[0].text)
+        assert mock_service.aggregate_tags.await_args.kwargs["limit"] == asked
+        assert payload["total"] == served
+        assert payload["has_more"] is True
+        assert len(result[0].text) < 150_000
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("args", [{}, {"with_tags": None}])

@@ -27,7 +27,7 @@ from mcp_server.tools._helpers import (
     execute_with_timeout,
 )
 from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
-from utils.response_budget import DEFAULT_MAX_CHARS, fit_items
+from utils.response_budget import DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT, fit_items
 
 logger = logging.getLogger(__name__)
 
@@ -730,6 +730,7 @@ _LIST_CONTEXTS_SUMMARY_PREVIEW_LENGTH = 300
 # budget, so an include_summary / include_details page stops early with
 # has_more rather than growing past it. include_details without name_contains
 # is limited to small pages: the full summaries are get_context_info's job.
+_LIST_TAGS_MAX_PAGE = 200
 _LIST_CONTEXTS_DEFAULT_LIMIT = 100
 _LIST_CONTEXTS_MAX_LIMIT = 200
 _LIST_CONTEXTS_DETAILS_MAX_LIMIT = 20
@@ -1285,6 +1286,11 @@ async def handle_list_tags(
             "prefix must be a string up to 200 characters.",
         )
 
+    # #1743: limit=500 measured 40k characters. 1-500 is still accepted, but a
+    # page holds at most 200 tags; has_more says more matched (narrow with
+    # prefix / min_count).
+    page_limit = min(limit, _LIST_TAGS_MAX_PAGE)
+
     sort = args.get("sort", "count")
 
     # #1669: multi-tag AND drill-down, same as REST ``?with_tags=``. Only the
@@ -1309,7 +1315,8 @@ async def handle_list_tags(
                 service.aggregate_tags(
                     user_id,
                     context_id,
-                    limit=limit,
+                    # One extra row tells whether more tags matched.
+                    limit=page_limit + 1,
                     min_count=min_count,
                     sort=sort,
                     prefix=prefix,
@@ -1326,6 +1333,13 @@ async def handle_list_tags(
                 }
                 for row in result["rows"]
             ]
+            has_more = len(tags_payload) > page_limit
+            tags_payload = tags_payload[:page_limit]
+            # Tags stored before the #1743 write cap can be long; the page
+            # stops at the largest response budget either way.
+            placed = fit_items(tags_payload, MAX_CHARS_LIMIT - 1_000)
+            if placed < len(tags_payload):
+                tags_payload, has_more = tags_payload[:placed], True
 
             await _log_tool_usage(
                 db,
@@ -1347,6 +1361,7 @@ async def handle_list_tags(
                             "context_name": result["context_name"],
                             "tags": tags_payload,
                             "total": len(tags_payload),
+                            "has_more": has_more,
                         }
                     ),
                 )

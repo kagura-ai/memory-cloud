@@ -802,7 +802,7 @@ Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], c
 
 Examples: list_tags(context_id=..., prefix='auth') for autocomplete; sort='recent' for what is in use now; min_count=5 to hide one-offs; with_tags=['python'] for the tags that co-occur with python.
 
-Returns: {status, context_id, context_name, tags: [{tag, count, last_used_at}], total}. An empty context returns tags=[] and total=0, not an error. Soft-deleted memories are not counted.""",
+Returns: {status, context_id, context_name, tags: [{tag, count, last_used_at}], total, has_more}. has_more: more tags matched — narrow with prefix or min_count. An empty context returns tags=[] and total=0, not an error. Soft-deleted memories are not counted.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -814,7 +814,7 @@ Returns: {status, context_id, context_name, tags: [{tag, count, last_used_at}], 
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max tags returned (1-500, default 50).",
+                        "description": "Max tags returned (1-500, default 50); a page holds at most 200 (has_more).",
                     },
                     "min_count": {
                         "type": "integer",
@@ -1764,13 +1764,17 @@ Returns: {status, file_id, deleted}.""",
             "name": "list_files",
             "description": """List uploaded, non-deleted files you can access in the workspace, newest first.
 
-Returns: {status, files: [{id, context_id, filename, content_type, size_bytes, sha256, status, created_at, uploaded_at}], count}.""",
+Returns: {status, files: [{id, context_id, filename, content_type, size_bytes, sha256, status, created_at, uploaded_at}], count, has_more, next_cursor}. has_more: pass next_cursor as cursor for the next page.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "limit": {
                         "type": "integer",
-                        "description": "Number of rows to return (1-500, default 50).",
+                        "description": "Files per page, 1-100 (default 50).",
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "next_cursor from the previous page.",
                     },
                     "workspace_id": {
                         "type": "string",
