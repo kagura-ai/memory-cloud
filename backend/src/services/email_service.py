@@ -29,6 +29,25 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def redact_recipient(email: str) -> str:
+    """Return a short keyed digest of ``email`` for log correlation (#1678).
+
+    Keyed with the audit HMAC key so the digest cannot be reversed with a
+    dictionary of addresses; normalized so the same mailbox always maps to the
+    same value.
+
+    Args:
+        email: The recipient address.
+
+    Returns:
+        The first 16 hex characters of HMAC-SHA256(lower(trim(email))).
+    """
+    from config.settings import get_settings
+    from utils.hashing import hmac_sha256_hex
+
+    return hmac_sha256_hex(email.strip().lower(), get_settings().audit_hmac_key)[:16]
+
+
 class EmailService(Protocol):
     """Transactional email sender.
 
@@ -228,6 +247,59 @@ class EmailService(Protocol):
         """
         ...
 
+    async def send_password_reset(
+        self,
+        *,
+        to_email: str,
+        reset_url: str,
+        expires_in_minutes: int,
+    ) -> bool:
+        """Deliver a password-reset link (Issue #1678).
+
+        Sent only for an account with a verified email and a password, in
+        answer to ``POST /auth/password/reset-request``. The caller answers
+        that request identically whether or not anything was sent.
+
+        ``reset_url`` embeds a single-use token, so it is **sensitive**:
+        implementations MUST NOT log it, and SHOULD NOT log the recipient
+        address in the clear either (a reset request is a hint about the
+        account).
+
+        Args:
+            to_email: The account's verified email address.
+            reset_url: Front-end reset URL embedding the raw token.
+                **Sensitive** — do not log.
+            expires_in_minutes: Link lifetime, for the body.
+
+        Returns:
+            True on delivery (or logging fallback), False on hard failure.
+        """
+        ...
+
+    async def send_password_setup(
+        self,
+        *,
+        to_email: str,
+        setup_url: str,
+        expires_in_minutes: int,
+    ) -> bool:
+        """Deliver a set-a-password link to a signed-in user (Issue #1678).
+
+        Following the link proves ownership of the address, so a successful
+        set also marks the email verified. Same redaction rules as
+        ``send_password_reset``.
+
+        Args:
+            to_email: The account's email address.
+            setup_url: Front-end set-password URL embedding the raw token.
+                **Sensitive** — do not log.
+            expires_in_minutes: Link lifetime, for the body.
+
+        Returns:
+            True on delivery (or logging fallback), False on hard failure.
+        """
+        ...
+
 
 class LoggingEmailService:
     """Default stub implementation: structured logs only, no SMTP.
@@ -371,6 +443,45 @@ class LoggingEmailService:
             workspace_name=workspace_name,
             email_dispatch_required=True,
             template="workspace_ownership_force_transferred",
+        )
+        return True
+
+    async def send_password_reset(
+        self,
+        *,
+        to_email: str,
+        reset_url: str,
+        expires_in_minutes: int,
+    ) -> bool:
+        # The URL carries the token: never logged. The recipient is logged
+        # only as a keyed digest (#1678) — a reset request hints at who has an
+        # account, so the address stays out of the log line.
+        del reset_url
+        logger.info(
+            "password_reset_email",
+            recipient_hash=redact_recipient(to_email),
+            purpose="reset_password",
+            expires_in_minutes=expires_in_minutes,
+            email_dispatch_required=True,
+            template="password_reset",
+        )
+        return True
+
+    async def send_password_setup(
+        self,
+        *,
+        to_email: str,
+        setup_url: str,
+        expires_in_minutes: int,
+    ) -> bool:
+        del setup_url
+        logger.info(
+            "password_setup_email",
+            recipient_hash=redact_recipient(to_email),
+            purpose="set_password",
+            expires_in_minutes=expires_in_minutes,
+            email_dispatch_required=True,
+            template="password_setup",
         )
         return True
 

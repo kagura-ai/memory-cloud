@@ -564,3 +564,45 @@ async def test_send_workspace_ownership_force_transferred_returns_false_when_sdk
             to_email="prev@owner.com", workspace_name="Acme"
         )
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Password emails (Issue #1678)
+# ---------------------------------------------------------------------------
+
+_PW_TOKEN = "tok_" + "P" * 40
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "url_kw", "subject_part"),
+    [
+        ("send_password_reset", "reset_url", "Reset your Kagura password"),
+        ("send_password_setup", "setup_url", "Set a password"),
+    ],
+)
+async def test_password_emails_carry_the_link_but_never_log_it(
+    method: str, url_kw: str, subject_part: str
+) -> None:
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    url = f"https://app.example.test/password/x?token={_PW_TOKEN}"
+
+    with (
+        patch.object(
+            resend_module.resend.Emails, "send", return_value={"id": "re_msg_pw"}
+        ) as mock_send,
+        patch.object(resend_module, "logger") as mock_logger,
+    ):
+        result = await getattr(svc, method)(
+            to_email="user@example.com", **{url_kw: url}, expires_in_minutes=30
+        )
+
+    assert result is True
+    (params,), _ = mock_send.call_args
+    assert params["to"] == ["user@example.com"]
+    assert subject_part in params["subject"]
+    assert url in params["text"]
+    assert "30 minutes" in params["text"]
+    logged = repr(mock_logger.mock_calls)
+    assert _PW_TOKEN not in logged
+    assert "user@example.com" not in logged

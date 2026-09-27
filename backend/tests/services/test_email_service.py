@@ -398,3 +398,51 @@ async def test_logging_send_workspace_ownership_force_transferred():
         "email_dispatch_required": True,
         "template": "workspace_ownership_force_transferred",
     }
+
+
+# ---------------------------------------------------------------------------
+# Password emails (Issue #1678) — no URL, no token, no clear-text recipient
+# ---------------------------------------------------------------------------
+
+_SECRET_TOKEN = "tok_" + "S" * 40
+_SECRET_URL = f"https://app.example.test/password/reset?token={_SECRET_TOKEN}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "url_kw", "event", "purpose"),
+    [
+        ("send_password_reset", "reset_url", "password_reset_email", "reset_password"),
+        ("send_password_setup", "setup_url", "password_setup_email", "set_password"),
+    ],
+)
+async def test_logging_password_emails_redact_url_and_recipient(
+    method: str, url_kw: str, event: str, purpose: str
+) -> None:
+    svc = LoggingEmailService()
+    with patch.object(email_service_module, "logger") as mock_logger:
+        result = await getattr(svc, method)(
+            to_email="Person@Example.com",
+            **{url_kw: _SECRET_URL},
+            expires_in_minutes=30,
+        )
+
+    assert result is True
+    mock_logger.info.assert_called_once()
+    args, kwargs = mock_logger.info.call_args
+    assert args[0] == event
+    assert kwargs["purpose"] == purpose
+    assert kwargs["email_dispatch_required"] is True
+    logged = repr(args) + repr(kwargs)
+    assert _SECRET_TOKEN not in logged
+    assert "password/reset" not in logged
+    assert "person@example.com" not in logged.lower()
+    # The digest is stable per mailbox, whatever the case / whitespace.
+    assert kwargs["recipient_hash"] == email_service_module.redact_recipient(" person@example.COM ")
+    assert len(kwargs["recipient_hash"]) == 16
+
+
+def test_redact_recipient_differs_per_address() -> None:
+    assert email_service_module.redact_recipient(
+        "a@example.com"
+    ) != email_service_module.redact_recipient("b@example.com")

@@ -24,6 +24,7 @@ from typing import Any
 
 import resend
 
+from services.email_service import redact_recipient
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -377,5 +378,72 @@ class ResendEmailService:
                 "to_email": to_email,
                 "request_id": request_id,
                 "template": "erasure_confirmation",
+            },
+        )
+
+    async def send_password_reset(
+        self,
+        *,
+        to_email: str,
+        reset_url: str,
+        expires_in_minutes: int,
+    ) -> bool:
+        # reset_url embeds the single-use token: it goes in the body only,
+        # never in log_context, and the recipient is logged as a digest.
+        text = (
+            "We received a request to reset the password for your Kagura Memory\n"
+            "Cloud account.\n"
+            "\n"
+            "Open the link below to choose a new password:\n"
+            "\n"
+            f"  {reset_url}\n"
+            "\n"
+            f"The link expires in {expires_in_minutes} minutes and works once.\n"
+            "Resetting your password signs you out everywhere.\n"
+            "\n"
+            "If you did not ask for this, ignore this email — your password\n"
+            "stays unchanged.\n"
+        )
+        return await self._send(
+            to_email=to_email,
+            subject="Reset your Kagura password",
+            text=text,
+            log_event="password_reset_email",
+            log_context={
+                "recipient_hash": redact_recipient(to_email),
+                "purpose": "reset_password",
+                "template": "password_reset",
+            },
+        )
+
+    async def send_password_setup(
+        self,
+        *,
+        to_email: str,
+        setup_url: str,
+        expires_in_minutes: int,
+    ) -> bool:
+        text = (
+            "You asked to add a password to your Kagura Memory Cloud account.\n"
+            "\n"
+            "Open the link below to choose it:\n"
+            "\n"
+            f"  {setup_url}\n"
+            "\n"
+            f"The link expires in {expires_in_minutes} minutes and works once.\n"
+            "After that you can also sign in with this email address and the\n"
+            "password.\n"
+            "\n"
+            "If you did not ask for this, ignore this email — nothing changes.\n"
+        )
+        return await self._send(
+            to_email=to_email,
+            subject="Set a password for your Kagura account",
+            text=text,
+            log_event="password_setup_email",
+            log_context={
+                "recipient_hash": redact_recipient(to_email),
+                "purpose": "set_password",
+                "template": "password_setup",
             },
         )
