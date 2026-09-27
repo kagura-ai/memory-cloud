@@ -1647,7 +1647,7 @@ Returns: {status, run_id, cluster_index, cluster_id, label, description, count, 
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Memories per page (1-200, default 50).",
+                        "description": "Memories per page (1-100, default 25).",
                     },
                     "cursor": {
                         "type": "string",
