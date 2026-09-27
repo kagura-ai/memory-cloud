@@ -508,6 +508,39 @@ A failure outside tool execution — the transport itself — is a JSON-RPC erro
 - The transport-level JSON-RPC error's `data` is no longer `{exception_type, details}`, and `message` no longer includes the exception text. On session-based connections a `ValueError` subclass (for example a JSON decode error) now gets `-32603` instead of `-32602`, an `httpx` timeout `-32001` instead of `-32603`, and a permission or validation refusal raised as a service exception `-32002` or `-32602` instead of `-32603`.
 - A [tool guardrail](#tool-guardrails) with `on: "result"` whose `match` targeted the raw exception text of one of these tools no longer matches. Match the `error` code instead.
 
+## Response bounds
+
+MCP clients cap what a tool result may put in front of the model — about 25k tokens in Claude Code and about 150k characters on claude.ai; a larger result is cut or saved to a file. Every tool whose reply grows with stored data is therefore bounded, and a default call stays well under those limits ([#1685](https://github.com/kagura-ai/memory-cloud/issues/1685) for `reference`, [#1743](https://github.com/kagura-ai/memory-cloud/issues/1743) for the rest). A reply is never cut silently: it says so with one of the flags below.
+
+- **`max_chars`** — a budget in characters of the compact JSON reply (not tokens), default 20,000, range 10,000–100,000; a value outside the range is a `validation_error`. 20,000 keeps an English reply near 5k tokens and a Japanese one under the 25k-token cap.
+- **`limit` / `cursor`** — a page size (an integer out of range is clamped, not refused) and the `next_cursor` of the previous page. `has_more: true` means more items exist; `next_cursor` is `null` on the last page.
+- **`*_truncated` / `truncated`** — items were left out; `total_available`, where present, keeps the real count.
+- **`<field>_omitted` + `<field>_total_chars`** — a field was left out of an item; read the memory with `reference(memory_id)`.
+- **`context_summary_omitted: true`** — the list did not fit, so every item's `context_summary` was left out before any item was.
+
+| Tool | Default | Largest | Flags |
+|------|---------|---------|-------|
+| `recall` | `max_chars` 20,000 | `max_chars` 100,000 (k up to 100) | `context_summary_omitted`, then `truncated` (lowest-ranked results cut; `count` = returned) |
+| `load_pinned` | `max_chars` 20,000 | 100,000 | `context_summary_omitted`, then `truncated` with the real `total_available` |
+| `load_guardrails` | `max_chars` 20,000 | 100,000 | `context_summary_omitted`, then pinned, then tool-triggered items (`pinned_truncated`, `tool_triggered_truncated`) |
+| `get_agent_bootstrap` | `max_chars` 20,000 for the whole envelope; `pinned_cap` 20 | 100,000 | `context_summary_omitted`, then `truncated: true` on the pinned / recall / upcoming components, in that order; `state` is a `get_state` page |
+| `list_edges` | `limit` 50 per direction | 200 per direction | `outgoing_has_more`, `incoming_has_more` (heaviest edges first) |
+| `get_state` (no key) | `limit` 50, `max_chars` 20,000 | `limit` 200, `max_chars` 100,000 | `has_more` / `next_cursor` (key order); `omitted_keys` for a value too large for the page |
+| `get_sleep_report` | `actions_limit` 50, `max_chars` 20,000 | 200 / 100,000 | `actions_has_more` / `actions_next_cursor`; `details_omitted` on an action larger than the page; `action_count` is the run's total |
+| `recall_nearby` | items carry `location` (= `details.location`) | `include_details=true` | past 20,000 characters the later items get `details_omitted` |
+| `recall_upcoming` | items carry `trigger` | `include_details=true` | past 20,000 characters the later items get `details_omitted` |
+| `list_contexts` | `limit` 100 (20 with `include_details` and no `name_contains`) | 200, and a page stops at 20,000 characters | `has_more` / `next_cursor` |
+| `list_tags` | `limit` 50 | a page holds at most 200 tags (`limit` 1–500 is still accepted) | `has_more` (narrow with `prefix` / `min_count`) |
+| `list_files` | `limit` 50 | 100 | `has_more` / `next_cursor` |
+| `list_agents` | `limit` 50, descriptions as 200-character previews | 100 | `has_more` / `next_cursor`, `description_truncated` |
+| `get_cluster` | `limit` 25 | 100 | `next_cursor` |
+
+Write-side caps keep the stored data these replies carry in proportion. They apply to new writes only; rows stored before them still read back.
+
+- `remember` / `update_memory`: at most 50 tags, each at most 100 characters.
+- `set_state`: a value of at most 16,384 characters as compact JSON.
+- Workspace description (web UI / REST): at most 1,000 characters; `get_context_info` serves a longer stored one cut to 1,000 with `workspace.description_truncated: true`.
+
 ## Usage notes
 
 The descriptions an agent receives from `tools/list` are paid for on every session, so they carry only what is needed to call a tool correctly: its purpose, when to use it instead of a neighbour, what each parameter means, the response keys, and the rules that must not be missed. The walkthroughs, rationale and longer examples live here. The plugin's `guide` skill carries the short version for an agent that wants it in-session.

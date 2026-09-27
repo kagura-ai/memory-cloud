@@ -33,7 +33,8 @@ from mcp_server.tools._profiles import (
 # budgets live in ``test_tool_definition_budget``.
 # #1683 (a title and annotations on every tool) and #1685 (reference()'s paging
 # parameters) took it to 32,999; a tool joining ``CORE_TOOLS`` still overshoots.
-CORE_CHAR_BUDGET = 33_500  # (#1683, #1685) was 32,000
+# #1743 (paging / max_chars parameters on the bounded tools) took it to 34,203.
+CORE_CHAR_BUDGET = 35_000  # (#1743) was 33,500
 
 REGISTRY = [tool["name"] for tool in get_tool_definitions()]
 
