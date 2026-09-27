@@ -68,6 +68,7 @@ class _Recorder:
 class _Sessions:
     def __init__(self) -> None:
         self.fail_with: BaseException | None = None
+        self.lookup_fails_with: BaseException | None = None
 
     async def get_or_create_session(self, user_id, workspace_id=None, session_id=None):
         if self.fail_with is not None:
@@ -77,6 +78,8 @@ class _Sessions:
         )
 
     async def get_owned_session(self, session_id, user_id, workspace_id):
+        if self.lookup_fails_with is not None:
+            raise self.lookup_fails_with
         return "missing", None
 
 
@@ -319,6 +322,25 @@ async def test_a_session_re_adoption_failure_is_a_jsonrpc_error(app):
     data = _assert_jsonrpc_failure(send, request_id=3, status=500, cause="internal_error")
     assert "boom" not in json.dumps(send.body)
     assert "retry_after_seconds" not in data
+
+
+@pytest.mark.asyncio
+async def test_a_session_lookup_failure_is_a_jsonrpc_error(app):
+    app.sessions.lookup_fails_with = ConnectionError("redis at 10.0.0.9:6379 refused")
+    send = await app.call(_rpc("tools/list", request_id=4), headers={b"mcp-session-id": b"s-1"})
+
+    _assert_jsonrpc_failure(send, request_id=4, status=503, cause="service_unavailable")
+    assert "6379" not in json.dumps(send.body)
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_uses_the_legacy_timeout_code(app):
+    app.sessions.lookup_fails_with = TimeoutError()
+    send = await app.call(_rpc("tools/list", request_id=4), headers={b"mcp-session-id": b"s-1"})
+
+    assert send.status == 503
+    assert send.body["error"]["code"] == -32001
+    assert send.body["error"]["data"]["cause"] == "timeout"
 
 
 @pytest.mark.asyncio

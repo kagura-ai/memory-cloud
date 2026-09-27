@@ -1497,9 +1497,15 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         else:
             # Ownership before activity: only the caller's own session is
             # touched, so a rejected one still idles out.
-            lookup, session = await session_manager.get_owned_session(
-                session_id, user_id, workspace_id
-            )
+            try:
+                lookup, session = await session_manager.get_owned_session(
+                    session_id, user_id, workspace_id
+                )
+            except Exception as e:
+                # #1742: same answer as a failure opening a session.
+                logger.error(f"MCP {method} /mcp session lookup failed: {e}", exc_info=True)
+                await _send_transport_failure(send, e, body=parsed_body, era="legacy")
+                return
             if lookup == "missing":
                 # Not held here: expired, or lost on a restart or deploy. It
                 # is re-adopted for the authenticated caller under the same
