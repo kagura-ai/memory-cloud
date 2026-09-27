@@ -90,7 +90,8 @@ def parse_offset_cursor(raw: Any, name: str = "cursor") -> int:
     """
     if raw is None or raw == "":
         return 0
-    if not isinstance(raw, str) or not raw.isdigit():
+    # isascii(): str.isdigit() also accepts e.g. superscripts, which int() refuses.
+    if not isinstance(raw, str) or not (raw.isascii() and raw.isdigit()):
         raise BudgetArgumentError(
             f"{name} must be the next_cursor of a previous response.",
             raw,

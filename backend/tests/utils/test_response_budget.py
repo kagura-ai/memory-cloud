@@ -43,7 +43,7 @@ def test_offset_cursor_round_trips_and_refuses_garbage():
     assert parse_offset_cursor(None) == 0
     assert parse_offset_cursor("") == 0
     assert parse_offset_cursor("150") == 150
-    for bad in ("-1", "abc", 5, "1.5"):
+    for bad in ("-1", "abc", 5, "1.5", "²", "١٢"):
         with pytest.raises(BudgetArgumentError):
             parse_offset_cursor(bad)
 

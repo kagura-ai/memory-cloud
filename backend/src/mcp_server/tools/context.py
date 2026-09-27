@@ -785,7 +785,11 @@ def _validate_list_contexts_args(args: dict[str, Any]) -> list[TextContent] | No
     if limit is not None and type(limit) is not int:
         return _error_response("validation_error", "'limit' must be an integer.", received=limit)
     cursor = args.get("cursor")
-    if cursor is not None and cursor != "" and not (isinstance(cursor, str) and cursor.isdigit()):
+    if (
+        cursor is not None
+        and cursor != ""
+        and not (isinstance(cursor, str) and cursor.isascii() and cursor.isdigit())
+    ):
         return _error_response(
             "validation_error",
             "'cursor' must be the next_cursor of a previous list_contexts response.",
@@ -873,7 +877,8 @@ async def handle_list_contexts(
         if include_details and not name_filter
         else _LIST_CONTEXTS_DEFAULT_LIMIT
     )
-    limit = max(1, min(args.get("limit") or default_limit, _LIST_CONTEXTS_MAX_LIMIT))
+    raw_limit = args.get("limit")
+    limit = max(1, min(default_limit if raw_limit is None else raw_limit, _LIST_CONTEXTS_MAX_LIMIT))
     offset = int(args.get("cursor") or 0)
 
     from db.base import get_db

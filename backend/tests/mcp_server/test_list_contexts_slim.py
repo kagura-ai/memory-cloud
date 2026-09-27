@@ -711,7 +711,7 @@ async def test_default_page_is_100_with_a_cursor():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("limit", "returned"), [(5, 5), (0, 100), (-3, 1), (120, 120)])
+@pytest.mark.parametrize(("limit", "returned"), [(5, 5), (0, 1), (-3, 1), (120, 120)])
 async def test_limit_is_clamped_to_1_200(limit, returned):
     harness = _Harness([_context(f"ctx-{i:03d}", age_days=i) for i in range(250)])
     payload = await _payload(harness, {"limit": limit})
@@ -745,7 +745,7 @@ async def test_include_details_without_a_filter_refuses_a_large_limit():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("args", [{"limit": "10"}, {"cursor": "x"}, {"cursor": 5}])
+@pytest.mark.parametrize("args", [{"limit": "10"}, {"cursor": "x"}, {"cursor": 5}, {"cursor": "²"}])
 async def test_bad_paging_arguments_are_refused(args):
     payload = await _payload(_Harness([_context("a")]), args)
     assert payload["error"] == "validation_error"
