@@ -59,7 +59,11 @@ from utils.exceptions import AuthenticationError, AuthorizationError, RedisError
 from utils.logger import get_logger
 from utils.oauth_errors import rfc6749_error_response
 from utils.oauth_messages import get_oauth_messages
-from utils.redirect_uri import is_valid_redirect_uri_pattern
+from utils.redirect_uri import (
+    is_loopback_redirect_uri,
+    is_valid_redirect_uri_pattern,
+    redirect_uri_display_host,
+)
 
 
 def _check_redirect_uri_patterns(value: list[str]) -> list[str]:
@@ -1784,6 +1788,12 @@ async def oauth_authorize_get(
                 "locale": locale,
                 "messages": messages,
                 "permission_keys": _consent_permission_keys(granted_scope),
+                # #1741: name where the user is sent next, and warn when the
+                # client can only redirect to this computer (its name is then
+                # self-asserted and unverifiable).
+                "redirect_host": redirect_uri_display_host(redirect_uri),
+                "loopback_only": bool(client.redirect_uris)
+                and all(is_loopback_redirect_uri(uri) for uri in client.redirect_uris),
             },
         )
     finally:

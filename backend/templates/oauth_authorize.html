@@ -73,6 +73,30 @@ h1 {
     font-weight: bold;
     margin-right: 8px;
 }
+.redirect-info {
+    color: #4a5568;
+    font-size: 14px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(0,0,0,0.06);
+    overflow-wrap: anywhere;
+}
+.redirect-host {
+    color: var(--kagura-ink);
+}
+.loopback-warning {
+    background: #fff7ed;
+    border: 1px solid #fdba74;
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 24px;
+    font-size: 14px;
+    color: #7c2d12;
+}
+.loopback-warning .warning-title {
+    font-weight: 700;
+    margin-bottom: 4px;
+}
 .user-info {
     text-align: center;
     color: #718096;
@@ -209,7 +233,14 @@ button:focus-visible {
 {% for key in permission_keys %}
 <div class="permission-item">{{ messages.permissions[key] }}</div>
 {% endfor %}
+<div class="redirect-info">{{ messages.redirect_notice }} <strong class="redirect-host">{{ redirect_host }}</strong></div>
 </div>
+{% if loopback_only %}
+<div class="loopback-warning" role="alert">
+<div class="warning-title">{{ messages.loopback_warning_title }}</div>
+<div>{{ messages.loopback_warning_body }}</div>
+</div>
+{% endif %}
 <div class="user-info">
 {{ messages.signing_in_as }} <strong>{{ user_email }}</strong>
 </div>

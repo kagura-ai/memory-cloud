@@ -3,6 +3,7 @@
 Issue #221: Internationalization support for OAuth authorization page.
 Issue #218: Error page messages for invalid redirect_uri pre-check.
 Issue #1686: Error page messages for an authorization request refused before consent.
+Issue #1741: Redirect host notice and loopback-only warning on the consent page.
 Supports English and Japanese.
 """
 
@@ -14,6 +15,14 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
         "cancel": "Cancel",
         "signing_in_as": "Signing in as",
         "badge_text": "Secure Authorization",
+        "redirect_notice": "After you approve, you will be sent to",
+        "loopback_warning_title": "This app runs on your own computer",
+        "loopback_warning_body": (
+            "It can only receive the sign-in on this computer (a localhost "
+            "address), so its name has not been verified. Approve only if you "
+            "just started this sign-in from an app on this computer, such as "
+            "a command-line tool. Otherwise, cancel."
+        ),
         "permissions": {
             "read": "Read your memories",
             "write": "Write new memories",
@@ -55,6 +64,15 @@ OAUTH_MESSAGES: dict[str, dict[str, str | dict[str, str]]] = {
         "cancel": "キャンセル",
         "signing_in_as": "ログイン中",
         "badge_text": "セキュア認可",
+        "redirect_notice": "許可すると、次の宛先に移動します:",
+        "loopback_warning_title": "このアプリはお使いのコンピューター上で動作しています",
+        "loopback_warning_body": (
+            "このアプリはこのコンピューター上 (localhost のアドレス) でしか"
+            "サインインを受け取れないため、名前は確認されていません。"
+            "このコンピューター上のアプリ (コマンドラインツールなど) から"
+            "今サインインを始めた場合にのみ許可してください。そうでなければ"
+            "キャンセルしてください。"
+        ),
         "permissions": {
             "read": "メモリーの読み取り",
             "write": "新しいメモリーの作成",
