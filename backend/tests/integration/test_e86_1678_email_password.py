@@ -4,7 +4,10 @@
   provider, never for ``@local`` addresses and never for password-only users;
 - ``email_action_tokens`` has the ``purpose`` CHECK, the unique ``token_hash``,
   the ``(user_id, purpose)`` index, and cascades with its user;
-- downgrade drops the table and the column; the round trip is repeatable.
+- ``users`` gets the ``lower(email)`` expression index the email sign-in and
+  reset lookups (``lower(email) = :normalized``) use;
+- downgrade drops the table, the index and the column; the round trip is
+  repeatable.
 """
 
 import uuid
@@ -83,6 +86,12 @@ def _column_exists(conn: Connection) -> bool:
     )
 
 
+def _email_lower_index(conn: Connection) -> str | None:
+    return conn.execute(
+        text("SELECT indexdef FROM pg_indexes WHERE indexname = 'ix_users_email_lower'")
+    ).scalar_one_or_none()
+
+
 def _leave_db_at_head() -> None:
     with _alembic_at_test_db():
         command.upgrade(_get_alembic_config(), "head")
@@ -99,6 +108,7 @@ class TestE86EmailPassword:
             with engine.begin() as conn:
                 assert not _table_exists(conn)
                 assert not _column_exists(conn)
+                assert _email_lower_index(conn) is None
                 google_user = _seed_user(conn, provider="google")
                 github_user = _seed_user(conn, provider="github")
                 password_only = _seed_user(conn)
@@ -132,6 +142,10 @@ class TestE86EmailPassword:
                     )
                 ).scalar_one()
                 assert "(user_id, purpose)" in index
+                email_index = _email_lower_index(conn)
+                assert email_index is not None
+                assert "lower((email)::text)" in email_index
+                assert "UNIQUE" not in email_index  # case variants may coexist
                 _insert_token(conn, user_id=password_only)
 
             # The purpose vocabulary is closed.
@@ -159,12 +173,14 @@ class TestE86EmailPassword:
             with engine.begin() as conn:
                 assert not _table_exists(conn)
                 assert not _column_exists(conn)
+                assert _email_lower_index(conn) is None
 
             # Repeatable.
             with _alembic_at_test_db():
                 command.upgrade(_get_alembic_config(), E86_REV)
             with engine.begin() as conn:
                 assert _table_exists(conn)
+                assert _email_lower_index(conn) is not None
                 assert _verified_at(conn, google_user) is not None
                 for uid in (google_user, github_user, cli_admin, cli_admin_upper):
                     conn.execute(text("DELETE FROM users WHERE user_id = :uid"), {"uid": uid})

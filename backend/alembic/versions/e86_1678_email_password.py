@@ -13,10 +13,15 @@
   ``user_id`` is ``ON DELETE CASCADE``. ``(user_id, purpose)`` is indexed for
   the "invalidate outstanding tokens" update.
 
+- ``ix_users_email_lower``: a (non-unique) expression index on
+  ``lower(email)`` for the email sign-in and reset lookups
+  (``lower(email) = :normalized``). Non-unique: addresses that differ only by
+  case may already coexist, and the lookup fails closed on them.
+
 ``users.auth_method`` and its CHECK are unchanged.
 
-Downgrade drops the table and the column (verification timestamps and
-outstanding links are lost).
+Downgrade drops the table, the index and the column (verification
+timestamps and outstanding links are lost).
 
 Revision ID: e86_1678_email_password
 Revises: e85_1665_terms_acceptances
@@ -88,10 +93,12 @@ def upgrade() -> None:
         "email_action_tokens",
         ["user_id", "purpose"],
     )
+    op.create_index("ix_users_email_lower", "users", [sa.text("lower(email)")])
 
 
 def downgrade() -> None:
-    """Drop ``email_action_tokens`` and ``users.email_verified_at``."""
+    """Drop ``email_action_tokens``, ``ix_users_email_lower`` and ``users.email_verified_at``."""
+    op.drop_index("ix_users_email_lower", table_name="users")
     op.drop_index("ix_email_action_tokens_user_purpose", table_name="email_action_tokens")
     op.drop_table("email_action_tokens")
     op.drop_column("users", "email_verified_at")

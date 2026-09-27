@@ -186,6 +186,10 @@ class User(Base):
         # reject negative bonus values too. tests/test_schema_drift.py
         # verifies the SQL text matches the migration's ADD CONSTRAINT.
         CheckConstraint("workspace_slot_bonus >= 0", name="workspace_slot_bonus_nonneg"),
+        # Issue #1678: email sign-in / reset look accounts up by
+        # ``lower(email)``. Non-unique (case variants may coexist; the lookup
+        # fails closed). Mirrors alembic e86_1678_email_password.
+        Index("ix_users_email_lower", text("lower(email)")),
     )
 
     def __repr__(self) -> str:
