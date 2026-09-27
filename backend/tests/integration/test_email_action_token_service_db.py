@@ -17,7 +17,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from models.auth import EmailActionToken, User
@@ -188,3 +188,60 @@ class TestEmailActionTokenService:
         start.set()
         results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
         assert sum(results) == 1
+
+    async def test_concurrent_issues_leave_only_the_newest_link(
+        self, async_engine, db_session: AsyncSession, user_id: str
+    ) -> None:
+        # Each issuer's commit waits (briefly) for the others to reach theirs.
+        # Without the user-row lock every issuer invalidates before any of
+        # them inserts, all arrive, and all links stay live. With it, the
+        # others are blocked inside ``issue``; each commits alone, in turn.
+        parallel = 3
+        session_maker = async_sessionmaker(async_engine, expire_on_commit=False)
+        start = asyncio.Event()
+        all_arrived = asyncio.Event()
+        arrived = 0
+        issued_in_order: list[str] = []
+
+        async def _issue_one() -> None:
+            nonlocal arrived
+            async with session_maker() as session:
+                await start.wait()
+                issued = await EmailActionTokenService(session).issue(
+                    user_id=user_id, email=f"{user_id}@token.invalid", purpose="reset_password"
+                )
+                issued_in_order.append(issued.raw_token)
+                arrived += 1
+                if arrived >= parallel:
+                    all_arrived.set()
+                try:
+                    await asyncio.wait_for(all_arrived.wait(), 0.5)
+                except TimeoutError:
+                    # Expected with the lock: the others are still blocked in
+                    # ``issue`` and never arrive while this one waits.
+                    pass
+                await session.commit()
+
+        tasks = [asyncio.create_task(_issue_one()) for _ in range(parallel)]
+        await asyncio.sleep(0)
+        start.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=15)
+
+        live = await db_session.scalar(
+            select(func.count())
+            .select_from(EmailActionToken)
+            .where(
+                EmailActionToken.user_id == user_id,
+                EmailActionToken.purpose == "reset_password",
+                EmailActionToken.used_at.is_(None),
+            )
+        )
+        assert live == 1
+        service = EmailActionTokenService(db_session)
+        usable = [
+            raw
+            for raw in issued_in_order
+            if await service.consume(raw_token=raw, purpose="reset_password") is not None
+        ]
+        await db_session.commit()
+        assert usable == [issued_in_order[-1]]

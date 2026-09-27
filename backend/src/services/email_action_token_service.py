@@ -7,12 +7,16 @@ cheat sheet:
 - The raw token is ``secrets.token_urlsafe(32)`` (256 bits). Only its SHA-256
   hex digest is stored, so a database read cannot be replayed as a link.
 - Issuing a token for a ``(user, purpose)`` invalidates that pair's outstanding
-  tokens: only the newest link works. ``invalidate`` does the same on demand
-  (e.g. when the password changes).
+  tokens: only the newest link works. Issuance locks the user row first, so
+  two concurrent issues run one after the other and cannot both leave a live
+  link. ``invalidate`` does the same on demand (e.g. when the password
+  changes).
 - Consuming is one ``UPDATE ... WHERE used_at IS NULL AND expires_at > now
   RETURNING``. Under Postgres row locking a second, concurrent consume of the
   same token re-evaluates the predicate after the first commits and matches no
-  row, so a link can never be used twice.
+  row, so a link can never be used twice. It locks the token's user row
+  BEFORE that update, so every writer here takes its locks in one order —
+  user row, then token rows — as the password flows do (no deadlock).
 - Unknown, expired, used and malformed tokens are indistinguishable to the
   caller (``None``).
 
@@ -28,11 +32,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
-from models.auth import EmailActionToken
+from models.auth import EmailActionToken, User
 from utils.datetime import utcnow
 from utils.hashing import sha256_hex
 from utils.logger import get_logger
@@ -136,6 +140,9 @@ class EmailActionTokenService:
         Returns:
             The raw token and its expiry. The row is flushed, not committed.
         """
+        # Serialize issuance per user: without the lock two concurrent issues
+        # both invalidate before either inserts, and both links stay live.
+        await self._lock_user(user_id)
         now = utcnow()
         await self.invalidate(user_id=user_id, purposes=(purpose,), now=now)
         raw_token = secrets.token_urlsafe(32)
@@ -203,6 +210,16 @@ class EmailActionTokenService:
         if not _looks_issued(raw_token):
             return None
         token_hash = sha256_hex(raw_token)
+        # Lock the account before the token row (see the module docstring).
+        owner = await self.db.scalar(
+            select(EmailActionToken.user_id).where(
+                EmailActionToken.token_hash == token_hash,
+                EmailActionToken.purpose == purpose,
+            )
+        )
+        if owner is None:
+            return None
+        await self._lock_user(owner)
         now = utcnow()
         result = await self.db.execute(
             update(EmailActionToken)
@@ -228,3 +245,7 @@ class EmailActionTokenService:
             return None
         logger.info("email_action_token_consumed", user_id=row.user_id, purpose=purpose)
         return ConsumedEmailActionToken(user_id=row.user_id, email=row.email)
+
+    async def _lock_user(self, user_id: str) -> None:
+        """Take the user row lock (``SELECT ... FOR UPDATE``) for this transaction."""
+        await self.db.execute(select(User.user_id).where(User.user_id == user_id).with_for_update())
