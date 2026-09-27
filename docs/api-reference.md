@@ -928,7 +928,10 @@ authorization code grant and PKCE:
 1. `GET /api/v1/oauth/authorize` with `response_type=code`, `client_id`,
    `redirect_uri`, `state`, `scope`, `code_challenge`,
    `code_challenge_method=S256` and `resource`. A signed-in user gets the
-   consent page; anyone else is sent to sign in first.
+   consent page; anyone else is sent to sign in first. The consent page names
+   the host the user is sent to after approving (with its port for a loopback
+   redirect), and warns when every registered `redirect_uri` of the client is
+   a loopback URI, since such a client's name cannot be verified.
 2. Approving redirects to `redirect_uri` with `code` and `state`.
 3. `POST /api/v1/oauth/token` with `grant_type=authorization_code`, `code`,
    `redirect_uri`, `client_id`, `code_verifier` and `resource`.
@@ -940,7 +943,20 @@ its host is `claude.ai`, `claude.com`, `anthropic.com`, `chatgpt.com`,
 `chat.openai.com`, `platform.openai.com`, `cursor.sh` or `cursor.com` (or a
 subdomain of one), or it is a loopback `http://localhost` / `127.0.0.1` /
 `[::1]` URI and the `client_name` names a supported client. A registration
-with any other entry is refused with `invalid_client_metadata`. The stored
+with any other entry is refused with `invalid_client_metadata`.
+Registrations are limited to 5 per minute per client address (`429`
+`invalid_request` over it). `OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS`
+(comma-separated CIDR ranges, empty by default) exempts callers in those
+ranges, for example a connector platform's published egress range; behind a
+reverse proxy, set `FORWARDED_ALLOW_IPS` so the address is the caller's.
+A malformed range stops the server at startup.
+
+**Loopback redirects.** A `redirect_uri` that is `http` on `localhost`,
+`127.0.0.1` or `[::1]` matches a registered loopback URI on any port
+(RFC 8252 §7.3), so a native client may listen on an ephemeral port. The
+scheme, host, path and query must still match: `localhost` and `127.0.0.1`
+are different hosts. Every other `redirect_uri` is matched exactly (or by
+its registered trailing `/*`). The stored
 scope is the requested scopes the server defines (`scopes_supported`). A
 registration that omits `scope`, or whose defined scopes include no
 `memory:*` scope (for example `claudeai` or `openid offline_access`), gets the
@@ -1017,6 +1033,21 @@ ignored (`/mcp?profile=core` names it). Any other origin or path is
 
 The token endpoint logs the grant type and the names of the parameters it
 receives, not their values.
+
+**Revocation and introspection.** Both endpoints take
+`application/x-www-form-urlencoded` and authenticate the caller (#1741):
+
+| Endpoint | Who may call | A token issued to another client |
+|---|---|---|
+| `POST /api/v1/oauth/revoke` (RFC 7009) | A public client by `client_id` (form, or HTTP Basic with an empty secret); a confidential client with its secret by HTTP Basic (`client_secret_basic`) or `client_id` + `client_secret` in the form (`client_secret_post`) | Left alone; the response is `200`, the same as for an unknown token |
+| `POST /api/v1/oauth/introspect` (RFC 7662) | A confidential client with its secret, by either method. Public clients cannot introspect | `{"active": false}` |
+
+A missing `client_id`, an unknown client or a wrong secret gets `401`
+`invalid_client` with `WWW-Authenticate: Basic`. HTTP Basic together with a
+form `client_secret`, or with a form `client_id` naming another client, gets
+`400` `invalid_request`. Revoking a
+refresh token also revokes the access token issued with it; revoking an
+access token leaves its refresh token usable.
 
 ---
 
