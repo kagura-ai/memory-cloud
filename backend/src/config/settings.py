@@ -1130,6 +1130,27 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Email + password sign-in (Issue #1678): lifetimes of the single-use
+    # links sent by email. Short for anything that sets a password.
+    password_reset_token_ttl_minutes: int = Field(
+        default=30,
+        ge=1,
+        le=24 * 60,
+        description="Lifetime of a password-reset link (minutes).",
+    )
+    set_password_token_ttl_minutes: int = Field(
+        default=30,
+        ge=1,
+        le=24 * 60,
+        description="Lifetime of a set-a-password link for a signed-in user (minutes).",
+    )
+    verify_email_token_ttl_hours: int = Field(
+        default=24,
+        ge=1,
+        le=7 * 24,
+        description="Lifetime of an email-verification link (hours).",
+    )
+
     # Memory Analysis allowlist (Issue #496) — kill switch.
     # Empty (default) → feature 403 globally. Comma-separated UUIDs → only listed
     # workspaces can run analyses. Env: ANALYSIS_ENABLED_WORKSPACE_IDS.
