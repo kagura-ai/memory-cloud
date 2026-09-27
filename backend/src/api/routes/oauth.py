@@ -37,7 +37,6 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Res
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, ValidationError, field_validator
-from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import ClientDisconnect
 
 from auth.dependencies import SessionUser, require_admin
@@ -52,7 +51,7 @@ from auth.oauth2_server import (
 from auth.oauth_scope import client_registered_scope, granted_scope, registration_scope
 from auth.starlette_oauth2_request import StarletteOAuth2Payload
 from config.settings import get_settings
-from db.base import get_db, get_sync_session
+from db.base import get_sync_session
 from db.redis import increment_counter
 from models.api_base import TZAwareBaseModel
 from models.auth import OAuth2Client, OAuth2DeviceCode, OAuth2Token, User, generate_user_code
