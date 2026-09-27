@@ -733,14 +733,21 @@ def _bound_cluster_page(cluster: dict[str, Any], *, explicit_limit: bool) -> dic
     budget = (MAX_CHARS_LIMIT if explicit_limit else DEFAULT_MAX_CHARS) - json_chars(
         {"status": "success", **cluster, "memories": []}
     )
-    placed = max(1, fit_items(members, budget)) if members else 0
+    placed = fit_items(members, budget)
     if placed >= len(members):
         return cluster
-    return {
-        **cluster,
-        "memories": members[:placed],
-        "next_cursor": members[placed - 1]["memory_id"],
-    }
+    if placed == 0:
+        first = members[0]
+        page = [
+            {
+                **{k: v for k, v in first.items() if k != "tags"},
+                "tags_omitted": True,
+                "tags_total_chars": json_chars(first.get("tags")),
+            }
+        ]
+    else:
+        page = members[:placed]
+    return {**cluster, "memories": page, "next_cursor": page[-1]["memory_id"]}
 
 
 async def handle_get_cluster(

@@ -533,7 +533,7 @@ MCP clients cap what a tool result may put in front of the model — about 25k t
 | `list_tags` | `limit` 50 | a page holds at most 200 tags (`limit` 1–500 is still accepted) | `has_more` (narrow with `prefix` / `min_count`) |
 | `list_files` | `limit` 50 | 100 | `has_more` / `next_cursor` |
 | `list_agents` | `limit` 50, descriptions as 200-character previews | 100 | `has_more` / `next_cursor`, `description_truncated` |
-| `get_cluster` | `limit` 25 | 100 | `next_cursor` |
+| `get_cluster` | `limit` 25, page stops at 20,000 characters | 100, page stops at 100,000 characters | `next_cursor`; `tags_omitted` on a member larger than the page |
 
 Write-side caps keep the stored data these replies carry in proportion. They apply to new writes only; rows stored before them still read back.
 
