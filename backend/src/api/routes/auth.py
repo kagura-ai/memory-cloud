@@ -18,6 +18,7 @@ Security features:
 - First user auto-assigned ADMIN role
 """
 
+import functools
 import os
 import re
 import secrets
@@ -27,7 +28,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,7 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import auth.oauth_endpoints as oauth_endpoints
 from auth.dependencies import SessionUser
 from auth.oauth2 import OAuth2Manager
-from auth.password import verify_password
+from auth.password import hash_password, verify_password
 from auth.roles import get_role_manager
 from auth.session import SessionManager
 from auth.totp import verify_totp
@@ -2227,37 +2228,140 @@ def _safe_redirect_url(return_to: str | None) -> str:
 _LOGIN_ATTEMPT_PREFIX = "login_attempts:"
 _MAX_LOGIN_ATTEMPTS = 5
 _LOGIN_LOCKOUT_SECONDS = 300  # 5 minutes
+# #1678: failed sign-ins per client address, across identifiers — stops one
+# client from spraying passwords over many login ids / emails. Higher than the
+# per-identifier limit so a shared NAT with a few typos is not locked out.
+_LOGIN_IP_ATTEMPT_PREFIX = "login_ip_attempts:"
+_MAX_LOGIN_IP_ATTEMPTS = 20
 
 
-def _check_login_rate_limit(login_id: str) -> None:
-    """Check brute-force protection. Raises 429 if too many attempts."""
+def _normalize_login_identifier(identifier: str) -> str:
+    """Normalize a login id / email for rate-limit keys (#1678).
+
+    ``Admin`` and ``admin `` share one failure counter, and so do the case
+    variants of an email address.
+    """
+    return identifier.strip().lower()
+
+
+def _login_client_ip(request: Request) -> str:
+    """Client address for the per-IP counter.
+
+    ``request.client`` is what the ASGI server resolved — behind a trusted
+    proxy uvicorn's ``--proxy-headers`` / ``--forwarded-allow-ips`` already
+    applied ``X-Forwarded-For`` — the same source the device-flow and DCR
+    limiters use.
+    """
+    return request.client.host if request.client else "unknown"
+
+
+def _check_login_rate_limit(login_id: str, client_ip: str | None = None) -> None:
+    """Check brute-force protection. Raises 429 if too many attempts.
+
+    Args:
+        login_id: The normalized identifier (see ``_normalize_login_identifier``).
+        client_ip: The client address; its counter is checked when given.
+    """
     if not _session_manager:
         return
-    key = f"{_LOGIN_ATTEMPT_PREFIX}{login_id}"
-    attempts = _session_manager._redis.get(key)
-    if attempts and int(attempts) >= _MAX_LOGIN_ATTEMPTS:
-        raise HTTPException(
-            status_code=429,
-            detail="Too many login attempts. Please try again later.",
-        )
+    keys = [(f"{_LOGIN_ATTEMPT_PREFIX}{login_id}", _MAX_LOGIN_ATTEMPTS)]
+    if client_ip is not None:
+        keys.append((f"{_LOGIN_IP_ATTEMPT_PREFIX}{client_ip}", _MAX_LOGIN_IP_ATTEMPTS))
+    for key, limit in keys:
+        attempts = _session_manager._redis.get(key)
+        if attempts and int(attempts) >= limit:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many login attempts. Please try again later.",
+            )
 
 
-def _record_login_failure(login_id: str) -> None:
-    """Record a failed login attempt."""
+def _record_login_failure(login_id: str, client_ip: str | None = None) -> None:
+    """Record a failed login attempt against the identifier (and the client)."""
     if not _session_manager:
         return
-    key = f"{_LOGIN_ATTEMPT_PREFIX}{login_id}"
     pipe = _session_manager._redis.pipeline()
-    pipe.incr(key)
-    pipe.expire(key, _LOGIN_LOCKOUT_SECONDS)
+    keys = [f"{_LOGIN_ATTEMPT_PREFIX}{login_id}"]
+    if client_ip is not None:
+        keys.append(f"{_LOGIN_IP_ATTEMPT_PREFIX}{client_ip}")
+    for key in keys:
+        pipe.incr(key)
+        pipe.expire(key, _LOGIN_LOCKOUT_SECONDS)
     pipe.execute()
 
 
 def _clear_login_failures(login_id: str) -> None:
-    """Clear failed login attempts on success."""
+    """Clear the identifier's failed attempts on success.
+
+    The per-client counter is left to expire: a success on one account must
+    not reset a client's budget for guessing others.
+    """
     if not _session_manager:
         return
     _session_manager._redis.delete(f"{_LOGIN_ATTEMPT_PREFIX}{login_id}")
+
+
+@functools.cache
+def _dummy_password_hash() -> str:
+    """A bcrypt hash of a random secret, computed once (#1678).
+
+    Checked against on a sign-in miss so an unknown identifier costs the same
+    bcrypt work as a wrong password — response time does not reveal whether an
+    account exists.
+    """
+    return hash_password(secrets.token_urlsafe(16))
+
+
+async def resolve_password_login_user(db: AsyncSession, identifier: str) -> User | None:
+    """Find the account a password sign-in identifier names (#1678).
+
+    Resolution order:
+
+    1. An exact ``login_id`` match on an account with a password — the CLI
+       admins' arbitrary login ids keep working unchanged.
+    2. Otherwise, when the identifier looks like an email address, the
+       account whose ``lower(email)`` equals ``lower(trim(identifier))``, whose
+       email is verified and which has a password. ``@local`` addresses (CLI
+       admins) never match. More than one match — accounts whose emails
+       differ only by case — fails closed.
+
+    Args:
+        db: The async session.
+        identifier: What the person typed as "Login ID or email".
+
+    Returns:
+        The user, or ``None`` when nothing (or more than one thing) matches.
+    """
+    result = await db.execute(
+        select(User).where(User.login_id == identifier, User.password_hash.is_not(None))
+    )
+    user = result.scalar_one_or_none()
+    if user is not None or "@" not in identifier:
+        return user
+
+    email = identifier.strip().lower()
+    if not email or email.endswith("@local"):
+        return None
+    rows = (
+        (
+            await db.execute(
+                select(User)
+                .where(
+                    func.lower(User.email) == email,
+                    User.email_verified_at.is_not(None),
+                    User.password_hash.is_not(None),
+                )
+                .limit(2)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(rows) != 1:
+        if rows:
+            logger.warning("password_login_email_collision", matches=len(rows))
+        return None
+    return rows[0]
 
 
 # #1665: a password login that stops at the MFA step carries its terms
@@ -2307,7 +2411,14 @@ async def password_login(
     request: Request,
     return_to: str | None = Query(None),
 ):
-    """Authenticate with login_id and password."""
+    """Authenticate with a login ID or a verified email, and a password.
+
+    ``login_id`` carries either an admin login ID or (#1678) the verified
+    email of an account that has a password — see
+    ``resolve_password_login_user``. Every failure is the same generic 401;
+    an unknown identifier costs the same bcrypt work as a wrong password.
+    Failures count per normalized identifier and per client address.
+    """
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Session manager not initialized")
 
@@ -2318,24 +2429,25 @@ async def password_login(
         raise InvalidCredentialsError()
 
     # Brute-force protection
-    _check_login_rate_limit(body.login_id)
+    rate_key = _normalize_login_identifier(body.login_id)
+    client_ip = _login_client_ip(request)
+    _check_login_rate_limit(rate_key, client_ip)
 
+    user: User | None = None
     async for db in get_db():
-        result = await db.execute(
-            select(User).where(User.login_id == body.login_id, User.auth_method == "password")
-        )
-        user = result.scalar_one_or_none()
+        user = await resolve_password_login_user(db, body.login_id)
         break
 
     if not user or not user.password_hash:
-        _record_login_failure(body.login_id)
+        verify_password(body.password, _dummy_password_hash())
+        _record_login_failure(rate_key, client_ip)
         raise InvalidCredentialsError()
 
     if not verify_password(body.password, user.password_hash):
-        _record_login_failure(body.login_id)
+        _record_login_failure(rate_key, client_ip)
         raise InvalidCredentialsError()
 
-    _clear_login_failures(body.login_id)
+    _clear_login_failures(rate_key)
 
     # MFA check
     if user.totp_enabled and user.totp_secret:
@@ -2367,7 +2479,7 @@ async def password_login(
     )
     _set_session_cookie(response, session_id)
 
-    logger.info(f"Password login successful: {user.email}")
+    logger.info("password_login_successful", user_id=user.user_id)
     return response
 
 
