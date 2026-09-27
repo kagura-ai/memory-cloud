@@ -133,7 +133,7 @@ class BillingHandoffRequest(BaseModel):
 class BillingHandoffResponse(TZAwareBaseModel):
     """The minted handoff token and the metadata the billing host needs."""
 
-    token: str = Field(..., description="Ed25519-signed JWT (alg=EdDSA).")
+    token: str = Field(..., description="Ed25519-signed JWT (alg=Ed25519, RFC 9864).")
     token_type: str = Field(default="billing_handoff", description="Token kind discriminator.")
     kid: str = Field(..., description="Signing key id — selects the verifier's public key.")
     jti: str = Field(..., description="Unique token id (verifier enforces single-use).")

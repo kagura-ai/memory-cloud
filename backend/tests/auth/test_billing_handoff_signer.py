@@ -36,7 +36,8 @@ from ._billing_handoff_helpers import (
     token_payload,
 )
 
-_ALGORITHMS = ["EdDSA"]
+# RFC 9864 name for the curve the signing key uses (#1727).
+_ALGORITHMS = ["Ed25519"]
 
 
 def _decode(token: str, public_pem: str) -> dict:
@@ -45,7 +46,7 @@ def _decode(token: str, public_pem: str) -> dict:
 
 
 class TestBillingHandoffSigner:
-    def test_mint_produces_eddsa_jwt_verifiable_with_public_key(self) -> None:
+    def test_mint_produces_ed25519_jwt_verifiable_with_public_key(self) -> None:
         private_pem, public_pem = ed25519_keypair()
         signer = BillingHandoffSigner(settings=handoff_settings(private_pem))
         workspace_id = uuid4()
@@ -81,7 +82,7 @@ class TestBillingHandoffSigner:
         minted = signer.mint(user_id="u", workspace_id=uuid4())
 
         header = token_header(minted.token)
-        assert header["alg"] == "EdDSA"
+        assert header["alg"] == "Ed25519"
         assert header["typ"] == "JWT"
         assert header["kid"] == "rotate-2026"
         assert minted.kid == "rotate-2026"
@@ -343,8 +344,8 @@ class TestOwnershipEpochClaim:
 
 
 def _sign(private_pem: str, payload: dict, *, kid: str = "kid-1") -> str:
-    """Sign an arbitrary payload with the EdDSA private key (cross-impl minter sim)."""
-    header = {"alg": "EdDSA", "typ": "JWT", "kid": kid}
+    """Sign an arbitrary payload with the Ed25519 private key (cross-impl minter sim)."""
+    header = {"alg": "Ed25519", "typ": "JWT", "kid": kid}
     return jwt.encode(header, payload, OKPKey.import_key(private_pem), algorithms=_ALGORITHMS)
 
 

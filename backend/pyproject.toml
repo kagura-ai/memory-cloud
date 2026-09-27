@@ -223,9 +223,6 @@ filterwarnings = [
     # removes the module, so a new import fails the suite instead of warning.
     # Matched on the message: other Authlib deprecations stay warnings.
     "error:authlib.jose module is deprecated:authlib.deprecate.AuthlibDeprecationWarning",
-    # auth/billing_handoff.py installs this filter at import; pytest gives
-    # every test its own filter list, so the suite repeats it here.
-    "ignore:EdDSA is deprecated via RFC 9864:joserfc.errors.SecurityWarning",
 ]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
