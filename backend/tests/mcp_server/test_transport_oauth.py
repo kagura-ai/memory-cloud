@@ -13,8 +13,10 @@
   ``ping`` / ``server/discover`` are not gated. A token whose stored scope
   names no ``memory:*`` scope gets its client's registered ``memory:*``
   scopes, else the DCR default.
-* Sessions on ``/mcp`` and ``/mcp/``: an unknown ``Mcp-Session-Id`` is
-  re-adopted for the caller, another user's or workspace's session is 404,
+* Sessions on ``/mcp`` and ``/mcp/``: an unknown ``Mcp-Session-Id`` in the
+  server-minted format is re-adopted for the caller (#1740: any other is 404,
+  see ``test_transport_spec_alignment``), another user's or workspace's
+  session is 404,
   ``DELETE`` ends the caller's own session (204). Other methods and paths
   never open a session.
 
@@ -48,6 +50,9 @@ from utils.exceptions import AuthenticationError, InvalidTokenError
 ORIGIN = "https://memory.example.com"
 MODERN = "2026-07-28"
 PV_KEY = "io.modelcontextprotocol/protocolVersion"
+# An id in the server-minted format: only those are re-adopted (#1740).
+MINTED = "mcp-0123456789abcdef"
+MINTED_B = MINTED.encode()
 
 
 @pytest.fixture(autouse=True)
@@ -121,6 +126,10 @@ class _Sessions:
 
     async def remove_session(self, session_id):
         self.calls.append(("remove_session", session_id))
+        self._sessions.pop(session_id, None)
+
+    async def terminate_session(self, session_id):
+        self.calls.append(("terminate_session", session_id))
         self._sessions.pop(session_id, None)
 
 
@@ -783,12 +792,12 @@ async def test_an_unknown_session_id_is_re_adopted_for_the_caller(app, path, met
     """A client that cannot re-initialize after a 404 keeps working across a
     restart, a deploy or the idle timeout."""
     body = _rpc("ping", 7) if method == "POST" else None
-    send = await app.call(body, headers={b"mcp-session-id": b"mcp-gone"}, path=path, method=method)
+    send = await app.call(body, headers={b"mcp-session-id": MINTED_B}, path=path, method=method)
 
     assert send.status == 200
-    assert send.headers[b"mcp-session-id"] == b"mcp-gone"
-    assert ("get_or_create_session", "mcp-gone") in app.sessions.calls
-    adopted = app.sessions._sessions["mcp-gone"]
+    assert send.headers[b"mcp-session-id"] == MINTED_B
+    assert ("get_or_create_session", MINTED) in app.sessions.calls
+    adopted = app.sessions._sessions[MINTED]
     assert (adopted.user_id, adopted.workspace_id) == ("user-1", None)
 
 
@@ -797,14 +806,14 @@ async def test_re_adoption_keeps_the_callers_workspace(app):
     from uuid import uuid4
 
     app.workspace = uuid4()
-    first = await app.call(_rpc("ping", 7), headers={b"mcp-session-id": b"mcp-gone"})
+    first = await app.call(_rpc("ping", 7), headers={b"mcp-session-id": MINTED_B})
     assert first.status == 200
-    assert app.sessions._sessions["mcp-gone"].workspace_id == app.workspace
+    assert app.sessions._sessions[MINTED].workspace_id == app.workspace
 
-    again = await app.call(_rpc("ping", 8), headers={b"mcp-session-id": b"mcp-gone"})
+    again = await app.call(_rpc("ping", 8), headers={b"mcp-session-id": MINTED_B})
     assert again.status == 200
-    assert again.headers[b"mcp-session-id"] == b"mcp-gone"
-    assert app.sessions.calls.count(("get_or_create_session", "mcp-gone")) == 1
+    assert again.headers[b"mcp-session-id"] == MINTED_B
+    assert app.sessions.calls.count(("get_or_create_session", MINTED)) == 1
 
 
 @pytest.mark.asyncio
@@ -816,7 +825,7 @@ async def test_a_session_adopted_by_someone_else_meanwhile_is_404(app):
 
     app.sessions.get_or_create_session = taken
     send = await app.call(
-        _rpc("tools/call", 7, name="list_contexts"), headers={b"mcp-session-id": b"mcp-race"}
+        _rpc("tools/call", 7, name="list_contexts"), headers={b"mcp-session-id": MINTED_B}
     )
 
     assert send.status == 404
@@ -837,20 +846,20 @@ async def test_a_rejected_session_is_not_kept_alive_and_is_adopted_after_cleanup
 
     manager = MCPSessionManager()
     monkeypatch.setattr(transport, "get_session_manager", lambda: manager)
-    theirs = await manager.get_or_create_session(user_id="user-2", session_id="mcp-shared")
+    theirs = await manager.get_or_create_session(user_id="user-2", session_id=MINTED)
     idle_since = utcnow() - timedelta(hours=2)
     theirs.last_active_at = idle_since
 
     body = _rpc("ping", 7) if method == "POST" else None
-    rejected = await app.call(body, headers={b"mcp-session-id": b"mcp-shared"}, method=method)
+    rejected = await app.call(body, headers={b"mcp-session-id": MINTED_B}, method=method)
     assert rejected.status == 404
     assert theirs.last_active_at == idle_since
 
     await manager.cleanup_inactive_sessions(timeout_seconds=3600)
-    adopted = await app.call(_rpc("ping", 8), headers={b"mcp-session-id": b"mcp-shared"})
+    adopted = await app.call(_rpc("ping", 8), headers={b"mcp-session-id": MINTED_B})
     assert adopted.status == 200
-    assert adopted.headers[b"mcp-session-id"] == b"mcp-shared"
-    assert manager._sessions["mcp-shared"].user_id == "user-1"
+    assert adopted.headers[b"mcp-session-id"] == MINTED_B
+    assert manager._sessions[MINTED].user_id == "user-1"
 
 
 @pytest.mark.asyncio

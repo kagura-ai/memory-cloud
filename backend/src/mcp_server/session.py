@@ -6,8 +6,10 @@ Based on v4.4.0 MCPSessionManager implementation.
 
 import asyncio
 import logging
+import os
+import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -18,7 +20,32 @@ from utils.datetime import utcnow
 logger = logging.getLogger(__name__)
 
 # How ``MCPSessionManager.get_owned_session`` found a session id (#1686).
-SessionLookup = Literal["owned", "foreign", "missing"]
+# ``terminated`` (#1740): not held, and ended by ``DELETE`` within the idle
+# timeout — the one unknown id that must never be re-adopted.
+SessionLookup = Literal["owned", "foreign", "missing", "terminated"]
+
+# The shape of every id this server mints (``mcp-`` + 16 lowercase hex). Only
+# an unknown id of this shape is re-adopted (#1686, #1740); a client-invented
+# one was never issued, and the spec answers it 404.
+_SERVER_MINTED_SESSION_ID = re.compile(r"mcp-[0-9a-f]{16}")
+
+# A tombstone lasts the idle timeout, and the map is bounded so a client
+# looping initialize → DELETE cannot grow it without limit. When full,
+# the oldest tombstone goes first: its id falls back to the re-adoption rule.
+DEFAULT_MAX_TOMBSTONES = 10_000
+
+
+def is_server_minted_session_id(session_id: str) -> bool:
+    """Whether ``session_id`` has the shape of an id this server mints."""
+    return _SERVER_MINTED_SESSION_ID.fullmatch(session_id) is not None
+
+
+def session_timeout_seconds() -> int:
+    """The MCP session idle timeout (``MCP_SESSION_TIMEOUT_SECONDS``, default 1 hour).
+
+    Shared by the idle cleanup task and the ``DELETE`` tombstones (#1740).
+    """
+    return int(os.getenv("MCP_SESSION_TIMEOUT_SECONDS", "3600"))
 
 
 @dataclass
@@ -39,6 +66,10 @@ class MCPSession:
     server: Server
     created_at: datetime = field(default_factory=utcnow)
     last_active_at: datetime = field(default_factory=utcnow)
+    # The legacy revision ``initialize`` negotiated (#1740): it decides whether
+    # a JSON-RPC batch is accepted. ``None`` for a session re-adopted after a
+    # restart, whose handshake this process never saw.
+    protocol_version: str | None = None
 
 
 class MCPSessionManager:
@@ -51,20 +82,47 @@ class MCPSessionManager:
     Each session maintains its own MCP server instance.
     """
 
-    def __init__(self):
-        """Initialize session manager."""
+    def __init__(
+        self,
+        *,
+        tombstone_ttl_seconds: int | None = None,
+        max_tombstones: int = DEFAULT_MAX_TOMBSTONES,
+    ):
+        """Initialize session manager.
+
+        Args:
+            tombstone_ttl_seconds: How long an id ended by ``DELETE`` stays
+                refused; the idle timeout when ``None``.
+            max_tombstones: Bound on the tombstone map.
+        """
         self._sessions: dict[str, MCPSession] = {}
+        # #1740: ids ended by ``DELETE`` → when their tombstone expires, in
+        # insertion (hence expiry) order.
+        self._tombstones: dict[str, datetime] = {}
+        self._tombstone_ttl_seconds = tombstone_ttl_seconds
+        self._max_tombstones = max_tombstones
         self._lock = asyncio.Lock()
 
     def generate_session_id(self) -> str:
-        """Generate cryptographically secure session ID.
+        """Generate a cryptographically secure session ID.
 
-        Uses UUID v4 for session identification per MCP Streamable HTTP spec.
-
-        Returns:
-            UUID v4 as string (e.g., "550e8400-e29b-41d4-a716-446655440000")
+        ``mcp-`` + 16 hex characters (64 random bits from UUID v4) — the shape
+        ``is_server_minted_session_id`` recognises.
         """
-        return str(uuid4())
+        return f"mcp-{uuid4().hex[:16]}"
+
+    def _is_tombstoned(self, session_id: str) -> bool:
+        """Whether ``session_id`` was ended by ``DELETE`` and is still refused.
+
+        Caller holds ``self._lock``. An expired tombstone is dropped here.
+        """
+        expires_at = self._tombstones.get(session_id)
+        if expires_at is None:
+            return False
+        if expires_at <= utcnow():
+            del self._tombstones[session_id]
+            return False
+        return True
 
     async def get_session(self, session_id: str) -> MCPSession | None:
         """Get existing session by ID with activity tracking.
@@ -107,12 +165,13 @@ class MCPSessionManager:
         Returns:
             ``("owned", session)`` with ``last_active_at`` refreshed,
             ``("foreign", None)`` for another user's or workspace's session,
-            or ``("missing", None)`` when no session has that id.
+            ``("terminated", None)`` for an id ended by ``DELETE`` within the
+            idle timeout, or ``("missing", None)`` when no session has that id.
         """
         async with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
-                return "missing", None
+                return ("terminated" if self._is_tombstoned(session_id) else "missing"), None
             if session.user_id != user_id or session.workspace_id != workspace_id:
                 logger.warning(
                     f"MCP session owner mismatch: session={session_id}, "
@@ -141,11 +200,18 @@ class MCPSessionManager:
 
         Returns:
             MCPSession instance (new or existing)
+
+        Raises:
+            PermissionError: The id belongs to another user or workspace, or
+                was ended by ``DELETE`` within the idle timeout (#1740).
         """
         async with self._lock:
             # Generate session ID if not provided
             if session_id is None:
-                session_id = f"mcp-{uuid4().hex[:16]}"
+                session_id = self.generate_session_id()
+            elif session_id not in self._sessions and self._is_tombstoned(session_id):
+                # A DELETE landed between the caller's lookup and this call.
+                raise PermissionError("Session was terminated")
 
             # Return existing session if found
             if session_id in self._sessions:
@@ -214,6 +280,28 @@ class MCPSessionManager:
         # Session removed successfully (no cleanup needed for Streamable HTTP)
         logger.debug(f"MCP session removed: {session_id}")
 
+    async def terminate_session(self, session_id: str) -> None:
+        """End a session at the client's request (``DELETE /mcp``) and tombstone its id.
+
+        #1740: the spec answers a request naming a terminated session 404, so
+        the id is refused — to every caller, never re-adopted — until the idle
+        timeout, after which it is indistinguishable from one lost to the idle
+        cleanup. Tombstones live in process memory, like the sessions.
+        """
+        ttl = self._tombstone_ttl_seconds
+        if ttl is None:
+            ttl = session_timeout_seconds()
+        async with self._lock:
+            self._sessions.pop(session_id, None)
+            self._tombstones.pop(session_id, None)  # re-inserted last: newest
+            while self._tombstones and len(self._tombstones) >= self._max_tombstones:
+                del self._tombstones[next(iter(self._tombstones))]
+            self._tombstones[session_id] = utcnow() + timedelta(seconds=ttl)
+            logger.info(
+                f"MCP session terminated: {session_id} (remaining={len(self._sessions)}, "
+                f"tombstones={len(self._tombstones)})"
+            )
+
     async def cleanup_inactive_sessions(self, timeout_seconds: int = 3600):
         """Remove sessions inactive for more than timeout_seconds.
 
@@ -224,6 +312,14 @@ class MCPSessionManager:
 
         # Issue #102: Lock only for listing (avoid deadlock)
         async with self._lock:
+            # #1740: expired tombstones go with the idle sessions. Insertion
+            # order is expiry order (one TTL for all), so stop at the first
+            # live one.
+            while self._tombstones:
+                oldest = next(iter(self._tombstones))
+                if self._tombstones[oldest] > now:
+                    break
+                del self._tombstones[oldest]
             to_remove = [
                 session_id
                 for session_id, session in self._sessions.items()

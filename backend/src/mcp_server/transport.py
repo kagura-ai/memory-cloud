@@ -11,6 +11,7 @@ import contextlib
 import json
 import logging
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from starlette.responses import Response
@@ -23,7 +24,7 @@ from mcp_server.auth import (
     authenticate_mcp_request,
     get_mcp_oauth_scopes,
 )
-from mcp_server.session import get_session_manager
+from mcp_server.session import get_session_manager, is_server_minted_session_id
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -98,6 +99,85 @@ async def _send_json_error(
         headers.extend(extra_headers)
     await send({"type": "http.response.start", "status": status, "headers": headers})
     await send({"type": "http.response.body", "body": json.dumps(payload).encode("utf-8")})
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _normalize_origin(value: str) -> str | None:
+    """Reduce an origin (or a URL) to ``scheme://host[:port]`` for comparison.
+
+    Scheme and host are lower-cased and a default port is dropped, so
+    ``https://Example.com:443`` and ``https://example.com`` compare equal.
+    Anything that is not an http(s) URL with a host — ``null``, ``*``, a bare
+    host name, user info — yields ``None`` and matches nothing.
+    """
+    try:
+        parts = urlsplit(value.strip())
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    if scheme not in _DEFAULT_PORTS or not host or parts.username or parts.password:
+        return None
+    if ":" in host:  # IPv6 literal
+        host = f"[{host}]"
+    if port is None or port == _DEFAULT_PORTS[scheme]:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
+def _allowed_origins() -> set[str]:
+    """The browser origins ``/mcp`` serves (#1740).
+
+    ``CORS_ORIGINS`` (the web UI and whatever the deployment already trusts
+    cross-origin), the ``FRONTEND_URL`` origin and ``MCP_ALLOWED_ORIGINS``. A
+    ``*`` entry is not an origin and allows nothing here.
+    """
+    settings = get_settings()
+    candidates = [
+        *settings.cors_origins_list,
+        settings.frontend_url,
+        *settings.mcp_allowed_origins_list,
+    ]
+    return {origin for origin in map(_normalize_origin, candidates) if origin}
+
+
+async def _reject_disallowed_origin(headers: dict[bytes, bytes], send: Send) -> bool:
+    """Answer 403 when the request carries an ``Origin`` that is not allow-listed.
+
+    MCP Streamable HTTP: servers MUST validate ``Origin`` on incoming
+    connections and answer an invalid one with 403 — the defence against DNS
+    rebinding, and against a page posting a ``text/plain`` simple request that
+    no preflight stops. Runs before authentication (#1740). A request without
+    ``Origin`` is served: server-side clients (the Claude and ChatGPT backends,
+    CLI clients) send none. ``null`` (sandboxed frames, ``file:``) is invalid.
+
+    Returns:
+        True when the refusal was sent and the request must go no further.
+    """
+    raw = headers.get(b"origin")
+    if raw is None:
+        return False
+    origin = raw.decode("latin-1")
+    normalized = _normalize_origin(origin)
+    if normalized is not None and normalized in _allowed_origins():
+        return False
+    logger.warning(f"MCP request refused: Origin {origin[:100]!r} is not allowed")
+    await _send_json_error(
+        send,
+        403,
+        {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {
+                "code": -32600,
+                "message": "Forbidden: the request Origin is not allowed for this MCP server",
+            },
+        },
+    )
+    return True
 
 
 def _extract_session_id(
@@ -199,8 +279,21 @@ SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = MODERN_PROTOCOL_VERSIONS + LEGACY
 
 # What ``initialize`` answers when the client asks for a revision we do not
 # list (or for none): the spec lets the server reply with another version it
-# supports, and this is what every existing client has been negotiating.
-DEFAULT_PROTOCOL_VERSION = "2024-11-05"
+# supports, and SHOULD be the latest one. #1740: 2025-03-26, the Streamable
+# HTTP revision this handler implements — 2024-11-05 (the default before)
+# only defines the HTTP+SSE transport removed in #248. A client that asks for
+# 2024-11-05 still gets it echoed.
+DEFAULT_PROTOCOL_VERSION = LEGACY_PROTOCOL_VERSIONS[0]
+
+# Legacy revisions whose base protocol requires accepting JSON-RPC batches
+# (#1740). 2024-11-05 is left out: its sessions keep the single-message
+# contract they always had. A session whose negotiated revision is unknown
+# (re-adopted after a restart) is not in this set either.
+BATCH_PROTOCOL_VERSIONS: frozenset[str] = frozenset({"2025-03-26"})
+
+# Upper bound on the messages of one batch. Elements are dispatched one after
+# another, so this bounds the work (and the tool calls) one POST can trigger.
+MAX_BATCH_MESSAGES = 50
 
 # ``params._meta`` key that carries the per-request protocol version. Its
 # presence is what marks a request as modern (see ``_is_modern_request``).
@@ -608,7 +701,9 @@ async def _end_session(
     """``DELETE /mcp``: end the caller's session (MCP session management).
 
     204 when the named session is the caller's; 404 when this server does not
-    hold it or another user or workspace does; 400 without a session id.
+    hold it (or it was already ended) or another user or workspace does; 400
+    without a session id. An ended id is tombstoned for the idle timeout, so a
+    later request naming it is 404 rather than re-adopted (#1740).
     """
     if not session_id:
         await _send_json_error(
@@ -625,7 +720,7 @@ async def _end_session(
         logger.info(f"MCP DELETE /mcp: no session {session_id} for user={user_id} ({lookup})")
         await _send_session_not_found(send, session_id)
         return
-    await manager.remove_session(session_id)
+    await manager.terminate_session(session_id)
     logger.info(f"MCP DELETE /mcp: session {session_id} ended by user={user_id}")
     await send({"type": "http.response.start", "status": 204, "headers": []})
     await send({"type": "http.response.body", "body": b""})
@@ -730,27 +825,151 @@ async def handle_streamable_http_post(
         )
         return
 
-    # A JSON-RPC message is a single object. A scalar body used to raise
-    # TypeError on the membership test below (HTTP 500), and a batch array
-    # passed it by list membership and was 202'd as a "notification", leaving
-    # the client waiting for a response that never came (#1541 review).
-    # Batching is not supported by this transport.
-    if not isinstance(body, dict):
-        await _send_json_error(
+    # A batch array used to pass the membership test below by list membership
+    # and was 202'd as a "notification", leaving the client waiting for a
+    # response that never came (#1541 review). #1740: 2025-03-26 requires
+    # accepting batches, so a session that negotiated it gets them; any other
+    # session keeps the single-message contract.
+    if isinstance(body, list):
+        if getattr(session, "protocol_version", None) in BATCH_PROTOCOL_VERSIONS:
+            await _handle_batch(scope, send, session, body)
+            return
+        await _send_invalid_request(
             send,
-            400,
-            {
-                "jsonrpc": "2.0",
-                "error": {
-                    "code": -32600,
-                    "message": (
-                        "Invalid Request: expected a single JSON-RPC object "
-                        "(batch arrays are not supported)"
-                    ),
-                },
-                "id": None,
-            },
+            "Invalid Request: expected a single JSON-RPC object (batch arrays are not "
+            "supported on this session's protocol version)",
         )
+        return
+
+    await _dispatch_message(scope, send, session, body)
+
+
+async def _send_invalid_request(send: Send, message: str, request_id: Any = None) -> None:
+    """HTTP 400 + JSON-RPC ``-32600`` Invalid Request."""
+    await _send_json_error(
+        send,
+        400,
+        {"jsonrpc": "2.0", "error": {"code": -32600, "message": message}, "id": request_id},
+    )
+
+
+class _CapturedResponse:
+    """An ASGI ``send`` that keeps one buffered response instead of sending it.
+
+    ``_dispatch_message`` answers every message with a single start + body
+    pair; a batch collects those answers into one array (#1740).
+    """
+
+    def __init__(self) -> None:
+        self.status = 0
+        self.headers: dict[bytes, bytes] = {}
+        self._body: list[bytes] = []
+
+    async def __call__(self, message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.start":
+            self.status = message["status"]
+            self.headers = dict(message.get("headers", []))
+        elif message["type"] == "http.response.body":
+            self._body.append(message.get("body", b""))
+
+    @property
+    def payload(self) -> Any:
+        """The decoded JSON body, or ``None`` for a bodiless (202) answer."""
+        raw = b"".join(self._body)
+        return json.loads(raw) if raw else None
+
+
+def _is_jsonrpc_response(message: Any) -> bool:
+    """A JSON-RPC response (to a server-initiated request): no method, a result or error."""
+    return (
+        isinstance(message, dict)
+        and "method" not in message
+        and "id" in message
+        and ("result" in message or "error" in message)
+    )
+
+
+async def _handle_batch(scope: Scope, send: Send, session: "MCPSession", batch: list) -> None:
+    """Serve a JSON-RPC batch on a session whose revision allows one (#1740).
+
+    MCP 2025-03-26 (JSON-RPC batching and the Streamable HTTP POST rules):
+
+    * ``initialize`` MUST NOT be part of a batch — the whole array is refused;
+    * an array of notifications and/or responses only is answered 202, no body;
+    * otherwise each message is dispatched as if it had been posted alone,
+      in order, and the answers to the requests are returned as one array.
+      Notifications add nothing to it; responses are dropped (this server
+      sends no requests of its own, so none can be outstanding).
+
+    The batch is answered 200 — or 403 with the ``insufficient_scope``
+    challenge when one of its tool calls was refused for scope, so a client
+    can step up just as it would for that call posted alone. The other
+    elements still ran; their answers are in the array.
+    """
+    if not batch:
+        await _send_invalid_request(send, "Invalid Request: empty batch")
+        return
+    if len(batch) > MAX_BATCH_MESSAGES:
+        await _send_invalid_request(
+            send, f"Invalid Request: a batch holds at most {MAX_BATCH_MESSAGES} messages"
+        )
+        return
+    if any(isinstance(m, dict) and m.get("method") == "initialize" for m in batch):
+        await _send_invalid_request(
+            send, "Invalid Request: initialize must not be part of a JSON-RPC batch"
+        )
+        return
+
+    answers: list[Any] = []
+    challenge: bytes | None = None
+    for message in batch:
+        if _is_jsonrpc_response(message):
+            continue
+        captured = _CapturedResponse()
+        await _dispatch_message(scope, captured, session, message)
+        payload = captured.payload
+        if payload is None:  # a notification: 202, nothing to answer
+            continue
+        answers.append(payload)
+        if challenge is None and captured.status == 403:
+            challenge = captured.headers.get(b"www-authenticate")
+
+    logger.info(
+        f"MCP batch (Streamable HTTP): messages={len(batch)}, answers={len(answers)}, "
+        f"session={session.session_id}"
+    )
+    if not answers:
+        await send({"type": "http.response.start", "status": 202, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+        return
+
+    headers: list[list[bytes]] = [
+        [b"content-type", b"application/json"],
+        [b"mcp-session-id", session.session_id.encode()],
+    ]
+    if challenge is not None:
+        headers.append([b"www-authenticate", challenge])
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 403 if challenge is not None else 200,
+            "headers": headers,
+        }
+    )
+    await send({"type": "http.response.body", "body": json.dumps(answers).encode()})
+
+
+async def _dispatch_message(scope: Scope, send: Send, session: "MCPSession", body: Any) -> None:
+    """Answer one decoded JSON-RPC message on a legacy session.
+
+    Posted alone, or one element of a batch (``_handle_batch``). Every path
+    sends exactly one response: a JSON body, or 202 without one for a
+    notification.
+    """
+    # A JSON-RPC message is a single object. A scalar used to raise TypeError
+    # on the membership test below (HTTP 500).
+    if not isinstance(body, dict):
+        await _send_invalid_request(send, "Invalid Request: expected a JSON-RPC object")
         return
 
     method = body.get("method")
@@ -797,6 +1016,8 @@ async def handle_streamable_http_post(
         protocol_version = (
             requested if requested in LEGACY_PROTOCOL_VERSIONS else DEFAULT_PROTOCOL_VERSION
         )
+        # #1740: the negotiated revision decides whether batches are accepted.
+        session.protocol_version = protocol_version
 
         # #1621: ``InitializeResult.instructions`` ("MAY be added to the system
         # prompt"). Codex reads it from initialization; ChatGPT-class clients
@@ -1107,6 +1328,12 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
     # Debug: header names only — values carry credentials (Authorization, Cookie).
     logger.debug(f"MCP headers: {sorted(name.decode('latin-1')[:100] for name in headers)}")
 
+    # #1740: Origin before anything else — authentication included, so a
+    # refused cross-origin request learns nothing about the credentials it
+    # rode on.
+    if await _reject_disallowed_origin(headers, send):
+        return
+
     # Authenticate request (Issue #155: Support both Authorization header and session cookie)
     auth_header = headers.get(b"authorization")
     cookie_header = headers.get(b"cookie")
@@ -1323,8 +1550,10 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
     # Session management logic (#1686)
     # POST / GET /mcp: open a session when none is named; a named session is
     #   used when it is the caller's, re-adopted when this server does not
-    #   hold it, and answered 404 when another user or workspace holds it.
-    # DELETE /mcp: end the caller's session (204).
+    #   hold it and the id is server-minted, and answered 404 when another
+    #   user or workspace holds it, it was ended by DELETE, or it was never
+    #   minted here (#1740).
+    # DELETE /mcp: end the caller's session (204) and tombstone its id.
     # Anything else — including the removed POST /messages/ and GET /sse
     # endpoints (410) — is answered without touching the session store.
     if method == "DELETE" and path in ("/mcp", "/mcp/"):
@@ -1353,11 +1582,22 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
             lookup, session = await session_manager.get_owned_session(
                 session_id, user_id, workspace_id
             )
-            if lookup == "missing":
+            if lookup == "terminated":
+                # #1740: ended by DELETE — the spec's 404, never re-adopted.
+                logger.info(f"MCP {method} /mcp: session {session_id} was terminated")
+            elif lookup == "missing" and not is_server_minted_session_id(session_id):
+                # #1740: never issued by this server (a client-chosen id), so
+                # there is nothing to re-adopt — the spec's 404.
+                logger.info(
+                    f"MCP {method} /mcp: unknown session id {session_id[:100]!r} "
+                    "is not server-minted"
+                )
+            elif lookup == "missing":
                 # Not held here: expired, or lost on a restart or deploy. It
                 # is re-adopted for the authenticated caller under the same
                 # id, so a client that cannot re-initialize after a 404 keeps
-                # working across restarts and idle timeouts.
+                # working across restarts and idle timeouts (#1686). Only an
+                # id in the server-minted shape qualifies (#1740).
                 try:
                     session = await session_manager.get_or_create_session(
                         user_id=user_id,
@@ -1365,7 +1605,8 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
                         session_id=session_id,
                     )
                 except PermissionError:
-                    session = None  # adopted by another caller in the meantime
+                    # Adopted by another caller, or ended, in the meantime.
+                    session = None
                 except Exception as e:
                     logger.error(f"MCP {method} /mcp session creation failed: {e}", exc_info=True)
                     await _send_session_creation_failed(send)
@@ -1378,8 +1619,9 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
             elif session is not None:
                 logger.info(f"MCP {method} /mcp: using existing session: {session.session_id}")
             if session is None:
-                # Another user's or workspace's session: MCP session
-                # management — 404, and the client re-initializes.
+                # Another user's or workspace's session, a terminated one, or
+                # an id this server never minted: MCP session management —
+                # 404, and the client re-initializes.
                 await _send_session_not_found(send, session_id)
                 return
 

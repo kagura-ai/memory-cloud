@@ -9,7 +9,7 @@ import os
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from mcp_server.session import get_session_manager
+from mcp_server.session import get_session_manager, session_timeout_seconds
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 
 async def cleanup_mcp_sessions_task():
     """Cleanup inactive MCP sessions to prevent memory leak."""
-    timeout = int(os.getenv("MCP_SESSION_TIMEOUT_SECONDS", "3600"))  # 1 hour
+    timeout = session_timeout_seconds()  # 1 hour; also the DELETE tombstone TTL (#1740)
 
     try:
         manager = get_session_manager()

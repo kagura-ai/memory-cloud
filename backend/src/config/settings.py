@@ -573,6 +573,35 @@ class Settings(BaseSettings):
         ),
     )
 
+    # #1740: MCP Streamable HTTP spec alignment. ``/mcp`` answers a request
+    # whose ``Origin`` header is present and not allow-listed with 403 (the
+    # spec's DNS-rebinding defence). The allow-list is ``CORS_ORIGINS``, the
+    # ``FRONTEND_URL`` origin and this setting; a request without ``Origin``
+    # (server-side clients) is served.
+    mcp_allowed_origins: str = Field(
+        default="",
+        description=(
+            "Extra browser origins allowed to call /mcp (comma-separated), on top "
+            "of CORS_ORIGINS and the FRONTEND_URL origin"
+        ),
+    )
+    # A 2026-07-28 (stateless) request must mirror its protocol version, method
+    # and tool name into the MCP-Protocol-Version / Mcp-Method / Mcp-Name
+    # headers. ``false`` serves a request that omits one (and logs it); a
+    # header that contradicts the body is rejected either way.
+    mcp_require_mirrored_headers: bool = Field(
+        default=True,
+        description=(
+            "Reject a 2026-07-28 MCP request that omits a mirrored "
+            "MCP-Protocol-Version / Mcp-Method / Mcp-Name header (400, -32020)"
+        ),
+    )
+
+    @property
+    def mcp_allowed_origins_list(self) -> list[str]:
+        """Parse ``MCP_ALLOWED_ORIGINS`` into a list, dropping empty entries."""
+        return [o.strip() for o in self.mcp_allowed_origins.split(",") if o.strip()]
+
     # Self-hosted inference configuration (Issue #44, renamed #1160)
     # Any OpenAI-compatible backend (Ollama default port 11434, vLLM default 8000).
     self_hosted_base_url: str = Field(
