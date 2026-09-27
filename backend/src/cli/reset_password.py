@@ -18,11 +18,14 @@ from sqlalchemy import create_engine, select  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 from auth.password import (  # noqa: E402
-    PASSWORD_MAX_BYTES,
     PASSWORD_NOT_ENCODABLE_MESSAGE,
     PASSWORD_TOO_LONG_MESSAGE,
     hash_password,
     is_password_too_long,
+)
+from auth.password_policy import (  # noqa: E402
+    PASSWORD_REQUIREMENT_LINES,
+    missing_password_requirements,
 )
 from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import User  # noqa: E402
@@ -83,25 +86,11 @@ def reset_password():
         if choice in ("1", "3"):
             while True:
                 print("\nPassword requirements:")
-                print("  - Minimum 12 characters")
-                print("  - At least 1 uppercase letter (A-Z)")
-                print("  - At least 1 lowercase letter (a-z)")
-                print("  - At least 1 digit (0-9)")
-                print("  - At least 1 special character (!@#$%^&*...)")
-                print(f"  - Maximum {PASSWORD_MAX_BYTES} bytes when UTF-8 encoded")
+                for line in PASSWORD_REQUIREMENT_LINES:
+                    print(f"  - {line}")
                 password = getpass.getpass("\n  New Password: ")
 
-                errors = []
-                if len(password) < 12:
-                    errors.append("at least 12 characters")
-                if not any(c.isupper() for c in password):
-                    errors.append("1 uppercase letter")
-                if not any(c.islower() for c in password):
-                    errors.append("1 lowercase letter")
-                if not any(c.isdigit() for c in password):
-                    errors.append("1 digit")
-                if not any(not c.isalnum() for c in password):
-                    errors.append("1 special character")
+                errors = missing_password_requirements(password)
                 if errors:
                     print(f"  ✗ Missing: {', '.join(errors)}. Try again.")
                     continue
