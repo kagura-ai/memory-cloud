@@ -78,6 +78,9 @@ def _hold_commits_until_both_arrive(*sessions: AsyncSession) -> None:
             try:
                 await asyncio.wait_for(both.wait(), _COMMIT_RENDEZVOUS_SECONDS)
             except TimeoutError:
+                # Expected when the lock works: the other session is still
+                # blocked on the row lock and never reaches its commit, so
+                # this one stops waiting and commits alone.
                 pass
             await original()
 

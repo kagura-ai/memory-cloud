@@ -104,8 +104,9 @@ class TestResetRequest:
         ((miss_func, miss_kwargs),) = _scheduled(miss_tasks)
         ((hit_func, hit_kwargs),) = _scheduled(hit_tasks)
         assert miss_func is hit_func is password_routes.process_reset_request
-        assert miss_kwargs.pop("email") == "nobody@example.test"
-        assert hit_kwargs.pop("email") == "somebody@example.test"
+        assert miss_kwargs["email"] == "nobody@example.test"
+        assert hit_kwargs["email"] == "somebody@example.test"
+        del miss_kwargs["email"], hit_kwargs["email"]
         assert miss_kwargs == hit_kwargs
         # No lookup, token, audit row or commit on the request path.
         session_factory.assert_not_called()
