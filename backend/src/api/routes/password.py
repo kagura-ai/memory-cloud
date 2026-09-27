@@ -125,6 +125,15 @@ async def _over_limit(key: str, limit: int, window: int = _RESET_WINDOW_SECONDS)
     return count > limit
 
 
+def _revocation_unavailable() -> MemoryCloudException:
+    """The 503 a password write gets when its sessions cannot be revoked."""
+    return MemoryCloudException(
+        "Could not sign out the account's other sessions. Please try again.",
+        status_code=503,
+        error_code="AUTH-304",
+    )
+
+
 def _session_revoker(keep_session_id: str | None) -> Callable[[str], None]:
     """Build the revocation step a password write runs before its commit.
 
@@ -138,7 +147,10 @@ def _session_revoker(keep_session_id: str | None) -> Callable[[str], None]:
     def revoke(user_id: str) -> None:
         manager = auth_module._session_manager
         if manager is None:
-            return
+            # No session store means the old sessions cannot be signed out;
+            # fail closed so the password write rolls back.
+            logger.error("password_sessions_revoke_failed", user_id=user_id, error_type="NoManager")
+            raise _revocation_unavailable()
         try:
             deleted = manager.delete_user_sessions(
                 user_id, exclude_session_id=keep_session_id, strict=True
@@ -147,11 +159,7 @@ def _session_revoker(keep_session_id: str | None) -> Callable[[str], None]:
             logger.error(
                 "password_sessions_revoke_failed", user_id=user_id, error_type=type(exc).__name__
             )
-            raise MemoryCloudException(
-                "Could not sign out the account's other sessions. Please try again.",
-                status_code=503,
-                error_code="AUTH-304",
-            ) from None
+            raise _revocation_unavailable() from None
         logger.info("password_sessions_revoked", user_id=user_id, deleted=deleted)
 
     return revoke

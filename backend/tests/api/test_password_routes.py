@@ -377,3 +377,19 @@ class TestRouteWiring:
     )
     def test_public_routes(self, path: str) -> None:
         assert require_session_auth not in self._dependency_calls(self._route(path, "POST"))
+
+
+def test_revocation_fails_closed_without_a_session_manager(monkeypatch) -> None:
+    """No session manager means old sessions cannot be revoked: 503, not success (#1678).
+
+    ``initialize_auth_routes()`` allows the manager to be unset; a password
+    write must then roll back instead of acknowledging the change.
+    """
+    monkeypatch.setattr(password_routes.auth_module, "_session_manager", None)
+    revoke = password_routes._session_revoker(keep_session_id=None)
+
+    with pytest.raises(MemoryCloudException) as exc_info:
+        revoke("user-1")
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.error_code == "AUTH-304"
