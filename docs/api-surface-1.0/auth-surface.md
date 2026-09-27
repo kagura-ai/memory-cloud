@@ -97,15 +97,16 @@ Router: `backend/src/api/routes/well_known.py`, mounted at prefix `/.well-known`
 | `scopes_supported` | `ALL_ADVERTISED_SCOPES` (6 scopes, see catalogue) |
 | `bearer_methods_supported` | `["header"]` |
 | `resource_documentation` | `{base_url}/redoc` |
-| `mcp_sse_endpoint` | `{mcp_base}/sse` |
+| `mcp_endpoint` | `{mcp_base}` (Streamable HTTP) |
 
 ✓ `resource_signing_alg_values_supported` and `resource_policy_uri` were **removed
 in #993**: access tokens are opaque (no signing alg to advertise — a strict client
 would attempt a doomed signature check) and there is no published policy document
 (the old value pointed at the Swagger UI `/docs`). Both are OPTIONAL per RFC 9728.
-✓ `mcp_sse_endpoint` is retained as a **stable, documented Kagura extension**
-(non-RFC) — the MCP SSE transport entrypoint for Claude Desktop / Claude Code, a
-committed part of the 1.0 surface.
+✓ `mcp_endpoint` is a **stable, documented Kagura extension** (non-RFC) naming
+the MCP Streamable HTTP endpoint. It replaced `mcp_sse_endpoint` in #1740: that
+field advertised `{mcp_base}/sse`, which has answered `410` since the SSE
+transport was removed (#248), so no client could use it.
 
 ### 3. `GET /.well-known/openid-configuration` (OIDC Discovery) — 15 fields
 
@@ -272,6 +273,8 @@ Grouped into 2 proposed sub-issue bundles (issue acceptance allows ≤2).
   `oauth-protected-resource` (tokens are opaque; no RS256 key exists).
 - ✅ **DONE (#993)** `mcp_sse_endpoint`: retained + declared a stable documented Kagura
   extension; removed `resource_policy_uri` (pointed at Swagger UI; no policy doc exists).
+  Superseded in #1740: `mcp_sse_endpoint` (a `410` endpoint since #248) was replaced
+  by `mcp_endpoint`, the Streamable HTTP endpoint.
 - **P2** Device-flow token-response extras (`user_email`, `workspace_id`,
   `workspace_name`): document stability tier explicitly (display-only,
   non-security-bearing) or namespace them. *(Still open — out of scope for #993.)*

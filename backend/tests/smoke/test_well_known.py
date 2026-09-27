@@ -33,12 +33,15 @@ class TestWellKnownEndpoints:
         Tokens are opaque (introspection-validated, never signed), so a signing-alg
         list would invite a doomed signature check; and there is no published policy
         document, so resource_policy_uri (which used to point at the Swagger UI) is
-        dropped. The Kagura mcp_sse_endpoint extension stays as a committed surface.
+        dropped. #1740: the Kagura extension names the Streamable HTTP endpoint
+        (``mcp_endpoint``); ``mcp_sse_endpoint`` pointed at the removed SSE
+        transport (410 since #248) and is gone.
         """
         data = client.get("/.well-known/oauth-protected-resource").json()
         assert "resource_signing_alg_values_supported" not in data
         assert "resource_policy_uri" not in data
-        assert "mcp_sse_endpoint" in data
+        assert "mcp_sse_endpoint" not in data
+        assert data["mcp_endpoint"] == data["resource"]
 
     def test_device_code_grant_advertised(self, client):
         """Both AS-metadata docs advertise the live device-code grant + endpoint (#993).

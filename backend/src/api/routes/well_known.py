@@ -57,10 +57,11 @@ async def oauth_protected_resource():
         # NOTE: resource_policy_uri intentionally omitted (#993). There is no
         # published resource-policy document; the previous value pointed at the
         # Swagger UI (/docs), which is not a policy. OPTIONAL per RFC 9728.
-        # mcp_sse_endpoint: stable, documented Kagura extension (non-RFC). The
-        # MCP SSE transport entrypoint for Claude Desktop / Claude Code. Retained
-        # as a committed part of the 1.0 surface.
-        "mcp_sse_endpoint": f"{mcp_base}/sse",
+        # mcp_endpoint: documented Kagura extension (non-RFC) naming the MCP
+        # Streamable HTTP endpoint. #1740: it replaces ``mcp_sse_endpoint``,
+        # which advertised ``/mcp/sse`` — answered 410 since the SSE transport
+        # was removed (#248).
+        "mcp_endpoint": mcp_base,
     }
 
 
