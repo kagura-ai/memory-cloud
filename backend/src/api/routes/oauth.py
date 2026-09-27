@@ -2698,11 +2698,12 @@ def _authenticate_endpoint_client(
     response_model=TokenIntrospectionResponse,
     response_model_exclude_none=True,
     responses={
+        400: {"description": "Two client authentication methods in one request"},
         401: {
             "description": (
                 "Missing or invalid client credentials, or a public client (``invalid_client``)"
             )
-        }
+        },
     },
 )
 async def introspect_token(
