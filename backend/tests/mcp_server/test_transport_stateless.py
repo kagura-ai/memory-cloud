@@ -732,6 +732,38 @@ async def test_notification_is_accepted_with_202_and_no_body():
     assert send.messages[1]["body"] == b""
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {b"mcp-protocol-version": MODERN.encode()},  # Mcp-Method absent
+        {b"mcp-method": b"notifications/cancelled"},  # MCP-Protocol-Version absent
+        {b"mcp-protocol-version": MODERN.encode(), b"mcp-method": b"tools/list"},  # contradicts
+    ],
+)
+async def test_a_notification_is_held_to_the_mirrored_header_rules(headers):
+    """#1740 review: the notification short-circuit ran before validation, so
+    a notification skipped the header rules the setting enforces."""
+    body = _request("notifications/cancelled")
+    del body["id"]
+    send = await _post(body, headers)
+
+    assert send.status == 400
+    _assert_stateless(send)
+    assert send.body["id"] is None
+    assert send.body["error"]["code"] == -32020
+
+
+@pytest.mark.asyncio
+async def test_a_notification_without_headers_is_accepted_when_not_required(lenient_headers):
+    body = _request("notifications/cancelled")
+    del body["id"]
+    send = await _post(body, {})
+
+    assert send.status == 202
+    assert send.messages[1]["body"] == b""
+
+
 # ------------------------------------------------------------------ era detection
 
 

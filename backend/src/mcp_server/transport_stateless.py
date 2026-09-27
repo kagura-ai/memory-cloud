@@ -313,20 +313,16 @@ async def handle_stateless_post(
         )
         return
 
-    # This revision defines no client-to-server notification over HTTP, but
-    # the transport rule for one is unchanged: accept, no body.
-    if "id" not in body:
-        logger.info(f"MCP notification (stateless): method={_shown(method)!r}")
-        await send({"type": "http.response.start", "status": 202, "headers": []})
-        await send({"type": "http.response.body", "body": b""})
-        return
-
-    if not valid_id:
+    is_notification = "id" not in body
+    if not is_notification and not valid_id:
         await _send_error(
             send, 400, None, -32600, "Invalid Request: id must be a string or an integer"
         )
         return
 
+    # Notifications are validated too (#1740 review): the header rules and
+    # ``MCP_REQUIRE_MIRRORED_HEADERS`` apply to every message, not only to
+    # the ones that get a result.
     try:
         method, params, missing = _validate(body, headers)
     except _Rejected as rejected:
@@ -342,8 +338,21 @@ async def handle_stateless_post(
             f"mcp_headers={mcp_headers}, user={user_id}"
         )
         await _send_error(
-            send, rejected.status, request_id, rejected.code, rejected.message, rejected.data
+            send,
+            rejected.status,
+            None if is_notification else request_id,
+            rejected.code,
+            rejected.message,
+            rejected.data,
         )
+        return
+
+    # This revision defines no client-to-server notification over HTTP, but
+    # the transport rule for one is unchanged: accept, no body.
+    if is_notification:
+        logger.info(f"MCP notification (stateless): method={_shown(method)!r}")
+        await send({"type": "http.response.start", "status": 202, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
         return
 
     meta = params.get("_meta") or {}

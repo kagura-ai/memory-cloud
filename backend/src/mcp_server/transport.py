@@ -898,8 +898,11 @@ async def _handle_batch(scope: Scope, send: Send, session: "MCPSession", batch: 
     * an array of notifications and/or responses only is answered 202, no body;
     * otherwise each message is dispatched as if it had been posted alone,
       in order, and the answers to the requests are returned as one array.
-      Notifications add nothing to it; responses are dropped (this server
-      sends no requests of its own, so none can be outstanding).
+      A notification gets exactly what it gets posted alone — accepted, with
+      no effect (this server acts on no client notification; ``tools/call``
+      and the other methods are requests and need an ``id``) — and adds
+      nothing to the array. Responses are dropped (this server sends no
+      requests of its own, so none can be outstanding).
 
     The batch is answered 200 — or 403 with the ``insufficient_scope``
     challenge when one of its tool calls was refused for scope, so a client
