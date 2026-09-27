@@ -73,9 +73,12 @@ _NAME_MAPS = frozenset(
         "links",
         "callbacks",
         "variables",
-        "scopes",
     }
 )
+
+# OAuth2 ``scopes`` maps each scope name to its description: the names are the
+# surface, the values are prose. The skeleton keeps the sorted names only.
+_SCOPES_KEY = "scopes"
 
 # Keywords whose value is a JSON literal a client receives or must send, not a
 # schema: nothing inside it is prose, whatever its keys are called. A default
@@ -114,7 +117,8 @@ def normalize(node: Any, *, keys_are_names: bool = False) -> Any:
 
     Returns:
         The normalized copy. The values of ``default``, ``const`` and ``enum``
-        are JSON literals and are kept whole. ``required`` lists are sorted (JSON Schema treats
+        are JSON literals and are kept whole; an OAuth2 ``scopes`` map is
+        reduced to its sorted scope names. ``required`` lists are sorted (JSON Schema treats
         them as sets); every other list, ``enum`` included, keeps the order of
         the document a client reads.
     """
@@ -126,6 +130,9 @@ def normalize(node: Any, *, keys_are_names: bool = False) -> Any:
                 continue
             if not keys_are_names and key in _LITERAL_KEYS:
                 out[key] = _literal(value)
+                continue
+            if not keys_are_names and key == _SCOPES_KEY and isinstance(value, dict):
+                out[key] = sorted(value)
                 continue
             child = normalize(value, keys_are_names=(not keys_are_names) and key in _NAME_MAPS)
             if (
@@ -386,6 +393,7 @@ def test_a_field_named_default_is_a_schema_not_a_literal():
         ("securitySchemes", "title"),
         ("headers", "example"),
         ("links", "examples"),
+        ("variables", "description"),
     ],
 )
 def test_name_map_entries_survive_whatever_they_are_called(name_map: str, entry: str):
@@ -396,6 +404,37 @@ def test_name_map_entries_survive_whatever_they_are_called(name_map: str, entry:
     }
     without = {name_map: {"other": "#/components/schemas/B"}}
     assert normalize(with_entry) != normalize(without)
+
+
+def _oauth_flows(scopes: dict[str, str]) -> dict:
+    return {
+        "components": {
+            "securitySchemes": {
+                "oauth": {
+                    "type": "oauth2",
+                    "description": "prose",
+                    "flows": {"authorizationCode": {"tokenUrl": "/token", "scopes": scopes}},
+                }
+            }
+        }
+    }
+
+
+def test_oauth_scope_descriptions_are_prose_but_scope_names_are_not():
+    base = normalize(_oauth_flows({"write": "Write memories", "read": "Read memories"}))
+    flow = base["components"]["securitySchemes"]["oauth"]["flows"]["authorizationCode"]
+    assert flow == {"scopes": ["read", "write"], "tokenUrl": "/token"}
+
+    reworded = _oauth_flows({"read": "Read your memories", "write": "Store memories"})
+    assert normalize(reworded) == base
+
+    added = _oauth_flows({"read": "Read memories", "write": "Write memories", "admin": "All"})
+    assert normalize(added) != base
+
+
+def test_a_field_named_scopes_is_a_schema():
+    fields = normalize({"properties": {"scopes": {"type": "array", "description": "prose"}}})
+    assert fields == {"properties": {"scopes": {"type": "array"}}}
 
 
 def test_top_level_tags_are_sorted_by_name():
