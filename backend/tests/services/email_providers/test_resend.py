@@ -606,3 +606,18 @@ async def test_password_emails_carry_the_link_but_never_log_it(
     logged = repr(mock_logger.mock_calls)
     assert _PW_TOKEN not in logged
     assert "user@example.com" not in logged
+
+
+@pytest.mark.asyncio
+async def test_reset_email_promises_only_browser_sign_out() -> None:
+    """#1678: a reset signs out browser sessions; OAuth/MCP tokens and API keys stay."""
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    with patch.object(resend_module.resend.Emails, "send", return_value={"id": "re_msg_pw"}) as m:
+        await svc.send_password_reset(
+            to_email="user@example.com",
+            reset_url=f"https://app.example.test/password/reset?token={_PW_TOKEN}",
+            expires_in_minutes=30,
+        )
+    (params,), _ = m.call_args
+    assert "everywhere" not in params["text"]
+    assert "browser" in params["text"]

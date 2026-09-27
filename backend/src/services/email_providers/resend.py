@@ -399,7 +399,7 @@ class ResendEmailService:
             f"  {reset_url}\n"
             "\n"
             f"The link expires in {expires_in_minutes} minutes and works once.\n"
-            "Resetting your password signs you out everywhere.\n"
+            "Resetting your password signs you out of every browser session.\n"
             "\n"
             "If you did not ask for this, ignore this email — your password\n"
             "stays unchanged.\n"
