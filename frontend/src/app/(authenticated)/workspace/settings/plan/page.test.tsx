@@ -94,8 +94,6 @@ const planInfo = (overrides: Record<string, unknown> = {}) => ({
   workspace_name: "WS",
   current_plan: "basic",
   plan_display_name: "Starter",
-  // Intentionally a legacy USD value — the page must NOT surface it.
-  price_monthly: 10,
   usage: { memories: 0, contexts: 0 },
   quotas: {
     memory_limit: 1,
@@ -131,13 +129,14 @@ describe("WorkspacePlanPage (#1141)", () => {
     expect(mockGetWorkspacePlan).not.toHaveBeenCalled();
   });
 
-  it("never renders a hardcoded $ price", async () => {
+  it("never renders a price", async () => {
     mockWorkspace = { current_user_role: "owner", plan_name: "basic" };
     render(<WorkspacePlanPage />);
     await screen.findByText("planPage.currentPlan");
-    // The pricePerMonth key is gone, and no "$10" leaks through.
+    // Prices live in the billing service (#1733): the plan payload has no
+    // price field, and the page shows no currency amount of its own.
     expect(screen.queryByText(/planPage\.pricePerMonth/)).toBeNull();
-    expect(document.body.textContent ?? "").not.toMatch(/\$\s*10/);
+    expect(document.body.textContent ?? "").not.toMatch(/[$¥]\s*\d/);
   });
 
   it("subscribed (paid) owner sees the review-or-change button + billing hint", async () => {

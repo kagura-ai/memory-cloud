@@ -78,8 +78,6 @@ def test_promax_tier_values() -> None:
     assert xl.max_contexts_per_workspace == 1000
     assert xl.memory_limit == 100_000
     assert xl.max_members_per_workspace == 50
-    # Legacy USD field: no pricing lives in this repo (#1096) — placeholder only.
-    assert xl.price_monthly == 0
 
 
 def test_memories_per_day_values_are_monotonic() -> None:
@@ -95,7 +93,7 @@ def test_promax_is_never_below_pro() -> None:
     pro = get_plan_tier("pro")
     xl = get_plan_tier("promax")
     for f in dataclasses.fields(pro):
-        if f.name in ("name", "display_name", "price_monthly", "features"):
+        if f.name in ("name", "display_name", "features"):
             continue
         pro_v, xl_v = getattr(pro, f.name), getattr(xl, f.name)
         if pro_v is None or xl_v is None:
@@ -222,3 +220,8 @@ def test_plan_display_name_falls_back_like_the_old_text() -> None:
     assert plan_display_name(None) == get_plan_tier("free").display_name
     assert plan_display_name("") == get_plan_tier("free").display_name
     assert plan_display_name("enterprise") == "enterprise"
+
+
+def test_plan_tier_has_no_price_field() -> None:
+    """#1733: prices live in the billing service; the tier registry carries none."""
+    assert "price_monthly" not in {f.name for f in dataclasses.fields(get_plan_tier("pro"))}

@@ -180,6 +180,18 @@ def test_price_is_omitted(client: TestClient) -> None:
     assert "price" not in free
 
 
+def test_available_plans_carry_no_price(client: TestClient) -> None:
+    """#1733: the billing service owns prices (Stripe); a hardcoded one here went
+    stale, so no plan payload carries a price field at all."""
+    resp = client.get("/api/v1/workspaces/plans/available")
+    assert resp.status_code == 200, resp.text
+    plans = resp.json()
+    assert [plan["name"] for plan in plans] == ["free", "basic", "pro", "promax"]
+    for plan in plans:
+        assert "price_monthly" not in plan
+        assert "price" not in plan
+
+
 def test_promax_row_is_pro_or_better(client: TestClient) -> None:
     """#1548: the XL tier is served last and never below pro on any row."""
     _free, _basic, pro, promax = client.get(ENDPOINT).json()

@@ -80,7 +80,6 @@ export async function getAdminPlanAudit(
 export interface PlanTierInfo {
   name: PlanTier;
   display_name: string;
-  price_monthly: number;
   max_contexts_per_workspace: number;
   max_members_per_workspace: number;
   owned_workspace_grant: number; // #1550: slots the tier grants its owner

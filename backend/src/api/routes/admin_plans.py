@@ -273,7 +273,6 @@ class PlanTierInfo(BaseModel):
 
     name: str
     display_name: str
-    price_monthly: int
     max_contexts_per_workspace: int
     max_members_per_workspace: int
     # #1550: raw tier grant + the resulting per-user cap with zero slot

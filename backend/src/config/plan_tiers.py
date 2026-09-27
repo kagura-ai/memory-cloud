@@ -57,7 +57,6 @@ class PlanTier:
     Attributes:
         name: Plan tier name ('free', 'basic', 'pro')
         display_name: Human-readable name
-        price_monthly: Monthly price in USD
         max_contexts_per_workspace: Maximum contexts per workspace
         max_members_per_workspace: Maximum members per workspace (Issue #229)
         owned_workspace_grant: Extra owned-workspace slots this tier grants
@@ -104,7 +103,6 @@ class PlanTier:
 
     name: str
     display_name: str
-    price_monthly: int
     max_contexts_per_workspace: int
     max_members_per_workspace: int
     memory_limit: int
@@ -142,7 +140,6 @@ class PlanTier:
 PLAN_FREE = PlanTier(
     name="free",
     display_name="S",
-    price_monthly=0,
     max_contexts_per_workspace=1,
     max_members_per_workspace=1,  # Issue #229: Owner only
     owned_workspace_grant=0,  # Issue #1550: base slot only → owns 1
@@ -171,7 +168,6 @@ PLAN_FREE = PlanTier(
 PLAN_BASIC = PlanTier(
     name="basic",
     display_name="M",
-    price_monthly=10,
     max_contexts_per_workspace=3,  # Limited to 3 contexts
     max_members_per_workspace=1,  # Issue #229: Owner only
     owned_workspace_grant=0,  # Issue #1550: same as Free → owns 1
@@ -202,7 +198,6 @@ PLAN_BASIC = PlanTier(
 PLAN_PRO = PlanTier(
     name="pro",
     display_name="L",
-    price_monthly=100,
     max_contexts_per_workspace=20,  # Issue #164: Set reasonable limit
     max_members_per_workspace=10,  # Issue #229: 10 members max for Pro plan
     owned_workspace_grant=2,  # Issue #1550: 1 base + 2 → owns 3
@@ -250,10 +245,6 @@ PLAN_PRO = PlanTier(
 PLAN_PROMAX = PlanTier(
     name="promax",
     display_name="XL",
-    # Legacy USD field served by the plan endpoints. Pricing does not live in
-    # this repo (#1096 / #1141) — the plan key is the whole contract with the
-    # billing service — so XL carries a placeholder, not a price.
-    price_monthly=0,
     max_contexts_per_workspace=1000,  # Issue #1547 matrix
     max_members_per_workspace=50,  # Issue #1547 matrix
     owned_workspace_grant=19,  # Issue #1550: 1 base + 19 → owns 20

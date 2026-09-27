@@ -354,7 +354,6 @@ export interface WorkspacePlanInfo {
   workspace_name: string;
   current_plan: string;
   plan_display_name: string;
-  price_monthly: number;
   usage: {
     memories: number;
     contexts: number;
@@ -381,7 +380,6 @@ export interface WorkspacePlanInfo {
 export interface AvailablePlanInfo {
   name: string;
   display_name: string;
-  price_monthly: number;
   quotas: {
     memory_limit: number;
     max_contexts: number;
