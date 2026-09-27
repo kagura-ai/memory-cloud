@@ -888,6 +888,18 @@
         "report_id": {
           "type": "string",
           "format": "uuid"
+        },
+        "actions_limit": {
+          "type": "integer",
+          "default": 50
+        },
+        "actions_cursor": {
+          "type": "string"
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 100000
         }
       },
       "additionalProperties": false

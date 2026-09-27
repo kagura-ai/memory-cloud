@@ -1192,3 +1192,93 @@ class TestRollbackActionDispatch:
         assert "memories.user_id = " in prefetch_sql[0], (
             f"re-embed prefetch is not scoped to the caller: {prefetch_sql[0]}"
         )
+
+
+class TestGetSleepReportPaging:
+    """#1743: get_sleep_report pages the run's actions."""
+
+    def _report(self):
+        return TestGetSleepReport._mock_report(None, uuid4(), "u-1743")
+
+    @staticmethod
+    def _action(i, details_chars=50):
+        a = MagicMock()
+        a.id = i
+        a.phase = "edge_discovery"
+        a.action_type = "create_edge"
+        a.memory_id = uuid4()
+        a.target_id = uuid4()
+        a.details = {"note": "x" * details_chars}
+        a.created_at = datetime(2026, 4, 5, 2, 1, 0, tzinfo=UTC)
+        return a
+
+    async def _run(self, args, actions, total=None):
+        mock_db = AsyncMock()
+        report_result = MagicMock()
+        report_result.scalar_one_or_none.return_value = self._report()
+        actions_result = MagicMock()
+        actions_result.scalars.return_value.all.return_value = actions
+        count_result = MagicMock()
+        count_result.scalar_one.return_value = total
+        results = [report_result, actions_result]
+        if total is not None:
+            results.append(count_result)
+        results.append(MagicMock())  # _log_tool_usage
+        mock_db.execute.side_effect = results
+
+        async def mock_get_db():
+            yield mock_db
+
+        with patch("db.base.get_db", new=mock_get_db):
+            result = await handle_get_sleep_report(
+                {"report_id": str(uuid4()), **args}, "u-1743", uuid4()
+            )
+        return json.loads(result[0].text), result[0].text, mock_db
+
+    @pytest.mark.asyncio
+    async def test_default_page_is_50_with_cursor_and_total(self):
+        body, _, db = await self._run({}, [self._action(i) for i in range(1, 52)], total=120)
+        stmt = db.execute.await_args_list[1].args[0]
+        assert stmt._limit_clause.value == 51
+        assert len(body["actions"]) == 50
+        assert body["actions_has_more"] is True
+        assert body["actions_next_cursor"] == "50"
+        assert body["action_count"] == 120
+
+    @pytest.mark.asyncio
+    async def test_last_page_has_no_cursor(self):
+        body, _, _ = await self._run(
+            {"actions_cursor": "50"}, [self._action(i) for i in range(51, 61)], total=60
+        )
+        assert body["actions_has_more"] is False
+        assert body["actions_next_cursor"] is None
+        assert body["action_count"] == 60
+
+    @pytest.mark.asyncio
+    async def test_page_stops_at_the_budget(self):
+        actions = [self._action(i, details_chars=3_000) for i in range(1, 30)]
+        body, text, _ = await self._run({}, actions, total=29)
+        assert 0 < len(body["actions"]) < 29
+        assert body["actions_has_more"] is True
+        assert body["actions_next_cursor"] == body["actions"][-1]["id"]
+        assert len(text) <= 20_000
+
+    @pytest.mark.asyncio
+    async def test_one_huge_action_comes_back_with_details_omitted(self):
+        body, text, _ = await self._run({}, [self._action(1, details_chars=90_000)])
+        action = body["actions"][0]
+        assert action["details_omitted"] is True
+        assert action["details_total_chars"] > 90_000
+        assert "details" not in action
+        assert len(text) <= 20_000
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "extra",
+        [{"actions_limit": "5"}, {"actions_cursor": "abc"}, {"max_chars": 1}],
+    )
+    async def test_bad_paging_arguments_are_refused(self, extra):
+        result = await handle_get_sleep_report(
+            {"report_id": str(uuid4()), **extra}, "u-1743", uuid4()
+        )
+        assert json.loads(result[0].text)["error"] == "validation_error"

@@ -8,7 +8,7 @@ from typing import Any, NamedTuple, cast
 from uuid import UUID
 
 from mcp.types import TextContent
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.engine import CursorResult
 
 from config.constants import TOMBSTONE_PURGER_CLAUSE
@@ -25,6 +25,13 @@ from mcp_server.tools._helpers import (
 from models.memory import DELETED_BY_SLEEP_ARCHIVE, DELETED_BY_SLEEP_MERGE
 from services.sleep.merge_retention import restore_sleep_tombstone_stmt
 from utils.logger import get_logger
+from utils.response_budget import (
+    BudgetArgumentError,
+    json_chars,
+    parse_limit,
+    parse_max_chars,
+    parse_offset_cursor,
+)
 
 # #1440: bind through ``utils.logger.get_logger`` (structlog) like the rest of
 # the project. This module previously used stdlib ``logging.getLogger``, whose
@@ -201,16 +208,67 @@ async def handle_get_sleep_history(
     return _error_response("db_error", "Database unavailable.")
 
 
+# #1743: a run can record hundreds of actions (measured 47 actions = 17k
+# characters; far more with the sleep LLM off), so the report pages them.
+SLEEP_REPORT_ACTIONS_DEFAULT_LIMIT = 50
+SLEEP_REPORT_ACTIONS_MAX_LIMIT = 200
+# Room kept for the paging fields next to ``report`` and ``actions``.
+_SLEEP_REPORT_ENVELOPE_RESERVE = 300
+
+
+def _page_actions(actions: list[dict[str, Any]], budget: int) -> tuple[list[dict[str, Any]], bool]:
+    """Place ``actions`` in order while they fit ``budget`` characters.
+
+    Returns the placed actions and whether any were left for the next page.
+    The first action always makes the page, so paging progresses: when it does
+    not fit, its ``details`` is left out with ``details_omitted`` /
+    ``details_total_chars`` (the #1685 marker).
+    """
+    placed: list[dict[str, Any]] = []
+    used = 0
+    for action in actions:
+        size = json_chars(action) + 1
+        if used + size > budget:
+            if placed:
+                return placed, True
+            details_chars = json_chars(action.get("details"))
+            action = {
+                **{k: v for k, v in action.items() if k != "details"},
+                "details_omitted": True,
+                "details_total_chars": details_chars,
+            }
+            size = json_chars(action) + 1
+        placed.append(action)
+        used += size
+    return placed, False
+
+
 async def handle_get_sleep_report(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """Get detailed sleep report with all actions."""
+    """Get a sleep report with one page of its actions (#1743).
+
+    Actions come in id order, ``actions_limit`` at a time (default 50, 1-200)
+    within ``max_chars``; ``actions_next_cursor`` resumes the list and
+    ``action_count`` is the run's total.
+    """
     from db.base import get_db
     from models.sleep import SleepAction, SleepReport
 
     report_uuid, error = _validate_report_id(args)
     if error or report_uuid is None:
         return error or _error_response("invalid_report_id", "Invalid report_id")
+    try:
+        actions_limit = parse_limit(
+            args.get("actions_limit"),
+            default=SLEEP_REPORT_ACTIONS_DEFAULT_LIMIT,
+            maximum=SLEEP_REPORT_ACTIONS_MAX_LIMIT,
+            name="actions_limit",
+        )
+        after_id = parse_offset_cursor(args.get("actions_cursor"), name="actions_cursor")
+        max_chars = parse_max_chars(args.get("max_chars"))
+    except BudgetArgumentError as e:
+        return _error_response("validation_error", e.message, received=e.received)
 
     start_time = time.time()
     async for db in get_db():
@@ -230,11 +288,35 @@ async def handle_get_sleep_report(
 
             actions_stmt = (
                 select(SleepAction)
-                .where(SleepAction.report_id == report_uuid)
+                .where(SleepAction.report_id == report_uuid, SleepAction.id > after_id)
                 .order_by(SleepAction.id)
+                # One extra row tells whether more exist past the page.
+                .limit(actions_limit + 1)
             )
             actions_result = await db.execute(actions_stmt)
-            actions = list(actions_result.scalars().all())
+            rows = list(actions_result.scalars().all())
+            more_rows = len(rows) > actions_limit
+            rows = rows[:actions_limit]
+
+            detail = _report_to_detail(report)
+            budget = (
+                max_chars
+                - json_chars({"status": "success", "report": detail})
+                - _SLEEP_REPORT_ENVELOPE_RESERVE
+            )
+            actions, cut = _page_actions([_action_to_dict(a) for a in rows], budget)
+            has_more = cut or more_rows
+            if after_id == 0 and not has_more:
+                # The page is the whole run: no count query needed.
+                action_count = len(actions)
+            else:
+                action_count = (
+                    await db.execute(
+                        select(func.count())
+                        .select_from(SleepAction)
+                        .where(SleepAction.report_id == report_uuid)
+                    )
+                ).scalar_one()
 
             # Resolve context_id from report for log_tool_usage
             ctx_id = report.context_id
@@ -251,9 +333,11 @@ async def handle_get_sleep_report(
             await db.commit()
 
             return _success_response(
-                report=_report_to_detail(report),
-                actions=[_action_to_dict(a) for a in actions],
-                action_count=len(actions),
+                report=detail,
+                actions=actions,
+                action_count=action_count,
+                actions_has_more=has_more,
+                actions_next_cursor=actions[-1]["id"] if has_more and actions else None,
             )
         except Exception:
             await db.rollback()

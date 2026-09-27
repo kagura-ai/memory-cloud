@@ -1081,9 +1081,9 @@ Returns: {status, reports: [{report_id, context_id, status, started_at, complete
         {
             "name": "get_sleep_report",
             "readOnly": True,
-            "description": """Get one Sleep Maintenance run in full: per-phase results, cost tracking and the audit log of every action. Find report_ids with get_sleep_history().
+            "description": """Get one Sleep Maintenance run: per-phase results, cost tracking and its audit log of actions, a page at a time in id order. Find report_ids with get_sleep_history().
 
-Returns: {status, report: {report_id, context_id, status, started_at, completed_at, memories_processed, edges_created, memories_merged, memories_promoted, llm_calls_made, llm_tokens_used, memories_flagged, embedding_calls_made, error_message, edge_discovery_result, dedup_result, importance_result, consolidation_result, reindex_result}, actions: [{id, phase, action_type, memory_id, target_id, details, created_at}], action_count}. action_type: create_edge | merge | update_importance | promote | archive; details holds action-specific data (old/new values, similarity scores).""",
+Returns: {status, report: {report_id, context_id, status, started_at, completed_at, memories_processed, edges_created, memories_merged, memories_promoted, llm_calls_made, llm_tokens_used, memories_flagged, embedding_calls_made, error_message, edge_discovery_result, dedup_result, importance_result, consolidation_result, reindex_result}, actions: [{id, phase, action_type, memory_id, target_id, details, created_at}], action_count, actions_has_more, actions_next_cursor}. action_count is the run's total; pass actions_next_cursor as actions_cursor for the next page. An action too large for the page has details_omitted instead of details. action_type: create_edge | merge | update_importance | promote | archive; details holds action-specific data (old/new values, similarity scores).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["report_id"],
@@ -1092,6 +1092,21 @@ Returns: {status, report: {report_id, context_id, status, started_at, completed_
                         "type": "string",
                         "format": "uuid",
                         "description": "Sleep report UUID (from get_sleep_history).",
+                    },
+                    "actions_limit": {
+                        "type": "integer",
+                        "description": "Actions per page, 1-200.",
+                        "default": 50,
+                    },
+                    "actions_cursor": {
+                        "type": "string",
+                        "description": "actions_next_cursor from the previous page.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 10000,
+                        "maximum": 100000,
+                        "description": "Response budget in characters, not tokens (default 20000).",
                     },
                 },
             },
