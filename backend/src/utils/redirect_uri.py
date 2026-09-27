@@ -78,14 +78,23 @@ def redirect_uri_display_host(uri: str) -> str:
         uri: A redirect URI that already matched a registered pattern.
 
     Returns:
-        ``host`` or ``host:port``; an empty string if ``uri`` has no host.
+        ``host`` or ``host:port``. A malformed port is shown as written, and a
+        URI without a host is returned whole, so the page never names nothing.
     """
     try:
         parsed = urlparse(uri)
-        host = parsed.hostname or ""
+    except ValueError:
+        return uri
+    try:
         port = parsed.port
     except ValueError:
-        return ""
+        # An exact-match pattern is not checked for a numeric port, so a
+        # registered ``http://host:abc/cb`` can reach the consent page. Show
+        # the authority as written (minus userinfo) rather than nothing.
+        return parsed.netloc.rpartition("@")[2].lower() or uri
+    host = parsed.hostname or ""
+    if not host:
+        return uri
     if ":" in host:
         host = f"[{host}]"
     return f"{host}:{port}" if port is not None else host

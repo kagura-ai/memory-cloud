@@ -316,6 +316,11 @@ class TestRedirectUriDisplayHost:
             ("http://localhost:51234/callback", "localhost:51234"),
             ("http://127.0.0.1/callback", "127.0.0.1"),
             ("http://[::1]:3000/cb", "[::1]:3000"),
+            # Never empty: a malformed port is shown as written (userinfo
+            # dropped), and a host-less URI is shown whole.
+            ("https://Example.com:abc/cb", "example.com:abc"),
+            ("https://user@example.com:99999/cb", "example.com:99999"),
+            ("https:///cb", "https:///cb"),
         ],
     )
     def test_host(self, uri, expected):
