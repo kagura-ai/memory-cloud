@@ -183,6 +183,28 @@ describe("with a password", () => {
     expect(screen.getByText("removeDisabledHint")).toBeTruthy();
   });
 
+  it("re-reads the linked providers when Connected Accounts changes them", async () => {
+    providers();
+    const { rerender } = render(<PasswordSettings providersVersion={0} />);
+    const remove = await screen.findByRole("button", { name: "removeButton" });
+    expect((remove as HTMLButtonElement).disabled).toBe(true);
+
+    // A provider was linked elsewhere on the page.
+    providers("github");
+    rerender(<PasswordSettings providersVersion={1} />);
+
+    await waitFor(() =>
+      expect(
+        (
+          screen.getByRole("button", {
+            name: "removeButton",
+          }) as HTMLButtonElement
+        ).disabled,
+      ).toBe(false),
+    );
+    expect(mockGet).toHaveBeenCalledTimes(2);
+  });
+
   it("removes the password after confirming the current one", async () => {
     providers("google");
     mockRemove.mockResolvedValue(undefined);

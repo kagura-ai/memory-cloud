@@ -296,6 +296,47 @@ describe("ConnectedAccounts — disconnect", () => {
   });
 });
 
+describe("ConnectedAccounts — tells the page when the providers change (#1678)", () => {
+  async function disconnectGoogle() {
+    const disconnectBtn = await screen.findByRole("button", {
+      name: /^disconnectButton\|google$/,
+    });
+    fireEvent.click(disconnectBtn);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^disconnectConfirm$/ }),
+    );
+  }
+
+  it("calls onProvidersChanged after a successful disconnect", async () => {
+    mockApiGet
+      .mockResolvedValueOnce({
+        providers: [{ provider: "google" }, { provider: "github" }],
+      })
+      .mockResolvedValueOnce({ providers: [{ provider: "github" }] });
+    mockApiPost.mockResolvedValueOnce({ status: "ok" });
+    const onProvidersChanged = vi.fn();
+
+    render(<ConnectedAccounts onProvidersChanged={onProvidersChanged} />);
+    await disconnectGoogle();
+
+    await waitFor(() => expect(onProvidersChanged).toHaveBeenCalledTimes(1));
+  });
+
+  it("does not call it when the disconnect fails", async () => {
+    mockApiGet.mockResolvedValue({
+      providers: [{ provider: "google" }, { provider: "github" }],
+    });
+    mockApiPost.mockRejectedValueOnce(new FakeApiError(409));
+    const onProvidersChanged = vi.fn();
+
+    render(<ConnectedAccounts onProvidersChanged={onProvidersChanged} />);
+    await disconnectGoogle();
+
+    await screen.findByText("lastMethodError");
+    expect(onProvidersChanged).not.toHaveBeenCalled();
+  });
+});
+
 // ---------- i18n: keys exist in both locales (no hardcoded strings) ----------
 
 describe("ConnectedAccounts — i18n key coverage", () => {

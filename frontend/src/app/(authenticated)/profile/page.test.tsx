@@ -41,8 +41,19 @@ vi.mock("@/components/account/DeleteAccountSection", () => ({
 }));
 // #1678: the Password section has its own suite (PasswordSettings.test.tsx)
 // and its own providers fetch.
+// Both sections are stubbed down to the wiring between them: Connected
+// Accounts reports a change, the Password section re-reads the providers.
 vi.mock("@/components/auth/PasswordSettings", () => ({
-  default: () => null,
+  default: ({ providersVersion }: { providersVersion?: number }) => (
+    <div data-testid="password-settings-stub">{String(providersVersion)}</div>
+  ),
+}));
+vi.mock("@/components/auth/ConnectedAccounts", () => ({
+  default: ({ onProvidersChanged }: { onProvidersChanged?: () => void }) => (
+    <button type="button" onClick={() => onProvidersChanged?.()}>
+      connected-accounts-stub
+    </button>
+  ),
 }));
 
 // AuthContext mock — flipped per test via mockUser.
@@ -515,5 +526,25 @@ describe("ProfilePage — post-callback search-param handling (#515)", () => {
 
     expect(mockToast).not.toHaveBeenCalled();
     expect(mockRouterReplace).not.toHaveBeenCalled();
+  });
+});
+
+// ---------- Connected Accounts → Password section (#1678) --------------------
+
+describe("ProfilePage — linked providers stay in sync (#1678)", () => {
+  it("bumps the Password section's providers version on a link change", () => {
+    mockUser = {
+      id: "u1",
+      email: "me@example.com",
+      name: "Me",
+      auth_method: "oauth",
+      auth_provider: "github",
+    };
+    render(<ProfilePage />);
+    expect(screen.getByTestId("password-settings-stub").textContent).toBe("0");
+
+    fireEvent.click(screen.getByText("connected-accounts-stub"));
+
+    expect(screen.getByTestId("password-settings-stub").textContent).toBe("1");
   });
 });

@@ -48,6 +48,9 @@ export default function ProfilePage() {
   const { toast } = useToast();
   const [isEditMode, setIsEditMode] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  // #1678: bumped when Connected Accounts unlinks a provider, so the Password
+  // section re-reads how many sign-in methods would remain.
+  const [providersVersion, setProvidersVersion] = useState(0);
 
   // Wait for useAuth() to finish its initial /auth/me fetch before
   // surfacing the refreshed=1 / error=refresh_* toast (enabled: !!user).
@@ -415,10 +418,12 @@ export default function ProfilePage() {
           covered by an extensive test suite and serve a distinct purpose
           (current method display + IdP profile refresh) from this management
           section, so removing them was judged riskier than additive mounting. */}
-      <ConnectedAccounts />
+      <ConnectedAccounts
+        onProvidersChanged={() => setProvidersVersion((v) => v + 1)}
+      />
 
       {/* Password (Issue #1678): set up / change / remove. */}
-      <PasswordSettings />
+      <PasswordSettings providersVersion={providersVersion} />
 
       {/* Theme & Appearance */}
       <Card>

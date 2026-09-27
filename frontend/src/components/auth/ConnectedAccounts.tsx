@@ -102,7 +102,19 @@ function ProviderGlyph({ provider }: { provider: Provider }) {
   return provider === "google" ? <GoogleGlyph /> : <GitHubGlyph />;
 }
 
-export default function ConnectedAccounts() {
+interface ConnectedAccountsProps {
+  /**
+   * Called after a provider was unlinked, so sections that depend on the
+   * linked providers (the Password section's Remove guard, #1678) re-read
+   * them. Linking needs no callback: it leaves the page for the IdP and the
+   * profile reloads on return.
+   */
+  onProvidersChanged?: () => void;
+}
+
+export default function ConnectedAccounts({
+  onProvidersChanged,
+}: ConnectedAccountsProps = {}) {
   const t = useTranslations("connectedAccounts");
   const tCommon = useTranslations("common");
   const { user } = useAuth();
@@ -176,6 +188,7 @@ export default function ConnectedAccounts() {
       await apiClient.post("/api/v1/me/account/unlink-provider", { provider });
       toast({ title: t("disconnectSuccess", { provider: t(provider) }) });
       setDisconnectTarget(null);
+      onProvidersChanged?.();
       await loadProviders();
     } catch (error) {
       // 409 = would leave zero auth methods. Surface the API's intent via an

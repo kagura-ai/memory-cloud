@@ -14,6 +14,10 @@
  *   POST   /api/v1/me/password/change        → 204 | 403 | 422 | 429
  *   DELETE /api/v1/me/password               → 204 | 403 | 409 | 429
  *   GET    /api/v1/me/account/providers      (how many OAuth methods remain)
+ *
+ * The providers are re-read whenever `providersVersion` changes: the profile
+ * page bumps it when Connected Accounts unlinks a provider, so the Remove
+ * button never acts on a stale count.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -59,7 +63,14 @@ function statusOf(err: unknown): number {
   return err instanceof ApiError ? err.status : 0;
 }
 
-export default function PasswordSettings() {
+interface PasswordSettingsProps {
+  /** Bumped by the page when the linked providers change elsewhere. */
+  providersVersion?: number;
+}
+
+export default function PasswordSettings({
+  providersVersion = 0,
+}: PasswordSettingsProps = {}) {
   const t = useTranslations("passwordSettings");
   const tCommon = useTranslations("common");
   const { user, refetchUser } = useAuth();
@@ -109,7 +120,7 @@ export default function PasswordSettings() {
 
   useEffect(() => {
     void loadProviders();
-  }, [loadProviders]);
+  }, [loadProviders, providersVersion]);
 
   const canRemove = linkedCount > 0;
 
