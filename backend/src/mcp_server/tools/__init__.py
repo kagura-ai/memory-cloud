@@ -18,7 +18,7 @@ from uuid import UUID
 from mcp.types import TextContent
 from pydantic import ValidationError
 
-from mcp_server.tools._arg_coercion import coerce_mcp_arguments
+from mcp_server.tools._arg_coercion import coerce_mcp_arguments, find_unknown_arguments
 from mcp_server.tools._definitions import get_tool_definitions  # noqa: F401
 from mcp_server.tools._errors import _tool_exception_response
 from mcp_server.tools._helpers import (
@@ -376,8 +376,6 @@ async def execute_tool_call(
     if _TOOL_REGISTRY is None:
         _TOOL_REGISTRY = _build_registry()
 
-    args = arguments or {}
-
     # Validate tool exists before expensive checks (avoids DB query for unknown tools)
     handler = _TOOL_REGISTRY.get(tool_name)
     if handler is None:
@@ -385,6 +383,34 @@ async def execute_tool_call(
             "unknown_tool",
             f"Unknown tool: {tool_name}",
             help="Call tools/list to see the tools this server provides.",
+        )
+
+    # #1742: both transports check this too; a direct caller gets the same
+    # refusal instead of a TypeError from the handler. ``null`` means no
+    # arguments, as in the MCP SDK.
+    if arguments is not None and not isinstance(arguments, dict):
+        return _error_response(
+            "invalid_argument",
+            "'arguments' must be an object.",
+            help='Send the tool arguments as a JSON object, for example {"context_id": "..."}.',
+        )
+    args = arguments or {}
+
+    # #1742: every tool schema sets ``additionalProperties: false``, and a
+    # misspelled argument used to be dropped silently (``importanc`` stored the
+    # default importance). Refuse it, naming the accepted arguments.
+    unknown = find_unknown_arguments(tool_name, args)
+    if unknown is not None:
+        message = unknown.pop("message")
+        logger.warning(f"mcp_tool_{tool_name}_unknown_arguments: {unknown['unknown_arguments']!r}")
+        return _error_response(
+            "invalid_argument",
+            message,
+            **unknown,
+            help=(
+                "Remove the unknown arguments or rename them as suggested, then call the "
+                "tool again. tools/list shows each tool's inputSchema."
+            ),
         )
 
     # Issue #196 / #197: some MCP clients serialize arrays / objects / booleans

@@ -20,6 +20,7 @@ error message.
 
 from __future__ import annotations
 
+import difflib
 import json
 from typing import Any
 
@@ -44,6 +45,31 @@ def _build_tool_schemas() -> dict[str, dict[str, dict]]:
 # time rather than memoizing a lookup function (lru_cache would hide staleness
 # across test sessions that patch get_tool_definitions).
 _TOOL_SCHEMAS: dict[str, dict[str, dict]] = _build_tool_schemas()
+
+# #1742: tools whose inputSchema sets ``additionalProperties: false`` — every
+# tool today (``test_tool_schema_policy.py``). An argument outside their
+# ``properties`` is refused instead of silently dropped.
+_CLOSED_TOOLS: frozenset[str] = frozenset(
+    tool["name"]
+    for tool in get_tool_definitions()
+    if tool.get("name") and tool.get("inputSchema", {}).get("additionalProperties") is False
+)
+
+# Argument names a tool still accepts although its schema no longer
+# advertises them: deliberate, deprecated aliases the handler reads.
+_ACCEPTED_ALIASES: dict[str, frozenset[str]] = {
+    # #990: renamed to source_context_id / target_context_id; the old names
+    # stay accepted for the SDK (see ``handle_merge_contexts``).
+    "merge_contexts": frozenset({"source_id", "target_id"}),
+}
+
+# Accepted on every tool and ignored: MCP request metadata some clients also
+# put inside ``arguments``.
+_ALWAYS_ACCEPTED: frozenset[str] = frozenset({"_meta"})
+
+# Bounds on the client-controlled names echoed back in the refusal.
+_MAX_UNKNOWN_SHOWN = 10
+_MAX_NAME_CHARS = 64
 
 
 def _coerce_to_array(value: Any) -> Any:
@@ -157,3 +183,54 @@ def coerce_mcp_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str,
             continue
         coerced[arg_name] = coercer(value)
     return coerced
+
+
+def _shown_name(name: str) -> str:
+    return repr(name[:_MAX_NAME_CHARS] + ("…" if len(name) > _MAX_NAME_CHARS else ""))
+
+
+def find_unknown_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+    """Describe the arguments a closed tool schema does not declare (#1742).
+
+    Args:
+        tool_name: MCP tool name.
+        arguments: The call's arguments.
+
+    Returns:
+        ``None`` when every argument is declared (or the tool's schema is
+        open or unknown); otherwise ``{"message", "unknown_arguments",
+        "allowed_arguments", "suggestions"}`` for an ``invalid_argument``
+        envelope. ``suggestions`` maps an unknown name to its closest declared
+        name (difflib) when one is close enough.
+    """
+    if not arguments or tool_name not in _CLOSED_TOOLS:
+        return None
+    props = _TOOL_SCHEMAS.get(tool_name, {})
+    accepted = props.keys() | _ACCEPTED_ALIASES.get(tool_name, frozenset()) | _ALWAYS_ACCEPTED
+    unknown = sorted(str(name) for name in arguments if name not in accepted)
+    if not unknown:
+        return None
+
+    allowed = sorted(props)
+    suggestions: dict[str, str] = {}
+    parts: list[str] = []
+    for name in unknown[:_MAX_UNKNOWN_SHOWN]:
+        close = difflib.get_close_matches(name, allowed, n=1, cutoff=0.6)
+        shown = _shown_name(name)
+        if close:
+            suggestions[name[:_MAX_NAME_CHARS]] = close[0]
+            parts.append(f"{shown} (did you mean '{close[0]}'?)")
+        else:
+            parts.append(shown)
+    more = len(unknown) - _MAX_UNKNOWN_SHOWN
+    listed = ", ".join(parts) + (f" and {more} more" if more > 0 else "")
+    noun = "argument" if len(unknown) == 1 else "arguments"
+    return {
+        "message": (
+            f"{tool_name} does not accept the {noun} {listed}. "
+            f"Accepted arguments: {', '.join(allowed)}."
+        ),
+        "unknown_arguments": [n[:_MAX_NAME_CHARS] for n in unknown[:_MAX_UNKNOWN_SHOWN]],
+        "allowed_arguments": allowed,
+        "suggestions": suggestions,
+    }
