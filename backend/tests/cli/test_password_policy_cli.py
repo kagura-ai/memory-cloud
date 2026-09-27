@@ -46,7 +46,9 @@ def _assert_policy_message(out: str) -> None:
 
 
 def test_reset_password_prints_the_policy_message(capsys) -> None:
-    user = SimpleNamespace(totp_enabled=False, totp_secret=None, password_hash="old")
+    user = SimpleNamespace(
+        user_id="local:admin", totp_enabled=False, totp_secret=None, password_hash="old"
+    )
     db = MagicMock()
     db.execute.return_value.scalar_one_or_none.return_value = user
     prompts: list[str] = []
@@ -96,3 +98,43 @@ def test_create_admin_prints_the_policy_message(capsys) -> None:
     assert prompts == ["Password:", "Password:", "Confirm:"]
     assert [c.args[0] for c in policy.call_args_list] == [REJECTED, VALID]
     _assert_policy_message(capsys.readouterr().out)
+
+
+def test_reset_password_kills_outstanding_password_links() -> None:
+    """A CLI reset invalidates emailed reset / set-up links in the same commit (#1678).
+
+    Otherwise a link issued before the admin reset could overwrite the new
+    password afterwards.
+    """
+    from sqlalchemy.sql.dml import Update
+
+    user = SimpleNamespace(
+        user_id="local:admin", totp_enabled=False, totp_secret=None, password_hash="old"
+    )
+    db = MagicMock()
+    db.execute.return_value.scalar_one_or_none.return_value = user
+
+    with (
+        patch.object(reset_password, "create_engine"),
+        patch.object(reset_password, "get_sync_database_url", return_value="x"),
+        patch.object(reset_password, "Session", _db_session(db)),
+        patch("builtins.input", side_effect=["admin", "1"]),
+        patch.object(reset_password.getpass, "getpass", side_effect=[VALID, VALID]),
+        patch.object(reset_password, "hash_password", return_value="new-hash"),
+    ):
+        reset_password.reset_password()
+
+    names = [name for name, _args, _kwargs in db.mock_calls if name in ("execute", "commit")]
+    updates = [
+        (i, call.args[0])
+        for i, call in enumerate(c for c in db.mock_calls if c[0] in ("execute", "commit"))
+        if call[0] == "execute" and isinstance(call.args[0], Update)
+    ]
+    assert len(updates) == 1
+    index, statement = updates[0]
+    assert statement.table.name == "email_action_tokens"
+    compiled = statement.compile()
+    assert set(compiled.params["purpose_1"]) == {"reset_password", "set_password"}
+    assert compiled.params["user_id_1"] == "local:admin"
+    assert "commit" in names[index + 1 :]
+    assert user.password_hash == "new-hash"

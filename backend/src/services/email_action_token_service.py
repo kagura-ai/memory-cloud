@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import select, update
+from sqlalchemy import Update, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
@@ -45,6 +45,42 @@ from utils.utf8 import is_utf8_encodable
 logger = get_logger(__name__)
 
 EmailActionPurpose = Literal["verify_email", "set_password", "reset_password"]
+
+# The links that act on the password: any password write kills them, so an
+# older email cannot undo (or redo) it.
+PASSWORD_LINK_PURPOSES: tuple[EmailActionPurpose, ...] = ("reset_password", "set_password")
+
+
+def invalidation_statement(
+    *,
+    user_id: str,
+    purposes: Iterable[EmailActionPurpose],
+    now: datetime | None = None,
+) -> Update:
+    """Build the UPDATE that marks a user's outstanding links for ``purposes`` used.
+
+    Shared by the async service and the synchronous admin CLI, so both kill
+    links the same way.
+
+    Args:
+        user_id: The account whose links die.
+        purposes: The purposes to invalidate.
+        now: The timestamp to record; defaults to the current time.
+
+    Returns:
+        The UPDATE statement, not yet executed.
+    """
+    return (
+        update(EmailActionToken)
+        .where(
+            EmailActionToken.user_id == user_id,
+            EmailActionToken.purpose.in_(list(purposes)),
+            EmailActionToken.used_at.is_(None),
+        )
+        .values(used_at=now or utcnow())
+        .execution_options(synchronize_session=False)
+    )
+
 
 # ``token_urlsafe(32)`` yields 43 characters. Anything far outside that range
 # was never issued; refusing it early keeps junk out of the hash + query.
@@ -178,16 +214,7 @@ class EmailActionTokenService:
             purposes: The purposes to invalidate.
             now: The timestamp to record; defaults to the current time.
         """
-        await self.db.execute(
-            update(EmailActionToken)
-            .where(
-                EmailActionToken.user_id == user_id,
-                EmailActionToken.purpose.in_(list(purposes)),
-                EmailActionToken.used_at.is_(None),
-            )
-            .values(used_at=now or utcnow())
-            .execution_options(synchronize_session=False)
-        )
+        await self.db.execute(invalidation_statement(user_id=user_id, purposes=purposes, now=now))
 
     async def consume(
         self,

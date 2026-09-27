@@ -25,6 +25,10 @@ from auth.password_policy import (  # noqa: E402
 )
 from cli.db import get_sync_database_url  # noqa: E402
 from models.auth import User  # noqa: E402
+from services.email_action_token_service import (  # noqa: E402
+    PASSWORD_LINK_PURPOSES,
+    invalidation_statement,
+)
 
 _project_root = Path(__file__).parent.parent.parent.parent
 
@@ -101,6 +105,11 @@ def reset_password():
                 break
 
             user.password_hash = hash_password(password)
+            # Kill emailed reset / set-up links in the same commit (#1678): one
+            # issued before this reset must not overwrite the new password.
+            db.execute(
+                invalidation_statement(user_id=user.user_id, purposes=PASSWORD_LINK_PURPOSES)
+            )
             print("  ✓ Password updated.")
 
         # Disable MFA

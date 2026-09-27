@@ -45,7 +45,9 @@ def _assert_refused(out: str) -> None:
 
 class TestResetPassword:
     def test_unencodable_password_is_refused_before_confirmation(self, capsys) -> None:
-        user = SimpleNamespace(totp_enabled=False, totp_secret=None, password_hash="old")
+        user = SimpleNamespace(
+            user_id="local:admin", totp_enabled=False, totp_secret=None, password_hash="old"
+        )
         db = MagicMock()
         db.execute.return_value.scalar_one_or_none.return_value = user
         prompts: list[str] = []

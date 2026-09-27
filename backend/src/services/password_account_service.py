@@ -40,6 +40,7 @@ from config.settings import get_settings
 from db.base import _get_session_factory
 from models.auth import AuditLog, User, UserOAuthProvider
 from services.email_action_token_service import (
+    PASSWORD_LINK_PURPOSES,
     EmailActionPurpose,
     EmailActionTokenService,
     token_ttl,
@@ -70,7 +71,7 @@ _AUDIT_ACTOR_LINK = "email-link"
 
 # Every password change kills the outstanding password links, so an older
 # email cannot undo (or redo) it.
-_PASSWORD_LINK_PURPOSES: tuple[EmailActionPurpose, ...] = ("reset_password", "set_password")
+_PASSWORD_LINK_PURPOSES = PASSWORD_LINK_PURPOSES
 
 
 def normalize_email(email: str) -> str:
