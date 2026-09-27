@@ -350,7 +350,7 @@ Large memories: nothing is cut silently, and the response stays within max_chars
             "readOnly": True,
             "description": """List Time Memories (type='time') whose scheduled window overlaps a time range, soonest first. Use for 'what's coming up?' questions. A deterministic time query, NOT semantic search — for topics use recall(). Create one by resolving the date yourself and calling remember(type='time', details={'trigger': {'year': 2026, 'month': 7}}); omit month/day for fuzzy timing.
 
-Returns: {status, results: [{memory_id, summary, type, trigger}], context_id, context_name, context_display_name, context_is_private, context_is_locked}. trigger is the memory's details.trigger (when it fires). With include_details=true each item carries the full details object instead of trigger (details.trigger is inside it); otherwise call reference(memory_id) for one memory's full content.""",
+Returns: {status, results: [{memory_id, summary, type, trigger}], context_id, context_name, context_display_name, context_is_private, context_is_locked}. trigger is the memory's details.trigger (when it fires). With include_details=true each item carries the full details object instead of trigger (details.trigger is inside it), but the later items get details_omitted + details_total_chars once the reply passes 20000 characters; call reference(memory_id) for one memory's full content.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -384,7 +384,7 @@ Returns: {status, results: [{memory_id, summary, type, trigger}], context_id, co
             "readOnly": True,
             "description": """List memories near a geographic point, nearest first with distance_m. Use for 'what happened around here?' questions. A deterministic spatial query over stored coordinates (details.location), NOT semantic search — for topics use recall(). Store a location on any memory type with remember(details={'location': {'lat': 35.68, 'lon': 139.76, 'label': 'optional'}}); lat/lon must be JSON numbers. update_memory replaces details wholesale — resend location or it is dropped.
 
-Returns: {status, results: [{memory_id, summary, type, details, distance_m}], context_id, context_name, context_display_name, context_is_private, context_is_locked}.""",
+Returns: {status, results: [{memory_id, summary, type, location, distance_m}], context_id, context_name, context_display_name, context_is_private, context_is_locked}. location is the memory's details.location. With include_details=true each item carries the full details object instead (later items get details_omitted + details_total_chars past 20000 characters); reference(memory_id) reads one memory in full.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id", "lat", "lon"],
@@ -409,6 +409,10 @@ Returns: {status, results: [{memory_id, summary, type, details, distance_m}], co
                     "k": {
                         "type": "integer",
                         "description": "Max results (default 20, max 100).",
+                    },
+                    "include_details": {
+                        "type": "boolean",
+                        "description": "Return each item's full details object instead of its location (default: false).",
                     },
                 },
             },

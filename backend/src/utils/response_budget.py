@@ -112,3 +112,31 @@ def fit_items(items: Sequence[Any], budget: int) -> int:
 def drop_key(items: Iterable[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     """Copies of ``items`` without ``key`` (the first thing cut under a budget)."""
     return [{k: v for k, v in item.items() if k != key} for item in items]
+
+
+def omit_field_to_fit(items: list[dict[str, Any]], field: str, budget: int) -> list[dict[str, Any]]:
+    """Leave ``field`` out of the last items until the array fits ``budget``.
+
+    Every item stays in the list; from the end backwards, an item's ``field``
+    is replaced with ``<field>_omitted: true`` + ``<field>_total_chars`` (the
+    #1685 markers) until the serialized array fits — so the first items keep
+    their field and the caller reads the others by id. May still exceed
+    ``budget`` when the items are large without the field.
+    """
+    out = list(items)
+    total = json_chars(out)
+    for index in range(len(out) - 1, -1, -1):
+        if total <= budget:
+            break
+        item = out[index]
+        if field not in item:
+            continue
+        field_chars = json_chars(item[field])
+        replaced = {
+            **{k: v for k, v in item.items() if k != field},
+            f"{field}_omitted": True,
+            f"{field}_total_chars": field_chars,
+        }
+        total += json_chars(replaced) - json_chars(item)
+        out[index] = replaced
+    return out

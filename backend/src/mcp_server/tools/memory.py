@@ -36,8 +36,15 @@ from mcp_server.tools._helpers import (
 )
 from utils.datetime import to_utc_iso
 from utils.exceptions import AuthorizationError, NotFoundException, QuotaExceededError
+from utils.response_budget import DEFAULT_MAX_CHARS, omit_field_to_fit
 
 logger = logging.getLogger(__name__)
+
+# #1743: recall_upcoming / recall_nearby with include_details=true. Items keep
+# their order; from the last one backwards, details is replaced by
+# details_omitted + details_total_chars until the results fit this many
+# characters (read those with reference()).
+_DETAILS_RESULTS_BUDGET = DEFAULT_MAX_CHARS - 1_000
 
 # #1228: server-side cap for cross-context recall — MUST stay in sync with
 # the recall inputSchema's context_ids maxItems in _definitions.py.
@@ -417,6 +424,8 @@ async def handle_recall_upcoming(
                 k=k,
                 include_details=include_details,
             )
+            if include_details:
+                results = omit_field_to_fit(results, "details", _DETAILS_RESULTS_BUDGET)
             await _log_tool_usage(
                 db, user_id, "recall_upcoming", start_time, 200, current_context_id, workspace_id
             )
@@ -483,6 +492,9 @@ async def handle_recall_nearby(
         k = clamp_nearby_k(args.get("k", 20))
     except (TypeError, ValueError):
         return _error_response("validation_error", f"k must be an integer, got {args.get('k')!r}")
+    # #1743: items carry details.location by default; the full details is
+    # opt-in (strictly True, as recall_upcoming) and held to a reply budget.
+    include_details = args.get("include_details") is True
 
     start_time = time.time()
     async for db in get_db():
@@ -496,8 +508,16 @@ async def handle_recall_nearby(
             current_context = await _resolve_context_for_read(db, user_id, current_context_id)
 
             results = await query_nearby_memories(
-                db, current_context_id, lat=lat, lon=lon, radius_m=radius_m, k=k
+                db,
+                current_context_id,
+                lat=lat,
+                lon=lon,
+                radius_m=radius_m,
+                k=k,
+                include_details=include_details,
             )
+            if include_details:
+                results = omit_field_to_fit(results, "details", _DETAILS_RESULTS_BUDGET)
             await _log_tool_usage(
                 db, user_id, "recall_nearby", start_time, 200, current_context_id, workspace_id
             )

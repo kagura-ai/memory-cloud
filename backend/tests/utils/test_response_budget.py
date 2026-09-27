@@ -60,3 +60,17 @@ def test_drop_key_copies_without_the_key():
     items = [{"a": 1, "b": 2}]
     assert drop_key(items, "b") == [{"a": 1}]
     assert items == [{"a": 1, "b": 2}]
+
+
+def test_omit_field_to_fit_cuts_from_the_end():
+    from utils.response_budget import omit_field_to_fit
+
+    items = [{"id": i, "details": {"x": "y" * 100}} for i in range(5)]
+    out = omit_field_to_fit(items, "details", 400)
+    assert json_chars(out) <= 400
+    assert "details" in out[0]
+    assert out[-1]["details_omitted"] is True
+    assert out[-1]["details_total_chars"] == json_chars(items[-1]["details"])
+    assert len(out) == 5
+    # Under the budget nothing changes.
+    assert omit_field_to_fit(items, "details", 10_000) == items

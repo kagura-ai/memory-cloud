@@ -300,3 +300,29 @@ def test_recall_upcoming_include_details_string_is_coerced_at_dispatch():
 
     coerced = coerce_mcp_arguments("recall_upcoming", {"include_details": "true"})
     assert coerced["include_details"] is True
+
+
+@pytest.mark.asyncio
+async def test_recall_upcoming_include_details_is_held_to_a_budget():
+    """#1743: with include_details the later items drop details (with the
+    #1685 markers) so the reply stays within the default budget."""
+    rows = []
+    for month in range(1, 21):
+        row = _row(month)
+        row.details = {"trigger": {"year": 2026, "month": month}, "notes": "x" * 5_000}
+        rows.append(row)
+    mock_db = _mock_db_returning(rows)
+
+    with _patched(mock_db):
+        result = await handle_recall_upcoming(
+            {"context_id": str(uuid4()), "include_details": True},
+            user_id="u1",
+            workspace_id=None,
+        )
+
+    assert len(result[0].text) <= 20_000
+    items = json.loads(result[0].text)["results"]
+    assert len(items) == 20
+    assert "details" in items[0]
+    assert items[-1]["details_omitted"] is True
+    assert items[-1]["details_total_chars"] > 5_000

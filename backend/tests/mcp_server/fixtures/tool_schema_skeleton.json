@@ -327,6 +327,9 @@
         },
         "k": {
           "type": "integer"
+        },
+        "include_details": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false
