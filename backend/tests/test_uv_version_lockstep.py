@@ -137,14 +137,34 @@ def test_locked_installs_everywhere() -> None:
         assert unlocked == [], f"{rel}: uv sync without --locked: {unlocked}"
 
 
-def test_lock_is_tracked_and_current_python() -> None:
-    """uv.lock exists, git does not ignore it, and it matches pyproject's requires-python."""
+def test_lock_matches_pyproject_requires_python() -> None:
+    """uv.lock exists and was resolved for pyproject's requires-python."""
     lock_path = _REPO_ROOT / "backend" / "uv.lock"
     assert lock_path.is_file(), "backend/uv.lock is missing — run `cd backend && uv lock`"
-    # git is the authority on ignore rules; exit 1 means "not ignored".
-    check = subprocess.run(
-        ["git", "check-ignore", "-q", "backend/uv.lock"], cwd=_REPO_ROOT, check=False
-    )
-    assert check.returncode == 1, "git ignores backend/uv.lock — the lock must be tracked"
     lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
     assert lock["requires-python"] == _pyproject()["project"]["requires-python"]
+
+
+def _git(*args: str) -> int:
+    return subprocess.run(
+        ["git", *args], cwd=_REPO_ROOT, check=False, capture_output=True
+    ).returncode
+
+
+def test_lock_is_tracked_by_git() -> None:
+    """git tracks the lock and no ignore rule matches it.
+
+    Skipped where there is no git metadata (a source tree copied into a
+    container). ``--no-index`` makes ``check-ignore`` consult the ignore rules
+    even for a tracked file, so re-adding the lock to ``.gitignore`` fails here
+    although the file is already in the index.
+    """
+    if not (_REPO_ROOT / ".git").exists() or _git("rev-parse", "--git-dir") != 0:
+        pytest.skip("no git metadata in this checkout")
+    assert _git("ls-files", "--error-unmatch", "backend/uv.lock") == 0, (
+        "backend/uv.lock is not tracked by git"
+    )
+    # Exit 1 means no ignore rule matches the path.
+    assert _git("check-ignore", "--no-index", "-q", "backend/uv.lock") == 1, (
+        "an ignore rule matches backend/uv.lock — the lock must stay tracked"
+    )
