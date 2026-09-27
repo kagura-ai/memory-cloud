@@ -242,6 +242,59 @@ class TestAlgorithmAllowList:
             jwt.decode(minted.token, key)
 
 
+class TestClaimTypes:
+    """The verifier refuses wrongly typed registered claims, as the Authlib one did.
+
+    joserfc checks the types of ``iss`` and ``sub`` from 1.7.3 on, which is why
+    ``pyproject.toml`` sets that floor; before it, an ``iss`` array that merely
+    contained the expected issuer was accepted.
+    """
+
+    @staticmethod
+    def _token(private_pem: str, **overrides: object) -> str:
+        claims = {**_GOLDEN_CLAIMS, **overrides}
+        return jwt.encode(
+            {"alg": "EdDSA", "typ": "JWT", "kid": "kid-1"},
+            claims,
+            OKPKey.import_key(private_pem),
+            algorithms=["EdDSA"],
+        )
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            pytest.param({"iss": [ISSUER, "someone-else"]}, id="iss-array-containing-issuer"),
+            pytest.param({"iss": 1}, id="iss-number"),
+            pytest.param({"sub": 5}, id="sub-number"),
+        ],
+    )
+    def test_wrongly_typed_claim_is_invalid(self, overrides: dict) -> None:
+        private_pem, public_pem = ed25519_keypair()
+
+        with pytest.raises(BillingHandoffInvalid):
+            verify_handoff_token(
+                self._token(private_pem, **overrides),
+                public_pem,
+                current_epoch=2,
+                issuer=ISSUER,
+                audience=AUDIENCE,
+            )
+
+    def test_audience_array_containing_the_audience_is_accepted(self) -> None:
+        # RFC 7519 allows `aud` to be an array; the Authlib verifier accepted
+        # it too, so this is unchanged behaviour, pinned so it stays deliberate.
+        private_pem, public_pem = ed25519_keypair()
+
+        claims = verify_handoff_token(
+            self._token(private_pem, aud=[AUDIENCE, "another-service"]),
+            public_pem,
+            current_epoch=2,
+            issuer=ISSUER,
+            audience=AUDIENCE,
+        )
+        assert claims["aud"] == [AUDIENCE, "another-service"]
+
+
 class TestNoAuthlibJoseInSource:
     def test_backend_src_does_not_import_authlib_jose(self) -> None:
         # Acceptance for #1708. The suite-wide filterwarnings entry in

@@ -63,11 +63,12 @@ dependencies = [
     # its PKCE and grant hooks, verified on 1.8 (#1701): pin the minor.
     "authlib>=1.8.0,<1.9",  # OAuth2 server (authlib.jose is no longer used, #1708)
     # Billing hand-off JWT (auth/billing_handoff.py): the successor of
-    # authlib.jose, which Authlib 2.0 removes. The signer needs the
-    # jwt.encode(default_type=) parameter from 1.5.0, and Authlib 1.8 itself
-    # requires >=1.6.1, so that is the floor; verified on 1.7.5 (#1708).
-    # Semver: stop at the next major.
-    "joserfc>=1.6.1,<2",
+    # authlib.jose, which Authlib 2.0 removes. The floor is 1.7.3: that
+    # release added the default type checks for iss / sub / aud (before it, an
+    # `iss` array containing the expected issuer passed the verifier, which
+    # the Authlib implementation refused); jwt.encode(default_type=) is older
+    # (1.5.0). Verified on 1.7.5 (#1708). Semver: stop at the next major.
+    "joserfc>=1.7.3,<2",
     # Semver, used through stable API only: take minors, stop at the next major.
     "google-auth>=2.35.0,<3",  # Google OAuth2
     "google-auth-oauthlib>=1.2.0,<2",  # Google OAuth2 helpers
