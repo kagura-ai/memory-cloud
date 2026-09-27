@@ -628,7 +628,13 @@ class SessionManager:
             logger.error(f"Failed to cleanup sessions: {e}")
             return -1
 
-    def delete_user_sessions(self, user_id: str, exclude_session_id: str | None = None) -> int:
+    def delete_user_sessions(
+        self,
+        user_id: str,
+        exclude_session_id: str | None = None,
+        *,
+        strict: bool = False,
+    ) -> int:
         """Delete all sessions for a specific user.
 
         Issue #114: Invalidate old sessions on new login to prevent
@@ -643,9 +649,15 @@ class SessionManager:
                 identity the container already holds would destroy the very
                 session being added to, evicting every other account with it.
                 #114 still holds: every OTHER session for the user is deleted.
+            strict: Re-raise a Redis failure instead of reporting 0 deleted.
+                The password flows (#1678) must not report success — or
+                commit the new password — when the old sessions survived.
 
         Returns:
             Number of sessions deleted
+
+        Raises:
+            Exception: Only with ``strict=True``: whatever Redis raised.
 
         Example:
             >>> # Before creating new session on login
@@ -715,4 +727,6 @@ class SessionManager:
 
         except Exception as e:
             logger.error(f"Failed to delete user sessions: {e}")
+            if strict:
+                raise
             return 0

@@ -6,24 +6,28 @@ Public (the emailed link is the credential):
   reset link is emailed only when the address names an account with a
   verified email and a password.
 - ``POST /auth/password/reset`` — set a new password from a reset link; every
-  session of the account is revoked. No automatic sign-in.
+  browser session of the account is revoked. No automatic sign-in.
 - ``POST /auth/password/setup`` — set the first password from a set-up link;
-  also marks the email verified; the account's other sessions are revoked.
+  also marks the email verified; the account's other browser sessions are
+  revoked.
 
 Signed in (browser session only — never an API key):
 
 - ``POST /me/password/setup-request`` — email a set-up link to an account
   without a password (following it proves the mailbox).
 - ``POST /me/password/change`` — change the password (current one required);
-  other sessions are revoked.
+  other browser sessions are revoked.
 - ``DELETE /me/password`` — remove the password (current one required),
   refused while it is the last sign-in method.
 
-None of these creates an account.
+None of these creates an account. Only browser sessions are revoked: OAuth /
+MCP tokens and API keys keep working. Revocation runs before the password
+write commits, and a failure answers 503 with the password unchanged.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response
@@ -40,7 +44,7 @@ from services.password_account_service import (
     normalize_email,
     process_reset_request,
 )
-from utils.exceptions import RateLimitError, RedisError
+from utils.exceptions import MemoryCloudException, RateLimitError, RedisError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -121,13 +125,36 @@ async def _over_limit(key: str, limit: int, window: int = _RESET_WINDOW_SECONDS)
     return count > limit
 
 
-def _revoke_sessions(user_id: str, keep_session_id: str | None) -> None:
-    """Delete the user's sessions except ``keep_session_id`` (if any)."""
-    manager = auth_module._session_manager
-    if manager is None:
-        return
-    deleted = manager.delete_user_sessions(user_id, exclude_session_id=keep_session_id)
-    logger.info("password_sessions_revoked", user_id=user_id, deleted=deleted)
+def _session_revoker(keep_session_id: str | None) -> Callable[[str], None]:
+    """Build the revocation step a password write runs before its commit.
+
+    Deletes the user's browser sessions except ``keep_session_id`` (if any).
+    A Redis failure raises (503) instead of reading as "0 revoked": the
+    service then rolls the password write back, so the flow never reports
+    success while the old sessions survive. OAuth / MCP tokens and API keys
+    are not touched here.
+    """
+
+    def revoke(user_id: str) -> None:
+        manager = auth_module._session_manager
+        if manager is None:
+            return
+        try:
+            deleted = manager.delete_user_sessions(
+                user_id, exclude_session_id=keep_session_id, strict=True
+            )
+        except Exception as exc:
+            logger.error(
+                "password_sessions_revoke_failed", user_id=user_id, error_type=type(exc).__name__
+            )
+            raise MemoryCloudException(
+                "Could not sign out the account's other sessions. Please try again.",
+                status_code=503,
+                error_code="AUTH-304",
+            ) from None
+        logger.info("password_sessions_revoked", user_id=user_id, deleted=deleted)
+
+    return revoke
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +205,7 @@ async def reset_password(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Set a new password from a reset link and sign the account out everywhere.
+    """Set a new password from a reset link; sign out every browser session.
 
     Returns 204; the person then signs in with the new password. 400 for an
     unknown, expired or used link; 422 when the password breaks the policy.
@@ -186,13 +213,13 @@ async def reset_password(
     ip = auth_module._login_client_ip(request)
     if await _over_limit(f"pw_link_ip:{ip}", _LINK_ATTEMPTS_PER_IP):
         raise RateLimitError("Too many attempts. Please try again later.")
-    user_id = await PasswordAccountService(db).complete_reset(
+    await PasswordAccountService(db).complete_reset(
         raw_token=body.token,
         new_password=body.new_password,
         ip_address=ip,
         user_agent=request.headers.get("user-agent"),
+        revoke_sessions=_session_revoker(keep_session_id=None),
     )
-    _revoke_sessions(user_id, keep_session_id=None)
     return Response(status_code=204)
 
 
@@ -205,19 +232,21 @@ async def setup_password(
     """Set the first password from a set-up link.
 
     Following the link proves the mailbox, so the email is marked verified.
-    The account's other sessions are revoked; a session in this browser (the
+    The account's other browser sessions are revoked; a session in this browser (the
     one that asked for the link) is kept.
     """
     ip = auth_module._login_client_ip(request)
     if await _over_limit(f"pw_link_ip:{ip}", _LINK_ATTEMPTS_PER_IP):
         raise RateLimitError("Too many attempts. Please try again later.")
-    user_id = await PasswordAccountService(db).complete_setup(
+    await PasswordAccountService(db).complete_setup(
         raw_token=body.token,
         new_password=body.new_password,
         ip_address=ip,
         user_agent=request.headers.get("user-agent"),
+        revoke_sessions=_session_revoker(
+            keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME)
+        ),
     )
-    _revoke_sessions(user_id, keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME))
     return Response(status_code=204)
 
 
@@ -258,7 +287,7 @@ async def change_password(
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    """Change the password; every other session of the account is revoked.
+    """Change the password; every other browser session is revoked.
 
     403 when ``current_password`` is wrong; 409 when there is no password;
     422 when the new password breaks the policy.
@@ -272,8 +301,10 @@ async def change_password(
         new_password=body.new_password,
         ip_address=auth_module._login_client_ip(request),
         user_agent=request.headers.get("user-agent"),
+        revoke_sessions=_session_revoker(
+            keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME)
+        ),
     )
-    _revoke_sessions(user_id, keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME))
     return Response(status_code=204)
 
 
@@ -286,7 +317,8 @@ async def remove_password(
 ) -> Response:
     """Remove the password. Refused (409) while no OAuth provider is linked.
 
-    403 when ``current_password`` is wrong. Every other session is revoked.
+    403 when ``current_password`` is wrong. Every other browser session is
+    revoked.
     """
     user_id = user["user_id"]
     if await _over_limit(f"pw_current_user:{user_id}", _CURRENT_PASSWORD_ATTEMPTS_PER_USER):
@@ -296,6 +328,8 @@ async def remove_password(
         current_password=body.current_password,
         ip_address=auth_module._login_client_ip(request),
         user_agent=request.headers.get("user-agent"),
+        revoke_sessions=_session_revoker(
+            keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME)
+        ),
     )
-    _revoke_sessions(user_id, keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME))
     return Response(status_code=204)

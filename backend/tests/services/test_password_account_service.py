@@ -644,6 +644,188 @@ class TestOutstandingLinks:
 
 
 # ---------------------------------------------------------------------------
+# Session revocation runs before the commit
+# ---------------------------------------------------------------------------
+
+
+class _RevocationFailed(Exception):
+    pass
+
+
+async def _committed_hash(async_engine, user_id: str) -> str | None:
+    """Read ``password_hash`` on a separate connection: committed state only."""
+    factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as other:
+        return await other.scalar(select(User.password_hash).where(User.user_id == user_id))
+
+
+async def _run_flow(flow: str, db: AsyncSession, made: _Made, revoke) -> tuple[User, str | None]:
+    """Run one password write with ``revoke_sessions``; return (user, link token)."""
+    service = PasswordAccountService(db, email_service=_email())
+    if flow == "reset":
+        user = await _user(db, made)
+        pending = await service.request_reset(email=user.email)
+        assert pending is not None
+        token = _token_from(pending.reset_url)
+        await service.complete_reset(raw_token=token, new_password=NEW, revoke_sessions=revoke)
+        return user, token
+    if flow == "setup":
+        user = await _user(db, made, password=None)
+        await service.request_setup(user_id=user.user_id)
+        token = _token_from(
+            service.email_service.send_password_setup.await_args.kwargs["setup_url"]
+        )
+        await service.complete_setup(raw_token=token, new_password=NEW, revoke_sessions=revoke)
+        return user, token
+    if flow == "change":
+        user = await _user(db, made)
+        await service.change(
+            user_id=user.user_id, current_password=OLD, new_password=NEW, revoke_sessions=revoke
+        )
+        return user, None
+    user = await _user(db, made, provider="github")
+    await service.remove(user_id=user.user_id, current_password=OLD, revoke_sessions=revoke)
+    return user, None
+
+
+FLOWS = ["reset", "setup", "change", "remove"]
+
+
+class TestSessionRevocationOrder:
+    @pytest.mark.parametrize("flow", FLOWS)
+    async def test_revokes_before_the_write_is_committed(
+        self, async_engine, db_session: AsyncSession, made: _Made, flow: str
+    ) -> None:
+        seen: list[tuple[str, str | None]] = []
+        users: list[str] = []
+
+        def revoke(user_id: str) -> None:
+            users.append(user_id)
+
+        async def _check_uncommitted() -> None:
+            seen.append((users[0], await _committed_hash(async_engine, users[0])))
+
+        # The callback is sync; record the committed state right after it.
+        original_commit = db_session.commit
+
+        async def commit() -> None:
+            if users and not seen:
+                await _check_uncommitted()
+            await original_commit()
+
+        db_session.commit = commit  # type: ignore[method-assign]
+        try:
+            user, _ = await _run_flow(flow, db_session, made, revoke)
+        finally:
+            db_session.commit = original_commit  # type: ignore[method-assign]
+
+        assert users == [user.user_id]
+        # At revocation time the new password was not committed yet.
+        (_, committed_then) = seen[0]
+        if flow == "setup":
+            assert committed_then is None
+        else:
+            assert committed_then is not None and verify_password(OLD, committed_then)
+        refreshed = await _reload(db_session, user.user_id)
+        if flow == "remove":
+            assert refreshed.password_hash is None
+        else:
+            assert refreshed.password_hash and verify_password(NEW, refreshed.password_hash)
+
+    @pytest.mark.parametrize("flow", FLOWS)
+    async def test_a_failed_revocation_rolls_the_write_back(
+        self, db_session: AsyncSession, made: _Made, flow: str
+    ) -> None:
+        def revoke(user_id: str) -> None:
+            raise _RevocationFailed
+
+        # _run_flow creates the user itself; capture its id from the audit.
+        with pytest.raises(_RevocationFailed):
+            await _run_flow(flow, db_session, made, revoke)
+
+        user_id = made.user_ids[-1]
+        refreshed = await _reload(db_session, user_id)
+        if flow == "setup":
+            assert refreshed.password_hash is None
+        else:
+            assert refreshed.password_hash and verify_password(OLD, refreshed.password_hash)
+        written = await db_session.scalar(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(
+                AuditLog.user_id == user_id,
+                AuditLog.action.in_(
+                    ["password_reset", "password_set", "password_changed", "password_removed"]
+                ),
+            )
+        )
+        assert written == 0
+
+    @pytest.mark.parametrize("flow", ["reset", "setup"])
+    async def test_the_link_survives_a_failed_revocation(
+        self, db_session: AsyncSession, made: _Made, flow: str
+    ) -> None:
+        state: dict[str, str | None] = {}
+
+        def revoke(user_id: str) -> None:
+            raise _RevocationFailed
+
+        service = PasswordAccountService(db_session, email_service=_email())
+        if flow == "reset":
+            user = await _user(db_session, made)
+            pending = await service.request_reset(email=user.email)
+            assert pending is not None
+            state["token"] = _token_from(pending.reset_url)
+            complete = service.complete_reset
+        else:
+            user = await _user(db_session, made, password=None)
+            await service.request_setup(user_id=user.user_id)
+            state["token"] = _token_from(
+                service.email_service.send_password_setup.await_args.kwargs["setup_url"]
+            )
+            complete = service.complete_setup
+        token = state["token"]
+        assert token is not None
+        with pytest.raises(_RevocationFailed):
+            await complete(raw_token=token, new_password=NEW, revoke_sessions=revoke)
+
+        # Retrying once Redis is back works: the link was not burned.
+        await complete(raw_token=token, new_password=NEW, revoke_sessions=lambda _uid: None)
+        refreshed = await _reload(db_session, user.user_id)
+        assert refreshed.password_hash and verify_password(NEW, refreshed.password_hash)
+
+
+# ---------------------------------------------------------------------------
+# bcrypt runs off the event loop
+# ---------------------------------------------------------------------------
+
+
+class TestBcryptOffTheLoop:
+    @pytest.fixture
+    def offloaded(self, monkeypatch) -> list[object]:
+        calls: list[object] = []
+        real = asyncio.to_thread
+
+        async def _to_thread(func, /, *args, **kwargs):
+            calls.append(func)
+            return await real(func, *args, **kwargs)
+
+        monkeypatch.setattr(password_service_module.asyncio, "to_thread", _to_thread)
+        return calls
+
+    @pytest.mark.parametrize("flow", FLOWS)
+    async def test_hash_and_verify_are_offloaded(
+        self, db_session: AsyncSession, made: _Made, flow: str, offloaded: list[object]
+    ) -> None:
+        await _run_flow(flow, db_session, made, None)
+        names = {getattr(f, "__name__", "") for f in offloaded}
+        if flow in ("change", "remove"):
+            assert "verify_password" in names
+        if flow != "remove":
+            assert "hash_password" in names
+
+
+# ---------------------------------------------------------------------------
 # Nothing secret reaches the logs
 # ---------------------------------------------------------------------------
 

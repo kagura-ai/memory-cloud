@@ -148,6 +148,29 @@ class TestDeleteUserSessions:
         mock_pipe.delete.assert_called_once_with("session:abc123")
         mock_pipe.execute.assert_called_once()
 
+    def test_redis_failure_returns_zero_by_default(self, session_manager, mock_redis):
+        """Existing callers keep the lenient contract: a failure reads as 0."""
+        mock_redis.scan.side_effect = ConnectionError("redis down")
+
+        assert session_manager.delete_user_sessions("user_123") == 0
+
+    def test_strict_redis_failure_raises(self, session_manager, mock_redis):
+        """#1678: the password flows must know when revocation did not happen."""
+        mock_redis.scan.side_effect = ConnectionError("redis down")
+
+        with pytest.raises(ConnectionError):
+            session_manager.delete_user_sessions("user_123", strict=True)
+
+    def test_strict_pipeline_failure_raises(self, session_manager, mock_redis):
+        mock_redis.scan.return_value = (0, ["session:abc123"])
+        mock_redis.get.return_value = json.dumps({"user_id": "user_123"})
+        mock_pipe = MagicMock()
+        mock_pipe.execute.side_effect = ConnectionError("redis down")
+        mock_redis.pipeline.return_value = mock_pipe
+
+        with pytest.raises(ConnectionError):
+            session_manager.delete_user_sessions("user_123", strict=True)
+
     def test_delete_user_sessions_multiple_sessions(self, session_manager, mock_redis):
         """Test deleting multiple sessions for a user using pipeline."""
         user_id = "user_123"

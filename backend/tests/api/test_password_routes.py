@@ -21,7 +21,7 @@ from api.routes import password as password_routes
 from auth.dependencies import require_session_auth
 from db.base import get_db
 from services import password_account_service as password_service_module
-from utils.exceptions import RateLimitError, RedisError
+from utils.exceptions import MemoryCloudException, RateLimitError, RedisError
 
 
 def _request(ip: str = "192.0.2.10", cookie: str | None = None) -> SimpleNamespace:
@@ -44,15 +44,25 @@ def counters(monkeypatch) -> dict[str, int]:
     return store
 
 
+def _writes_then_revokes(user_id: str = "u-1"):
+    """Stand-in for a service write: it calls ``revoke_sessions`` before commit."""
+
+    async def _write(**kwargs):
+        kwargs["revoke_sessions"](user_id)
+        return user_id
+
+    return _write
+
+
 @pytest.fixture
 def service(monkeypatch) -> MagicMock:
     instance = MagicMock()
     instance.request_reset = AsyncMock(return_value=None)
-    instance.complete_reset = AsyncMock(return_value="u-1")
-    instance.complete_setup = AsyncMock(return_value="u-1")
+    instance.complete_reset = AsyncMock(side_effect=_writes_then_revokes())
+    instance.complete_setup = AsyncMock(side_effect=_writes_then_revokes())
     instance.request_setup = AsyncMock()
-    instance.change = AsyncMock()
-    instance.remove = AsyncMock()
+    instance.change = AsyncMock(side_effect=_writes_then_revokes())
+    instance.remove = AsyncMock(side_effect=_writes_then_revokes())
     monkeypatch.setattr(password_routes, "PasswordAccountService", MagicMock(return_value=instance))
     return instance
 
@@ -207,13 +217,17 @@ class TestSessionRevocation:
         body = password_routes.PasswordLinkBody(token="t" * 43, new_password="x")
         response = await password_routes.reset_password(body, _request(cookie="mine"), db=None)
         assert response.status_code == 204
-        sessions.delete_user_sessions.assert_called_once_with("u-1", exclude_session_id=None)
+        sessions.delete_user_sessions.assert_called_once_with(
+            "u-1", exclude_session_id=None, strict=True
+        )
 
     @pytest.mark.asyncio
     async def test_setup_keeps_this_browser(self, counters, service, sessions) -> None:
         body = password_routes.PasswordLinkBody(token="t" * 43, new_password="x")
         await password_routes.setup_password(body, _request(cookie="mine"), db=None)
-        sessions.delete_user_sessions.assert_called_once_with("u-1", exclude_session_id="mine")
+        sessions.delete_user_sessions.assert_called_once_with(
+            "u-1", exclude_session_id="mine", strict=True
+        )
 
     @pytest.mark.asyncio
     async def test_change_keeps_the_current_session(self, counters, service, sessions) -> None:
@@ -222,7 +236,9 @@ class TestSessionRevocation:
             body, _request(cookie="current"), {"user_id": "u-1"}, db=None
         )
         assert response.status_code == 204
-        sessions.delete_user_sessions.assert_called_once_with("u-1", exclude_session_id="current")
+        sessions.delete_user_sessions.assert_called_once_with(
+            "u-1", exclude_session_id="current", strict=True
+        )
 
     @pytest.mark.asyncio
     async def test_remove_keeps_the_current_session(self, counters, service, sessions) -> None:
@@ -230,7 +246,9 @@ class TestSessionRevocation:
         await password_routes.remove_password(
             body, _request(cookie="current"), {"user_id": "u-1"}, db=None
         )
-        sessions.delete_user_sessions.assert_called_once_with("u-1", exclude_session_id="current")
+        sessions.delete_user_sessions.assert_called_once_with(
+            "u-1", exclude_session_id="current", strict=True
+        )
 
     @pytest.mark.asyncio
     async def test_failed_change_revokes_nothing(self, counters, service, sessions) -> None:
@@ -241,6 +259,50 @@ class TestSessionRevocation:
                 body, _request(cookie="current"), {"user_id": "u-1"}, db=None
             )
         sessions.delete_user_sessions.assert_not_called()
+
+
+class TestRevocationFailure:
+    """A Redis failure while revoking must not read as success (#1678)."""
+
+    @pytest.fixture
+    def broken_sessions(self, monkeypatch) -> MagicMock:
+        manager = MagicMock()
+        manager.delete_user_sessions = MagicMock(side_effect=ConnectionError("redis down"))
+        monkeypatch.setattr(password_routes.auth_module, "_session_manager", manager)
+        return manager
+
+    @pytest.mark.parametrize("flow", ["reset", "setup", "change", "remove"])
+    @pytest.mark.asyncio
+    async def test_each_flow_answers_503(self, flow, counters, service, broken_sessions) -> None:
+        link = password_routes.PasswordLinkBody(token="t" * 43, new_password="x")
+        calls = {
+            "reset": lambda: password_routes.reset_password(link, _request(), db=None),
+            "setup": lambda: password_routes.setup_password(link, _request(), db=None),
+            "change": lambda: password_routes.change_password(
+                password_routes.PasswordChangeBody(current_password="a", new_password="b"),
+                _request(),
+                {"user_id": "u-1"},
+                db=None,
+            ),
+            "remove": lambda: password_routes.remove_password(
+                password_routes.PasswordRemoveBody(current_password="a"),
+                _request(),
+                {"user_id": "u-1"},
+                db=None,
+            ),
+        }
+        with pytest.raises(MemoryCloudException) as exc_info:
+            await calls[flow]()
+        assert exc_info.value.status_code == 503
+        broken_sessions.delete_user_sessions.assert_called_once()
+        assert broken_sessions.delete_user_sessions.call_args.kwargs["strict"] is True
+
+    @pytest.mark.asyncio
+    async def test_revocation_is_handed_to_the_service(self, counters, service, sessions) -> None:
+        # The service calls it before its commit, so a failure rolls back.
+        body = password_routes.PasswordChangeBody(current_password="a", new_password="b")
+        await password_routes.change_password(body, _request(), {"user_id": "u-1"}, db=None)
+        assert callable(service.change.await_args.kwargs["revoke_sessions"])
 
 
 class TestLimits:

@@ -13,8 +13,13 @@ CLIs:
   removing refuses when no OAuth provider would remain.
 
 No method here creates a ``User``: password sign-in and recovery never create
-accounts. Session revocation is the caller's job (it needs the session manager
-and the request's cookie); each method returns the ``user_id`` to revoke for.
+accounts. Session revocation is the caller's (it needs the session manager
+and the request's cookie): each write takes a ``revoke_sessions`` callback and
+runs it after the write and BEFORE the commit, so a failed revocation rolls the
+write back instead of leaving a new password beside the old sessions.
+
+bcrypt (``hash_password`` / ``verify_password``) runs in a worker thread: it
+is CPU-bound and would otherwise stall the event loop.
 
 Raw tokens, reset URLs and passwords are never logged or placed in exceptions.
 """
@@ -123,8 +128,12 @@ def _frontend_link(path: str, raw_token: str) -> str:
     return f"{base_url}{path}?token={raw_token}"
 
 
-def _validated_hash(new_password: str) -> str:
-    """Validate ``new_password`` against the policy and hash it.
+# Revokes the account's browser sessions; raises when it could not.
+SessionRevoker = Callable[[str], None]
+
+
+async def _validated_hash(new_password: str) -> str:
+    """Validate ``new_password`` against the policy and hash it (off the loop).
 
     Raises:
         ValidationError: 422 with the policy message (never the password).
@@ -133,7 +142,7 @@ def _validated_hash(new_password: str) -> str:
         validate_password_policy(new_password)
     except PasswordPolicyError as exc:
         raise ValidationError(str(exc), field="new_password") from None
-    return hash_password(new_password)
+    return await asyncio.to_thread(hash_password, new_password)
 
 
 @dataclass(frozen=True)
@@ -235,6 +244,7 @@ class PasswordAccountService:
         new_password: str,
         ip_address: str | None = None,
         user_agent: str | None = None,
+        revoke_sessions: SessionRevoker | None = None,
     ) -> str:
         """Set a new password from a reset link.
 
@@ -246,9 +256,10 @@ class PasswordAccountService:
             new_password: The new password.
             ip_address: Client IP for the audit row.
             user_agent: Client user agent for the audit row.
+            revoke_sessions: Signs the account out; run before the commit.
 
         Returns:
-            The user_id whose sessions the caller must revoke.
+            The user_id whose password was reset.
 
         Raises:
             ValidationError: The password breaks the policy (422).
@@ -256,12 +267,12 @@ class PasswordAccountService:
                 sent to an address the account no longer has, or the account
                 no longer has a password to reset (400).
         """
-        password_hash = _validated_hash(new_password)
+        password_hash = await _validated_hash(new_password)
         user = await self._consume_for_user(raw_token, "reset_password")
         user.password_hash = password_hash
         await self._invalidate_password_links(user.user_id)
         self._audit(user.user_id, _AUDIT_ACTOR_LINK, "password_reset", ip_address, user_agent)
-        await self.db.commit()
+        await self._revoke_then_commit(user.user_id, revoke_sessions)
         logger.info("password_reset_completed", user_id=user.user_id)
         return user.user_id
 
@@ -339,6 +350,7 @@ class PasswordAccountService:
         new_password: str,
         ip_address: str | None = None,
         user_agent: str | None = None,
+        revoke_sessions: SessionRevoker | None = None,
     ) -> str:
         """Set the first password from a set-up link and verify the email.
 
@@ -347,9 +359,11 @@ class PasswordAccountService:
             new_password: The new password.
             ip_address: Client IP for the audit row.
             user_agent: Client user agent for the audit row.
+            revoke_sessions: Signs the account's other sessions out; run
+                before the commit.
 
         Returns:
-            The user_id whose other sessions the caller must revoke.
+            The user_id whose password was set.
 
         Raises:
             ValidationError: The password breaks the policy (422).
@@ -357,14 +371,14 @@ class PasswordAccountService:
                 sent to an address the account no longer has, or the account
                 has a password by now (400).
         """
-        password_hash = _validated_hash(new_password)
+        password_hash = await _validated_hash(new_password)
         user = await self._consume_for_user(raw_token, "set_password")
         user.password_hash = password_hash
         if user.email_verified_at is None:
             user.email_verified_at = utcnow()
         await self._invalidate_password_links(user.user_id)
         self._audit(user.user_id, _AUDIT_ACTOR_LINK, "password_set", ip_address, user_agent)
-        await self.db.commit()
+        await self._revoke_then_commit(user.user_id, revoke_sessions)
         logger.info("password_setup_completed", user_id=user.user_id)
         return user.user_id
 
@@ -380,8 +394,11 @@ class PasswordAccountService:
         new_password: str,
         ip_address: str | None = None,
         user_agent: str | None = None,
+        revoke_sessions: SessionRevoker | None = None,
     ) -> None:
         """Replace the password after re-verifying the current one.
+
+        ``revoke_sessions`` signs the other sessions out before the commit.
 
         Raises:
             NotFoundException: The user row is gone (404).
@@ -390,11 +407,11 @@ class PasswordAccountService:
             ValidationError: The new password breaks the policy (422).
         """
         user = await self._load_user(user_id)
-        self._verify_current(user, current_password)
-        user.password_hash = _validated_hash(new_password)
+        await self._verify_current(user, current_password)
+        user.password_hash = await _validated_hash(new_password)
         await self._invalidate_password_links(user.user_id)
         self._audit(user.user_id, _AUDIT_ACTOR_SELF, "password_changed", ip_address, user_agent)
-        await self.db.commit()
+        await self._revoke_then_commit(user.user_id, revoke_sessions)
         logger.info("password_changed", user_id=user_id)
 
     async def remove(
@@ -404,8 +421,11 @@ class PasswordAccountService:
         current_password: str,
         ip_address: str | None = None,
         user_agent: str | None = None,
+        revoke_sessions: SessionRevoker | None = None,
     ) -> None:
         """Remove the password, never the last sign-in method.
+
+        ``revoke_sessions`` signs the other sessions out before the commit.
 
         Raises:
             NotFoundException: The user row is gone (404).
@@ -417,7 +437,7 @@ class PasswordAccountService:
         # time locks it too, so one of the two sees the other's commit and
         # refuses instead of both removing a method.
         user = await self._load_user(user_id, for_update=True)
-        self._verify_current(user, current_password)
+        await self._verify_current(user, current_password)
         linked = await self.db.scalar(
             select(func.count())
             .select_from(UserOAuthProvider)
@@ -428,7 +448,7 @@ class PasswordAccountService:
         user.password_hash = None
         await self._invalidate_password_links(user.user_id)
         self._audit(user.user_id, _AUDIT_ACTOR_SELF, "password_removed", ip_address, user_agent)
-        await self.db.commit()
+        await self._revoke_then_commit(user.user_id, revoke_sessions)
         logger.info("password_removed", user_id=user_id)
 
     # ------------------------------------------------------------------
@@ -447,11 +467,27 @@ class PasswordAccountService:
         return user
 
     @staticmethod
-    def _verify_current(user: User, current_password: str) -> None:
+    async def _verify_current(user: User, current_password: str) -> None:
         if user.password_hash is None:
             raise ConflictError("This account has no password")
-        if not verify_password(current_password, user.password_hash):
+        if not await asyncio.to_thread(verify_password, current_password, user.password_hash):
             raise CurrentPasswordMismatchError()
+
+    async def _revoke_then_commit(
+        self, user_id: str, revoke_sessions: SessionRevoker | None
+    ) -> None:
+        """Revoke the sessions, then commit the password write.
+
+        Revoking first means a failure leaves nothing committed: the write
+        (and a consumed link) is rolled back and the caller can retry.
+        """
+        if revoke_sessions is not None:
+            try:
+                revoke_sessions(user_id)
+            except BaseException:
+                await self.db.rollback()
+                raise
+        await self.db.commit()
 
     async def _consume_for_user(self, raw_token: str, purpose: EmailActionPurpose) -> User:
         consumed = await EmailActionTokenService(self.db).consume(
