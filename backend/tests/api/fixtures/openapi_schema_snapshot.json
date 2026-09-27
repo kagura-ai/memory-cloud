@@ -1654,6 +1654,26 @@
       },
       "Body_introspect_token_api_v1_oauth_introspect_post": {
         "properties": {
+          "client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "client_secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "token": {
             "type": "string"
           }
@@ -1665,6 +1685,26 @@
       },
       "Body_oauth_revoke_api_v1_oauth_revoke_post": {
         "properties": {
+          "client_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "client_secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "token": {
             "type": "string"
           },
@@ -22191,6 +22231,7 @@
               }
             }
           },
+          "401": {},
           "422": {
             "content": {
               "application/json": {
@@ -22287,6 +22328,8 @@
               }
             }
           },
+          "400": {},
+          "401": {},
           "422": {
             "content": {
               "application/json": {

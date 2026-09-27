@@ -19,6 +19,8 @@ Security:
 - Automatic secret generation
 """
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -27,7 +29,7 @@ import secrets
 import unicodedata
 from datetime import timedelta
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote_plus, urlencode, urlparse, urlsplit, urlunsplit
 
 from authlib.oauth2.rfc6749.errors import OAuth2Error
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
@@ -2571,86 +2573,196 @@ async def device_confirm(
         db_session.close()
 
 
-@router.post("/introspect", response_model=TokenIntrospectionResponse)
+_CLIENT_AUTH_CHALLENGE = 'Basic realm="Kagura Memory Cloud OAuth"'
+
+
+def _invalid_client_response(description: str) -> JSONResponse:
+    """401 ``invalid_client`` with a Basic challenge (RFC 6749 §5.2)."""
+    response = rfc6749_error_response(
+        error="invalid_client",
+        description=description,
+        status_code=status.HTTP_401_UNAUTHORIZED,
+    )
+    response.headers["WWW-Authenticate"] = _CLIENT_AUTH_CHALLENGE
+    return response
+
+
+def _basic_client_credentials(header: str) -> tuple[str, str] | None:
+    """Decode an ``Authorization: Basic`` header into (client_id, secret).
+
+    RFC 6749 §2.3.1: both parts are form-urlencoded before base64 encoding.
+
+    Raises:
+        ValueError: The header is not valid Basic credentials.
+    """
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() != "basic":
+        return None
+    try:
+        decoded = base64.b64decode(value.strip(), validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError) as e:
+        raise ValueError("malformed Basic credentials") from e
+    client_id, sep, secret = decoded.partition(":")
+    if not sep or not client_id:
+        raise ValueError("malformed Basic credentials")
+    return unquote_plus(client_id), unquote_plus(secret)
+
+
+def _authenticate_endpoint_client(
+    request: Request,
+    db_session,
+    form_client_id: str | None,
+    form_client_secret: str | None,
+    *,
+    allow_public: bool,
+) -> OAuth2Client | JSONResponse:
+    """Authenticate the caller of the revocation or introspection endpoint.
+
+    Credentials come from ``Authorization: Basic`` (``client_secret_basic``)
+    or the form (``client_secret_post``); a public client
+    (``token_endpoint_auth_method="none"``) is identified by ``client_id``
+    alone and any secret it sends is ignored (#1741, RFC 7009 §2.1,
+    RFC 7662 §2.1). A confidential client must present its secret by either
+    method.
+
+    Args:
+        request: The incoming request (source of the Authorization header).
+        db_session: Synchronous OAuth session.
+        form_client_id: ``client_id`` form field, if any.
+        form_client_secret: ``client_secret`` form field, if any.
+        allow_public: Whether a public client may call the endpoint.
+
+    Returns:
+        The authenticated client, or the error response to return.
+    """
+    header = request.headers.get("Authorization")
+    client_id = form_client_id
+    secret = form_client_secret
+    if header:
+        try:
+            basic = _basic_client_credentials(header)
+        except ValueError:
+            return _invalid_client_response("Malformed client credentials.")
+        if basic is not None:
+            if form_client_secret is not None or (
+                form_client_id is not None and form_client_id != basic[0]
+            ):
+                return rfc6749_error_response(
+                    error="invalid_request",
+                    description="Use one client authentication method.",
+                )
+            client_id, secret = basic
+
+    if not client_id:
+        return _invalid_client_response("Client authentication is required.")
+
+    client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
+    if client is None:
+        return _invalid_client_response("Client authentication failed.")
+    if client.token_endpoint_auth_method == "none":
+        if not allow_public:
+            return _invalid_client_response(
+                "This endpoint requires a confidential client's credentials."
+            )
+        return client
+    if not secret or not client.check_client_secret(secret):
+        return _invalid_client_response("Client authentication failed.")
+    return client
+
+
+@router.post(
+    "/introspect",
+    response_model=TokenIntrospectionResponse,
+    response_model_exclude_none=True,
+    responses={
+        401: {
+            "description": (
+                "Missing or invalid client credentials, or a public client (``invalid_client``)"
+            )
+        }
+    },
+)
 async def introspect_token(
     request: Request,
     token: str = Form(..., description="Access token to introspect"),
-    db: AsyncSession = Depends(get_db),
-) -> TokenIntrospectionResponse:
+    client_id: str | None = Form(
+        None, description="Client identifier (client_secret_post; or use HTTP Basic)"
+    ),
+    client_secret: str | None = Form(
+        None, description="Client secret (client_secret_post; or use HTTP Basic)"
+    ),
+) -> TokenIntrospectionResponse | JSONResponse:
     """Token Introspection endpoint (RFC 7662).
 
-    Issue #157: MCP SDK compliance - Token Introspection
+    Issue #157: MCP SDK compliance - Token Introspection.
 
-    Allows Resource Servers to validate access tokens.
+    The caller must authenticate as a confidential OAuth client, with HTTP
+    Basic (``client_secret_basic``) or ``client_id`` + ``client_secret`` in
+    the form (``client_secret_post``) (RFC 7662 §2.1, #1741). Anyone else,
+    including a public client, gets ``401 invalid_client``. A client learns
+    about its own tokens only: a token issued to another client, like an
+    unknown, expired or revoked one, is ``{"active": false}``.
 
     Args:
-        request: FastAPI request (for caller IP logging)
+        request: FastAPI request (Authorization header, caller IP logging)
         token: Access token to introspect
+        client_id: Caller's client_id for ``client_secret_post``
+        client_secret: Caller's secret for ``client_secret_post``
 
     Returns:
-        Token metadata if active, or {\"active\": False}
+        Token metadata if active and issued to the caller, else
+        ``{"active": false}``; a 401 error response when the caller is not
+        an authenticated confidential client.
 
     Example:
         POST /api/v1/oauth/introspect
+        Authorization: Basic <base64(client_id:client_secret)>
         Content-Type: application/x-www-form-urlencoded
 
         token=mcp_abc123...
 
-        Response (active):
-        {
-            \"active\": true,
-            \"client_id\": \"oauth__...\",
-            \"scope\": \"memory:read memory:write\",
-            \"exp\": 1733414400,
-            \"aud\": \"https://your-domain.com/mcp\"
-        }
-
-        Response (inactive):
-        {\"active\": false}
-
     Spec: RFC 7662 - OAuth 2.0 Token Introspection
-    https://datatracker.ietf.workspace/doc/html/rfc7662
     """
-    from sqlalchemy import select
     from sqlalchemy.exc import SQLAlchemyError
 
     caller_ip = request.client.host if request.client else "unknown"
     token_prefix = token[:8] + "..." if token else "(empty)"
 
+    db_session = get_sync_session()
     try:
-        # Look up token in database
-        result = await db.execute(select(OAuth2Token).where(OAuth2Token.access_token == token))
-        oauth_token = result.scalar_one_or_none()
+        caller = _authenticate_endpoint_client(
+            request, db_session, client_id, client_secret, allow_public=False
+        )
+        if isinstance(caller, JSONResponse):
+            logger.info("oauth_introspect_unauthenticated", caller_ip=caller_ip)
+            return caller
 
-        if not oauth_token:
-            logger.info(
-                "oauth_introspect",
-                caller_ip=caller_ip,
-                token_prefix=token_prefix,
-                active=False,
-                reason="not_found",
-            )
-            return TokenIntrospectionResponse(active=False)
+        oauth_token = db_session.query(OAuth2Token).filter_by(access_token=token).first()
 
-        # Determine introspection result
-        is_expired = oauth_token.is_expired()
-        is_revoked = oauth_token.is_revoked()
-        active = not is_expired and not is_revoked
-        reason = "expired" if is_expired else "revoked" if is_revoked else None
+        reason: str | None
+        if oauth_token is None:
+            reason = "not_found"
+        elif oauth_token.client_id != caller.client_id:
+            reason = "other_client"
+        elif oauth_token.is_expired():
+            reason = "expired"
+        elif oauth_token.is_revoked():
+            reason = "revoked"
+        else:
+            reason = None
 
         logger.info(
             "oauth_introspect",
             caller_ip=caller_ip,
+            caller_client_id=caller.client_id,
             token_prefix=token_prefix,
-            active=active,
+            active=reason is None,
             reason=reason,
-            client_id=oauth_token.client_id,
         )
 
-        if not active:
+        if oauth_token is None or reason is not None:
             return TokenIntrospectionResponse(active=False)
 
-        # Return token metadata (RFC 7662) - type-safe response
         return TokenIntrospectionResponse(
             active=True,
             client_id=oauth_token.client_id,
@@ -2663,39 +2775,77 @@ async def introspect_token(
 
     except SQLAlchemyError as e:
         logger.error("oauth_introspect_db_error", error=str(e), caller_ip=caller_ip)
-        await db.rollback()
+        db_session.rollback()
         raise HTTPException(
             status_code=500, detail="Internal server error during token introspection"
         ) from e
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error in token introspection: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error") from e
+    finally:
+        db_session.close()
 
 
-@router.post("/revoke")
+@router.post(
+    "/revoke",
+    response_model=None,
+    responses={
+        400: {"description": "Two client authentication methods in one request"},
+        401: {"description": "Missing client_id, unknown client, or bad secret"},
+    },
+)
 async def oauth_revoke(
     request: Request,
     token: str = Form(...),
     token_type_hint: str | None = Form(None),
-):
-    """Revoke access or refresh token."""
+    client_id: str | None = Form(
+        None, description="Client identifier (public clients, client_secret_post)"
+    ),
+    client_secret: str | None = Form(
+        None, description="Client secret (client_secret_post; or use HTTP Basic)"
+    ),
+) -> dict[str, str] | JSONResponse:
+    """Revoke an access or refresh token (RFC 7009).
+
+    The caller identifies itself (#1741, RFC 7009 §2.1): a public client by
+    ``client_id``, a confidential client with its secret by HTTP Basic or
+    the form. A token issued to another client is left alone and answered
+    like an unknown token, ``200`` (§2.2). Revoking a refresh token also
+    revokes the access token issued with it.
+    """
     db_session = get_sync_session()
     try:
+        caller = _authenticate_endpoint_client(
+            request, db_session, client_id, client_secret, allow_public=True
+        )
+        if isinstance(caller, JSONResponse):
+            return caller
+
         oauth_token = (
             db_session.query(OAuth2Token)
             .filter((OAuth2Token.access_token == token) | (OAuth2Token.refresh_token == token))
             .first()
         )
 
-        if oauth_token:
-            if token == oauth_token.access_token:
-                oauth_token.access_token_revoked_at = utcnow()
+        if oauth_token is not None and oauth_token.client_id != caller.client_id:
+            logger.info(
+                "oauth_token_revoke_ignored_other_client",
+                caller_client_id=caller.client_id,
+                token_prefix=token[:8],
+            )
+        elif oauth_token is not None:
+            now = utcnow()
+            if token == oauth_token.access_token and oauth_token.access_token_revoked_at is None:
+                oauth_token.access_token_revoked_at = now
             if token == oauth_token.refresh_token:
-                oauth_token.refresh_token_revoked_at = utcnow()
+                if oauth_token.refresh_token_revoked_at is None:
+                    oauth_token.refresh_token_revoked_at = now
+                if oauth_token.access_token_revoked_at is None:
+                    oauth_token.access_token_revoked_at = now
             db_session.commit()
-            logger.info("oauth_token_revoked", token_prefix=token[:8])
+            logger.info(
+                "oauth_token_revoked",
+                caller_client_id=caller.client_id,
+                token_prefix=token[:8],
+                token_type_hint=token_type_hint,
+            )
 
         return {"status": "ok"}
     finally:

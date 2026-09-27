@@ -123,9 +123,16 @@ async def openid_configuration(request: Request):
             "client_secret_post",
             "client_secret_basic",
         ],
-        # Introspection endpoint auth methods (RFC 7662, Issue #157)
+        # RFC 7009 §2.1: public clients identify themselves by client_id (#1741)
+        "revocation_endpoint_auth_methods_supported": [
+            "none",
+            "client_secret_post",
+            "client_secret_basic",
+        ],
+        # RFC 7662 §2.1: introspection needs a confidential client (#1741)
         "introspection_endpoint_auth_methods_supported": [
-            "none",  # Public endpoint
+            "client_secret_post",
+            "client_secret_basic",
         ],
         # Additional OpenID Connect fields (optional but recommended)
         "response_modes_supported": ["query"],
@@ -178,7 +185,15 @@ async def oauth_authorization_server(request: Request):
             "client_secret_post",
             "client_secret_basic",
         ],
+        # RFC 7009 §2.1: public clients identify themselves by client_id (#1741)
+        "revocation_endpoint_auth_methods_supported": [
+            "none",
+            "client_secret_post",
+            "client_secret_basic",
+        ],
+        # RFC 7662 §2.1: introspection needs a confidential client (#1741)
         "introspection_endpoint_auth_methods_supported": [
-            "none",  # RFC 7662 (Issue #157)
+            "client_secret_post",
+            "client_secret_basic",
         ],
     }

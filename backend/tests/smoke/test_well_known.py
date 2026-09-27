@@ -77,3 +77,26 @@ class TestWellKnownEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert "issuer" in data or "authorization_endpoint" in data
+
+    def test_revocation_and_introspection_auth_methods(self, client):
+        """Both AS-metadata docs advertise the client authentication the
+        revocation and introspection endpoints enforce (#1741).
+
+        Introspection needs a confidential client's credentials (RFC 7662
+        §2.1), so ``none`` is not offered there; revocation also accepts a
+        public client by ``client_id`` (RFC 7009 §2.1).
+        """
+        for endpoint in (
+            "/.well-known/openid-configuration",
+            "/.well-known/oauth-authorization-server",
+        ):
+            data = client.get(endpoint).json()
+            assert set(data["introspection_endpoint_auth_methods_supported"]) == {
+                "client_secret_basic",
+                "client_secret_post",
+            }, endpoint
+            assert set(data["revocation_endpoint_auth_methods_supported"]) == {
+                "none",
+                "client_secret_basic",
+                "client_secret_post",
+            }, endpoint
