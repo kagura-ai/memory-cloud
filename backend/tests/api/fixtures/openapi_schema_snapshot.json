@@ -1720,6 +1720,8 @@
           "max_chars": {
             "anyOf": [
               {
+                "maximum": 100000.0,
+                "minimum": 10000.0,
                 "type": "integer"
               },
               {

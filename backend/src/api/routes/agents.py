@@ -520,7 +520,7 @@ class BootstrapRequest(BaseModel):
     include: list[Literal["pinned", "recall", "upcoming", "state", "policy"]] | None = None
     recall_evaluation: dict[str, Any] | None = None
     # #1743: whole-envelope budget in characters (default 20,000).
-    max_chars: int | None = None
+    max_chars: int | None = Field(None, ge=10_000, le=100_000)
 
 
 @router.post("/{agent_id}/bootstrap")
