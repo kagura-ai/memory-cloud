@@ -75,7 +75,7 @@ Never print, ask for or store a token, an API key, a device-flow code or an OAut
 
 ## Resolve Context
 
-Start by calling `list_contexts()` when the context is unknown. It returns a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at` — no summaries), most recently used first. If you already know the context name, narrow it with `list_contexts(name_contains="...")`; if you already resolved the id earlier in this session, reuse it instead of listing again.
+Start by calling `list_contexts()` when the context is unknown. It returns a slim name→id directory (`id`, `name`, `is_private`, `is_locked`, `last_used_at` — no summaries), most recently used first, 100 per page (when `has_more` is true, pass `next_cursor` as `cursor`). If you already know the context name, narrow it with `list_contexts(name_contains="...")`; if you already resolved the id earlier in this session, reuse it instead of listing again.
 
 Pick the context whose `name` or recent usage matches the current repository or task. When names alone don't settle it, add `include_summary=true` to a narrowed list for 300-character previews. If several contexts are plausible and the choice affects writes, ask the user.
 
