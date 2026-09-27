@@ -4,6 +4,38 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.81.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.81.0) — 2026-09-27
+
+Email and password sign-in for existing accounts. People who signed up with Google or GitHub can add a password and sign in with their verified email, recover it by email, and manage it from their profile. The login entry is renamed to a sign-in method, the billing hand-off JWT moves to the RFC 9864 algorithm name, and the stale plan price leaves the API.
+
+### Added
+- **Email and password sign-in** ([#1678](https://github.com/kagura-ai/memory-cloud/issues/1678)):
+  - `POST /api/v1/auth/login` accepts a login ID or an email address. An email matches only a verified address on an account that has a password; addresses that differ only by case fail closed. Admin login IDs, TOTP MFA (also on the email path), Google/GitHub, MCP `return_to` and terms acceptance are unchanged. Failed attempts are counted per resolved account.
+  - Recovery: `POST /api/v1/auth/password/reset-request` always answers 202 and does the account work after the response, so neither the body nor the timing shows whether an address is registered; `POST /api/v1/auth/password/reset` sets the new password and signs out every browser session.
+  - Set-up for OAuth accounts: `POST /api/v1/me/password/setup-request` emails a link to the account's own address, and `POST /api/v1/auth/password/setup` completes it and marks the email verified. `@local` CLI addresses are refused.
+  - Settings: `POST /api/v1/me/password/change` (signs out the other browser sessions) and `DELETE /api/v1/me/password` (refused while it is the last sign-in method). `/api/v1/auth/me` reports `has_password`.
+  - Emailed links are stored as SHA-256 hashes, single-use, short-lived, invalidated by a newer link and by any password write (including `reset_password` from the CLI). Revocation failures return 503 (`AUTH-304`) and roll the change back.
+  - Web UI: "Login ID or email" and "Forgot password?" on the login page, `/password/forgot`, `/password/reset`, `/password/setup` (no-referrer, noindex; the token leaves the address bar on arrival) and a Password section on the profile page.
+  - One password policy is shared by the admin CLIs and the API.
+  - Not included: creating a new account by email ([#1734](https://github.com/kagura-ai/memory-cloud/issues/1734)); revoking OAuth/MCP tokens on a password reset ([#1738](https://github.com/kagura-ai/memory-cloud/issues/1738)).
+
+### Changed
+- **"Sign in with password"** ([#1677](https://github.com/kagura-ai/memory-cloud/issues/1677)): the login page's "Admin Login" / 「管理者ログイン」 toggle is renamed "Sign in with password" / 「パスワードでログイン」 with a key icon.
+- **Billing hand-off JWT signed as `Ed25519`** ([#1727](https://github.com/kagura-ai/memory-cloud/issues/1727)): the header's `alg` is the RFC 9864 name instead of the deprecated `EdDSA`; same key and signature. The `SecurityWarning` filter is gone, and the reference verifier accepts `Ed25519` only.
+
+### Removed
+- **`price_monthly` from the plan API** ([#1733](https://github.com/kagura-ai/memory-cloud/issues/1733)): the hardcoded prices were stale, and the external billing service is the source of truth. The field is dropped from `GET /api/v1/workspaces/{id}/plan`, `GET /api/v1/workspaces/plans/available` and `GET /api/v1/admin/plans/tiers`.
+
+### Migration
+- **Database:** run `alembic upgrade head` (`e86_1678_email_password`): adds `users.email_verified_at` (backfilled for accounts with a linked Google/GitHub identity, never for `@local` addresses), the `email_action_tokens` table and an index on `lower(users.email)`.
+- **Plan API clients:** stop reading `price_monthly`; show prices from the billing page instead. The Python and TypeScript SDKs do not use the field.
+- **Billing service:** its hand-off verifier must accept `alg: "Ed25519"` before this version is deployed; a verifier that accepts only `EdDSA` refuses every hand-off token from v0.81.0.
+
+### Notes
+- Password reset and set-up links are only delivered with `EMAIL_PROVIDER=resend` (plus `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `RESEND_DPA_ACCEPTED_AT`). With the default `logging` provider the requests succeed but no link is sent, and the link is never written to the log. See `docs/deployment.md`.
+- New optional environment variables: `PASSWORD_RESET_TOKEN_TTL_MINUTES` (default 30), `SET_PASSWORD_TOKEN_TTL_MINUTES` (default 30), `VERIFY_EMAIL_TOKEN_TTL_HOURS` (default 24, reserved for #1734).
+- New error codes: `AUTH-301` (invalid or expired link), `AUTH-302` (wrong current password), `AUTH-303` (`@local` account), `AUTH-304` (sessions could not be revoked).
+
 ## [v0.80.2](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.80.2) — 2026-09-27
 
 Build and supply-chain hardening. CI, the Docker image and the local setup install from a tracked `uv.lock`, the billing hand-off JWT moves off the deprecated `authlib.jose`, and the REST OpenAPI schema is pinned by a snapshot test so surface changes arrive as reviewed diffs.
