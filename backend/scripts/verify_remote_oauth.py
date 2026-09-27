@@ -191,6 +191,25 @@ def redact_url(url: str) -> str:
     return parts._replace(query="&".join(pairs)).geturl()
 
 
+# RFC 7662 §2.2 response members; none may reach an unauthenticated caller.
+INTROSPECTION_METADATA_FIELDS = frozenset(
+    {
+        "active",
+        "scope",
+        "client_id",
+        "username",
+        "token_type",
+        "exp",
+        "iat",
+        "nbf",
+        "sub",
+        "aud",
+        "iss",
+        "jti",
+    }
+)
+
+
 class Redactor:
     """Scrubs secrets and the target host out of everything recorded.
 
@@ -1594,10 +1613,11 @@ class Verifier:
             )
             s.check("anonymous request → 401", anonymous.status_code == 401)
             s.check("public client → 401", public.status_code == 401)
-            s.check(
-                "no token metadata disclosed",
-                "active" not in anonymous_body and "active" not in public_body,
+            disclosed = sorted(
+                INTROSPECTION_METADATA_FIELDS & (set(anonymous_body) | set(public_body))
             )
+            s.evidence["disclosed_fields"] = disclosed
+            s.check("no token metadata disclosed", not disclosed)
             s.check(
                 "'none' is not an advertised auth method",
                 "none"

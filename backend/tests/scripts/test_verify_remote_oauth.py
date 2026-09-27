@@ -688,6 +688,7 @@ def test_happy_path_run_passes_with_one_consent_and_redacted_evidence(tmp_path: 
     assert by_id["T4"]["evidence"]["refresh_token_issued"] is True
     assert by_id["S1"]["evidence"]["anonymous_status"] == 401
     assert by_id["S1"]["evidence"]["public_client_status"] == 401
+    assert by_id["S1"]["evidence"]["disclosed_fields"] == []
 
     # Every secret handed out stays out of the evidence and the Markdown.
     assert deployment.issued
