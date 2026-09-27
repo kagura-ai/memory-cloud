@@ -200,7 +200,9 @@ def find_unknown_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[st
         ``None`` when every argument is declared (or the tool's schema is
         open or unknown); otherwise ``{"message", "unknown_arguments",
         "allowed_arguments", "suggestions"}`` for an ``invalid_argument``
-        envelope. ``suggestions`` maps an unknown name to its closest declared
+        envelope. ``allowed_arguments`` is the schema's declared names only:
+        the deprecated aliases and ``_meta`` are tolerated, not advertised,
+        so a repaired call never reaches for them. ``suggestions`` maps an unknown name to its closest declared
         name (difflib) when one is close enough.
     """
     if not arguments or tool_name not in _CLOSED_TOOLS:
@@ -228,7 +230,7 @@ def find_unknown_arguments(tool_name: str, arguments: dict[str, Any]) -> dict[st
     return {
         "message": (
             f"{tool_name} does not accept the {noun} {listed}. "
-            f"Accepted arguments: {', '.join(allowed)}."
+            f"Arguments its inputSchema declares: {', '.join(allowed)}."
         ),
         "unknown_arguments": [n[:_MAX_NAME_CHARS] for n in unknown[:_MAX_UNKNOWN_SHOWN]],
         "allowed_arguments": allowed,

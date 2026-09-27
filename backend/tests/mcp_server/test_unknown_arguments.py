@@ -102,6 +102,21 @@ async def test_declared_arguments_still_pass(handlers):
 
 
 @pytest.mark.asyncio
+async def test_aliases_are_tolerated_but_not_advertised(handlers):
+    result = await execute_tool_call(
+        "merge_contexts",
+        {"source_id": str(uuid4()), "target_id": str(uuid4()), "delete_sourse": True},
+        "user-1",
+        uuid4(),
+    )
+    payload = _payload(result)
+    assert payload["unknown_arguments"] == ["delete_sourse"]
+    assert payload["suggestions"] == {"delete_sourse": "delete_source"}
+    assert "source_id" not in payload["allowed_arguments"]
+    assert "_meta" not in payload["allowed_arguments"]
+
+
+@pytest.mark.asyncio
 async def test_merge_contexts_deprecated_aliases_are_accepted(handlers):
     args = {"source_id": str(uuid4()), "target_id": str(uuid4())}
     result = await execute_tool_call("merge_contexts", args, "user-1", uuid4())
