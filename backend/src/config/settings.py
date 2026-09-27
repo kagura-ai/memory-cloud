@@ -5,6 +5,7 @@ Use ENV_FILE environment variable to specify which file to load.
 Database URLs are managed directly via os.getenv() in config/database.py.
 """
 
+import ipaddress
 import os
 import re
 from datetime import datetime
@@ -82,6 +83,18 @@ def _validate_handoff_base_url(value: str) -> str:
     return v
 
 
+def _parse_cidrs(value: str) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """Parse a comma-separated CIDR list; blank entries are skipped.
+
+    Raises:
+        ValueError: An entry is not a network, or has host bits set (a likely
+            typo such as ``203.0.113.5/24``).
+    """
+    return tuple(
+        ipaddress.ip_network(part.strip(), strict=True) for part in value.split(",") if part.strip()
+    )
+
+
 class Settings(BaseSettings):
     """Application settings."""
 
@@ -143,6 +156,36 @@ class Settings(BaseSettings):
             "FORWARDED_ALLOW_IPS so it is the caller's, not the proxy's."
         ),
     )
+    # #1741: DCR (POST /api/v1/oauth/register) is limited to 5 registrations
+    # per minute per client address. A connector platform registers a client
+    # on each fresh connection from a shared egress range, so the operator can
+    # exempt that range. Empty (the default) exempts nobody. Same address
+    # caveat as above: behind a reverse proxy, set FORWARDED_ALLOW_IPS.
+    oauth_dcr_rate_limit_exempt_cidrs: str = Field(
+        default="",
+        description=(
+            "Comma-separated CIDR ranges whose client addresses skip the "
+            "per-address limit on POST /api/v1/oauth/register (#1741), for "
+            "example a connector platform's published egress range. Empty "
+            "exempts nobody. The address is request.client.host — behind a "
+            "reverse proxy, set FORWARDED_ALLOW_IPS so it is the caller's."
+        ),
+    )
+
+    @field_validator("oauth_dcr_rate_limit_exempt_cidrs")
+    @classmethod
+    def _validate_dcr_exempt_cidrs(cls, value: str) -> str:
+        """Refuse a malformed range at startup rather than exempting nothing."""
+        _parse_cidrs(value)
+        return value
+
+    @property
+    def oauth_dcr_rate_limit_exempt_networks(
+        self,
+    ) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+        """Parsed ``oauth_dcr_rate_limit_exempt_cidrs``."""
+        return _parse_cidrs(self.oauth_dcr_rate_limit_exempt_cidrs)
+
     oauth_device_code_retention_seconds: int = Field(
         default=3600,
         ge=0,

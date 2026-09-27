@@ -22,6 +22,7 @@ Security:
 import base64
 import binascii
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -727,6 +728,24 @@ def detect_dcr_provider(redirect_uri: str, client_name: str) -> str:
     return "custom"
 
 
+def _dcr_rate_limit_exempt(client_ip: str) -> bool:
+    """Whether ``client_ip`` is in ``OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS`` (#1741).
+
+    An IPv4-mapped IPv6 address is compared as its IPv4 address. Anything that
+    is not an IP address (for example ``"unknown"``) is never exempt.
+    """
+    networks = get_settings().oauth_dcr_rate_limit_exempt_networks
+    if not networks:
+        return False
+    try:
+        address = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return any(address in network for network in networks)
+
+
 @router.post(
     "/register",
     response_model=OAuth2ClientWithSecretResponse,
@@ -752,7 +771,8 @@ async def dynamic_client_registration(
       RFC 8252 loopback redirects, a ``client_name`` naming ChatGPT, Claude,
       Cursor, Codex, Hermes Agent or OpenClaw (issue #1657). Every entry of
       ``redirect_uris`` must pass on its own (#1686)
-    - IP-based rate limiting (5 registrations per minute per IP)
+    - IP-based rate limiting (5 registrations per minute per IP); addresses in
+      ``OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS`` are not limited (#1741)
     - Redirect URI pattern validation
     - Automatic token_endpoint_auth_method="none" (public clients)
 
@@ -783,9 +803,12 @@ async def dynamic_client_registration(
     # Get client IP for rate limiting
     client_ip = request.client.host if request.client else "unknown"
 
-    # Check rate limit (5 registrations per minute per IP)
-    rate_limit_key = f"dcr_rate_limit:{client_ip}"
-    count = await increment_counter(rate_limit_key, ttl=60)
+    # Check rate limit (5 registrations per minute per IP), unless the address
+    # is in an operator-exempted range (#1741)
+    count = 0
+    if not _dcr_rate_limit_exempt(client_ip):
+        rate_limit_key = f"dcr_rate_limit:{client_ip}"
+        count = await increment_counter(rate_limit_key, ttl=60)
 
     if count > 5:
         logger.warning(
