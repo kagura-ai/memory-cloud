@@ -2000,10 +2000,20 @@ Returns: {status, agent: {id, name, status, enforcement_mode, ...}}.""",
             "readOnly": True,
             "description": """List the workspace's registered agents, newest first (owner/admin only), with status (active | suspended | retired) and enforcement_mode (shadow | enforce).
 
-Returns: {status, agents: [...], count}.""",
+Returns: {status, agents: [...], count, has_more, next_cursor}. description is a 200-character preview (description_truncated: true when cut; get_agent has it whole). has_more: pass next_cursor as cursor.""",
             "inputSchema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Agents per page, 1-100.",
+                        "default": 50,
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "next_cursor from the previous page.",
+                    },
+                },
             },
         },
         {

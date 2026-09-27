@@ -1710,7 +1710,15 @@
     "readOnly": true,
     "inputSchema": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "default": 50
+        },
+        "cursor": {
+          "type": "string"
+        }
+      },
       "additionalProperties": false
     }
   },
