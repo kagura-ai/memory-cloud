@@ -1786,7 +1786,7 @@ Returns: {status, key}.""",
                         "description": "State key (max 255 chars). Re-using a key overwrites its value.",
                     },
                     "value": {
-                        "description": "Any JSON value to store (object, array, string, number or boolean).",
+                        "description": "Any JSON value to store (object, array, string, number or boolean), at most 16384 characters as compact JSON.",
                     },
                     "ttl_seconds": {
                         "type": "integer",
@@ -1799,10 +1799,10 @@ Returns: {status, key}.""",
         {
             "name": "get_state",
             "readOnly": True,
-            "description": """Read ephemeral agent run-state (see set_state). Pass key for one value; omit it to list every live entry of the context. Expired entries are never returned.
+            "description": """Read ephemeral agent run-state (see set_state). Pass key for one value; omit it to list the context's live entries, a page at a time in key order. Expired entries are never returned.
 
 Returns (with key): {status, key, value, found}. found is false (value null) when the key is absent or expired — not an error.
-Returns (without key): {status, states: {key: value, ...}, count}. An empty states object with count 0 is a normal success.""",
+Returns (without key): {status, states: {key: value, ...}, count, has_more, next_cursor, omitted_keys?}. An empty states object with count 0 is a normal success. has_more: pass next_cursor as cursor for the next page. omitted_keys: values too large for this reply — read each with key.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1813,7 +1813,22 @@ Returns (without key): {status, states: {key: value, ...}, count}. An empty stat
                     },
                     "key": {
                         "type": "string",
-                        "description": "Omit to list all live entries of the context.",
+                        "description": "Omit to list the live entries of the context.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "List mode: entries per page, 1-200.",
+                        "default": 50,
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "List mode: next_cursor from the previous page.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 10000,
+                        "maximum": 100000,
+                        "description": "List mode: response budget in characters, not tokens (default 20000).",
                     },
                 },
                 "required": ["context_id"],

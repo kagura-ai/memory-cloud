@@ -1533,6 +1533,18 @@
         },
         "key": {
           "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "default": 50
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 100000
         }
       },
       "required": [
