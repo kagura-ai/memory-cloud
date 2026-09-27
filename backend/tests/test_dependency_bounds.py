@@ -25,6 +25,7 @@ AUTH_CRITICAL = frozenset(
         "cryptography",
         "google-auth",
         "google-auth-oauthlib",
+        "joserfc",
         "mcp",
         "pyotp",
         "starlette",
