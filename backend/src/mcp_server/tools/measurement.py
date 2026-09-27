@@ -144,6 +144,9 @@ async def handle_record_measurement(
             # #1742: only the service's own ValueError is the caller's; a
             # subclass from server code is a server failure (outcome unknown).
             if not is_caller_value_error(exc):
+                # get_db() commits on a normal return: drop anything the failed
+                # insert may have flushed before reporting an unknown outcome.
+                await db.rollback()
                 return _tool_exception_response("record_measurement", exc)
             return _error_response("validation_error", str(exc))
         return _success_response(

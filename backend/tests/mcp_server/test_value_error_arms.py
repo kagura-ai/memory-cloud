@@ -321,3 +321,5 @@ class TestMeasurement:
         payload = _payload(result)
         _assert_server_failure(payload, write=True)
         assert "recall_series" in payload["help"]
+        # get_db() commits on a normal return, so the failed write is rolled back.
+        db.rollback.assert_awaited()
