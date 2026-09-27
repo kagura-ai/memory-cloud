@@ -7,6 +7,7 @@ user; and that neither the token nor the link nor a password reaches the logs.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from unittest.mock import AsyncMock
@@ -21,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from auth.password import hash_password, verify_password
 from models.auth import AuditLog, EmailActionToken, User, UserOAuthProvider
+from services import password_account_service as password_service_module
 from services.email_action_token_service import EmailActionTokenService
 from services.email_service import LoggingEmailService
 from services.password_account_service import PasswordAccountService, process_reset_request
@@ -388,28 +390,63 @@ class TestSetup:
                 user_id=user.user_id
             )
 
-    @pytest.mark.parametrize("failure", ["raises", "false"])
-    async def test_failed_send_leaves_no_token(
-        self, db_session: AsyncSession, made: _Made, failure: str
+    @pytest.mark.parametrize("failure", ["raises", "false", "timeout"])
+    async def test_failed_send_is_a_503_but_keeps_the_committed_token(
+        self, db_session: AsyncSession, made: _Made, failure: str, monkeypatch
+    ) -> None:
+        # The token is committed before the send: a send that times out may
+        # still deliver its email (the provider call cannot be cancelled), and
+        # its link must then work. A stranded token is harmless: the next
+        # request invalidates it.
+        user = await _user(db_session, made, password=None)
+        user_id = user.user_id
+        email = _email()
+        if failure == "raises":
+            email.send_password_setup = AsyncMock(side_effect=RuntimeError("smtp"))
+        elif failure == "false":
+            email.send_password_setup = AsyncMock(return_value=False)
+        else:
+            monkeypatch.setattr(password_service_module, "_EMAIL_TIMEOUT_SECONDS", 0.01)
+
+            async def _slow(**kwargs) -> bool:
+                await asyncio.sleep(1)
+                return True
+
+            email.send_password_setup = AsyncMock(side_effect=_slow)
+        service = PasswordAccountService(db_session, email_service=email)
+
+        with pytest.raises(EmailDispatchError):
+            await service.request_setup(user_id=user_id)
+
+        token = _token_from(email.send_password_setup.await_args.kwargs["setup_url"])
+        assert await _live_links(db_session, user_id) == 1
+        requested = await db_session.scalar(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.user_id == user_id, AuditLog.action == "password_setup_requested")
+        )
+        assert requested == 1
+        # The delivered-late link still works.
+        await service.complete_setup(raw_token=token, new_password=NEW)
+
+    async def test_token_is_committed_before_the_send(
+        self, async_engine, db_session: AsyncSession, made: _Made
     ) -> None:
         user = await _user(db_session, made, password=None)
-        user_id = user.user_id  # the rollback expires the instance
+        seen_by_another_session: list[int] = []
+        factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+
+        async def _send(**kwargs) -> bool:
+            async with factory() as other:
+                seen_by_another_session.append(await _live_links(other, user.user_id))
+            return True
+
         email = _email()
-        email.send_password_setup = (
-            AsyncMock(side_effect=RuntimeError("smtp"))
-            if failure == "raises"
-            else AsyncMock(return_value=False)
+        email.send_password_setup = AsyncMock(side_effect=_send)
+        await PasswordAccountService(db_session, email_service=email).request_setup(
+            user_id=user.user_id
         )
-        with pytest.raises(EmailDispatchError):
-            await PasswordAccountService(db_session, email_service=email).request_setup(
-                user_id=user_id
-            )
-        rows = await db_session.scalar(
-            select(func.count())
-            .select_from(EmailActionToken)
-            .where(EmailActionToken.user_id == user_id)
-        )
-        assert rows == 0
+        assert seen_by_another_session == [1]
 
 
 # ---------------------------------------------------------------------------

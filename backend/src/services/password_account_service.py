@@ -55,7 +55,7 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 # Same bound as the erasure confirmation email: a stuck provider must not hold
-# the request (and its transaction) open indefinitely.
+# the request open indefinitely. No transaction is open during a send.
 _EMAIL_TIMEOUT_SECONDS = 10.0
 
 # ``audit_logs.user_email`` carries an actor label, not the subject's mutable
@@ -278,9 +278,12 @@ class PasswordAccountService:
     ) -> None:
         """Email a set-a-password link to a signed-in user without a password.
 
-        Pre-commit dispatch (#469): the token row is flushed, the email is
-        sent, and only a successful send commits. A failed send rolls the row
-        back and raises, so the user can simply retry.
+        The token (and the audit row recording the request) is committed
+        BEFORE the email is sent. The send runs in a worker thread that a
+        timeout cannot cancel, so a send reported as failed may still deliver
+        its email; its link must then work. A failed send raises (503) and the
+        user can retry; the stranded token is harmless, because the next
+        request invalidates it and it expires anyway.
 
         Args:
             user_id: The signed-in user.
@@ -305,10 +308,12 @@ class PasswordAccountService:
         self._audit(
             user.user_id, _AUDIT_ACTOR_SELF, "password_setup_requested", ip_address, user_agent
         )
+        to_email = user.email
+        await self.db.commit()
         try:
             sent = await asyncio.wait_for(
                 self.email_service.send_password_setup(
-                    to_email=user.email,
+                    to_email=to_email,
                     setup_url=_frontend_link("/password/setup", issued.raw_token),
                     expires_in_minutes=int(token_ttl("set_password").total_seconds() // 60),
                 ),
@@ -318,7 +323,6 @@ class PasswordAccountService:
             logger.error(
                 "password_setup_email_dispatch_failed", user_id=user_id, **_error_fields(exc)
             )
-            await self.db.rollback()
             raise EmailDispatchError() from None
         if not sent:
             logger.error(
@@ -326,9 +330,7 @@ class PasswordAccountService:
                 user_id=user_id,
                 error_type="send_returned_false",
             )
-            await self.db.rollback()
             raise EmailDispatchError()
-        await self.db.commit()
 
     async def complete_setup(
         self,

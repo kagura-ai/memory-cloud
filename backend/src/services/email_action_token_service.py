@@ -107,10 +107,8 @@ def _looks_issued(raw_token: str) -> bool:
 class EmailActionTokenService:
     """Issue and consume email action tokens.
 
-    The service only flushes; the caller owns the transaction. That lets a
-    caller dispatch the email before committing and roll back on a failed
-    send (the pre-commit dispatch pattern of #469), so a committed token is
-    never stranded without its email.
+    The service only flushes; the caller owns the transaction and decides
+    whether to commit before or after sending the email.
     """
 
     def __init__(self, db: AsyncSession) -> None:
