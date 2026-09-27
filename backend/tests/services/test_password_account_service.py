@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from auth.password import hash_password, verify_password
 from models.auth import AuditLog, EmailActionToken, User, UserOAuthProvider
+from services.email_action_token_service import EmailActionTokenService
 from services.email_service import LoggingEmailService
 from services.password_account_service import PasswordAccountService, process_reset_request
 from utils.datetime import utcnow
@@ -473,6 +474,136 @@ class TestRemove:
             await PasswordAccountService(db_session).remove(
                 user_id=user.user_id, current_password="Wrong-Pass-000!"
             )
+
+
+# ---------------------------------------------------------------------------
+# Outstanding links die when the password changes
+# ---------------------------------------------------------------------------
+
+
+async def _issue_link(db: AsyncSession, user: User, purpose: str) -> str:
+    issued = await EmailActionTokenService(db).issue(
+        user_id=user.user_id,
+        email=user.email,
+        purpose=purpose,  # type: ignore[arg-type]
+    )
+    await db.commit()
+    return issued.raw_token
+
+
+async def _live_links(db: AsyncSession, user_id: str) -> int:
+    return int(
+        await db.scalar(
+            select(func.count())
+            .select_from(EmailActionToken)
+            .where(EmailActionToken.user_id == user_id, EmailActionToken.used_at.is_(None))
+        )
+        or 0
+    )
+
+
+class TestOutstandingLinks:
+    async def test_change_kills_an_outstanding_reset_link(
+        self, db_session: AsyncSession, made: _Made
+    ) -> None:
+        user = await _user(db_session, made)
+        service = PasswordAccountService(db_session, email_service=_email())
+        token = await _issue_link(db_session, user, "reset_password")
+
+        await service.change(user_id=user.user_id, current_password=OLD, new_password=NEW)
+
+        with pytest.raises(PasswordLinkInvalidError):
+            await service.complete_reset(raw_token=token, new_password="Another-Pass-789!")
+
+    async def test_remove_kills_outstanding_links(
+        self, db_session: AsyncSession, made: _Made
+    ) -> None:
+        user = await _user(db_session, made, provider="google")
+        await _issue_link(db_session, user, "reset_password")
+        await _issue_link(db_session, user, "set_password")
+
+        await PasswordAccountService(db_session).remove(user_id=user.user_id, current_password=OLD)
+
+        assert await _live_links(db_session, user.user_id) == 0
+
+    async def test_complete_reset_kills_the_other_links(
+        self, db_session: AsyncSession, made: _Made
+    ) -> None:
+        user = await _user(db_session, made)
+        setup = await _issue_link(db_session, user, "set_password")
+        reset = await _issue_link(db_session, user, "reset_password")
+        service = PasswordAccountService(db_session, email_service=_email())
+
+        await service.complete_reset(raw_token=reset, new_password=NEW)
+
+        assert await _live_links(db_session, user.user_id) == 0
+        with pytest.raises(PasswordLinkInvalidError):
+            await service.complete_setup(raw_token=setup, new_password=NEW)
+
+    async def test_complete_setup_kills_the_other_links(
+        self, db_session: AsyncSession, made: _Made
+    ) -> None:
+        user = await _user(db_session, made, password=None)
+        reset = await _issue_link(db_session, user, "reset_password")
+        setup = await _issue_link(db_session, user, "set_password")
+        service = PasswordAccountService(db_session, email_service=_email())
+
+        await service.complete_setup(raw_token=setup, new_password=NEW)
+
+        assert await _live_links(db_session, user.user_id) == 0
+        with pytest.raises(PasswordLinkInvalidError):
+            await service.complete_reset(raw_token=reset, new_password="Another-Pass-789!")
+
+    async def test_reset_link_refused_once_the_password_is_gone(
+        self, db_session: AsyncSession, made: _Made
+    ) -> None:
+        user = await _user(db_session, made)
+        token = await _issue_link(db_session, user, "reset_password")
+        await db_session.execute(
+            update(User).where(User.user_id == user.user_id).values(password_hash=None)
+        )
+        await db_session.commit()
+        service = PasswordAccountService(db_session, email_service=_email())
+
+        with pytest.raises(PasswordLinkInvalidError):
+            await service.complete_reset(raw_token=token, new_password=NEW)
+        assert (await _reload(db_session, user.user_id)).password_hash is None
+
+        # The link stays burned even once the account is eligible again.
+        await db_session.execute(
+            update(User)
+            .where(User.user_id == user.user_id)
+            .values(password_hash=hash_password(OLD))
+        )
+        await db_session.commit()
+        with pytest.raises(PasswordLinkInvalidError):
+            await service.complete_reset(raw_token=token, new_password=NEW)
+
+    async def test_setup_link_refused_once_a_password_exists(
+        self, db_session: AsyncSession, made: _Made
+    ) -> None:
+        user = await _user(db_session, made, password=None)
+        token = await _issue_link(db_session, user, "set_password")
+        await db_session.execute(
+            update(User)
+            .where(User.user_id == user.user_id)
+            .values(password_hash=hash_password(OLD))
+        )
+        await db_session.commit()
+        service = PasswordAccountService(db_session, email_service=_email())
+
+        with pytest.raises(PasswordLinkInvalidError):
+            await service.complete_setup(raw_token=token, new_password=NEW)
+        refreshed = await _reload(db_session, user.user_id)
+        assert refreshed.password_hash and verify_password(OLD, refreshed.password_hash)
+
+        # The link stays burned even once the account is eligible again.
+        await db_session.execute(
+            update(User).where(User.user_id == user.user_id).values(password_hash=None)
+        )
+        await db_session.commit()
+        with pytest.raises(PasswordLinkInvalidError):
+            await service.complete_setup(raw_token=token, new_password=NEW)
 
 
 # ---------------------------------------------------------------------------

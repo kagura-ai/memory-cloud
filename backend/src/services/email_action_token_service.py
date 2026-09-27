@@ -7,7 +7,8 @@ cheat sheet:
 - The raw token is ``secrets.token_urlsafe(32)`` (256 bits). Only its SHA-256
   hex digest is stored, so a database read cannot be replayed as a link.
 - Issuing a token for a ``(user, purpose)`` invalidates that pair's outstanding
-  tokens: only the newest link works.
+  tokens: only the newest link works. ``invalidate`` does the same on demand
+  (e.g. when the password changes).
 - Consuming is one ``UPDATE ... WHERE used_at IS NULL AND expires_at > now
   RETURNING``. Under Postgres row locking a second, concurrent consume of the
   same token re-evaluates the predicate after the first commits and matches no
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import hmac
 import secrets
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
@@ -137,16 +139,7 @@ class EmailActionTokenService:
             The raw token and its expiry. The row is flushed, not committed.
         """
         now = utcnow()
-        await self.db.execute(
-            update(EmailActionToken)
-            .where(
-                EmailActionToken.user_id == user_id,
-                EmailActionToken.purpose == purpose,
-                EmailActionToken.used_at.is_(None),
-            )
-            .values(used_at=now)
-            .execution_options(synchronize_session=False)
-        )
+        await self.invalidate(user_id=user_id, purposes=(purpose,), now=now)
         raw_token = secrets.token_urlsafe(32)
         expires_at = now + token_ttl(purpose)
         self.db.add(
@@ -161,6 +154,35 @@ class EmailActionTokenService:
         await self.db.flush()
         logger.info("email_action_token_issued", user_id=user_id, purpose=purpose)
         return IssuedEmailActionToken(raw_token=raw_token, expires_at=expires_at)
+
+    async def invalidate(
+        self,
+        *,
+        user_id: str,
+        purposes: Iterable[EmailActionPurpose],
+        now: datetime | None = None,
+    ) -> None:
+        """Mark the user's outstanding tokens for ``purposes`` used.
+
+        Called when a link would no longer be right to act on — e.g. the
+        password was changed, removed or set — so an older email cannot undo
+        the change. Runs in the caller's transaction; not committed.
+
+        Args:
+            user_id: The account whose links die.
+            purposes: The purposes to invalidate.
+            now: The timestamp to record; defaults to the current time.
+        """
+        await self.db.execute(
+            update(EmailActionToken)
+            .where(
+                EmailActionToken.user_id == user_id,
+                EmailActionToken.purpose.in_(list(purposes)),
+                EmailActionToken.used_at.is_(None),
+            )
+            .values(used_at=now or utcnow())
+            .execution_options(synchronize_session=False)
+        )
 
     async def consume(
         self,

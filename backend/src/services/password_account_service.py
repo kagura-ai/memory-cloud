@@ -34,7 +34,11 @@ from auth.password_policy import PasswordPolicyError, validate_password_policy
 from config.settings import get_settings
 from db.base import _get_session_factory
 from models.auth import AuditLog, User, UserOAuthProvider
-from services.email_action_token_service import EmailActionTokenService, token_ttl
+from services.email_action_token_service import (
+    EmailActionPurpose,
+    EmailActionTokenService,
+    token_ttl,
+)
 from services.email_service import EmailService, get_email_service
 from utils.datetime import utcnow
 from utils.exceptions import (
@@ -58,6 +62,10 @@ _EMAIL_TIMEOUT_SECONDS = 10.0
 # email: the subject is identified by ``user_id``, which erasure pseudonymizes.
 _AUDIT_ACTOR_SELF = "self-service"
 _AUDIT_ACTOR_LINK = "email-link"
+
+# Every password change kills the outstanding password links, so an older
+# email cannot undo (or redo) it.
+_PASSWORD_LINK_PURPOSES: tuple[EmailActionPurpose, ...] = ("reset_password", "set_password")
 
 
 def normalize_email(email: str) -> str:
@@ -244,12 +252,14 @@ class PasswordAccountService:
 
         Raises:
             ValidationError: The password breaks the policy (422).
-            PasswordLinkInvalidError: The link is unknown, expired, used, or
-                was sent to an address the account no longer has (400).
+            PasswordLinkInvalidError: The link is unknown, expired, used, was
+                sent to an address the account no longer has, or the account
+                no longer has a password to reset (400).
         """
         password_hash = _validated_hash(new_password)
         user = await self._consume_for_user(raw_token, "reset_password")
         user.password_hash = password_hash
+        await self._invalidate_password_links(user.user_id)
         self._audit(user.user_id, _AUDIT_ACTOR_LINK, "password_reset", ip_address, user_agent)
         await self.db.commit()
         logger.info("password_reset_completed", user_id=user.user_id)
@@ -341,14 +351,16 @@ class PasswordAccountService:
 
         Raises:
             ValidationError: The password breaks the policy (422).
-            PasswordLinkInvalidError: The link is unknown, expired, used, or
-                was sent to an address the account no longer has (400).
+            PasswordLinkInvalidError: The link is unknown, expired, used, was
+                sent to an address the account no longer has, or the account
+                has a password by now (400).
         """
         password_hash = _validated_hash(new_password)
         user = await self._consume_for_user(raw_token, "set_password")
         user.password_hash = password_hash
         if user.email_verified_at is None:
             user.email_verified_at = utcnow()
+        await self._invalidate_password_links(user.user_id)
         self._audit(user.user_id, _AUDIT_ACTOR_LINK, "password_set", ip_address, user_agent)
         await self.db.commit()
         logger.info("password_setup_completed", user_id=user.user_id)
@@ -378,6 +390,7 @@ class PasswordAccountService:
         user = await self._load_user(user_id)
         self._verify_current(user, current_password)
         user.password_hash = _validated_hash(new_password)
+        await self._invalidate_password_links(user.user_id)
         self._audit(user.user_id, _AUDIT_ACTOR_SELF, "password_changed", ip_address, user_agent)
         await self.db.commit()
         logger.info("password_changed", user_id=user_id)
@@ -411,6 +424,7 @@ class PasswordAccountService:
         if not linked:
             raise ConflictError("Cannot remove the only remaining sign-in method")
         user.password_hash = None
+        await self._invalidate_password_links(user.user_id)
         self._audit(user.user_id, _AUDIT_ACTOR_SELF, "password_removed", ip_address, user_agent)
         await self.db.commit()
         logger.info("password_removed", user_id=user_id)
@@ -437,7 +451,7 @@ class PasswordAccountService:
         if not verify_password(current_password, user.password_hash):
             raise CurrentPasswordMismatchError()
 
-    async def _consume_for_user(self, raw_token: str, purpose: Any) -> User:
+    async def _consume_for_user(self, raw_token: str, purpose: EmailActionPurpose) -> User:
         consumed = await EmailActionTokenService(self.db).consume(
             raw_token=raw_token, purpose=purpose
         )
@@ -448,11 +462,22 @@ class PasswordAccountService:
             await self.db.execute(select(User).where(User.user_id == consumed.user_id))
         ).scalar_one_or_none()
         # A link sent to an address the account no longer has proves nothing
-        # about the current mailbox.
-        if user is None or normalize_email(user.email) != normalize_email(consumed.email):
+        # about the current mailbox. A reset link needs a password to reset;
+        # a set-up link is for an account that has none (either may have
+        # changed since the link was sent).
+        if (
+            user is None
+            or normalize_email(user.email) != normalize_email(consumed.email)
+            or (user.password_hash is None) != (purpose == "set_password")
+        ):
             await self.db.commit()  # keep the link burned
             raise PasswordLinkInvalidError()
         return user
+
+    async def _invalidate_password_links(self, user_id: str) -> None:
+        await EmailActionTokenService(self.db).invalidate(
+            user_id=user_id, purposes=_PASSWORD_LINK_PURPOSES
+        )
 
     def _audit(
         self,

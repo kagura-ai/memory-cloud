@@ -4,6 +4,7 @@
 - issue → consume works once; a second consume, an expired, an unknown, a
   malformed and a wrong-purpose token all answer ``None``;
 - issuing a new token for the same (user, purpose) invalidates the old one;
+- ``invalidate`` kills the outstanding tokens of the named purposes only;
 - N sessions racing one token: exactly one wins (atomic UPDATE ... RETURNING).
 """
 
@@ -148,6 +149,22 @@ class TestEmailActionTokenService:
             )
             is not None
         )
+        await db_session.commit()
+
+    async def test_invalidate_kills_only_the_named_purposes(
+        self, db_session: AsyncSession, user_id: str
+    ) -> None:
+        reset = await _issue(db_session, user_id, purpose="reset_password")
+        setup = await _issue(db_session, user_id, purpose="set_password")
+        verify = await _issue(db_session, user_id, purpose="verify_email")
+        service = EmailActionTokenService(db_session)
+
+        await service.invalidate(user_id=user_id, purposes=("reset_password", "set_password"))
+        await db_session.commit()
+
+        assert await service.consume(raw_token=reset, purpose="reset_password") is None
+        assert await service.consume(raw_token=setup, purpose="set_password") is None
+        assert await service.consume(raw_token=verify, purpose="verify_email") is not None
         await db_session.commit()
 
     async def test_racing_consumers_win_exactly_once(
