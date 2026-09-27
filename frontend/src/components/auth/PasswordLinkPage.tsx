@@ -6,15 +6,17 @@
  * `mode="reset"`  — /password/reset?token=…  (forgot-password link)
  * `mode="setup"`  — /password/setup?token=…  (set-a-password link from the profile)
  *
- * The token rides the URL (unavoidable for an email link); it is sent once to
- * the backend and never logged or stored. A reset signs the account out
- * everywhere, so success points at /login; a set-up keeps this browser's
- * session, so success points at the profile.
+ * The token rides the URL (unavoidable for an email link). It is read once
+ * into component state and the URL is immediately replaced with the bare
+ * path, so it does not linger in the address bar or the history; it is sent
+ * once to the backend and never logged or stored. A reset signs out every
+ * browser session of the account, so success points at /login; a set-up
+ * keeps this browser's session, so success points at the profile.
  */
 
 import Link from "next/link";
-import { useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useEffect, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { AlertTriangle, CheckCircle2, KeyRound } from "lucide-react";
 
@@ -42,7 +44,15 @@ export function PasswordLinkPage({ mode }: PasswordLinkPageProps) {
   const tCommon = useTranslations("common");
   const { toast } = useToast();
   const searchParams = useSearchParams();
-  const token = searchParams.get("token");
+  const router = useRouter();
+  const pathname = usePathname();
+  // Read once: the URL loses the token right below, and a re-render must
+  // keep the value it had on arrival.
+  const [token] = useState<string | null>(() => searchParams.get("token"));
+
+  useEffect(() => {
+    if (token) router.replace(pathname, { scroll: false });
+  }, [token, router, pathname]);
 
   const [phase, setPhase] = useState<Phase>(token ? "form" : "invalid");
   const [submitting, setSubmitting] = useState(false);

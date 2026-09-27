@@ -14,8 +14,12 @@ let mockToken: string | null = "tok-1";
 const mockSearchParams = {
   get: (k: string) => (k === "token" ? mockToken : null),
 };
+const mockReplace = vi.fn();
+let mockPathname = "/password/reset";
 vi.mock("next/navigation", () => ({
   useSearchParams: () => mockSearchParams,
+  useRouter: () => ({ replace: mockReplace }),
+  usePathname: () => mockPathname,
 }));
 
 const mockToast = vi.fn();
@@ -54,6 +58,8 @@ function fill(newPassword: string, confirm: string) {
 
 beforeEach(() => {
   mockToken = "tok-1";
+  mockPathname = "/password/reset";
+  mockReplace.mockReset();
   mockReset.mockReset();
   mockSetup.mockReset();
   mockToast.mockReset();
@@ -159,5 +165,39 @@ describe("PasswordLinkPage — setup", () => {
     await waitFor(() =>
       expect(screen.getByText("setup.invalidTitle")).toBeTruthy(),
     );
+  });
+});
+
+describe("PasswordLinkPage — token leaves the address bar", () => {
+  it("replaces the URL with the bare path right away", async () => {
+    render(<PasswordLinkPage mode="reset" />);
+    await waitFor(() =>
+      expect(mockReplace).toHaveBeenCalledWith("/password/reset", {
+        scroll: false,
+      }),
+    );
+    expect(mockReplace.mock.calls[0][0]).not.toContain("tok-1");
+  });
+
+  it("still submits the token once the URL no longer carries it", async () => {
+    mockReset.mockResolvedValue(undefined);
+    const { rerender } = render(<PasswordLinkPage mode="reset" />);
+    await waitFor(() => expect(mockReplace).toHaveBeenCalled());
+    // The replace dropped ?token= — the search params are empty now.
+    mockToken = null;
+    rerender(<PasswordLinkPage mode="reset" />);
+
+    fill(GOOD, GOOD);
+    fireEvent.click(screen.getByRole("button", { name: "reset.submit" }));
+
+    await waitFor(() => expect(mockReset).toHaveBeenCalledWith("tok-1", GOOD));
+  });
+
+  it("does not touch the URL when there is no token", () => {
+    mockToken = null;
+    mockPathname = "/password/setup";
+    render(<PasswordLinkPage mode="setup" />);
+    expect(mockReplace).not.toHaveBeenCalled();
+    expect(screen.getByText("setup.invalidTitle")).toBeTruthy();
   });
 });
