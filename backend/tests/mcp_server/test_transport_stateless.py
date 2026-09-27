@@ -921,8 +921,10 @@ async def test_unauthenticated_modern_request_gets_the_oauth_challenge(monkeypat
     """ChatGPT's first POST is an unauthenticated probe: it must still get the
     401 + WWW-Authenticate that starts the OAuth flow, whatever its era."""
 
+    from mcp_server.auth import MissingCredentialsError
+
     async def failing_auth(**_kwargs):
-        raise Exception("Missing Authorization header")
+        raise MissingCredentialsError("Missing Authorization header")
 
     monkeypatch.setattr(transport, "authenticate_mcp_request", failing_auth)
 
