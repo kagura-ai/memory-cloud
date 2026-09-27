@@ -66,8 +66,12 @@ fi
 cd backend && uv sync --locked --extra dev
 cd ..
 echo "Backend dependencies are in backend/.venv (activate it, or run commands with 'uv run')."
-echo "Installing kagura-memory SDK..."
-pip install kagura-memory
+# The SDK is a command-line tool for you, not a backend dependency: install it
+# as a uv tool (its own environment, `kagura` on PATH) so it lands in a known
+# place — a bare `pip` would target whichever interpreter is first on PATH —
+# and so a later `uv sync` does not remove it from backend/.venv.
+echo "Installing kagura-memory SDK (uv tool install)..."
+uv tool install kagura-memory
 
 # Check for port conflicts before starting services
 echo ""
