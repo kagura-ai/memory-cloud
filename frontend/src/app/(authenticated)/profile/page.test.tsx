@@ -17,10 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { resetConsumedSearchParams } from "@/hooks/useConsumeSearchParams";
 
 import ProfilePage from "./page";
-import {
-  getSignInMethodLabel,
-  getRefreshProviderName,
-} from "./signInLabels";
+import { getSignInMethodLabel, getRefreshProviderName } from "./signInLabels";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -41,6 +38,11 @@ vi.mock("next-intl", () => ({
 // own mount-time fetch and hooks.
 vi.mock("@/components/account/DeleteAccountSection", () => ({
   DeleteAccountSection: () => null,
+}));
+// #1678: the Password section has its own suite (PasswordSettings.test.tsx)
+// and its own providers fetch.
+vi.mock("@/components/auth/PasswordSettings", () => ({
+  default: () => null,
 }));
 
 // AuthContext mock — flipped per test via mockUser.
@@ -258,7 +260,9 @@ describe("ProfilePage — refresh-from-IdP button visibility (#515)", () => {
     // Translator interpolates {provider} → label is "key|Google".
     expect(screen.getByText("refreshFromIdP|signInMethodGoogle")).toBeTruthy();
     expect(
-      screen.getByRole("button", { name: /refreshFromIdPButton\|signInMethodGoogle/ }),
+      screen.getByRole("button", {
+        name: /refreshFromIdPButton\|signInMethodGoogle/,
+      }),
     ).toBeTruthy();
   });
 
@@ -394,7 +398,9 @@ describe("ProfilePage — refresh button click (#515)", () => {
     });
     const lastToast = mockToast.mock.calls[mockToast.mock.calls.length - 1][0];
     expect(lastToast.variant).toBe("destructive");
-    expect(lastToast.description).toBe("refreshFromIdPErrorRateLimited|signInMethodGitHub");
+    expect(lastToast.description).toBe(
+      "refreshFromIdPErrorRateLimited|signInMethodGitHub",
+    );
   });
 
   it("on generic failure surfaces the generic error toast", async () => {
@@ -410,7 +416,9 @@ describe("ProfilePage — refresh button click (#515)", () => {
     render(<ProfilePage />);
 
     fireEvent.click(
-      screen.getByRole("button", { name: /refreshFromIdPButton\|signInMethodGoogle/ }),
+      screen.getByRole("button", {
+        name: /refreshFromIdPButton\|signInMethodGoogle/,
+      }),
     );
 
     await waitFor(() => {
@@ -418,7 +426,9 @@ describe("ProfilePage — refresh button click (#515)", () => {
     });
     const lastToast = mockToast.mock.calls[mockToast.mock.calls.length - 1][0];
     expect(lastToast.variant).toBe("destructive");
-    expect(lastToast.description).toBe("refreshFromIdPErrorGeneric|signInMethodGoogle");
+    expect(lastToast.description).toBe(
+      "refreshFromIdPErrorGeneric|signInMethodGoogle",
+    );
   });
 });
 
@@ -464,7 +474,9 @@ describe("ProfilePage — post-callback search-param handling (#515)", () => {
     });
     const errorToast = mockToast.mock.calls[0][0];
     expect(errorToast.variant).toBe("destructive");
-    expect(errorToast.description).toBe("refreshFromIdPErrorMismatch|signInMethodGoogle");
+    expect(errorToast.description).toBe(
+      "refreshFromIdPErrorMismatch|signInMethodGoogle",
+    );
     expect(mockRouterReplace).toHaveBeenCalledWith("/profile");
   });
 
@@ -484,7 +496,9 @@ describe("ProfilePage — post-callback search-param handling (#515)", () => {
       expect(mockToast).toHaveBeenCalled();
     });
     const errorToast = mockToast.mock.calls[0][0];
-    expect(errorToast.description).toBe("refreshFromIdPErrorExpired|signInMethodGitHub");
+    expect(errorToast.description).toBe(
+      "refreshFromIdPErrorExpired|signInMethodGitHub",
+    );
   });
 
   it("does nothing on a clean URL (no toast, no replace)", () => {

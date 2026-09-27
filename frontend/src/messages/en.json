@@ -254,11 +254,11 @@
     "oauthFailed": "Sign-in failed. Please try again.",
     "oauthExpired": "The sign-in link has expired. Please try again.",
     "termsRequired": "No account was created: please agree to the Terms of Service and Privacy Policy below, then sign in again.",
-    "loginId": "Login ID",
+    "loginId": "Login ID or email",
     "password": "Password",
     "signIn": "Sign In",
     "signingIn": "Signing in...",
-    "invalidCredentials": "Invalid login ID or password",
+    "invalidCredentials": "Invalid login ID/email or password",
     "orContinueWith": "Or continue with",
     "mfaRequired": "Two-Factor Authentication",
     "enterTotpCode": "Enter the 6-digit code from your authenticator app",
@@ -272,7 +272,8 @@
       "placeholder": "Paste the invite link you received",
       "submit": "Continue with invite",
       "invalid": "That doesn't look like an invite link. Paste the whole link you received."
-    }
+    },
+    "forgotPassword": "Forgot password?"
   },
   "landing": {
     "heroTitle": "Never lose your AI context",
@@ -4362,5 +4363,78 @@
         "singular": "API call"
       }
     }
+  },
+  "passwordRecovery": {
+    "requirements": "At least 12 characters, with an upper-case letter, a lower-case letter, a digit and a symbol.",
+    "newPassword": "New password",
+    "confirmPassword": "Confirm new password",
+    "mismatch": "The passwords do not match.",
+    "policyError": "This password does not meet the requirements.",
+    "tooManyRequests": "Too many attempts. Please wait a few minutes and try again.",
+    "genericError": "Something went wrong. Please try again.",
+    "backToLogin": "Back to sign in",
+    "forgot": {
+      "title": "Forgot your password?",
+      "description": "Enter the email address of your account. If it can sign in with a password, we will email you a link to choose a new one.",
+      "emailLabel": "Email",
+      "submit": "Send reset link",
+      "submitting": "Sending…",
+      "sent": "If an account with that email exists, we sent a link to reset its password. The link expires in 30 minutes."
+    },
+    "reset": {
+      "title": "Choose a new password",
+      "description": "Resetting your password signs you out on every device.",
+      "submit": "Reset password",
+      "submitting": "Saving…",
+      "successTitle": "Password updated",
+      "successBody": "Your password was changed and you were signed out everywhere. Sign in with your new password.",
+      "signIn": "Sign in",
+      "invalidTitle": "This link can't be used",
+      "invalidBody": "The link is invalid, was already used, or has expired. Request a new one.",
+      "requestNew": "Request a new link"
+    },
+    "setup": {
+      "title": "Set a password",
+      "description": "After this you can also sign in with your email address and this password.",
+      "submit": "Set password",
+      "submitting": "Saving…",
+      "successTitle": "Password set",
+      "successBody": "You can now sign in with your email address and this password.",
+      "continue": "Go to your profile",
+      "invalidTitle": "This link can't be used",
+      "invalidBody": "The link is invalid, was already used, or has expired. Request a new one from your profile."
+    }
+  },
+  "passwordSettings": {
+    "title": "Password",
+    "description": "Sign in with your email address and a password, in addition to Google or GitHub.",
+    "statusSet": "A password is set for this account.",
+    "statusNotSet": "No password is set for this account.",
+    "loadError": "Couldn't load your sign-in methods. Please refresh and try again.",
+    "setupButton": "Set up a password",
+    "setupSending": "Sending…",
+    "setupSent": "Check your email: we sent a link to {email} to set your password. It expires in 30 minutes.",
+    "setupError": "Couldn't send the email. Please try again.",
+    "currentPassword": "Current password",
+    "newPassword": "New password",
+    "confirmPassword": "Confirm new password",
+    "requirements": "At least 12 characters, with an upper-case letter, a lower-case letter, a digit and a symbol.",
+    "changeButton": "Change password",
+    "changing": "Saving…",
+    "changeSuccess": "Password changed. Your other sessions were signed out.",
+    "changeError": "Couldn't change the password. Please try again.",
+    "wrongCurrent": "The current password is incorrect.",
+    "mismatch": "The new passwords do not match.",
+    "policyError": "This password does not meet the requirements.",
+    "tooManyRequests": "Too many attempts. Please wait a few minutes and try again.",
+    "removeButton": "Remove password",
+    "removeDisabledHint": "This is your only sign-in method. Link Google or GitHub before removing it.",
+    "removeTitle": "Remove your password?",
+    "removeDescription": "You will no longer be able to sign in with your email address and password. Enter your current password to confirm.",
+    "removeConfirm": "Remove",
+    "removing": "Removing…",
+    "removeSuccess": "Password removed.",
+    "removeError": "Couldn't remove the password. Please try again.",
+    "lastMethodError": "This is your only sign-in method, so it can't be removed. Link Google or GitHub first."
   }
 }

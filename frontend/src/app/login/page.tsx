@@ -15,8 +15,11 @@
  * Issue #1665: when the deployment reports a `terms_version`, the ticked
  * checkbox is sent as `accepted_terms` with every sign-in so the backend can
  * record it; without one the requests are unchanged.
+ * Issue #1678: the login ID field also takes the verified email of an account
+ * with a password; "Forgot password?" leads to the self-service reset.
  */
 
+import Link from "next/link";
 import { useEffect, useRef, useState, Suspense } from "react";
 import { useTranslations } from "next-intl";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -525,6 +528,17 @@ function LoginContent() {
                           : t("signIn")}
                       </Button>
                     </form>
+
+                    {/* #1678: self-service reset for accounts that sign in
+                        with a verified email + password. */}
+                    <p className="mt-3 text-center text-sm">
+                      <Link
+                        href="/password/forgot"
+                        className="text-gray-600 underline hover:text-gray-900"
+                      >
+                        {t("forgotPassword")}
+                      </Link>
+                    </p>
 
                     {/* Divider between admin form and OAuth */}
                     {hasOAuth && (

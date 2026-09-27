@@ -34,6 +34,9 @@ export interface User {
   // Issue #514: sign-in method display
   auth_method?: "password" | "oauth";
   auth_provider?: "google" | "github" | null;
+  // Issue #1678: whether the account can sign in with a password now.
+  // `auth_method` stays the ORIGINAL sign-in method.
+  has_password?: boolean;
   // Issue #953: protected initial administrator — cannot self-delete
   // (backend blocks erasure with ERASURE-004 / 403). Hides the danger zone.
   is_initial_admin?: boolean;
@@ -285,6 +288,75 @@ export async function verifyMfa(
     `/api/v1/auth/mfa/verify${returnToParam(returnTo)}`,
     { mfa_session_token: mfaSessionToken, totp_code: totpCode },
   );
+}
+
+// ============================================================================
+// Email + password sign-in: reset / set up / change / remove (Issue #1678)
+// ============================================================================
+
+/**
+ * Ask for a password-reset link. The backend answers the same way whether or
+ * not an account exists, so the caller shows one neutral message either way.
+ */
+export async function requestPasswordReset(email: string): Promise<void> {
+  await apiClient.post("/api/v1/auth/password/reset-request", { email });
+}
+
+/**
+ * Set a new password from a reset link. Every session of the account ends;
+ * the person signs in again. 400 = invalid or expired link, 422 = policy.
+ */
+export async function resetPassword(
+  token: string,
+  newPassword: string,
+): Promise<void> {
+  await apiClient.post("/api/v1/auth/password/reset", {
+    token,
+    new_password: newPassword,
+  });
+}
+
+/**
+ * Set the first password from a set-up link (also verifies the email).
+ * 400 = invalid or expired link, 422 = policy.
+ */
+export async function setupPassword(
+  token: string,
+  newPassword: string,
+): Promise<void> {
+  await apiClient.post("/api/v1/auth/password/setup", {
+    token,
+    new_password: newPassword,
+  });
+}
+
+/** Email a set-a-password link to the signed-in account's address. */
+export async function requestPasswordSetup(): Promise<void> {
+  await apiClient.post("/api/v1/me/password/setup-request");
+}
+
+/**
+ * Change the signed-in account's password. Other sessions end.
+ * 403 = wrong current password, 422 = policy.
+ */
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<void> {
+  await apiClient.post("/api/v1/me/password/change", {
+    current_password: currentPassword,
+    new_password: newPassword,
+  });
+}
+
+/**
+ * Remove the signed-in account's password.
+ * 403 = wrong current password, 409 = it is the last sign-in method.
+ */
+export async function removePassword(currentPassword: string): Promise<void> {
+  await apiClient.delete("/api/v1/me/password", {
+    body: JSON.stringify({ current_password: currentPassword }),
+  });
 }
 
 // ============================================================================

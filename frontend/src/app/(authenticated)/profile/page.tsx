@@ -37,6 +37,7 @@ import { COMMON_TIMEZONES } from "@/lib/utils/datetime";
 import { apiClient, ApiError } from "@/lib/api/base";
 import { PageContainer } from "@/components/common/PageContainer";
 import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
+import PasswordSettings from "@/components/auth/PasswordSettings";
 import { DeleteAccountSection } from "@/components/account/DeleteAccountSection";
 import { getSignInMethodLabel, getRefreshProviderName } from "./signInLabels";
 
@@ -415,6 +416,9 @@ export default function ProfilePage() {
           (current method display + IdP profile refresh) from this management
           section, so removing them was judged riskier than additive mounting. */}
       <ConnectedAccounts />
+
+      {/* Password (Issue #1678): set up / change / remove. */}
+      <PasswordSettings />
 
       {/* Theme & Appearance */}
       <Card>

@@ -861,7 +861,7 @@ describe("LoginPage password sign-in entry (#1677)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "passwordLogin" }));
 
-    // The field stays a login ID (#1677): the backend matches User.login_id.
+    // #1678: the field takes a login ID or a verified email.
     await waitFor(() =>
       expect(screen.getByLabelText("loginId")).toBeInTheDocument(),
     );
@@ -873,6 +873,34 @@ describe("LoginPage password sign-in entry (#1677)", () => {
     expect(ja.login.passwordLogin).toBe("パスワードでログイン");
     expect(en.login).not.toHaveProperty("adminLogin");
     expect(ja.login).not.toHaveProperty("adminLogin");
+  });
+});
+
+// ---------- #1678: email sign-in + forgot password -------------------------
+
+describe("LoginPage email + password sign-in (#1678)", () => {
+  beforeEach(() => {
+    mockGetAuthConfig.mockResolvedValue({
+      password_login_enabled: true,
+      google_oauth_enabled: false,
+      github_oauth_enabled: false,
+    });
+  });
+
+  it("links to the forgot-password page under the password form", async () => {
+    renderLogin();
+    const link = await screen.findByRole("link", { name: "forgotPassword" });
+    expect(link.getAttribute("href")).toBe("/password/forgot");
+  });
+
+  it("labels the identifier as a login ID or email in both catalogs", () => {
+    expect(en.login.loginId).toBe("Login ID or email");
+    expect(ja.login.loginId).toBe("ログインIDまたはメールアドレス");
+    expect(en.login.invalidCredentials).toBe(
+      "Invalid login ID/email or password",
+    );
+    expect(en.login.forgotPassword).toBeTruthy();
+    expect(ja.login.forgotPassword).toBeTruthy();
   });
 });
 

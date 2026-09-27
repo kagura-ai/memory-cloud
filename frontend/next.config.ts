@@ -33,6 +33,15 @@ const nextConfig: NextConfig = {
           { key: "X-Robots-Tag", value: "noindex, nofollow" },
         ],
       },
+      {
+        // #1678: /password/reset and /password/setup carry a one-time token in
+        // the query string; same policy as /join (app/password/layout.tsx).
+        source: "/password/:path*",
+        headers: [
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+        ],
+      },
     ];
   },
 };

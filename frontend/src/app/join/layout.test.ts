@@ -12,21 +12,23 @@ describe("/join referrer + indexing policy (#1588)", () => {
   it("serves /join/* with no-referrer and noindex response headers", async () => {
     const rules = await nextConfig.headers?.();
 
-    expect(rules).toEqual([
-      {
-        source: "/join/:path*",
-        headers: [
-          { key: "Referrer-Policy", value: "no-referrer" },
-          { key: "X-Robots-Tag", value: "noindex, nofollow" },
-        ],
-      },
-    ]);
+    expect(rules).toContainEqual({
+      source: "/join/:path*",
+      headers: [
+        { key: "Referrer-Policy", value: "no-referrer" },
+        { key: "X-Robots-Tag", value: "noindex, nofollow" },
+      ],
+    });
   });
 
-  it("scopes the header rule to /join only", async () => {
+  it("scopes the header rules to the token-bearing routes only", async () => {
     const rules = (await nextConfig.headers?.()) ?? [];
 
-    expect(rules.map((rule) => rule.source)).toEqual(["/join/:path*"]);
+    // #1678 adds /password (reset / set-up links carry a token too).
+    expect(rules.map((rule) => rule.source)).toEqual([
+      "/join/:path*",
+      "/password/:path*",
+    ]);
   });
 
   it("repeats both as document metadata for proxies that overwrite headers", () => {

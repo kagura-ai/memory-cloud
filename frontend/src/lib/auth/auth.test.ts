@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockApiClientGet = vi.fn();
 const mockApiClientPost = vi.fn();
+const mockApiClientDelete = vi.fn();
 
 vi.mock("../api/base", () => ({
   apiClient: {
     get: (...args: unknown[]) => mockApiClientGet(...args),
     post: (...args: unknown[]) => mockApiClientPost(...args),
+    delete: (...args: unknown[]) => mockApiClientDelete(...args),
   },
   ApiError: class ApiError extends Error {},
 }));
@@ -132,7 +134,10 @@ describe("logout — scope (#1488 Phase 4)", () => {
   });
 
   it("sends the requested scope", async () => {
-    mockApiClientPost.mockResolvedValue({ success: true, session_ended: false });
+    mockApiClientPost.mockResolvedValue({
+      success: true,
+      session_ended: false,
+    });
     await logout("current");
     expect(mockApiClientPost).toHaveBeenCalledWith(
       "/api/v1/auth/logout?scope=current",
@@ -200,5 +205,52 @@ describe("terms acceptance plumbing (#1665)", () => {
       "/api/v1/me/terms-acceptance",
       { version: "2026-09" },
     );
+  });
+});
+
+describe("password endpoints (#1678)", () => {
+  it("posts the reset request, reset, set-up, set-up request and change", async () => {
+    const {
+      requestPasswordReset,
+      resetPassword,
+      setupPassword,
+      requestPasswordSetup,
+      changePassword,
+    } = await import("./auth");
+    mockApiClientPost.mockResolvedValue({});
+
+    await requestPasswordReset("a@example.com");
+    await resetPassword("tok", "New-Pass-123!");
+    await setupPassword("tok2", "New-Pass-123!");
+    await requestPasswordSetup();
+    await changePassword("Old-Pass-123!", "New-Pass-123!");
+
+    expect(mockApiClientPost.mock.calls).toEqual([
+      ["/api/v1/auth/password/reset-request", { email: "a@example.com" }],
+      [
+        "/api/v1/auth/password/reset",
+        { token: "tok", new_password: "New-Pass-123!" },
+      ],
+      [
+        "/api/v1/auth/password/setup",
+        { token: "tok2", new_password: "New-Pass-123!" },
+      ],
+      ["/api/v1/me/password/setup-request"],
+      [
+        "/api/v1/me/password/change",
+        { current_password: "Old-Pass-123!", new_password: "New-Pass-123!" },
+      ],
+    ]);
+  });
+});
+
+describe("removePassword (#1678)", () => {
+  it("sends the current password in the DELETE body", async () => {
+    const { removePassword } = await import("./auth");
+    mockApiClientDelete.mockResolvedValue({});
+    await removePassword("Old-Pass-123!");
+    expect(mockApiClientDelete).toHaveBeenCalledWith("/api/v1/me/password", {
+      body: JSON.stringify({ current_password: "Old-Pass-123!" }),
+    });
   });
 });
