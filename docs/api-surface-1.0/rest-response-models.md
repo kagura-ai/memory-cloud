@@ -5,6 +5,7 @@
 > Scope: all BaseModel / TZAwareBaseModel subclasses defined in backend/src/api/routes/ (46 route files, 208 model classes — 208 of 208 enumerated)
 > Re-frozen after #991 (Phase 1): 3 duplicate class names renamed; dead `APIKey*` schemas removed from `models/schemas.py`; redundant `WorkspaceConnectorCreateResponse.resource_pk` dropped.
 > Re-frozen after #991 (Phase 2): `WorkspaceConnectorSummary.resource_pk` → public `resource_id` slug (via Resource JOIN); `TelemetryResponse.embedding_config.ollama_base_url` dropped (internal URL, no consumer); sequential int PKs (`APIKeyResponse.id`, `ExternalKeyResponse.id`, `ResourceTokenResponse.id`, `WorkspaceConnectorCreateResponse.token_id`) **consciously frozen** into the 1.0 contract — opaque-ID replacement deferred to #1008 (post-1.0, breaking/major). #991 is now fully resolved.
+> Changed by #1678: new `password.py` models (email + password recovery and settings); `PasswordLoginRequest.login_id` now also accepts a verified email address (field name unchanged); `/auth/me` gains `has_password` (defined in `models/schemas.py`, outside this enumeration's scope).
 
 Notes:
 
@@ -416,7 +417,7 @@ Notes:
 
 ### PasswordLoginRequest (BaseModel, L1293) (request model)
 > Password login request.
-- `login_id: str` — required
+- `login_id: str` — required (a login ID, or a verified email address since #1678)
 - `password: str` — required
 
 ### PasswordLoginResponse (BaseModel, L1300)
@@ -1053,6 +1054,35 @@ Notes:
 ### DeviceUnauthAuditRequest (BaseModel, L290) (request model)
 > Fire-and-forget audit payload for unauthenticated /device hits (Issue #779).
 - `user_code_prefix: str` — optional (default `''`)
+
+## password.py
+
+### PasswordResetRequestBody (BaseModel) (request model)
+> Body for POST /auth/password/reset-request.
+- `email: str` — required
+
+### PasswordEmailAcceptedResponse (BaseModel)
+> Identical for every reset request, whether or not an email was sent.
+- `status: Literal["accepted"]` — optional (default `'accepted'`)
+- `message: str` — optional (default: a fixed sentence)
+
+### PasswordSetupRequestedResponse (BaseModel)
+> Returned once the set-up link was emailed to the signed-in user.
+- `status: Literal["sent"]` — optional (default `'sent'`)
+
+### PasswordLinkBody (BaseModel) (request model)
+> Body for POST /auth/password/reset and /auth/password/setup.
+- `token: str` — required
+- `new_password: str` — required
+
+### PasswordChangeBody (BaseModel) (request model)
+> Body for POST /me/password/change.
+- `current_password: str` — required
+- `new_password: str` — required
+
+### PasswordRemoveBody (BaseModel) (request model)
+> Body for DELETE /me/password.
+- `current_password: str` — required
 
 ## public_search.py
 
