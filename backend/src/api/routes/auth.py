@@ -18,6 +18,7 @@ Security features:
 - First user auto-assigned ADMIN role
 """
 
+import asyncio
 import functools
 import os
 import re
@@ -2235,11 +2236,6 @@ def _safe_redirect_url(return_to: str | None) -> str:
 _LOGIN_ATTEMPT_PREFIX = "login_attempts:"
 _MAX_LOGIN_ATTEMPTS = 5
 _LOGIN_LOCKOUT_SECONDS = 300  # 5 minutes
-# #1678: failed sign-ins per client address, across identifiers — stops one
-# client from spraying passwords over many login ids / emails. Higher than the
-# per-identifier limit so a shared NAT with a few typos is not locked out.
-_LOGIN_IP_ATTEMPT_PREFIX = "login_ip_attempts:"
-_MAX_LOGIN_IP_ATTEMPTS = 20
 
 
 def _normalize_login_identifier(identifier: str) -> str:
@@ -2251,8 +2247,26 @@ def _normalize_login_identifier(identifier: str) -> str:
     return identifier.strip().lower()
 
 
+def _login_rate_key(identifier: str, user: User | None) -> str:
+    """The failure counter a sign-in attempt counts against (#1678).
+
+    An identifier that resolves to an account counts against the ACCOUNT, so
+    its login id and its email share one budget and a success clears it.
+    Anything else counts against the normalized identifier. The two
+    namespaces are disjoint: a typed ``user:<id>`` is an identifier, never an
+    account's counter.
+
+    There is deliberately no per-client-address counter: behind a reverse
+    proxy that does not forward the client address, every request shares the
+    proxy's, and such a counter becomes a global lockout.
+    """
+    if user is not None:
+        return f"user:{user.user_id}"
+    return f"id:{_normalize_login_identifier(identifier)}"
+
+
 def _login_client_ip(request: Request) -> str:
-    """Client address for the per-IP counter.
+    """Client address for audit rows and per-client limits.
 
     ``request.client`` is what the ASGI server resolved — behind a trusted
     proxy uvicorn's ``--proxy-headers`` / ``--forwarded-allow-ips`` already
@@ -2262,50 +2276,38 @@ def _login_client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _check_login_rate_limit(login_id: str, client_ip: str | None = None) -> None:
+def _check_login_rate_limit(rate_key: str) -> None:
     """Check brute-force protection. Raises 429 if too many attempts.
 
     Args:
-        login_id: The normalized identifier (see ``_normalize_login_identifier``).
-        client_ip: The client address; its counter is checked when given.
+        rate_key: The counter to check (see ``_login_rate_key``).
     """
     if not _session_manager:
         return
-    keys = [(f"{_LOGIN_ATTEMPT_PREFIX}{login_id}", _MAX_LOGIN_ATTEMPTS)]
-    if client_ip is not None:
-        keys.append((f"{_LOGIN_IP_ATTEMPT_PREFIX}{client_ip}", _MAX_LOGIN_IP_ATTEMPTS))
-    for key, limit in keys:
-        attempts = _session_manager._redis.get(key)
-        if attempts and int(attempts) >= limit:
-            raise HTTPException(
-                status_code=429,
-                detail="Too many login attempts. Please try again later.",
-            )
+    attempts = _session_manager._redis.get(f"{_LOGIN_ATTEMPT_PREFIX}{rate_key}")
+    if attempts and int(attempts) >= _MAX_LOGIN_ATTEMPTS:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Please try again later.",
+        )
 
 
-def _record_login_failure(login_id: str, client_ip: str | None = None) -> None:
-    """Record a failed login attempt against the identifier (and the client)."""
+def _record_login_failure(rate_key: str) -> None:
+    """Record a failed login attempt against ``rate_key``."""
     if not _session_manager:
         return
+    key = f"{_LOGIN_ATTEMPT_PREFIX}{rate_key}"
     pipe = _session_manager._redis.pipeline()
-    keys = [f"{_LOGIN_ATTEMPT_PREFIX}{login_id}"]
-    if client_ip is not None:
-        keys.append(f"{_LOGIN_IP_ATTEMPT_PREFIX}{client_ip}")
-    for key in keys:
-        pipe.incr(key)
-        pipe.expire(key, _LOGIN_LOCKOUT_SECONDS)
+    pipe.incr(key)
+    pipe.expire(key, _LOGIN_LOCKOUT_SECONDS)
     pipe.execute()
 
 
-def _clear_login_failures(login_id: str) -> None:
-    """Clear the identifier's failed attempts on success.
-
-    The per-client counter is left to expire: a success on one account must
-    not reset a client's budget for guessing others.
-    """
+def _clear_login_failures(rate_key: str) -> None:
+    """Clear the failed attempts counted against ``rate_key`` on success."""
     if not _session_manager:
         return
-    _session_manager._redis.delete(f"{_LOGIN_ATTEMPT_PREFIX}{login_id}")
+    _session_manager._redis.delete(f"{_LOGIN_ATTEMPT_PREFIX}{rate_key}")
 
 
 @functools.cache
@@ -2401,7 +2403,8 @@ async def password_login(
     email of an account that has a password — see
     ``resolve_password_login_user``. Every failure is the same generic 401;
     an unknown identifier costs the same bcrypt work as a wrong password.
-    Failures count per normalized identifier and per client address.
+    Failures count per resolved account, or per normalized identifier when
+    nothing resolves.
     """
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Session manager not initialized")
@@ -2412,23 +2415,24 @@ async def password_login(
     if not is_utf8_encodable(body.login_id):
         raise InvalidCredentialsError()
 
-    # Brute-force protection
-    rate_key = _normalize_login_identifier(body.login_id)
-    client_ip = _login_client_ip(request)
-    _check_login_rate_limit(rate_key, client_ip)
-
     user: User | None = None
     async for db in get_db():
         user = await resolve_password_login_user(db, body.login_id)
         break
 
+    # Brute-force protection: one budget per account (see _login_rate_key).
+    rate_key = _login_rate_key(body.login_id, user)
+    _check_login_rate_limit(rate_key)
+
+    # bcrypt is CPU-bound for ~100 ms+: run it off the event loop.
     if not user or not user.password_hash:
-        verify_password(body.password, _dummy_password_hash())
-        _record_login_failure(rate_key, client_ip)
+        dummy_hash = await asyncio.to_thread(_dummy_password_hash)
+        await asyncio.to_thread(verify_password, body.password, dummy_hash)
+        _record_login_failure(rate_key)
         raise InvalidCredentialsError()
 
-    if not verify_password(body.password, user.password_hash):
-        _record_login_failure(rate_key, client_ip)
+    if not await asyncio.to_thread(verify_password, body.password, user.password_hash):
+        _record_login_failure(rate_key)
         raise InvalidCredentialsError()
 
     _clear_login_failures(rate_key)

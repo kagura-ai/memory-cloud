@@ -3,9 +3,10 @@
 - ``resolve_password_login_user`` against real Postgres: admin login ids are
   unchanged; an email signs in only when verified, with a password, not
   ``@local``; a case-insensitive collision fails closed;
-- ``password_login``: email sign-in (with and without MFA), the per-identifier
-  counter keyed on the normalized identifier, the per-client counter across
-  identifiers, and the same bcrypt work on a miss.
+- ``password_login``: email sign-in (with and without MFA), one failure
+  counter per resolved account (per normalized identifier when nothing
+  resolves), no per-client lockout, and the same bcrypt work — off the event
+  loop — on a miss.
 """
 
 from __future__ import annotations
@@ -262,41 +263,90 @@ async def test_email_sign_in_with_mfa_stops_at_the_second_factor(redis, resolver
 
 
 @pytest.mark.asyncio
-async def test_identifier_counter_is_normalized(redis, resolver) -> None:
+async def test_unresolved_identifier_counter_is_normalized(redis, resolver) -> None:
     for identifier in ("Person@Example.test", " person@example.test", "PERSON@EXAMPLE.TEST"):
         body = auth_routes.PasswordLoginRequest(login_id=identifier, password="wrong")
         with pytest.raises(InvalidCredentialsError):
             await auth_routes.password_login(body, _request(), return_to=None)
 
-    assert redis.store["login_attempts:person@example.test"] == 3
+    assert redis.store["login_attempts:id:person@example.test"] == 3
 
 
 @pytest.mark.asyncio
-async def test_per_ip_counter_spans_identifiers(redis, resolver) -> None:
-    for i in range(auth_routes._MAX_LOGIN_IP_ATTEMPTS):
+async def test_login_id_and_email_share_the_account_budget(redis, resolver) -> None:
+    # Both identifiers resolve to one account: they draw on one counter.
+    resolver.return_value = _email_user(user_id="u-shared")
+    identifiers = ["admin-x", "person@example.test"] * auth_routes._MAX_LOGIN_ATTEMPTS
+    for identifier in identifiers[: auth_routes._MAX_LOGIN_ATTEMPTS]:
+        body = auth_routes.PasswordLoginRequest(login_id=identifier, password="wrong")
+        with pytest.raises(InvalidCredentialsError):
+            await auth_routes.password_login(body, _request(), return_to=None)
+
+    assert redis.store["login_attempts:user:u-shared"] == auth_routes._MAX_LOGIN_ATTEMPTS
+    for identifier in ("admin-x", "person@example.test"):
+        body = auth_routes.PasswordLoginRequest(login_id=identifier, password=PASSWORD)
+        with pytest.raises(auth_routes.HTTPException) as exc_info:
+            await auth_routes.password_login(body, _request(), return_to=None)
+        assert exc_info.value.status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_success_clears_the_account_budget(redis, resolver) -> None:
+    resolver.return_value = _email_user(user_id="u-shared")
+    wrong = auth_routes.PasswordLoginRequest(login_id="admin-x", password="wrong")
+    with pytest.raises(InvalidCredentialsError):
+        await auth_routes.password_login(wrong, _request(), return_to=None)
+    assert redis.store["login_attempts:user:u-shared"] == 1
+
+    right = auth_routes.PasswordLoginRequest(login_id="person@example.test", password=PASSWORD)
+    await auth_routes.password_login(right, _request(), return_to=None)
+
+    assert "login_attempts:user:u-shared" not in redis.store
+
+
+@pytest.mark.asyncio
+async def test_an_identifier_cannot_collide_with_an_account_key(redis, resolver) -> None:
+    # "user:u-1" typed as a login id is an unknown identifier, not account u-1.
+    body = auth_routes.PasswordLoginRequest(login_id="user:u-1", password="wrong")
+    with pytest.raises(InvalidCredentialsError):
+        await auth_routes.password_login(body, _request(), return_to=None)
+    assert "login_attempts:user:u-1" not in redis.store
+
+
+@pytest.mark.asyncio
+async def test_no_per_client_lockout(redis, resolver) -> None:
+    # Behind a proxy without forwarded headers every request shares one
+    # address; failures across identifiers must not lock everyone out.
+    for i in range(auth_routes._MAX_LOGIN_ATTEMPTS * 10):
         body = auth_routes.PasswordLoginRequest(login_id=f"user{i}@example.test", password="x")
         with pytest.raises(InvalidCredentialsError):
             await auth_routes.password_login(body, _request("203.0.113.50"), return_to=None)
 
-    fresh = auth_routes.PasswordLoginRequest(login_id="fresh@example.test", password="x")
-    with pytest.raises(auth_routes.HTTPException) as exc_info:
-        await auth_routes.password_login(fresh, _request("203.0.113.50"), return_to=None)
-    assert exc_info.value.status_code == 429
-
-    # Another client is unaffected.
-    with pytest.raises(InvalidCredentialsError):
-        await auth_routes.password_login(fresh, _request("203.0.113.51"), return_to=None)
+    resolver.return_value = _email_user()
+    ok = auth_routes.PasswordLoginRequest(login_id="person@example.test", password=PASSWORD)
+    response = await auth_routes.password_login(ok, _request("203.0.113.50"), return_to=None)
+    assert response.status_code == 200
+    assert not [k for k in redis.store if "203.0.113.50" in k]
 
 
 @pytest.mark.asyncio
-async def test_success_does_not_reset_the_client_counter(redis, resolver) -> None:
-    redis.store["login_ip_attempts:198.51.100.9"] = 3
+async def test_bcrypt_runs_off_the_event_loop(redis, resolver, monkeypatch) -> None:
+    offloaded: list[object] = []
+
+    async def _to_thread(func, /, *args, **kwargs):
+        offloaded.append(func)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(auth_routes.asyncio, "to_thread", _to_thread)
+    body = auth_routes.PasswordLoginRequest(login_id="ghost@example.test", password="guess")
+    with pytest.raises(InvalidCredentialsError):
+        await auth_routes.password_login(body, _request(), return_to=None)
+
     resolver.return_value = _email_user()
-    body = auth_routes.PasswordLoginRequest(login_id="person@example.test", password=PASSWORD)
+    ok = auth_routes.PasswordLoginRequest(login_id="person@example.test", password=PASSWORD)
+    await auth_routes.password_login(ok, _request(), return_to=None)
 
-    await auth_routes.password_login(body, _request(), return_to=None)
-
-    assert redis.store["login_ip_attempts:198.51.100.9"] == 3
+    assert offloaded.count(auth_routes.verify_password) == 2
 
 
 @pytest.mark.asyncio

@@ -378,9 +378,11 @@ the *original* sign-in method; whether an account has a password is
 erasure flow (password re-entry vs emailed link) all follow `has_password`.
 
 Every sign-in failure is the same 401, and an unknown identifier costs the same
-bcrypt work as a wrong password. Failures are counted per normalized identifier
-(5 per 5 minutes) and per client address (20 per 5 minutes); a success resets
-only the identifier's counter.
+bcrypt work as a wrong password. Failures are counted per account (5 per 5
+minutes) — an account's login ID and its email share one budget, and a success
+resets it; an identifier that names no account is counted on its own
+(normalized). There is no per-client-address lockout: behind a reverse proxy
+that does not forward the client address it would lock everyone out.
 
 **Links and endpoints.**
 

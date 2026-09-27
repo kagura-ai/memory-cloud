@@ -93,7 +93,7 @@ class TestPasswordLogin:
         )
         assert response.status_code == 401
         assert response.json()["error"] == "AUTH-002"
-        assert redis.get("login_attempts:x") == "1"
+        assert redis.get("login_attempts:user:user-1") == "1"
 
     def test_unencodable_password_is_401_and_counted(self, client, redis, monkeypatch) -> None:
         _password_user(monkeypatch)
@@ -104,7 +104,7 @@ class TestPasswordLogin:
         )
         assert response.status_code == 401
         assert response.json()["error"] == "AUTH-002"
-        assert redis.get("login_attempts:x") == "1"
+        assert redis.get("login_attempts:user:user-1") == "1"
 
     def test_unencodable_passwords_hit_the_rate_limit(self, client, redis, monkeypatch) -> None:
         _password_user(monkeypatch)

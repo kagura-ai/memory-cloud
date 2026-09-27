@@ -87,7 +87,7 @@ def _hash(raw: bytes) -> str:
     return bcrypt.hashpw(raw, bcrypt.gensalt(rounds=4)).decode()
 
 
-KEY = "login_attempts:admin"
+KEY = "login_attempts:user:admin-1"
 
 
 @pytest.mark.asyncio
