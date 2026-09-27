@@ -138,7 +138,9 @@ class AccountLinkingService:
         if target is None:
             raise NotFoundException("OAuth provider", resource_id=provider)
 
-        has_password = user.auth_method == "password" and user.password_hash is not None
+        # #1678: any account with a password can sign in with it (by login id
+        # or verified email), whatever its original ``auth_method``.
+        has_password = user.password_hash is not None
         # As of #938 the ensure_user legacy ``users.user_id``-as-sub fallback is
         # gone (the e37_517 backfill saturated — a prod probe confirmed 0
         # un-migrated google/github users), so every usable OAuth sign-in method

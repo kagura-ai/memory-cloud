@@ -514,3 +514,38 @@ class TestUnlinkProviderEndpoint:
                     db=AsyncMock(),
                 )
         assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_unlink_last_provider_allowed_when_oauth_user_added_a_password(
+    db_session: AsyncSession,
+):
+    """#1678: a password counts as a sign-in method whatever ``auth_method`` says."""
+    suffix = uuid4().hex[:8]
+    user = await _make_user(db_session, suffix=suffix, password_hash="hashed")
+    svc = AccountLinkingService(db_session)
+    await svc.link(
+        user_id=user.user_id, provider="google", oauth_sub=f"g-{suffix}", email=user.email
+    )
+
+    await svc.unlink(user_id=user.user_id, provider="google")
+
+    assert await svc.list_providers(user.user_id) == []
+
+
+@pytest.mark.asyncio
+async def test_unlink_last_provider_refused_for_password_primary_without_hash(
+    db_session: AsyncSession,
+):
+    """#1678: ``auth_method='password'`` alone is not a usable method."""
+    suffix = uuid4().hex[:8]
+    user = await _make_user(
+        db_session, suffix=suffix, auth_method="password", auth_provider=None, password_hash=None
+    )
+    svc = AccountLinkingService(db_session)
+    await svc.link(
+        user_id=user.user_id, provider="github", oauth_sub=f"gh-{suffix}", email=user.email
+    )
+
+    with pytest.raises(ConflictError):
+        await svc.unlink(user_id=user.user_id, provider="github")

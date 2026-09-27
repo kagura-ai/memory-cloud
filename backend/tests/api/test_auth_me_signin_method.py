@@ -35,7 +35,9 @@ def _session(*, user_id: str = "u-1", email: str = "u@example.com") -> dict:
     }
 
 
-def _db_user(*, auth_method: str, auth_provider: str | None) -> SimpleNamespace:
+def _db_user(
+    *, auth_method: str, auth_provider: str | None, password_hash: str | None = None
+) -> SimpleNamespace:
     """Stand-in for the ``User`` ORM row.
 
     The handler reads ``timezone``, ``auth_method``, ``auth_provider``,
@@ -47,6 +49,7 @@ def _db_user(*, auth_method: str, auth_provider: str | None) -> SimpleNamespace:
         locale="en",
         auth_method=auth_method,
         auth_provider=auth_provider,
+        password_hash=password_hash,
         is_initial_admin=False,
     )
 
@@ -141,6 +144,7 @@ class TestAuthMeSignInMethod:
                 locale="ja",
                 auth_method="oauth",
                 auth_provider="google",
+                password_hash=None,
                 is_initial_admin=False,
             )
         )
@@ -158,6 +162,7 @@ class TestAuthMeSignInMethod:
             locale="en",
             auth_method="oauth",
             auth_provider="google",
+            password_hash=None,
             is_initial_admin=True,
         )
         result = await get_current_user_info(user=_session(), db=_mock_db(protected))
@@ -166,3 +171,32 @@ class TestAuthMeSignInMethod:
         normal = _db_user(auth_method="oauth", auth_provider="google")
         result2 = await get_current_user_info(user=_session(), db=_mock_db(normal))
         assert result2["user"]["is_initial_admin"] is False
+
+
+class TestAuthMeHasPassword:
+    """Issue #1678: ``has_password`` follows ``password_hash``, not ``auth_method``."""
+
+    @pytest.mark.asyncio
+    async def test_oauth_user_with_a_password(self):
+        db = _mock_db(_db_user(auth_method="oauth", auth_provider="google", password_hash="h"))
+        result = await get_current_user_info(user=_session(), db=db)
+        assert result["user"]["auth_method"] == "oauth"
+        assert result["user"]["has_password"] is True
+
+    @pytest.mark.asyncio
+    async def test_oauth_user_without_a_password(self):
+        db = _mock_db(_db_user(auth_method="oauth", auth_provider="github"))
+        result = await get_current_user_info(user=_session(), db=db)
+        assert result["user"]["has_password"] is False
+
+    @pytest.mark.asyncio
+    async def test_password_admin(self):
+        db = _mock_db(_db_user(auth_method="password", auth_provider=None, password_hash="h"))
+        result = await get_current_user_info(user=_session(), db=db)
+        assert result["user"]["has_password"] is True
+
+    @pytest.mark.asyncio
+    async def test_missing_row(self):
+        db = _mock_db(None)
+        result = await get_current_user_info(user=_session(), db=db)
+        assert result["user"]["has_password"] is False

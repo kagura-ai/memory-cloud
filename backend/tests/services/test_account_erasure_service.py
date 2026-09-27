@@ -1322,3 +1322,45 @@ class TestConfirmSelfServiceLongPassword:
             )
             with pytest.raises(ErasureForbiddenError, match="Incorrect password"):
                 await svc.confirm_self_service(user_id="u-1", token=token, password="y" * 100)
+
+
+class TestErasureFollowsHasPassword1678:
+    """#1678: the second factor follows ``password_hash``, not ``auth_method``."""
+
+    @pytest.mark.asyncio
+    async def test_oauth_user_with_password_gets_the_token_in_the_response(self):
+        svc = _service()
+        target = _user(auth_method="oauth", password_hash="hashed")
+        TestRequestSelfServiceErasure._wire_typical_path(svc, target)
+
+        with patch("services.account_erasure_service.get_redis_client") as mock_redis:
+            mock_redis.return_value = MagicMock(setex=AsyncMock(), delete=AsyncMock())
+            _, response_token = await svc.request_self_service_erasure(user_id="u-1")
+
+        assert response_token is not None
+        svc.email_service.send_erasure_confirmation.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_oauth_user_with_password_must_reenter_it(self):
+        svc = _service()
+        target = _user(auth_method="oauth", password_hash="hashed")
+        svc._load_user_or_404 = AsyncMock(return_value=target)
+        token = "tok"
+        request = ErasureRequest(
+            user_id="u-1",
+            user_email_hash="x",
+            initiated_by="u-1",
+            is_self_service=True,
+            reason_code=REASON_SELF_SERVICE,
+            status=STATUS_PENDING,
+            confirm_token_hash=_sha256_hex(token),
+        )
+        request.id = uuid4()
+        svc._load_request_or_404 = AsyncMock(return_value=request)
+
+        with patch("services.account_erasure_service.get_redis_client") as mock_redis:
+            mock_redis.return_value = MagicMock(
+                get=AsyncMock(return_value=str(request.id)), delete=AsyncMock()
+            )
+            with pytest.raises(ErasureForbiddenError):
+                await svc.confirm_self_service(user_id="u-1", token=token, password=None)

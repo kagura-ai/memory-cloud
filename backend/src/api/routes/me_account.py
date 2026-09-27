@@ -58,13 +58,14 @@ class ErasureRequestCreateResponse(TZAwareBaseModel):
     """Returned after creating a self-service erasure request.
 
     The confirmation token is delivered through one of two channels
-    depending on the user's auth method (Issue #469):
+    depending on whether the account has a password (Issue #469; since #1678
+    an OAuth account that added a password counts as a password user):
 
-    - **Password-auth users**: ``confirm_token`` is populated in this
+    - **Users with a password**: ``confirm_token`` is populated in this
       response. The user re-enters their password alongside this token at
       ``POST /me/account/erasure-confirm`` (the password is the second
       factor — the response token is the first).
-    - **OAuth users**: ``confirm_token`` is ``None`` here. The token is
+    - **Users without a password**: ``confirm_token`` is ``None`` here. The token is
       delivered via email to the user's account address as a one-time
       confirm link. Email is the canonical second factor for OAuth, just
       as the password re-prompt is for password-auth users — keeping the
@@ -91,9 +92,10 @@ class ErasureRequestCreateResponse(TZAwareBaseModel):
         default=None,
         description=(
             "One-time confirmation token, valid for 1 hour. **Populated only "
-            "for password-auth users** — they re-enter their password "
+            "for users with a password** — they re-enter their password "
             "alongside this token at POST /me/account/erasure-confirm. **For "
-            "OAuth users this is null** and the token is delivered via email."
+            "users without a password this is null** and the token is "
+            "delivered via email."
         ),
     )
 
@@ -104,7 +106,7 @@ class ErasureConfirmRequest(BaseModel):
     token: str
     password: str | None = Field(
         default=None,
-        description="Required only for password-auth users. OAuth users omit.",
+        description="Required only for users with a password. Others omit.",
     )
 
 

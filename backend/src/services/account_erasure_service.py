@@ -253,7 +253,11 @@ class AccountErasureService:
             await self.db.rollback()
             raise
 
-        is_oauth = target.auth_method == "oauth"
+        # #1678: the channel follows whether the account HAS a password, not
+        # its original sign-in method — an OAuth account that added a password
+        # re-enters it like any password user, and only a passwordless account
+        # needs the emailed link as its second factor.
+        is_oauth = target.password_hash is None
 
         if is_oauth:
             try:
@@ -434,7 +438,7 @@ class AccountErasureService:
         # Password re-confirm for password users (Q5 design). OAuth users
         # rely on the email-link click as the second factor; the active
         # session cookie was the first.
-        if target.auth_method == "password":
+        if target.password_hash is not None:
             if not password:
                 raise ErasureForbiddenError("Password required to confirm erasure")
             from auth.password import verify_password

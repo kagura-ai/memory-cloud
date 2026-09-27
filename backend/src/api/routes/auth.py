@@ -1635,6 +1635,9 @@ async def get_current_user_info(
             # Issue #514: surface auth_method + auth_provider for sign-in-method display
             "auth_method": db_user.auth_method if db_user else "oauth",
             "auth_provider": db_user.auth_provider if db_user else None,
+            # Issue #1678: ``auth_method`` is the ORIGINAL sign-in method; this
+            # says whether the account can sign in with a password now.
+            "has_password": bool(db_user and db_user.password_hash is not None),
             # Issue #953: surface the protected-initial-admin flag so the frontend
             # can hide the self-serve account-deletion control. The backend hard-
             # blocks erasure of this account (InitialAdminCannotBeErasedError —
