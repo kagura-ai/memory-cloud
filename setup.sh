@@ -70,8 +70,18 @@ echo "Backend dependencies are in backend/.venv (activate it, or run commands wi
 # as a uv tool (its own environment, `kagura` on PATH) so it lands in a known
 # place — a bare `pip` would target whichever interpreter is first on PATH —
 # and so a later `uv sync` does not remove it from backend/.venv.
+# --upgrade makes a second run of this script succeed when the tool is already
+# installed. uv's tool bin directory is put on PATH for the rest of this
+# script; `uv tool update-shell` makes that permanent for your shell.
 echo "Installing kagura-memory SDK (uv tool install)..."
-uv tool install kagura-memory
+uv tool install --upgrade kagura-memory
+UV_TOOL_BIN="$(uv tool dir --bin)"
+export PATH="$UV_TOOL_BIN:$PATH"
+if ! command -v kagura >/dev/null 2>&1; then
+  echo "✗ kagura was installed to $UV_TOOL_BIN but is not callable."
+  exit 1
+fi
+echo "kagura is in $UV_TOOL_BIN. If that directory is not on your PATH yet, run: uv tool update-shell"
 
 # Check for port conflicts before starting services
 echo ""

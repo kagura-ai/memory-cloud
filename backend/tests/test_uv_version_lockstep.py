@@ -30,6 +30,15 @@ import yaml
 # backend/tests/test_uv_version_lockstep.py -> tests -> backend -> repo root
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Every site this module compares lives outside backend/ (workflows, setup.sh)
+# or is not copied into the image (the Dockerfile itself). Inside the api
+# container the tests sit at /app/tests and none of those files exist, so
+# there is nothing to check there: the guard runs from a repository checkout.
+pytestmark = pytest.mark.skipif(
+    not (_REPO_ROOT / ".github" / "workflows" / "ci.yml").is_file(),
+    reason="not a repository checkout (e.g. tests mounted into the api container)",
+)
+
 _WORKFLOWS = [".github/workflows/ci.yml", ".github/workflows/eval-nightly.yml"]
 _INSTALL_SITES = [*_WORKFLOWS, "backend/Dockerfile", "setup.sh"]
 
