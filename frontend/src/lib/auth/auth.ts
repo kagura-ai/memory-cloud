@@ -303,8 +303,9 @@ export async function requestPasswordReset(email: string): Promise<void> {
 }
 
 /**
- * Set a new password from a reset link. Every session of the account ends;
- * the person signs in again. 400 = invalid or expired link, 422 = policy.
+ * Set a new password from a reset link. Every browser session of the account
+ * is signed out (OAuth / MCP tokens and API keys are not revoked); the person
+ * signs in again. 400 = invalid or expired link, 422 = policy.
  */
 export async function resetPassword(
   token: string,

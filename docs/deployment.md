@@ -387,10 +387,10 @@ only the identifier's counter.
 | Endpoint | Auth | What it does |
 |----------|------|--------------|
 | `POST /api/v1/auth/password/reset-request` `{email}` | public | Always `202` with the same body. Emails a reset link only to an account with that verified email and a password. 10 per client address and 3 per address per 15 minutes (the per-address limit is silent). |
-| `POST /api/v1/auth/password/reset` `{token, new_password}` | the link | Sets the password and **ends every session** of the account; the person then signs in. |
+| `POST /api/v1/auth/password/reset` `{token, new_password}` | the link | Sets the password and **signs out every browser session** of the account; the person then signs in. |
 | `POST /api/v1/me/password/setup-request` | browser session | For an account without a password: emails a set-a-password link to the account's address (`409` if it has one, `400` for `@local`). |
-| `POST /api/v1/auth/password/setup` `{token, new_password}` | the link | Sets the first password, marks the email verified, ends the account's other sessions. |
-| `POST /api/v1/me/password/change` `{current_password, new_password}` | browser session | Ends the account's other sessions. |
+| `POST /api/v1/auth/password/setup` `{token, new_password}` | the link | Sets the first password, marks the email verified, signs out the account's other browser sessions. |
+| `POST /api/v1/me/password/change` `{current_password, new_password}` | browser session | Signs out the account's other browser sessions. |
 | `DELETE /api/v1/me/password` `{current_password}` | browser session | Refused (`409`) while no Google / GitHub identity is linked — the last sign-in method can never be removed. |
 
 Links are single-use and expire (`PASSWORD_RESET_TOKEN_TTL_MINUTES`,
@@ -402,6 +402,10 @@ was sent. Links point at `FRONTEND_URL` (`/password/reset?token=…`,
 `/password/setup?token=…`); those pages send `Referrer-Policy: no-referrer` and
 are not indexed. New passwords follow the admin CLI policy (12+ characters,
 upper- and lower-case letter, digit, symbol, at most 72 bytes).
+
+Only browser sessions are signed out by a reset, set-up, change or removal:
+OAuth / MCP access and refresh tokens and API keys issued to the account keep
+working until they expire or are revoked.
 
 **Email delivery.** The links need `EMAIL_PROVIDER=resend`. The default
 `logging` provider writes one `email_dispatch_required=true` line per email with
