@@ -234,13 +234,14 @@ def test_definition_is_read_only_and_sits_after_load_pinned():
     tool = _tool("load_guardrails")
     assert tool["readOnly"] is True
     assert tool["inputSchema"]["required"] == ["context_id"]
-    assert set(tool["inputSchema"]["properties"]) == {"context_id", "cap"}
+    assert set(tool["inputSchema"]["properties"]) == {"context_id", "cap", "max_chars"}
     assert tool["inputSchema"]["additionalProperties"] is False
 
 
 def test_definition_stays_small():
     size = len(json.dumps(_tool("load_guardrails"), ensure_ascii=False, separators=(",", ":")))
-    assert size <= 1_900, size
+    # #1743 added the max_chars parameter and its budget sentence (~170).
+    assert size <= 2_100, size
 
 
 def test_definition_names_the_contract_an_agent_must_not_lose():
