@@ -2209,7 +2209,7 @@ Returns: {status, deleted, binding_id}.""",
             "readOnly": True,
             "description": """Rehydrate an agent's working state at session start in ONE call: context info + pinned memories + a trusted-only recall (only when query is given) + upcoming time memories + agent state, each bounded and filtered like its standalone tool. Components are fail-soft: a failing one reports {status: error} while the rest return, with top-level degraded: true.
 
-Returns: {status, degraded, agent, context, instructions, components: {pinned, recall, upcoming, state, policy}, correlation, generated_at}.""",
+Returns: {status, degraded, agent, context, instructions, components: {pinned, recall, upcoming, state, policy}, correlation, generated_at}. The reply is held to max_chars: context_summary goes first (context_summary_omitted: true), then pinned / recall / upcoming items from the end, each such component flagged truncated: true. state is a get_state page (has_more, next_cursor).""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2238,6 +2238,7 @@ Returns: {status, degraded, agent, context, instructions, components: {pinned, r
                     "pinned_cap": {
                         "type": "integer",
                         "description": "Clamped like load_pinned's cap (1-1000).",
+                        "default": 20,
                     },
                     "upcoming_until": {
                         "type": "string",
@@ -2274,6 +2275,12 @@ Returns: {status, degraded, agent, context, instructions, components: {pinned, r
                         },
                         "required": ["seed", "exploration_floor", "candidate_pool_k"],
                         "description": "Evaluation-only selection evidence policy; requires query and the recall component.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 10000,
+                        "maximum": 100000,
+                        "description": "Response budget in characters, not tokens (default 20000).",
                     },
                 },
                 "required": ["agent_id"],

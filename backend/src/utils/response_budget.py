@@ -38,8 +38,12 @@ class BudgetArgumentError(ValueError):
 
 
 def json_chars(obj: Any) -> int:
-    """Characters of ``obj`` as compact UTF-8 JSON (the tool-result form)."""
-    return len(json.dumps(obj, ensure_ascii=False, separators=(",", ":")))
+    """Characters of ``obj`` as compact UTF-8 JSON (the tool-result form).
+
+    A value JSON cannot encode is measured as its ``str`` — the measure never
+    raises; serializing the reply is the handler's job.
+    """
+    return len(json.dumps(obj, ensure_ascii=False, separators=(",", ":"), default=str))
 
 
 def parse_max_chars(raw: Any, *, default: int = DEFAULT_MAX_CHARS) -> int:

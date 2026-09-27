@@ -672,6 +672,12 @@ deterministic `seed`, an exact `exploration_floor`, and `candidate_pool_k` (1–
 `selection_policy`. Ordinary bootstrap clients are unchanged when the object is omitted;
 component errors never include this evidence.
 
+The bootstrap reply is held to `max_chars` characters (default 20,000, range 10,000–100,000):
+over budget, `context_summary` is left out first (`context_summary_omitted: true`), then the
+pinned, recall and upcoming lists are cut from the end, each flagged `truncated: true`.
+`pinned_cap` defaults to 20 here, and the state component is the first `get_state` page
+(`has_more` / `next_cursor`). See [the bootstrap contract](design/agent-bootstrap-contract.md).
+
 > **Preview boundary:** `allowed_memory_types` and `allowed_source_types` are enforced per read-lane row as of [#1299](https://github.com/kagura-ai/memory-cloud/issues/1299) (`null` = all, `[]` = deny-all) on the memory-read lanes (recall, reference, forget, explore, load_pinned, upcoming) for enforce-mode agents; shadow mode records `would_deny` without filtering. REST and MCP accept W3C `traceparent` and baggage keys `gen_ai.agent.id`, `gen_ai.conversation.id` (or `session.id`), and `kagura.agent.run.id`; invalid advisory values are dropped and credential-bound agent identity always wins. Server-side span export is not part of P0. The append-only `memory_access_events` table and writer cover bootstrap, load-pinned, feedback, recall, reference, remember, update, and forget emission with binding deny capture.
 
 ---

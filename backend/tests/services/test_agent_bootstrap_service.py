@@ -816,3 +816,111 @@ class TestContextAndInstructions:
 
         assert instructions == KAGURA_MEMORY_INSTRUCTIONS
         assert context_block["usage_guide"].startswith("No usage guide provided.")
+
+
+# ---------------------------------------------------------------------------
+# #1743: bootstrap reply budget
+# ---------------------------------------------------------------------------
+
+
+class TestBootstrapBudget:
+    def _principal(self):
+        return BootstrapPrincipal(user_id="u", workspace_id=WORKSPACE_ID, principal_type="agent")
+
+    def test_max_chars_is_validated(self):
+        from services.agent_bootstrap_service import parse_bootstrap_max_chars
+
+        assert parse_bootstrap_max_chars(None) == 20_000
+        assert parse_bootstrap_max_chars(50_000) == 50_000
+        for bad in (5, 100_001, "20000", True):
+            with pytest.raises(BootstrapError):
+                parse_bootstrap_max_chars(bad)
+
+    @pytest.mark.asyncio
+    async def test_pinned_defaults_to_the_bootstrap_cap(self):
+        from services.agent_bootstrap_service import BOOTSTRAP_DEFAULT_PINNED_CAP
+
+        svc = AgentBootstrapService(MagicMock())
+        load_pinned = AsyncMock(
+            return_value=SimpleNamespace(memories=[], total_available=0, truncated=False, cap=20)
+        )
+        with patch("services.memory_service.MemoryService") as ms_cls:
+            ms_cls.return_value.load_pinned = load_pinned
+            await svc._pinned(_context(), self._principal(), None)
+        assert BOOTSTRAP_DEFAULT_PINNED_CAP == 20
+        assert load_pinned.await_args.kwargs["cap"] == 20
+
+    @pytest.mark.asyncio
+    async def test_state_component_is_a_bounded_get_state_page(self):
+        rows = [(f"k{i:03d}", "v" * 1_000) for i in range(51)]
+        svc = AgentBootstrapService(MagicMock())
+        with patch("services.agent_state_service.AgentStateService") as st_cls:
+            st_cls.return_value.list_state_page = AsyncMock(return_value=rows)
+            body = await svc._state(_context(), 5_000)
+        assert st_cls.return_value.list_state_page.await_args.kwargs == {
+            "after_key": None,
+            "limit": 51,
+        }
+        assert 0 < body["count"] < 50
+        assert body["has_more"] is True
+        assert body["next_cursor"] == sorted(body["states"])[-1]
+
+    def _envelope(self, pinned, recall, upcoming):
+        return {
+            "status": "success",
+            "degraded": False,
+            "agent": {"agent_id": str(AGENT_ID), "name": "ci-bot", "binding": {}},
+            "context": {"id": str(CONTEXT_ID)},
+            "instructions": "i" * 2_500,
+            "components": {
+                "pinned": {
+                    "status": STATUS_OK,
+                    "memories": pinned,
+                    "total_available": len(pinned),
+                    "truncated": False,
+                    "cap": 20,
+                },
+                "recall": {"status": STATUS_OK, "results": recall, "k": 5},
+                "upcoming": {"status": STATUS_OK, "results": upcoming, "from": "now"},
+                "state": {"status": STATUS_OK, "states": {}, "count": 0},
+            },
+            "correlation": {},
+            "generated_at": "2026-09-27T00:00:00Z",
+        }
+
+    @staticmethod
+    def _items(n):
+        return [
+            {"memory_id": str(uuid.uuid4()), "summary": "s" * 400, "context_summary": "c" * 2_000}
+            for _ in range(n)
+        ]
+
+    def test_small_envelope_is_unchanged(self):
+        from services.agent_bootstrap_service import _fit_envelope
+
+        env = self._envelope(self._items(1), self._items(1), [])
+        assert _fit_envelope(env, 20_000) is env
+
+    def test_large_envelope_drops_context_summary_then_cuts_in_priority(self):
+        from services.agent_bootstrap_service import _fit_envelope
+        from utils.response_budget import json_chars
+
+        env = self._envelope(self._items(20), self._items(20), self._items(20))
+        out = _fit_envelope(env, 20_000)
+        assert json_chars(out) <= 20_000
+        assert out["context_summary_omitted"] is True
+        comps = out["components"]
+        assert len(comps["pinned"]["memories"]) == 20
+        assert comps["pinned"]["truncated"] is False
+        assert comps["recall"]["truncated"] is True
+        assert comps["upcoming"]["truncated"] is True
+        assert comps["pinned"]["total_available"] == 20
+
+    def test_error_components_are_left_alone(self):
+        from services.agent_bootstrap_service import _fit_envelope
+
+        env = self._envelope(self._items(40), [], [])
+        env["components"]["recall"] = {"status": "error", "error": "component_error"}
+        out = _fit_envelope(env, 20_000)
+        assert out["components"]["recall"] == {"status": "error", "error": "component_error"}
+        assert out["components"]["pinned"]["truncated"] is True

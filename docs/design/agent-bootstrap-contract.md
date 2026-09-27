@@ -44,10 +44,10 @@ one envelope with embedded instructions.
 | Component | Delegated primitive (chokepoint) | Inherited bounds / invariants |
 |---|---|---|
 | `context` + `instructions` | `_resolve_context_for_read` + context row + search-config fallback, as in `tools/context.py`; `instructions` is the static constant in `tools/_constants.py` alone — the string `get_context_info` returns; the context's `usage_guide` stays in the `context` block as data (before v0.79.0 it was prefixed to `instructions`, [#1682](https://github.com/kagura-ai/memory-cloud/issues/1682)) | uniform `context_not_found` on any deny (CWE-639); API-key workspace confinement via contextvar |
-| `pinned` | `MemoryService.load_pinned` | `pinned_load_cap` default 100, clamp [1, 1000]; deterministic `importance DESC, created_at ASC, id ASC`; `truncated` + `total_available` never silent; partial columns (no `content`/`details`) |
+| `pinned` | `MemoryService.load_pinned` | `pinned_cap` default 20 here (load_pinned's own default is `pinned_load_cap`, 100; [#1743](https://github.com/kagura-ai/memory-cloud/issues/1743)), clamp [1, 1000]; deterministic `importance DESC, created_at ASC, id ASC`; `truncated` + `total_available` never silent; partial columns (no `content`/`details`) |
 | `recall` | `MemoryService` recall with `filters={"trust_tier": "trusted"}` | trusted-context subquery + `source_type != 'connector'` defence-in-depth; normal recall semantics incl. reinforcement re-rank and access counters — unchanged by design |
 | `upcoming` | the `recall_upcoming` window-overlap query | `k` default 20, clamp [1, 100]; `from` is always `"now"`; rows are `recall_upcoming`'s default shape `{memory_id, summary, type, trigger}` — never the full `details` (bootstrap has no `include_details`; fetch one memory with `reference`) |
-| `state` | `AgentStateService.list_state` | bounded structurally by one row per `(context_id, key)` upsert; expired rows reaped before return |
+| `state` | `AgentStateService.list_state_page` | the first keyless `get_state` page: 50 entries in key order within a quarter of `max_chars`, with `has_more` / `next_cursor` (continue with `get_state(cursor=...)`) and `omitted_keys` for a value too large for the page ([#1743](https://github.com/kagura-ai/memory-cloud/issues/1743)); expired rows reaped before return |
 | `policy` | P1 pointer only | `null`/skipped in P0; reserved shape `{bundle_id, revision_id, revision, content_sha256}` |
 
 Implementation note (descriptive): the `upcoming` query currently lives in the MCP handler;
@@ -69,9 +69,10 @@ stamped, and every read param must be declared per the schema policy test
   "session_id": "string",        // optional, opaque, <=128 chars, [A-Za-z0-9._-]; correlation only
   "query": "string",             // optional, <=1024; enables the recall component
   "recall_k": 10,                // optional; forwarded verbatim to recall's existing k validation
-  "pinned_cap": 100,             // optional; clamped by the load_pinned clamp to [1, 1000]
+  "pinned_cap": 20,              // optional (default 20); clamped by the load_pinned clamp to [1, 1000]
   "upcoming_until": "ISO|null",  // optional; "from" is always "now"
   "include": ["pinned","recall","upcoming","state","policy"], // optional selector; default all
+  "max_chars": 20000,            // optional reply budget in characters, 10000..100000 (#1743)
   "recall_evaluation": {        // optional #1306 evaluation-only selection evidence
     "seed": 188,                // signed 64-bit deterministic replay seed
     "exploration_floor": 0.05, // exact marginal inclusion-probability floor
@@ -134,7 +135,8 @@ one exists. If the agent has multiple bindings and no default, the call fails wi
                     "ranking_policy": { "name": "production_hybrid_recall_v1",
                       "reinforce_enabled": true, "trust_filter": "trusted" } } },
     "upcoming": { "status": "ok", "results": [ /* recall_upcoming default rows: {memory_id, summary, type, trigger} */ ], "from": "…", "until": "…" },
-    "state":    { "status": "ok", "states": { "…": {} }, "count": 3 },
+    "state":    { "status": "ok", "states": { "…": {} }, "count": 3,
+                  "has_more": false, "next_cursor": null },
     "policy":   { "status": "skipped", "reason": "no_policy_bundle" }
   },
   "correlation": { "agent_id": "…", "session_id": "…", "trace_id": "…", "span_id": "…" },
@@ -147,7 +149,7 @@ shapes, plus additive bootstrap metadata.** The primitive's response fields appe
 inside the sub-envelope (`load_pinned` → `{memories, total_available, truncated, cap}`;
 `recall_upcoming` → its handler's response fields including `results`, in the tool's default
 item shape (`trigger`, not `details`); keyless `get_state` →
-`{states, count}`), so clients reuse one parser per primitive whether they call it directly
+`{states, count, has_more, next_cursor}`), so clients reuse one parser per primitive whether they call it directly
 or via bootstrap. Bootstrap-only fields (`status`, `query_hash`, `k`, `trust_filter`, `from`,
 `until`, `selection_probabilities`, `selection_policy`) are additive metadata alongside the
 primitive fields, never replacements. Selection probabilities cover the full eligible
@@ -206,9 +208,14 @@ are different layers, not an inconsistency. A flattened bespoke bundle schema wa
   components add none because usage logging is handler-layer, not service-layer.
 - Registration conformance: registry entry in `_build_registry()`; membership in
   `_TOOLS_WITHOUT_CONTEXT_ID` (context is optional).
-- **No cross-component byte/token budget in v1** — each component is individually bounded. A
-  `max_bundle_bytes` hint with proportional truncation interacts with the "never silent
-  truncation" invariant and is deferred to its own design.
+- **Whole-envelope budget** ([#1743](https://github.com/kagura-ai/memory-cloud/issues/1743)).
+  The reply is held to `max_chars` characters of compact JSON (default 20,000, range
+  10,000–100,000; the unit of `reference`'s #1685 budget) on both surfaces. When the composed
+  envelope does not fit, `context_summary` is left out of every pinned and recall item first
+  (top-level `context_summary_omitted: true`), then the ok components' item lists are cut from
+  the end in priority order — pinned, recall, upcoming — and each cut component carries
+  `truncated: true` (pinned keeps its real `total_available`). The state component is budgeted
+  up front as a `get_state` page. Truncation is never silent.
 
 ## Cross-repo follow-up (implementation checklist)
 

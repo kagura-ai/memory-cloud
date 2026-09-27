@@ -1717,6 +1717,16 @@
               }
             ]
           },
+          "max_chars": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "pinned_cap": {
             "anyOf": [
               {

@@ -1944,7 +1944,8 @@
           "type": "integer"
         },
         "pinned_cap": {
-          "type": "integer"
+          "type": "integer",
+          "default": 20
         },
         "upcoming_until": {
           "type": "string"
@@ -1985,6 +1986,11 @@
             "exploration_floor",
             "candidate_pool_k"
           ]
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 100000
         }
       },
       "required": [
