@@ -1126,9 +1126,6 @@
           "name": {
             "type": "string"
           },
-          "price_monthly": {
-            "type": "integer"
-          },
           "quotas": {
             "additionalProperties": true,
             "type": "object"
@@ -1138,7 +1135,6 @@
           "display_name",
           "features",
           "name",
-          "price_monthly",
           "quotas"
         ],
         "type": "object"
@@ -6429,9 +6425,6 @@
           "owned_workspaces": {
             "type": "integer"
           },
-          "price_monthly": {
-            "type": "integer"
-          },
           "public_calls_per_day": {
             "type": "integer"
           },
@@ -6475,7 +6468,6 @@
           "name",
           "owned_workspace_grant",
           "owned_workspaces",
-          "price_monthly",
           "public_calls_per_day",
           "public_calls_per_week",
           "public_contexts",
@@ -10938,9 +10930,6 @@
           "plan_display_name": {
             "type": "string"
           },
-          "price_monthly": {
-            "type": "integer"
-          },
           "quotas": {
             "$ref": "#/components/schemas/WorkspacePlanQuotas"
           },
@@ -10960,7 +10949,6 @@
           "can_upgrade",
           "current_plan",
           "plan_display_name",
-          "price_monthly",
           "quotas",
           "usage",
           "workspace_id",

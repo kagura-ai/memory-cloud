@@ -95,7 +95,6 @@ const planInfo = (overrides: Record<string, unknown> = {}) => ({
   current_plan: "basic",
   plan_display_name: "Starter",
   // Intentionally a legacy USD value — the page must NOT surface it.
-  price_monthly: 10,
   usage: { memories: 0, contexts: 0 },
   quotas: {
     memory_limit: 1,

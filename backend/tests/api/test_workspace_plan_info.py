@@ -119,3 +119,12 @@ def test_quotas_shape_matches_the_frontend_type(make_client) -> None:
     resp = make_client("promax").get(ENDPOINT)
     assert resp.status_code == 200, resp.text
     assert set(resp.json()["quotas"]) == FRONTEND_QUOTA_KEYS
+
+
+def test_plan_carries_no_price(make_client) -> None:
+    """#1733: the billing service owns prices; this payload names the plan only."""
+    resp = make_client("pro").get(ENDPOINT)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["current_plan"] == "pro"
+    assert "price_monthly" not in body

@@ -5,6 +5,7 @@
 > Scope: all BaseModel / TZAwareBaseModel subclasses defined in backend/src/api/routes/ (46 route files, 208 model classes — 208 of 208 enumerated)
 > Re-frozen after #991 (Phase 1): 3 duplicate class names renamed; dead `APIKey*` schemas removed from `models/schemas.py`; redundant `WorkspaceConnectorCreateResponse.resource_pk` dropped.
 > Re-frozen after #991 (Phase 2): `WorkspaceConnectorSummary.resource_pk` → public `resource_id` slug (via Resource JOIN); `TelemetryResponse.embedding_config.ollama_base_url` dropped (internal URL, no consumer); sequential int PKs (`APIKeyResponse.id`, `ExternalKeyResponse.id`, `ResourceTokenResponse.id`, `WorkspaceConnectorCreateResponse.token_id`) **consciously frozen** into the 1.0 contract — opaque-ID replacement deferred to #1008 (post-1.0, breaking/major). #991 is now fully resolved.
+> Changed by #1733: `price_monthly` dropped from `PlanTierInfo`, `WorkspacePlanInfo` and `AvailablePlanInfo` — the value was stale, and the external billing service is the source of truth for prices.
 
 Notes:
 
@@ -199,7 +200,6 @@ Notes:
 > Plan tier configuration served to the admin tiers comparison table.
 - `name: str` — required
 - `display_name: str` — required
-- `price_monthly: int` — required
 - `max_contexts_per_workspace: int` — required
 - `max_members_per_workspace: int` — required
 - `max_resource_tokens: int` — required
@@ -1506,7 +1506,6 @@ Notes:
 - `workspace_name: str` — required
 - `current_plan: str` — required
 - `plan_display_name: str` — required
-- `price_monthly: int` — required
 - `usage: dict` — required
 - `quotas: dict` — required
 - `can_upgrade: bool` — required
@@ -1516,7 +1515,6 @@ Notes:
 > Available plan tier information.
 - `name: str` — required
 - `display_name: str` — required
-- `price_monthly: int` — required
 - `quotas: dict` — required
 - `features: list[str]` — required
 

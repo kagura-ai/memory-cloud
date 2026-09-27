@@ -107,7 +107,6 @@ import AdminPlansPage from "./page";
 const FREE = {
   name: "free",
   display_name: "S",
-  price_monthly: 0,
   max_contexts_per_workspace: 1,
   max_members_per_workspace: 1,
   owned_workspace_grant: 0,
@@ -138,7 +137,6 @@ const BASIC = {
   ...FREE,
   name: "basic",
   display_name: "M",
-  price_monthly: 10,
   max_contexts_per_workspace: 3,
   max_resource_tokens: 3,
   max_connectors: 3,
@@ -154,7 +152,6 @@ const PRO = {
   ...FREE,
   name: "pro",
   display_name: "L",
-  price_monthly: 100,
   max_contexts_per_workspace: 20,
   max_members_per_workspace: 10,
   owned_workspace_grant: 2,
@@ -189,7 +186,6 @@ const PROMAX = {
   // test exercises values production can actually return.
   name: "promax",
   display_name: "XL",
-  price_monthly: 0, // legacy field, placeholder — no pricing in this repo (#1096)
   max_contexts_per_workspace: 1000,
   max_members_per_workspace: 50,
   owned_workspace_grant: 19,

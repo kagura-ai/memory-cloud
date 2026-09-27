@@ -82,7 +82,6 @@ class WorkspacePlanInfo(BaseModel):
     workspace_name: str
     current_plan: str
     plan_display_name: str
-    price_monthly: int
     usage: dict  # Current usage (memories, storage, contexts)
     quotas: WorkspacePlanQuotas
     can_upgrade: bool
@@ -94,7 +93,6 @@ class AvailablePlanInfo(BaseModel):
 
     name: str
     display_name: str
-    price_monthly: int
     quotas: dict
     features: list[str]
 
@@ -227,7 +225,6 @@ async def get_workspace_plan(
         workspace_name=workspace.name,
         current_plan=workspace.plan_name,
         plan_display_name=plan_tier.display_name,
-        price_monthly=plan_tier.price_monthly,
         usage={
             "memories": memory_count,
             "contexts": context_count,
@@ -268,7 +265,6 @@ async def get_available_plans(
         AvailablePlanInfo(
             name=tier.name,
             display_name=tier.display_name,
-            price_monthly=tier.price_monthly,
             quotas={
                 "memory_limit": tier.memory_limit,
                 "max_contexts": tier.max_contexts_per_workspace,

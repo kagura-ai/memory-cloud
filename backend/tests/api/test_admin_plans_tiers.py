@@ -169,15 +169,21 @@ def test_list_plan_tiers_reflects_runtime_override(client: TestClient, monkeypat
 
 
 def test_list_plan_tiers_serves_promax_last_with_pro_features(client: TestClient) -> None:
-    """#1548: XL (``promax``) is the fourth row, carries every PRO feature and a
-    placeholder price — pricing does not live in this repo (#1096)."""
+    """#1548: XL (``promax``) is the fourth row and carries every PRO feature."""
     resp = client.get("/api/v1/admin/plans/tiers")
     _free, _basic, pro, promax = resp.json()
     assert promax["name"] == "promax"
     assert set(promax["features"]) >= set(pro["features"])
-    assert promax["price_monthly"] == 0
     assert promax["max_contexts_per_workspace"] == 1000
     assert promax["max_members_per_workspace"] == 50
+
+
+def test_list_plan_tiers_carries_no_price(client: TestClient) -> None:
+    """#1733: pricing lives in the billing service (#1096); no tier row has a price."""
+    resp = client.get("/api/v1/admin/plans/tiers")
+    assert resp.status_code == 200, resp.text
+    for tier in resp.json():
+        assert "price_monthly" not in tier
 
 
 def test_list_plan_tiers_exposes_xl_only_feature_booleans(client: TestClient) -> None:
