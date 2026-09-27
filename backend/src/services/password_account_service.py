@@ -406,7 +406,10 @@ class PasswordAccountService:
             CurrentPasswordMismatchError: ``current_password`` is wrong (403).
             ValidationError: The new password breaks the policy (422).
         """
-        user = await self._load_user(user_id)
+        # Same lock as remove(): a removal running at the same time waits, then
+        # sees this change (and refuses), instead of the two overwriting each
+        # other.
+        user = await self._load_user(user_id, for_update=True)
         await self._verify_current(user, current_password)
         user.password_hash = await _validated_hash(new_password)
         await self._invalidate_password_links(user.user_id)
@@ -496,8 +499,16 @@ class PasswordAccountService:
         if consumed is None:
             await self.db.rollback()
             raise PasswordLinkInvalidError()
+        # ``consume`` locked the user row; re-read it under that lock (fresh,
+        # not from the identity map), so a removal or change committed in the
+        # meantime is what the checks below see.
         user = (
-            await self.db.execute(select(User).where(User.user_id == consumed.user_id))
+            await self.db.execute(
+                select(User)
+                .where(User.user_id == consumed.user_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
         ).scalar_one_or_none()
         # A link sent to an address the account no longer has proves nothing
         # about the current mailbox. A reset link needs a password to reset;
