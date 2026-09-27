@@ -24,6 +24,7 @@ from functools import cached_property
 from typing import Any
 
 from sqlalchemy import (
+    CHAR,
     JSON,
     BigInteger,
     Boolean,
@@ -133,6 +134,12 @@ class User(Base):
     totp_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+    # Issue #1678: when ownership of ``email`` was last proven — by an IdP
+    # (backfilled for users with a linked OAuth provider) or by following a
+    # link sent to the address. Password sign-in by email requires it.
+    # ``auth_method`` keeps meaning "the original sign-in method"; whether a
+    # user can sign in with a password is ``password_hash IS NOT NULL``.
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
@@ -223,6 +230,65 @@ class UserOAuthProvider(Base):
 
     def __repr__(self) -> str:
         return f"<UserOAuthProvider(user_id='{self.user_id}', provider='{self.provider}')>"
+
+
+# Issue #1678: what an emailed one-time link lets its holder do. Byte-identical
+# to the CHECK below and to the e86 migration (schema drift test).
+EMAIL_ACTION_PURPOSES: tuple[str, ...] = ("verify_email", "set_password", "reset_password")
+
+
+class EmailActionToken(Base):
+    """A single-use, expiring token delivered by email (Issue #1678).
+
+    Only the SHA-256 hex digest of the token is stored; the raw token exists in
+    the emailed link alone. A token is consumed by an atomic
+    ``UPDATE ... WHERE used_at IS NULL AND expires_at > now`` so two concurrent
+    requests cannot both use it.
+
+    Attributes:
+        id: Primary key (UUID).
+        user_id: The account the link acts on (``ON DELETE CASCADE``).
+        purpose: ``verify_email`` / ``set_password`` / ``reset_password``.
+        token_hash: SHA-256 hex digest of the raw token (unique).
+        email: The address the link was sent to. A link stops working when
+            the account's email changes after it was sent.
+        expires_at: Naive UTC expiry.
+        used_at: Naive UTC time of consumption; NULL while unused.
+        created_at: Naive UTC issue time.
+    """
+
+    __tablename__ = "email_action_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    purpose: Mapped[str] = mapped_column(String(20), nullable=False)
+    token_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="email_action_tokens_token_hash_key"),
+        CheckConstraint(
+            "purpose IN ('verify_email', 'set_password', 'reset_password')",
+            name="valid_email_action_purpose",
+        ),
+        Index("ix_email_action_tokens_user_purpose", "user_id", "purpose"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<EmailActionToken(user_id='{self.user_id}', purpose='{self.purpose}')>"
 
 
 class AuditLog(Base):
