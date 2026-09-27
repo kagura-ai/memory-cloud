@@ -734,8 +734,8 @@ async def _send_transport_failure(
     body is a JSON-RPC error whose ``data`` carries ``cause``,
     ``correlation_id``, ``help`` and retry advice (``describe_transport_exception``);
     the exception text stays in the server log under the ``correlation_id``.
-    HTTP 503 with ``Retry-After`` when a dependency was down or timed out,
-    500 for anything else.
+    HTTP 503 when a dependency was down or timed out (with ``Retry-After``
+    only when repeating the request is safe), 500 for anything else.
 
     Args:
         send: ASGI send callable.
@@ -766,7 +766,11 @@ async def _send_transport_failure(
         status = 500
     else:
         status = 503
-        headers.append([b"retry-after", str(RETRY_AFTER_SECONDS).encode()])
+        # Only when a repeat is safe: a write whose outcome is unknown keeps
+        # its verify-before-retry advice in ``data`` and gets no automatic
+        # retry hint an HTTP client might act on.
+        if failure.fields.get("retryable") is True:
+            headers.append([b"retry-after", str(RETRY_AFTER_SECONDS).encode()])
     if session_id:
         headers.append([b"mcp-session-id", session_id.encode()])
     await _send_json_error(

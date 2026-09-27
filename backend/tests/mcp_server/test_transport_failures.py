@@ -372,6 +372,26 @@ async def test_a_stateless_handler_failure_is_a_jsonrpc_error(app, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_write_with_an_unknown_outcome_gets_no_retry_after(app, monkeypatch):
+    """A tools/call failing in the transport keeps the tool's advice: a write
+    may have run, so there is no Retry-After inviting an automatic repeat."""
+
+    async def broken_post(scope, receive, send, session, headers):
+        raise DB_DOWN
+
+    monkeypatch.setattr(transport, "handle_streamable_http_post", broken_post)
+    send = await app.call(
+        _rpc("tools/call", request_id=9, name="remember", arguments={}),
+    )
+
+    assert send.status == 503
+    assert b"retry-after" not in send.headers
+    data = send.body["error"]["data"]
+    assert data["outcome"] == "unknown"
+    assert data["retryable"] is False
+
+
+@pytest.mark.asyncio
 async def test_a_failure_after_the_response_started_is_re_raised(app, monkeypatch):
     async def half_sent(scope, receive, send, session, headers):
         await send({"type": "http.response.start", "status": 200, "headers": []})
