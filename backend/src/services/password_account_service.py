@@ -398,7 +398,10 @@ class PasswordAccountService:
                 remain (409).
             CurrentPasswordMismatchError: ``current_password`` is wrong (403).
         """
-        user = await self._load_user(user_id)
+        # Lock the user row before counting: an unlink running at the same
+        # time locks it too, so one of the two sees the other's commit and
+        # refuses instead of both removing a method.
+        user = await self._load_user(user_id, for_update=True)
         self._verify_current(user, current_password)
         linked = await self.db.scalar(
             select(func.count())
@@ -416,10 +419,13 @@ class PasswordAccountService:
     # Helpers
     # ------------------------------------------------------------------
 
-    async def _load_user(self, user_id: str) -> User:
-        user = (
-            await self.db.execute(select(User).where(User.user_id == user_id))
-        ).scalar_one_or_none()
+    async def _load_user(self, user_id: str, *, for_update: bool = False) -> User:
+        stmt = select(User).where(User.user_id == user_id)
+        if for_update:
+            # ``populate_existing``: a row already in the identity map must be
+            # refreshed from the locked read, not served stale.
+            stmt = stmt.with_for_update().execution_options(populate_existing=True)
+        user = (await self.db.execute(stmt)).scalar_one_or_none()
         if user is None:
             raise NotFoundException("User", resource_id=user_id)
         return user
