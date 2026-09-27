@@ -467,6 +467,17 @@ class WorkspaceService:
             workspace.name = name
 
         if description is not None:
+            from config.constants import WORKSPACE_DESCRIPTION_MAX_LENGTH
+
+            # #1743: new text is capped; an unchanged pre-cap description is
+            # accepted so the settings form, which resends it, keeps working.
+            if (
+                len(description) > WORKSPACE_DESCRIPTION_MAX_LENGTH
+                and description != workspace.description
+            ):
+                raise ValidationError(
+                    f"description must be at most {WORKSPACE_DESCRIPTION_MAX_LENGTH} characters"
+                )
             workspace.description = description
 
         workspace.updated_at = func.now()

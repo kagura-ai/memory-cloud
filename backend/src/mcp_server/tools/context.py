@@ -148,7 +148,7 @@ async def handle_get_context_info(
                 workspace_data = {
                     "id": str(workspace.id),
                     "name": workspace.name,
-                    "description": workspace.description,
+                    **_workspace_description(workspace.description),
                 }
 
             stats_data: dict[str, Any] = {
@@ -831,6 +831,22 @@ def _summary_preview(summary: str | None) -> dict[str, Any]:
         return {"summary": summary}
     preview = summary[:_LIST_CONTEXTS_SUMMARY_PREVIEW_LENGTH].rstrip()
     return {"summary": preview + "…", "summary_truncated": True}
+
+
+def _workspace_description(description: str | None) -> dict[str, Any]:
+    """The workspace description for get_context_info, capped (#1743).
+
+    New descriptions are held to ``WORKSPACE_DESCRIPTION_MAX_LENGTH``; one
+    stored before the cap comes back cut to it with ``description_truncated``.
+    """
+    from config.constants import WORKSPACE_DESCRIPTION_MAX_LENGTH
+
+    if description is None or len(description) <= WORKSPACE_DESCRIPTION_MAX_LENGTH:
+        return {"description": description}
+    return {
+        "description": description[:WORKSPACE_DESCRIPTION_MAX_LENGTH].rstrip() + "…",
+        "description_truncated": True,
+    }
 
 
 async def handle_list_contexts(

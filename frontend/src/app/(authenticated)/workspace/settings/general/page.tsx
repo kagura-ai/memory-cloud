@@ -294,6 +294,7 @@ export default function WorkspaceSettingsPage() {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder={t("descPlaceholder")}
+              maxLength={1000}
               rows={3}
               className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
             />

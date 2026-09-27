@@ -30,6 +30,7 @@ from config.constants import (
     CONTEXT_SUMMARY_MAX_LENGTH,
     CONTEXT_USAGE_GUIDE_MAX_LENGTH,
     EMBEDDING_MODEL_REGISTRY,
+    WORKSPACE_DESCRIPTION_MAX_LENGTH,
 )
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -64,7 +65,7 @@ class WorkspaceCreate(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=255)
     openai_api_key: str | None = Field(None, pattern=r"^sk-[A-Za-z0-9_-]+$", min_length=20)
-    description: str | None = None
+    description: str | None = Field(None, max_length=WORKSPACE_DESCRIPTION_MAX_LENGTH)
     # Issue #169: Default context settings
     default_context_name: str | None = Field(None, pattern=r"^[a-z0-9_-]+$", max_length=100)
     # #1193: same caps as every other Context.summary/usage_guide write path
@@ -89,6 +90,9 @@ class WorkspaceUpdate(BaseModel):
     """
 
     name: str | None = Field(None, min_length=1, max_length=255)
+    # #1743: capped in WorkspaceService.update_workspace, not here, so a
+    # description stored before the cap can be saved back unchanged (the
+    # settings form always resends it — the #1193 lesson).
     description: str | None = None
 
 

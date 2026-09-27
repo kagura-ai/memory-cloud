@@ -10794,6 +10794,7 @@
           "description": {
             "anyOf": [
               {
+                "maxLength": 1000,
                 "type": "string"
               },
               {

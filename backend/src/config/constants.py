@@ -38,6 +38,12 @@ CONTEXT_DESCRIPTION_MAX_LENGTH = 500
 CONTEXT_SUMMARY_MAX_LENGTH = 2000
 CONTEXT_USAGE_GUIDE_MAX_LENGTH = 2000
 
+# #1743: get_context_info returns the workspace description on every call, and
+# it had no cap. New writes are held to this; a longer description stored
+# before the cap is served as a preview of this length (description_truncated)
+# and may be saved back unchanged.
+WORKSPACE_DESCRIPTION_MAX_LENGTH = 1000
+
 # ============================================================================
 # Memory Content Limits
 # ============================================================================
