@@ -754,7 +754,7 @@ Returns: {status, context: {id, name, display_name, summary, usage_guide, is_pri
 
 The default carries no summaries, so it stays small on large workspaces. Narrow with name_contains; add include_summary=true to choose between a few contexts. For one context's full summary, usage guide and search config call get_context_info(context_id).
 
-Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], count, total, limit, can_create, hint?}. count = contexts in the workspace (quota usage, unaffected by name_contains); total = contexts in this response (0 on no match is still a success); limit = the plan's maximum; hint = present only when you can see no context, says how to create one.""",
+Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], count, total, limit, can_create, has_more, next_cursor, hint?}. count = contexts in the workspace (quota usage, unaffected by name_contains); total = contexts in this response (0 on no match is still a success); limit = the plan's maximum; has_more = pass next_cursor as cursor for the next page; hint = present only when you can see no context, says how to create one.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -773,7 +773,15 @@ Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], c
                     },
                     "include_details": {
                         "type": "boolean",
-                        "description": "Add the FULL summary (up to 2,000 characters each) and embedding_model. Large: combine with name_contains. Wins over include_summary. Default: false.",
+                        "description": "Add the FULL summary (up to 2,000 characters each) and embedding_model. Without name_contains, page size is at most 20. Wins over include_summary. Default: false.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Contexts per page, 1-200 (default 100; 20 with include_details). A page also stops at 20000 characters.",
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "next_cursor from the previous page.",
                     },
                 },
             },

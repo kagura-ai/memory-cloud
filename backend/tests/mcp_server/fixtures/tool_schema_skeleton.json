@@ -640,6 +640,12 @@
         },
         "include_details": {
           "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "cursor": {
+          "type": "string"
         }
       },
       "additionalProperties": false
