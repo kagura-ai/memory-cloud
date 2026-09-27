@@ -35,6 +35,8 @@ from mcp_server.transport import mcp_asgi_app
 ORIGIN = "https://memory.example.com"
 MODERN = "2026-07-28"
 PV_KEY = "io.modelcontextprotocol/protocolVersion"
+# A server-minted session id shape (#1740): only these are re-adopted.
+SESSION_ID = b"mcp-0123456789abcdef"
 DB_DOWN = ConnectionRefusedError("[Errno 111] Connect call failed ('127.0.0.1', 5432)")
 
 
@@ -317,7 +319,7 @@ async def test_a_session_creation_failure_is_a_jsonrpc_error(app):
 @pytest.mark.asyncio
 async def test_a_session_re_adoption_failure_is_a_jsonrpc_error(app):
     app.sessions.fail_with = RuntimeError("boom at /srv/app/session.py")
-    send = await app.call(_rpc("tools/list", request_id=3), headers={b"mcp-session-id": b"s-1"})
+    send = await app.call(_rpc("tools/list", request_id=3), headers={b"mcp-session-id": SESSION_ID})
 
     data = _assert_jsonrpc_failure(send, request_id=3, status=500, cause="internal_error")
     assert "boom" not in json.dumps(send.body)
@@ -327,7 +329,7 @@ async def test_a_session_re_adoption_failure_is_a_jsonrpc_error(app):
 @pytest.mark.asyncio
 async def test_a_session_lookup_failure_is_a_jsonrpc_error(app):
     app.sessions.lookup_fails_with = ConnectionError("redis at 10.0.0.9:6379 refused")
-    send = await app.call(_rpc("tools/list", request_id=4), headers={b"mcp-session-id": b"s-1"})
+    send = await app.call(_rpc("tools/list", request_id=4), headers={b"mcp-session-id": SESSION_ID})
 
     _assert_jsonrpc_failure(send, request_id=4, status=503, cause="service_unavailable")
     assert "6379" not in json.dumps(send.body)
@@ -336,7 +338,7 @@ async def test_a_session_lookup_failure_is_a_jsonrpc_error(app):
 @pytest.mark.asyncio
 async def test_a_timeout_uses_the_legacy_timeout_code(app):
     app.sessions.lookup_fails_with = TimeoutError()
-    send = await app.call(_rpc("tools/list", request_id=4), headers={b"mcp-session-id": b"s-1"})
+    send = await app.call(_rpc("tools/list", request_id=4), headers={b"mcp-session-id": SESSION_ID})
 
     assert send.status == 503
     assert send.body["error"]["code"] == -32001
@@ -402,7 +404,7 @@ async def test_the_transport_failure_is_logged_with_the_correlation_id(app):
 async def test_legacy_non_object_arguments_is_invalid_params(app, arguments):
     send = await app.call(
         _rpc("tools/call", request_id=2, name="list_contexts", arguments=arguments),
-        headers={b"mcp-session-id": b"s-1"},
+        headers={b"mcp-session-id": SESSION_ID},
     )
 
     assert send.status == 200
@@ -426,6 +428,6 @@ async def test_stateless_non_object_arguments_is_invalid_params(app, arguments):
 async def test_legacy_null_arguments_still_call_the_tool(app):
     send = await app.call(
         _rpc("tools/call", request_id=2, name="list_contexts", arguments=None),
-        headers={b"mcp-session-id": b"s-1"},
+        headers={b"mcp-session-id": SESSION_ID},
     )
     assert send.body["result"]["content"][0]["text"] == '{"status":"success"}'

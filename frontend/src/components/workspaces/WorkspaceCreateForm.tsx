@@ -173,6 +173,7 @@ export function WorkspaceCreateForm({
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder={t("descPlaceholder")}
+                maxLength={1000}
                 disabled={loading}
               />
               <p className="text-sm text-slate-500">{t("descHelp")}</p>

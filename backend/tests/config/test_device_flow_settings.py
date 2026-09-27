@@ -49,3 +49,26 @@ def test_retention_cannot_be_negative(monkeypatch):
     monkeypatch.setenv("OAUTH_DEVICE_CODE_RETENTION_SECONDS", "-1")
     with pytest.raises(ValidationError, match="oauth_device_code_retention_seconds"):
         Settings(_env_file=None)
+
+
+def test_dcr_rate_limit_exemption_defaults_to_none(monkeypatch):
+    monkeypatch.delenv("OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS", raising=False)
+    s = Settings(_env_file=None)
+    assert s.oauth_dcr_rate_limit_exempt_cidrs == ""
+    assert s.oauth_dcr_rate_limit_exempt_networks == ()
+
+
+def test_dcr_rate_limit_exemption_parses_cidrs(monkeypatch):
+    monkeypatch.setenv("OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS", " 203.0.113.0/24 ,2001:db8::/32,, ")
+    s = Settings(_env_file=None)
+    assert [str(n) for n in s.oauth_dcr_rate_limit_exempt_networks] == [
+        "203.0.113.0/24",
+        "2001:db8::/32",
+    ]
+
+
+@pytest.mark.parametrize("raw", ["not-a-cidr", "203.0.113.5/24", "10.0.0.0/33"])
+def test_dcr_rate_limit_exemption_rejects_bad_cidrs(monkeypatch, raw):
+    monkeypatch.setenv("OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS", raw)
+    with pytest.raises(ValidationError, match="oauth_dcr_rate_limit_exempt_cidrs"):
+        Settings(_env_file=None)

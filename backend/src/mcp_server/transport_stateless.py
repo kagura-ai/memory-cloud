@@ -21,6 +21,7 @@ from uuid import UUID
 
 from starlette.types import Send
 
+from config.settings import get_settings
 from mcp_server.transport import (
     MODERN_PROTOCOL_VERSIONS,
     PROTOCOL_VERSION_META_KEY,
@@ -96,15 +97,25 @@ def _decode_header_value(raw: bytes | None) -> str | None:
 
 
 def _check_mirror(
-    headers: dict[bytes, bytes], name: str, expected: str, missing: list[str]
+    headers: dict[bytes, bytes],
+    name: str,
+    expected: str,
+    missing: list[str],
+    *,
+    required: bool,
 ) -> None:
-    """Reject a mirrored header that disagrees with the body; note an absent one.
+    """Reject a mirrored header that disagrees with the body — or is absent
+    while ``required`` — and note an absent one that is tolerated.
 
     Header *names* are case-insensitive (ASGI lower-cases them); header *values*
     are compared case-sensitively, as the spec requires.
     """
     raw = headers.get(name.lower().encode("ascii"))
     if raw is None:
+        if required:
+            raise _Rejected(
+                400, HEADER_MISMATCH, f"Header mismatch: required {name} header is missing"
+            )
         missing.append(name)
         return
     actual = _decode_header_value(raw)
@@ -125,19 +136,18 @@ def _validate(body: dict, headers: dict[bytes, bytes]) -> tuple[str, dict, list[
     hear ``-32022`` (and the versions to retry with), not be blamed for a
     2026-07-28 rule its revision may not define.
 
-    Mirrored metadata is then checked for *disagreement*, which is always
-    rejected — a header that contradicts the body is the case the spec's
-    validation rule exists for (an intermediary acting on one value while we
-    execute the other). Mere *absence* of a mirrored header, or of
-    ``clientCapabilities``, is tolerated and reported back to the caller for
-    logging. That is a deliberate robustness deviation from two spec MUSTs:
-    nothing here routes on those headers or relies on a client capability, the
-    clients that matter can only be exercised in production, and a rejection
-    would cost them the connection while protecting nothing. Tighten it once
-    real clients are observed to send them.
+    Mirrored metadata is then checked. A header that contradicts the body is
+    always rejected — the case the spec's validation rule exists for (an
+    intermediary acting on one value while we execute the other). An *absent*
+    mirrored header is rejected too (#1740: the spec's 400 HeaderMismatch)
+    unless ``MCP_REQUIRE_MIRRORED_HEADERS`` is off, which restores the earlier
+    leniency: served, and reported back to the caller for logging. Absent
+    ``clientCapabilities`` (body metadata, which nothing here relies on) stays
+    tolerated and reported.
 
     ``server/discover`` is the pre-negotiation probe, so it is answerable even
-    with no ``_meta`` at all.
+    with no ``_meta`` at all, and never needs its headers: a client probing
+    what the server speaks cannot yet know what to mirror.
 
     Returns:
         ``(method, params, missing)`` — ``missing`` names the tolerated gaps.
@@ -147,6 +157,7 @@ def _validate(body: dict, headers: dict[bytes, bytes]) -> tuple[str, dict, list[
     """
     method = body["method"]
     is_discover = method == "server/discover"
+    required = get_settings().mcp_require_mirrored_headers and not is_discover
     missing: list[str] = []
 
     params = body.get("params")
@@ -158,7 +169,7 @@ def _validate(body: dict, headers: dict[bytes, bytes]) -> tuple[str, dict, list[
         # it does send must still not contradict it — absence is tolerated,
         # contradiction never is.
         missing.append("params._meta")
-        _check_mirror(headers, "Mcp-Method", method, missing)
+        _check_mirror(headers, "Mcp-Method", method, missing, required=required)
         return method, {}, missing
 
     requested = meta.get(PROTOCOL_VERSION_META_KEY)
@@ -178,7 +189,7 @@ def _validate(body: dict, headers: dict[bytes, bytes]) -> tuple[str, dict, list[
             {"supported": list(SUPPORTED_PROTOCOL_VERSIONS), "requested": _shown(requested)},
         )
     else:
-        _check_mirror(headers, "MCP-Protocol-Version", requested, missing)
+        _check_mirror(headers, "MCP-Protocol-Version", requested, missing, required=required)
 
     capabilities = meta.get(CLIENT_CAPABILITIES_META_KEY)
     if capabilities is None:
@@ -190,13 +201,13 @@ def _validate(body: dict, headers: dict[bytes, bytes]) -> tuple[str, dict, list[
             f"Invalid params: _meta['{CLIENT_CAPABILITIES_META_KEY}'] must be an object",
         )
 
-    _check_mirror(headers, "Mcp-Method", method, missing)
+    _check_mirror(headers, "Mcp-Method", method, missing, required=required)
 
     if method in _NAMED_METHODS:
         name = params.get("name")
         if not isinstance(name, str) or not name:
             raise _Rejected(400, -32602, "Invalid params: 'name' must be a non-empty string")
-        _check_mirror(headers, "Mcp-Name", name, missing)
+        _check_mirror(headers, "Mcp-Name", name, missing, required=required)
         # An explicit ``null`` is treated like an omitted field, as the
         # reference SDK does (``arguments: dict[str, Any] | None = None``):
         # serializers with nullable fields emit it for a no-argument call.
@@ -302,20 +313,16 @@ async def handle_stateless_post(
         )
         return
 
-    # This revision defines no client-to-server notification over HTTP, but
-    # the transport rule for one is unchanged: accept, no body.
-    if "id" not in body:
-        logger.info(f"MCP notification (stateless): method={_shown(method)!r}")
-        await send({"type": "http.response.start", "status": 202, "headers": []})
-        await send({"type": "http.response.body", "body": b""})
-        return
-
-    if not valid_id:
+    is_notification = "id" not in body
+    if not is_notification and not valid_id:
         await _send_error(
             send, 400, None, -32600, "Invalid Request: id must be a string or an integer"
         )
         return
 
+    # Notifications are validated too (#1740 review): the header rules and
+    # ``MCP_REQUIRE_MIRRORED_HEADERS`` apply to every message, not only to
+    # the ones that get a result.
     try:
         method, params, missing = _validate(body, headers)
     except _Rejected as rejected:
@@ -331,8 +338,21 @@ async def handle_stateless_post(
             f"mcp_headers={mcp_headers}, user={user_id}"
         )
         await _send_error(
-            send, rejected.status, request_id, rejected.code, rejected.message, rejected.data
+            send,
+            rejected.status,
+            None if is_notification else request_id,
+            rejected.code,
+            rejected.message,
+            rejected.data,
         )
+        return
+
+    # This revision defines no client-to-server notification over HTTP, but
+    # the transport rule for one is unchanged: accept, no body.
+    if is_notification:
+        logger.info(f"MCP notification (stateless): method={_shown(method)!r}")
+        await send({"type": "http.response.start", "status": 202, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
         return
 
     meta = params.get("_meta") or {}
@@ -343,8 +363,8 @@ async def handle_stateless_post(
         f"client={_shown(client_name)!r}, user={user_id}"
     )
     if missing:
-        # Tolerated, not rejected (see ``_validate``) — but worth knowing
-        # before the leniency is ever tightened.
+        # Tolerated, not rejected (see ``_validate``): body metadata, the
+        # discover probe, or headers with MCP_REQUIRE_MIRRORED_HEADERS off.
         logger.warning(
             f"MCP stateless request served without required metadata: "
             f"method={_shown(method)!r}, missing={missing}, client={_shown(client_name)!r}"

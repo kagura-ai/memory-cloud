@@ -22,10 +22,69 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.agent_state import AgentState
 from utils.datetime import utcnow
+from utils.response_budget import json_chars
 
 # Guardrail so a caller cannot pin an unbounded TTL far in the future; the lane
 # is for ephemeral run-state, not long-lived storage. 30 days is generous.
 MAX_TTL_SECONDS = 30 * 24 * 60 * 60
+
+# #1743: a value is at most this many characters of compact JSON. Enforced on
+# write only — rows stored before the cap still read back (a single-key
+# get_state returns them whole; a list page names them in omitted_keys).
+STATE_VALUE_MAX_CHARS = 16_384
+
+# #1743: list-mode page size. Entries come back in key order, so a cursor (the
+# last key of a page) resumes where the page stopped.
+STATE_LIST_DEFAULT_LIMIT = 50
+STATE_LIST_MAX_LIMIT = 200
+
+
+def bound_state_page(rows: list[tuple[str, Any]], *, limit: int, budget: int) -> dict[str, Any]:
+    """Shape a key-ordered list of ``(key, value)`` rows into one bounded page.
+
+    ``rows`` holds up to ``limit + 1`` entries (the extra one only says more
+    exist). Entries are placed in order while their ``"key":value`` members fit
+    ``budget`` characters. An entry that could never fit (larger than the whole
+    budget — a value stored before ``STATE_VALUE_MAX_CHARS``) is named in
+    ``omitted_keys`` instead, so the caller reads it with ``get_state(key)``;
+    the first entry that does not fit what is left ends the page.
+
+    Returns:
+        ``{states, count, has_more, next_cursor}`` plus ``omitted_keys`` when
+        any value was left out. ``next_cursor`` is the last key the page
+        covered, or ``None`` on the last page.
+    """
+    states: dict[str, Any] = {}
+    omitted: list[str] = []
+    used = 0
+    last_key: str | None = None
+    stopped_early = False
+    for key, value in rows[:limit]:
+        entry = json_chars(key) + json_chars(value) + 2  # "key":value plus a comma
+        if entry > budget:
+            marker = json_chars(key) + 1
+            if used + marker > budget:
+                stopped_early = True
+                break
+            omitted.append(key)
+            used += marker
+        elif used + entry > budget:
+            stopped_early = True
+            break
+        else:
+            states[key] = value
+            used += entry
+        last_key = key
+    has_more = stopped_early or len(rows) > limit
+    page: dict[str, Any] = {
+        "states": states,
+        "count": len(states),
+        "has_more": has_more,
+        "next_cursor": last_key if has_more else None,
+    }
+    if omitted:
+        page["omitted_keys"] = omitted
+    return page
 
 
 class AgentStateService:
@@ -118,6 +177,32 @@ class AgentStateService:
             )
         ).all()
         return {row.key: row.value for row in rows}
+
+    async def list_state_page(
+        self, context_id: UUID, *, after_key: str | None, limit: int
+    ) -> list[tuple[str, Any]]:
+        """Return up to ``limit`` live ``(key, value)`` rows in key order (#1743).
+
+        ``after_key`` is the cursor of the previous page (rows with a greater
+        key). Reaps the context's expired rows first, like ``list_state``.
+        """
+        await self._reap_expired_context(context_id)
+        now = utcnow()
+        conditions = [
+            AgentState.context_id == context_id,
+            or_(AgentState.expires_at.is_(None), AgentState.expires_at > now),
+        ]
+        if after_key is not None:
+            conditions.append(AgentState.key > after_key)
+        rows = (
+            await self.db.execute(
+                select(AgentState.key, AgentState.value)
+                .where(and_(*conditions))
+                .order_by(AgentState.key.asc())
+                .limit(limit)
+            )
+        ).all()
+        return [(row.key, row.value) for row in rows]
 
     async def list_state_detail(self, context_id: UUID) -> list[dict[str, Any]]:
         """Return live entries for the context WITH per-entry recency (#1064).

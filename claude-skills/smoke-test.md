@@ -181,6 +181,8 @@ recall_nearby(context_id=..., lat=35.6812, lon=139.7671, radius_m=500)
 -> Verify: status=success
 -> Verify: results array contains the located memory seeded in step 3 (geo_memory_id present)
 -> Verify: that result carries distance_m (a small number — the query point equals the stored point)
+-> Verify: that result carries location ({lat, lon}) and no details — the full details is opt-in
+   with include_details=true
 
 load_pinned(context_id=...)
 -> Verify: status=success; returns the COMPLETE unranked set for delivery_mode="always"

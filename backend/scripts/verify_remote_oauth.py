@@ -191,6 +191,25 @@ def redact_url(url: str) -> str:
     return parts._replace(query="&".join(pairs)).geturl()
 
 
+# RFC 7662 §2.2 response members; none may reach an unauthenticated caller.
+INTROSPECTION_METADATA_FIELDS = frozenset(
+    {
+        "active",
+        "scope",
+        "client_id",
+        "username",
+        "token_type",
+        "exp",
+        "iat",
+        "nbf",
+        "sub",
+        "aud",
+        "iss",
+        "jti",
+    }
+)
+
+
 class Redactor:
     """Scrubs secrets and the target host out of everything recorded.
 
@@ -1563,35 +1582,50 @@ class Verifier:
     # ----------------------------------------------- 5 resource / audience
 
     def introspection(self) -> None:
-        """S1: the token's recorded audience and scope (RFC 7662)."""
+        """S1: introspection refuses callers that are not confidential clients.
+
+        RFC 7662 §2.1 requires the endpoint to authenticate its callers. The
+        run holds only a public DCR client, so it checks that neither an
+        anonymous request nor one naming the public ``client_id`` learns
+        anything about its token (#1741).
+        """
         with self.step(
-            "S1", "resource-scope", "Introspection: audience and scope of the token", False
+            "S1", "resource-scope", "Introspection requires client authentication", False
         ) as s:
             endpoint = self.as_meta.get("introspection_endpoint")
             if not endpoint:
                 s.skip("no introspection_endpoint advertised")
             assert self.current is not None
-            resp = self.post(endpoint, data={"token": self.current.access_token})
-            body = json_dict(resp)
-            exp, iat = body.get("exp"), body.get("iat")
+            token = self.current.access_token
+            anonymous = self.post(endpoint, data={"token": token})
+            public = self.post(endpoint, data={"token": token, "client_id": self.client_id or ""})
+            anonymous_body, public_body = json_dict(anonymous), json_dict(public)
             s.evidence.update(
                 {
-                    "status": resp.status_code,
-                    "active": body.get("active"),
-                    "aud": body.get("aud"),
-                    "scope": body.get("scope"),
-                    "token_type": body.get("token_type"),
-                    "client_id_matches": body.get("client_id") == self.client_id,
-                    "lifetime_s": exp - iat
-                    if isinstance(exp, int) and isinstance(iat, int)
-                    else None,
+                    "anonymous_status": anonymous.status_code,
+                    "anonymous_error": anonymous_body.get("error"),
+                    "public_client_status": public.status_code,
+                    "public_client_error": public_body.get("error"),
+                    "auth_methods": self.as_meta.get(
+                        "introspection_endpoint_auth_methods_supported"
+                    ),
                 }
             )
-            s.check("active", body.get("active") is True)
-            s.check("aud is the requested resource", body.get("aud") == self.resource)
-            s.check("client_id matches", body.get("client_id") == self.client_id)
+            s.check("anonymous request → 401", anonymous.status_code == 401)
+            s.check("public client → 401", public.status_code == 401)
+            disclosed = sorted(
+                INTROSPECTION_METADATA_FIELDS & (set(anonymous_body) | set(public_body))
+            )
+            s.evidence["disclosed_fields"] = disclosed
+            s.check("no token metadata disclosed", not disclosed)
+            s.check(
+                "'none' is not an advertised auth method",
+                "none"
+                not in (self.as_meta.get("introspection_endpoint_auth_methods_supported") or []),
+            )
             s.summary = (
-                f"active={body.get('active')}, aud {body.get('aud')}, scope '{body.get('scope')}'"
+                f"anonymous → {anonymous.status_code} {anonymous_body.get('error')}, "
+                f"public client → {public.status_code} {public_body.get('error')}"
             )
 
     # ------------------------------------------------------------------ 6 MCP

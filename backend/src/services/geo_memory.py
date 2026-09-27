@@ -33,6 +33,7 @@ async def query_nearby_memories(
     radius_m: float,
     k: int,
     trusted_only: bool = False,
+    include_details: bool = False,
 ) -> list[dict[str, Any]]:
     """Return the context's memories within ``radius_m`` of (lat, lon).
 
@@ -48,8 +49,12 @@ async def query_nearby_memories(
     ``False`` for the user-initiated tool; any future bootstrap/always face
     consuming location MUST pass ``True``.
 
-    Result rows: ``memory_id`` / ``summary`` / ``type`` / ``details`` /
-    ``distance_m`` (ascending).
+    Result rows: ``memory_id`` / ``summary`` / ``type`` / ``location`` /
+    ``distance_m`` (ascending). #1743: ``location`` is ``details.location`` —
+    what a nearby list is read for — while the whole ``details`` blob is
+    ``reference()`` territory; ``include_details=True`` returns ``details`` in
+    place of ``location`` (it already contains it), the #1599
+    ``recall_upcoming`` convention.
     """
     from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
     from models.memory import SOURCE_TYPE_CONNECTOR, Memory
@@ -101,7 +106,15 @@ async def query_nearby_memories(
             "memory_id": str(m.id),
             "summary": m.summary,
             "type": m.type,
-            "details": m.details,
+            **(
+                {"details": m.details}
+                if include_details
+                # Rows match on the generated location columns, so details is
+                # a dict with a location here; anything else degrades to null.
+                else {
+                    "location": m.details.get("location") if isinstance(m.details, dict) else None
+                }
+            ),
             "distance_m": round(distance_by_id[m.id], 1),
         }
         for m in kept_rows

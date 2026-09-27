@@ -66,6 +66,11 @@ PRUNE_AGE_S = 7 * 86400.0
 
 STDIN_CAP_BYTES = 4 * 1024 * 1024
 CACHE_CAP_BYTES = 4 * 1024 * 1024
+# load_guardrails bounds its reply (server #1743, default 20,000 characters):
+# context_summary goes first, then the pinned lane, then the tool-triggered
+# lane. The hook is not a model reader, so it asks for the largest budget. A
+# server before #1743 ignores the argument.
+FETCH_MAX_CHARS = 100_000
 LOG_ROTATE_BYTES = 1_000_000
 
 INFORM_CAP_PER_KEY = 10
@@ -1037,7 +1042,7 @@ def fetch_guardrails(
             "method": "tools/call",
             "params": {
                 "name": "load_guardrails",
-                "arguments": {"context_id": context_id},
+                "arguments": {"context_id": context_id, "max_chars": FETCH_MAX_CHARS},
                 "_meta": {
                     "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
                     "io.modelcontextprotocol/clientCapabilities": {},

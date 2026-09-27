@@ -18,7 +18,7 @@ even though ``recall`` has already validated workspace context once.
 
 Pagination contract for ``get_cluster``:
 
-- ``limit`` clamped to ``MAX_CLUSTER_PAGE_SIZE`` (200) server-side.
+- ``limit`` clamped to ``MAX_CLUSTER_PAGE_SIZE`` (100) server-side.
 - ``cursor`` is an opaque token; v1 implementation is the last
   ``memory_id`` UUID encoded as a string. Keyset pagination on
   the assignments PK guarantees stable order under concurrent writes
@@ -47,11 +47,13 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-# Server-enforced clamp for ``get_cluster`` (Issue #496 AC). Keeps any
-# single MCP transport frame under ~200 KB even if every memory in the
-# cluster has a 500-char summary + tags array.
-MAX_CLUSTER_PAGE_SIZE = 200
-DEFAULT_CLUSTER_PAGE_SIZE = 50
+# Server-enforced clamp for ``get_cluster`` (Issue #496 AC). #1743: a member
+# with a 500-character summary and a full tag list runs to ~1,250 characters,
+# so 200 per page reached ~250k — past what an MCP client passes to the
+# model. 100 keeps the largest page near 125k characters and the default page
+# of 25 near 31k (well under 25k tokens even for Japanese summaries).
+MAX_CLUSTER_PAGE_SIZE = 100
+DEFAULT_CLUSTER_PAGE_SIZE = 25
 
 # Server-enforced clamp for ``list_analyses`` (mirrors the recall paging
 # convention so MCP clients can rely on a single behavior).

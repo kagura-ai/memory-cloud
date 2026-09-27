@@ -672,6 +672,12 @@ deterministic `seed`, an exact `exploration_floor`, and `candidate_pool_k` (1–
 `selection_policy`. Ordinary bootstrap clients are unchanged when the object is omitted;
 component errors never include this evidence.
 
+The bootstrap reply is held to `max_chars` characters (default 20,000, range 10,000–100,000):
+over budget, `context_summary` is left out first (`context_summary_omitted: true`), then the
+pinned, recall and upcoming lists are cut from the end, each flagged `truncated: true`.
+`pinned_cap` defaults to 20 here, and the state component is the first `get_state` page
+(`has_more` / `next_cursor`). See [the bootstrap contract](design/agent-bootstrap-contract.md).
+
 > **Preview boundary:** `allowed_memory_types` and `allowed_source_types` are enforced per read-lane row as of [#1299](https://github.com/kagura-ai/memory-cloud/issues/1299) (`null` = all, `[]` = deny-all) on the memory-read lanes (recall, reference, forget, explore, load_pinned, upcoming) for enforce-mode agents; shadow mode records `would_deny` without filtering. REST and MCP accept W3C `traceparent` and baggage keys `gen_ai.agent.id`, `gen_ai.conversation.id` (or `session.id`), and `kagura.agent.run.id`; invalid advisory values are dropped and credential-bound agent identity always wins. Server-side span export is not part of P0. The append-only `memory_access_events` table and writer cover bootstrap, load-pinned, feedback, recall, reference, remember, update, and forget emission with binding deny capture.
 
 ---
@@ -928,7 +934,10 @@ authorization code grant and PKCE:
 1. `GET /api/v1/oauth/authorize` with `response_type=code`, `client_id`,
    `redirect_uri`, `state`, `scope`, `code_challenge`,
    `code_challenge_method=S256` and `resource`. A signed-in user gets the
-   consent page; anyone else is sent to sign in first.
+   consent page; anyone else is sent to sign in first. The consent page names
+   the host the user is sent to after approving (with its port for a loopback
+   redirect), and warns when every registered `redirect_uri` of the client is
+   a loopback URI, since such a client's name cannot be verified.
 2. Approving redirects to `redirect_uri` with `code` and `state`.
 3. `POST /api/v1/oauth/token` with `grant_type=authorization_code`, `code`,
    `redirect_uri`, `client_id`, `code_verifier` and `resource`.
@@ -940,7 +949,20 @@ its host is `claude.ai`, `claude.com`, `anthropic.com`, `chatgpt.com`,
 `chat.openai.com`, `platform.openai.com`, `cursor.sh` or `cursor.com` (or a
 subdomain of one), or it is a loopback `http://localhost` / `127.0.0.1` /
 `[::1]` URI and the `client_name` names a supported client. A registration
-with any other entry is refused with `invalid_client_metadata`. The stored
+with any other entry is refused with `invalid_client_metadata`.
+Registrations are limited to 5 per minute per client address (`429`
+`invalid_request` over it). `OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS`
+(comma-separated CIDR ranges, empty by default) exempts callers in those
+ranges, for example a connector platform's published egress range; behind a
+reverse proxy, set `FORWARDED_ALLOW_IPS` so the address is the caller's.
+A malformed range stops the server at startup.
+
+**Loopback redirects.** A `redirect_uri` that is `http` on `localhost`,
+`127.0.0.1` or `[::1]` matches a registered loopback URI on any port
+(RFC 8252 §7.3), so a native client may listen on an ephemeral port. The
+scheme, host, path and query must still match: `localhost` and `127.0.0.1`
+are different hosts. Every other `redirect_uri` is matched exactly (or by
+its registered trailing `/*`). The stored
 scope is the requested scopes the server defines (`scopes_supported`). A
 registration that omits `scope`, or whose defined scopes include no
 `memory:*` scope (for example `claudeai` or `openid offline_access`), gets the
@@ -1017,6 +1039,21 @@ ignored (`/mcp?profile=core` names it). Any other origin or path is
 
 The token endpoint logs the grant type and the names of the parameters it
 receives, not their values.
+
+**Revocation and introspection.** Both endpoints take
+`application/x-www-form-urlencoded` and authenticate the caller (#1741):
+
+| Endpoint | Who may call | A token issued to another client |
+|---|---|---|
+| `POST /api/v1/oauth/revoke` (RFC 7009) | A public client by `client_id` (form, or HTTP Basic with an empty secret); a confidential client with its secret by HTTP Basic (`client_secret_basic`) or `client_id` + `client_secret` in the form (`client_secret_post`) | Left alone; the response is `200`, the same as for an unknown token |
+| `POST /api/v1/oauth/introspect` (RFC 7662) | A confidential client with its secret, by either method. Public clients cannot introspect | `{"active": false}` |
+
+A missing `client_id`, an unknown client or a wrong secret gets `401`
+`invalid_client` with `WWW-Authenticate: Basic`. HTTP Basic together with a
+form `client_secret`, or with a form `client_id` naming another client, gets
+`400` `invalid_request`. Revoking a
+refresh token also revokes the access token issued with it; revoking an
+access token leaves its refresh token usable.
 
 ---
 
@@ -1513,11 +1550,14 @@ Kagura Memory Cloud provides 64 MCP tools for AI assistants across 13 categories
 - **Credentials that cannot be checked.** When the server cannot look a credential up (the database is unreachable, or the lookup fails unexpectedly) it answers `503` with `Retry-After: 5`, no `WWW-Authenticate` and `{"error": "temporarily_unavailable", "error_description": "Could not verify credentials right now; retry shortly.", "correlation_id": "…"}`. The credential may well be valid: retry the request instead of re-authorizing. A failed workspace membership check on `/mcp/w/{workspace_id}` answers the same way.
 - **Audience (RFC 8707).** An OAuth access token bound to a resource must be bound to this server's MCP resource. Every form the [resource rule](#authorization-code-grant-mcp-clients) accepts qualifies: `<origin>/mcp`, `<origin>/mcp/` and paths beneath it such as `/mcp/w/{workspace_id}`, the default port given or left out, the host in any case, any query. The rule applies on `/mcp/w/{workspace_id}` too. A token issued without `resource` is accepted.
 - **Scope.** `memory:read` or `memory:write` per tool, checked on `tools/call` only; see [MCP Tools › OAuth scopes](mcp-tools.md#oauth-scopes). API keys, agent-bound keys and session cookies are not scope-checked.
+- **Origin.** Checked before authentication on every `/mcp` request. A request without `Origin` (server-side clients such as the Claude and ChatGPT backends, CLI clients) is served. One whose `Origin` is not `CORS_ORIGINS`, the `FRONTEND_URL` origin or an entry of `MCP_ALLOWED_ORIGINS` — including `null` — gets `403` with the JSON-RPC error `-32600` "Forbidden: the request Origin is not allowed for this MCP server".
 - **Sessions (session-based Streamable HTTP)** on `/mcp`, `/mcp/` and `/mcp/w/{workspace_id}`:
-  - `POST` / `GET` without `Mcp-Session-Id` opens a session under an id the server chooses (returned in `Mcp-Session-Id`).
-  - `POST` / `GET` naming a session of the caller uses it. One the server does not hold (expired after an hour idle, or lost on a restart or deploy) is re-adopted for the authenticated caller under the same id, so a client keeps working without re-initializing.
+  - `POST` / `GET` without `Mcp-Session-Id` opens a session under an id the server chooses (returned in `Mcp-Session-Id`; `mcp-` followed by 16 lowercase hex digits).
+  - `POST` / `GET` naming a session of the caller uses it. One the server does not hold (expired after an hour idle, or lost on a restart or deploy) is re-adopted for the authenticated caller under the same id, so a client keeps working without re-initializing. Only an id of the server-minted shape is re-adopted; any other id was never issued and gets `404`.
   - A session id opened by another user or in another workspace gets `404` with the JSON-RPC error "This session id cannot be used by this connection. Send a new initialize request without Mcp-Session-Id." Such a request does not refresh that session's idle timer.
-  - `DELETE` with the caller's `Mcp-Session-Id` ends that session (`204`); an unknown or foreign id gets the same `404`, a request without one `400`.
+  - `DELETE` with the caller's `Mcp-Session-Id` ends that session (`204`); an unknown or foreign id gets the same `404`, a request without one `400`. The ended id then gets `404` from every caller until the idle timeout (`MCP_SESSION_TIMEOUT_SECONDS`, default one hour) has passed; the record is kept in process memory, so a restart forgets it.
+  - `initialize` echoes `2025-03-26` or `2024-11-05` when the client asks for one of them, and answers any other requested version with `2025-03-26`.
+  - A session that negotiated `2025-03-26` accepts JSON-RPC batch arrays (at most 50 messages): the answers to its requests come back as one array, an array of notifications and responses only gets `202`, and an array containing `initialize` or an empty one gets `400` `-32600`. A batch in which a `tools/call` was refused for scope is answered `403` with the `insufficient_scope` challenge; its other messages still ran. A `2024-11-05` session, or one re-adopted after a restart, answers a batch with `400` `-32600`.
   - Other methods get `405` (`Allow: GET, POST, DELETE`) and other paths `404`. The removed SSE transport answers `410`: `GET /mcp/sse` and `POST /mcp/messages/…`. None of them reads or opens a session.
   - Stateless MCP 2026-07-28 requests have no session and ignore an `Mcp-Session-Id` header.
 

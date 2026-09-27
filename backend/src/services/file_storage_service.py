@@ -564,8 +564,11 @@ class FileStorageService:
         workspace_id: UUID,
         accessible_context_ids: list[UUID] | None = None,
         limit: int = 50,
+        offset: int = 0,
     ) -> list[FileObject]:
         """Return uploaded, non-deleted files the caller can access, newest first.
+
+        ``offset`` skips that many rows of the same order (MCP paging, #1743).
 
         Issue #1136: a row is visible when it is workspace-scoped (``context_id``
         IS NULL — legacy behaviour) OR bound to a context in
@@ -602,7 +605,9 @@ class FileStorageService:
                 FileObject.status == "uploaded",
                 visibility,
             )
-            .order_by(FileObject.created_at.desc())
+            # id breaks created_at ties so offset pages never overlap.
+            .order_by(FileObject.created_at.desc(), FileObject.id.desc())
+            .offset(max(offset, 0))
             .limit(limit)
         )
         return list(result.scalars().all())

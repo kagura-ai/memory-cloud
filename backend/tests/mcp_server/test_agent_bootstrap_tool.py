@@ -108,6 +108,16 @@ class TestArgValidation:
         )
         assert _payload(result)["error"] == "invalid_arguments"
 
+    @pytest.mark.asyncio
+    async def test_bad_max_chars_rejected(self):
+        # #1743: the whole-envelope budget follows the #1685 range.
+        result = await handle_get_agent_bootstrap(
+            args={"agent_id": str(AGENT_ID), "max_chars": 500},
+            user_id="u",
+            workspace_id=WORKSPACE_ID,
+        )
+        assert _payload(result)["error"] == "invalid_arguments"
+
 
 class TestDispatch:
     @pytest.mark.asyncio

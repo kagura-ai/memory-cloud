@@ -519,6 +519,8 @@ class BootstrapRequest(BaseModel):
     upcoming_until: str | None = None
     include: list[Literal["pinned", "recall", "upcoming", "state", "policy"]] | None = None
     recall_evaluation: dict[str, Any] | None = None
+    # #1743: whole-envelope budget in characters (default 20,000).
+    max_chars: int | None = Field(None, ge=10_000, le=100_000)
 
 
 @router.post("/{agent_id}/bootstrap")
@@ -541,6 +543,7 @@ async def agent_bootstrap(
         AgentBootstrapService,
         BootstrapError,
         BootstrapParams,
+        parse_bootstrap_max_chars,
         parse_include,
         parse_recall_evaluation,
         validate_query,
@@ -564,6 +567,7 @@ async def agent_bootstrap(
             upcoming_until=body.upcoming_until,
             include=parse_include(body.include),
             recall_evaluation=parse_recall_evaluation(body.recall_evaluation),
+            max_chars=parse_bootstrap_max_chars(body.max_chars),
         )
         validate_recall_evaluation_usage(params)
     except BootstrapError as e:

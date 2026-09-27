@@ -975,3 +975,21 @@ class TestHandleCreateContextPlanRefusal:
         assert payload["outcome"] == "unknown"
         assert "list_contexts" in payload["help"]
         assert "hunter2" not in json.dumps(payload)
+
+
+class TestWorkspaceDescriptionCap:
+    """#1743: get_context_info serves at most WORKSPACE_DESCRIPTION_MAX_LENGTH."""
+
+    def test_short_description_is_unchanged(self):
+        from mcp_server.tools.context import _workspace_description
+
+        assert _workspace_description(None) == {"description": None}
+        assert _workspace_description("team notes") == {"description": "team notes"}
+
+    def test_pre_cap_description_is_cut_and_flagged(self):
+        from config.constants import WORKSPACE_DESCRIPTION_MAX_LENGTH
+        from mcp_server.tools.context import _workspace_description
+
+        out = _workspace_description("z" * 50_000)
+        assert out["description_truncated"] is True
+        assert out["description"] == "z" * WORKSPACE_DESCRIPTION_MAX_LENGTH + "…"

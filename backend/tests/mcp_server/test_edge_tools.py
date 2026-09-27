@@ -874,3 +874,85 @@ class TestSupersedeAcceptanceTelemetry:
 
         assert json.loads(result[0].text)["status"] == "success"
         accept.assert_not_awaited()
+
+
+class TestListEdgesBounds:
+    """#1743: list_edges pages each direction (default 50, clamp 1-200)."""
+
+    @staticmethod
+    def _edges(n, src, *, incoming=False):
+        edges = []
+        for i in range(n):
+            e = _mock_edge(uuid4() if incoming else src, src if incoming else uuid4())
+            e.id = (100_000 if incoming else 0) + i
+            edges.append(e)
+        return edges
+
+    async def _run(self, args, outgoing, incoming):
+        memory_id = uuid4()
+        mock_repo = MagicMock()
+        mock_repo.get_outgoing_edges = AsyncMock(side_effect=lambda **kw: outgoing[: kw["limit"]])
+        mock_repo.get_incoming_edges = AsyncMock(side_effect=lambda **kw: incoming[: kw["limit"]])
+        mock_db = AsyncMock()
+
+        async def mock_get_db():
+            yield mock_db
+
+        ctx = MagicMock()
+        ctx.id = uuid4()
+        ctx.workspace_id = uuid4()
+        ctx.is_private = False
+        from mcp_server.tools.edge import handle_list_edges
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=mock_repo),
+            patch(
+                "mcp_server.tools.edge._resolve_context_for_read",
+                new_callable=AsyncMock,
+                return_value=ctx,
+            ),
+            patch("mcp_server.tools.edge._log_tool_usage", new_callable=AsyncMock),
+        ):
+            result = await handle_list_edges(
+                {"memory_id": str(memory_id), "context_id": str(ctx.id), **args},
+                "user-1743",
+                ctx.workspace_id,
+            )
+        return json.loads(result[0].text), mock_repo
+
+    @pytest.mark.asyncio
+    async def test_default_page_is_50_per_direction_with_has_more(self):
+        src = uuid4()
+        body, repo = await self._run({}, self._edges(60, src), self._edges(10, src, incoming=True))
+        assert body["status"] == "success"
+        # One extra row per direction is read to know whether more exist.
+        assert repo.get_outgoing_edges.await_args.kwargs["limit"] == 51
+        assert repo.get_incoming_edges.await_args.kwargs["limit"] == 51
+        assert body["count"] == 60
+        assert body["outgoing_has_more"] is True
+        assert body["incoming_has_more"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("limit", "expected"), [(0, 1), (-5, 1), (1000, 200), (7, 7)])
+    async def test_limit_is_clamped_to_1_200(self, limit, expected):
+        src = uuid4()
+        body, repo = await self._run({"limit": limit}, self._edges(3, src), [])
+        assert repo.get_outgoing_edges.await_args.kwargs["limit"] == expected + 1
+        assert body["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_non_integer_limit_is_refused(self):
+        body, _ = await self._run({"limit": "lots"}, [], [])
+        assert body["status"] == "error"
+        assert body["error"] == "validation_error"
+
+    @pytest.mark.asyncio
+    async def test_max_page_stays_under_150k_chars(self):
+        src = uuid4()
+        body, _ = await self._run(
+            {"limit": 200}, self._edges(250, src), self._edges(250, src, incoming=True)
+        )
+        assert body["count"] == 400
+        assert body["outgoing_has_more"] is True and body["incoming_has_more"] is True
+        assert len(json.dumps(body, ensure_ascii=False, separators=(",", ":"))) < 150_000

@@ -184,6 +184,11 @@
         "k": {
           "type": "integer"
         },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 100000
+        },
         "use_rerank": {
           "type": "boolean"
         },
@@ -327,6 +332,9 @@
         },
         "k": {
           "type": "integer"
+        },
+        "include_details": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -347,6 +355,11 @@
         },
         "cap": {
           "type": "integer"
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 100000
         }
       },
       "additionalProperties": false
@@ -367,6 +380,11 @@
         },
         "cap": {
           "type": "integer"
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 100000
         }
       },
       "additionalProperties": false
@@ -458,7 +476,8 @@
           }
         },
         "limit": {
-          "type": "integer"
+          "type": "integer",
+          "default": 50
         },
         "context_id": {
           "type": "string",
@@ -626,6 +645,12 @@
         },
         "include_details": {
           "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "cursor": {
+          "type": "string"
         }
       },
       "additionalProperties": false
@@ -887,6 +912,18 @@
         "report_id": {
           "type": "string",
           "format": "uuid"
+        },
+        "actions_limit": {
+          "type": "integer",
+          "default": 50
+        },
+        "actions_cursor": {
+          "type": "string"
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 100000
         }
       },
       "additionalProperties": false
@@ -1457,6 +1494,9 @@
         "limit": {
           "type": "integer"
         },
+        "cursor": {
+          "type": "string"
+        },
         "workspace_id": {
           "type": "string"
         }
@@ -1532,6 +1572,18 @@
         },
         "key": {
           "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "default": 50
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 100000
         }
       },
       "required": [
@@ -1658,7 +1710,15 @@
     "readOnly": true,
     "inputSchema": {
       "type": "object",
-      "properties": {},
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "default": 50
+        },
+        "cursor": {
+          "type": "string"
+        }
+      },
       "additionalProperties": false
     }
   },
@@ -1906,7 +1966,8 @@
           "type": "integer"
         },
         "pinned_cap": {
-          "type": "integer"
+          "type": "integer",
+          "default": 20
         },
         "upcoming_until": {
           "type": "string"
@@ -1947,6 +2008,11 @@
             "exploration_floor",
             "candidate_pool_k"
           ]
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 100000
         }
       },
       "required": [

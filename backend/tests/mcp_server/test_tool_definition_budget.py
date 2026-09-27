@@ -58,11 +58,16 @@ SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 # #1721 reworded delivery_mode and feedback to user-directed text: full list
 # 95,522, core list 31,954, recall 6,479, remember 6,143. Every ceiling still
 # sits within MAX_SLACK of its measure, so none moved.
-FULL_LIST_BUDGET = 96_000  # (#1683, #1685) was 84,000
-CORE_LIST_BUDGET = 32_500  # (#1683, #1685) was 31,000
-RECALL_BUDGET = 6_600  # (#1683) was 6,500
+#
+# #1743 bounded the remaining unbounded tool results: new paging and budget
+# parameters (limit / cursor / max_chars / include_details on eleven tools)
+# and one line per tool naming the truncation flags. Schema, not prose: full
+# list 99,472, core list 33,113, recall 6,782, remember 6,176.
+FULL_LIST_BUDGET = 100_500  # (#1743) was 96,000
+CORE_LIST_BUDGET = 33_600  # (#1743) was 32,500
+RECALL_BUDGET = 6_900  # (#1743) was 6,600
 REMEMBER_BUDGET = 6_200  # (#1683) was 6,000
-PER_TOOL_BUDGET = 6_600  # (#1683) was 6,500
+PER_TOOL_BUDGET = 6_900  # (#1743) was 6,600
 
 # A ceiling more than this far above the measured size is a stale constant.
 MAX_SLACK = 0.15

@@ -495,11 +495,66 @@ async def test_base64_sentinel_name_header_is_decoded_before_comparison(monkeypa
     assert send.status == 200
 
 
-# ---------------------------------------- tolerated gaps (deliberate leniency)
-# The spec makes the mirrored headers and ``clientCapabilities`` MUSTs. Nothing
-# here routes on the headers or relies on a client capability, and the clients
-# that matter can only be exercised in production — so their *absence* is
-# served (and logged), while any *disagreement* above is still rejected.
+# ------------------------------------------------ absent mirrored headers
+# #1740: the spec makes the mirrored headers MUSTs, and an absent one is a
+# 400 HeaderMismatch (-32020) like a contradicting one. MCP_REQUIRE_MIRRORED_
+# HEADERS=false restores the earlier leniency (served and logged) for a
+# deployment whose clients are seen to omit them. ``server/discover`` is exempt
+# either way: it is the pre-negotiation probe (see the bare-probe tests below).
+# ``clientCapabilities`` is body metadata, not a header, and stays tolerated.
+
+
+def _strip_headers(body: dict, present: list[str]) -> dict[bytes, bytes]:
+    return {k: v for k, v in _headers(body).items() if k.decode() in present}
+
+
+@pytest.fixture
+def lenient_headers(monkeypatch):
+    from config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "mcp_require_mirrored_headers", False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("present", "absent"),
+    [
+        ([], "MCP-Protocol-Version"),
+        (["mcp-protocol-version"], "Mcp-Method"),
+        (["mcp-method"], "MCP-Protocol-Version"),
+        (["mcp-protocol-version", "mcp-method"], "Mcp-Name"),
+    ],
+)
+async def test_absent_mirrored_headers_are_a_400_header_mismatch(
+    monkeypatch, caplog, present, absent
+):
+    import mcp_server.tools as tools_mod
+
+    async def must_not_run(**_kwargs):  # pragma: no cover - the assertion
+        raise AssertionError("a request without its mirrored headers reached the tool")
+
+    monkeypatch.setattr(tools_mod, "execute_tool_call", must_not_run)
+    body = _request("tools/call", {"name": "recall"}, request_id=4)
+
+    with caplog.at_level("WARNING", logger="mcp_server.transport_stateless"):
+        send = await _post(body, _strip_headers(body, present))
+
+    assert send.status == 400
+    _assert_stateless(send)
+    assert send.body["id"] == 4
+    assert send.body["error"]["code"] == -32020
+    assert absent in send.body["error"]["message"]
+    assert "MCP stateless request rejected" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["ping", "tools/list"])
+async def test_absent_method_header_is_rejected_for_every_non_discover_method(method):
+    body = _request(method)
+    send = await _post(body, _strip_headers(body, ["mcp-protocol-version"]))
+
+    assert send.status == 400
+    assert send.body["error"]["code"] == -32020
 
 
 @pytest.mark.asyncio
@@ -511,7 +566,9 @@ async def test_base64_sentinel_name_header_is_decoded_before_comparison(monkeypa
         ["mcp-method"],
     ],
 )
-async def test_absent_mirrored_headers_are_tolerated_and_logged(monkeypatch, caplog, present):
+async def test_absent_mirrored_headers_are_tolerated_and_logged_when_not_required(
+    monkeypatch, caplog, lenient_headers, present
+):
     import mcp_server.tools as tools_mod
 
     async def fake_execute(**_kwargs):
@@ -519,13 +576,31 @@ async def test_absent_mirrored_headers_are_tolerated_and_logged(monkeypatch, cap
 
     monkeypatch.setattr(tools_mod, "execute_tool_call", fake_execute)
     body = _request("tools/call", {"name": "recall"})
-    headers = {k: v for k, v in _headers(body).items() if k.decode() in present}
 
     with caplog.at_level("WARNING", logger="mcp_server.transport_stateless"):
-        send = await _post(body, headers)
+        send = await _post(body, _strip_headers(body, present))
 
     assert send.status == 200
     assert "Mcp-Name" in caplog.text  # never sent in any of the cases above
+
+
+@pytest.mark.asyncio
+async def test_a_contradicting_header_is_rejected_even_when_not_required(lenient_headers):
+    body = _request("tools/list", request_id=8)
+    send = await _post(body, _headers(body, **{"mcp-method": "ping"}))
+
+    assert send.status == 400
+    assert send.body["error"]["code"] == -32020
+
+
+@pytest.mark.asyncio
+async def test_discover_with_meta_but_no_headers_is_answered():
+    """Exempt: the probe a client sends before it knows what to mirror."""
+    body = _request("server/discover")
+    send = await _post(body, {})
+
+    assert send.status == 200
+    assert MODERN in send.body["result"]["supportedVersions"]
 
 
 @pytest.mark.asyncio
@@ -654,6 +729,38 @@ async def test_notification_is_accepted_with_202_and_no_body():
 
     assert send.status == 202
     _assert_stateless(send)
+    assert send.messages[1]["body"] == b""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {b"mcp-protocol-version": MODERN.encode()},  # Mcp-Method absent
+        {b"mcp-method": b"notifications/cancelled"},  # MCP-Protocol-Version absent
+        {b"mcp-protocol-version": MODERN.encode(), b"mcp-method": b"tools/list"},  # contradicts
+    ],
+)
+async def test_a_notification_is_held_to_the_mirrored_header_rules(headers):
+    """#1740 review: the notification short-circuit ran before validation, so
+    a notification skipped the header rules the setting enforces."""
+    body = _request("notifications/cancelled")
+    del body["id"]
+    send = await _post(body, headers)
+
+    assert send.status == 400
+    _assert_stateless(send)
+    assert send.body["id"] is None
+    assert send.body["error"]["code"] == -32020
+
+
+@pytest.mark.asyncio
+async def test_a_notification_without_headers_is_accepted_when_not_required(lenient_headers):
+    body = _request("notifications/cancelled")
+    del body["id"]
+    send = await _post(body, {})
+
+    assert send.status == 202
     assert send.messages[1]["body"] == b""
 
 

@@ -37,8 +37,57 @@ from mcp_server.tools._helpers import (
 )
 from utils.datetime import to_utc_iso
 from utils.exceptions import AuthorizationError, NotFoundException, QuotaExceededError
+from utils.response_budget import (
+    DEFAULT_MAX_CHARS,
+    BudgetArgumentError,
+    fit_lanes,
+    json_chars,
+    omit_field_to_fit,
+    parse_max_chars,
+)
 
 logger = logging.getLogger(__name__)
+
+# #1743: recall_upcoming / recall_nearby with include_details=true. Items keep
+# their order; from the last one backwards, details is replaced by
+# details_omitted + details_total_chars until the results fit this many
+# characters (read those with reference()).
+_DETAILS_RESULTS_BUDGET = DEFAULT_MAX_CHARS - 1_000
+
+
+def _bound_list_envelope(
+    envelope: dict[str, Any], lanes: tuple[str, ...], max_chars: int
+) -> tuple[dict[str, Any], dict[str, bool]]:
+    """Fit the item lists of a recall / load_pinned / load_guardrails reply into ``max_chars``.
+
+    #1743: at the default caps (100 pinned + 50 tool-triggered, each with a
+    context_summary of up to 2,000 characters) the reply could pass 300k
+    characters. When it does not fit, ``context_summary`` is left out of every
+    item first (``context_summary_omitted: true`` — reference() has it), then
+    each lane keeps the prefix that fits, in ``lanes`` order. The caller turns
+    a lane cut into its ``*_truncated`` flag; ``total_available`` keeps the
+    real count.
+
+    Returns:
+        The bounded envelope and, per lane key, whether items were cut.
+    """
+    shell = {**envelope, **{lane: [] for lane in lanes}}
+    budget = max_chars - json_chars(shell) - len('"context_summary_omitted":true,')
+    bounded, cut, dropped = fit_lanes(
+        [envelope[lane] for lane in lanes], budget, droppable="context_summary"
+    )
+    out = {**envelope, **dict(zip(lanes, bounded, strict=True))}
+    if dropped:
+        out["context_summary_omitted"] = True
+    return out, dict(zip(lanes, cut, strict=True))
+
+
+def _parse_max_chars_arg(args: dict[str, Any]) -> tuple[int, list[TextContent] | None]:
+    try:
+        return parse_max_chars(args.get("max_chars")), None
+    except BudgetArgumentError as e:
+        return 0, _error_response("validation_error", e.message, received=e.received)
+
 
 # #1228: server-side cap for cross-context recall — MUST stay in sync with
 # the recall inputSchema's context_ids maxItems in _definitions.py.
@@ -440,6 +489,8 @@ async def handle_recall_upcoming(
                 k=k,
                 include_details=include_details,
             )
+            if include_details:
+                results = omit_field_to_fit(results, "details", _DETAILS_RESULTS_BUDGET)
             await _log_tool_usage(
                 db, user_id, "recall_upcoming", start_time, 200, current_context_id, workspace_id
             )
@@ -506,6 +557,9 @@ async def handle_recall_nearby(
         k = clamp_nearby_k(args.get("k", 20))
     except (TypeError, ValueError):
         return _error_response("validation_error", f"k must be an integer, got {args.get('k')!r}")
+    # #1743: items carry details.location by default; the full details is
+    # opt-in (strictly True, as recall_upcoming) and held to a reply budget.
+    include_details = args.get("include_details") is True
 
     start_time = time.time()
     async for db in get_db():
@@ -519,8 +573,16 @@ async def handle_recall_nearby(
             current_context = await _resolve_context_for_read(db, user_id, current_context_id)
 
             results = await query_nearby_memories(
-                db, current_context_id, lat=lat, lon=lon, radius_m=radius_m, k=k
+                db,
+                current_context_id,
+                lat=lat,
+                lon=lon,
+                radius_m=radius_m,
+                k=k,
+                include_details=include_details,
             )
+            if include_details:
+                results = omit_field_to_fit(results, "details", _DETAILS_RESULTS_BUDGET)
             await _log_tool_usage(
                 db, user_id, "recall_nearby", start_time, 200, current_context_id, workspace_id
             )
@@ -563,6 +625,9 @@ async def handle_load_pinned(
     from services.memory_service import MemoryService
 
     cap = args.get("cap")
+    max_chars, arg_error = _parse_max_chars_arg(args)
+    if arg_error:
+        return arg_error
     start_time = time.time()
     async for db in get_db():
         current_context_id: UUID | None = None
@@ -588,31 +653,30 @@ async def handle_load_pinned(
             await _log_tool_usage(
                 db, user_id, "load_pinned", start_time, 200, current_context_id, workspace_id
             )
-            return [
-                TextContent(
-                    type="text",
-                    text=_dumps(
+            envelope, cut = _bound_list_envelope(
+                {
+                    "status": "success",
+                    "memories": [
                         {
-                            "status": "success",
-                            "memories": [
-                                {
-                                    "memory_id": str(m.memory_id),
-                                    "summary": m.summary,
-                                    "context_summary": m.context_summary,
-                                    "type": m.type,
-                                    "importance": m.importance,
-                                    "delivery_mode": m.delivery_mode,
-                                }
-                                for m in result.memories
-                            ],
-                            "total_available": result.total_available,
-                            "truncated": result.truncated,
-                            "cap": result.cap,
-                            **_context_response_fields(current_context),
+                            "memory_id": str(m.memory_id),
+                            "summary": m.summary,
+                            "context_summary": m.context_summary,
+                            "type": m.type,
+                            "importance": m.importance,
+                            "delivery_mode": m.delivery_mode,
                         }
-                    ),
-                )
-            ]
+                        for m in result.memories
+                    ],
+                    "total_available": result.total_available,
+                    "truncated": result.truncated,
+                    "cap": result.cap,
+                    **_context_response_fields(current_context),
+                },
+                ("memories",),
+                max_chars,
+            )
+            envelope["truncated"] = result.truncated or cut["memories"]
+            return [TextContent(type="text", text=_dumps(envelope))]
         except _ContextNotFoundError as e:
             await _log_tool_usage(
                 db, user_id, "load_pinned", start_time, 404, current_context_id, workspace_id
@@ -670,6 +734,9 @@ async def handle_load_guardrails(
     from services.memory_service import MemoryService
 
     cap = args.get("cap")
+    max_chars, arg_error = _parse_max_chars_arg(args)
+    if arg_error:
+        return arg_error
     start_time = time.time()
     async for db in get_db():
         current_context_id: UUID | None = None
@@ -695,33 +762,36 @@ async def handle_load_guardrails(
             await _log_tool_usage(
                 db, user_id, "load_guardrails", start_time, 200, current_context_id, workspace_id
             )
-            return [
-                TextContent(
-                    type="text",
-                    text=_dumps(
-                        {
-                            "status": "success",
-                            "format": result.format,
-                            "version": result.version,
-                            "pinned": [_guardrail_item_payload(i) for i in result.pinned],
-                            "tool_triggered": [
-                                _guardrail_item_payload(i) for i in result.tool_triggered
-                            ],
-                            "total_available": result.total_available,
-                            "truncated": result.truncated,
-                            "cap": result.cap,
-                            "pinned_cap": result.pinned_cap,
-                            "pinned_total_available": result.pinned_total_available,
-                            "pinned_truncated": result.pinned_truncated,
-                            "tool_triggered_total_available": (
-                                result.tool_triggered_total_available
-                            ),
-                            "tool_triggered_truncated": result.tool_triggered_truncated,
-                            **_context_response_fields(current_context),
-                        }
-                    ),
-                )
-            ]
+            # The tool-triggered lane goes first: a client hook enforces it,
+            # while the pinned lane is advisory context (#1743).
+            envelope, cut = _bound_list_envelope(
+                {
+                    "status": "success",
+                    "format": result.format,
+                    "version": result.version,
+                    "pinned": [_guardrail_item_payload(i) for i in result.pinned],
+                    "tool_triggered": [_guardrail_item_payload(i) for i in result.tool_triggered],
+                    "total_available": result.total_available,
+                    "truncated": result.truncated,
+                    "cap": result.cap,
+                    "pinned_cap": result.pinned_cap,
+                    "pinned_total_available": result.pinned_total_available,
+                    "pinned_truncated": result.pinned_truncated,
+                    "tool_triggered_total_available": result.tool_triggered_total_available,
+                    "tool_triggered_truncated": result.tool_triggered_truncated,
+                    **_context_response_fields(current_context),
+                },
+                ("tool_triggered", "pinned"),
+                max_chars,
+            )
+            envelope["pinned_truncated"] = result.pinned_truncated or cut["pinned"]
+            envelope["tool_triggered_truncated"] = (
+                result.tool_triggered_truncated or cut["tool_triggered"]
+            )
+            envelope["truncated"] = (
+                envelope["pinned_truncated"] or envelope["tool_triggered_truncated"]
+            )
+            return [TextContent(type="text", text=_dumps(envelope))]
         except _ContextNotFoundError as e:
             await _log_tool_usage(
                 db, user_id, "load_guardrails", start_time, 404, current_context_id, workspace_id
@@ -847,6 +917,21 @@ def _recall_envelope(result: Any, context: Any) -> dict[str, Any]:
     return response_data
 
 
+def _bound_recall_envelope(envelope: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    """Hold a recall reply to ``max_chars`` characters (#1743).
+
+    k=100 measured 86k characters on real data. Over budget, context_summary
+    is left out of every result first (``context_summary_omitted``), then the
+    lowest-ranked results are cut: ``truncated: true`` and ``count`` is the
+    number returned. Absent when nothing was cut (#1599: absence is the signal).
+    """
+    bounded, cut = _bound_list_envelope(envelope, ("results",), max_chars)
+    if cut["results"]:
+        bounded["count"] = len(bounded["results"])
+        bounded["truncated"] = True
+    return bounded
+
+
 async def handle_recall(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -864,6 +949,10 @@ async def handle_recall(
     from db.base import get_db
     from models.schemas import RecallRequest
     from services.memory_service import MemoryService
+
+    max_chars, arg_error = _parse_max_chars_arg(args)
+    if arg_error:
+        return arg_error
 
     request = RecallRequest(
         query=args["query"],
@@ -993,7 +1082,9 @@ async def handle_recall(
 
             # Built before the usage row / commit, as the item projection always
             # was: a result that cannot be rendered fails the call as a whole.
-            response_data = _recall_envelope(result, current_context)
+            response_data = _bound_recall_envelope(
+                _recall_envelope(result, current_context), max_chars
+            )
 
             await _log_tool_usage(
                 db,

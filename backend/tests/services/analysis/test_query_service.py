@@ -4,7 +4,7 @@ Covers the read-path helpers that REST routes, MCP tools, the
 ``recall`` filter extension, and the ``/usage`` endpoint all share.
 
 Pagination contract (``get_cluster``):
-- ``limit`` is clamped server-side to ``MAX_CLUSTER_PAGE_SIZE`` (200).
+- ``limit`` is clamped server-side to ``MAX_CLUSTER_PAGE_SIZE`` (100).
 - ``cursor`` is the last memory_id UUID of the previous page; the next
   query uses ``> cursor`` so the cursor row is not duplicated.
 - ``next_cursor`` is None on the last page.
@@ -568,7 +568,7 @@ async def test_get_cluster_limit_clamped_to_max(
         workspace_id=fixture_workspace_id,
         run_id=run.id,
         cluster_index=0,
-        limit=500,  # > MAX_CLUSTER_PAGE_SIZE=200
+        limit=500,  # > MAX_CLUSTER_PAGE_SIZE=100
     )
     # The clamp is internal to _clamp_limit; we verify behavior via the
     # peek-one query: empty cluster yields 0 memories and no cursor.
@@ -1417,3 +1417,11 @@ async def test_count_binding_visible_shadow_scope_keeps_true_count(
         assert visible == 3
     finally:
         set_agent_scope(None)
+
+
+def test_cluster_page_sizes_fit_mcp_result_limits():
+    """#1743: default 25 / max 100 members per get_cluster page."""
+    assert query_service.DEFAULT_CLUSTER_PAGE_SIZE == 25
+    assert query_service.MAX_CLUSTER_PAGE_SIZE == 100
+    assert query_service._clamp_limit(None, 25, 100) == 25
+    assert query_service._clamp_limit(500, 25, 100) == 100

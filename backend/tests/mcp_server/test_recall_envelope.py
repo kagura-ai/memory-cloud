@@ -463,3 +463,48 @@ class TestToolDescription:
         for key in ("context_summary?", "superseded_by?", "contradicts?", "supersede_candidate?"):
             assert key in returns, f"{key} not marked optional in recall Returns"
         assert "omitted" in returns
+
+
+# ============================================================================
+# #1743: max_chars budget
+# ============================================================================
+
+
+class TestRecallBudget:
+    @staticmethod
+    def _big(k: int) -> RecallResponse:
+        return RecallResponse(
+            results=[
+                _memory(summary="s" * 500, context_summary="c" * 2_000, tags=["t" * 50] * 20)
+                for _ in range(k)
+            ]
+        )
+
+    def test_default_k_fits_untouched(self):
+        env = _envelope(RecallResponse(results=[_memory() for _ in range(5)]))
+        bounded = mcp_memory._bound_recall_envelope(env, 20_000)
+        assert bounded == env
+        assert "truncated" not in bounded and "context_summary_omitted" not in bounded
+
+    def test_context_summary_goes_before_results(self):
+        bounded = mcp_memory._bound_recall_envelope(_envelope(self._big(8)), 20_000)
+        assert len(_dumps(bounded)) <= 20_000
+        assert bounded["context_summary_omitted"] is True
+        assert bounded["count"] == 8 and "truncated" not in bounded
+
+    def test_k100_worst_case_is_cut_and_flagged(self):
+        bounded = mcp_memory._bound_recall_envelope(_envelope(self._big(100)), 20_000)
+        assert len(_dumps(bounded)) <= 20_000
+        assert bounded["truncated"] is True
+        assert bounded["count"] == len(bounded["results"]) < 100
+
+    def test_largest_budget_stays_under_the_claude_ai_limit(self):
+        bounded = mcp_memory._bound_recall_envelope(_envelope(self._big(100)), 100_000)
+        assert len(_dumps(bounded)) <= 100_000
+
+
+async def test_recall_refuses_a_bad_max_chars_before_any_read():
+    result = await mcp_memory.handle_recall(
+        {"query": "x", "context_id": str(uuid4()), "max_chars": 5}, "u", None
+    )
+    assert json.loads(result[0].text)["error"] == "validation_error"

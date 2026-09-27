@@ -144,6 +144,41 @@ class TestUpdateWorkspace:
         assert updated.name == "New"
         assert updated.description == "desc"
 
+    @pytest.mark.asyncio
+    async def test_new_description_over_the_cap_is_refused(self, db_session) -> None:
+        """#1743: new descriptions are held to WORKSPACE_DESCRIPTION_MAX_LENGTH."""
+        from config.constants import WORKSPACE_DESCRIPTION_MAX_LENGTH
+
+        service = WorkspaceService(db_session)
+        ws = Workspace(id=uuid4(), name="Cap", owner_user_id="u3", plan_name="free")
+        db_session.add(ws)
+        await db_session.flush()
+
+        with pytest.raises(ValidationError):
+            await service.update_workspace(
+                ws.id, description="x" * (WORKSPACE_DESCRIPTION_MAX_LENGTH + 1)
+            )
+        ok = await service.update_workspace(
+            ws.id, description="x" * WORKSPACE_DESCRIPTION_MAX_LENGTH
+        )
+        assert len(ok.description) == WORKSPACE_DESCRIPTION_MAX_LENGTH
+
+    @pytest.mark.asyncio
+    async def test_unchanged_pre_cap_description_can_be_saved_back(self, db_session) -> None:
+        """#1743: the settings form resends the stored description; a longer one
+        written before the cap must not brick the save (the #1193 lesson)."""
+        legacy = "y" * 5_000
+        service = WorkspaceService(db_session)
+        ws = Workspace(
+            id=uuid4(), name="Legacy", owner_user_id="u3", plan_name="free", description=legacy
+        )
+        db_session.add(ws)
+        await db_session.flush()
+
+        updated = await service.update_workspace(ws.id, name="Renamed", description=legacy)
+        assert updated.name == "Renamed"
+        assert updated.description == legacy
+
 
 # ---------------------------------------------------------------------------
 # add_member

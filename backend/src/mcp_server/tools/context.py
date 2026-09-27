@@ -27,6 +27,7 @@ from mcp_server.tools._helpers import (
     execute_with_timeout,
 )
 from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
+from utils.response_budget import DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT, fit_items
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +148,7 @@ async def handle_get_context_info(
                 workspace_data = {
                     "id": str(workspace.id),
                     "name": workspace.name,
-                    "description": workspace.description,
+                    **_workspace_description(workspace.description),
                 }
 
             stats_data: dict[str, Any] = {
@@ -728,6 +729,18 @@ async def handle_update_context(
 _LIST_CONTEXTS_FLAGS = ("include_stats", "include_summary", "include_details")
 _LIST_CONTEXTS_NAME_FILTER_MAX_LENGTH = 100
 _LIST_CONTEXTS_SUMMARY_PREVIEW_LENGTH = 300
+# #1743: a workspace near the largest plan's context limit made even the slim
+# default call ~165k characters. The directory is paged (offset cursor over
+# the most-recently-used order) and each page is held to the shared response
+# budget, so an include_summary / include_details page stops early with
+# has_more rather than growing past it. include_details without name_contains
+# is limited to small pages: the full summaries are get_context_info's job.
+_LIST_TAGS_MAX_PAGE = 200
+_LIST_CONTEXTS_DEFAULT_LIMIT = 100
+_LIST_CONTEXTS_MAX_LIMIT = 200
+_LIST_CONTEXTS_DETAILS_MAX_LIMIT = 20
+# Room kept for the quota fields and the empty-account hint next to the items.
+_LIST_CONTEXTS_ENVELOPE_RESERVE = 1_500
 
 # #1658: a new account has a workspace but no context, and every memory tool
 # needs a context_id. Sent only when the caller can see no context at all
@@ -773,7 +786,38 @@ def _validate_list_contexts_args(args: dict[str, Any]) -> list[TextContent] | No
         if value is not None and type(value) is not bool:
             return _error_response("validation_error", f"'{flag}' must be a boolean.")
 
+    limit = args.get("limit")
+    if limit is not None and type(limit) is not int:
+        return _error_response("validation_error", "'limit' must be an integer.", received=limit)
+    cursor = args.get("cursor")
+    if (
+        cursor is not None
+        and cursor != ""
+        and not (isinstance(cursor, str) and cursor.isascii() and cursor.isdigit())
+    ):
+        return _error_response(
+            "validation_error",
+            "'cursor' must be the next_cursor of a previous list_contexts response.",
+            received=cursor,
+        )
+
     name_contains = args.get("name_contains")
+    if (
+        args.get("include_details") is True
+        and not (isinstance(name_contains, str) and name_contains.strip())
+        and limit is not None
+        and limit > _LIST_CONTEXTS_DETAILS_MAX_LIMIT
+    ):
+        return _error_response(
+            "validation_error",
+            f"include_details returns full summaries; pass name_contains or a limit of at "
+            f"most {_LIST_CONTEXTS_DETAILS_MAX_LIMIT}.",
+            received=limit,
+            help=(
+                "Narrow with name_contains, lower limit, or use include_summary for "
+                "previews; get_context_info(context_id) returns one context in full."
+            ),
+        )
     if name_contains is None:
         return None
     if type(name_contains) is not str:
@@ -798,6 +842,22 @@ def _summary_preview(summary: str | None) -> dict[str, Any]:
     return {"summary": preview + "…", "summary_truncated": True}
 
 
+def _workspace_description(description: str | None) -> dict[str, Any]:
+    """The workspace description for get_context_info, capped (#1743).
+
+    New descriptions are held to ``WORKSPACE_DESCRIPTION_MAX_LENGTH``; one
+    stored before the cap comes back cut to it with ``description_truncated``.
+    """
+    from config.constants import WORKSPACE_DESCRIPTION_MAX_LENGTH
+
+    if description is None or len(description) <= WORKSPACE_DESCRIPTION_MAX_LENGTH:
+        return {"description": description}
+    return {
+        "description": description[:WORKSPACE_DESCRIPTION_MAX_LENGTH].rstrip() + "…",
+        "description_truncated": True,
+    }
+
+
 async def handle_list_contexts(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -817,6 +877,14 @@ async def handle_list_contexts(
     include_details = args.get("include_details", False)
     include_summary = args.get("include_summary", False)
     name_filter = (args.get("name_contains") or "").strip().casefold()
+    default_limit = (
+        _LIST_CONTEXTS_DETAILS_MAX_LIMIT
+        if include_details and not name_filter
+        else _LIST_CONTEXTS_DEFAULT_LIMIT
+    )
+    raw_limit = args.get("limit")
+    limit = max(1, min(default_limit if raw_limit is None else raw_limit, _LIST_CONTEXTS_MAX_LIMIT))
+    offset = int(args.get("cursor") or 0)
 
     from db.base import get_db
 
@@ -867,6 +935,11 @@ async def handle_list_contexts(
                     or name_filter in (ctx.display_name or "").casefold()
                 ]
 
+            # #1743: one page of the directory. Everything below (config
+            # batch, stats) runs for the page only.
+            matched_count = len(contexts_sorted)
+            contexts_sorted = contexts_sorted[offset : offset + limit]
+
             # Batch-fetch embedding configs to avoid N+1 — only the
             # include_details shape reports embedding_model (#1600).
             config_by_ctx: dict[Any, Any] = {}
@@ -914,6 +987,20 @@ async def handle_list_contexts(
                     except Exception:
                         ctx_data["memory_count"] = 0
                 context_list.append(ctx_data)
+
+            # #1743: the page stops where the shared response budget runs out
+            # (include_summary / include_details items are large); the cursor
+            # resumes after the last item returned.
+            placed = fit_items(context_list, DEFAULT_MAX_CHARS - _LIST_CONTEXTS_ENVELOPE_RESERVE)
+            if context_list and placed == 0:
+                placed = 1  # a page always advances
+            context_list = context_list[:placed]
+            next_offset = offset + placed
+            has_more = next_offset < matched_count
+            page_info: dict[str, Any] = {
+                "has_more": has_more,
+                "next_cursor": str(next_offset) if has_more else None,
+            }
 
             # Get context quota (workspace-wide count, not just user-visible).
             # ``count`` is quota usage, so it never tracks name_contains; the
@@ -964,6 +1051,7 @@ async def handle_list_contexts(
                             "status": "success",
                             "contexts": context_list,
                             **quota_info,
+                            **page_info,
                             **({"hint": hint} if hint else {}),
                         }
                     ),
@@ -1232,6 +1320,11 @@ async def handle_list_tags(
             "prefix must be a string up to 200 characters.",
         )
 
+    # #1743: limit=500 measured 40k characters. 1-500 is still accepted, but a
+    # page holds at most 200 tags; has_more says more matched (narrow with
+    # prefix / min_count).
+    page_limit = min(limit, _LIST_TAGS_MAX_PAGE)
+
     sort = args.get("sort", "count")
 
     # #1669: multi-tag AND drill-down, same as REST ``?with_tags=``. Only the
@@ -1256,7 +1349,8 @@ async def handle_list_tags(
                 service.aggregate_tags(
                     user_id,
                     context_id,
-                    limit=limit,
+                    # One extra row tells whether more tags matched.
+                    limit=page_limit + 1,
                     min_count=min_count,
                     sort=sort,
                     prefix=prefix,
@@ -1273,6 +1367,13 @@ async def handle_list_tags(
                 }
                 for row in result["rows"]
             ]
+            has_more = len(tags_payload) > page_limit
+            tags_payload = tags_payload[:page_limit]
+            # Tags stored before the #1743 write cap can be long; the page
+            # stops at the largest response budget either way.
+            placed = fit_items(tags_payload, MAX_CHARS_LIMIT - 1_000)
+            if placed < len(tags_payload):
+                tags_payload, has_more = tags_payload[:placed], True
 
             await _log_tool_usage(
                 db,
@@ -1294,6 +1395,7 @@ async def handle_list_tags(
                             "context_name": result["context_name"],
                             "tags": tags_payload,
                             "total": len(tags_payload),
+                            "has_more": has_more,
                         }
                     ),
                 )

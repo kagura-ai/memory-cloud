@@ -191,3 +191,56 @@ class TestDryRunEstimatePricing:
         snapshot = {"rates": {"input_tokens": 0.2, "output_tokens": 1.25}}
         body = _envelope(await self._run(db_mock, pricing=(MagicMock(), snapshot)))
         assert body["estimated_cost_cents"] >= 1
+
+
+# #1743: get_cluster pages are held to a character budget.
+
+
+def _cluster(n, tag_chars):
+    return {
+        "run_id": "r",
+        "cluster_index": 0,
+        "memories": [
+            {"memory_id": f"m{i:03d}", "summary": "s" * 200, "tags": ["t" * tag_chars] * 50}
+            for i in range(n)
+        ],
+        "next_cursor": None,
+    }
+
+
+def test_small_cluster_page_is_unchanged():
+    from mcp_server.tools.analysis import _bound_cluster_page
+
+    page = _cluster(3, 5)
+    assert _bound_cluster_page(page, explicit_limit=False) is page
+
+
+def test_default_cluster_page_is_cut_at_20000_characters():
+    from mcp_server.tools.analysis import _bound_cluster_page
+
+    out = _bound_cluster_page(_cluster(25, 100), explicit_limit=False)
+    assert len(json.dumps({"status": "success", **out}, separators=(",", ":"))) <= 20_000
+    assert 0 < len(out["memories"]) < 25
+    assert out["next_cursor"] == out["memories"][-1]["memory_id"]
+
+
+def test_explicit_limit_page_is_cut_at_100000_characters():
+    from mcp_server.tools.analysis import _bound_cluster_page
+
+    out = _bound_cluster_page(_cluster(100, 100), explicit_limit=True)
+    assert len(json.dumps({"status": "success", **out}, separators=(",", ":"))) <= 100_000
+    assert out["next_cursor"] == out["memories"][-1]["memory_id"]
+
+
+def test_member_larger_than_the_budget_comes_back_without_tags():
+    """A legacy member whose tags alone pass the budget is not forced in whole."""
+    from mcp_server.tools.analysis import _bound_cluster_page
+
+    page = _cluster(3, 100)
+    page["memories"][0]["tags"] = ["x" * 1_000] * 200
+    out = _bound_cluster_page(page, explicit_limit=True)
+    assert len(json.dumps({"status": "success", **out}, separators=(",", ":"))) <= 100_000
+    (member,) = out["memories"]
+    assert "tags" not in member
+    assert member["tags_omitted"] is True and member["tags_total_chars"] > 200_000
+    assert out["next_cursor"] == "m000"

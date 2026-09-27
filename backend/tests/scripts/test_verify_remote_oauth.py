@@ -452,27 +452,21 @@ class FakeDeployment:
         if path == "/api/v1/oauth/token":
             return self.token(form)
         if path == "/api/v1/oauth/introspect":
-            token = self.tokens.get(form.get("token", ""))
-            if not token or token["revoked"]:
-                return httpx.Response(200, json={"active": False})
+            # RFC 7662 §2.1 (#1741): only confidential clients may introspect,
+            # and the run holds a public DCR client only.
             return httpx.Response(
-                200,
-                json={
-                    "active": True,
-                    "client_id": token["client_id"],
-                    "scope": token["scope"],
-                    "aud": token["resource"],
-                    "iat": 1000,
-                    "exp": 4600,
-                    "token_type": "Bearer",
-                },
+                401,
+                json={"error": "invalid_client", "error_description": "auth required"},
+                headers={"WWW-Authenticate": 'Basic realm="x"'},
             )
         if path == "/api/v1/oauth/revoke":
             value = form.get("token", "")
             if value in self.tokens:
                 self.tokens[value]["revoked"] = True
             if value in self.refresh:
+                # The paired access token goes with its refresh token (#1741).
                 self.tokens[self.refresh[value]]["refresh_revoked"] = True
+                self.tokens[self.refresh[value]]["revoked"] = True
             return httpx.Response(200, json={"status": "ok"})
         if path == vro.REST_SCOPE_PROBE_PATH:
             token = self.bearer(request)
@@ -501,6 +495,10 @@ class FakeDeployment:
             "grant_types_supported": ["authorization_code", "refresh_token"],
             "response_types_supported": ["code"],
             "token_endpoint_auth_methods_supported": ["none"],
+            "introspection_endpoint_auth_methods_supported": [
+                "client_secret_basic",
+                "client_secret_post",
+            ],
         }
 
     def token(self, form: dict[str, str]) -> httpx.Response:
@@ -688,7 +686,9 @@ def test_happy_path_run_passes_with_one_consent_and_redacted_evidence(tmp_path: 
     assert by_id["C2"]["status"] == "info"  # no RFC 7592 management URI
     assert by_id["M3"]["evidence"]["tool_count"] == 2
     assert by_id["T4"]["evidence"]["refresh_token_issued"] is True
-    assert by_id["S1"]["evidence"]["aud"] == "https://<target>/mcp"
+    assert by_id["S1"]["evidence"]["anonymous_status"] == 401
+    assert by_id["S1"]["evidence"]["public_client_status"] == 401
+    assert by_id["S1"]["evidence"]["disclosed_fields"] == []
 
     # Every secret handed out stays out of the evidence and the Markdown.
     assert deployment.issued

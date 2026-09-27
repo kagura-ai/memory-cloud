@@ -22,10 +22,20 @@ from mcp_server.tools._helpers import (
     _resolve_context_id,
     _success_response,
 )
+from utils.response_budget import (
+    BudgetArgumentError,
+    json_chars,
+    parse_limit,
+    parse_max_chars,
+)
 
 # Matches the agent_states.key column length (VARCHAR(255)). Enforced in the
 # handlers so an overlong key returns a structured error, not a DB-layer 500.
 _STATE_KEY_MAX_LEN = 255
+
+# Room kept for the list envelope around ``states`` (status, count, has_more,
+# next_cursor — a key of up to 255 characters — and the context fields).
+_STATE_LIST_ENVELOPE_RESERVE = 1_000
 
 
 async def handle_set_state(
@@ -47,6 +57,17 @@ async def handle_set_state(
     if value is None:
         # JSONB column is NOT NULL — reject up front instead of a generic 500.
         return _error_response("validation_error", "'value' must not be null")
+    from services.agent_state_service import STATE_VALUE_MAX_CHARS
+
+    # #1743: every get_state list page and bootstrap state component has to fit
+    # an MCP tool result, so one value is capped (compact JSON characters).
+    value_chars = json_chars(value)
+    if value_chars > STATE_VALUE_MAX_CHARS:
+        return _error_response(
+            "validation_error",
+            f"'value' must be at most {STATE_VALUE_MAX_CHARS} characters as compact JSON "
+            f"({value_chars} given). Store large data as a memory and keep its id here.",
+        )
     ttl_seconds = args.get("ttl_seconds")
     if ttl_seconds is not None and (
         isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0
@@ -105,9 +126,33 @@ async def handle_set_state(
 async def handle_get_state(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """Read one key's live value, or list all live entries when ``key`` is omitted."""
+    """Read one key's live value, or list live entries when ``key`` is omitted.
+
+    #1743: the list is paged in key order — ``limit`` entries (default 50,
+    1-200) within ``max_chars`` — with ``has_more`` / ``next_cursor``; a value
+    too large for the page is named in ``omitted_keys``.
+    """
     from db.base import get_db
-    from services.agent_state_service import AgentStateService
+    from services.agent_state_service import (
+        STATE_LIST_DEFAULT_LIMIT,
+        STATE_LIST_MAX_LIMIT,
+        AgentStateService,
+        bound_state_page,
+    )
+
+    # #1743: list-mode paging arguments, validated before any read.
+    cursor = args.get("cursor")
+    try:
+        limit = parse_limit(
+            args.get("limit"), default=STATE_LIST_DEFAULT_LIMIT, maximum=STATE_LIST_MAX_LIMIT
+        )
+        max_chars = parse_max_chars(args.get("max_chars"))
+        if cursor is not None and (not isinstance(cursor, str) or len(cursor) > _STATE_KEY_MAX_LEN):
+            raise BudgetArgumentError(
+                "cursor must be the next_cursor of a previous get_state response.", cursor
+            )
+    except BudgetArgumentError as e:
+        return _error_response("validation_error", e.message, received=e.received)
 
     async for db in get_db():
         # Defense-in-depth context_id guard (see handle_set_state).
@@ -140,7 +185,8 @@ async def handle_get_state(
             value = await service.get_state(context_id, key)
             return _success_response(key=key, value=value, found=value is not None)
 
-        states = await service.list_state(context_id)
-        return _success_response(states=states, count=len(states))
+        rows = await service.list_state_page(context_id, after_key=cursor or None, limit=limit + 1)
+        page = bound_state_page(rows, limit=limit, budget=max_chars - _STATE_LIST_ENVELOPE_RESERVE)
+        return _success_response(**page)
 
     return _error_response("internal_error", "Database session unavailable")

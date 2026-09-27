@@ -159,6 +159,56 @@ class TestListAndGet:
             result = await handle_list_agents(args={}, user_id="u", workspace_id=WORKSPACE_ID)
         body = _payload(result)
         assert body["count"] == 2
+        assert body["has_more"] is False and body["next_cursor"] is None
+
+    @pytest.mark.asyncio
+    async def test_list_pages_with_a_cursor(self):
+        """#1743: 50 per page by default (1-100), continued by next_cursor."""
+        agents = [_fake_agent(name=f"a{i}") for i in range(120)]
+        svc = MagicMock(list_agents=AsyncMock(return_value=agents))
+        with ExitStack() as stack:
+            _enter(stack, service=svc)
+            first = _payload(
+                await handle_list_agents(args={}, user_id="u", workspace_id=WORKSPACE_ID)
+            )
+            last = _payload(
+                await handle_list_agents(
+                    args={"cursor": "100", "limit": 500}, user_id="u", workspace_id=WORKSPACE_ID
+                )
+            )
+            bad = _payload(
+                await handle_list_agents(
+                    args={"cursor": "x"}, user_id="u", workspace_id=WORKSPACE_ID
+                )
+            )
+        assert first["count"] == 50 and first["has_more"] is True
+        assert first["total_available"] == 120
+        assert first["next_cursor"] == "50"
+        assert [a["name"] for a in last["agents"]] == [f"a{i}" for i in range(100, 120)]
+        assert last["has_more"] is False and last["next_cursor"] is None
+        assert bad["error"] == "validation_error"
+
+    @pytest.mark.asyncio
+    async def test_list_previews_long_descriptions(self):
+        """#1743: the list carries a 200-character preview; get_agent has it all."""
+        svc = MagicMock(
+            list_agents=AsyncMock(
+                return_value=[
+                    _fake_agent(description="d" * 10_000),
+                    _fake_agent(description="short"),
+                ]
+            )
+        )
+        with ExitStack() as stack:
+            _enter(stack, service=svc)
+            body = _payload(
+                await handle_list_agents(args={}, user_id="u", workspace_id=WORKSPACE_ID)
+            )
+        long_item, short_item = body["agents"]
+        assert long_item["description"] == "d" * 200 + "…"
+        assert long_item["description_truncated"] is True
+        assert short_item["description"] == "short"
+        assert "description_truncated" not in short_item
 
     @pytest.mark.asyncio
     async def test_get_malformed_uuid_rejected(self):

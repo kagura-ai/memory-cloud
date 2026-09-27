@@ -234,13 +234,14 @@ def test_definition_is_read_only_and_sits_after_load_pinned():
     tool = _tool("load_guardrails")
     assert tool["readOnly"] is True
     assert tool["inputSchema"]["required"] == ["context_id"]
-    assert set(tool["inputSchema"]["properties"]) == {"context_id", "cap"}
+    assert set(tool["inputSchema"]["properties"]) == {"context_id", "cap", "max_chars"}
     assert tool["inputSchema"]["additionalProperties"] is False
 
 
 def test_definition_stays_small():
     size = len(json.dumps(_tool("load_guardrails"), ensure_ascii=False, separators=(",", ":")))
-    assert size <= 1_900, size
+    # #1743 added the max_chars parameter and its budget sentence (~170).
+    assert size <= 2_100, size
 
 
 def test_definition_names_the_contract_an_agent_must_not_lose():
@@ -308,3 +309,71 @@ async def test_update_memory_maps_author_gate_to_permission_denied():
     payload = json.loads(result[0].text)
     assert payload["error"] == "permission_denied"
     assert log.await_args.args[4] == 403
+
+
+# --------------------------------------------------------------------------
+# #1743: response budget (max_chars)
+# --------------------------------------------------------------------------
+
+
+def _big(n, **o):
+    return [_item(summary="s" * 400, context_summary="c" * 2_000, **o) for _ in range(n)]
+
+
+@pytest.mark.asyncio
+async def test_small_set_is_unchanged_and_carries_no_budget_marker():
+    service = MagicMock(
+        load_guardrails=AsyncMock(return_value=_response(tool=[_item(tool_trigger=TT)]))
+    )
+    with _patched(service):
+        result = await handle_load_guardrails({"context_id": str(uuid4())}, "u", uuid4())
+    body = json.loads(result[0].text)
+    assert "context_summary_omitted" not in body
+    assert body["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_context_summary_goes_before_any_item():
+    tool = _big(8, tool_trigger=TT)
+    service = MagicMock(load_guardrails=AsyncMock(return_value=_response(tool=tool)))
+    with _patched(service):
+        result = await handle_load_guardrails({"context_id": str(uuid4())}, "u", uuid4())
+    body = json.loads(result[0].text)
+    assert len(result[0].text) <= 20_000
+    assert body["context_summary_omitted"] is True
+    assert len(body["tool_triggered"]) == 8
+    assert all("context_summary" not in i for i in body["tool_triggered"])
+    assert body["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_pinned_lane_is_cut_before_the_tool_triggered_lane():
+    pinned = _big(100, delivery_mode="always")
+    tool = _big(10, tool_trigger=TT)
+    service = MagicMock(load_guardrails=AsyncMock(return_value=_response(pinned=pinned, tool=tool)))
+    with _patched(service):
+        result = await handle_load_guardrails({"context_id": str(uuid4())}, "u", uuid4())
+    body = json.loads(result[0].text)
+    assert len(result[0].text) <= 20_000
+    assert len(body["tool_triggered"]) == 10
+    assert body["tool_triggered_truncated"] is False
+    assert len(body["pinned"]) < 100
+    assert body["pinned_truncated"] is True and body["truncated"] is True
+    assert body["pinned_total_available"] == 100
+
+
+@pytest.mark.asyncio
+async def test_max_chars_raises_the_budget_and_is_validated():
+    pinned = _big(100, delivery_mode="always")
+    service = MagicMock(load_guardrails=AsyncMock(return_value=_response(pinned=pinned)))
+    with _patched(service):
+        result = await handle_load_guardrails(
+            {"context_id": str(uuid4()), "max_chars": 100_000}, "u", uuid4()
+        )
+        bad = await handle_load_guardrails(
+            {"context_id": str(uuid4()), "max_chars": 50}, "u", uuid4()
+        )
+    body = json.loads(result[0].text)
+    assert len(result[0].text) <= 100_000
+    assert len(body["pinned"]) > 30
+    assert json.loads(bad[0].text)["error"] == "validation_error"

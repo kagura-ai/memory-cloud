@@ -468,8 +468,13 @@ async def test_response_size_budget_for_a_large_workspace():
     assert len(default_text) < 8_000
     assert _utf8_length(default_text) < 8_000
     assert _utf8_length(summary_text) < 25_000
-    # The opt-in full shape is the old cost — that is what the default avoids.
-    assert _utf8_length(details_text) > 80_000
+    # #1743: the opt-in full shape is paged (20 by default without
+    # name_contains) and held to the shared 20,000-character budget.
+    details = json.loads(details_text)
+    assert len(details_text) <= 20_000
+    assert 0 < len(details["contexts"]) < 20
+    assert details["has_more"] is True
+    assert details["next_cursor"] == str(len(details["contexts"]))
 
 
 # ============================================================================
@@ -484,7 +489,14 @@ def _definition():
 def test_definition_declares_the_new_parameters():
     props = _definition()["inputSchema"]["properties"]
 
-    assert set(props) == {"include_stats", "name_contains", "include_summary", "include_details"}
+    assert set(props) == {
+        "include_stats",
+        "name_contains",
+        "include_summary",
+        "include_details",
+        "limit",
+        "cursor",
+    }
     for flag in ("include_stats", "include_summary", "include_details"):
         assert props[flag]["type"] == "boolean"
     assert props["name_contains"]["type"] == "string"
@@ -663,9 +675,77 @@ async def test_no_hint_when_the_caller_can_see_a_context(args):
     payload = await _payload(harness, args, workspace_id="ws-1")
 
     assert "hint" not in payload
-    assert set(payload) == {"status", "contexts", "count", "total", "limit", "can_create"}
+    assert set(payload) == {
+        "status",
+        "contexts",
+        "count",
+        "total",
+        "limit",
+        "can_create",
+        "has_more",
+        "next_cursor",
+    }
 
 
 def test_list_contexts_description_mentions_the_hint():
     (tool,) = [t for t in get_tool_definitions() if t["name"] == "list_contexts"]
     assert "hint" in tool["description"]
+
+
+# ============================================================================
+# #1743: paging
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_default_page_is_100_with_a_cursor():
+    contexts = [_context(f"ctx-{i:03d}", age_days=i) for i in range(150)]
+    harness = _Harness(contexts)
+    first = await _payload(harness, {})
+    assert len(first["contexts"]) == 100
+    assert first["has_more"] is True and first["next_cursor"] == "100"
+    assert first["total"] == 100
+    second = await _payload(harness, {"cursor": first["next_cursor"]})
+    assert [c["name"] for c in second["contexts"]] == [f"ctx-{i:03d}" for i in range(100, 150)]
+    assert second["has_more"] is False and second["next_cursor"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("limit", "returned"), [(5, 5), (0, 1), (-3, 1), (120, 120)])
+async def test_limit_is_clamped_to_1_200(limit, returned):
+    harness = _Harness([_context(f"ctx-{i:03d}", age_days=i) for i in range(250)])
+    payload = await _payload(harness, {"limit": limit})
+    assert len(payload["contexts"]) == returned
+
+
+@pytest.mark.asyncio
+async def test_a_large_limit_is_held_to_the_response_budget():
+    harness = _Harness([_context(f"ctx-{i:03d}", age_days=i) for i in range(250)])
+    text = await harness.call({"limit": 500})
+    payload = json.loads(text)
+    assert len(text) <= 20_000
+    assert 100 < len(payload["contexts"]) <= 200
+    assert payload["next_cursor"] == str(len(payload["contexts"]))
+
+
+@pytest.mark.asyncio
+async def test_stats_are_read_for_the_page_only():
+    harness = _Harness([_context(f"ctx-{i:03d}", age_days=i) for i in range(30)])
+    await _payload(harness, {"include_stats": True, "limit": 5})
+    assert harness.service.get_context_stats.await_count == 5
+
+
+@pytest.mark.asyncio
+async def test_include_details_without_a_filter_refuses_a_large_limit():
+    harness = _Harness([_context("a")])
+    payload = await _payload(harness, {"include_details": True, "limit": 50})
+    assert payload["error"] == "validation_error"
+    ok = await _payload(harness, {"include_details": True, "limit": 50, "name_contains": "a"})
+    assert ok["status"] == "success"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", [{"limit": "10"}, {"cursor": "x"}, {"cursor": 5}, {"cursor": "²"}])
+async def test_bad_paging_arguments_are_refused(args):
+    payload = await _payload(_Harness([_context("a")]), args)
+    assert payload["error"] == "validation_error"

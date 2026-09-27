@@ -167,7 +167,8 @@ async def test_server_discover_returns_a_complete_cacheable_discover_result():
     # it stopped dual-era fallback and left modern-only clients no version.
     versions = result["supportedVersions"]
     assert "2026-07-28" in versions
-    assert "2024-11-05" in versions  # what initialize negotiates today
+    assert "2025-03-26" in versions  # what initialize negotiates by default (#1740)
+    assert "2024-11-05" in versions  # still echoed to a client that asks for it
 
     assert result["capabilities"] == {"tools": {}}
     server_info = result["_meta"]["io.modelcontextprotocol/serverInfo"]
@@ -204,7 +205,8 @@ async def test_initialize_still_negotiates_the_legacy_protocol():
     send = await _post({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
     assert send.status == 200
     assert send.headers[b"mcp-session-id"] == b"sess-1"
-    assert send.body["result"]["protocolVersion"] == "2024-11-05"
+    # #1740: a request naming no version gets the latest legacy revision.
+    assert send.body["result"]["protocolVersion"] == "2025-03-26"
 
 
 # ------------------------------------------------ version negotiation (review)
@@ -216,9 +218,11 @@ async def test_initialize_still_negotiates_the_legacy_protocol():
     [
         ("2025-03-26", "2025-03-26"),  # advertised by discover → must be echoed
         ("2024-11-05", "2024-11-05"),
-        ("2025-06-18", "2024-11-05"),  # not advertised → fall back to the default
-        ("2026-07-28", "2024-11-05"),  # advertised, but modern: no handshake form
-        (None, "2024-11-05"),
+        # #1740: not advertised → the latest legacy revision we implement, not
+        # 2024-11-05 (which only defines the HTTP+SSE transport removed in #248)
+        ("2025-06-18", "2025-03-26"),
+        ("2026-07-28", "2025-03-26"),  # advertised, but modern: no handshake form
+        (None, "2025-03-26"),
     ],
 )
 async def test_initialize_echoes_every_version_discover_advertises(requested, negotiated):
@@ -258,7 +262,7 @@ async def test_every_advertised_legacy_version_is_negotiable():
 async def test_initialize_tolerates_non_object_params():
     send = await _post({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": [1]})
     assert send.status == 200
-    assert send.body["result"]["protocolVersion"] == "2024-11-05"
+    assert send.body["result"]["protocolVersion"] == "2025-03-26"
 
 
 # --------------------------------------------------- invalid requests (review)

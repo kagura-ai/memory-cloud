@@ -69,10 +69,43 @@ async def test_recall_nearby_returns_rows_with_distance():
     payload = json.loads(result[0].text)
     assert payload["status"] == "success"
     assert [r["distance_m"] for r in payload["results"]] == [12.5, 340.0]
+    # #1743: details.location by default, not the whole details blob.
     assert all(
-        set(r) == {"memory_id", "summary", "type", "details", "distance_m"}
+        set(r) == {"memory_id", "summary", "type", "location", "distance_m"}
         for r in payload["results"]
     )
+    assert payload["results"][0]["location"] == {"lat": 35.68, "lon": 139.76}
+
+
+@pytest.mark.asyncio
+async def test_include_details_returns_details_in_place_of_location():
+    mock_db = _mock_db_returning([_row(12.5)])
+    with _patched(mock_db):
+        result = await handle_recall_nearby(
+            _args(include_details=True), user_id="u1", workspace_id=None
+        )
+    item = json.loads(result[0].text)["results"][0]
+    assert set(item) == {"memory_id", "summary", "type", "details", "distance_m"}
+
+
+@pytest.mark.asyncio
+async def test_include_details_is_held_to_a_budget():
+    rows = []
+    for i in range(20):
+        m, d = _row(float(i))
+        m.details = {"location": {"lat": 35.68, "lon": 139.76}, "blob": "x" * 5_000}
+        rows.append((m, d))
+    mock_db = _mock_db_returning(rows)
+    with _patched(mock_db):
+        result = await handle_recall_nearby(
+            _args(include_details=True), user_id="u1", workspace_id=None
+        )
+    assert len(result[0].text) <= 20_000
+    items = json.loads(result[0].text)["results"]
+    assert len(items) == 20
+    assert "details" in items[0]
+    assert items[-1]["details_omitted"] is True
+    assert items[-1]["details_total_chars"] > 5_000
 
 
 @pytest.mark.asyncio

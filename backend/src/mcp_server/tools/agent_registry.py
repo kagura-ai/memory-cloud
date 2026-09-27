@@ -128,12 +128,43 @@ async def handle_register_agent(
     return _error_response("internal_error", "Database session unavailable")
 
 
+# #1743: descriptions run to 10,000 characters and the list had no paging. The
+# list view carries a preview (get_agent returns the whole description) and
+# pages through the registry, newest first.
+_LIST_AGENTS_DEFAULT_LIMIT = 50
+_LIST_AGENTS_MAX_LIMIT = 100
+_LIST_AGENTS_DESCRIPTION_PREVIEW = 200
+
+
+def _serialize_agent_list_item(agent: Any) -> dict[str, Any]:
+    """``_serialize_agent`` with the description cut to a preview (#1743).
+
+    Slices by code point; ``description_truncated`` is present only on items
+    that were cut (the list_contexts ``summary_truncated`` convention).
+    """
+    item = _serialize_agent(agent)
+    description = item["description"]
+    if isinstance(description, str) and len(description) > _LIST_AGENTS_DESCRIPTION_PREVIEW:
+        item["description"] = description[:_LIST_AGENTS_DESCRIPTION_PREVIEW].rstrip() + "…"
+        item["description_truncated"] = True
+    return item
+
+
 async def handle_list_agents(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """List the active workspace's registered agents (owner/admin only)."""
+    """List the active workspace's registered agents, a page at a time (owner/admin only)."""
     if not workspace_id:
         return _error_response("workspace_required", "No active workspace.")
+    from utils.response_budget import BudgetArgumentError, parse_limit, parse_offset_cursor
+
+    try:
+        limit = parse_limit(
+            args.get("limit"), default=_LIST_AGENTS_DEFAULT_LIMIT, maximum=_LIST_AGENTS_MAX_LIMIT
+        )
+        offset = parse_offset_cursor(args.get("cursor"))
+    except BudgetArgumentError as e:
+        return _error_response("validation_error", e.message, received=e.received)
 
     from db.base import get_db
     from mcp_server.tools.resource import _check_owner_admin_role
@@ -144,8 +175,18 @@ async def handle_list_agents(
         if role_err:
             return role_err
 
+        # The registry is quota-bounded (a few hundred rows at most), so the
+        # page is cut from the ordered list rather than pushed into SQL.
         agents = await AgentRegistryService(db).list_agents(workspace_id)
-        return _success_response(agents=[_serialize_agent(a) for a in agents], count=len(agents))
+        page = agents[offset : offset + limit]
+        has_more = offset + len(page) < len(agents)
+        return _success_response(
+            agents=[_serialize_agent_list_item(a) for a in page],
+            count=len(page),
+            total_available=len(agents),
+            has_more=has_more,
+            next_cursor=str(offset + len(page)) if has_more else None,
+        )
 
     return _error_response("internal_error", "Database session unavailable")
 

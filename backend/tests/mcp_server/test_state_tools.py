@@ -265,7 +265,7 @@ class TestGetState:
 
     @pytest.mark.asyncio
     async def test_no_key_lists_all_live_entries(self):
-        svc = MagicMock(list_state=AsyncMock(return_value={"a": 1, "b": 2}))
+        svc = MagicMock(list_state_page=AsyncMock(return_value=[("a", 1), ("b", 2)]))
         with ExitStack() as stack:
             _enter(stack, service=svc)
             result = await handle_get_state(
@@ -274,10 +274,17 @@ class TestGetState:
         body = _payload(result)
         assert body["count"] == 2
         assert body["states"] == {"a": 1, "b": 2}
+        assert body["has_more"] is False
+        assert body["next_cursor"] is None
+        assert "omitted_keys" not in body
+        # #1743: default page of 50, plus one row to detect more.
+        svc.list_state_page.assert_awaited_once()
+        kwargs = svc.list_state_page.await_args.kwargs
+        assert kwargs == {"after_key": None, "limit": 51}
 
     @pytest.mark.asyncio
     async def test_empty_key_is_rejected_not_treated_as_list(self):
-        svc = MagicMock(get_state=AsyncMock(), list_state=AsyncMock(return_value={"a": 1}))
+        svc = MagicMock(get_state=AsyncMock(), list_state_page=AsyncMock(return_value=[]))
         with ExitStack() as stack:
             _enter(stack, service=svc)
             result = await handle_get_state(
@@ -285,7 +292,7 @@ class TestGetState:
             )
         assert _payload(result)["error"] == "validation_error"
         svc.get_state.assert_not_called()
-        svc.list_state.assert_not_called()
+        svc.list_state_page.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_context_not_found_short_circuits(self):
@@ -297,3 +304,95 @@ class TestGetState:
             )
         assert _payload(result)["error"] == "context_not_found"
         svc.get_state.assert_not_called()
+
+
+class TestStateBounds:
+    """#1743: set_state caps a value's size; get_state's list mode is paged."""
+
+    @pytest.mark.asyncio
+    async def test_oversized_value_is_rejected_on_write(self):
+        from services.agent_state_service import STATE_VALUE_MAX_CHARS
+
+        svc = MagicMock(set_state=AsyncMock())
+        with ExitStack() as stack:
+            _enter(stack, service=svc)
+            result = await handle_set_state(
+                args={"context_id": CTX, "key": "k", "value": "x" * STATE_VALUE_MAX_CHARS},
+                user_id="u",
+                workspace_id=uuid4(),
+            )
+        body = _payload(result)
+        assert body["error"] == "validation_error"
+        assert str(STATE_VALUE_MAX_CHARS) in body["message"]
+        svc.set_state.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_value_at_the_cap_is_accepted(self):
+        from services.agent_state_service import STATE_VALUE_MAX_CHARS
+
+        svc = MagicMock(set_state=AsyncMock())
+        value = "x" * (STATE_VALUE_MAX_CHARS - 2)  # plus its two quotes
+        with ExitStack() as stack:
+            _enter(stack, service=svc)
+            result = await handle_set_state(
+                args={"context_id": CTX, "key": "k", "value": value},
+                user_id="u",
+                workspace_id=uuid4(),
+            )
+        assert _payload(result)["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_list_passes_cursor_and_clamped_limit(self):
+        svc = MagicMock(list_state_page=AsyncMock(return_value=[]))
+        with ExitStack() as stack:
+            _enter(stack, service=svc)
+            await handle_get_state(
+                args={"context_id": CTX, "cursor": "k050", "limit": 999},
+                user_id="u",
+                workspace_id=uuid4(),
+            )
+        assert svc.list_state_page.await_args.kwargs == {"after_key": "k050", "limit": 201}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "extra", [{"limit": "10"}, {"cursor": 5}, {"max_chars": 5}, {"max_chars": True}]
+    )
+    async def test_bad_paging_arguments_are_refused(self, extra):
+        svc = MagicMock(list_state_page=AsyncMock(return_value=[]))
+        with ExitStack() as stack:
+            _enter(stack, service=svc)
+            result = await handle_get_state(
+                args={"context_id": CTX, **extra}, user_id="u", workspace_id=uuid4()
+            )
+        assert _payload(result)["error"] == "validation_error"
+        svc.list_state_page.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_page_stops_at_the_budget_and_reports_the_cursor(self):
+        rows = [(f"k{i:03d}", "v" * 4_000) for i in range(51)]
+        svc = MagicMock(list_state_page=AsyncMock(return_value=rows))
+        with ExitStack() as stack:
+            _enter(stack, service=svc)
+            result = await handle_get_state(
+                args={"context_id": CTX}, user_id="u", workspace_id=uuid4()
+            )
+        body = _payload(result)
+        assert 0 < body["count"] < 50
+        assert body["has_more"] is True
+        assert body["next_cursor"] == sorted(body["states"])[-1]
+        assert len(result[0].text) <= 20_000
+
+    @pytest.mark.asyncio
+    async def test_legacy_oversized_value_is_named_not_returned(self):
+        rows = [("big", "v" * 60_000), ("small", 1)]
+        svc = MagicMock(list_state_page=AsyncMock(return_value=rows))
+        with ExitStack() as stack:
+            _enter(stack, service=svc)
+            result = await handle_get_state(
+                args={"context_id": CTX}, user_id="u", workspace_id=uuid4()
+            )
+        body = _payload(result)
+        assert body["states"] == {"small": 1}
+        assert body["omitted_keys"] == ["big"]
+        assert body["has_more"] is False
+        assert len(result[0].text) <= 20_000

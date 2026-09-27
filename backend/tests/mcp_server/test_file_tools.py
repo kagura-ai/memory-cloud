@@ -480,6 +480,53 @@ class TestListFiles:
         body = _payload(out)
         assert body["count"] == 2
         assert len(body["files"]) == 2
+        assert body["has_more"] is False
+        assert body["next_cursor"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("limit", "asked"), [(9999, 101), (0, 2), (10, 11)])
+    async def test_page_is_clamped_to_100_and_continues_with_a_cursor(self, limit, asked):
+        """#1743: a page holds 1-100 files; the offset cursor continues it."""
+        ws = uuid4()
+        rows = [
+            MagicMock(
+                id=uuid4(),
+                context_id=None,
+                filename=f"{i}.bin",
+                content_type="application/octet-stream",
+                size_bytes=1,
+                sha256=VALID_SHA,
+                status="uploaded",
+                created_at=datetime.now(UTC),
+                uploaded_at=datetime.now(UTC),
+            )
+            for i in range(asked)
+        ]
+        list_files = AsyncMock(return_value=rows)
+        get_db_patch, _ = _patch_get_db()
+        with (
+            get_db_patch,
+            _patch_viewer_check_pass(),
+            patch(
+                "services.permission_service.PermissionService.get_accessible_contexts",
+                AsyncMock(return_value=[]),
+            ),
+            patch("mcp_server.tools.files.FileStorageService.list_files", list_files),
+        ):
+            out = await handle_list_files(
+                {"limit": limit, "cursor": "40"}, user_id=USER_ID, workspace_id=ws
+            )
+        body = _payload(out)
+        assert list_files.await_args.kwargs["limit"] == asked
+        assert list_files.await_args.kwargs["offset"] == 40
+        assert body["count"] == asked - 1
+        assert body["has_more"] is True
+        assert body["next_cursor"] == str(40 + asked - 1)
+
+    @pytest.mark.asyncio
+    async def test_bad_cursor_is_a_validation_error(self):
+        out = await handle_list_files({"cursor": "abc"}, user_id=USER_ID, workspace_id=uuid4())
+        assert _payload(out)["error"] == "validation_error"
 
     @pytest.mark.asyncio
     async def test_invalid_limit_validation_error(self):

@@ -28,6 +28,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from services.recall_selection import RecallSelectionConfig
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
+from utils.response_budget import (
+    DEFAULT_MAX_CHARS,
+    BudgetArgumentError,
+    fit_lanes,
+    json_chars,
+    parse_max_chars,
+)
 
 logger = get_logger(__name__)
 
@@ -40,6 +47,16 @@ STATUS_SKIPPED = "skipped"
 _ALL_COMPONENTS = ("pinned", "recall", "upcoming", "state", "policy")
 _QUERY_MAX_LEN = 1024
 _SESSION_ID_MAX_LEN = 128
+
+# #1743: bootstrap composes five components into one reply, so it has its own
+# pinned default (load_pinned's is 100) and a whole-envelope character budget
+# (``max_chars``, the #1685 unit). The state component gets a quarter of it
+# as a get_state page; the item lists — pinned, then recall, then upcoming —
+# share what is left after the fixed blocks.
+BOOTSTRAP_DEFAULT_PINNED_CAP = 20
+_STATE_SHARE = 4
+# The component item lists fitted to the envelope budget, in priority order.
+_BUDGETED_LISTS = (("pinned", "memories"), ("recall", "results"), ("upcoming", "results"))
 
 
 class BootstrapError(Exception):
@@ -71,6 +88,8 @@ class BootstrapParams:
     # owns retrieval/ranking; bootstrap only requests reproducible selection
     # evidence from the authorized trusted candidate pool.
     recall_evaluation: RecallSelectionConfig | None = None
+    # #1743: whole-envelope budget in characters of compact JSON.
+    max_chars: int = DEFAULT_MAX_CHARS
 
 
 @dataclass
@@ -100,6 +119,14 @@ def parse_include(raw: Any) -> tuple[str, ...]:
         )
     # Preserve declared order, dedup.
     return tuple(c for c in _ALL_COMPONENTS if c in raw)
+
+
+def parse_bootstrap_max_chars(raw: Any) -> int:
+    """Validate the optional ``max_chars`` budget (#1743); default 20,000."""
+    try:
+        return parse_max_chars(raw)
+    except BudgetArgumentError as e:
+        raise BootstrapError("invalid_arguments", e.message) from e
 
 
 def validate_session_id(raw: Any) -> str | None:
@@ -364,7 +391,7 @@ class AgentBootstrapService:
             )
         if "state" in include:
             components["state"] = await self._transaction_owning_component(
-                "state", lambda: self._state(context)
+                "state", lambda: self._state(context, params.max_chars // _STATE_SHARE)
             )
         if "policy" in include:
             components["policy"] = {"status": STATUS_SKIPPED, "reason": "no_policy_bundle"}
@@ -379,20 +406,23 @@ class AgentBootstrapService:
             for c in components.values()
         )
 
-        return {
-            "status": "success",
-            "degraded": degraded,
-            "agent": {
-                "agent_id": str(agent.id),
-                "name": agent.name,
-                "binding": binding_info,
+        return _fit_envelope(
+            {
+                "status": "success",
+                "degraded": degraded,
+                "agent": {
+                    "agent_id": str(agent.id),
+                    "name": agent.name,
+                    "binding": binding_info,
+                },
+                "context": context_block,
+                "instructions": instructions,
+                "components": components,
+                "correlation": self._correlation_block(agent, params),
+                "generated_at": to_utc_iso(utcnow()),
             },
-            "context": context_block,
-            "instructions": instructions,
-            "components": components,
-            "correlation": self._correlation_block(agent, params),
-            "generated_at": to_utc_iso(utcnow()),
-        }
+            params.max_chars,
+        )
 
     # ------------------------------------------------------------------
     # Components
@@ -546,9 +576,10 @@ class AgentBootstrapService:
             current_context_id=context.id,
             current_workspace_id=principal.workspace_id,
             # #1281 item 6: honor the caller's pinned_cap override (was a silent
-            # no-op). None → load_pinned applies its default clamp; a set value
-            # is clamped to [1, _PINNED_LOAD_CAP_MAX] by _clamp_pinned_cap.
-            cap=pinned_cap,
+            # no-op); a set value is clamped to [1, _PINNED_LOAD_CAP_MAX] by
+            # _clamp_pinned_cap. #1743: None → the bootstrap default (20), not
+            # load_pinned's 100 — this lane shares one reply with four others.
+            cap=pinned_cap if pinned_cap is not None else BOOTSTRAP_DEFAULT_PINNED_CAP,
             # #1293: pinned is behaviour-establishing — trusted-tier only, parity
             # with the recall lane's filters={"trust_tier": "trusted"}.
             trusted_only=True,
@@ -671,11 +702,65 @@ class AgentBootstrapService:
         )
         return {"results": results, "from": q_from, "until": q_until}
 
-    async def _state(self, context: Any) -> dict[str, Any]:
-        from services.agent_state_service import AgentStateService
+    async def _state(self, context: Any, budget: int) -> dict[str, Any]:
+        """The first get_state list page (#1743), within ``budget`` characters.
 
-        states = await AgentStateService(self.db).list_state(context.id)
-        return {"states": states, "count": len(states)}
+        Same shape as a keyless ``get_state``: ``has_more`` / ``next_cursor``
+        continue with ``get_state(cursor=...)``.
+        """
+        from services.agent_state_service import (
+            STATE_LIST_DEFAULT_LIMIT,
+            AgentStateService,
+            bound_state_page,
+        )
+
+        rows = await AgentStateService(self.db).list_state_page(
+            context.id, after_key=None, limit=STATE_LIST_DEFAULT_LIMIT + 1
+        )
+        return bound_state_page(rows, limit=STATE_LIST_DEFAULT_LIMIT, budget=budget)
+
+
+def _fit_envelope(envelope: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    """Hold the composed bootstrap envelope to ``max_chars`` characters (#1743).
+
+    Nothing changes when it fits. Otherwise the ok components' item lists —
+    pinned memories, recall results, upcoming results, in that priority — are
+    fitted into what the rest of the envelope leaves: ``context_summary`` is
+    left out of every item first (top-level ``context_summary_omitted``), then
+    each list keeps the prefix that fits, and a cut list's component gets
+    ``truncated: true`` (pinned keeps its ``total_available``). Never silent.
+    """
+    if json_chars(envelope) <= max_chars:
+        return envelope
+    components = envelope["components"]
+    present = [
+        (name, key)
+        for name, key in _BUDGETED_LISTS
+        if isinstance(components.get(name), dict)
+        and components[name].get("status") == STATUS_OK
+        and isinstance(components[name].get(key), list)
+    ]
+    shell = {
+        **envelope,
+        "components": {
+            **components,
+            **{name: {**components[name], key: [], "truncated": True} for name, key in present},
+        },
+    }
+    budget = max_chars - json_chars(shell) - len('"context_summary_omitted":true,')
+    bounded, cut, dropped = fit_lanes(
+        [components[name][key] for name, key in present], budget, droppable="context_summary"
+    )
+    new_components = dict(components)
+    for (name, key), items, was_cut in zip(present, bounded, cut, strict=True):
+        component = {**components[name], key: items}
+        if was_cut:
+            component["truncated"] = True
+        new_components[name] = component
+    out = {**envelope, "components": new_components}
+    if dropped:
+        out["context_summary_omitted"] = True
+    return out
 
 
 def _coerce_uuid(value: Any) -> UUID | None:

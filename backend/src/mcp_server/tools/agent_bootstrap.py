@@ -48,6 +48,7 @@ async def handle_get_agent_bootstrap(
         AgentBootstrapService,
         BootstrapError,
         BootstrapParams,
+        parse_bootstrap_max_chars,
         parse_include,
         parse_recall_evaluation,
         validate_query,
@@ -70,6 +71,7 @@ async def handle_get_agent_bootstrap(
             upcoming_until=args.get("upcoming_until"),
             include=parse_include(args.get("include")),
             recall_evaluation=parse_recall_evaluation(args.get("recall_evaluation")),
+            max_chars=parse_bootstrap_max_chars(args.get("max_chars")),
         )
         validate_recall_evaluation_usage(params)
     except BootstrapError as e:

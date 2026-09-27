@@ -101,7 +101,7 @@ Returns: {status, memory_id, scope, persistence?: {scope, committed, promotes_vi
                     "tags": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Tags for filtering (recall filters match them exactly). Mix category tags ('category:auth') and entity tags ('oauth2', 'fastapi'); for Japanese include script variants (['鯖', 'サバ', 'さば']).",
+                        "description": "Tags for filtering (recall filters match them exactly); at most 50, 100 characters each. Mix category tags ('category:auth') and entity tags ('oauth2', 'fastapi'); for Japanese include script variants (['鯖', 'サバ', 'さば']).",
                     },
                     "context": {
                         "type": "object",
@@ -199,7 +199,7 @@ Returns: {status, memory_id, operation: 'updated'|'created'|'replaced', re_embed
                     "tags": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "New tags (replaces the list).",
+                        "description": "New tags (replaces the list); at most 50, 100 characters each.",
                     },
                     "context": {
                         "type": "object",
@@ -233,7 +233,7 @@ Reading the response:
 • updated_at — last change to the fact (null if never edited); an old value may mean it is stale.
 • supersede_candidate {memory_id, summary, similarity, detected_at} — an OLDER near-duplicate this result likely replaces. A suggestion, never auto-applied. Accept: create_edge(source_id=<this memory_id>, target_id=<supersede_candidate.memory_id>, edge_type='supersedes') shadows the old fact out of default recall. Reject a deliberately separate pair: update_memory(memory_id, dismiss_supersede_candidate=true). It disappears once accepted or once the candidate is deleted.
 
-Returns: {status, results: [{memory_id, summary, context_summary?, type, importance, scope, score, tags, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?}], count, related_tags: [{tag, count}], context_id, context_name, context_display_name, context_is_private, context_is_locked, confidence: {level, top_score, prominence, relative_margin, result_count, rationale}, explore_hints?: [{memory_id, reason}], tag_suggestions?: {requested_tag: ['stored-tag (count)']}, degraded?, degraded_reason?}. Keys marked ? are omitted when empty (absent, never null): context_summary when none was written; superseded_by unless the memory is shadowed (needs include_superseded=true); contradicts when no memory opposes it; supersede_candidate unless a live suggestion exists; explore_hints unless requested; tag_suggestions unless a tag filter returned nothing and similar stored tags exist (advisory — the filter was not widened); degraded / degraded_reason unless the search was degraded. score is rounded to 4 decimals. related_tags: the up-to-10 most frequent tags among these results (candidates for a tag filter).""",
+Returns: {status, results: [{memory_id, summary, context_summary?, type, importance, scope, score, tags, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?}], count, related_tags: [{tag, count}], context_id, context_name, context_display_name, context_is_private, context_is_locked, confidence: {level, top_score, prominence, relative_margin, result_count, rationale}, explore_hints?: [{memory_id, reason}], tag_suggestions?: {requested_tag: ['stored-tag (count)']}, degraded?, degraded_reason?, context_summary_omitted?, truncated?}. Keys marked ? are omitted when empty (absent, never null): context_summary when none was written; superseded_by unless the memory is shadowed (needs include_superseded=true); contradicts when no memory opposes it; supersede_candidate unless a live suggestion exists; explore_hints unless requested; tag_suggestions unless a tag filter returned nothing and similar stored tags exist (advisory — the filter was not widened); degraded / degraded_reason unless the search was degraded. score is rounded to 4 decimals. related_tags: the up-to-10 most frequent tags among these results (candidates for a tag filter). Over max_chars, context_summary is dropped first (context_summary_omitted), then the lowest-ranked results (truncated: true).""",
             "inputSchema": {
                 "type": "object",
                 # ``query`` is the only unconditional requirement. The handler
@@ -254,6 +254,12 @@ Returns: {status, results: [{memory_id, summary, context_summary?, type, importa
                     "k": {
                         "type": "integer",
                         "description": "Number of results (default 5, max 100).",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 10000,
+                        "maximum": 100000,
+                        "description": "Response budget in characters, not tokens (default 20000).",
                     },
                     "use_rerank": {
                         "type": "boolean",
@@ -350,7 +356,7 @@ Large memories: nothing is cut silently, and the response stays within max_chars
             "readOnly": True,
             "description": """List Time Memories (type='time') whose scheduled window overlaps a time range, soonest first. Use for 'what's coming up?' questions. A deterministic time query, NOT semantic search — for topics use recall(). Create one by resolving the date yourself and calling remember(type='time', details={'trigger': {'year': 2026, 'month': 7}}); omit month/day for fuzzy timing.
 
-Returns: {status, results: [{memory_id, summary, type, trigger}], context_id, context_name, context_display_name, context_is_private, context_is_locked}. trigger is the memory's details.trigger (when it fires). With include_details=true each item carries the full details object instead of trigger (details.trigger is inside it); otherwise call reference(memory_id) for one memory's full content.""",
+Returns: {status, results: [{memory_id, summary, type, trigger}], context_id, context_name, context_display_name, context_is_private, context_is_locked}. trigger is the memory's details.trigger (when it fires). With include_details=true each item carries the full details object instead of trigger (details.trigger is inside it), but the later items get details_omitted + details_total_chars once the reply passes 20000 characters; call reference(memory_id) for one memory's full content.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -384,7 +390,7 @@ Returns: {status, results: [{memory_id, summary, type, trigger}], context_id, co
             "readOnly": True,
             "description": """List memories near a geographic point, nearest first with distance_m. Use for 'what happened around here?' questions. A deterministic spatial query over stored coordinates (details.location), NOT semantic search — for topics use recall(). Store a location on any memory type with remember(details={'location': {'lat': 35.68, 'lon': 139.76, 'label': 'optional'}}); lat/lon must be JSON numbers. update_memory replaces details wholesale — resend location or it is dropped.
 
-Returns: {status, results: [{memory_id, summary, type, details, distance_m}], context_id, context_name, context_display_name, context_is_private, context_is_locked}.""",
+Returns: {status, results: [{memory_id, summary, type, location, distance_m}], context_id, context_name, context_display_name, context_is_private, context_is_locked}. location is the memory's details.location. With include_details=true each item carries the full details object instead (later items get details_omitted + details_total_chars past 20000 characters); reference(memory_id) reads one memory in full.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id", "lat", "lon"],
@@ -410,6 +416,10 @@ Returns: {status, results: [{memory_id, summary, type, details, distance_m}], co
                         "type": "integer",
                         "description": "Max results (default 20, max 100).",
                     },
+                    "include_details": {
+                        "type": "boolean",
+                        "description": "Return each item's full details object instead of its location (default: false).",
+                    },
                 },
             },
         },
@@ -418,7 +428,7 @@ Returns: {status, results: [{memory_id, summary, type, details, distance_m}], co
             "readOnly": True,
             "description": """Load a context's pinned memories (delivery_mode='always'): notes context members marked as always relevant, e.g. goals or standing decisions. The deterministic counterpart to recall(): the complete, unranked set on every call — no search, no ranking. Pin with remember(delivery_mode='always') or update_memory(delivery_mode='always'); unpin with update_memory(delivery_mode='on_recall'). Items are Layers 1-2 only; use reference(memory_id) for full content.
 
-Returns: {status, memories: [{memory_id, summary, context_summary, type, importance, delivery_mode}], total_available, truncated, cap, context_id, context_name, context_display_name, context_is_private, context_is_locked}. If more pinned memories exist than cap, truncated is true and total_available is the real count (never silently dropped).""",
+Returns: {status, memories: [{memory_id, summary, context_summary, type, importance, delivery_mode}], total_available, truncated, cap, context_id, context_name, context_display_name, context_is_private, context_is_locked}. If more pinned memories exist than cap, or than fit max_chars, truncated is true and total_available is the real count (never silently dropped). Over max_chars, context_summary is left out first (context_summary_omitted: true).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -432,6 +442,12 @@ Returns: {status, memories: [{memory_id, summary, context_summary, type, importa
                         "type": "integer",
                         "description": "Max memories returned (1-1000). Omit for the server default.",
                     },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 10000,
+                        "maximum": 100000,
+                        "description": "Response budget in characters, not tokens (default 20000).",
+                    },
                 },
             },
         },
@@ -440,7 +456,7 @@ Returns: {status, memories: [{memory_id, summary, context_summary, type, importa
             "readOnly": True,
             "description": """Load a context's guardrail set — stored notes by context members — for a client-side hook: pinned memories (delivery_mode='always') plus memories marked with details.tool_trigger = {tool, on, match?, action}. Deterministic and cheap — no search, no ranking — trusted-tier rows only (connector-ingested memories are never returned). Each list is ordered importance DESC, created_at ASC, id ASC and capped on its own; cap bounds tool_triggered only, so a large pinned set never crowds guardrails out. The server validates tool_trigger patterns on write and never runs them; matching happens in the client hook. Contract and cache format: the 'Tool guardrails' section of the MCP tools docs.
 
-Returns: {status, format, version, pinned: [item], tool_triggered: [item], total_available, truncated, cap, pinned_cap, pinned_total_available, pinned_truncated, tool_triggered_total_available, tool_triggered_truncated, context_id, context_name, context_display_name, context_is_private, context_is_locked}. item = {memory_id, summary, context_summary (pinned only), type, importance, delivery_mode, tool_trigger|null, source_type, authored_by_caller, created_at, updated_at}. A memory that is both pinned and tool-triggered appears in both lists.""",
+Returns: {status, format, version, pinned: [item], tool_triggered: [item], total_available, truncated, cap, pinned_cap, pinned_total_available, pinned_truncated, tool_triggered_total_available, tool_triggered_truncated, context_id, context_name, context_display_name, context_is_private, context_is_locked}. item = {memory_id, summary, context_summary (pinned only), type, importance, delivery_mode, tool_trigger|null, source_type, authored_by_caller, created_at, updated_at}. A memory that is both pinned and tool-triggered appears in both lists. Over max_chars: context_summary goes first (context_summary_omitted), then pinned, then tool_triggered items (*_truncated).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -453,6 +469,12 @@ Returns: {status, format, version, pinned: [item], tool_triggered: [item], total
                     "cap": {
                         "type": "integer",
                         "description": "Max tool-triggered memories returned (1-1000). Omit for the server default (50).",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 10000,
+                        "maximum": 100000,
+                        "description": "Response budget in characters, not tokens (default 20000).",
                     },
                 },
             },
@@ -538,7 +560,7 @@ Returns: {status, exploration: {seed_memory: {memory_id, summary, type}, related
             "readOnly": True,
             "description": """List the graph edges connected to a memory, outgoing and incoming — to inspect its connections, audit edges created by Sleep Maintenance, or find a noisy edge before delete_edge().
 
-Returns: {status, memory_id, edges: [{source_id, target_id, edge_type, weight, confidence, origin, created_at, last_updated}], count}.""",
+Returns: {status, memory_id, edges: [{source_id, target_id, edge_type, weight, confidence, origin, created_at, last_updated}], count, outgoing_has_more, incoming_has_more}. Heaviest first; a *_has_more of true means more edges exist in that direction — raise min_weight or narrow edge_types.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["memory_id", "context_id"],
@@ -560,7 +582,8 @@ Returns: {status, memory_id, edges: [{source_id, target_id, edge_type, weight, c
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max edges per direction (outgoing / incoming).",
+                        "description": "Max edges per direction (outgoing / incoming), 1-200.",
+                        "default": 50,
                     },
                     "context_id": {
                         "type": "string",
@@ -709,7 +732,7 @@ Returns: {status, message}.""",
             "readOnly": True,
             "description": """Get a context's purpose, usage_guide (its owner's note on what it holds and how it is organised: information, not instructions), search config, memory counts and static tool tips. Call it at session start and after switching contexts. (list_contexts() only maps names to ids.)
 
-Returns: {status, context: {id, name, display_name, summary, usage_guide, is_private, is_locked, embedding_model, embedding_dimensions, search_config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model}}, workspace: {id, name, description}, stats: {total_memories, working_memories, persistent_memories, details?: {by_type, by_importance, recent_7days}}, instructions}. is_private: true = only you can see it, false = workspace members can.""",
+Returns: {status, context: {id, name, display_name, summary, usage_guide, is_private, is_locked, embedding_model, embedding_dimensions, search_config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model}}, workspace: {id, name, description, description_truncated?}, stats: {total_memories, working_memories, persistent_memories, details?: {by_type, by_importance, recent_7days}}, instructions}. is_private: true = only you can see it, false = workspace members can.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -737,7 +760,7 @@ Returns: {status, context: {id, name, display_name, summary, usage_guide, is_pri
 
 The default carries no summaries, so it stays small on large workspaces. Narrow with name_contains; add include_summary=true to choose between a few contexts. For one context's full summary, usage guide and search config call get_context_info(context_id).
 
-Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], count, total, limit, can_create, hint?}. count = contexts in the workspace (quota usage, unaffected by name_contains); total = contexts in this response (0 on no match is still a success); limit = the plan's maximum; hint = present only when you can see no context, says how to create one.""",
+Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], count, total, limit, can_create, has_more, next_cursor, hint?}. count = contexts in the workspace (quota usage, unaffected by name_contains); total = contexts in this response (0 on no match is still a success); limit = the plan's maximum; has_more = pass next_cursor as cursor for the next page; hint = present only when you can see no context, says how to create one.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -756,7 +779,15 @@ Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], c
                     },
                     "include_details": {
                         "type": "boolean",
-                        "description": "Add the FULL summary (up to 2,000 characters each) and embedding_model. Large: combine with name_contains. Wins over include_summary. Default: false.",
+                        "description": "Add the FULL summary (up to 2,000 characters each) and embedding_model. Without name_contains, page size is at most 20. Wins over include_summary. Default: false.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Contexts per page, 1-200 (default 100; 20 with include_details). A page also stops at 20000 characters.",
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "next_cursor from the previous page.",
                     },
                 },
             },
@@ -771,7 +802,7 @@ Returns: {status, contexts: [{id, name, is_private, is_locked, last_used_at}], c
 
 Examples: list_tags(context_id=..., prefix='auth') for autocomplete; sort='recent' for what is in use now; min_count=5 to hide one-offs; with_tags=['python'] for the tags that co-occur with python.
 
-Returns: {status, context_id, context_name, tags: [{tag, count, last_used_at}], total}. An empty context returns tags=[] and total=0, not an error. Soft-deleted memories are not counted.""",
+Returns: {status, context_id, context_name, tags: [{tag, count, last_used_at}], total, has_more}. has_more: more tags matched — narrow with prefix or min_count. An empty context returns tags=[] and total=0, not an error. Soft-deleted memories are not counted.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -783,7 +814,7 @@ Returns: {status, context_id, context_name, tags: [{tag, count, last_used_at}], 
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max tags returned (1-500, default 50).",
+                        "description": "Max tags returned (1-500, default 50); a page holds at most 200 (has_more).",
                     },
                     "min_count": {
                         "type": "integer",
@@ -1080,9 +1111,9 @@ Returns: {status, reports: [{report_id, context_id, status, started_at, complete
         {
             "name": "get_sleep_report",
             "readOnly": True,
-            "description": """Get one Sleep Maintenance run in full: per-phase results, cost tracking and the audit log of every action. Find report_ids with get_sleep_history().
+            "description": """Get one Sleep Maintenance run: per-phase results, cost tracking and its audit log of actions, a page at a time in id order. Find report_ids with get_sleep_history().
 
-Returns: {status, report: {report_id, context_id, status, started_at, completed_at, memories_processed, edges_created, memories_merged, memories_promoted, llm_calls_made, llm_tokens_used, memories_flagged, embedding_calls_made, error_message, edge_discovery_result, dedup_result, importance_result, consolidation_result, reindex_result}, actions: [{id, phase, action_type, memory_id, target_id, details, created_at}], action_count}. action_type: create_edge | merge | update_importance | promote | archive; details holds action-specific data (old/new values, similarity scores).""",
+Returns: {status, report: {report_id, context_id, status, started_at, completed_at, memories_processed, edges_created, memories_merged, memories_promoted, llm_calls_made, llm_tokens_used, memories_flagged, embedding_calls_made, error_message, edge_discovery_result, dedup_result, importance_result, consolidation_result, reindex_result}, actions: [{id, phase, action_type, memory_id, target_id, details, created_at}], action_count, actions_has_more, actions_next_cursor}. action_count is the run's total; pass actions_next_cursor as actions_cursor for the next page. An action too large for the page has details_omitted instead of details. action_type: create_edge | merge | update_importance | promote | archive; details holds action-specific data (old/new values, similarity scores).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["report_id"],
@@ -1091,6 +1122,21 @@ Returns: {status, report: {report_id, context_id, status, started_at, completed_
                         "type": "string",
                         "format": "uuid",
                         "description": "Sleep report UUID (from get_sleep_history).",
+                    },
+                    "actions_limit": {
+                        "type": "integer",
+                        "description": "Actions per page, 1-200.",
+                        "default": 50,
+                    },
+                    "actions_cursor": {
+                        "type": "string",
+                        "description": "actions_next_cursor from the previous page.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 10000,
+                        "maximum": 100000,
+                        "description": "Response budget in characters, not tokens (default 20000).",
                     },
                 },
             },
@@ -1601,7 +1647,7 @@ Returns: {status, run_id, cluster_index, cluster_id, label, description, count, 
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Memories per page (1-200, default 50).",
+                        "description": "Memories per page (1-100, default 25).",
                     },
                     "cursor": {
                         "type": "string",
@@ -1718,13 +1764,17 @@ Returns: {status, file_id, deleted}.""",
             "name": "list_files",
             "description": """List uploaded, non-deleted files you can access in the workspace, newest first.
 
-Returns: {status, files: [{id, context_id, filename, content_type, size_bytes, sha256, status, created_at, uploaded_at}], count}.""",
+Returns: {status, files: [{id, context_id, filename, content_type, size_bytes, sha256, status, created_at, uploaded_at}], count, has_more, next_cursor}. has_more: pass next_cursor as cursor for the next page.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "limit": {
                         "type": "integer",
-                        "description": "Number of rows to return (1-500, default 50).",
+                        "description": "Files per page, 1-100 (default 50).",
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "next_cursor from the previous page.",
                     },
                     "workspace_id": {
                         "type": "string",
@@ -1785,7 +1835,7 @@ Returns: {status, key}.""",
                         "description": "State key (max 255 chars). Re-using a key overwrites its value.",
                     },
                     "value": {
-                        "description": "Any JSON value to store (object, array, string, number or boolean).",
+                        "description": "Any JSON value to store (object, array, string, number or boolean), at most 16384 characters as compact JSON.",
                     },
                     "ttl_seconds": {
                         "type": "integer",
@@ -1798,10 +1848,10 @@ Returns: {status, key}.""",
         {
             "name": "get_state",
             "readOnly": True,
-            "description": """Read ephemeral agent run-state (see set_state). Pass key for one value; omit it to list every live entry of the context. Expired entries are never returned.
+            "description": """Read ephemeral agent run-state (see set_state). Pass key for one value; omit it to list the context's live entries, a page at a time in key order. Expired entries are never returned.
 
 Returns (with key): {status, key, value, found}. found is false (value null) when the key is absent or expired — not an error.
-Returns (without key): {status, states: {key: value, ...}, count}. An empty states object with count 0 is a normal success.""",
+Returns (without key): {status, states: {key: value, ...}, count, has_more, next_cursor, omitted_keys?}. An empty states object with count 0 is a normal success. has_more: pass next_cursor as cursor for the next page. omitted_keys: values too large for this reply — read each with key.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1812,7 +1862,22 @@ Returns (without key): {status, states: {key: value, ...}, count}. An empty stat
                     },
                     "key": {
                         "type": "string",
-                        "description": "Omit to list all live entries of the context.",
+                        "description": "Omit to list the live entries of the context.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "List mode: entries per page, 1-200.",
+                        "default": 50,
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "List mode: next_cursor from the previous page.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 10000,
+                        "maximum": 100000,
+                        "description": "List mode: response budget in characters, not tokens (default 20000).",
                     },
                 },
                 "required": ["context_id"],
@@ -1935,10 +2000,20 @@ Returns: {status, agent: {id, name, status, enforcement_mode, ...}}.""",
             "readOnly": True,
             "description": """List the workspace's registered agents, newest first (owner/admin only), with status (active | suspended | retired) and enforcement_mode (shadow | enforce).
 
-Returns: {status, agents: [...], count}.""",
+Returns: {status, agents: [...], count, total_available, has_more, next_cursor}. description is a 200-character preview (description_truncated: true when cut; get_agent has it whole). has_more: pass next_cursor as cursor.""",
             "inputSchema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Agents per page, 1-100.",
+                        "default": 50,
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "description": "next_cursor from the previous page.",
+                    },
+                },
             },
         },
         {
@@ -2162,7 +2237,7 @@ Returns: {status, deleted, binding_id}.""",
             "readOnly": True,
             "description": """Rehydrate an agent's working state at session start in ONE call: context info + pinned memories + a trusted-only recall (only when query is given) + upcoming time memories + agent state, each bounded and filtered like its standalone tool. Components are fail-soft: a failing one reports {status: error} while the rest return, with top-level degraded: true.
 
-Returns: {status, degraded, agent, context, instructions, components: {pinned, recall, upcoming, state, policy}, correlation, generated_at}.""",
+Returns: {status, degraded, agent, context, instructions, components: {pinned, recall, upcoming, state, policy}, correlation, generated_at}. The reply is held to max_chars: context_summary goes first (context_summary_omitted: true), then pinned / recall / upcoming items from the end, each such component flagged truncated: true. state is a get_state page (has_more, next_cursor).""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2191,6 +2266,7 @@ Returns: {status, degraded, agent, context, instructions, components: {pinned, r
                     "pinned_cap": {
                         "type": "integer",
                         "description": "Clamped like load_pinned's cap (1-1000).",
+                        "default": 20,
                     },
                     "upcoming_until": {
                         "type": "string",
@@ -2227,6 +2303,12 @@ Returns: {status, degraded, agent, context, instructions, components: {pinned, r
                         },
                         "required": ["seed", "exploration_floor", "candidate_pool_k"],
                         "description": "Evaluation-only selection evidence policy; requires query and the recall component.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 10000,
+                        "maximum": 100000,
+                        "description": "Response budget in characters, not tokens (default 20000).",
                     },
                 },
                 "required": ["agent_id"],

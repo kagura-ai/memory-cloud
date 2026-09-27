@@ -229,7 +229,7 @@ The grammar guarantees that a pattern *compiles* on both sides; it does not make
 
 ### `load_guardrails` — the deterministic read
 
-MCP `load_guardrails(context_id, cap?)` and the REST twin `POST /api/v1/memory/guardrails` with body `{"context_id": "<uuid>", "cap"?: 1..1000}`. Read-only, rate-limit exempt, plain SQL — no search, no ranking, no embedding, no vector-store call, no Hebbian write.
+MCP `load_guardrails(context_id, cap?, max_chars?)` and the REST twin `POST /api/v1/memory/guardrails` with body `{"context_id": "<uuid>", "cap"?: 1..1000}`. Read-only, rate-limit exempt, plain SQL — no search, no ranking, no embedding, no vector-store call, no Hebbian write.
 
 ```json
 {
@@ -252,6 +252,7 @@ MCP `load_guardrails(context_id, cap?)` and the REST twin `POST /api/v1/memory/g
 - **Order** inside each list: `importance DESC, created_at ASC, id ASC` — deterministic down to the id, so the cap and every consumer cut the same entries. Consumers keep this order and must not re-sort.
 - **Both lists.** A memory that is both pinned and tool-triggered appears in both lists; its `pinned` entry has `tool_trigger: null`, its `tool_triggered` entry carries the object. Clients dedupe by `memory_id` and inject once.
 - `total_available` = `pinned_total_available + tool_triggered_total_available`; `truncated` = either lane truncated; `cap` = the tool-triggered cap. The per-lane fields say which protection is incomplete. Totals are the context's set sizes before the binding filter.
+- **Reply budget (MCP only).** The MCP reply is held to `max_chars` characters (default 20,000, range 10,000–100,000; see [Response bounds](#response-bounds)). When the lists do not fit, `context_summary` is left out of every item first (`context_summary_omitted: true`), then pinned items are cut from the end, then tool-triggered items; a cut sets that lane's `*_truncated` and `truncated`, and the `*_total_available` counts stay real. `version` still describes the whole served set. The plugin hook asks for `max_chars: 100000`. The REST twin is not budgeted.
 - **Trusted only, unconditionally.** Both lanes apply `Context.trust_tier == "trusted"` AND `source_type != "connector"`. There is no parameter to turn this off from any surface.
 - **Layers.** Pinned items carry L1 + L2 (`summary`, `context_summary`); tool-triggered items are L1 only (`context_summary` is `null`). Never `content`, never `details` beyond `tool_trigger`, never tags or scores.
 - **Provenance.** `source_type` and `authored_by_caller` (the caller wrote this row) let a client label a foreign-authored guardrail; `updated_at` falls back to `created_at`.
@@ -370,9 +371,11 @@ The v0.49.0 control plane builds on existing workspace RBAC: agents are registry
 | `name_contains` | Case-insensitive substring match on the context name or display name (trimmed, ≤100 characters; blank = no filter). No match is a success with an empty list. |
 | `include_stats` | Adds `memory_count` per item. |
 | `include_summary` | Adds `summary` truncated to 300 characters; items that were cut also carry `summary_truncated: true` (a null summary stays null). |
-| `include_details` | Adds the full `summary` (up to 2,000 characters each) and `embedding_model` — the previous default item shape ([#1600](https://github.com/kagura-ai/memory-cloud/issues/1600)). Wins over `include_summary`; combine it with `name_contains`. |
+| `include_details` | Adds the full `summary` (up to 2,000 characters each) and `embedding_model` — the previous default item shape ([#1600](https://github.com/kagura-ai/memory-cloud/issues/1600)). Wins over `include_summary`; combine it with `name_contains`. Without `name_contains` the page size defaults to 20 and a larger `limit` is a `validation_error` ([#1743](https://github.com/kagura-ai/memory-cloud/issues/1743)). |
+| `limit` | Contexts per page, clamped to 1–200 (default 100, or 20 with `include_details` and no `name_contains`). A page also stops once its items reach the 20,000-character response budget. |
+| `cursor` | The `next_cursor` of the previous page. Pages follow the most-recently-used order, so a context used between two calls can move between pages. |
 
-Envelope: `{status, contexts, count, total, limit, can_create}`, plus `hint` on an empty list (below). `count` is the number of contexts in the workspace (quota usage against `limit`; it can exceed what you are allowed to see and is not affected by `name_contains`), `total` is the number of contexts in this response. A non-boolean flag or an over-long `name_contains` returns a `validation_error`; an explicit `null` for any parameter is treated as omitted.
+Envelope: `{status, contexts, count, total, limit, can_create, has_more, next_cursor}`, plus `hint` on an empty list (below). `has_more: true` means more contexts match: pass `next_cursor` as `cursor`. `count` is the number of contexts in the workspace (quota usage against `limit`; it can exceed what you are allowed to see and is not affected by `name_contains`), `total` is the number of contexts in this response. A non-boolean flag or an over-long `name_contains` returns a `validation_error`; an explicit `null` for any parameter is treated as omitted.
 
 When you can see no context at all, the envelope also carries `hint`: one line saying that a workspace owner can create one with `create_context(name=...)` and an admin with `create_context(name=..., is_private=false)` (only owners can create private contexts, the default), that a member can ask an owner or admin for a context or for access, and that a client whose tool list has no `create_context` (for example under `?profile=core`) can create it in the web UI or reconnect without `?profile=core`. With no current workspace, `create_context` would fail with `workspace_required`, so the hint instead says to create or select a workspace in the web UI and call `list_contexts` again. It is absent whenever at least one context is visible, including when `name_contains` matches nothing, and when the access lookup itself failed (that still answers an empty list, as before, but is not an empty account). No context is ever created automatically ([#1658](https://github.com/kagura-ai/memory-cloud/issues/1658)).
 
@@ -514,6 +517,39 @@ The same shape answers a server failure before or around a tool call: a session 
 - `delete_context` refusing a context that cannot be deleted (the default context) now returns `validation_error` instead of `permission_denied`. `setup_connector` names the field it cannot parse (`quota_events_per_hour`, `virtual_key_valid_until`) in `message` and `field`.
 - An MCP request whose credentials could not be checked (database down) got `401 invalid_request` with the driver's error text, which made clients re-authorize. It is now `503 temporarily_unavailable` with `Retry-After`. A failure opening a session was `500 {"error": "Internal error"}`, and other transport failures a `text/plain` "Internal Server Error"; both are now the JSON-RPC error described above.
 - A [tool guardrail](#tool-guardrails) with `on: "result"` whose `match` targeted the raw exception text of one of these tools no longer matches. Match the `error` code instead.
+
+## Response bounds
+
+MCP clients cap what a tool result may put in front of the model — about 25k tokens in Claude Code and about 150k characters on claude.ai; a larger result is cut or saved to a file. Every tool whose reply grows with stored data is therefore bounded, and a default call stays well under those limits ([#1685](https://github.com/kagura-ai/memory-cloud/issues/1685) for `reference`, [#1743](https://github.com/kagura-ai/memory-cloud/issues/1743) for the rest). A reply is never cut silently: it says so with one of the flags below.
+
+- **`max_chars`** — a budget in characters of the compact JSON reply (not tokens), default 20,000, range 10,000–100,000; a value outside the range is a `validation_error`. 20,000 keeps an English reply near 5k tokens and a Japanese one under the 25k-token cap.
+- **`limit` / `cursor`** — a page size (an integer out of range is clamped, not refused) and the `next_cursor` of the previous page. `has_more: true` means more items exist; `next_cursor` is `null` on the last page.
+- **`*_truncated` / `truncated`** — items were left out; `total_available`, where present, keeps the real count.
+- **`<field>_omitted` + `<field>_total_chars`** — a field was left out of an item; read the memory with `reference(memory_id)`.
+- **`context_summary_omitted: true`** — the list did not fit, so every item's `context_summary` was left out before any item was.
+
+| Tool | Default | Largest | Flags |
+|------|---------|---------|-------|
+| `recall` | `max_chars` 20,000 | `max_chars` 100,000 (k up to 100) | `context_summary_omitted`, then `truncated` (lowest-ranked results cut; `count` = returned) |
+| `load_pinned` | `max_chars` 20,000 | 100,000 | `context_summary_omitted`, then `truncated` with the real `total_available` |
+| `load_guardrails` | `max_chars` 20,000 | 100,000 | `context_summary_omitted`, then pinned, then tool-triggered items (`pinned_truncated`, `tool_triggered_truncated`) |
+| `get_agent_bootstrap` | `max_chars` 20,000 for the whole envelope; `pinned_cap` 20 | 100,000 | `context_summary_omitted`, then `truncated: true` on the pinned / recall / upcoming components, in that order; `state` is a `get_state` page |
+| `list_edges` | `limit` 50 per direction | 200 per direction | `outgoing_has_more`, `incoming_has_more` (heaviest edges first) |
+| `get_state` (no key) | `limit` 50, `max_chars` 20,000 | `limit` 200, `max_chars` 100,000 | `has_more` / `next_cursor` (key order); `omitted_keys` for a value too large for the page |
+| `get_sleep_report` | `actions_limit` 50, `max_chars` 20,000 | 200 / 100,000 | `actions_has_more` / `actions_next_cursor`; `details_omitted` on an action larger than the page; `action_count` is the run's total |
+| `recall_nearby` | items carry `location` (= `details.location`) | `include_details=true` | past 20,000 characters the later items get `details_omitted` |
+| `recall_upcoming` | items carry `trigger` | `include_details=true` | past 20,000 characters the later items get `details_omitted` |
+| `list_contexts` | `limit` 100 (20 with `include_details` and no `name_contains`) | 200, and a page stops at 20,000 characters | `has_more` / `next_cursor` |
+| `list_tags` | `limit` 50 | a page holds at most 200 tags (`limit` 1–500 is still accepted) | `has_more` (narrow with `prefix` / `min_count`) |
+| `list_files` | `limit` 50 | 100 | `has_more` / `next_cursor` |
+| `list_agents` | `limit` 50, descriptions as 200-character previews | 100 | `has_more` / `next_cursor`, `description_truncated` |
+| `get_cluster` | `limit` 25, page stops at 20,000 characters | 100, page stops at 100,000 characters | `next_cursor`; `tags_omitted` on a member larger than the page |
+
+Write-side caps keep the stored data these replies carry in proportion. They apply to new writes only; rows stored before them still read back.
+
+- `remember` / `update_memory`: at most 50 tags, each at most 100 characters.
+- `set_state`: a value of at most 16,384 characters as compact JSON.
+- Workspace description (web UI / REST): at most 1,000 characters; `get_context_info` serves a longer stored one cut to 1,000 with `workspace.description_truncated: true`.
 
 ## Usage notes
 

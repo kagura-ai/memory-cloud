@@ -57,10 +57,11 @@ async def oauth_protected_resource():
         # NOTE: resource_policy_uri intentionally omitted (#993). There is no
         # published resource-policy document; the previous value pointed at the
         # Swagger UI (/docs), which is not a policy. OPTIONAL per RFC 9728.
-        # mcp_sse_endpoint: stable, documented Kagura extension (non-RFC). The
-        # MCP SSE transport entrypoint for Claude Desktop / Claude Code. Retained
-        # as a committed part of the 1.0 surface.
-        "mcp_sse_endpoint": f"{mcp_base}/sse",
+        # mcp_endpoint: documented Kagura extension (non-RFC) naming the MCP
+        # Streamable HTTP endpoint. #1740: it replaces ``mcp_sse_endpoint``,
+        # which advertised ``/mcp/sse`` — answered 410 since the SSE transport
+        # was removed (#248).
+        "mcp_endpoint": mcp_base,
     }
 
 
@@ -123,9 +124,16 @@ async def openid_configuration(request: Request):
             "client_secret_post",
             "client_secret_basic",
         ],
-        # Introspection endpoint auth methods (RFC 7662, Issue #157)
+        # RFC 7009 §2.1: public clients identify themselves by client_id (#1741)
+        "revocation_endpoint_auth_methods_supported": [
+            "none",
+            "client_secret_post",
+            "client_secret_basic",
+        ],
+        # RFC 7662 §2.1: introspection needs a confidential client (#1741)
         "introspection_endpoint_auth_methods_supported": [
-            "none",  # Public endpoint
+            "client_secret_post",
+            "client_secret_basic",
         ],
         # Additional OpenID Connect fields (optional but recommended)
         "response_modes_supported": ["query"],
@@ -178,7 +186,15 @@ async def oauth_authorization_server(request: Request):
             "client_secret_post",
             "client_secret_basic",
         ],
+        # RFC 7009 §2.1: public clients identify themselves by client_id (#1741)
+        "revocation_endpoint_auth_methods_supported": [
+            "none",
+            "client_secret_post",
+            "client_secret_basic",
+        ],
+        # RFC 7662 §2.1: introspection needs a confidential client (#1741)
         "introspection_endpoint_auth_methods_supported": [
-            "none",  # RFC 7662 (Issue #157)
+            "client_secret_post",
+            "client_secret_basic",
         ],
     }

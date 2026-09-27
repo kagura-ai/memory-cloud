@@ -17,24 +17,23 @@ class TestMCPServerE2E:
         with TestClient(app) as test_client:
             yield test_client
 
-    def test_mcp_sse_endpoint_exists(self, client):
-        """Test that MCP SSE endpoint exists."""
-        # OPTIONS request to check CORS
-        response = client.options("/mcp/sse")
+    def test_mcp_streamable_http_endpoint_is_advertised(self, client):
+        """The protected-resource metadata names the Streamable HTTP endpoint,
+        not the removed SSE one (#248, #1740)."""
+        data = client.get("/.well-known/oauth-protected-resource").json()
 
-        # Should not be 404
-        assert response.status_code != 404
+        assert "mcp_sse_endpoint" not in data
+        assert data["mcp_endpoint"].endswith("/mcp")
 
-    def test_mcp_sse_connection(self, client):
-        """Test SSE connection establishment."""
-        # GET request to establish SSE
-        response = client.get(
-            "/mcp/sse",
-            headers={"Accept": "text/event-stream"},
+    def test_mcp_streamable_http_endpoint_requires_auth(self, client):
+        """POST /mcp exists and challenges an unauthenticated client."""
+        response = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "ping"},
         )
 
-        # Should return SSE or authentication required
-        assert response.status_code in [200, 401, 403]
+        assert response.status_code == 401
+        assert "www-authenticate" in response.headers
 
     def test_mcp_remember_tool(self, client):
         """Test MCP remember tool execution."""

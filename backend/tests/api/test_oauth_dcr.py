@@ -805,3 +805,60 @@ class TestDcrRegisteredScope:
         assert response.status_code == 201, response.text
         assert response.json()["scope"] == stored
         assert fake_session.add.call_args.args[0].scope == stored
+
+
+class TestDcrRateLimitExemption:
+    """``OAUTH_DCR_RATE_LIMIT_EXEMPT_CIDRS`` lifts the per-IP DCR limit (#1741).
+
+    A connector platform registers a client on every fresh connection from a
+    shared egress range, so the operator can exempt that range; everyone else
+    keeps the per-IP limit.
+    """
+
+    _BODY = {
+        # Rejected at provider detection (400): proves the request got past
+        # the rate limit without touching the database.
+        "client_name": "MyRandomApp",
+        "redirect_uris": ["https://attacker.example/cb"],
+        "token_endpoint_auth_method": "none",
+    }
+
+    def _post(self, monkeypatch, client_ip: str, exempt: str):
+        from config.settings import get_settings
+
+        monkeypatch.setattr(get_settings(), "oauth_dcr_rate_limit_exempt_cidrs", exempt)
+        over_limit = AsyncMock(return_value=6)
+        with (
+            patch("api.routes.oauth.increment_counter", over_limit),
+            TestClient(app, client=(client_ip, 50000)) as client,
+        ):
+            response = client.post("/api/v1/oauth/register", json=self._BODY)
+        return response, over_limit
+
+    @pytest.mark.parametrize(
+        ("client_ip", "exempt"),
+        [
+            ("203.0.113.7", "203.0.113.0/24"),
+            ("203.0.113.7", "198.51.100.0/24, 203.0.113.0/24"),
+            ("2001:db8::1", "2001:db8::/32"),
+            ("::ffff:203.0.113.7", "203.0.113.0/24"),
+        ],
+    )
+    def test_exempt_address_skips_the_limit(self, monkeypatch, client_ip: str, exempt: str):
+        response, counter = self._post(monkeypatch, client_ip, exempt)
+        assert response.status_code == 400, response.text
+        assert response.json()["error"] == "invalid_client_metadata"
+        counter.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("client_ip", "exempt"),
+        [
+            ("198.51.100.7", "203.0.113.0/24"),
+            ("203.0.113.7", ""),
+            ("testclient", "203.0.113.0/24"),
+        ],
+    )
+    def test_other_addresses_keep_the_limit(self, monkeypatch, client_ip: str, exempt: str):
+        response, counter = self._post(monkeypatch, client_ip, exempt)
+        assert response.status_code == 429, response.text
+        counter.assert_awaited_once()

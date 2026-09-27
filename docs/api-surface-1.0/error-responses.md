@@ -137,7 +137,10 @@ Requests whose `method` the transport does not implement (anything other than `i
 |---|---|---|
 | `-32601` | unknown / unimplemented request method (standard) | `handle_streamable_http_post` — terminal branch |
 | `-32602` | `tools/list` on a URL whose tool profile cannot be served — unknown `?profile=` value, or a `?tools=` allowlist matching no tool (#1601); no `data` | `handle_streamable_http_post` — `tools/list` branch |
-| `-32600` | body is not a single JSON-RPC object (scalar / batch array), or a message without a string `method` — with or without an `id`, so a malformed id-less envelope is not mistaken for a notification — HTTP **400** (standard) | `handle_streamable_http_post` — envelope guards |
+| `-32600` | body is not a JSON-RPC object (a scalar, or a batch array on a session that did not negotiate `2025-03-26`), or a message without a string `method` — with or without an `id`, so a malformed id-less envelope is not mistaken for a notification — HTTP **400** (standard) | `handle_streamable_http_post` / `_dispatch_message` — envelope guards |
+| `-32600` | on a `2025-03-26` session: an empty batch, a batch of more than 50 messages, or one containing `initialize` — HTTP **400**. Other invalid elements get their own `-32600` inside the answer array (#1740) | `_handle_batch` |
+
+**Origin (#1740).** Before authentication, on both eras and every method, a request whose `Origin` header is present and not allow-listed (`CORS_ORIGINS`, the `FRONTEND_URL` origin, `MCP_ALLOWED_ORIGINS`; `null` never is) gets HTTP **403** with `{"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "Forbidden: the request Origin is not allowed for this MCP server"}}`. A request without `Origin` is not affected.
 
 #### Modern (MCP 2026-07-28) requests — stateless path
 
@@ -148,13 +151,13 @@ The server is dual-era (#1544). The tables above describe the **legacy** half (`
 | 400 | `-32600` | message without a string `method`, or a request `id` that is not a string / integer |
 | 400 | `-32602` | `_meta.protocolVersion` not a string, `_meta.clientCapabilities` present but not an object; `tools/call` without a string `name`, or with `arguments` that is neither an object nor `null` (an explicit `null` is treated as omitted, like the reference SDK) |
 | 400 | `-32602` | `tools/list` on a URL whose tool profile cannot be served — unknown `?profile=` value, or a `?tools=` allowlist matching no tool (#1601). The legacy path keeps HTTP **200** for the same code |
-| 400 | `-32020` **HeaderMismatch** | `MCP-Protocol-Version`, `Mcp-Method` or (for `tools/call`) `Mcp-Name` header present but undecodable or different from the body value (`Mcp-Name` is Base64-sentinel-decoded first) |
+| 400 | `-32020` **HeaderMismatch** | `MCP-Protocol-Version`, `Mcp-Method` or (for `tools/call`) `Mcp-Name` header present but undecodable or different from the body value (`Mcp-Name` is Base64-sentinel-decoded first), or absent (#1740; not for `server/discover`, and not with `MCP_REQUIRE_MIRRORED_HEADERS=false`) |
 | 400 | `-32022` **UnsupportedProtocolVersion** | requested version is not a modern revision this server serves — settled before every other rule; `data` = `{ "supported": [...], "requested": "..." }`. `supported` lists the legacy revisions too — they are reachable through `initialize` |
 | 404 | `-32601` | unknown / unimplemented method (`resources/*`, `prompts/*`, `subscriptions/listen`, …). The legacy path keeps HTTP **200** for the same code |
 | 200 | `-32602` | an exception escaping `execute_tool_call` that the #1684 vocabulary classifies as `validation_error` (a plain `ValueError`, or a 4xx `MemoryCloudException` with no more specific code) |
 | 200 | `-32603` | any other exception escaping `execute_tool_call`. `message` and `data` come from the #1684 vocabulary (§4, §5) — the exception text is logged, not returned. The legacy-range `-32001` / `-32002` are **not** used on this path |
 
-**Deliberate leniency.** The spec makes the mirrored headers and `_meta.clientCapabilities` MUSTs. Their *absence* is tolerated — the request is served and a warning naming the gaps is logged — because nothing here routes on those headers or relies on a client capability; only a header that *contradicts* the body is rejected. The `MCP-Protocol-Version` header is likewise not an era signal (legacy session clients send it too).
+**Mirrored headers.** The spec makes the mirrored headers MUSTs, and since #1740 an absent one is answered `400` `-32020` like a contradicting one. `MCP_REQUIRE_MIRRORED_HEADERS=false` restores the earlier leniency: the request is served and a warning naming the gaps is logged; a contradicting header is still rejected. `server/discover` is exempt either way — it is the probe a client sends before it knows what to mirror. An absent `_meta.clientCapabilities` (body metadata nothing here relies on) stays tolerated and logged. The `MCP-Protocol-Version` header is not an era signal (legacy session clients send it too).
 
 Successful results carry `resultType: "complete"` and `_meta["io.modelcontextprotocol/serverInfo"]`; `server/discover` and `tools/list` additionally carry the `ttlMs` / `cacheScope` caching hints.
 
