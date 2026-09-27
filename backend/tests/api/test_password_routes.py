@@ -8,6 +8,7 @@ each flow revokes, and the auth dependency of each route.
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,7 +18,8 @@ from fastapi import BackgroundTasks
 from api.main import app
 from api.routes import password as password_routes
 from auth.dependencies import require_session_auth
-from services.password_account_service import PendingResetEmail
+from db.base import get_db
+from services import password_account_service as password_service_module
 from utils.exceptions import RateLimitError, RedisError
 
 
@@ -45,7 +47,6 @@ def counters(monkeypatch) -> dict[str, int]:
 def service(monkeypatch) -> MagicMock:
     instance = MagicMock()
     instance.request_reset = AsyncMock(return_value=None)
-    instance.send_reset_email = AsyncMock()
     instance.complete_reset = AsyncMock(return_value="u-1")
     instance.complete_setup = AsyncMock(return_value="u-1")
     instance.request_setup = AsyncMock()
@@ -63,71 +64,99 @@ def sessions(monkeypatch) -> MagicMock:
     return manager
 
 
-_PENDING = PendingResetEmail(
-    to_email="p@example.test", reset_url="https://x/password/reset?token=t", expires_in_minutes=30
-)
+@pytest.fixture
+def session_factory(monkeypatch) -> MagicMock:
+    """Stand-in for the background task's own session factory.
+
+    The request path must never touch it: the lookup, the token and the audit
+    row all happen after the response.
+    """
+    factory = MagicMock()
+    monkeypatch.setattr(password_service_module, "_get_session_factory", factory)
+    return factory
+
+
+def _scheduled(tasks: BackgroundTasks) -> list[tuple[object, dict]]:
+    return [(task.func, dict(task.kwargs)) for task in tasks.tasks]
 
 
 class TestResetRequest:
     @pytest.mark.asyncio
-    async def test_same_answer_whether_or_not_an_account_matched(self, counters, service) -> None:
-        body = password_routes.PasswordResetRequestBody(email="a@example.test")
-
+    async def test_same_answer_and_same_work_whether_or_not_an_account_matched(
+        self, counters, service, session_factory
+    ) -> None:
+        # One address names an account and one does not; the request path
+        # cannot tell them apart because it never looks.
         miss_tasks = BackgroundTasks()
-        miss = await password_routes.request_password_reset(body, _request(), miss_tasks, db=None)
-
-        service.request_reset.return_value = _PENDING
+        miss = await password_routes.request_password_reset(
+            password_routes.PasswordResetRequestBody(email="nobody@example.test"),
+            _request(),
+            miss_tasks,
+        )
         hit_tasks = BackgroundTasks()
         hit = await password_routes.request_password_reset(
-            password_routes.PasswordResetRequestBody(email="b@example.test"),
+            password_routes.PasswordResetRequestBody(email="somebody@example.test"),
             _request(),
             hit_tasks,
-            db=None,
         )
 
         assert miss.model_dump() == hit.model_dump()
-        assert miss_tasks.tasks == []
-        assert len(hit_tasks.tasks) == 1  # the email goes out after the response
+        ((miss_func, miss_kwargs),) = _scheduled(miss_tasks)
+        ((hit_func, hit_kwargs),) = _scheduled(hit_tasks)
+        assert miss_func is hit_func is password_routes.process_reset_request
+        assert miss_kwargs.pop("email") == "nobody@example.test"
+        assert hit_kwargs.pop("email") == "somebody@example.test"
+        assert miss_kwargs == hit_kwargs
+        # No lookup, token, audit row or commit on the request path.
+        session_factory.assert_not_called()
+        service.request_reset.assert_not_awaited()
+
+    def test_request_path_takes_no_db_session(self) -> None:
+        assert "db" not in inspect.signature(password_routes.request_password_reset).parameters
+        route = TestRouteWiring._route("/api/v1/auth/password/reset-request", "POST")
+        assert get_db not in TestRouteWiring._dependency_calls(route)
 
     @pytest.mark.asyncio
-    async def test_email_is_normalized(self, counters, service) -> None:
+    async def test_email_is_normalized(self, counters, session_factory) -> None:
+        tasks = BackgroundTasks()
         body = password_routes.PasswordResetRequestBody(email="  Person@Example.TEST ")
-        await password_routes.request_password_reset(body, _request(), BackgroundTasks(), db=None)
-        assert service.request_reset.await_args.kwargs["email"] == "person@example.test"
+        await password_routes.request_password_reset(body, _request(), tasks)
+        ((_, kwargs),) = _scheduled(tasks)
+        assert kwargs["email"] == "person@example.test"
+        assert kwargs["ip_address"] == "192.0.2.10"
+        assert kwargs["user_agent"] == "pytest"
 
     @pytest.mark.asyncio
-    async def test_per_ip_limit_is_a_429(self, counters, service) -> None:
+    async def test_per_ip_limit_is_a_429(self, counters, session_factory) -> None:
         for i in range(password_routes._RESET_REQUESTS_PER_IP):
             body = password_routes.PasswordResetRequestBody(email=f"u{i}@example.test")
-            await password_routes.request_password_reset(
-                body, _request(), BackgroundTasks(), db=None
-            )
+            await password_routes.request_password_reset(body, _request(), BackgroundTasks())
         with pytest.raises(RateLimitError):
             await password_routes.request_password_reset(
                 password_routes.PasswordResetRequestBody(email="z@example.test"),
                 _request(),
                 BackgroundTasks(),
-                db=None,
             )
 
     @pytest.mark.asyncio
-    async def test_per_email_limit_is_silent(self, counters, service) -> None:
-        service.request_reset.return_value = _PENDING
+    async def test_per_email_limit_is_silent(self, counters, session_factory) -> None:
         answers = []
+        scheduled = 0
         for i in range(password_routes._RESET_REQUESTS_PER_EMAIL + 2):
+            tasks = BackgroundTasks()
             answers.append(
                 await password_routes.request_password_reset(
                     password_routes.PasswordResetRequestBody(email="same@example.test"),
                     _request(ip=f"192.0.2.{i}"),
-                    BackgroundTasks(),
-                    db=None,
+                    tasks,
                 )
             )
+            scheduled += len(tasks.tasks)
         assert {a.status for a in answers} == {"accepted"}
-        assert service.request_reset.await_count == password_routes._RESET_REQUESTS_PER_EMAIL
+        assert scheduled == password_routes._RESET_REQUESTS_PER_EMAIL
 
     @pytest.mark.asyncio
-    async def test_redis_outage_fails_open(self, monkeypatch, service) -> None:
+    async def test_redis_outage_fails_open(self, monkeypatch, session_factory) -> None:
         monkeypatch.setattr(
             password_routes, "increment_counter", AsyncMock(side_effect=RedisError("down"))
         )
@@ -135,7 +164,6 @@ class TestResetRequest:
             password_routes.PasswordResetRequestBody(email="a@example.test"),
             _request(),
             BackgroundTasks(),
-            db=None,
         )
         assert answer.status == "accepted"
 

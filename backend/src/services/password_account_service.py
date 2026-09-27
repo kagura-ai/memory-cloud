@@ -22,6 +22,7 @@ Raw tokens, reset URLs and passwords are never logged or placed in exceptions.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.password import hash_password, verify_password
 from auth.password_policy import PasswordPolicyError, validate_password_policy
 from config.settings import get_settings
+from db.base import _get_session_factory
 from models.auth import AuditLog, User, UserOAuthProvider
 from services.email_action_token_service import EmailActionTokenService, token_ttl
 from services.email_service import EmailService, get_email_service
@@ -167,10 +169,11 @@ class PasswordAccountService:
     ) -> PendingResetEmail | None:
         """Issue a reset link when ``email`` names an eligible account.
 
-        The token is committed here and the email is returned for the caller
-        to send AFTER responding, so the response takes the same time whether
-        or not an account matched. A failed send strands nothing: the link just
-        expires, and a new request invalidates it.
+        Runs after the response (see ``process_reset_request``): the lookup,
+        the token, the audit row and the commit all differ between a hit and
+        a miss, so none of them may happen on the request path. A failed send
+        strands nothing: the link just expires, and a new request invalidates
+        it.
 
         Args:
             email: The address as typed.
@@ -463,6 +466,43 @@ class PasswordAccountService:
                 user_agent=user_agent,
             )
         )
+
+
+async def process_reset_request(
+    *,
+    email: str,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+    session_factory: Callable[[], AsyncSession] | None = None,
+    email_service: EmailService | None = None,
+) -> None:
+    """Do a reset request's work after the response; never raises.
+
+    The route answers every reset request with the same 202 before any of
+    this runs, so neither the answer nor its timing reveals whether an
+    account matched. The request's session is closed by then, so this opens
+    its own; it is closed before the email is sent.
+
+    Args:
+        email: The normalized address. **Personal data** — never logged.
+        ip_address: Client IP for the audit row.
+        user_agent: Client user agent for the audit row.
+        session_factory: Override for tests; defaults to the app's factory.
+        email_service: Override for tests; defaults to the configured one.
+    """
+    try:
+        factory = session_factory or _get_session_factory()
+        async with factory() as db:
+            service = PasswordAccountService(db, email_service=email_service)
+            pending = await service.request_reset(
+                email=email, ip_address=ip_address, user_agent=user_agent
+            )
+    except Exception as exc:
+        # Type only: a driver error's text could echo the address.
+        logger.error("password_reset_request_failed", error_type=type(exc).__name__)
+        return
+    if pending is not None:
+        await service.send_reset_email(pending)
 
 
 def _error_fields(exc: BaseException) -> dict[str, Any]:

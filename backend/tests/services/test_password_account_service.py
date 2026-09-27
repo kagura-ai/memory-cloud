@@ -17,12 +17,12 @@ import pytest
 import pytest_asyncio
 import structlog
 from sqlalchemy import delete, func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from auth.password import hash_password, verify_password
 from models.auth import AuditLog, EmailActionToken, User, UserOAuthProvider
 from services.email_service import LoggingEmailService
-from services.password_account_service import PasswordAccountService
+from services.password_account_service import PasswordAccountService, process_reset_request
 from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,
@@ -242,6 +242,85 @@ class TestReset:
         pending = await service.request_reset(email=user.email)
         assert pending is not None
         await service.send_reset_email(pending)  # does not raise
+
+
+class TestBackgroundResetRequest:
+    """``process_reset_request`` does all of a reset request's work after the
+    response, on its own session: lookup, token, audit row, commit, email."""
+
+    @staticmethod
+    def _factory(async_engine) -> async_sessionmaker[AsyncSession]:
+        return async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def test_issues_and_sends_a_link_for_an_eligible_account(
+        self, async_engine, db_session: AsyncSession, made: _Made
+    ) -> None:
+        user = await _user(db_session, made)
+        email = _email()
+
+        await process_reset_request(
+            email=f"  {user.email.upper()} ",
+            ip_address="192.0.2.1",
+            user_agent="pytest",
+            session_factory=self._factory(async_engine),
+            email_service=email,
+        )
+
+        email.send_password_reset.assert_awaited_once()
+        kwargs = email.send_password_reset.await_args.kwargs
+        assert kwargs["to_email"] == user.email
+        audits = await db_session.scalar(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.user_id == user.user_id, AuditLog.action == "password_reset_requested")
+        )
+        assert audits == 1
+        await PasswordAccountService(db_session, email_service=_email()).complete_reset(
+            raw_token=_token_from(kwargs["reset_url"]), new_password=NEW
+        )
+
+    @pytest.mark.parametrize("kind", ["unknown", "unverified", "no_password", "local"])
+    async def test_does_nothing_for_an_ineligible_address(
+        self, async_engine, db_session: AsyncSession, made: _Made, kind: str
+    ) -> None:
+        if kind == "unknown":
+            address = f"nobody-{uuid4().hex[:6]}@pw.example"
+        elif kind == "unverified":
+            address = (await _user(db_session, made, verified=False)).email
+        elif kind == "no_password":
+            address = (await _user(db_session, made, password=None)).email
+        else:
+            address = (await _user(db_session, made, email=f"x{uuid4().hex[:6]}@local")).email
+        tokens_before = await db_session.scalar(select(func.count()).select_from(EmailActionToken))
+        audits_before = await db_session.scalar(select(func.count()).select_from(AuditLog))
+        email = _email()
+
+        await process_reset_request(
+            email=address, session_factory=self._factory(async_engine), email_service=email
+        )
+
+        email.send_password_reset.assert_not_awaited()
+        assert (
+            await db_session.scalar(select(func.count()).select_from(EmailActionToken))
+            == tokens_before
+        )
+        assert await db_session.scalar(select(func.count()).select_from(AuditLog)) == audits_before
+
+    async def test_a_failure_is_logged_without_the_address(self) -> None:
+        address = f"secret-{uuid4().hex[:6]}@pw.example"
+
+        def _broken_factory():
+            raise RuntimeError(f"db down while handling {address}")
+
+        email = _email()
+        with structlog.testing.capture_logs() as logs:
+            await process_reset_request(  # does not raise
+                email=address, session_factory=_broken_factory, email_service=email
+            )
+
+        email.send_password_reset.assert_not_awaited()
+        assert any(e.get("event") == "password_reset_request_failed" for e in logs)
+        assert address not in repr(logs)
 
 
 # ---------------------------------------------------------------------------

@@ -37,6 +37,7 @@ from db.redis import increment_counter
 from services.password_account_service import (
     PasswordAccountService,
     normalize_email,
+    process_reset_request,
 )
 from utils.exceptions import RateLimitError, RedisError
 from utils.logger import get_logger
@@ -144,13 +145,15 @@ async def request_password_reset(
     body: PasswordResetRequestBody,
     request: Request,
     background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_db),
 ) -> PasswordEmailAcceptedResponse:
     """Email a password-reset link if the address names an eligible account.
 
-    Always answers 202 with the same body so the response does not reveal
-    whether an account exists; the email is sent after the response. Limited
-    per client address (429) and per address (silently: no further emails).
+    Always answers 202 with the same body. The request path only checks the
+    rate limits and schedules the same background task for every address;
+    the account lookup, the token, the audit row and the email all happen
+    after the response, on their own session, so neither the answer nor its
+    timing reveals whether an account exists. Limited per client address
+    (429) and per address (silently: no further emails).
     """
     ip = _client_ip(request)
     if await _over_limit(f"pw_reset_ip:{ip}", _RESET_REQUESTS_PER_IP):
@@ -163,12 +166,12 @@ async def request_password_reset(
         logger.info("password_reset_request_throttled")
         return PasswordEmailAcceptedResponse()
 
-    service = PasswordAccountService(db)
-    pending = await service.request_reset(
-        email=email, ip_address=ip, user_agent=request.headers.get("user-agent")
+    background_tasks.add_task(
+        process_reset_request,
+        email=email,
+        ip_address=ip,
+        user_agent=request.headers.get("user-agent"),
     )
-    if pending is not None:
-        background_tasks.add_task(service.send_reset_email, pending)
     return PasswordEmailAcceptedResponse()
 
 
