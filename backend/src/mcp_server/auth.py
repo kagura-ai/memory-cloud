@@ -152,6 +152,9 @@ async def authenticate_mcp_request(
         InvalidTokenError: If the Bearer token is invalid, expired, revoked, or
             an OAuth2 access token bound to another resource
         AuthenticationError: If the Authorization header is malformed
+        Exception: Anything else — the token lookup could not run (database
+            down, #1742). Not an ``AuthenticationError``: the transport
+            answers 503, not 401.
 
     Example:
         >>> user_id, context_id, workspace_id = await authenticate_mcp_request("Bearer api_key_...")
@@ -274,25 +277,23 @@ async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | Non
         public-bound; None otherwise (invalid / revoked / expired / bound).
         - context_id is always None (now required in tool arguments)
         - workspace_id is from the API key scope (workspace-scoped keys)
+
+    Raises:
+        Exception: A failed lookup (#1742) — the transport answers 503, not a
+            401 that would tell the client its credential is bad.
     """
-    try:
-        from auth.dependencies import verify_api_key
+    from auth.dependencies import verify_api_key
 
-        result = await verify_api_key(api_key)
+    result = await verify_api_key(api_key, raise_on_lookup_error=True)
 
-        if result:
-            user_id = result.user_id
-            workspace_id = result.workspace_id
-            context_id = None  # Issue #245: context_id is now in tool args
-            logger.debug(f"API key valid: user={user_id}, workspace={workspace_id}")
-            return (user_id, context_id, workspace_id)
-        else:
-            logger.debug("API key invalid")
-            return None
-
-    except Exception as e:
-        logger.error(f"API key verification error: {e}")
-        return None
+    if result:
+        user_id = result.user_id
+        workspace_id = result.workspace_id
+        context_id = None  # Issue #245: context_id is now in tool args
+        logger.debug(f"API key valid: user={user_id}, workspace={workspace_id}")
+        return (user_id, context_id, workspace_id)
+    logger.debug("API key invalid")
+    return None
 
 
 async def _verify_oauth2_token(access_token: str) -> OAuthGrant | None:
@@ -313,7 +314,8 @@ async def _verify_oauth2_token(access_token: str) -> OAuthGrant | None:
     # this returns, not whenever the generator is garbage-collected.
     async with contextlib.aclosing(get_db()) as sessions:
         async for db in sessions:
-            token = await find_active_oauth_token(access_token, db)
+            # #1742: a failed lookup raises (→ 503), never "no such token".
+            token = await find_active_oauth_token(access_token, db, raise_on_lookup_error=True)
             if token is None:
                 return None
             client_scope = None

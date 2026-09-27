@@ -200,7 +200,9 @@ async def get_api_key(authorization: str | None = Header(None)) -> str | None:
     return authorization[7:]  # Remove "Bearer " prefix
 
 
-async def verify_api_key(api_key: str) -> VerifiedKey | None:
+async def verify_api_key(
+    api_key: str, *, raise_on_lookup_error: bool = False
+) -> VerifiedKey | None:
     """Verify API key and return a ``VerifiedKey`` view.
 
     Issue #169: ``workspace_id`` for workspace-scoped API keys.
@@ -227,6 +229,10 @@ async def verify_api_key(api_key: str) -> VerifiedKey | None:
 
     Args:
         api_key: API key to verify (e.g., "kagura_...")
+        raise_on_lookup_error: ``True`` lets a failed lookup (database down,
+            any unexpected error) raise instead of answering "invalid key".
+            MCP authentication passes it (#1742), so an outage is a 503, not
+            a 401 that tells the client its credential is bad.
 
     Returns:
         ``VerifiedKey`` if valid AND not public-bound; ``None`` if
@@ -276,6 +282,8 @@ async def verify_api_key(api_key: str) -> VerifiedKey | None:
             set_agent_scope_from_verified(verified)
             return verified
     except Exception:
+        if raise_on_lookup_error:
+            raise
         # Silent failure - return None on any error
         return None
     return None

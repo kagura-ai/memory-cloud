@@ -26,6 +26,8 @@ logger = get_logger(__name__)
 async def find_active_oauth_token(
     access_token: str,
     db: AsyncSession,
+    *,
+    raise_on_lookup_error: bool = False,
 ) -> OAuth2Token | None:
     """Look up an OAuth 2.0 Bearer access token that is neither revoked nor expired.
 
@@ -41,14 +43,24 @@ async def find_active_oauth_token(
     grant endpoints depend on, and avoids the per-request thread hop
     that an ``asyncio.to_thread`` wrapper would incur on every
     authenticated REST request.
+
+    Args:
+        access_token: The Bearer token.
+        db: The caller's session.
+        raise_on_lookup_error: ``True`` lets a failed lookup raise instead of
+            answering "no such token". MCP passes it (#1742): a database
+            outage must not read as an invalid credential, which makes a
+            client re-authorize. REST keeps the silent-failure contract.
     """
-    try:
-        stmt = select(OAuth2Token).where(OAuth2Token.access_token == access_token)
-        result = await db.execute(stmt)
-        token = result.scalar_one_or_none()
-    except SQLAlchemyError as exc:
-        logger.error("oauth_bearer_token_lookup_failed", error=str(exc))
-        return None
+    stmt = select(OAuth2Token).where(OAuth2Token.access_token == access_token)
+    if raise_on_lookup_error:
+        token = (await db.execute(stmt)).scalar_one_or_none()
+    else:
+        try:
+            token = (await db.execute(stmt)).scalar_one_or_none()
+        except SQLAlchemyError as exc:
+            logger.error("oauth_bearer_token_lookup_failed", error=str(exc))
+            return None
 
     if token is None:
         logger.debug("oauth_bearer_token_not_found")

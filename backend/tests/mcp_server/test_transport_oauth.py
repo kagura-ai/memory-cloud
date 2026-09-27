@@ -448,7 +448,7 @@ async def test_the_client_scope_is_read_only_when_the_token_names_no_memory_scop
     async def get_db():
         yield _Db()
 
-    async def find(_token, _db):
+    async def find(_token, _db, **_kwargs):
         return row
 
     monkeypatch.setattr(db.base, "get_db", get_db)
@@ -485,7 +485,7 @@ async def test_the_db_session_is_closed_when_the_lookup_returns(monkeypatch, cas
         finally:
             state["closed"] = True
 
-    async def find(_token, _db):
+    async def find(_token, _db, **_kwargs):
         return None if case == "no_token" else row
 
     monkeypatch.setattr(db.base, "get_db", get_db)
@@ -517,7 +517,7 @@ async def test_a_failed_client_lookup_grants_no_memory_scope(monkeypatch):
     async def get_db():
         yield _Db()
 
-    async def find(_token, _db):
+    async def find(_token, _db, **_kwargs):
         return row
 
     monkeypatch.setattr(db.base, "get_db", get_db)
