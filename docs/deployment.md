@@ -351,6 +351,64 @@ enforcement off again; the recorded history stays in `terms_acceptances`.
 Adding an account from the account switcher follows the same rule: an identity
 that has no account yet is refused until it signs up from `/login`.
 
+## Email + password sign-in (Issue #1678)
+
+Existing accounts can sign in with a verified email address and a password,
+in addition to Google / GitHub. **No endpoint creates an account**: new
+accounts still come from an OAuth sign-in (through the signup gate and beta
+invites) or the admin CLI, so this adds no way around a closed registration.
+
+**Who can sign in by email.** `POST /api/v1/auth/login` keeps its `login_id`
+field and reads it as either a login ID or an email address:
+
+1. an exact `login_id` match on an account with a password (the CLI admins,
+   unchanged, MFA included);
+2. otherwise, for a value containing `@`, the account whose email equals it
+   case-insensitively (`lower(trim())`), whose `email_verified_at` is set and
+   which has a password. `@local` addresses never match. When two accounts'
+   emails differ only by case the lookup fails closed (a generic 401).
+
+`email_verified_at` is set when a person proves the mailbox by following a
+set-a-password link. The e86 migration back-fills it for accounts with a linked
+Google / GitHub identity (those addresses came verified from the provider) —
+never for `@local` addresses. `users.auth_method` is unchanged and still means
+the *original* sign-in method; whether an account has a password is
+`password_hash IS NOT NULL` (`GET /api/v1/auth/me` reports it as
+`has_password`). Unlinking a provider, removing the password and the account
+erasure flow (password re-entry vs emailed link) all follow `has_password`.
+
+Every sign-in failure is the same 401, and an unknown identifier costs the same
+bcrypt work as a wrong password. Failures are counted per normalized identifier
+(5 per 5 minutes) and per client address (20 per 5 minutes); a success resets
+only the identifier's counter.
+
+**Links and endpoints.**
+
+| Endpoint | Auth | What it does |
+|----------|------|--------------|
+| `POST /api/v1/auth/password/reset-request` `{email}` | public | Always `202` with the same body. Emails a reset link only to an account with that verified email and a password. 10 per client address and 3 per address per 15 minutes (the per-address limit is silent). |
+| `POST /api/v1/auth/password/reset` `{token, new_password}` | the link | Sets the password and **ends every session** of the account; the person then signs in. |
+| `POST /api/v1/me/password/setup-request` | browser session | For an account without a password: emails a set-a-password link to the account's address (`409` if it has one, `400` for `@local`). |
+| `POST /api/v1/auth/password/setup` `{token, new_password}` | the link | Sets the first password, marks the email verified, ends the account's other sessions. |
+| `POST /api/v1/me/password/change` `{current_password, new_password}` | browser session | Ends the account's other sessions. |
+| `DELETE /api/v1/me/password` `{current_password}` | browser session | Refused (`409`) while no Google / GitHub identity is linked — the last sign-in method can never be removed. |
+
+Links are single-use and expire (`PASSWORD_RESET_TOKEN_TTL_MINUTES`,
+`SET_PASSWORD_TOKEN_TTL_MINUTES`, default 30; `VERIFY_EMAIL_TOKEN_TTL_HOURS`,
+default 24, reserved for a later verification flow). Only a SHA-256 digest is
+stored (`email_action_tokens`); a newer link for the same purpose invalidates
+the older one, and a link stops working if the account's email changed after it
+was sent. Links point at `FRONTEND_URL` (`/password/reset?token=…`,
+`/password/setup?token=…`); those pages send `Referrer-Policy: no-referrer` and
+are not indexed. New passwords follow the admin CLI policy (12+ characters,
+upper- and lower-case letter, digit, symbol, at most 72 bytes).
+
+**Email delivery.** The links need `EMAIL_PROVIDER=resend`. The default
+`logging` provider writes one `email_dispatch_required=true` line per email with
+the purpose and a keyed hash of the recipient — never the address, the token or
+the link — so under `logging` the links cannot be delivered and self-service
+reset / set-up do not work.
+
 ## Hosted-mode UI gates (Issue #1571)
 
 The web UI reads `GET /api/v1/system/info` → `features.*` at runtime, so a

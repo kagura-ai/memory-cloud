@@ -285,7 +285,7 @@ Two OAuth2 providers are supported:
 - **Google OAuth2** — Optional. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
 - **GitHub OAuth2** — Optional. Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`
 
-Users with the same email address across providers share a single account. Password + MFA login is available without any OAuth provider (see [Quick Start](#quick-start)).
+Users with the same email address across providers share a single account. Password + MFA login is available without any OAuth provider (see [Quick Start](#quick-start)). An existing account can also add a password from its profile and then sign in with its verified email address and that password; see [Deployment → Email + password sign-in](docs/deployment.md#email--password-sign-in-issue-1678).
 
 ## Plan Tier Customization
 

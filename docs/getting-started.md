@@ -62,7 +62,7 @@ This interactive command will:
 ### 6. Access the Application
 
 - **Web UI**: http://localhost:3000
-- **Password sign-in**: Click "Sign in with password" on the login page and enter the admin login ID and password
+- **Password sign-in**: Click "Sign in with password" on the login page and enter the admin login ID (or a verified email, see [Authentication](#authentication)) and password
 - **API Docs**: http://localhost:8080/docs
 - **Health Check**: http://localhost:8080/health
 
@@ -113,9 +113,12 @@ python -m src.cli.delete_admin
 
 Kagura Memory Cloud supports multiple authentication methods:
 
-- **Password + MFA**: For the admin user (created via CLI)
+- **Password + MFA**: For the admin user (created via CLI), signing in with its login ID
 - **Google OAuth**: Optional, configure `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env.local`
 - **GitHub OAuth**: Optional, configure `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` in `.env.local`
+- **Email + password**: An existing account can add a password from **Profile → Password** ("Set up a password" emails a one-time link to the account's address). Afterwards it can also sign in with its verified email and that password, and "Forgot password?" on the login page emails a reset link. This never creates an account — new accounts still come from Google / GitHub (and the signup gate) or the admin CLI.
+
+The emailed links need a real email provider (`EMAIL_PROVIDER=resend`): the default `logging` provider records only that an email was due, never the link, so the links cannot be delivered by hand. See [Deployment → Email + password sign-in](deployment.md#email--password-sign-in-issue-1678).
 
 ## MCP Integration
 
