@@ -54,10 +54,10 @@ logger = logging.getLogger(__name__)
 _DETAILS_RESULTS_BUDGET = DEFAULT_MAX_CHARS - 1_000
 
 
-def _bound_pinned_envelope(
+def _bound_list_envelope(
     envelope: dict[str, Any], lanes: tuple[str, ...], max_chars: int
 ) -> tuple[dict[str, Any], dict[str, bool]]:
-    """Fit the item lists of a load_pinned / load_guardrails reply into ``max_chars``.
+    """Fit the item lists of a recall / load_pinned / load_guardrails reply into ``max_chars``.
 
     #1743: at the default caps (100 pinned + 50 tool-triggered, each with a
     context_summary of up to 2,000 characters) the reply could pass 300k
@@ -81,7 +81,7 @@ def _bound_pinned_envelope(
     return out, dict(zip(lanes, cut, strict=True))
 
 
-def _parse_pinned_max_chars(args: dict[str, Any]) -> tuple[int, list[TextContent] | None]:
+def _parse_max_chars_arg(args: dict[str, Any]) -> tuple[int, list[TextContent] | None]:
     try:
         return parse_max_chars(args.get("max_chars")), None
     except BudgetArgumentError as e:
@@ -602,7 +602,7 @@ async def handle_load_pinned(
     from services.memory_service import MemoryService
 
     cap = args.get("cap")
-    max_chars, arg_error = _parse_pinned_max_chars(args)
+    max_chars, arg_error = _parse_max_chars_arg(args)
     if arg_error:
         return arg_error
     start_time = time.time()
@@ -630,7 +630,7 @@ async def handle_load_pinned(
             await _log_tool_usage(
                 db, user_id, "load_pinned", start_time, 200, current_context_id, workspace_id
             )
-            envelope, cut = _bound_pinned_envelope(
+            envelope, cut = _bound_list_envelope(
                 {
                     "status": "success",
                     "memories": [
@@ -705,7 +705,7 @@ async def handle_load_guardrails(
     from services.memory_service import MemoryService
 
     cap = args.get("cap")
-    max_chars, arg_error = _parse_pinned_max_chars(args)
+    max_chars, arg_error = _parse_max_chars_arg(args)
     if arg_error:
         return arg_error
     start_time = time.time()
@@ -735,7 +735,7 @@ async def handle_load_guardrails(
             )
             # The tool-triggered lane goes first: a client hook enforces it,
             # while the pinned lane is advisory context (#1743).
-            envelope, cut = _bound_pinned_envelope(
+            envelope, cut = _bound_list_envelope(
                 {
                     "status": "success",
                     "format": result.format,
@@ -876,6 +876,21 @@ def _recall_envelope(result: Any, context: Any) -> dict[str, Any]:
     return response_data
 
 
+def _bound_recall_envelope(envelope: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    """Hold a recall reply to ``max_chars`` characters (#1743).
+
+    k=100 measured 86k characters on real data. Over budget, context_summary
+    is left out of every result first (``context_summary_omitted``), then the
+    lowest-ranked results are cut: ``truncated: true`` and ``count`` is the
+    number returned. Absent when nothing was cut (#1599: absence is the signal).
+    """
+    bounded, cut = _bound_list_envelope(envelope, ("results",), max_chars)
+    if cut["results"]:
+        bounded["count"] = len(bounded["results"])
+        bounded["truncated"] = True
+    return bounded
+
+
 async def handle_recall(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -893,6 +908,10 @@ async def handle_recall(
     from db.base import get_db
     from models.schemas import RecallRequest
     from services.memory_service import MemoryService
+
+    max_chars, arg_error = _parse_max_chars_arg(args)
+    if arg_error:
+        return arg_error
 
     request = RecallRequest(
         query=args["query"],
@@ -1022,7 +1041,9 @@ async def handle_recall(
 
             # Built before the usage row / commit, as the item projection always
             # was: a result that cannot be rendered fails the call as a whole.
-            response_data = _recall_envelope(result, current_context)
+            response_data = _bound_recall_envelope(
+                _recall_envelope(result, current_context), max_chars
+            )
 
             await _log_tool_usage(
                 db,

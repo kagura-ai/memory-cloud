@@ -101,7 +101,7 @@ Returns: {status, memory_id, scope, persistence?: {scope, committed, promotes_vi
                     "tags": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Tags for filtering (recall filters match them exactly). Mix category tags ('category:auth') and entity tags ('oauth2', 'fastapi'); for Japanese include script variants (['鯖', 'サバ', 'さば']).",
+                        "description": "Tags for filtering (recall filters match them exactly); at most 50, 100 characters each. Mix category tags ('category:auth') and entity tags ('oauth2', 'fastapi'); for Japanese include script variants (['鯖', 'サバ', 'さば']).",
                     },
                     "context": {
                         "type": "object",
@@ -199,7 +199,7 @@ Returns: {status, memory_id, operation: 'updated'|'created'|'replaced', re_embed
                     "tags": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "New tags (replaces the list).",
+                        "description": "New tags (replaces the list); at most 50, 100 characters each.",
                     },
                     "context": {
                         "type": "object",
@@ -233,7 +233,7 @@ Reading the response:
 • updated_at — last change to the fact (null if never edited); an old value may mean it is stale.
 • supersede_candidate {memory_id, summary, similarity, detected_at} — an OLDER near-duplicate this result likely replaces. A suggestion, never auto-applied. Accept: create_edge(source_id=<this memory_id>, target_id=<supersede_candidate.memory_id>, edge_type='supersedes') shadows the old fact out of default recall. Reject a deliberately separate pair: update_memory(memory_id, dismiss_supersede_candidate=true). It disappears once accepted or once the candidate is deleted.
 
-Returns: {status, results: [{memory_id, summary, context_summary?, type, importance, scope, score, tags, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?}], count, related_tags: [{tag, count}], context_id, context_name, context_display_name, context_is_private, context_is_locked, confidence: {level, top_score, prominence, relative_margin, result_count, rationale}, explore_hints?: [{memory_id, reason}], tag_suggestions?: {requested_tag: ['stored-tag (count)']}, degraded?, degraded_reason?}. Keys marked ? are omitted when empty (absent, never null): context_summary when none was written; superseded_by unless the memory is shadowed (needs include_superseded=true); contradicts when no memory opposes it; supersede_candidate unless a live suggestion exists; explore_hints unless requested; tag_suggestions unless a tag filter returned nothing and similar stored tags exist (advisory — the filter was not widened); degraded / degraded_reason unless the search was degraded. score is rounded to 4 decimals. related_tags: the up-to-10 most frequent tags among these results (candidates for a tag filter).""",
+Returns: {status, results: [{memory_id, summary, context_summary?, type, importance, scope, score, tags, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?}], count, related_tags: [{tag, count}], context_id, context_name, context_display_name, context_is_private, context_is_locked, confidence: {level, top_score, prominence, relative_margin, result_count, rationale}, explore_hints?: [{memory_id, reason}], tag_suggestions?: {requested_tag: ['stored-tag (count)']}, degraded?, degraded_reason?, context_summary_omitted?, truncated?}. Keys marked ? are omitted when empty (absent, never null): context_summary when none was written; superseded_by unless the memory is shadowed (needs include_superseded=true); contradicts when no memory opposes it; supersede_candidate unless a live suggestion exists; explore_hints unless requested; tag_suggestions unless a tag filter returned nothing and similar stored tags exist (advisory — the filter was not widened); degraded / degraded_reason unless the search was degraded. score is rounded to 4 decimals. related_tags: the up-to-10 most frequent tags among these results (candidates for a tag filter). Over max_chars, context_summary is dropped first (context_summary_omitted), then the lowest-ranked results (truncated: true).""",
             "inputSchema": {
                 "type": "object",
                 # ``query`` is the only unconditional requirement. The handler
@@ -254,6 +254,12 @@ Returns: {status, results: [{memory_id, summary, context_summary?, type, importa
                     "k": {
                         "type": "integer",
                         "description": "Number of results (default 5, max 100).",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": 10000,
+                        "maximum": 100000,
+                        "description": "Response budget in characters, not tokens (default 20000).",
                     },
                     "use_rerank": {
                         "type": "boolean",

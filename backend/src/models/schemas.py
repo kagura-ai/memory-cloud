@@ -25,6 +25,27 @@ logger = logging.getLogger(__name__)
 # Summary-length guidance, named so the write-time lint (#1502) can advise the
 # caller on exactly the thresholds this schema already logs about, rather than
 # restating literals that would drift apart.
+# #1743: tags come back on every recall / reference / get_cluster item, so a
+# write may carry at most this many, each at most this long. Enforced on new
+# remember / update_memory writes only — stored rows are never rejected on read.
+MEMORY_TAGS_MAX_COUNT = 50
+MEMORY_TAG_MAX_CHARS = 100
+
+
+def _check_memory_tags(tags: list[str] | None) -> list[str] | None:
+    """Validate a remember / update_memory ``tags`` list against the #1743 caps."""
+    if tags is None:
+        return tags
+    if len(tags) > MEMORY_TAGS_MAX_COUNT:
+        raise ValueError(f"at most {MEMORY_TAGS_MAX_COUNT} tags (got {len(tags)})")
+    for idx, tag in enumerate(tags):
+        if len(tag) > MEMORY_TAG_MAX_CHARS:
+            raise ValueError(
+                f"tag at index {idx} exceeds {MEMORY_TAG_MAX_CHARS} characters (got {len(tag)})"
+            )
+    return tags
+
+
 SUMMARY_SHORT_THRESHOLD = 50
 SUMMARY_LONG_THRESHOLD = 400
 
@@ -131,6 +152,12 @@ class RememberRequest(BaseModel):
         default=None,
         description="Memory ID this new memory supersedes (old one is shadowed, not deleted)",
     )
+
+    @field_validator("tags")
+    @classmethod
+    def _cap_tags(cls, v: list[str]) -> list[str]:
+        """#1743: at most MEMORY_TAGS_MAX_COUNT tags of MEMORY_TAG_MAX_CHARS each."""
+        return _check_memory_tags(v) or []
 
     @field_validator("summary")
     @classmethod
@@ -838,6 +865,13 @@ class UpdateMemoryRequest(BaseModel):
     importance: float | None = Field(None, ge=0.0, le=1.0, description="Updated importance")
     tags: list[str] | None = Field(None, description="Updated tags")
     context: dict | None = Field(None, description="Updated context metadata")
+
+    @field_validator("tags")
+    @classmethod
+    def _cap_tags(cls, v: list[str] | None) -> list[str] | None:
+        """#1743: at most MEMORY_TAGS_MAX_COUNT tags of MEMORY_TAG_MAX_CHARS each."""
+        return _check_memory_tags(v)
+
     # Issue #886: change delivery_mode in place. Setting 'always' pins the
     # memory to persistent (like remember's pin-on-write); setting 'on_recall'
     # unpins it (the memory stays persistent — delivery_mode controls loading,

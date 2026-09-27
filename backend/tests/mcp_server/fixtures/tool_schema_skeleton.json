@@ -184,6 +184,11 @@
         "k": {
           "type": "integer"
         },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 100000
+        },
         "use_rerank": {
           "type": "boolean"
         },
