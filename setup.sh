@@ -51,6 +51,11 @@ if ! command -v uv >/dev/null 2>&1 || [ "$(uv --version 2>/dev/null | awk '{prin
   # Project-local install: a machine-wide uv of another version is left alone
   # (no silent downgrade, no shell rc edits), and this script uses the pinned
   # one from backend/.uv-bin. backend/.dockerignore and .gitignore skip it.
+  command -v curl >/dev/null 2>&1 || {
+    echo "✗ curl not found: it is needed to install uv ${UV_REQUIRED}."
+    echo "  Install curl, or install uv yourself (pip install \"uv==${UV_REQUIRED}\" inside a venv) and re-run."
+    exit 1
+  }
   echo "Installing uv ${UV_REQUIRED} (the pinned version) into backend/.uv-bin..."
   curl -LsSf "https://astral.sh/uv/${UV_REQUIRED}/install.sh" \
     | env UV_INSTALL_DIR="$PWD/backend/.uv-bin" UV_NO_MODIFY_PATH=1 sh
