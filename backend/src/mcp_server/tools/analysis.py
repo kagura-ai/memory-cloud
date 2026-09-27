@@ -716,6 +716,33 @@ async def handle_get_active_analysis(
 # ============================================================================
 
 
+def _bound_cluster_page(cluster: dict[str, Any], *, explicit_limit: bool) -> dict[str, Any]:
+    """Hold a get_cluster page to a character budget (#1743).
+
+    Each member carries its full ``tags``; the #1743 write cap (50 x 100
+    characters) does not cover rows stored before it, so the page size alone
+    does not bound the reply. Members are kept in order while they fit —
+    20,000 characters for a default page, 100,000 when the caller chose a
+    ``limit`` — and ``next_cursor`` moves to the last member returned, so the
+    keyset continuation picks up the rest. A page always returns at least one
+    member.
+    """
+    from utils.response_budget import DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT, fit_items, json_chars
+
+    members = cluster.get("memories") or []
+    budget = (MAX_CHARS_LIMIT if explicit_limit else DEFAULT_MAX_CHARS) - json_chars(
+        {"status": "success", **cluster, "memories": []}
+    )
+    placed = max(1, fit_items(members, budget)) if members else 0
+    if placed >= len(members):
+        return cluster
+    return {
+        **cluster,
+        "memories": members[:placed],
+        "next_cursor": members[placed - 1]["memory_id"],
+    }
+
+
 async def handle_get_cluster(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -818,7 +845,9 @@ async def handle_get_cluster(
             await _log_tool_usage(
                 db, user_id, "get_cluster", start_time, 200, workspace_id=workspace_id
             )
-            return _success_response(**cluster)
+            return _success_response(
+                **_bound_cluster_page(cluster, explicit_limit=limit is not None)
+            )
 
         except Exception as e:
             await _log_tool_usage(
