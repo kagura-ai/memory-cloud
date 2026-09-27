@@ -42,6 +42,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import {
   ArrowRight,
   Info,
+  KeyRound,
   MailPlus,
   Sparkles,
   Shield,
@@ -85,7 +86,9 @@ function LoginContent() {
   const [notice, setNotice] = useState<string | null>(null);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
-  const [showAdminLogin, setShowAdminLogin] = useState<boolean | null>(null);
+  const [showPasswordLogin, setShowPasswordLogin] = useState<boolean | null>(
+    null,
+  );
 
   // Password login state
   const [loginId, setLoginId] = useState("");
@@ -203,13 +206,13 @@ function LoginContent() {
     getAuthConfig()
       .then((config) => {
         setAuthConfig(config);
-        // Auto-show admin login if no OAuth providers configured
+        // Auto-show the password form if no OAuth providers are configured
         const hasOAuth =
           config.google_oauth_enabled || config.github_oauth_enabled;
         if (!hasOAuth && config.password_login_enabled) {
-          setShowAdminLogin(true);
+          setShowPasswordLogin(true);
         } else {
-          setShowAdminLogin(false);
+          setShowPasswordLogin(false);
         }
       })
       .catch(() => {
@@ -218,7 +221,7 @@ function LoginContent() {
           google_oauth_enabled: false,
           github_oauth_enabled: false,
         });
-        setShowAdminLogin(true);
+        setShowPasswordLogin(true);
       });
   }, [searchParams, isMockAuth, router, t]);
 
@@ -466,8 +469,8 @@ function LoginContent() {
               </form>
             ) : (
               <>
-                {/* Admin Password Login Form (hidden by default) */}
-                {showAdminLogin && authConfig?.password_login_enabled && (
+                {/* Password sign-in form (hidden by default when OAuth is on) */}
+                {showPasswordLogin && authConfig?.password_login_enabled && (
                   <>
                     <form onSubmit={handlePasswordLogin} className="space-y-4">
                       <div className="space-y-2">
@@ -546,9 +549,9 @@ function LoginContent() {
                       systemInfoPending
                     }
                     size="lg"
-                    variant={showAdminLogin ? "outline" : "default"}
+                    variant={showPasswordLogin ? "outline" : "default"}
                     className={`group relative h-14 w-full overflow-hidden text-base font-semibold transition-all hover:scale-[1.02] disabled:opacity-50 disabled:hover:scale-100 ${
-                      !showAdminLogin
+                      !showPasswordLogin
                         ? "rounded-full bg-kagura-accent text-white shadow-md transition-colors hover:bg-[#a8380a]"
                         : "shadow-md hover:shadow-lg"
                     }`}
@@ -588,7 +591,7 @@ function LoginContent() {
                 {/* GitHub */}
                 {authConfig?.github_oauth_enabled && (
                   <>
-                    {authConfig.google_oauth_enabled && !showAdminLogin && (
+                    {authConfig.google_oauth_enabled && !showPasswordLogin && (
                       <div className="relative my-2">
                         <div className="absolute inset-0 flex items-center">
                           <span className="w-full border-t border-gray-300" />
@@ -636,7 +639,7 @@ function LoginContent() {
                 )}
 
                 {/* Terms (shown here when admin form is hidden) */}
-                {!showAdminLogin && (
+                {!showPasswordLogin && (
                   <div className="mt-6">
                     <TermsAgreement
                       checked={agreedToTerms}
@@ -747,14 +750,14 @@ function LoginContent() {
               const hasOAuth =
                 authConfig.google_oauth_enabled ||
                 authConfig.github_oauth_enabled;
-              if (!hasOAuth || showAdminLogin) return null;
+              if (!hasOAuth || showPasswordLogin) return null;
               return (
                 <button
-                  onClick={() => setShowAdminLogin(true)}
+                  onClick={() => setShowPasswordLogin(true)}
                   className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white/60 px-4 py-2 text-sm font-medium text-gray-600 backdrop-blur-sm transition-colors hover:bg-white hover:text-kagura-link"
                 >
-                  <Shield className="h-4 w-4" />
-                  {t("adminLogin")}
+                  <KeyRound className="h-4 w-4" />
+                  {t("passwordLogin")}
                 </button>
               );
             })()}

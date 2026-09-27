@@ -58,8 +58,12 @@ vi.mock("@/lib/auth/safeReturnTo", async (importOriginal) => {
   };
 });
 
+// Stable like the real useTranslations(): the auth-config effect lists `t` in
+// its dependency array, so a fresh function per render would re-run it and
+// reset the password-form toggle right after a click (#1677).
+const mockT = (k: string) => k;
 vi.mock("next-intl", () => ({
-  useTranslations: () => (k: string) => k,
+  useTranslations: () => mockT,
 }));
 
 const mockPush = vi.fn();
@@ -836,6 +840,39 @@ describe("LoginPage forwards a live session (#1594)", () => {
     // Component tests mock useTranslations, so a missing key would not show.
     expect(en.login.checkingSession).toBeTruthy();
     expect(ja.login.checkingSession).toBeTruthy();
+  });
+});
+
+// ---------- #1677: "Sign in with password" entry -----------------------------
+
+describe("LoginPage password sign-in entry (#1677)", () => {
+  beforeEach(() => {
+    mockGetAuthConfig.mockResolvedValue({
+      password_login_enabled: true,
+      google_oauth_enabled: true,
+      github_oauth_enabled: false,
+    });
+  });
+
+  it("offers the password form behind a sign-in-method toggle", async () => {
+    renderLogin();
+    await screen.findByRole("button", { name: /continueWithGoogle/ });
+    expect(screen.queryByLabelText("loginId")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "passwordLogin" }));
+
+    // The field stays a login ID (#1677): the backend matches User.login_id.
+    await waitFor(() =>
+      expect(screen.getByLabelText("loginId")).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: "passwordLogin" })).toBeNull();
+  });
+
+  it("names the entry by sign-in method in both catalogs", () => {
+    expect(en.login.passwordLogin).toBe("Sign in with password");
+    expect(ja.login.passwordLogin).toBe("パスワードでログイン");
+    expect(en.login).not.toHaveProperty("adminLogin");
+    expect(ja.login).not.toHaveProperty("adminLogin");
   });
 });
 

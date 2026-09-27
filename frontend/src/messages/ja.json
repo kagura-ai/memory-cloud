@@ -265,7 +265,7 @@
     "totpCode": "認証コード",
     "verify": "認証",
     "verifying": "認証中...",
-    "adminLogin": "管理者ログイン",
+    "passwordLogin": "パスワードでログイン",
     "inviteEntry": {
       "toggle": "招待リンクをお持ちの方",
       "label": "招待リンク",

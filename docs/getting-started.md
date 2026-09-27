@@ -62,7 +62,7 @@ This interactive command will:
 ### 6. Access the Application
 
 - **Web UI**: http://localhost:3000
-- **Admin Login**: Click "Admin Login" link on the login page
+- **Password sign-in**: Click "Sign in with password" on the login page and enter the admin login ID and password
 - **API Docs**: http://localhost:8080/docs
 - **Health Check**: http://localhost:8080/health
 

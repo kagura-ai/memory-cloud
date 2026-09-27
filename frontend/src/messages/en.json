@@ -265,7 +265,7 @@
     "totpCode": "Verification Code",
     "verify": "Verify",
     "verifying": "Verifying...",
-    "adminLogin": "Admin Login",
+    "passwordLogin": "Sign in with password",
     "inviteEntry": {
       "toggle": "I have an invite link",
       "label": "Invite link",

@@ -39,15 +39,15 @@ def login_admin(page: Page) -> None:
     page.goto(f"{BASE_URL}/login")
     page.wait_for_load_state("networkidle")
 
-    admin_link = page.locator(
-        "a, button", has_text=re.compile(r"管理者ログイン|Admin Login|管理者")
+    password_toggle = page.locator(
+        "a, button", has_text=re.compile(r"パスワードでログイン|Sign in with password")
     )
-    if admin_link.count() > 0:
-        admin_link.first.click()
+    if password_toggle.count() > 0:
+        password_toggle.first.click()
         page.wait_for_load_state("networkidle")
 
     # Wait deterministically for the login form input to be present —
-    # replaces the previous time.sleep(1) hard-pause after the admin-link
+    # replaces the previous time.sleep(1) hard-pause after the password-toggle
     # click (which only fires on first login but is shared across every
     # authenticated_context variant).
     page.wait_for_selector('input[type="text"]', state="visible", timeout=10000)
