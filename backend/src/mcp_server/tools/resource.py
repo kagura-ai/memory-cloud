@@ -19,7 +19,12 @@ from uuid import UUID
 from mcp.types import TextContent
 
 import services.resource_ingest_service as resource_ingest_service
-from mcp_server.tools._errors import _tool_exception_response
+from mcp_server.tools._errors import (
+    CAUSE_INTERNAL_ERROR,
+    _tool_exception_response,
+    classify_cause,
+    new_correlation_id,
+)
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
     _context_cap_error_response,
@@ -39,6 +44,9 @@ from utils.exceptions import (
     QuotaExceededError,
     RateLimitError,
 )
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 # Resource ID format: lowercase alphanumeric + underscore + hyphen
 _RESOURCE_ID_PATTERN = re.compile(r"^[a-z0-9_-]+$")
@@ -96,7 +104,57 @@ def _format_batch_item_error(err: IngestItemError) -> dict:
     out: dict[str, Any] = {"index": err.index, "error": message}
     if doc_id_field:
         out["doc_id"] = err.doc_id
+    if kind in (svc.KIND_CONSTRAINT_VIOLATION, svc.KIND_UNEXPECTED):
+        out.update(_failed_item_fields(err))
     return out
+
+
+def _failed_item_fields(err: IngestItemError) -> dict[str, Any]:
+    """What a caller needs to resend one event the server failed to store (#1742).
+
+    The item's ``doc_id``, a ``correlation_id`` (logged here with the failure,
+    whose exception text never reaches the caller), ``help`` and, for an
+    unexpected failure, its ``cause``; for a constraint violation, the
+    constraint's name.
+    """
+    svc = resource_ingest_service
+    correlation_id = new_correlation_id()
+    fields: dict[str, Any] = {"doc_id": err.doc_id, "correlation_id": correlation_id}
+    if err.kind == svc.KIND_CONSTRAINT_VIOLATION:
+        constraint = err.detail.get("constraint")
+        if constraint:
+            fields["constraint"] = constraint
+        logger.error(
+            "mcp_ingest_event_constraint_violation",
+            index=err.index,
+            doc_id=err.doc_id,
+            constraint=constraint,
+            correlation_id=correlation_id,
+        )
+        fields["help"] = (
+            "This event was not stored; the other events are unaffected. It conflicts with a "
+            "database constraint: check its doc_id, version and idempotency_key before sending "
+            "it again. If it keeps failing, report the correlation_id."
+        )
+        return fields
+
+    exc = err.detail.get("exception")
+    cause = classify_cause(exc) if isinstance(exc, BaseException) else CAUSE_INTERNAL_ERROR
+    logger.error(
+        "mcp_ingest_event_failed",
+        index=err.index,
+        doc_id=err.doc_id,
+        cause=cause,
+        correlation_id=correlation_id,
+        exc_type=type(exc).__name__ if exc is not None else None,
+        exc=err.detail.get("message"),
+    )
+    fields["cause"] = cause
+    fields["help"] = (
+        "This event was not stored; the other events are unaffected. Send only this event "
+        "again in a new ingest_events call. If it fails again, report the correlation_id."
+    )
+    return fields
 
 
 # ============================================================================
@@ -1114,13 +1172,27 @@ async def handle_setup_connector(
             if role_err:
                 return role_err
 
+            # #1742: one refusal per field, naming it — the raw int() /
+            # fromisoformat() text named neither the field nor the format.
             try:
                 quota_events_per_hour = int(args.get("quota_events_per_hour", 1000))
+            except (TypeError, ValueError):
+                return _error_response(
+                    "validation_error",
+                    "quota_events_per_hour must be an integer.",
+                    field="quota_events_per_hour",
+                )
+            try:
                 virtual_key_valid_until = _parse_optional_datetime(
                     args.get("virtual_key_valid_until")
                 )
-            except (TypeError, ValueError) as ve:
-                return _error_response("validation_error", str(ve))
+            except (TypeError, ValueError):
+                return _error_response(
+                    "validation_error",
+                    "virtual_key_valid_until must be an ISO 8601 datetime string, "
+                    "for example 2026-12-31T00:00:00Z.",
+                    field="virtual_key_valid_until",
+                )
 
             oauth_tokens = args.get("oauth_tokens")
             if oauth_tokens is not None and not isinstance(oauth_tokens, dict):

@@ -371,7 +371,9 @@ async def persist_events(
                     index=ev.index,
                     kind=KIND_UNEXPECTED,
                     doc_id=ev.doc_id,
-                    detail={"message": str(e)},
+                    # ``exception`` lets the MCP adapter classify the cause
+                    # (#1742); neither adapter puts it on the wire.
+                    detail={"message": str(e), "exception": e},
                 )
             )
 

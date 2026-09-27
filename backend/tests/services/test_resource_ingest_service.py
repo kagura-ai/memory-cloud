@@ -6,6 +6,7 @@ domain semantics both surfaces previously implemented independently, plus the
 per-surface wire strings the adapters must keep byte-compatible.
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -271,6 +272,8 @@ class TestPersistEvents:
         assert len(result.errors) == 1
         assert result.errors[0].kind == svc.KIND_UNEXPECTED
         assert result.errors[0].index == 0
+        # #1742: the exception rides along so the MCP adapter can classify it.
+        assert isinstance(result.errors[0].detail["exception"], RuntimeError)
         assert len(result.created_ids) == 1
 
     @pytest.mark.asyncio
@@ -398,10 +401,13 @@ class TestAdapterErrorFormatting:
                 False,
             ),
             svc.KIND_DUPLICATE_IDEMPOTENCY: ({}, "Duplicate idempotency_key", False),
+            # #1742: the two server-failure kinds also carry doc_id (to resend
+            # the one event), correlation_id and help — see
+            # test_server_failure_items_say_how_to_resend.
             svc.KIND_CONSTRAINT_VIOLATION: (
                 {"constraint": "x"},
                 "Unable to ingest event due to a constraint violation",
-                False,
+                True,
             ),
             # New wire string on this surface: a per-event unexpected failure
             # previously aborted the whole MCP call; the generic message must
@@ -409,7 +415,7 @@ class TestAdapterErrorFormatting:
             svc.KIND_UNEXPECTED: (
                 {"message": "boom"},
                 "Unexpected error ingesting event",
-                False,
+                True,
             ),
         }
         for kind, (detail, expected, has_doc_id) in cases.items():
@@ -417,3 +423,41 @@ class TestAdapterErrorFormatting:
             assert out["index"] == 1, kind
             assert out["error"] == expected, kind
             assert ("doc_id" in out) is has_doc_id, kind
+
+    def test_server_failure_items_say_how_to_resend(self):
+        """#1742: an event the server failed to store names its cause, a
+        correlation_id and what to resend; never the exception text."""
+        from mcp_server.tools.resource import _format_batch_item_error as fmt
+
+        boom = ConnectionRefusedError("[Errno 111] Connect call failed ('10.0.0.5', 5432)")
+        out = fmt(
+            IngestItemError(
+                index=2,
+                kind=svc.KIND_UNEXPECTED,
+                doc_id="d2",
+                detail={"message": str(boom), "exception": boom},
+            )
+        )
+        assert out["doc_id"] == "d2"
+        assert out["cause"] == "service_unavailable"
+        assert out["correlation_id"]
+        assert "Send only this event again" in out["help"]
+        assert "5432" not in json.dumps(out) and "Errno" not in json.dumps(out)
+
+        out = fmt(
+            IngestItemError(index=3, kind=svc.KIND_UNEXPECTED, doc_id="d3", detail={"message": "x"})
+        )
+        assert out["cause"] == "internal_error"
+
+        out = fmt(
+            IngestItemError(
+                index=4,
+                kind=svc.KIND_CONSTRAINT_VIOLATION,
+                doc_id="d4",
+                detail={"constraint": "ck_resource_events_payload"},
+            )
+        )
+        assert out["constraint"] == "ck_resource_events_payload"
+        assert out["correlation_id"]
+        assert "doc_id, version and idempotency_key" in out["help"]
+        assert "cause" not in out

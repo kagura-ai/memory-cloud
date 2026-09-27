@@ -124,3 +124,38 @@ async def test_setup_connector_passes_normalized_runtime_to_service():
     runtime = service_cls.return_value.provision_connector.await_args.kwargs["runtime_config"]
     assert runtime["vision_enabled"] is False
     assert runtime["buffer"] == {"ttl_seconds": 86400, "max_len": 10_000}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("quota_events_per_hour", "lots"),
+        ("quota_events_per_hour", None),
+        ("virtual_key_valid_until", "next tuesday"),
+        ("virtual_key_valid_until", 1700000000),
+    ],
+)
+async def test_setup_connector_names_the_field_it_cannot_parse(field, value):
+    """#1742: the raw int() / fromisoformat() text named neither the field nor
+    the expected format."""
+    args = {"connector_type": "slack", "resource_id": "slack_general", field: value}
+
+    with (
+        patch("db.base.get_db", side_effect=_fake_get_db),
+        patch(
+            "mcp_server.tools.resource._check_owner_admin_role",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("services.connector_provisioning.ConnectorProvisioningService") as service_cls,
+    ):
+        service_cls.return_value.provision_connector = AsyncMock()
+        result = await handle_setup_connector(args, "user-1", uuid4())
+
+    payload = json.loads(result[0].text)
+    assert payload["error"] == "validation_error"
+    assert payload["field"] == field
+    assert payload["message"].startswith(field)
+    assert "invalid literal" not in payload["message"]
+    assert "Invalid isoformat" not in payload["message"]
+    service_cls.return_value.provision_connector.assert_not_awaited()
