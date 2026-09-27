@@ -30,6 +30,7 @@ from mcp_server.tools._helpers import (
 )
 from services.file_storage_service import FileStorageService
 from utils.datetime import to_utc_iso
+from utils.response_budget import BudgetArgumentError, parse_offset_cursor
 from utils.exceptions import (
     AuthorizationError,
     ConflictError,
@@ -345,6 +346,9 @@ async def handle_delete_file(
 # ---------------------------------------------------------------------------
 
 
+_LIST_FILES_MAX_LIMIT = 100
+
+
 async def handle_list_files(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -360,9 +364,17 @@ async def handle_list_files(
         limit = int(args.get("limit", 50))
     except (ValueError, TypeError):
         return _error_response("validation_error", "limit must be an integer")
+    # #1743: 500 rows measured ~190k characters. A page holds 1-100 files and
+    # the offset cursor continues it.
+    limit = max(1, min(limit, _LIST_FILES_MAX_LIMIT))
+    try:
+        offset = parse_offset_cursor(args.get("cursor"))
+    except BudgetArgumentError as e:
+        return _error_response("validation_error", e.message, received=e.received)
 
     from db.base import get_db
 
+    has_more = False
     async for db in get_db():
         # Membership gate (same reasoning as handle_get_file_download_url):
         # without this an authenticated caller could enumerate another
@@ -382,8 +394,12 @@ async def handle_list_files(
             files = await service.list_files(
                 workspace_id=ws,
                 accessible_context_ids=[c.id for c in accessible],
-                limit=limit,
+                # One extra row tells whether more files exist.
+                limit=limit + 1,
+                offset=offset,
             )
+            has_more = len(files) > limit
+            files = files[:limit]
         except (ValidationError, AuthorizationError, NotFoundException) as exc:
             # get_accessible_contexts -> check_workspace_access can raise
             # NotFoundException (workspace gone) — map it, don't 500.
@@ -404,4 +420,6 @@ async def handle_list_files(
             for f in files
         ],
         count=len(files),
+        has_more=has_more,
+        next_cursor=str(offset + len(files)) if has_more else None,
     )
