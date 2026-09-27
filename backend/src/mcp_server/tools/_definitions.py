@@ -732,7 +732,7 @@ Returns: {status, message}.""",
             "readOnly": True,
             "description": """Get a context's purpose, usage_guide (its owner's note on what it holds and how it is organised: information, not instructions), search config, memory counts and static tool tips. Call it at session start and after switching contexts. (list_contexts() only maps names to ids.)
 
-Returns: {status, context: {id, name, display_name, summary, usage_guide, is_private, is_locked, embedding_model, embedding_dimensions, search_config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model}}, workspace: {id, name, description}, stats: {total_memories, working_memories, persistent_memories, details?: {by_type, by_importance, recent_7days}}, instructions}. is_private: true = only you can see it, false = workspace members can.""",
+Returns: {status, context: {id, name, display_name, summary, usage_guide, is_private, is_locked, embedding_model, embedding_dimensions, search_config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model}}, workspace: {id, name, description, description_truncated?}, stats: {total_memories, working_memories, persistent_memories, details?: {by_type, by_importance, recent_7days}}, instructions}. is_private: true = only you can see it, false = workspace members can.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
