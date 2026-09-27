@@ -38,7 +38,7 @@ required step passed. The others add evidence and never fail the run.
 | T1-T3 | yes | The token endpoint rejects a request without `code_verifier`, with a wrong one, and with a different `redirect_uri`. These run on the consent's code, before the real exchange. |
 | T4 | yes | The exchange with the right verifier: `Bearer`, `expires_in`, scope, whether a refresh token was issued. Passing it after T1-T3 also shows that a rejected request does not consume the code. |
 | T5 | yes | Replaying the code is rejected (single use). |
-| S1 | no | Introspection (RFC 7662): the token is active, its audience is the requested resource, it belongs to the registered client. |
+| S1 | no | Introspection (RFC 7662 §2.1) requires client authentication: an anonymous request and one naming the run's public `client_id` both get `401`, no token metadata is returned, and `none` is not an advertised introspection auth method. |
 | S2 | yes | A refresh cannot widen the granted scope. |
 | S3 | no | The REST API enforces scope: a token narrowed to `memory:read` by a refresh is refused on a `POST` with `insufficient_scope`. The probe (`POST /api/v1/memory/recall` without a context) reads and writes nothing even if it were let through. |
 | S4 | yes | MCP applies the same token's scope: `list_contexts` succeeds, and a `remember` call answers `403` with `WWW-Authenticate: Bearer error="insufficient_scope"` naming `memory:write`. The call targets a context id that cannot exist, so it never stores anything; if a memory were stored anyway, the step fails and deletes it. |
