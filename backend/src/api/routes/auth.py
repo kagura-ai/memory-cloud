@@ -73,6 +73,9 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
+# The browser session cookie (Issue #115 renamed it from ``session_id``).
+SESSION_COOKIE_NAME = "kagura_session"
+
 # Google OAuth2 subrouter (provider-specific endpoints)
 google_router = APIRouter(prefix="/google", tags=["authentication", "google-oauth2"])
 
@@ -563,7 +566,7 @@ async def google_login(
         # append to. Only meaningful when the caller already has one; without a
         # cookie there is nothing to add to and this degrades to a normal login.
         if add_account:
-            current_session = request.cookies.get("kagura_session")
+            current_session = request.cookies.get(SESSION_COOKIE_NAME)
             if current_session:
                 _remember_add_account_intent(state, current_session)
 
@@ -1065,7 +1068,7 @@ async def logout(
         raise HTTPException(status_code=500, detail="Session manager not initialized")
 
     # Read session_id from cookie (Issue #115: renamed to kagura_session)
-    session_id = request.cookies.get("kagura_session")
+    session_id = request.cookies.get(SESSION_COOKIE_NAME)
 
     if not session_id:
         # Nothing to end. Idempotent success — see the docstring.
@@ -1113,7 +1116,7 @@ async def logout(
     # Full sign-out: `scope="all"`, the last account, or the fail-safe above.
     _session_manager.delete_session(session_id)
     logger.info(f"User logged out: session={session_id[:8]}...")
-    response.delete_cookie(key="kagura_session", path="/")
+    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
 
     return {
         "success": True,
@@ -1181,7 +1184,7 @@ def _take_add_account_intent(state: str, request: Request) -> tuple[str, str | N
 
     # Possession of `state` is not authority: the callback must arrive from the
     # browser that actually holds the session.
-    cookie_session = request.cookies.get("kagura_session")
+    cookie_session = request.cookies.get(SESSION_COOKIE_NAME)
     if not cookie_session or cookie_session != intended:
         logger.warning("add_account_intent_rejected_cookie_mismatch")
         return ("unusable", None)
@@ -1521,7 +1524,7 @@ async def list_signed_in_accounts(request: Request, user: SessionUser):
     # absent cookie here is a contradiction rather than an anonymous caller.
     # Answer 401 as the dependency itself would, instead of an empty list that
     # would read as "signed in with no accounts".
-    session_id = request.cookies.get("kagura_session")
+    session_id = request.cookies.get(SESSION_COOKIE_NAME)
     if not session_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
@@ -1560,7 +1563,7 @@ async def switch_active_account(
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Session manager not initialized")
 
-    session_id = request.cookies.get("kagura_session")
+    session_id = request.cookies.get(SESSION_COOKIE_NAME)
     if not session_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
@@ -1734,7 +1737,7 @@ async def github_login(
     # #1488: see the Google login for why the session id (not just a flag) is
     # what gets stored.
     if add_account:
-        current_session = request.cookies.get("kagura_session")
+        current_session = request.cookies.get(SESSION_COOKIE_NAME)
         if current_session:
             _remember_add_account_intent(state, current_session)
 
@@ -2159,7 +2162,7 @@ def _set_session_cookie(response: Response, session_id: str) -> None:
         return
     is_production = os.getenv("ENVIRONMENT", "development") == "production"
     response.set_cookie(
-        key="kagura_session",
+        key=SESSION_COOKIE_NAME,
         value=session_id,
         path="/",
         httponly=True,

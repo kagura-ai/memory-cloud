@@ -16,6 +16,7 @@ import pytest
 from fastapi import BackgroundTasks
 
 from api.main import app
+from api.routes import auth as auth_routes
 from api.routes import password as password_routes
 from auth.dependencies import require_session_auth
 from db.base import get_db
@@ -27,7 +28,7 @@ def _request(ip: str = "192.0.2.10", cookie: str | None = None) -> SimpleNamespa
     return SimpleNamespace(
         client=SimpleNamespace(host=ip),
         headers={"user-agent": "pytest"},
-        cookies={"kagura_session": cookie} if cookie else {},
+        cookies={auth_routes.SESSION_COOKIE_NAME: cookie} if cookie else {},
     )
 
 
@@ -155,6 +156,37 @@ class TestResetRequest:
             scheduled += len(tasks.tasks)
         assert {a.status for a in answers} == {"accepted"}
         assert scheduled == password_routes._RESET_REQUESTS_PER_EMAIL
+
+    @pytest.mark.asyncio
+    async def test_per_email_key_does_not_carry_the_address(
+        self, counters, session_factory
+    ) -> None:
+        # ``increment_counter`` logs the key when Redis fails: no plain email.
+        body = password_routes.PasswordResetRequestBody(email="  Private@Example.TEST ")
+        await password_routes.request_password_reset(body, _request(), BackgroundTasks())
+        email_keys = [k for k in counters if k.startswith("pw_reset_email:")]
+        assert len(email_keys) == 1
+        assert "private" not in email_keys[0].lower()
+        assert "example" not in email_keys[0].lower()
+
+        # Case / whitespace variants still share one counter.
+        again = password_routes.PasswordResetRequestBody(email="private@example.test")
+        await password_routes.request_password_reset(again, _request(), BackgroundTasks())
+        assert counters[email_keys[0]] == 2
+
+    @pytest.mark.asyncio
+    async def test_client_ip_comes_from_the_login_helper(
+        self, monkeypatch, counters, session_factory
+    ) -> None:
+        monkeypatch.setattr(
+            password_routes.auth_module, "_login_client_ip", lambda request: "203.0.113.77"
+        )
+        tasks = BackgroundTasks()
+        body = password_routes.PasswordResetRequestBody(email="a@example.test")
+        await password_routes.request_password_reset(body, _request(), tasks)
+        ((_, kwargs),) = _scheduled(tasks)
+        assert kwargs["ip_address"] == "203.0.113.77"
+        assert "pw_reset_ip:203.0.113.77" in counters
 
     @pytest.mark.asyncio
     async def test_redis_outage_fails_open(self, monkeypatch, session_factory) -> None:

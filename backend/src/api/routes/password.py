@@ -34,6 +34,7 @@ from api.routes import auth as auth_module
 from auth.dependencies import SessionUser
 from db.base import get_db
 from db.redis import increment_counter
+from services.email_service import redact_recipient
 from services.password_account_service import (
     PasswordAccountService,
     normalize_email,
@@ -55,8 +56,6 @@ _RESET_REQUESTS_PER_EMAIL = 3
 _LINK_ATTEMPTS_PER_IP = 20
 _SETUP_REQUESTS_PER_USER = 3
 _CURRENT_PASSWORD_ATTEMPTS_PER_USER = 10
-
-_SESSION_COOKIE = "kagura_session"
 
 
 # ---------------------------------------------------------------------------
@@ -112,10 +111,6 @@ class PasswordRemoveBody(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
-
-
 async def _over_limit(key: str, limit: int, window: int = _RESET_WINDOW_SECONDS) -> bool:
     """Count one request against ``key``; True when it is over ``limit``."""
     try:
@@ -155,14 +150,16 @@ async def request_password_reset(
     timing reveals whether an account exists. Limited per client address
     (429) and per address (silently: no further emails).
     """
-    ip = _client_ip(request)
+    ip = auth_module._login_client_ip(request)
     if await _over_limit(f"pw_reset_ip:{ip}", _RESET_REQUESTS_PER_IP):
         raise RateLimitError(
             "Too many password reset requests. Please try again later.",
             retry_after=_RESET_WINDOW_SECONDS,
         )
     email = normalize_email(body.email)
-    if await _over_limit(f"pw_reset_email:{email}", _RESET_REQUESTS_PER_EMAIL):
+    # A keyed digest, not the address: ``increment_counter`` logs the key
+    # when Redis fails, and the key would otherwise sit in Redis in clear.
+    if await _over_limit(f"pw_reset_email:{redact_recipient(email)}", _RESET_REQUESTS_PER_EMAIL):
         logger.info("password_reset_request_throttled")
         return PasswordEmailAcceptedResponse()
 
@@ -186,7 +183,7 @@ async def reset_password(
     Returns 204; the person then signs in with the new password. 400 for an
     unknown, expired or used link; 422 when the password breaks the policy.
     """
-    ip = _client_ip(request)
+    ip = auth_module._login_client_ip(request)
     if await _over_limit(f"pw_link_ip:{ip}", _LINK_ATTEMPTS_PER_IP):
         raise RateLimitError("Too many attempts. Please try again later.")
     user_id = await PasswordAccountService(db).complete_reset(
@@ -211,7 +208,7 @@ async def setup_password(
     The account's other sessions are revoked; a session in this browser (the
     one that asked for the link) is kept.
     """
-    ip = _client_ip(request)
+    ip = auth_module._login_client_ip(request)
     if await _over_limit(f"pw_link_ip:{ip}", _LINK_ATTEMPTS_PER_IP):
         raise RateLimitError("Too many attempts. Please try again later.")
     user_id = await PasswordAccountService(db).complete_setup(
@@ -220,7 +217,7 @@ async def setup_password(
         ip_address=ip,
         user_agent=request.headers.get("user-agent"),
     )
-    _revoke_sessions(user_id, keep_session_id=request.cookies.get(_SESSION_COOKIE))
+    _revoke_sessions(user_id, keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME))
     return Response(status_code=204)
 
 
@@ -248,7 +245,7 @@ async def request_password_setup(
         )
     await PasswordAccountService(db).request_setup(
         user_id=user_id,
-        ip_address=_client_ip(request),
+        ip_address=auth_module._login_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
     return PasswordSetupRequestedResponse()
@@ -273,10 +270,10 @@ async def change_password(
         user_id=user_id,
         current_password=body.current_password,
         new_password=body.new_password,
-        ip_address=_client_ip(request),
+        ip_address=auth_module._login_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
-    _revoke_sessions(user_id, keep_session_id=request.cookies.get(_SESSION_COOKIE))
+    _revoke_sessions(user_id, keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME))
     return Response(status_code=204)
 
 
@@ -297,8 +294,8 @@ async def remove_password(
     await PasswordAccountService(db).remove(
         user_id=user_id,
         current_password=body.current_password,
-        ip_address=_client_ip(request),
+        ip_address=auth_module._login_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
-    _revoke_sessions(user_id, keep_session_id=request.cookies.get(_SESSION_COOKIE))
+    _revoke_sessions(user_id, keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME))
     return Response(status_code=204)
