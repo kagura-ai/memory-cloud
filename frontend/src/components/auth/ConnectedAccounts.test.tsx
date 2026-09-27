@@ -34,6 +34,7 @@ vi.mock("next-intl", () => ({
 let mockUser: {
   auth_method?: "password" | "oauth";
   auth_provider?: "google" | "github" | null;
+  has_password?: boolean;
 } | null = { auth_method: "password", auth_provider: null };
 vi.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({ user: mockUser }),
@@ -223,6 +224,43 @@ describe("ConnectedAccounts — disconnect", () => {
     });
     expect((disconnectBtn as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText("lastMethodHint")).toBeTruthy();
+  });
+
+  it("keeps Disconnect enabled for an OAuth user who added a password (#1678)", async () => {
+    mockUser = {
+      auth_method: "oauth",
+      auth_provider: "google",
+      has_password: true,
+    };
+    mockApiGet.mockResolvedValueOnce({
+      providers: [{ provider: "google" }],
+    });
+
+    render(<ConnectedAccounts />);
+
+    const disconnectBtn = await screen.findByRole("button", {
+      name: /^disconnectButton\|google$/,
+    });
+    expect((disconnectBtn as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText("lastMethodHint")).toBeNull();
+  });
+
+  it("treats has_password=false as authoritative over auth_method (#1678)", async () => {
+    mockUser = {
+      auth_method: "password",
+      auth_provider: null,
+      has_password: false,
+    };
+    mockApiGet.mockResolvedValueOnce({
+      providers: [{ provider: "github" }],
+    });
+
+    render(<ConnectedAccounts />);
+
+    const disconnectBtn = await screen.findByRole("button", {
+      name: /^disconnectButton\|github$/,
+    });
+    expect((disconnectBtn as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("toasts success and reloads providers on a successful disconnect", async () => {

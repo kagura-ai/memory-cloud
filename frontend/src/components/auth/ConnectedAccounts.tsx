@@ -139,11 +139,13 @@ export default function ConnectedAccounts() {
 
   const linkedSet = new Set(linked.map((p) => p.provider));
 
-  // A password user always retains a fallback sign-in method, so unlinking the
-  // last OAuth provider is safe. An OAuth-only user with a single linked
-  // provider must keep it — disable Disconnect to pre-empt the backend 409
-  // (which is still handled defensively in handleDisconnectConfirm).
-  const hasPassword = user?.auth_method === "password";
+  // A user with a password always retains a fallback sign-in method, so
+  // unlinking the last OAuth provider is safe. An OAuth-only user with a single
+  // linked provider must keep it — disable Disconnect to pre-empt the backend
+  // 409 (which is still handled defensively in handleDisconnectConfirm).
+  // #1678: `has_password` is authoritative (an OAuth user may have added a
+  // password); an older backend only sends `auth_method`.
+  const hasPassword = user?.has_password ?? user?.auth_method === "password";
   const isOnlyMethod = !hasPassword && linkedSet.size <= 1;
 
   const handleConnect = async (provider: Provider) => {
