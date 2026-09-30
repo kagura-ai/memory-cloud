@@ -22,12 +22,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 
 from api.routes.api_keys import regenerate_api_key
 from utils.datetime import utcnow
 
 USER = {"user_id": "user-1", "email": "u@example.com", "role": "user"}
+REQUEST = SimpleNamespace(client=SimpleNamespace(host="192.0.2.1"), headers={})
 AGENT_ID = uuid.uuid4()
 CONTEXT_ID = uuid.uuid4()
 WORKSPACE_ID = uuid.uuid4()
@@ -84,7 +85,14 @@ async def test_regenerate_carries_agent_binding_forward():
     old = _old_key(agent_id=AGENT_ID)
     manager = _manager()
 
-    await regenerate_api_key(key_id=7, user=USER, manager=manager, db=_db(old))
+    await regenerate_api_key(
+        key_id=7,
+        request=REQUEST,
+        background_tasks=BackgroundTasks(),
+        user=USER,
+        manager=manager,
+        db=_db(old),
+    )
 
     kwargs = manager.create_key.await_args.kwargs
     assert kwargs["agent_id"] == AGENT_ID
@@ -101,7 +109,14 @@ async def test_regenerate_carries_public_context_binding_forward():
     old = _old_key(workspace_id=None, bound_context_id=CONTEXT_ID)
     manager = _manager()
 
-    await regenerate_api_key(key_id=7, user=USER, manager=manager, db=_db(old))
+    await regenerate_api_key(
+        key_id=7,
+        request=REQUEST,
+        background_tasks=BackgroundTasks(),
+        user=USER,
+        manager=manager,
+        db=_db(old),
+    )
 
     kwargs = manager.create_key.await_args.kwargs
     assert kwargs["bound_context_id"] == CONTEXT_ID
@@ -117,7 +132,14 @@ async def test_regenerate_surfaces_binding_revalidation_as_400():
     manager = _manager(create_side_effect=ValueError("agent is 'suspended'"))
 
     with pytest.raises(HTTPException) as exc_info:
-        await regenerate_api_key(key_id=7, user=USER, manager=manager, db=_db(old))
+        await regenerate_api_key(
+            key_id=7,
+            request=REQUEST,
+            background_tasks=BackgroundTasks(),
+            user=USER,
+            manager=manager,
+            db=_db(old),
+        )
 
     assert exc_info.value.status_code == 400
     assert "suspended" in exc_info.value.detail
@@ -146,7 +168,14 @@ async def test_pro_workspace_can_still_rotate_an_existing_bound_key() -> None:
             side_effect=AssertionError("regenerate built a create-gate refusal"),
         ),
     ):
-        response = await regenerate_api_key(key_id=7, user=USER, manager=manager, db=_db(old))
+        response = await regenerate_api_key(
+            key_id=7,
+            request=REQUEST,
+            background_tasks=BackgroundTasks(),
+            user=USER,
+            manager=manager,
+            db=_db(old),
+        )
 
     assert response.api_key == "plaintext"
     assert old.revoked_at is not None  # the old key is gone …
@@ -168,7 +197,9 @@ def test_regenerate_cannot_bind_an_unbound_key_or_rebind_to_another_context() ->
     binding is copied from the OLD row, so unbound stays unbound and bound
     stays bound to the same context."""
     params = inspect.signature(regenerate_api_key).parameters
-    assert set(params) == {"key_id", "user", "manager", "db"}
+    # ``request`` / ``background_tasks`` carry the security notice (#1752),
+    # not a body.
+    assert set(params) == {"key_id", "request", "background_tasks", "user", "manager", "db"}
     assert "bound_context_id" not in params
 
 
@@ -177,6 +208,13 @@ async def test_regenerate_keeps_an_unbound_key_unbound() -> None:
     old = _old_key(workspace_id=None, bound_context_id=None)
     manager = _manager()
 
-    await regenerate_api_key(key_id=7, user=USER, manager=manager, db=_db(old))
+    await regenerate_api_key(
+        key_id=7,
+        request=REQUEST,
+        background_tasks=BackgroundTasks(),
+        user=USER,
+        manager=manager,
+        db=_db(old),
+    )
 
     assert manager.create_key.await_args.kwargs["bound_context_id"] is None

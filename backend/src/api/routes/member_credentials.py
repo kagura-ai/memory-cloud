@@ -13,7 +13,7 @@ Endpoints:
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +36,10 @@ from models.schemas import (
     RegenerateOAuthSecretResponse,
 )
 from services.member_credentials_service import MemberCredentialsService
+from services.security_notification_service import (
+    SecurityEvent,
+    schedule_security_notification,
+)
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     AuthorizationError,
@@ -177,6 +181,8 @@ async def _owner_provisioned_mint(
     data: CreateAPIKeyRequest,
     user: dict,
     db: AsyncSession,
+    request: Request,
+    background_tasks: BackgroundTasks,
 ) -> dict:
     """Issue #1165: mint an API key for another member with a workspace-owner key.
 
@@ -190,7 +196,8 @@ async def _owner_provisioned_mint(
     - 400 if ``expires_days`` omitted (never-expiring CI keys are unacceptable here);
     - 400 if ``bound_context_id`` set (public-bound keys stay self-only).
     The minted key is force-hidden (``hidden_at=now``) so ``plaintext_key`` exists
-    only in this single 201 response; a follow-up GET returns it null.
+    only in this single 201 response; a follow-up GET returns it null. The
+    target member is emailed a security notice naming the owner (#1752).
     """
     # Owner gate FIRST on the path workspace (+ #963 confinement). The helper
     # fails closed on a malformed principal missing user_id (clean 403, never a
@@ -263,6 +270,14 @@ async def _owner_provisioned_mint(
             },
         )
         await db.commit()
+        schedule_security_notification(
+            background_tasks,
+            user_id=user_id,
+            event=SecurityEvent.API_KEY_CREATED,
+            request=request,
+            key_name=new_key.name,
+            actor_user_id=caller_id,
+        )
 
         logger.info(
             "member_api_key_provisioned",
@@ -441,6 +456,8 @@ async def hide_api_key(
 async def regenerate_api_key(
     workspace_id: UUID,
     user_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> RegenerateAPIKeyResponse:
@@ -453,9 +470,14 @@ async def regenerate_api_key(
     - Owner: Can regenerate admin/member/viewer's keys
     - Admin: Can regenerate member/viewer's keys
 
+    The key owner is emailed a security notice; when an admin acted, it
+    names the admin (#1752).
+
     Args:
         workspace_id: Workspace ID
         user_id: Target user ID
+        request: The request (IP / user agent for the notice)
+        background_tasks: Runs the notice after the response
         user: Current user (from auth)
         db: Database session
 
@@ -505,6 +527,14 @@ async def regenerate_api_key(
     )
 
     await db.commit()
+    schedule_security_notification(
+        background_tasks,
+        user_id=user_id,
+        event=SecurityEvent.API_KEY_REGENERATED,
+        request=request,
+        key_name=old_key.name,
+        actor_user_id=user["user_id"],
+    )
 
     logger.info(
         "api_key_regenerated",
@@ -527,6 +557,8 @@ async def create_api_key(
     workspace_id: UUID,
     user_id: str,
     data: CreateAPIKeyRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
     user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -553,6 +585,9 @@ async def create_api_key(
     audit / revoke surface on ``/api/v1/public/{ctx}/*``. The binding is
     immutable — to change it, revoke this key and create a new one.
 
+    Issue #1752: the key owner is emailed a security notice after the commit
+    (naming the owner key's user on the owner-provisioned path).
+
     Args:
         workspace_id: Workspace ID (from URL — used as permission scope; also
             assigned to ``api_keys.workspace_id`` unless a bound context is set)
@@ -573,7 +608,9 @@ async def create_api_key(
 
     # Issue #1165: owner-provisioned programmatic minting for ANOTHER member.
     if is_api_key_principal(user):
-        return await _owner_provisioned_mint(workspace_id, user_id, data, user, db)
+        return await _owner_provisioned_mint(
+            workspace_id, user_id, data, user, db, request, background_tasks
+        )
 
     # Fail closed: only a POSITIVELY-identified session may reach the self-mint
     # path. Reaching it by elimination (not OAuth, not API-key => assume session)
@@ -735,6 +772,13 @@ async def create_api_key(
             )
 
         await db.commit()
+        schedule_security_notification(
+            background_tasks,
+            user_id=user_id,
+            event=SecurityEvent.API_KEY_CREATED,
+            request=request,
+            key_name=new_key.name,
+        )
 
         logger.info(
             "api_key_created",
@@ -1082,6 +1126,8 @@ async def hide_oauth_app(
 async def regenerate_oauth_secret(
     workspace_id: UUID,
     user_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> RegenerateOAuthSecretResponse:
@@ -1094,9 +1140,14 @@ async def regenerate_oauth_secret(
     - Owner: Can regenerate admin/member/viewer's secrets
     - Admin: Can regenerate member/viewer's secrets
 
+    The app owner is emailed a security notice; when an admin acted, it
+    names the admin (#1752).
+
     Args:
         workspace_id: Workspace ID
         user_id: Target user ID
+        request: The request (IP / user agent for the notice)
+        background_tasks: Runs the notice after the response
         user: Current user (from auth)
         db: Database session
 
@@ -1156,6 +1207,14 @@ async def regenerate_oauth_secret(
     oauth_app.plaintext_secret_encrypted = plaintext_secret_encrypted  # Migration 035
 
     await db.commit()
+    schedule_security_notification(
+        background_tasks,
+        user_id=user_id,
+        event=SecurityEvent.OAUTH_SECRET_REGENERATED,
+        request=request,
+        client_name=oauth_app.client_name,
+        actor_user_id=user["user_id"],
+    )
 
     logger.info(
         "oauth_secret_regenerated",

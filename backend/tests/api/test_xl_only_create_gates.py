@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 from fastapi.testclient import TestClient
 
 from api.main import app
@@ -550,7 +550,12 @@ class TestBoundPublicKeyCreate:
             patch("api.routes.member_credentials.APIKeyManager", return_value=mgr),
         ):
             r = await mc.regenerate_api_key(
-                _WS, "member-1", {"user_id": "member-1", "sub": "m"}, db
+                _WS,
+                "member-1",
+                SimpleNamespace(client=None, headers={}),
+                BackgroundTasks(),
+                {"user_id": "member-1", "sub": "m"},
+                db,
             )
 
         assert r.key == "kagura_PLAIN"

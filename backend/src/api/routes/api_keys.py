@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +20,10 @@ from auth.dependencies import SessionUser, get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import APIKey
+from services.security_notification_service import (
+    SecurityEvent,
+    schedule_security_notification,
+)
 from utils import db_transaction, get_user_id
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -196,12 +200,16 @@ async def list_api_keys(
 @router.post("", response_model=APIKeyCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_api_key(
     data: APIKeyCreate,
+    request: Request,
+    background_tasks: BackgroundTasks,
     user: SessionUser,
     manager: APIKeyManager = Depends(get_api_key_manager),
 ) -> APIKeyCreateResponse:
     """Create a new API key for the current user.
 
     Issue #246: Creates API key with context_id=None (no auto-assignment).
+    Issue #1752: the owner is emailed a security notice once the key is
+    committed (the key's name only, never its value).
     """
     try:
         user_id = get_user_id(user)
@@ -212,6 +220,16 @@ async def create_api_key(
             name=data.name,
             user_id=user_id,
             expires_days=data.expires_days,
+        )
+        # Commit here rather than in get_db's teardown so the notice is only
+        # scheduled for a key that exists.
+        await manager.db.commit()
+        schedule_security_notification(
+            background_tasks,
+            user_id=user_id,
+            event=SecurityEvent.API_KEY_CREATED,
+            request=request,
+            key_name=created_key.name,
         )
 
         response_data = _format_key_response(created_key)
@@ -323,13 +341,16 @@ async def revoke_api_key(
 @router.post("/{key_id}/regenerate", response_model=APIKeyCreateResponse)
 async def regenerate_api_key(
     key_id: int,
+    request: Request,
+    background_tasks: BackgroundTasks,
     user: SessionUser,
     manager: APIKeyManager = Depends(get_api_key_manager),
     db: AsyncSession = Depends(get_db),
 ) -> APIKeyCreateResponse:
     """Regenerate an API key (revokes old key, creates new one with same name).
 
-    Issue #169: Secret regeneration feature.
+    Issue #169: Secret regeneration feature. Issue #1752: the owner is emailed
+    a security notice after the commit.
 
     WARNING: This immediately invalidates the old key. Update all applications.
     """
@@ -403,6 +424,13 @@ async def regenerate_api_key(
         )
 
         await db.commit()
+        schedule_security_notification(
+            background_tasks,
+            user_id=user_id,
+            event=SecurityEvent.API_KEY_REGENERATED,
+            request=request,
+            key_name=key_name,
+        )
 
         logger.info(f"api_key_regenerated: old_id={key_id}, new_id={new_key.id}, user={user_id}")
 

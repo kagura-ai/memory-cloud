@@ -24,6 +24,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from fastapi import BackgroundTasks
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,6 +40,7 @@ from api.routes.me_account import (
 )
 from models.auth import AuditLog, User, UserOAuthProvider
 from services.account_linking_service import AccountLinkingService
+from services.security_notification_service import notify_security_event
 from utils.exceptions import ConflictError, NotFoundException
 
 
@@ -467,11 +469,13 @@ class TestUnlinkProviderEndpoint:
     async def test_unlink_provider_endpoint(self):
         """Unlinking one of two providers → 200 {"status": "ok"}; the handler
         forwards ip/user-agent to the service for the audit row."""
+        tasks = BackgroundTasks()
         with patch.object(me_account, "AccountLinkingService") as mock_cls:
             mock_cls.return_value.unlink = AsyncMock(return_value=None)
             result = await unlink_provider(
                 body=UnlinkProviderRequest(provider="github"),
                 request=_request(),
+                background_tasks=tasks,
                 user=_session(),
                 db=AsyncMock(),
             )
@@ -481,6 +485,11 @@ class TestUnlinkProviderEndpoint:
         assert kwargs["provider"] == "github"
         assert kwargs["ip_address"] == "127.0.0.1"
         assert kwargs["user_agent"] == "pytest"
+        # Issue #1752: the owner is told a sign-in method was removed.
+        (task,) = tasks.tasks
+        assert task.func is notify_security_event
+        assert task.args == (_session()["user_id"], "sign_in_method_removed")
+        assert task.kwargs["sign_in_method"] == "GitHub sign-in"
 
     @pytest.mark.asyncio
     async def test_unlink_last_method_propagates_conflict(self):
@@ -490,14 +499,17 @@ class TestUnlinkProviderEndpoint:
             mock_cls.return_value.unlink = AsyncMock(
                 side_effect=ConflictError("Cannot unlink the only remaining sign-in method")
             )
+            tasks = BackgroundTasks()
             with pytest.raises(ConflictError) as exc_info:
                 await unlink_provider(
                     body=UnlinkProviderRequest(provider="google"),
                     request=_request(),
+                    background_tasks=tasks,
                     user=_session(),
                     db=AsyncMock(),
                 )
         assert exc_info.value.status_code == 409
+        assert tasks.tasks == []  # nothing was removed, nothing to notify
 
     @pytest.mark.asyncio
     async def test_unlink_not_linked_propagates_not_found(self):
@@ -510,6 +522,7 @@ class TestUnlinkProviderEndpoint:
                 await unlink_provider(
                     body=UnlinkProviderRequest(provider="github"),
                     request=_request(),
+                    background_tasks=BackgroundTasks(),
                     user=_session(),
                     db=AsyncMock(),
                 )

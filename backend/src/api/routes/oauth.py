@@ -33,7 +33,17 @@ from pathlib import Path
 from urllib.parse import parse_qsl, unquote_plus, urlencode, urlparse, urlsplit, urlunsplit
 
 from authlib.oauth2.rfc6749.errors import OAuth2Error
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -57,6 +67,11 @@ from db.redis import increment_counter
 from models.api_base import TZAwareBaseModel
 from models.auth import OAuth2Client, OAuth2DeviceCode, OAuth2Token, User, generate_user_code
 from models.schemas import TokenIntrospectionResponse
+from services.security_notification_service import (
+    SecurityEvent,
+    is_first_client_authorization,
+    schedule_security_notification,
+)
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import AuthenticationError, AuthorizationError, RedisError
 from utils.logger import get_logger
@@ -1163,12 +1178,14 @@ async def hide_oauth2_client_secret(
 )
 async def regenerate_oauth2_client_secret(
     request: Request,
+    background_tasks: BackgroundTasks,
     client_id: str,
     user: SessionUser,
 ) -> OAuth2ClientWithSecretResponse:
     """Regenerate OAuth2 client secret.
 
-    Issue #169: Secret regeneration feature.
+    Issue #169: Secret regeneration feature. Issue #1752: the owner is emailed
+    a security notice after the commit.
 
     WARNING: This immediately invalidates the old secret. Update all applications.
 
@@ -1218,6 +1235,13 @@ async def regenerate_oauth2_client_secret(
 
         db_session.commit()
         db_session.refresh(client)
+        schedule_security_notification(
+            background_tasks,
+            user_id=current_user_id,
+            event=SecurityEvent.OAUTH_SECRET_REGENERATED,
+            request=request,
+            client_name=client.client_name,
+        )
 
         logger.info(
             "oauth2_client_secret_regenerated",
@@ -1851,15 +1875,43 @@ def _run_oauth_sync(action: str, request, **kwargs):
         db_session.close()
 
 
+def _first_authorization_of(client_id: str | None, user_id: str | None) -> bool:
+    """Whether ``user_id`` has never authorized ``client_id`` (Issue #1752).
+
+    Runs on its own sync session (call it via ``asyncio.to_thread``). A failed
+    check answers True: an extra notice is better than a missed one.
+    """
+    if not client_id or not user_id:
+        return False
+    session = get_sync_session()
+    try:
+        return is_first_client_authorization(session, client_id=client_id, user_id=user_id)
+    except Exception as exc:
+        logger.warning("oauth_first_authorization_check_failed", error_type=type(exc).__name__)
+        return True
+    finally:
+        session.close()
+
+
+def _grant_issued(location: str) -> bool:
+    """Whether an authorization redirect carries a code (not an error)."""
+    params = dict(parse_qsl(urlsplit(location).query))
+    return "code" in params and "error" not in params
+
+
 @router.post("/authorize")
 async def oauth_authorize_post(
     request: Request,
+    background_tasks: BackgroundTasks,
 ):
     """Process authorization consent.
 
     OAuth2 params (client_id, redirect_uri, etc.) must be in query string,
     not in POST body. This is required by Authlib 1.6.5 which generates
     payload from query params for authorization endpoint.
+
+    Issue #1752: the first time a user authorizes a client, the user is
+    emailed a security notice once the authorization code is stored.
     """
     import asyncio
 
@@ -1907,6 +1959,9 @@ async def oauth_authorize_post(
             status_code=303,  # See Other: POST→GET redirect
         )
 
+    # Decided before the grant writes its authorization code (Issue #1752).
+    first_authorization = await asyncio.to_thread(_first_authorization_of, client_id, user.user_id)
+
     # Run Authlib operations in thread pool to avoid blocking event loop
     try:
         response = await asyncio.to_thread(
@@ -1916,6 +1971,14 @@ async def oauth_authorize_post(
         # Use 303 See Other to convert POST to GET redirect
         # Claude.ai callback expects GET, not POST
         if hasattr(response, "location") and response.location:
+            if first_authorization and user.user_id and _grant_issued(response.location):
+                schedule_security_notification(
+                    background_tasks,
+                    user_id=user.user_id,
+                    event=SecurityEvent.OAUTH_CLIENT_AUTHORIZED,
+                    request=request,
+                    client_id=client_id,
+                )
             return RedirectResponse(response.location, status_code=303)
 
         # No location - should not happen in normal flow
@@ -2510,15 +2573,39 @@ def _get_user_from_session(request: Request) -> dict | None:
     return {"user_id": user_stub.user_id, "email": user_stub.email}
 
 
+def _device_first_authorization(
+    db_session: Session, device: OAuth2DeviceCode, user_id: str
+) -> bool:
+    """Whether approving ``device`` is the user's first grant to its client (#1752).
+
+    A failed check answers True: an extra notice is better than a missed one.
+    """
+    try:
+        # A savepoint, so a failed lookup cannot abort the approval's transaction.
+        with db_session.begin_nested():
+            return is_first_client_authorization(
+                db_session,
+                client_id=device.client_id,
+                user_id=user_id,
+                exclude_device_code_id=device.id,
+            )
+    except Exception as exc:
+        logger.warning("device_first_authorization_check_failed", error_type=type(exc).__name__)
+        return True
+
+
 @router.post("/device/confirm", response_model=DeviceConfirmResponse)
 async def device_confirm(
     request: Request,
     body: DeviceConfirmRequest,
+    background_tasks: BackgroundTasks,
 ) -> DeviceConfirmResponse:
     """User consent endpoint for device authorization.
 
     Requires session authentication. Sets authorized_at or denied_at on the
-    device code record so the polling CLI receives the decision.
+    device code record so the polling CLI receives the decision. The first
+    time a user approves a client, the user is emailed a security notice
+    after the commit (Issue #1752).
     """
     user = _get_user_from_session(request)
     if not user:
@@ -2565,14 +2652,24 @@ async def device_confirm(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="User ID not found in session",
                 )
+            first_authorization = _device_first_authorization(db_session, device, user_id)
             device.user_id = user_id
             device.authorized_at = utcnow()
             status_str = "approved"
         else:
+            first_authorization = False
             device.denied_at = utcnow()
             status_str = "denied"
 
         db_session.commit()
+        if first_authorization and device.user_id:
+            schedule_security_notification(
+                background_tasks,
+                user_id=device.user_id,
+                event=SecurityEvent.OAUTH_CLIENT_AUTHORIZED,
+                request=request,
+                client_id=device.client_id,
+            )
 
         # A user_code is logged by its prefix, as /device/audit-unauth does (#779).
         logger.info(
