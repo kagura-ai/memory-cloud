@@ -527,3 +527,86 @@ class TestIsEmailUniqueViolationWrapShapes:
         # getattr(...).
         exc = IntegrityError("UNIQUE", params={}, orig=None)  # type: ignore[arg-type]
         assert _is_email_unique_violation(exc) is False
+
+
+class TestEmailVerifiedAt:
+    """#1752: ``email_verified_at`` follows the IdP's verified attestation only."""
+
+    @pytest.mark.parametrize(("verified", "expect_set"), [(True, True), (False, False)])
+    @pytest.mark.asyncio
+    async def test_new_user(self, role_manager, verified, expect_set):
+        db = _make_db_mock(_execute_returns(None, {"scalar": 1}))
+        with _patch_get_db(db):
+            await role_manager.ensure_user(
+                email="new@example.com",
+                user_id="g-new",
+                auth_provider="google",
+                email_verified=verified,
+            )
+        added = db.add.call_args_list[0].args[0]
+        assert (added.email_verified_at is not None) is expect_set
+
+    @pytest.mark.asyncio
+    async def test_existing_user_verified_on_sign_in(self, role_manager):
+        existing = _user_row(email="alice@example.com")
+        existing.email_verified_at = None
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
+        with _patch_get_db(db):
+            await role_manager.ensure_user(
+                email="alice@example.com",
+                user_id="u1",
+                auth_provider="google",
+                email_verified=True,
+            )
+        assert existing.email_verified_at is not None
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unverified_assertion_never_sets_it(self, role_manager):
+        existing = _user_row(email="alice@example.com")
+        existing.email_verified_at = None
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
+        with _patch_get_db(db):
+            await role_manager.ensure_user(
+                email="alice@example.com",
+                user_id="u1",
+                auth_provider="google",
+                email_verified=False,
+            )
+        assert existing.email_verified_at is None
+
+    @pytest.mark.asyncio
+    async def test_existing_verification_time_is_kept(self, role_manager):
+        from datetime import datetime
+
+        earlier = datetime(2026, 1, 1)
+        existing = _user_row(email="alice@example.com")
+        existing.email_verified_at = earlier
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
+        with _patch_get_db(db):
+            await role_manager.ensure_user(
+                email="alice@example.com",
+                user_id="u1",
+                auth_provider="google",
+                email_verified=True,
+            )
+        assert existing.email_verified_at == earlier
+
+    @pytest.mark.asyncio
+    async def test_verified_email_change_resets_it(self, role_manager):
+        from datetime import datetime
+
+        earlier = datetime(2026, 1, 1)
+        existing = _user_row(email="alice@old.com")
+        existing.email_verified_at = earlier
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
+        with _patch_get_db(db):
+            await role_manager.ensure_user(
+                email="alice@new.com",
+                user_id="u1",
+                auth_provider="google",
+                email_verified=True,
+            )
+        assert existing.email == "alice@new.com"
+        assert existing.email_verified_at is not None
+        assert existing.email_verified_at != earlier
