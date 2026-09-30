@@ -32,6 +32,34 @@ from utils.response_budget import DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT, fit_items
 logger = logging.getLogger(__name__)
 
 
+# #1750: memory ``type`` is free text, so ``stats.details.by_type`` could list
+# any number of types. The reply keeps the largest ones and folds the rest into
+# ``other``.
+_BY_TYPE_TOP = 20
+_BY_TYPE_OTHER = "other"
+
+
+def _cap_by_type(by_type: dict[str, int]) -> tuple[dict[str, int], bool, int]:
+    """Keep the ``_BY_TYPE_TOP`` largest types; fold the rest into ``other``.
+
+    Largest count first, ties by name, so the result is stable. A stored type
+    that is itself named ``other`` keeps its place and absorbs the folded
+    count; the sum of the counts is unchanged either way.
+
+    Returns:
+        ``(by_type, truncated, total_types)`` — ``truncated`` is whether any
+        type was folded, ``total_types`` the number of distinct types stored.
+    """
+    total_types = len(by_type)
+    if total_types <= _BY_TYPE_TOP:
+        return by_type, False, total_types
+    ranked = sorted(by_type.items(), key=lambda kv: (-kv[1], kv[0]))
+    kept = dict(ranked[:_BY_TYPE_TOP])
+    folded = sum(count for _, count in ranked[_BY_TYPE_TOP:])
+    kept[_BY_TYPE_OTHER] = kept.get(_BY_TYPE_OTHER, 0) + folded
+    return kept, True, total_types
+
+
 async def handle_get_context_info(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
@@ -157,11 +185,16 @@ async def handle_get_context_info(
                 "persistent_memories": result.persistent_count,
             }
             if include_details:
-                stats_data["details"] = {
-                    "by_type": result.by_type,
+                by_type, by_type_truncated, total_types = _cap_by_type(result.by_type)
+                details: dict[str, Any] = {
+                    "by_type": by_type,
                     "by_importance": result.by_importance,
                     "recent_7days": result.recent_activity,
                 }
+                if by_type_truncated:
+                    details["by_type_truncated"] = True
+                    details["by_type_total_types"] = total_types
+                stats_data["details"] = details
 
             guardrails_field = await _guardrails_field(db, user_id, current_context)
 

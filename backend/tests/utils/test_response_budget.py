@@ -103,3 +103,12 @@ def test_fit_lanes_gives_the_first_lane_priority():
     out, cut, dropped = fit_lanes([first, second], budget)
     assert out[0] == first and out[1] == second[:1]
     assert cut == [False, True] and dropped is False
+
+
+def test_text_preview_cuts_by_code_point_and_says_so():
+    from utils.response_budget import text_preview
+
+    assert text_preview("日本語テキスト", 3) == ("日本語…", True)
+    assert text_preview("ab   cd", 4) == ("ab…", True)  # trailing space stripped
+    assert text_preview("abc", 3) == ("abc", False)
+    assert text_preview(None, 3) == (None, False)

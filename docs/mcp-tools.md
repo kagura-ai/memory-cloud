@@ -543,6 +543,7 @@ MCP clients cap what a tool result may put in front of the model — about 25k t
 | `list_tags` | `limit` 50 | a page holds at most 200 tags (`limit` 1–500 is still accepted) | `has_more` (narrow with `prefix` / `min_count`) |
 | `list_files` | `limit` 50 | 100 | `has_more` / `next_cursor` |
 | `list_agents` | `limit` 50, descriptions as 200-character previews | 100 | `has_more` / `next_cursor`, `description_truncated` |
+| `list_analyses` | `limit` 20, `error` as a 300-character preview (`get_analysis` returns it whole); page stops at 20,000 characters | 100, page stops at 20,000 characters | `next_cursor` (resumes after the last run returned), `error_truncated` |
 | `get_cluster` | `limit` 25, page stops at 20,000 characters | 100, page stops at 100,000 characters | `next_cursor`; `tags_omitted` on a member larger than the page |
 
 Write-side caps keep the stored data these replies carry in proportion. They apply to new writes only; rows stored before them still read back.
@@ -550,6 +551,7 @@ Write-side caps keep the stored data these replies carry in proportion. They app
 - `remember` / `update_memory`: at most 50 tags, each at most 100 characters.
 - `set_state`: a value of at most 16,384 characters as compact JSON.
 - Workspace description (web UI / REST): at most 1,000 characters; `get_context_info` serves a longer stored one cut to 1,000 with `workspace.description_truncated: true`.
+- Memory `type` is free text, so a context can hold any number of distinct types: `get_context_info` `stats.details.by_type` keeps the 20 types with the most memories and folds the rest into `other` (a stored type named `other` absorbs the folded count), with `by_type_truncated: true` and the real `by_type_total_types`.
 
 ## Usage notes
 
@@ -798,7 +800,7 @@ list_resource_tokens(resource_id="ec_products")  → {tokens: [{id: 1, resource_
 analyze_context(context_id="...", dry_run=True)   # cost preview, nothing is created
 analyze_context(context_id="...")                 # starts the run → run_id
 get_analysis(run_id="...")                        # poll until finished_at is set
-list_analyses(context_id="...", limit=20)         # → {items: [...], next_cursor: "2026-04-30T12:34:56"}
+list_analyses(context_id="...", limit=20)         # → {items: [...], next_cursor: "2026-04-30T12:34:56Z|<run_id>"}
 get_cluster(run_id="...", cluster_index=3)        # label, representatives, paginated members
 ```
 

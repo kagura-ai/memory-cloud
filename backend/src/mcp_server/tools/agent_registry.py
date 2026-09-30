@@ -142,10 +142,11 @@ def _serialize_agent_list_item(agent: Any) -> dict[str, Any]:
     Slices by code point; ``description_truncated`` is present only on items
     that were cut (the list_contexts ``summary_truncated`` convention).
     """
+    from utils.response_budget import text_preview
+
     item = _serialize_agent(agent)
-    description = item["description"]
-    if isinstance(description, str) and len(description) > _LIST_AGENTS_DESCRIPTION_PREVIEW:
-        item["description"] = description[:_LIST_AGENTS_DESCRIPTION_PREVIEW].rstrip() + "…"
+    item["description"], cut = text_preview(item["description"], _LIST_AGENTS_DESCRIPTION_PREVIEW)
+    if cut:
         item["description_truncated"] = True
     return item
 

@@ -114,6 +114,20 @@ def fit_items(items: Sequence[Any], budget: int) -> int:
     return len(items)
 
 
+def text_preview(text: Any, limit: int) -> tuple[Any, bool]:
+    """``text`` cut to a ``limit``-character preview, and whether it was cut.
+
+    The list-view convention of #1743 (``list_contexts`` ``summary``,
+    ``list_agents`` ``description``, ``list_analyses`` ``error``): slices by
+    code point, strips trailing whitespace and appends ``…``. A non-string or
+    a string within ``limit`` comes back unchanged with ``False``; the caller
+    sets ``<field>_truncated: true`` only on items that were cut.
+    """
+    if not isinstance(text, str) or len(text) <= limit:
+        return text, False
+    return text[:limit].rstrip() + "…", True
+
+
 def drop_key(items: Iterable[dict[str, Any]], key: str) -> list[dict[str, Any]]:
     """Copies of ``items`` without ``key`` (the first thing cut under a budget)."""
     return [{k: v for k, v in item.items() if k != key} for item in items]

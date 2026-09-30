@@ -264,6 +264,20 @@ async def get_analysis(
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+def encode_list_cursor(row: MemoryAnalysis) -> str:
+    """The ``list_analyses`` cursor that resumes after ``row``.
+
+    The compound ``(started_at, id)`` of the last row returned (#1247).
+    ``started_at`` uses the project's standard ``Z`` suffix so JS clients that
+    round-trip the cursor through their own parser don't drop the timezone
+    info (#489 wire-format rule). The MCP handler also calls this when the
+    response budget stops a page early (#1750).
+    """
+    from utils.datetime import to_utc_iso
+
+    return f"{to_utc_iso(row.started_at)}|{row.id}"
+
+
 def _decode_list_cursor(cursor: str) -> tuple[datetime | None, UUID | None]:
     """Decode a ``list_analyses`` keyset cursor into ``(started_at, id)``.
 
@@ -367,14 +381,7 @@ async def list_analyses(
     next_cursor: str | None = None
     if len(rows) > page_size:
         rows = rows[:page_size]
-        # Cursor for next page is the compound (started_at, id) of the LAST
-        # row we returned. ``started_at`` uses the project's standard ``Z``
-        # suffix so JS clients that round-trip the cursor through their own
-        # parser don't drop the timezone info (#489 wire-format rule).
-        from utils.datetime import to_utc_iso
-
-        last = rows[-1]
-        next_cursor = f"{to_utc_iso(last.started_at)}|{last.id}"
+        next_cursor = encode_list_cursor(rows[-1])
 
     return rows, next_cursor
 

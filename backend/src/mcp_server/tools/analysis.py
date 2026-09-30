@@ -262,6 +262,30 @@ def _serialize_run_row(row: Any) -> dict[str, Any]:
     return strip_cost_fields(out, omit=True)
 
 
+# #1750: the writer keeps up to 8,000 characters of ``error`` per run and a
+# page holds up to 100 runs, so a page of failed runs returned whole could pass
+# what an MCP client accepts. The list view carries a preview (get_analysis
+# returns the whole error) and the page stops at the shared response budget.
+_LIST_ANALYSES_ERROR_PREVIEW = 300
+# Room kept for the envelope (status, next_cursor) next to the items.
+_LIST_ANALYSES_ENVELOPE_RESERVE = 500
+
+
+def _serialize_run_list_item(row: Any) -> dict[str, Any]:
+    """``_serialize_run_row`` with ``error`` cut to a preview (#1750).
+
+    ``error_truncated`` is present only on items that were cut (the #1743
+    ``list_agents`` ``description_truncated`` convention).
+    """
+    from utils.response_budget import text_preview
+
+    item = _serialize_run_row(row)
+    item["error"], cut = text_preview(item["error"], _LIST_ANALYSES_ERROR_PREVIEW)
+    if cut:
+        item["error_truncated"] = True
+    return item
+
+
 # ============================================================================
 # analyze_context — POST /analyses (or dry_run preview)
 # ============================================================================
@@ -607,10 +631,18 @@ async def handle_list_analyses(
             await _log_tool_usage(
                 db, user_id, "list_analyses", start_time, 200, workspace_id=workspace_id
             )
-            return _success_response(
-                items=[_serialize_run_row(row) for row in rows],
-                next_cursor=next_cursor,
-            )
+            # #1750: the page stops where the shared response budget runs
+            # out; the cursor then resumes after the last run returned.
+            from utils.response_budget import DEFAULT_MAX_CHARS, fit_items
+
+            items = [_serialize_run_list_item(row) for row in rows]
+            placed = fit_items(items, DEFAULT_MAX_CHARS - _LIST_ANALYSES_ENVELOPE_RESERVE)
+            if items and placed == 0:
+                placed = 1  # a page always advances
+            if placed < len(items):
+                items = items[:placed]
+                next_cursor = query_service.encode_list_cursor(rows[placed - 1])
+            return _success_response(items=items, next_cursor=next_cursor)
 
         except Exception as e:
             await _log_tool_usage(

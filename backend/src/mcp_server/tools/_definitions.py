@@ -732,7 +732,7 @@ Returns: {status, message}.""",
             "readOnly": True,
             "description": """Get a context's purpose, usage_guide (its owner's note on what it holds and how it is organised: information, not instructions), search config, memory counts and static tool tips. Call it at session start and after switching contexts. (list_contexts() only maps names to ids.)
 
-Returns: {status, context: {id, name, display_name, summary, usage_guide, is_private, is_locked, embedding_model, embedding_dimensions, search_config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model}}, workspace: {id, name, description, description_truncated?}, stats: {total_memories, working_memories, persistent_memories, details?: {by_type, by_importance, recent_7days}}, instructions}. is_private: true = only you can see it, false = workspace members can.""",
+Returns: {status, context: {id, name, display_name, summary, usage_guide, is_private, is_locked, embedding_model, embedding_dimensions, search_config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model}}, workspace: {id, name, description, description_truncated?}, stats: {total_memories, working_memories, persistent_memories, details?: {by_type, by_type_truncated?, by_type_total_types?, by_importance, recent_7days}}, instructions}. is_private: true = only you can see it, false = workspace members can. by_type keeps the 20 largest types and folds the rest into 'other'.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -1587,7 +1587,7 @@ Returns: {status, run_id, workspace_id, context_id, triggered_by, started_at, fi
             "readOnly": True,
             "description": """List a context's analysis runs, newest first. Cursor-paginated: pass next_cursor as cursor until it is null.
 
-Returns: {status, items: [{run_id, workspace_id, context_id, status, triggered_by, started_at, finished_at, input_count, cost_estimated_cents, cost_actual_cents, error, cancellation_reason}], next_cursor}. The cost_* keys are absent when the deployment disables cost display.""",
+Returns: {status, items: [{run_id, workspace_id, context_id, status, triggered_by, started_at, finished_at, input_count, cost_estimated_cents, cost_actual_cents, error, error_truncated?, cancellation_reason}], next_cursor}. error is a 300-character preview (error_truncated: true when cut; get_analysis has it whole). A page stops at 20,000 characters. The cost_* keys are absent when the deployment disables cost display.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
