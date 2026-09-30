@@ -105,6 +105,7 @@ async def test_setup_connector_passes_normalized_runtime_to_service():
         context_id=None,
         plaintext_token="resource-token",
         plaintext_kmc_api_key=None,
+        kmc_api_key_name=None,
     )
 
     with (
@@ -159,3 +160,44 @@ async def test_setup_connector_names_the_field_it_cannot_parse(field, value):
     assert "invalid literal" not in payload["message"]
     assert "Invalid isoformat" not in payload["message"]
     service_cls.return_value.provision_connector.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key_name", ["connector:abc", None])
+async def test_setup_connector_notifies_when_a_kmc_key_was_minted(key_name):
+    """#1752: a minted KMC write key emails its owner (the caller); the key
+    value never reaches the notice."""
+    provisioned = SimpleNamespace(
+        connector=SimpleNamespace(id=uuid4(), connector_type="slack"),
+        token=SimpleNamespace(id=7, quota_events_per_hour=1000),
+        resource_id="slack_general",
+        resource_pk=uuid4(),
+        context_id=uuid4() if key_name else None,
+        plaintext_token="resource-token",
+        plaintext_kmc_api_key="kagura_SECRETVALUE" if key_name else None,
+        kmc_api_key_name=key_name,
+    )
+    spawn = MagicMock()
+    with (
+        patch("db.base.get_db", side_effect=_fake_get_db),
+        patch(
+            "mcp_server.tools.resource._check_owner_admin_role",
+            new=AsyncMock(return_value=None),
+        ),
+        patch("services.connector_provisioning.ConnectorProvisioningService") as service_cls,
+        patch("mcp_server.tools.resource._log_tool_usage", new=AsyncMock()),
+        patch("services.security_notification_service.spawn_security_notification", spawn),
+    ):
+        service_cls.return_value.provision_connector = AsyncMock(return_value=provisioned)
+        await handle_setup_connector(
+            {"connector_type": "slack", "resource_id": "slack_general"}, "user-1", uuid4()
+        )
+
+    if key_name is None:
+        spawn.assert_not_called()
+        return
+    kwargs = spawn.call_args.kwargs
+    assert kwargs["user_id"] == "user-1"
+    assert kwargs["event"] == "api_key_created"
+    assert kwargs["key_name"] == "connector:abc"
+    assert "kagura_SECRETVALUE" not in repr(kwargs)

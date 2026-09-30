@@ -111,7 +111,11 @@ async def test_link_already_mine_is_idempotent_touch(db_session: AsyncSession):
     sub = f"gh-{suffix}"
     svc = AccountLinkingService(db_session)
 
-    await svc.link(user_id=user.user_id, provider="github", oauth_sub=sub, email=user.email)
+    # #1752: True only for a new link (the caller then notifies the owner).
+    assert (
+        await svc.link(user_id=user.user_id, provider="github", oauth_sub=sub, email=user.email)
+        is True
+    )
     first = (
         await db_session.execute(
             select(UserOAuthProvider).filter_by(provider="github", oauth_sub=sub)
@@ -120,7 +124,10 @@ async def test_link_already_mine_is_idempotent_touch(db_session: AsyncSession):
     first_used = first.last_used_at
 
     # Re-link the same identity to the same user: no error, no duplicate row.
-    await svc.link(user_id=user.user_id, provider="github", oauth_sub=sub, email=user.email)
+    assert (
+        await svc.link(user_id=user.user_id, provider="github", oauth_sub=sub, email=user.email)
+        is False
+    )
 
     rows = list(
         (

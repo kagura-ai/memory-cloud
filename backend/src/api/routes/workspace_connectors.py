@@ -7,7 +7,16 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +29,10 @@ from models.worker_runtime import WorkerRuntimeConfig
 from services.connector_provisioning import (
     ConnectorProvisioningService,
     ConnectorRuntimeUpdateResult,
+)
+from services.security_notification_service import (
+    SecurityEvent,
+    schedule_security_notification,
 )
 from services.slack_channels import (
     SlackChannel,
@@ -332,6 +345,8 @@ _CREATE_CONFLICT_RESPONSE: dict[int | str, dict[str, Any]] = {
 )
 async def create_workspace_connector(
     request: WorkspaceConnectorCreateRequest,
+    http_request: Request,
+    background_tasks: BackgroundTasks,
     admin: WorkspaceAdmin,
     db: AsyncSession = Depends(get_db),
 ) -> WorkspaceConnectorCreateResponse:
@@ -441,6 +456,16 @@ async def create_workspace_connector(
     # (handles its own exceptions) — the handle will expire via TTL regardless.
     if request.slack_install_handle:
         await discard_slack_install(request.slack_install_handle)
+
+    # #1752: a KMC write key was minted for the registering admin.
+    if result.kmc_api_key_name is not None:
+        schedule_security_notification(
+            background_tasks,
+            user_id=user_id,
+            event=SecurityEvent.API_KEY_CREATED,
+            request=http_request,
+            key_name=result.kmc_api_key_name,
+        )
 
     return WorkspaceConnectorCreateResponse(
         connector_id=result.connector.id,
@@ -818,6 +843,8 @@ async def delete_workspace_connector(
 )
 async def rotate_connector_kmc_key(
     connector_id: UUID,
+    http_request: Request,
+    background_tasks: BackgroundTasks,
     admin: WorkspaceAdmin,
     db: AsyncSession = Depends(get_db),
 ) -> RotateKmcKeyResponse:
@@ -831,6 +858,9 @@ async def rotate_connector_kmc_key(
     or a brief pause in ai-worker activity; the old key is invalid as soon as
     this call returns. A grace-period dual-key approach is deferred to a
     follow-up issue once usage patterns are better understood.
+
+    Issue #1752: the key's owner is emailed a security notice after the
+    commit, naming the rotating admin when that is someone else.
     """
     from utils.exceptions import NotFoundException
     from utils.exceptions import ValidationError as SvcValidationError
@@ -873,6 +903,14 @@ async def rotate_connector_kmc_key(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to rotate KMC write key",
         ) from exc
+    schedule_security_notification(
+        background_tasks,
+        user_id=rotation.key_owner_user_id,
+        event=SecurityEvent.API_KEY_REGENERATED,
+        request=http_request,
+        key_name=rotation.key_name,
+        actor_user_id=user_id,
+    )
     return RotateKmcKeyResponse(
         connector_id=connector_id,
         kmc_api_key=rotation.plaintext_kmc_api_key,

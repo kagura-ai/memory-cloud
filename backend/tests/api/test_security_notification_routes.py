@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -19,7 +20,7 @@ import fakeredis.aioredis
 import pytest
 import pytest_asyncio
 from fastapi import BackgroundTasks
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from api.routes import api_keys as api_keys_routes
@@ -383,38 +384,29 @@ class TestOAuthRoutes:
         )
         return session
 
-    @pytest.mark.parametrize(("first", "expected"), [(True, 1), (False, 0)])
     @pytest.mark.asyncio
-    async def test_device_approval_notifies_only_the_first_time(
-        self, monkeypatch, first, expected
-    ) -> None:
-        device = self._device()
-        self._device_session(monkeypatch, device)
-        check = MagicMock(return_value=first)
+    async def test_every_device_approval_notifies(self, monkeypatch) -> None:
+        # A device code can be phished, so approvals are not limited to the
+        # first grant (unlike consent); no first-time lookup runs at all.
+        check = MagicMock()
         monkeypatch.setattr(oauth_routes, "is_first_client_authorization", check)
-        tasks = BackgroundTasks()
+        for _ in range(2):
+            self._device_session(monkeypatch, self._device())
+            tasks = BackgroundTasks()
 
-        result = await oauth_routes.device_confirm(
-            _request(), oauth_routes.DeviceConfirmRequest(user_code="ABCD1234"), tasks
-        )
+            result = await oauth_routes.device_confirm(
+                _request(), oauth_routes.DeviceConfirmRequest(user_code="ABCD1234"), tasks
+            )
 
-        assert result.status == "approved"
-        assert check.call_args.kwargs == {
-            "client_id": "cli-client",
-            "user_id": "u-1",
-            "exclude_device_code_id": 5,
-        }
-        notices = _notices(tasks)
-        assert len(notices) == expected
-        if notices:
-            ((args, kwargs),) = notices
+            assert result.status == "approved"
+            ((args, kwargs),) = _notices(tasks)
             assert args == ("u-1", "oauth_client_authorized")
             assert kwargs["client_id"] == "cli-client"
+        check.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_device_denial_notifies_nothing(self, monkeypatch) -> None:
         self._device_session(monkeypatch, self._device())
-        monkeypatch.setattr(oauth_routes, "is_first_client_authorization", MagicMock())
         tasks = BackgroundTasks()
         result = await oauth_routes.device_confirm(
             _request(),
@@ -425,16 +417,30 @@ class TestOAuthRoutes:
         assert tasks.tasks == []
 
     @pytest.mark.asyncio
-    async def test_device_check_failure_fails_open_to_notifying(self, monkeypatch) -> None:
-        self._device_session(monkeypatch, self._device())
-        monkeypatch.setattr(
-            oauth_routes, "is_first_client_authorization", MagicMock(side_effect=OSError("db"))
-        )
+    async def test_create_client_notifies_the_owner(self, monkeypatch, encryptor) -> None:
+        session = MagicMock()
+
+        def _refresh(client):
+            client.id = 3
+            client.created_at = utcnow()
+
+        session.refresh.side_effect = _refresh
+        monkeypatch.setattr(oauth_routes, "get_sync_session", lambda: session)
+        monkeypatch.setattr(oauth_routes, "get_current_user_id", lambda request: "owner-1")
         tasks = BackgroundTasks()
-        await oauth_routes.device_confirm(
-            _request(), oauth_routes.DeviceConfirmRequest(user_code="ABCD1234"), tasks
+        data = oauth_routes.OAuth2ClientCreateRequest(
+            client_name="My Connector", redirect_uris=["https://cb.example/cb"]
         )
-        assert len(_notices(tasks)) == 1
+
+        response = await oauth_routes.create_oauth2_client(
+            _request(), tasks, data, {"user_id": "owner-1"}
+        )
+
+        session.commit.assert_called_once()
+        ((args, kwargs),) = _notices(tasks)
+        assert args == ("owner-1", "oauth_client_created")
+        assert kwargs["client_name"] == "My Connector"
+        assert response.client_secret not in repr(kwargs)
 
     def _authorize(self, monkeypatch, *, first: bool, location: str) -> SimpleNamespace:
         request = _request()
@@ -648,3 +654,245 @@ class TestAdminIsNamed:
                 delete(User).where(User.user_id.in_([owner.user_id, admin.user_id]))
             )
             await db_session.commit()
+
+
+# ---------------------------------------------------------------------------
+# Connector KMC keys, provider linking, MCP spawn
+# ---------------------------------------------------------------------------
+
+
+class TestConnectorKeys:
+    def _create_result(self, key_name: str | None) -> MagicMock:
+        result = MagicMock()
+        result.connector.id = uuid4()
+        result.connector.connector_type = "slack"
+        result.connector.app_key = "default"
+        result.resource_id = "slack_general"
+        result.context_id = uuid4()
+        result.plaintext_kmc_api_key = PLAINTEXT_KEY if key_name else None
+        result.kmc_api_key_name = key_name
+        result.token.id = 1
+        result.plaintext_token = "kagura_resource_x"
+        result.token.quota_events_per_hour = 1000
+        return result
+
+    @pytest.mark.parametrize("key_name", ["connector:abc", None])
+    @pytest.mark.asyncio
+    async def test_register_notifies_when_a_key_was_minted(self, monkeypatch, key_name) -> None:
+        from api.routes import workspace_connectors as wc
+
+        service = MagicMock()
+        service.provision_connector = AsyncMock(return_value=self._create_result(key_name))
+        monkeypatch.setattr(wc, "ConnectorProvisioningService", lambda db: service)
+        db = MagicMock()
+        db.commit = AsyncMock()
+        db.refresh = AsyncMock()
+        tasks = BackgroundTasks()
+
+        await wc.create_workspace_connector(
+            wc.WorkspaceConnectorCreateRequest(connector_type="slack", resource_id="slack_general"),
+            _request(),
+            tasks,
+            {"user_id": "admin-1", "current_workspace_id": WS},
+            db,
+        )
+
+        notices = _notices(tasks)
+        if key_name is None:
+            assert notices == []
+            return
+        ((args, kwargs),) = notices
+        assert args == ("admin-1", "api_key_created")
+        assert kwargs["key_name"] == "connector:abc"
+        assert kwargs["actor_user_id"] is None
+        assert PLAINTEXT_KEY not in repr(kwargs)
+
+    @pytest.mark.parametrize(("owner", "actor"), [("owner-1", "admin-1"), ("admin-1", None)])
+    @pytest.mark.asyncio
+    async def test_rotate_notifies_the_key_owner(self, monkeypatch, owner, actor) -> None:
+        from api.routes import workspace_connectors as wc
+        from services.connector_provisioning import KmcKeyRotationResult
+
+        service = MagicMock()
+        service.rotate_kmc_key = AsyncMock(
+            return_value=KmcKeyRotationResult(
+                plaintext_kmc_api_key=PLAINTEXT_KEY,
+                expires_at=utcnow(),
+                config_version=2,
+                key_owner_user_id=owner,
+                key_name="connector:c1",
+            )
+        )
+        monkeypatch.setattr(wc, "ConnectorProvisioningService", lambda db: service)
+        db = MagicMock()
+        db.commit = AsyncMock()
+        tasks = BackgroundTasks()
+
+        await wc.rotate_connector_kmc_key(
+            uuid4(), _request(), tasks, {"user_id": "admin-1", "current_workspace_id": WS}, db
+        )
+
+        ((args, kwargs),) = _notices(tasks)
+        assert args == (owner, "api_key_regenerated")
+        assert kwargs["key_name"] == "connector:c1"
+        assert kwargs["actor_user_id"] == actor
+        assert PLAINTEXT_KEY not in repr(kwargs)
+
+    @pytest.mark.asyncio
+    async def test_failed_rotation_notifies_nothing(self, monkeypatch) -> None:
+        from api.routes import workspace_connectors as wc
+        from utils.exceptions import NotFoundException
+
+        service = MagicMock()
+        service.rotate_kmc_key = AsyncMock(side_effect=NotFoundException("Connector"))
+        monkeypatch.setattr(wc, "ConnectorProvisioningService", lambda db: service)
+        db = MagicMock()
+        db.rollback = AsyncMock()
+        tasks = BackgroundTasks()
+        with pytest.raises(Exception):  # noqa: B017 — the HTTP 404
+            await wc.rotate_connector_kmc_key(
+                uuid4(), _request(), tasks, {"user_id": "admin-1", "current_workspace_id": WS}, db
+            )
+        assert tasks.tasks == []
+
+
+class TestProviderLinking:
+    def _session_manager(self, suffix: str) -> MagicMock:
+        values = {
+            f"oauth2_state_intent:{suffix}": "link",
+            f"oauth2_state_user:{suffix}": "u-link",
+        }
+        redis = MagicMock()
+        redis.get.side_effect = lambda key: values.get(key)
+        manager = MagicMock()
+        manager._redis = redis
+        return manager
+
+    @pytest.mark.parametrize(("newly_linked", "expected"), [(True, 1), (False, 0)])
+    @pytest.mark.asyncio
+    async def test_link_callback_notifies_a_new_link(
+        self, monkeypatch, newly_linked, expected
+    ) -> None:
+        from api.routes import auth as auth_module
+
+        suffix = uuid4().hex[:8]
+        monkeypatch.setattr(auth_module, "_session_manager", self._session_manager(suffix))
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = SimpleNamespace(email="u@example.test")
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=result)
+
+        async def _get_db():
+            yield db
+
+        monkeypatch.setattr(auth_module, "get_db", _get_db)
+        service = MagicMock()
+        service.link = AsyncMock(return_value=newly_linked)
+        monkeypatch.setattr(auth_module, "AccountLinkingService", lambda db: service)
+
+        response = await auth_module._maybe_link_redirect(
+            state=suffix,
+            provider="github",
+            idp_sub="gh-1",
+            idp_email="u@example.test",
+            ip_address="198.51.100.7",
+            user_agent="pytest-link",
+        )
+
+        assert response is not None and response.status_code == 303
+        notices = _notices(response.background)
+        assert len(notices) == expected
+        if notices:
+            ((args, kwargs),) = notices
+            assert args == ("u-link", "sign_in_method_added")
+            assert kwargs["sign_in_method"] == "GitHub sign-in"
+            assert kwargs["ip"] == "198.51.100.7"
+            assert kwargs["user_agent"] == "pytest-link"
+
+
+class TestSpawn:
+    @pytest.mark.asyncio
+    async def test_spawn_runs_the_notice_without_background_tasks(self, monkeypatch) -> None:
+        import asyncio
+
+        notify = AsyncMock()
+        monkeypatch.setattr(sns, "notify_security_event", notify)
+        sns.spawn_security_notification(
+            user_id="u-mcp", event=sns.SecurityEvent.API_KEY_CREATED, key_name="connector:x"
+        )
+        await asyncio.gather(*list(sns._spawned))
+        assert notify.await_args.args == ("u-mcp", sns.SecurityEvent.API_KEY_CREATED)
+        assert notify.await_args.kwargs["key_name"] == "connector:x"
+        assert notify.await_args.kwargs["ip"] is None
+
+    def test_schedule_never_raises(self) -> None:
+        tasks = MagicMock()
+        tasks.add_task.side_effect = RuntimeError("boom")
+        sns.schedule_security_notification(
+            tasks, user_id="u", event=sns.SecurityEvent.PASSWORD_CHANGED, request=_request()
+        )  # does not raise
+
+
+# ---------------------------------------------------------------------------
+# Real Postgres: device approval commits even when the notice cannot be queued
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sync_session_factory():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from config.database import to_sync_database_url
+    from tests.conftest import TEST_DATABASE_URL
+
+    engine = create_engine(to_sync_database_url(TEST_DATABASE_URL))
+    try:
+        with engine.connect():
+            pass
+    except Exception as exc:  # noqa: BLE001
+        engine.dispose()
+        pytest.skip(f"Test database not available (sync): {exc}")
+    yield sessionmaker(engine)
+    engine.dispose()
+
+
+class TestDeviceApprovalCommitsDespiteNoticeFailure:
+    pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+    async def test_approval_commits_when_scheduling_raises(
+        self, db_session: AsyncSession, oauth_rows, sync_session_factory, monkeypatch
+    ) -> None:
+        user_code = uuid4().hex[:8].upper()
+        db_session.add(
+            OAuth2DeviceCode(
+                device_code=f"dc-{uuid4().hex}",
+                user_code=user_code,
+                client_id=oauth_rows["client_id"],
+                expires_at=utcnow() + timedelta(minutes=10),
+            )
+        )
+        await db_session.commit()
+        monkeypatch.setattr(oauth_routes, "get_sync_session", sync_session_factory)
+        monkeypatch.setattr(
+            oauth_routes,
+            "_get_user_from_session",
+            lambda request: {"user_id": oauth_rows["user_id"]},
+        )
+        tasks = MagicMock()
+        tasks.add_task.side_effect = RuntimeError("queue broken")
+
+        result = await oauth_routes.device_confirm(
+            _request(), oauth_routes.DeviceConfirmRequest(user_code=user_code), tasks
+        )
+
+        assert result.status == "approved"
+        tasks.add_task.assert_called_once()  # the notice was attempted
+        db_session.expire_all()
+        row = (
+            await db_session.execute(
+                select(OAuth2DeviceCode).where(OAuth2DeviceCode.user_code == user_code)
+            )
+        ).scalar_one()
+        assert row.authorized_at is not None
+        assert row.user_id == oauth_rows["user_id"]

@@ -100,6 +100,9 @@ class ConnectorProvisioningResult:
     # with a write-target context.
     context_id: UUID | None = None
     plaintext_kmc_api_key: str | None = None
+    # Name of the minted KMC key (never its value), for the owner's security
+    # notice (#1752). None when no key was minted.
+    kmc_api_key_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +136,10 @@ class KmcKeyRotationResult:
     plaintext_kmc_api_key: str
     expires_at: datetime
     config_version: int
+    # The key's owner (not necessarily the rotating admin) and its name, for
+    # the owner's security notice (#1752).
+    key_owner_user_id: str = ""
+    key_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -385,6 +392,7 @@ class ConnectorProvisioningService:
             # has a write-target context. Stored Fernet-encrypted on the connector
             # so the worker config endpoint can return it on every fetch.
             plaintext_kmc_api_key: str | None = None
+            kmc_api_key_name: str | None = None
             if resolved_context_id is not None:
                 from auth.api_keys import APIKeyManager
 
@@ -393,6 +401,7 @@ class ConnectorProvisioningService:
                     user_id=user_id,
                     workspace_id=workspace_id,
                 )
+                kmc_api_key_name = kmc_key_row.name
                 connector.set_kmc_api_key(plaintext_kmc_api_key)
                 # #1537: the key now expires by default, and the worker config
                 # endpoint's expiry warning reads only this connector column —
@@ -458,6 +467,7 @@ class ConnectorProvisioningService:
             resource_pk=resource_pk,
             context_id=resolved_context_id,
             plaintext_kmc_api_key=plaintext_kmc_api_key,
+            kmc_api_key_name=kmc_api_key_name,
         )
 
     async def _resolve_context(
@@ -1371,6 +1381,8 @@ class ConnectorProvisioningService:
             plaintext_kmc_api_key=plaintext_new_key,
             expires_at=new_key_row.expires_at,
             config_version=connector.config_version,
+            key_owner_user_id=owner_user_id,
+            key_name=new_key_row.name,
         )
 
     async def _get_connector_for_resource(

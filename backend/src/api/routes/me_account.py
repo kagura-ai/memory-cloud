@@ -41,6 +41,7 @@ from models.api_base import TZAwareBaseModel
 from services.account_erasure_service import AccountErasureService
 from services.account_linking_service import AccountLinkingService
 from services.security_notification_service import (
+    PROVIDER_SIGN_IN_LABELS,
     SecurityEvent,
     schedule_security_notification,
 )
@@ -279,10 +280,6 @@ class UnlinkProviderRequest(BaseModel):
     provider: Literal["google", "github"]
 
 
-# Display names for the security notice sent after an unlink (#1752).
-_PROVIDER_LABELS = {"google": "Google sign-in", "github": "GitHub sign-in"}
-
-
 class UnlinkProviderResponse(BaseModel):
     """Returned by POST /me/account/unlink-provider on success."""
 
@@ -386,7 +383,7 @@ async def unlink_provider(
         user_id=user["user_id"],
         event=SecurityEvent.SIGN_IN_METHOD_REMOVED,
         request=request,
-        sign_in_method=_PROVIDER_LABELS.get(body.provider, body.provider),
+        sign_in_method=PROVIDER_SIGN_IN_LABELS.get(body.provider, body.provider),
     )
     return UnlinkProviderResponse(status="ok")
 

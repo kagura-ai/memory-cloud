@@ -121,6 +121,9 @@ class SecurityEvent(StrEnum):
     OAUTH_CLIENT_CREATED = "oauth_client_created"
 
 
+# How a linked / unlinked sign-in provider is named in a notice.
+PROVIDER_SIGN_IN_LABELS = {"google": "Google sign-in", "github": "GitHub sign-in"}
+
 # (subject, one-line description of one occurrence)
 _EVENT_TEXT: dict[SecurityEvent, tuple[str, str]] = {
     SecurityEvent.PASSWORD_SET: (

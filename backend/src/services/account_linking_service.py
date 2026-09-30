@@ -52,7 +52,7 @@ class AccountLinkingService:
         email: str,
         ip_address: str | None = None,
         user_agent: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Bind ``(provider, oauth_sub)`` to ``user_id`` (3-arm, audited).
 
         Args:
@@ -62,6 +62,10 @@ class AccountLinkingService:
             email: Actor email, recorded in the audit row.
             ip_address: Client IP for the audit row, if available.
             user_agent: Client user agent for the audit row, if available.
+
+        Returns:
+            True when a new link was written (the caller notifies the owner,
+            #1752); False when the identity was already linked to this user.
 
         Raises:
             ConflictError: The identity is already bound to a different user.
@@ -80,7 +84,7 @@ class AccountLinkingService:
         if existing is not None and existing.user_id == user_id:
             existing.last_used_at = utcnow()
             await self.db.commit()
-            return
+            return False
 
         # arm 3 (other): identity owned by someone else — audit the failure, reject.
         if existing is not None:
@@ -103,6 +107,7 @@ class AccountLinkingService:
         self._audit(user_id, email, "oauth_provider_linked", provider, ip_address, user_agent)
         await self.db.commit()
         logger.info("oauth_provider_linked", user_id=user_id, provider=provider)
+        return True
 
     async def unlink(
         self,

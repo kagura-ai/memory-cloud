@@ -490,10 +490,14 @@ async def list_oauth2_clients(
 )
 async def create_oauth2_client(
     request: Request,
+    background_tasks: BackgroundTasks,
     data: OAuth2ClientCreateRequest,
     user: SessionUser,
 ) -> OAuth2ClientWithSecretResponse:
     """Register a new OAuth2 client.
+
+    Issue #1752: the owner is emailed a security notice after the commit
+    (a new client secret was minted on the account).
 
     Args:
         data: Client registration data
@@ -558,6 +562,13 @@ async def create_oauth2_client(
         db_session.add(client)
         db_session.commit()
         db_session.refresh(client)
+        schedule_security_notification(
+            background_tasks,
+            user_id=user_id,
+            event=SecurityEvent.OAUTH_CLIENT_CREATED,
+            request=request,
+            client_name=client.client_name,
+        )
 
         logger.info(
             "oauth2_client_created",
@@ -1911,7 +1922,9 @@ async def oauth_authorize_post(
     payload from query params for authorization endpoint.
 
     Issue #1752: the first time a user authorizes a client, the user is
-    emailed a security notice once the authorization code is stored.
+    emailed a security notice once the authorization code is stored. Only
+    the first time: the code can only reach the client's registered
+    redirect URI, so a repeat consent to a known client adds little.
     """
     import asyncio
 
@@ -2573,27 +2586,6 @@ def _get_user_from_session(request: Request) -> dict | None:
     return {"user_id": user_stub.user_id, "email": user_stub.email}
 
 
-def _device_first_authorization(
-    db_session: Session, device: OAuth2DeviceCode, user_id: str
-) -> bool:
-    """Whether approving ``device`` is the user's first grant to its client (#1752).
-
-    A failed check answers True: an extra notice is better than a missed one.
-    """
-    try:
-        # A savepoint, so a failed lookup cannot abort the approval's transaction.
-        with db_session.begin_nested():
-            return is_first_client_authorization(
-                db_session,
-                client_id=device.client_id,
-                user_id=user_id,
-                exclude_device_code_id=device.id,
-            )
-    except Exception as exc:
-        logger.warning("device_first_authorization_check_failed", error_type=type(exc).__name__)
-        return True
-
-
 @router.post("/device/confirm", response_model=DeviceConfirmResponse)
 async def device_confirm(
     request: Request,
@@ -2603,9 +2595,12 @@ async def device_confirm(
     """User consent endpoint for device authorization.
 
     Requires session authentication. Sets authorized_at or denied_at on the
-    device code record so the polling CLI receives the decision. The first
-    time a user approves a client, the user is emailed a security notice
-    after the commit (Issue #1752).
+    device code record so the polling CLI receives the decision. Every
+    approval emails the user a security notice after the commit (Issue #1752):
+    a device code can be phished (the attacker starts the flow and gets the
+    victim to approve the code), so unlike authorization-code consent this is
+    not limited to the first grant; coalescing bounds the volume. Scheduling
+    the notice touches no DB, so nothing here runs sync DB work for it.
     """
     user = _get_user_from_session(request)
     if not user:
@@ -2652,17 +2647,15 @@ async def device_confirm(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="User ID not found in session",
                 )
-            first_authorization = _device_first_authorization(db_session, device, user_id)
             device.user_id = user_id
             device.authorized_at = utcnow()
             status_str = "approved"
         else:
-            first_authorization = False
             device.denied_at = utcnow()
             status_str = "denied"
 
         db_session.commit()
-        if first_authorization and device.user_id:
+        if status_str == "approved" and device.user_id:
             schedule_security_notification(
                 background_tasks,
                 user_id=device.user_id,

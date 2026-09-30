@@ -1,10 +1,12 @@
 """Tests for workspace connector setup API (Issue #851, F6-b of #755)."""
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from fastapi import BackgroundTasks
 from pydantic import ValidationError as PydanticValidationError
 
 from api.routes.workspace_connectors import (
@@ -12,6 +14,8 @@ from api.routes.workspace_connectors import (
     create_workspace_connector,
 )
 from utils.exceptions import MemoryCloudException
+
+_HTTP = SimpleNamespace(client=SimpleNamespace(host="192.0.2.5"), headers={})
 
 
 @pytest.mark.asyncio
@@ -34,7 +38,7 @@ async def test_create_workspace_connector_rolls_back_on_service_failure():
             )
         )
         with pytest.raises(MemoryCloudException):
-            await create_workspace_connector(request, admin, db)
+            await create_workspace_connector(request, _HTTP, BackgroundTasks(), admin, db)
 
     db.rollback.assert_awaited_once()
     db.commit.assert_not_awaited()
@@ -99,7 +103,7 @@ async def test_create_rejects_invalid_pii_guardrail_config_before_calling_servic
     with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
         service_cls.return_value.provision_connector = AsyncMock()
         with pytest.raises(MemoryCloudException) as exc:
-            await create_workspace_connector(request, admin, db)
+            await create_workspace_connector(request, _HTTP, BackgroundTasks(), admin, db)
 
     assert exc.value.status_code == 422
     assert exc.value.error_code == "VAL-001"  # canonical validation code, not a one-off
@@ -134,7 +138,7 @@ async def test_create_passes_normalized_pii_guardrail_config_dict_to_service():
 
     with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
         service_cls.return_value.provision_connector = AsyncMock(return_value=result)
-        await create_workspace_connector(request, admin, db)
+        await create_workspace_connector(request, _HTTP, BackgroundTasks(), admin, db)
 
     kwargs = service_cls.return_value.provision_connector.await_args.kwargs
     assert kwargs["pii_guardrail_config"] == {
@@ -171,7 +175,7 @@ async def test_create_passes_normalized_runtime_config_to_service():
 
     with patch("api.routes.workspace_connectors.ConnectorProvisioningService") as service_cls:
         service_cls.return_value.provision_connector = AsyncMock(return_value=result)
-        await create_workspace_connector(request, admin, db)
+        await create_workspace_connector(request, _HTTP, BackgroundTasks(), admin, db)
 
     runtime = service_cls.return_value.provision_connector.await_args.kwargs["runtime_config"]
     assert runtime["vision_enabled"] is False
@@ -488,7 +492,7 @@ async def test_rotate_kmc_key_returns_new_key_on_success():
                 config_version=3,
             )
         )
-        resp = await rotate_connector_kmc_key(conn_id, admin, db)
+        resp = await rotate_connector_kmc_key(conn_id, _HTTP, BackgroundTasks(), admin, db)
 
     assert resp.connector_id == conn_id
     assert resp.kmc_api_key == "kmc-new-plaintext"
@@ -517,7 +521,7 @@ async def test_rotate_kmc_key_404_when_connector_missing():
             side_effect=NotFoundException("Connector", str(uuid4()))
         )
         with pytest.raises(HTTPException) as exc:
-            await rotate_connector_kmc_key(uuid4(), admin, db)
+            await rotate_connector_kmc_key(uuid4(), _HTTP, BackgroundTasks(), admin, db)
 
     assert exc.value.status_code == 404
     db.rollback.assert_awaited_once()
@@ -541,7 +545,7 @@ async def test_rotate_kmc_key_422_when_no_kmc_key():
             side_effect=ValidationError("Connector has no KMC write key")
         )
         with pytest.raises(HTTPException) as exc:
-            await rotate_connector_kmc_key(uuid4(), admin, db)
+            await rotate_connector_kmc_key(uuid4(), _HTTP, BackgroundTasks(), admin, db)
 
     assert exc.value.status_code == 422
     db.rollback.assert_awaited_once()

@@ -26,7 +26,7 @@ import secrets
 from typing import Any, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import or_, select
@@ -53,6 +53,11 @@ from models.auth import User
 from services.account_linking_service import AccountLinkingService
 from services.beta_invite_service import BETA_INVITE_TOKEN_PATTERN
 from services.password_account_service import find_password_user_by_email
+from services.security_notification_service import (
+    PROVIDER_SIGN_IN_LABELS,
+    SecurityEvent,
+    schedule_security_notification,
+)
 from services.signup_gate_service import check_signup_access
 from services.terms_service import TermsService, current_terms_version
 from services.workspace_service import WorkspaceService
@@ -395,6 +400,7 @@ async def _maybe_link_redirect(
             status_code=303,
         )
 
+    newly_linked = False
     try:
         async for db in get_db():
             # The audit actor for a link is the INITIATING SESSION USER, not the
@@ -417,7 +423,7 @@ async def _maybe_link_redirect(
                     _safe_redirect_url(f"{frontend_url}/profile?error=link_failed"),
                     status_code=303,
                 )
-            await AccountLinkingService(db).link(
+            newly_linked = await AccountLinkingService(db).link(
                 user_id=user_id,
                 provider=provider,
                 oauth_sub=idp_sub,
@@ -453,7 +459,20 @@ async def _maybe_link_redirect(
         redirect_url = _safe_redirect_url(f"{frontend_url}/profile?linked=1")
 
     logger.info("oauth_provider_link_success", user_id=user_id, provider=provider)
-    return RedirectResponse(url=redirect_url, status_code=303)
+    # #1752: tell the owner a sign-in method was added (after the commit, once
+    # the redirect is sent). Re-linking an identity already on the account is
+    # not a change.
+    notice = BackgroundTasks()
+    if newly_linked:
+        schedule_security_notification(
+            notice,
+            user_id=user_id,
+            event=SecurityEvent.SIGN_IN_METHOD_ADDED,
+            ip=ip_address,
+            user_agent=user_agent,
+            sign_in_method=PROVIDER_SIGN_IN_LABELS.get(provider, provider),
+        )
+    return RedirectResponse(url=redirect_url, status_code=303, background=notice)
 
 
 # ============================================================================

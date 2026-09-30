@@ -1261,6 +1261,19 @@ async def handle_setup_connector(
             await db.commit()
             await db.refresh(result.connector)
             await db.refresh(result.token)
+            if result.kmc_api_key_name is not None:
+                # #1752: a KMC write key was minted for the caller. No HTTP
+                # request here, so no IP / user agent in the notice.
+                from services.security_notification_service import (
+                    SecurityEvent,
+                    spawn_security_notification,
+                )
+
+                spawn_security_notification(
+                    user_id=user_id,
+                    event=SecurityEvent.API_KEY_CREATED,
+                    key_name=result.kmc_api_key_name,
+                )
 
             await _log_tool_usage(
                 db,

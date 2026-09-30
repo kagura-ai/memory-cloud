@@ -418,9 +418,11 @@ the link — so under `logging` the links cannot be delivered and self-service
 reset / set-up do not work.
 
 **Security-change notifications (Issue #1752).** After a password is set,
-changed, reset or removed, a Google / GitHub identity is unlinked, an OAuth /
-MCP client is authorized for the first time, an API key is created or
-regenerated, or an OAuth client secret is regenerated, the account owner is
+changed, reset or removed, a Google / GitHub identity is linked or unlinked, an
+OAuth / MCP client is authorized (by consent the first time, by device-flow
+approval every time), an API key is created or regenerated (connector write
+keys included), or an OAuth client is registered or its secret regenerated,
+the account owner is
 emailed a notice (UTC time, IP address, user agent, key or client name, and the
 acting admin for admin actions — never a secret, token or link other than the
 plain `FRONTEND_URL/profile` page). The notices cannot be turned off. They go
@@ -429,7 +431,10 @@ provider, never to `@local`. Repeats of the same event for the same account
 within `SECURITY_NOTIFICATION_WINDOW_SECONDS` (default 600) are sent as one
 digest when the window closes; the first is sent at once. The window lives in
 Redis and a job checks it every minute; when Redis is unavailable every
-occurrence is sent at once. A send failure is logged and never affects the
+occurrence is sent at once. A digest keeps the first 20 occurrences and counts
+the rest; a digest whose send fails is retried up to twice (after one, then two minutes),
+then dropped with a `security_notification_digest_dropped` log line. Operator
+CLI actions (`reset_password`, `create_admin`) send no notice. A send failure is logged and never affects the
 change. Under `EMAIL_PROVIDER=logging` each notice is one
 `security_notification_email` log line (event and a keyed recipient hash only).
 

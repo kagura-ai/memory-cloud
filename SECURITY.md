@@ -29,19 +29,25 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
 - **Security-change notification emails** — the account owner is emailed
   (mandatory, no opt-out) when:
   - a password is set, changed or reset with an emailed link;
-  - a sign-in method is removed (the password, or an unlinked Google / GitHub
-    identity);
-  - an OAuth / MCP client is authorized for the first time (browser consent or
-    device-flow approval);
-  - an API key is created or regenerated, or an OAuth client secret is
-    regenerated — including by a workspace admin or owner, whom the email names.
+  - a sign-in method is added (a Google / GitHub identity linked) or removed
+    (the password, or an unlinked identity);
+  - an OAuth / MCP client is authorized: by browser consent the first time the
+    user authorizes that client (the code only reaches the client's registered
+    redirect URI), by device-flow approval every time (a device code can be
+    phished — an attacker starts the flow and gets the victim to approve it);
+  - an API key is created or regenerated (including a connector's write key),
+    an OAuth client is registered or its secret regenerated — also when a
+    workspace admin or owner does it, whom the email then names.
 
   Each email lists the UTC time, IP address, user agent and the key or client
   name. It never carries a secret, token, key value or action link; the
-  "Wasn't you?" paragraph points to the profile page and to "Forgot password?".
-  Repeats of one event within 10 minutes are sent as one follow-up digest.
-  Emails go only to a verified address (password flow or sign-in provider),
-  never to `@local` accounts.
+  "Wasn't you?" paragraph points to the pages that list sign-in methods, API
+  keys and OAuth apps and to "Forgot password?". Untrusted names and user
+  agents are normalized and defanged so no link survives. Repeats of one
+  event within 10 minutes are sent as one follow-up digest. Emails go only to
+  a verified address (password flow or sign-in provider), never to `@local`
+  accounts. Operator CLI actions (`reset_password`, `create_admin`, ...) run
+  outside the API and send no notice.
 
 ### Authorization (RBAC)
 
