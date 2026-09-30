@@ -564,9 +564,7 @@ class TestFirstClientAuthorization:
         await db_session.commit()
         assert await _is_first(db_session, oauth_rows) is False
 
-    async def test_other_approved_device_code_counts_but_not_this_one(
-        self, db_session: AsyncSession, oauth_rows
-    ) -> None:
+    async def test_approved_device_code_counts(self, db_session: AsyncSession, oauth_rows) -> None:
         device = OAuth2DeviceCode(
             device_code=f"dc-{uuid4().hex}",
             user_code=uuid4().hex[:8].upper(),
@@ -577,7 +575,6 @@ class TestFirstClientAuthorization:
         )
         db_session.add(device)
         await db_session.commit()
-        assert await _is_first(db_session, oauth_rows, exclude_device_code_id=device.id) is True
         assert await _is_first(db_session, oauth_rows) is False
 
     async def test_another_users_grant_does_not_count(
@@ -896,3 +893,86 @@ class TestDeviceApprovalCommitsDespiteNoticeFailure:
         ).scalar_one()
         assert row.authorized_at is not None
         assert row.user_id == oauth_rows["user_id"]
+
+
+# ---------------------------------------------------------------------------
+# gate2 follow-ups: first-grant check wrapper, commit-before-notice order
+# ---------------------------------------------------------------------------
+
+
+class TestFirstAuthorizationOf:
+    def test_db_error_fails_open_to_notifying(self, monkeypatch) -> None:
+        session = MagicMock()
+        monkeypatch.setattr(oauth_routes, "get_sync_session", lambda: session)
+        monkeypatch.setattr(
+            oauth_routes, "is_first_client_authorization", MagicMock(side_effect=OSError("db"))
+        )
+        assert oauth_routes._first_authorization_of("cid", "u-1") is True
+        session.close.assert_called_once()
+
+    @pytest.mark.parametrize(("client_id", "user_id"), [(None, "u-1"), ("cid", None), ("", "")])
+    def test_missing_ids_never_notify(self, monkeypatch, client_id, user_id) -> None:
+        opened = MagicMock()
+        monkeypatch.setattr(oauth_routes, "get_sync_session", opened)
+        assert oauth_routes._first_authorization_of(client_id, user_id) is False
+        opened.assert_not_called()
+
+    def test_passes_the_answer_through(self, monkeypatch) -> None:
+        monkeypatch.setattr(oauth_routes, "get_sync_session", MagicMock)
+        check = MagicMock(return_value=False)
+        monkeypatch.setattr(oauth_routes, "is_first_client_authorization", check)
+        assert oauth_routes._first_authorization_of("cid", "u-1") is False
+        assert check.call_args.kwargs == {"client_id": "cid", "user_id": "u-1"}
+
+
+class TestCommitBeforeNotice:
+    """The notice is scheduled only after the change's commit."""
+
+    @pytest.mark.asyncio
+    async def test_api_key_create(self) -> None:
+        order = MagicMock()
+        manager = MagicMock()
+        manager.create_key = AsyncMock(return_value=(PLAINTEXT_KEY, _new_key()))
+        manager.db.commit = AsyncMock(side_effect=lambda: order.commit())
+        tasks = BackgroundTasks()
+        real_add = tasks.add_task
+        tasks.add_task = lambda *a, **k: (order.schedule(), real_add(*a, **k))  # type: ignore[method-assign]
+
+        await api_keys_routes.create_api_key(
+            api_keys_routes.APIKeyCreate(name="deploy"),
+            _request(),
+            tasks,
+            {"user_id": "owner-1"},
+            manager=manager,
+        )
+
+        assert [c[0] for c in order.mock_calls] == ["commit", "schedule"]
+
+    @pytest.mark.asyncio
+    async def test_password_change(self, monkeypatch) -> None:
+        from api.routes import password as password_routes
+
+        order = MagicMock()
+
+        async def _change(**kwargs):
+            order.commit()  # the service commits inside change()
+
+        service = MagicMock()
+        service.change = AsyncMock(side_effect=_change)
+        monkeypatch.setattr(password_routes, "PasswordAccountService", lambda db: service)
+        monkeypatch.setattr(password_routes, "increment_counter", AsyncMock(return_value=1))
+        tasks = BackgroundTasks()
+        real_add = tasks.add_task
+        tasks.add_task = lambda *a, **k: (order.schedule(), real_add(*a, **k))  # type: ignore[method-assign]
+
+        await password_routes.change_password(
+            password_routes.PasswordChangeBody(current_password="a", new_password="b"),
+            _request(),
+            {"user_id": "u-1"},
+            db=None,
+            background_tasks=tasks,
+        )
+
+        assert [c[0] for c in order.mock_calls] == ["commit", "schedule"]
+        ((args, _),) = _notices(tasks)
+        assert args == ("u-1", "password_changed")

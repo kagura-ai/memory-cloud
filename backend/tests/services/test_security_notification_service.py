@@ -815,3 +815,139 @@ class TestDigestRetry:
         assert [
             o.key_name for o in email.send_security_notification.await_args.kwargs["occurrences"]
         ] == ["second", "third"]
+
+
+# ---------------------------------------------------------------------------
+# gate2 follow-ups: failed opening notice, orphaned claims, wording
+# ---------------------------------------------------------------------------
+
+
+class TestFailedOpeningNotice:
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            {"return_value": False},
+            {"side_effect": RuntimeError("provider down")},
+            {"side_effect": TimeoutError()},
+        ],
+        ids=["returned_false", "raised", "timeout"],
+    )
+    @pytest.mark.asyncio
+    async def test_window_is_closed_and_the_next_occurrence_sent_at_once(
+        self, redis, deliverable, email, failure
+    ) -> None:
+        email.send_security_notification = AsyncMock(**failure)
+        await _notify(email, key_name="first")
+
+        member = f"{OWNER}|api_key_created"
+        assert await redis.zscore(sns._DUE_KEY, member) is None
+        for template in (sns._BUFFER_KEY, sns._COUNT_KEY):
+            assert await redis.exists(sns._key(template, OWNER, "api_key_created")) == 0
+
+        email.send_security_notification = AsyncMock(return_value=True)
+        await _notify(email, key_name="second")
+        kwargs = email.send_security_notification.await_args.kwargs
+        assert kwargs["digest"] is False
+        assert [o.key_name for o in kwargs["occurrences"]] == ["second"]
+        assert await redis.zscore(sns._DUE_KEY, member) is not None
+
+    @pytest.mark.asyncio
+    async def test_buffered_occurrences_go_with_the_failed_window(
+        self, redis, deliverable, monkeypatch
+    ) -> None:
+        # A second occurrence is buffered while the opening send is in flight.
+        email = AsyncMock()
+
+        async def _slow_failing_send(**kwargs):
+            await sns._buffer_if_window_open(
+                OWNER, SecurityEvent.API_KEY_CREATED, SecurityOccurrence(occurred_at="t")
+            )
+            return False
+
+        email.send_security_notification = _slow_failing_send
+        await _notify(email)
+        assert await redis.exists(sns._buffer_key(OWNER, "api_key_created")) == 0
+        assert await redis.zcard(sns._DUE_KEY) == 0
+
+    @pytest.mark.asyncio
+    async def test_recipient_lookup_failure_opens_no_window(
+        self, redis, email, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            sns, "resolve_deliverable_address", AsyncMock(side_effect=OSError("db down"))
+        )
+        await _notify(email)
+        assert await redis.zcard(sns._DUE_KEY) == 0
+
+    @pytest.mark.asyncio
+    async def test_redis_down_failure_does_not_touch_windows(
+        self, monkeypatch, deliverable
+    ) -> None:
+        broken = MagicMock()
+        broken.zadd = AsyncMock(side_effect=ConnectionError("redis down"))
+        broken.pipeline = MagicMock(side_effect=AssertionError("closed a window it never opened"))
+        monkeypatch.setattr(sns, "get_redis_client", lambda: broken)
+        email = AsyncMock()
+        email.send_security_notification = AsyncMock(return_value=False)
+        await _notify(email)  # does not raise, does not try to close
+        broken.pipeline.assert_not_called()
+
+
+class TestOrphanedClaim:
+    async def _orphan(self, redis, *names: str, count: int | None = None) -> None:
+        claim = sns._key(sns._CLAIM_BUFFER_KEY, OWNER, "api_key_created")
+        for name in names:
+            await redis.rpush(claim, SecurityOccurrence(occurred_at="t", key_name=name).to_json())
+        await redis.set(
+            sns._key(sns._CLAIM_COUNT_KEY, OWNER, "api_key_created"), count or len(names)
+        )
+
+    @pytest.mark.asyncio
+    async def test_orphan_is_merged_before_the_new_buffer_not_overwritten(
+        self, redis, deliverable, email
+    ) -> None:
+        await self._orphan(redis, "lost-1", "lost-2", count=5)
+        await _notify(email, key_name="first")
+        await _notify(email, key_name="second")
+        email.send_security_notification.reset_mock()
+
+        sent = await sns.flush_due_security_notifications(
+            now_score=_window_end() + 1, session_factory=_factory(), email_service=email
+        )
+
+        assert sent == 1
+        kwargs = email.send_security_notification.await_args.kwargs
+        assert [o.key_name for o in kwargs["occurrences"]] == ["lost-1", "lost-2", "second"]
+        assert kwargs["total"] == 6
+        for template in (sns._CLAIM_BUFFER_KEY, sns._CLAIM_COUNT_KEY, sns._BUFFER_KEY):
+            assert await redis.exists(sns._key(template, OWNER, "api_key_created")) == 0
+
+    @pytest.mark.asyncio
+    async def test_orphan_is_sent_when_the_window_buffered_nothing(
+        self, redis, deliverable, email
+    ) -> None:
+        await self._orphan(redis, "lost-1")
+        await _notify(email, key_name="first")
+        email.send_security_notification.reset_mock()
+
+        await sns.flush_due_security_notifications(
+            now_score=_window_end() + 1, session_factory=_factory(), email_service=email
+        )
+
+        kwargs = email.send_security_notification.await_args.kwargs
+        assert [o.key_name for o in kwargs["occurrences"]] == ["lost-1"]
+        assert kwargs["total"] == 1
+
+
+class TestAuthorizedWording:
+    def test_app_authorization_does_not_claim_the_app_is_new(self) -> None:
+        subject, text = render_security_notification(
+            SecurityEvent.OAUTH_CLIENT_AUTHORIZED,
+            [SecurityOccurrence(occurred_at="t", client_name="kagura-cli")],
+            digest=False,
+            window_minutes=10,
+            profile_page_url="https://app.example/profile",
+        )
+        assert subject == "An app was authorized to access your Kagura account"
+        assert "An app was authorized to access your account." in text
+        assert "new app" not in (subject + text).lower()

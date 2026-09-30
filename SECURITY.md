@@ -47,7 +47,8 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
   event within 10 minutes are sent as one follow-up digest. Emails go only to
   a verified address (password flow or sign-in provider), never to `@local`
   accounts. Operator CLI actions (`reset_password`, `create_admin`, ...) run
-  outside the API and send no notice.
+  outside the API and send no notice. Share keys (read-only, bound to one
+  context) and connector resource tokens do not send notices either.
 
 ### Authorization (RBAC)
 

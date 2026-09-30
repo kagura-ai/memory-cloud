@@ -24,14 +24,23 @@ caller whose ``ZREM`` removed the member sends, so several API processes can
 run the job), moves the buffer to a claim key and sends one digest listing
 them. The claim key is deleted only after the send succeeded; a failed send
 puts the occurrences back and retries the window a bounded number of times.
-When Redis is unavailable the occurrence is sent at once: the failure mode is
-an extra email, never silence.
+When the first, immediate send of a window fails, the window is closed again,
+so the next occurrence is sent at once rather than as a follow-up to a notice
+that never arrived. When Redis is unavailable the occurrence is sent at once:
+the failure mode is an extra email, never silence.
 
-Recipient: the account's email when it is known to be deliverable — verified
-by the password flow (``email_verified_at``) or taken from a sign-in provider
-that verified it (a ``user_oauth_providers`` row; accounts are created only
-from provider-verified addresses and addresses cannot be changed). Local CLI
-accounts (``@local``) are never emailed.
+Known limitation: delivery is at most once. When a process crashes after a
+window was claimed and before its digest was sent, that digest is lost unless
+a later window of the same user and event closes before the claim's TTL ends
+(its flush recovers the orphaned claim).
+
+Recipient: the address on the account at send time, when it is known to be
+deliverable — verified by the password flow (``email_verified_at``) or taken
+from a sign-in provider that verified it (a ``user_oauth_providers`` row;
+accounts are created from provider-verified addresses, and a sign-in syncs a
+provider-side email change onto the account, see
+``auth.roles._sync_existing_user``). Local CLI accounts (``@local``) are never
+emailed.
 
 Content safety: client names are set by whoever registers a client (Dynamic
 Client Registration is public), user agents are client-supplied and key names
@@ -138,9 +147,11 @@ _EVENT_TEXT: dict[SecurityEvent, tuple[str, str]] = {
         "Your Kagura password was reset",
         "Your password was reset with a link sent to this address.",
     ),
+    # Neutral wording: device-flow approvals notify every time, not only for
+    # an app the account never authorized before.
     SecurityEvent.OAUTH_CLIENT_AUTHORIZED: (
-        "A new app was authorized to access your Kagura account",
-        "A new app was authorized to access your account.",
+        "An app was authorized to access your Kagura account",
+        "An app was authorized to access your account.",
     ),
     SecurityEvent.API_KEY_CREATED: (
         "A new API key was created for your Kagura account",
@@ -467,24 +478,23 @@ def is_first_client_authorization(
     *,
     client_id: str,
     user_id: str,
-    exclude_device_code_id: int | None = None,
 ) -> bool:
     """Whether ``user_id`` has never authorized ``client_id`` before.
 
-    Called before the new grant is written. A user has authorized a client
-    before when any of these exists for the pair:
+    Used for authorization-code consent (device-flow approvals notify every
+    time). Called before the new grant is written. A user has authorized a
+    client before when any of these exists for the pair:
 
     - an ``oauth_tokens`` row, revoked or not (rows are only deleted with the
       client or the account, so this remembers every past grant);
     - an ``oauth_authorization_codes`` row (consented, not yet exchanged);
-    - another ``oauth_device_codes`` row with ``authorized_at`` set (approved,
+    - an ``oauth_device_codes`` row with ``authorized_at`` set (approved,
       not yet exchanged).
 
     Args:
         session: Sync session (the OAuth routes run Authlib on one).
         client_id: The client's ``client_id``.
         user_id: The consenting user.
-        exclude_device_code_id: The device code being approved right now.
 
     Returns:
         True when no earlier grant exists.
@@ -506,14 +516,16 @@ def is_first_client_authorization(
         is not None
     ):
         return False
-    device_query = session.query(OAuth2DeviceCode.id).filter(
-        OAuth2DeviceCode.client_id == client_id,
-        OAuth2DeviceCode.user_id == user_id,
-        OAuth2DeviceCode.authorized_at.is_not(None),
+    return (
+        session.query(OAuth2DeviceCode.id)
+        .filter(
+            OAuth2DeviceCode.client_id == client_id,
+            OAuth2DeviceCode.user_id == user_id,
+            OAuth2DeviceCode.authorized_at.is_not(None),
+        )
+        .first()
+        is None
     )
-    if exclude_device_code_id is not None:
-        device_query = device_query.filter(OAuth2DeviceCode.id != exclude_device_code_id)
-    return device_query.first() is None
 
 
 # ---------------------------------------------------------------------------
@@ -716,12 +728,19 @@ async def notify_security_event(
             sign_in_method=sanitize_display_text(sign_in_method, _NAME_MAX_CHARS),
             actor=actor,
         )
-        if await _buffer_if_window_open(user_id, event, occurrence):
+        outcome = await _buffer_if_window_open(user_id, event, occurrence)
+        if outcome == _BUFFERED:
             logger.info(
                 "security_notification_buffered", user_id=user_id, security_event=event.value
             )
             return
-        await _deliver(recipient, user_id, event, [occurrence], digest=False, email=email_service)
+        sent = await _deliver(
+            recipient, user_id, event, [occurrence], digest=False, email=email_service
+        )
+        if not sent and outcome == _OPENED:
+            # The notice that opened the window never went out: close it, so
+            # the next occurrence is sent at once and not as a "follow-up".
+            await _close_window(user_id, event)
     except Exception as exc:
         # Type only: a driver error's text could echo the address.
         logger.error(
@@ -748,15 +767,22 @@ def _window_seconds() -> int:
     return get_settings().security_notification_window_seconds
 
 
+# Outcomes of _buffer_if_window_open.
+_OPENED = "opened"  # send now; this occurrence opened the window
+_BUFFERED = "buffered"  # the window's digest will list it
+_SEND_NOW = "send_now"  # send now; no window is ours (Redis down, lost race)
+
+
 async def _buffer_if_window_open(
     user_id: str, event: SecurityEvent, occurrence: SecurityOccurrence
-) -> bool:
+) -> str:
     """Open a window, or buffer ``occurrence`` in the one already open.
 
     Returns:
-        True when the occurrence was buffered (the digest will list it);
-        False when it must be sent now — it opened the window, or Redis is
-        unavailable (fail open to notifying).
+        ``_OPENED`` when this occurrence opened the window (send it now);
+        ``_BUFFERED`` when the digest will list it; ``_SEND_NOW`` when it must
+        be sent now without a window of its own — Redis is unavailable (fail
+        open to notifying) or the window was claimed under it.
     """
     window = _window_seconds()
     member = _member(user_id, event)
@@ -766,7 +792,7 @@ async def _buffer_if_window_open(
         client = get_redis_client()
         opened = await client.zadd(_DUE_KEY, {member: _now_score() + window}, nx=True)
         if opened:
-            return False
+            return _OPENED
         payload = occurrence.to_json()
         ttl = _buffer_ttl()
         pipe = client.pipeline(transaction=True)
@@ -784,8 +810,8 @@ async def _buffer_if_window_open(
         if await client.zscore(_DUE_KEY, member) is None:
             if await client.lrem(buffer_key, 1, payload):
                 await client.decr(count_key)
-                return False
-        return True
+                return _SEND_NOW
+        return _BUFFERED
     except Exception as exc:
         logger.warning(
             "security_notification_redis_unavailable",
@@ -793,7 +819,31 @@ async def _buffer_if_window_open(
             security_event=event.value,
             error_type=type(exc).__name__,
         )
-        return False
+        return _SEND_NOW
+
+
+async def _close_window(user_id: str, event: SecurityEvent) -> None:
+    """Drop a window whose opening notice failed (never raises).
+
+    Occurrences buffered meanwhile go with it: they would otherwise arrive as
+    a follow-up to an email the owner never got.
+    """
+    try:
+        client = get_redis_client()
+        pipe = client.pipeline(transaction=True)
+        pipe.zrem(_DUE_KEY, _member(user_id, event))
+        pipe.delete(_buffer_key(user_id, event), _key(_COUNT_KEY, user_id, event))
+        await pipe.execute()
+        logger.info(
+            "security_notification_window_closed", user_id=user_id, security_event=event.value
+        )
+    except Exception as exc:
+        logger.warning(
+            "security_notification_window_close_failed",
+            user_id=user_id,
+            security_event=event.value,
+            error_type=type(exc).__name__,
+        )
 
 
 def _buffer_ttl() -> int:
@@ -936,6 +986,7 @@ async def _flush_window(
     claim_count = _key(_CLAIM_COUNT_KEY, user_id, event_value)
     attempts_key = _key(_ATTEMPTS_KEY, user_id, event_value)
 
+    await _recover_orphaned_claim(client, user_id, event_value)
     if await client.exists(buffer_key):
         # RENAME keeps the TTL; a missing counter only loses the "N more" total.
         pipe = client.pipeline(transaction=True)
@@ -985,6 +1036,39 @@ async def _flush_window(
         return True
     await _requeue_digest(client, user_id, event, raw_items, total, now=now)
     return False
+
+
+async def _recover_orphaned_claim(client: Any, user_id: str, event_value: str) -> None:
+    """Put a claim left behind by a crashed flush back in front of the buffer.
+
+    Without this the RENAME below would overwrite it (the occurrences lost)
+    or, with no newer buffer, its items would be sent under this window's
+    count without being accounted for.
+    """
+    claim_buffer = _key(_CLAIM_BUFFER_KEY, user_id, event_value)
+    claim_count = _key(_CLAIM_COUNT_KEY, user_id, event_value)
+    orphaned = await client.lrange(claim_buffer, 0, -1)
+    if not orphaned:
+        await client.delete(claim_count)
+        return
+    orphaned_total = max(int(await client.get(claim_count) or 0), len(orphaned))
+    buffer_key = _buffer_key(user_id, event_value)
+    count_key = _key(_COUNT_KEY, user_id, event_value)
+    ttl = _buffer_ttl()
+    pipe = client.pipeline(transaction=True)
+    pipe.lpush(buffer_key, *reversed(orphaned))
+    pipe.ltrim(buffer_key, 0, _DIGEST_MAX_OCCURRENCES - 1)
+    pipe.incrby(count_key, orphaned_total)
+    pipe.expire(buffer_key, ttl)
+    pipe.expire(count_key, ttl)
+    pipe.delete(claim_buffer, claim_count)
+    await pipe.execute()
+    logger.warning(
+        "security_notification_orphaned_claim_recovered",
+        user_id=user_id,
+        security_event=event_value,
+        occurrences=orphaned_total,
+    )
 
 
 async def _requeue_digest(
