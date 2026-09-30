@@ -17,7 +17,7 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 import structlog
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from auth.oauth2_bearer import find_active_oauth_token
@@ -344,6 +344,26 @@ async def _pending_grants(db: AsyncSession, user_id: str) -> tuple[int, int]:
     return int(codes or 0), int(devices or 0)
 
 
+async def _wait_until_blocked(async_engine, timeout: float = 10.0) -> None:
+    """Wait until some backend of this database is waiting on a row lock."""
+    factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    deadline = asyncio.get_running_loop().time() + timeout
+    async with factory() as probe:
+        while True:
+            waiting = await probe.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                )
+            )
+            await probe.rollback()
+            if waiting:
+                return
+            if asyncio.get_running_loop().time() > deadline:
+                raise AssertionError("the reset never waited on a lock")
+            await asyncio.sleep(0.05)
+
+
 class TestResetRevokesOAuthGrants:
     async def test_reset_revokes_the_users_tokens_and_pending_grants(
         self, db_session: AsyncSession, made: _Made, oauth_client: str
@@ -480,8 +500,8 @@ class TestResetRevokesOAuthGrants:
             reset = asyncio.create_task(
                 service.complete_reset(raw_token=_token_from(pending.reset_url), new_password=NEW)
             )
-            await asyncio.sleep(0.5)
-            assert not reset.done()  # blocked on the code row
+            await _wait_until_blocked(async_engine)  # the reset waits on the code row
+            assert not reset.done()
             exchange.add(
                 OAuth2Token(
                     client_id=oauth_client,
@@ -500,6 +520,69 @@ class TestResetRevokesOAuthGrants:
 
         db_session.expire_all()
         assert await find_active_oauth_token(f"at-race-{suffix}", db_session) is None
+
+    async def test_a_refresh_racing_the_reset_is_revoked(
+        self, db_session: AsyncSession, made: _Made, oauth_client: str, async_engine
+    ) -> None:
+        # A refresh holding the owner lock and its token row when the reset
+        # starts: the reset waits for it, then revokes the token it minted.
+        user = await _user(db_session, made)
+        uid = user.user_id
+        old = await _grants(db_session, oauth_client, uid)
+        service = PasswordAccountService(db_session, email_service=_email())
+        pending = await service.request_reset(email=user.email)
+        assert pending is not None
+        suffix = uuid4().hex
+
+        factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+        async with factory() as refresh:
+            # authenticate_refresh_token: owner KEY SHARE, then the token row.
+            await refresh.execute(
+                select(User.user_id)
+                .where(User.user_id == uid)
+                .with_for_update(read=True, key_share=True)
+            )
+            await refresh.execute(
+                select(OAuth2Token).where(OAuth2Token.access_token == old).with_for_update()
+            )
+            reset = asyncio.create_task(
+                service.complete_reset(raw_token=_token_from(pending.reset_url), new_password=NEW)
+            )
+            await _wait_until_blocked(async_engine)  # the reset waits on the user row
+            assert not reset.done()
+            # save_token: rotate the old pair and store the new one.
+            now = utcnow()
+            await refresh.execute(
+                update(OAuth2Token)
+                .where(OAuth2Token.access_token == old)
+                .values(access_token_revoked_at=now, refresh_token_revoked_at=now)
+            )
+            refresh.add(
+                OAuth2Token(
+                    client_id=oauth_client,
+                    user_id=uid,
+                    access_token=f"at-new-{suffix}",
+                    refresh_token=f"rt-new-{suffix}",
+                    scope="memory:read",
+                    expires_in=3600,
+                )
+            )
+            await refresh.commit()
+        await asyncio.wait_for(reset, timeout=10)
+
+        db_session.expire_all()
+        assert await find_active_oauth_token(f"at-new-{suffix}", db_session) is None
+
+    async def test_remove_keeps_oauth_tokens(
+        self, db_session: AsyncSession, made: _Made, oauth_client: str
+    ) -> None:
+        user = await _user(db_session, made, provider="google")
+        token = await _grants(db_session, oauth_client, user.user_id)
+
+        await PasswordAccountService(db_session).remove(user_id=user.user_id, current_password=OLD)
+
+        db_session.expire_all()
+        assert await find_active_oauth_token(token, db_session) is not None
 
     async def test_change_keeps_oauth_tokens(
         self, db_session: AsyncSession, made: _Made, oauth_client: str

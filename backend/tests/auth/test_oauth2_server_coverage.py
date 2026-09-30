@@ -529,7 +529,7 @@ class TestRefreshTokenGrant:
         assert grant.authenticate_refresh_token("rt-active") is token
 
         locks = [c for c in session.mock_calls if c[0].endswith("with_for_update")]
-        assert locks[0].kwargs == {"read": True}
+        assert locks[0].kwargs == {"read": True, "key_share": True}
         assert locks[-1].kwargs == {}
         queried = [c.args[0] for c in session.mock_calls if c[0] == "query"]
         assert queried[1] is User.user_id
