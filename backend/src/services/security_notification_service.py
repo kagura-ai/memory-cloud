@@ -269,13 +269,18 @@ def sanitize_display_text(value: object, max_chars: int) -> str | None:
     text = unicodedata.normalize("NFKC", str(value)).translate(_DOT_LIKE)
     text = _strip_unsafe_chars(text)
     text = " ".join(text.split())
+    # Cut before the patterns run: _HOST_RE rescans suffixes of long dotted
+    # runs, so an unbounded user agent would cost quadratic time. Defanging
+    # only lengthens the text, so nothing past the cut could be shown anyway.
+    truncated = len(text) > max_chars
+    text = text[:max_chars]
     text = _SCHEME_RE.sub("[:]//", text)
     text = _WWW_RE.sub(lambda m: m.group(0)[:-1] + "[.]", text)
     text = _HOST_RE.sub(lambda m: m.group(0).replace(".", "[.]"), text)
     text = _IPV4_RE.sub(lambda m: m.group(0).replace(".", "[.]"), text)
     if not text:
         return None
-    if len(text) > max_chars:
+    if truncated or len(text) > max_chars:
         text = text[: max_chars - 1].rstrip() + "…"
     return text
 
@@ -1310,10 +1315,15 @@ async def _expire_stale_windows(client: Any, *, now: float) -> None:
     Their buffers have expired by then; the entry would otherwise sit in the
     due set forever. Each goes with its pointer (when it still names it) and
     its keys; a warning records the loss.
+
+    The due set is watched too and the entry's score re-read inside the
+    transaction: a replica that claimed the window after the range read (its
+    claim removes the entry and holds the buffer in the claim keys) or
+    re-queued it must keep those keys. A conflict leaves the entry to the
+    next run.
     """
-    stale = await client.zrangebyscore(
-        _DUE_KEY, "-inf", f"({now - _STATE_RETENTION_SECONDS}", start=0, num=_FLUSH_BATCH
-    )
+    cutoff = now - _STATE_RETENTION_SECONDS
+    stale = await client.zrangebyscore(_DUE_KEY, "-inf", f"({cutoff}", start=0, num=_FLUSH_BATCH)
     for raw_member in stale:
         member = cast(str, raw_member)
         try:
@@ -1324,8 +1334,12 @@ async def _expire_stale_windows(client: Any, *, now: float) -> None:
         open_key = _open_key(user_id, event_value)
         try:
             async with client.pipeline(transaction=True) as pipe:
-                await pipe.watch(open_key)
+                await pipe.watch(open_key, _DUE_KEY)
                 pointer = _parse_pointer(await pipe.get(open_key))
+                score = await pipe.zscore(_DUE_KEY, member)
+                if score is None or float(score) >= cutoff:
+                    await pipe.unwatch()
+                    continue  # claimed or re-queued since the range read
                 pipe.multi()
                 pipe.zrem(_DUE_KEY, member)
                 if pointer is not None and pointer[0] == window_id:

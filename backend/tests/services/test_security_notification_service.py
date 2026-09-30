@@ -1507,3 +1507,184 @@ class TestStalledScheduler:
         assert await redis.zscore(sns._DUE_KEY, _m(old)) is None
         assert await redis.zscore(sns._DUE_KEY, _m(new)) is not None
         assert await _wid(redis) == new
+
+
+# ---------------------------------------------------------------------------
+# Copilot round 4: stale sweep vs a concurrent claim, bounded host matching,
+# provider timeouts
+# ---------------------------------------------------------------------------
+
+
+class TestStaleSweepRace:
+    @pytest.mark.asyncio
+    async def test_sweep_leaves_a_window_claimed_meanwhile_by_another_replica(
+        self, redis, deliverable, email, monkeypatch
+    ) -> None:
+        await _notify(email, key_name="first")
+        await _notify(email, key_name="second")
+        wid = await _wid(redis)
+        assert wid is not None
+        much_later = _window_end() + sns._STATE_RETENTION_SECONDS + 60
+
+        async def _claim_elsewhere() -> None:
+            # Another replica's claim: the due entry goes, the buffer moves.
+            await redis.zrem(sns._DUE_KEY, _m(wid))
+            await redis.rename(_k(sns._BUFFER_KEY, wid), _k(sns._CLAIM_BUFFER_KEY, wid))
+
+        _conflict_on_read(redis, monkeypatch, _claim_elsewhere, method="get")
+        await sns._expire_stale_windows(redis, now=much_later)
+
+        assert await redis.lrange(_k(sns._CLAIM_BUFFER_KEY, wid), 0, -1)
+
+    @pytest.mark.asyncio
+    async def test_sweep_leaves_an_entry_requeued_meanwhile(
+        self, redis, deliverable, email, monkeypatch
+    ) -> None:
+        await _notify(email, key_name="first")
+        await _notify(email, key_name="second")
+        wid = await _wid(redis)
+        assert wid is not None
+        much_later = _window_end() + sns._STATE_RETENTION_SECONDS + 60
+
+        async def _requeue_elsewhere() -> None:
+            await redis.zadd(sns._DUE_KEY, {_m(wid): much_later + 60})
+
+        _conflict_on_read(redis, monkeypatch, _requeue_elsewhere, method="get")
+        await sns._expire_stale_windows(redis, now=much_later)
+
+        assert await redis.zscore(sns._DUE_KEY, _m(wid)) == much_later + 60
+        assert await redis.lrange(_k(sns._BUFFER_KEY, wid), 0, -1)
+
+
+class _LengthRecordingPattern:
+    def __init__(self, pattern) -> None:
+        self._pattern = pattern
+        self.lengths: list[int] = []
+
+    def sub(self, repl, text):
+        self.lengths.append(len(text))
+        return self._pattern.sub(repl, text)
+
+
+class TestBoundedHostMatching:
+    def test_host_patterns_only_see_a_bounded_prefix(self, monkeypatch) -> None:
+        recorder = _LengthRecordingPattern(sns._HOST_RE)
+        monkeypatch.setattr(sns, "_HOST_RE", recorder)
+        text = sanitize_display_text("a." * 50_000 + "1", 200)
+        assert text is not None and len(text) <= 200 and text.endswith("…")
+        assert recorder.lengths and max(recorder.lengths) <= 200
+
+    def test_host_at_the_cut_is_still_defanged(self) -> None:
+        text = sanitize_display_text("x" * 170 + " evil.example.com/login " + "y" * 500, 200)
+        assert text is not None and len(text) <= 200 and text.endswith("…")
+        assert "evil.example" not in text
+        assert "evil[.]example" in text
+
+    def test_cut_input_that_shrinks_below_the_cap_keeps_the_ellipsis(self) -> None:
+        text = sanitize_display_text("A" * 199 + "​" * 10 + "B" * 50, 200)
+        assert text is not None and text.endswith("…")
+
+    def test_still_idempotent_after_a_pre_cut(self) -> None:
+        once = sanitize_display_text("go to a.example " * 40, 80)
+        assert sanitize_display_text(once, 80) == once
+
+
+def _sdk_http_error(inner: Exception):
+    """What resend.Emails.send raises on a transport error: ResendError
+    (HttpClientError) raised while handling RuntimeError from ``inner``."""
+    import resend
+
+    def _send(params):
+        try:
+            try:
+                raise inner
+            except Exception as exc:
+                raise RuntimeError(f"Request failed: {exc}") from exc
+        except Exception as exc:
+            raise resend.exceptions.ResendError(
+                code=500,
+                message=str(exc),
+                error_type="HttpClientError",
+                suggested_action="Request failed, please try again.",
+            ) from exc
+
+    return _send
+
+
+class TestProviderTimeout:
+    def _send_with(self, monkeypatch, inner: Exception):
+        import services.email_providers.resend as resend_module
+        from services.email_providers.resend import ResendEmailService
+
+        monkeypatch.setattr(resend_module.resend.Emails, "send", _sdk_http_error(inner))
+        service = ResendEmailService(api_key="re_test", from_email="noreply@example.test")
+        return _send_notice(service)
+
+    @pytest.mark.asyncio
+    async def test_read_timeout_is_uncertain(self, monkeypatch) -> None:
+        import requests
+
+        send = self._send_with(monkeypatch, requests.exceptions.ReadTimeout("read timed out"))
+        with pytest.raises(TimeoutError):
+            await send
+
+    @pytest.mark.asyncio
+    async def test_connect_timeout_is_a_definite_failure(self, monkeypatch) -> None:
+        import requests
+
+        send = self._send_with(monkeypatch, requests.exceptions.ConnectTimeout("connect timed out"))
+        assert await send is False
+
+    @pytest.mark.asyncio
+    async def test_other_emails_keep_returning_false_on_a_read_timeout(self, monkeypatch) -> None:
+        import requests
+
+        import services.email_providers.resend as resend_module
+        from services.email_providers.resend import ResendEmailService
+
+        monkeypatch.setattr(
+            resend_module.resend.Emails,
+            "send",
+            _sdk_http_error(requests.exceptions.ReadTimeout("read timed out")),
+        )
+        service = ResendEmailService(api_key="re_test", from_email="noreply@example.test")
+        assert await service.send_erasure_receipt(to_email=ADDRESS, request_id="r-1") is False
+
+    @pytest.mark.asyncio
+    async def test_digest_whose_provider_call_timed_out_is_not_resent(
+        self, redis, deliverable, monkeypatch
+    ) -> None:
+        import requests
+
+        import services.email_providers.resend as resend_module
+        from services.email_providers.resend import ResendEmailService
+
+        service = ResendEmailService(api_key="re_test", from_email="noreply@example.test")
+        monkeypatch.setattr(resend_module.resend.Emails, "send", lambda params: {"id": "m-1"})
+        await _notify(service, key_name="first")
+        await _notify(service, key_name="second")
+        calls = []
+
+        def _timed_out(params):
+            calls.append(params)
+            return _sdk_http_error(requests.exceptions.ReadTimeout("read timed out"))(params)
+
+        monkeypatch.setattr(resend_module.resend.Emails, "send", _timed_out)
+        sent = await sns.flush_due_security_notifications(
+            now_score=_window_end() + 1, session_factory=_factory(), email_service=service
+        )
+
+        assert sent == 0
+        assert len(calls) == 1
+        assert await redis.zcard(sns._DUE_KEY) == 0
+
+
+def _send_notice(service):
+    return service.send_security_notification(
+        to_email=ADDRESS,
+        event=EVENT,
+        occurrences=[SecurityOccurrence(occurred_at="2026-09-30T00:00:00 UTC")],
+        digest=False,
+        window_minutes=10,
+        profile_page_url="https://app.example/profile",
+    )

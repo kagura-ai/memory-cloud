@@ -33,6 +33,28 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _may_have_been_delivered(exc: BaseException) -> bool:
+    """Whether a send failure may have happened after Resend took the request.
+
+    The SDK wraps transport errors (``ResendError`` raised while handling a
+    ``RuntimeError`` caused by the ``requests`` / ``httpx`` exception), so the
+    whole chain is searched. Only a read timeout is uncertain: the request was
+    sent and the answer never came. A connect timeout, a refused connection or
+    an API error response are definite failures.
+    """
+    import httpx
+    import requests
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (requests.exceptions.ReadTimeout, httpx.ReadTimeout)):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class ResendEmailService:
     """``EmailService`` backend backed by the Resend HTTPS API.
 
@@ -64,6 +86,7 @@ class ResendEmailService:
         text: str,
         log_event: str,
         log_context: dict[str, Any],
+        raise_if_uncertain: bool = False,
     ) -> bool:
         params: dict[str, Any] = {
             "from": self._from_email,
@@ -86,6 +109,13 @@ class ResendEmailService:
             status_code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
             if isinstance(status_code, (int, str)):
                 error_fields["status_code"] = status_code
+            if raise_if_uncertain and _may_have_been_delivered(exc):
+                logger.warning(
+                    f"{log_event}_uncertain",
+                    **error_fields,
+                    **log_context,
+                )
+                raise TimeoutError(f"{log_event}: provider response timed out") from None
             logger.warning(
                 f"{log_event}_failed",
                 **error_fields,
@@ -489,4 +519,7 @@ class ResendEmailService:
                 "digest": digest,
                 "template": "security_notification",
             },
+            # After a read timeout the notice may already be out; the caller
+            # treats TimeoutError as "may have been sent" and never resends.
+            raise_if_uncertain=True,
         )

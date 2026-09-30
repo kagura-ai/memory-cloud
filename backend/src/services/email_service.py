@@ -335,6 +335,12 @@ class EmailService(Protocol):
 
         Returns:
             True on delivery (or logging fallback), False on hard failure.
+
+        Raises:
+            TimeoutError: The provider may have accepted the email but its
+                answer never came (unlike the other methods, which return
+                False). The caller counts it as possibly sent and never
+                resends it.
         """
         ...
 
