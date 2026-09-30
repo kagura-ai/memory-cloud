@@ -2494,6 +2494,8 @@
         "user": "User",
         "role": "Role",
         "workspaces": "Workspaces",
+        "workspaceTooltip": "{name} · {role} · {plan}",
+        "moreWorkspaces": "{count, plural, one {# more workspace} other {# more workspaces}}",
         "cap": "Cap",
         "capTooltip": "Owns {owned} of {cap} workspaces (bonus: +{bonus})",
         "memories": "Memories",

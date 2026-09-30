@@ -40,7 +40,6 @@ import {
   Trash2,
   RefreshCw,
   Lock,
-  Building2,
   Search,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
@@ -48,13 +47,10 @@ import {
   InlineSpinner,
   TableLoadingState,
 } from "@/components/common/LoadingState";
-
-interface WorkspaceMembership {
-  workspace_id: string;
-  workspace_name: string;
-  role: string;
-  plan_name: string;
-}
+import {
+  WorkspacePlanBadges,
+  type WorkspaceMembership,
+} from "./WorkspacePlanBadges";
 
 interface User {
   id: string;
@@ -358,25 +354,9 @@ export default function AdminUsersPage() {
                     </div>
                   </TableCell>
                   <TableCell>
-                    {/* Issue #165: Workspace badges */}
+                    {/* Issue #165: Workspace badges; #1754: with each plan */}
                     {user.workspaces && user.workspaces.length > 0 ? (
-                      <div className="flex flex-wrap gap-1">
-                        {user.workspaces.slice(0, 2).map((workspace) => (
-                          <Badge
-                            key={workspace.workspace_id}
-                            className="bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 text-xs"
-                            title={`${workspace.workspace_name} (${workspace.role})`}
-                          >
-                            <Building2 className="h-3 w-3 mr-1" />
-                            {workspace.workspace_name}
-                          </Badge>
-                        ))}
-                        {user.workspaces.length > 2 && (
-                          <Badge className="bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300 text-xs">
-                            +{user.workspaces.length - 2}
-                          </Badge>
-                        )}
-                      </div>
+                      <WorkspacePlanBadges workspaces={user.workspaces} />
                     ) : (
                       <span className="text-xs text-gray-400 dark:text-gray-500">
                         {t("table.none")}

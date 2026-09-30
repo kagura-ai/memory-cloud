@@ -2494,6 +2494,8 @@
         "user": "ユーザー",
         "role": "ロール",
         "workspaces": "ワークスペース",
+        "workspaceTooltip": "{name} · {role} · {plan}",
+        "moreWorkspaces": "他 {count} 件のワークスペース",
         "cap": "上限",
         "capTooltip": "ワークスペース {owned} / {cap} 所有 (ボーナス: +{bonus})",
         "memories": "メモリー",
