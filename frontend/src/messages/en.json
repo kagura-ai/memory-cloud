@@ -4021,6 +4021,13 @@
     "createDesc": "Connecting {team}. A private context will be created to hold ingested conversations.",
     "missingScopesTitle": "Reconnect Slack to enable commands",
     "missingScopesDesc": "This install did not grant {scopes}. Ingestion works, but the slash command and @mention replies need these scopes. Make sure the Slack app requests them, then connect Slack again.",
+    "teamConflict": {
+      "subjectNamed": "The Slack workspace “{name}”",
+      "subjectUnnamed": "This Slack workspace",
+      "here": "{subject} is already connected in this workspace by the connector “{connector}”. To change its settings, edit the existing connector.",
+      "elsewhere": "{subject} is already connected to another Kagura workspace. A Slack workspace can be connected to only one Kagura workspace. To move it, delete the connector in the original workspace. To share it, ask a member of the original workspace to invite you.",
+      "editExisting": "Edit the existing connector"
+    },
     "displayName": "Display name",
     "contextName": "Context name",
     "contextNameHelp": "Lowercase letters, numbers, hyphen and underscore only.",

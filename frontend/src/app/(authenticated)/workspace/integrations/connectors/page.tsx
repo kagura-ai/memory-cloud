@@ -83,6 +83,12 @@ import { useErrorGate } from "@/hooks/useErrorGate";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
 import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
+import {
+  TeamConflictAlert,
+  teamConflictOf,
+  useTeamConflictMessage,
+  type TeamConflict,
+} from "./TeamConflictAlert";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { hasWorkspaceRole, WorkspaceRole } from "@/lib/auth/rbac";
 import { API_BASE_URL, ApiError } from "@/lib/api/base";
@@ -284,6 +290,11 @@ export default function ConnectorsPage() {
   // cap, any quota) — rendered in the dialog as the inline notice.
   const [createRefusal, setCreateRefusal] = useState<ApiError | null>(null);
   const createGate = useErrorGate(createRefusal, "connectors");
+  // #1753: the Slack team is already connected — here or elsewhere.
+  const [createConflict, setCreateConflict] = useState<TeamConflict | null>(
+    null,
+  );
+  const teamConflictMessage = useTeamConflictMessage();
 
   // #890: PII guardrail config for the create form. Defaults scrub on by
   // default so an admin who touches nothing still ships a safe config.
@@ -716,9 +727,23 @@ export default function ConnectorsPage() {
     setPending(null);
     setCreateError(null);
     setCreateRefusal(null);
+    setCreateConflict(null);
     // Drop the one-time handle from the URL so a refresh doesn't re-trigger.
     router.replace("/workspace/integrations/connectors");
   }, [router]);
+
+  // #1753: "connected here" hands over to the existing connector's editor,
+  // when that connector is in the loaded list.
+  const conflictingConnector =
+    createConflict?.kind === "here"
+      ? connectors?.find((c) => c.connector_id === createConflict.connectorId)
+      : undefined;
+  const editConflictingConnector = conflictingConnector
+    ? () => {
+        closeCreateDialog();
+        openSettings(conflictingConnector);
+      }
+    : undefined;
 
   const handleCreate = useCallback(async () => {
     if (!installHandle || !pending) return;
@@ -728,6 +753,7 @@ export default function ConnectorsPage() {
     setSubmitting(true);
     setCreateError(null);
     setCreateRefusal(null);
+    setCreateConflict(null);
     try {
       // #890: build a valid pii_guardrail_config. When disabled, send an
       // empty detectors list (backend only requires non-empty when enabled);
@@ -765,8 +791,11 @@ export default function ConnectorsPage() {
       // reader's language; anything else keeps the server's own text. #1646:
       // any gate (not just the plan and connector seat-cap pair) renders as
       // the inline notice through useErrorGate, like every create error.
+      const conflict = teamConflictOf(err);
       if (err instanceof ApiError && err.gate) {
         setCreateRefusal(err);
+      } else if (conflict) {
+        setCreateConflict(conflict);
       } else {
         setCreateError(err instanceof Error ? err.message : String(err));
       }
@@ -916,8 +945,12 @@ export default function ConnectorsPage() {
         const toastArgs = refusal
           ? featureGateToast(refusal, tGate, "create")
           : null;
+        const conflict = teamConflictOf(err);
         if (toastArgs) {
           toast(toastArgs);
+        } else if (conflict) {
+          // #1753: only the team id is known here, so no Slack name.
+          setManualError(teamConflictMessage(conflict));
         } else {
           setManualError(err instanceof Error ? err.message : String(err));
         }
@@ -935,6 +968,7 @@ export default function ConnectorsPage() {
       reload,
       t,
       tGate,
+      teamConflictMessage,
       tiers,
       toast,
     ],
@@ -1755,6 +1789,13 @@ export default function ConnectorsPage() {
                   })}
                 </AlertDescription>
               </Alert>
+            )}
+            {createConflict && (
+              <TeamConflictAlert
+                conflict={createConflict}
+                teamName={pending?.team_name}
+                onEditExisting={editConflictingConnector}
+              />
             )}
             <div>
               <label

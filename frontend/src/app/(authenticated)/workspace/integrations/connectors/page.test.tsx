@@ -1844,6 +1844,53 @@ describe("ConnectorsPage RBAC gate", () => {
     ]);
   });
 
+  // #1753: a team conflict is told from details.reason, never the server's
+  // English. The copy itself is covered with the real catalogues in
+  // TeamConflictAlert.test.tsx; here the dialog wiring is.
+  it("a team connected elsewhere renders the localized notice, not the server text (#1753)", async () => {
+    const serverText =
+      "This slack team is already connected to another workspace.";
+    mockCreateConnector.mockRejectedValue(
+      new ApiError({
+        error: "RES-002",
+        message: serverText,
+        status: 409,
+        details: { reason: "connector_team_connected_elsewhere" },
+      }),
+    );
+    await submitCreate();
+
+    expect(await screen.findByText("elsewhere")).toBeInTheDocument();
+    expect(screen.queryByText(serverText)).toBeNull();
+    expect(screen.queryByRole("button", { name: "editExisting" })).toBeNull();
+    expect(screen.getByText("createTitle")).toBeInTheDocument();
+  });
+
+  it("a team connected here hands over to the existing connector's settings (#1753)", async () => {
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ connector_id: "connector-1", display_name: "Acme" }),
+    ]);
+    mockCreateConnector.mockRejectedValue(
+      new ApiError({
+        error: "RES-002",
+        message: "server text",
+        status: 409,
+        details: {
+          reason: "connector_team_connected_here",
+          connector_id: "connector-1",
+          display_name: "Acme",
+        },
+      }),
+    );
+    await submitCreate();
+
+    expect(await screen.findByText("here")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "editExisting" }));
+
+    expect(await screen.findByText("settingsTitle")).toBeInTheDocument();
+    expect(screen.queryByText("createTitle")).toBeNull();
+  });
+
   it("renders the plan refusal with the required tier's label (#1644)", async () => {
     mockCreateConnector.mockRejectedValue(
       gateRefusal(403, "FEAT-001", "Feature 'connectors' not available.", {
