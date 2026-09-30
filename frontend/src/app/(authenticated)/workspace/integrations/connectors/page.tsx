@@ -1086,8 +1086,9 @@ export default function ConnectorsPage() {
       {/* #1389: provider picker rendered from the CONNECTOR_PROVIDERS
           descriptor so Slack-hardcoded JSX stops multiplying (#1390).
           #1757: only enabled providers render — no "coming soon" promise
-          for Discord/Teams without a committed date; enabling one later is
-          a one-line descriptor change. */}
+          for Discord/Teams without a committed date. Enabling one later
+          means wiring its connect flow (the descriptor's installUrl) and
+          then flipping `enabled`. */}
       <div className="mb-4 flex flex-wrap justify-end gap-2">
         {CONNECTOR_PROVIDERS.filter((p) => p.enabled).map((provider) => (
           <Button
