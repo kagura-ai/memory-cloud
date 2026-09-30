@@ -759,8 +759,9 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
         password reset holds it exclusively while it revokes every token of
         the account, so a refresh either commits before the reset (whose
         revocation then covers the new token) or waits and finds this refresh
-        token revoked. Locking the user before the token matches the reset's
-        order, so the two cannot deadlock.
+        token revoked. Every path that locks both takes the user first (the
+        reset, and account erasure before it sweeps the tokens), so none of
+        them can deadlock with this one.
 
         Args:
             refresh_token: Refresh token value

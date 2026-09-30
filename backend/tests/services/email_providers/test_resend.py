@@ -622,4 +622,4 @@ async def test_reset_email_names_what_the_reset_revokes() -> None:
     assert "everywhere" not in params["text"]
     assert "browser" in params["text"]
     assert "MCP client" in params["text"]
-    assert "API keys keep working" in params["text"]
+    assert "API keys and other integration" in params["text"]

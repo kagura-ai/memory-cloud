@@ -395,6 +395,112 @@ class TestResetRevokesOAuthGrants:
         assert await find_active_oauth_token(token, db_session) is not None
         assert await _pending_grants(db_session, uid) == (1, 1)
 
+    async def test_keeps_earlier_revocation_times(
+        self, db_session: AsyncSession, made: _Made, oauth_client: str
+    ) -> None:
+        # A rotated token (timestamps set, ``revoked`` still false) keeps the
+        # time it was revoked at; only live tokens are counted.
+        user = await _user(db_session, made)
+        uid = user.user_id
+        live = await _grants(db_session, oauth_client, uid)
+        rotated_at = utcnow() - timedelta(days=3)
+        db_session.add(
+            OAuth2Token(
+                client_id=oauth_client,
+                user_id=uid,
+                access_token=f"at-old-{uuid4().hex}",
+                refresh_token=f"rt-old-{uuid4().hex}",
+                scope="memory:read",
+                expires_in=3600,
+                access_token_revoked_at=rotated_at,
+                refresh_token_revoked_at=rotated_at,
+            )
+        )
+        await db_session.commit()
+        service = PasswordAccountService(db_session, email_service=_email())
+
+        revoked = await service._revoke_oauth_grants(uid)
+        await db_session.commit()
+
+        assert revoked == 1
+        db_session.expire_all()
+        rows = (
+            (await db_session.execute(select(OAuth2Token).where(OAuth2Token.user_id == uid)))
+            .scalars()
+            .all()
+        )
+        old = next(r for r in rows if r.access_token != live)
+        assert old.access_token_revoked_at == rotated_at
+        assert old.refresh_token_revoked_at == rotated_at
+        assert not old.is_refresh_token_active() and old.is_revoked()
+
+    async def test_codes_go_before_the_token_update(self) -> None:
+        # The DELETEs wait for an in-flight exchange; the UPDATE, a later
+        # statement, then sees the token it stored.
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=type("R", (), {"rowcount": 0})())
+        await PasswordAccountService(db)._revoke_oauth_grants("u-order")
+        tables = [call.args[0].table.name for call in db.execute.await_args_list]
+        kinds = [type(call.args[0]).__name__ for call in db.execute.await_args_list]
+        assert kinds == ["Delete", "Delete", "Update"]
+        assert tables == ["oauth_authorization_codes", "oauth_device_codes", "oauth_tokens"]
+
+    async def test_a_code_exchange_racing_the_reset_is_revoked(
+        self, db_session: AsyncSession, made: _Made, oauth_client: str, async_engine
+    ) -> None:
+        # An exchange holding its code row when the reset runs: the reset
+        # waits for it, then revokes the token it stored.
+        user = await _user(db_session, made)
+        uid = user.user_id
+        suffix = uuid4().hex
+        code = f"race-{suffix}"
+        db_session.add(
+            OAuth2AuthorizationCode(
+                code=code,
+                client_id=oauth_client,
+                user_id=uid,
+                redirect_uri="https://client.example/cb",
+                scope="memory:read",
+                expires_at=utcnow() + timedelta(minutes=5),
+            )
+        )
+        await db_session.commit()
+        service = PasswordAccountService(db_session, email_service=_email())
+        pending = await service.request_reset(email=user.email)
+        assert pending is not None
+
+        factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+        async with factory() as exchange:
+            # The exchange locks its code, as query_authorization_code does.
+            await exchange.execute(
+                select(OAuth2AuthorizationCode)
+                .where(OAuth2AuthorizationCode.code == code)
+                .with_for_update()
+            )
+            reset = asyncio.create_task(
+                service.complete_reset(raw_token=_token_from(pending.reset_url), new_password=NEW)
+            )
+            await asyncio.sleep(0.5)
+            assert not reset.done()  # blocked on the code row
+            exchange.add(
+                OAuth2Token(
+                    client_id=oauth_client,
+                    user_id=uid,
+                    access_token=f"at-race-{suffix}",
+                    refresh_token=f"rt-race-{suffix}",
+                    scope="memory:read",
+                    expires_in=3600,
+                )
+            )
+            await exchange.execute(
+                delete(OAuth2AuthorizationCode).where(OAuth2AuthorizationCode.code == code)
+            )
+            await exchange.commit()
+        await asyncio.wait_for(reset, timeout=10)
+
+        db_session.expire_all()
+        assert await find_active_oauth_token(f"at-race-{suffix}", db_session) is None
+
     async def test_change_keeps_oauth_tokens(
         self, db_session: AsyncSession, made: _Made, oauth_client: str
     ) -> None:
