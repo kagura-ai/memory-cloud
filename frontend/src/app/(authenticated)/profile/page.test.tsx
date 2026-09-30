@@ -240,6 +240,16 @@ describe("getSignInMethodLabel — email and password (#1751)", () => {
     ).toBe("signInMethodPassword");
   });
 
+  it("names only known providers; an unknown one alone reads Other", () => {
+    expect(
+      getSignInMethodLabel(
+        { auth_method: "oauth", auth_provider: null, has_password: false },
+        stableTranslator,
+        ["microsoft"],
+      ),
+    ).toBe("signInMethodOther");
+  });
+
   it("uses the translated separator", () => {
     const ja = (key: string) => (key === "signInMethodSeparator" ? "、" : key);
     expect(
@@ -498,6 +508,38 @@ describe("ProfilePage — sign-in method from linked providers (#1751)", () => {
     expect(
       (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
     ).toBe("signInMethodGitHub");
+  });
+
+  it("ignores a providers response that arrives after a newer one", async () => {
+    mockUser = {
+      id: "u-1",
+      email: "u@example.com",
+      name: "Test",
+      auth_method: "oauth",
+      auth_provider: "google",
+      has_password: true,
+    };
+    let resolveStale: (v: unknown) => void = () => {};
+    mockApiGet.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStale = resolve;
+      }),
+    );
+    render(<ProfilePage />);
+
+    mockApiGet.mockResolvedValueOnce({ providers: [] });
+    fireEvent.click(screen.getByText("connected-accounts-stub"));
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
+      ).toBe("signInMethodEmailPassword"),
+    );
+
+    resolveStale({ providers: [{ provider: "google" }] });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(
+      (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
+    ).toBe("signInMethodEmailPassword");
   });
 
   it("updates the field when a password is added (user refetched)", () => {
