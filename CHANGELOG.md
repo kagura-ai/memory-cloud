@@ -4,6 +4,25 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.82.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.82.1) — 2026-09-30
+
+Slack connector fixes and the residuals of the v0.82.0 re-audit. The Slack install asks for the scopes the slash command and @mentions need, a Slack team that is already connected is explained in the reader's language, the connector page drops its "coming soon" buttons and its curl sample works as pasted, and `list_analyses` no longer returns failed runs' errors whole.
+
+### Changed
+- **Slack bot scopes** ([#1758](https://github.com/kagura-ai/memory-cloud/issues/1758)): the default `SLACK_OAUTH_SCOPES` adds `commands` (the `/kagura` slash command) and `app_mentions:read` (`app_mention` events). The OAuth callback keeps the scopes Slack granted, and the connector create dialog warns "Reconnect Slack to enable commands" when either is missing. The scopes and what each is for are listed in `docs/ops/slack-public-distribution.md`.
+- **`list_analyses` bounds** ([#1750](https://github.com/kagura-ai/memory-cloud/issues/1750)): each run's `error` is a 300-character preview with `error_truncated: true` when cut (`get_analysis` still returns it whole), and a page stops at 20,000 characters with a `next_cursor` that resumes after the last run returned. `get_context_info` `stats.details.by_type` keeps the 20 largest types and folds the rest into `other` (`by_type_truncated`, `by_type_total_types`).
+- **Tool descriptions name their side effects** ([#1749](https://github.com/kagura-ai/memory-cloud/issues/1749)): `recall` (may strengthen associations and promote returned memories), `secret_put` (grants not listed in `grant_pubkey_ids` are revoked) and `update_context` `resource_id` (changing it revokes the resource tokens the caller issued for the old slug).
+- **Connector picker** ([#1757](https://github.com/kagura-ai/memory-cloud/issues/1757)): the disabled "Discord — coming soon" and "Microsoft Teams — coming soon" buttons are no longer shown; only enabled providers are listed.
+
+### Fixed
+- **Slack team conflict explained** ([#1753](https://github.com/kagura-ai/memory-cloud/issues/1753)): creating a connector for a Slack team that is already connected no longer shows the raw English message with the team id. The 409 `RES-002` now carries `details.reason`: `connector_team_connected_here` names the existing connector in this workspace (with a button to edit it), and `connector_team_connected_elsewhere` says only that another Kagura workspace holds the team — nothing about that workspace is disclosed. The dialog shows both in English and Japanese, using the Slack workspace name when it is known.
+- **Connector curl sample** ([#1756](https://github.com/kagura-ai/memory-cloud/issues/1756)): the "Developer / CLI testing" sample sends `"version": 1`, which the resource-ingest API requires, with a note on re-sending and cleaning up the test memory. Both UI samples are built from one fixture that a backend test validates against the request model.
+
+### Notes
+- No migration and no new environment variables.
+- **Operator action (Slack):** add the `commands` and `app_mentions:read` bot scopes to the Slack app, with Slash Commands and the `app_mention` event enabled. Deployments that set `SLACK_OAUTH_SCOPES` explicitly must add the two scopes themselves. Slack does not widen an existing grant: workspaces installed before this release keep their old scopes until a workspace admin runs **Connect Slack** again.
+- **MCP clients** that read full error text from `list_analyses` should call `get_analysis` for it, and follow `next_cursor` since a page can now stop before `limit`.
+
 ## [v0.82.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.82.0) — 2026-09-27
 
 MCP spec and connector-directory hardening. The Streamable HTTP transport validates `Origin` and follows the session, version and header rules; OAuth accepts any loopback port, shows the redirect host on the consent page and authenticates revocation and introspection; authentication outages answer 503 instead of "invalid token"; and every tool reply that still grew with stored data is bounded.
