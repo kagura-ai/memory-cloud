@@ -4,6 +4,34 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.83.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.83.0) — 2026-09-30
+
+Account security for email + password sign-in. The account owner is emailed when a security-sensitive change is made to the account, a password reset now also disconnects every OAuth / MCP client, and the profile shows email and password as a sign-in method.
+
+### Added
+- **Security-change notification emails** ([#1752](https://github.com/kagura-ai/memory-cloud/issues/1752)): the account owner is emailed (mandatory, no opt-out) when
+  - a password is set, changed, reset or removed;
+  - a Google / GitHub identity is linked or unlinked;
+  - an OAuth / MCP client is authorized — by browser consent when it grants something new (a first authorization, a scope not granted before, or a client changed since the user's last grant), and by device-flow approval every time;
+  - an API key is created or regenerated (connector write keys included), or an OAuth client is registered or its secret regenerated — also when a workspace admin does it, whom the email then names;
+  - a provider sign-in changes the account's email address (the previous address is told, and the notices still pending go to it).
+
+  Each email lists the UTC time, IP address, user agent and the key or client name, never a secret, token, key value or action link; untrusted names and user agents are defanged. The first three occurrences of one event within `SECURITY_NOTIFICATION_WINDOW_SECONDS` (default 600, at most 3600) are each sent at once and later ones as one digest; an email whose send fails is tried three times in all. Notices go only to a verified address (`users.email_verified_at`), never to `@local`. Operator CLI actions, share keys and resource tokens send no notice.
+
+### Changed
+- **A password reset revokes OAuth / MCP grants** ([#1738](https://github.com/kagura-ai/memory-cloud/issues/1738)): a reset with an emailed link now revokes, in the same transaction as the new password, every access and refresh token of the account and deletes its unexchanged authorization codes and device codes. Connected clients (Claude Code, ChatGPT, the CLI) must sign in again. Password change, set-up and removal still revoke browser sessions only. API keys, OAuth client secrets, share keys and resource tokens are never revoked by a password flow; the reset email and page say so and point at Settings.
+- **Email action token cleanup** ([#1738](https://github.com/kagura-ai/memory-cloud/issues/1738)): an hourly job deletes used and expired `email_action_tokens` rows once they are `EMAIL_ACTION_TOKEN_RETENTION_SECONDS` (default 86400) past use or expiry.
+- **Email provider timeout** ([#1752](https://github.com/kagura-ai/memory-cloud/issues/1752)): requests to Resend time out after 4 seconds for the connect and for the read (the SDK default was 30), for every email.
+
+### Fixed
+- **Sign-in method on the profile** ([#1751](https://github.com/kagura-ai/memory-cloud/issues/1751)): the field lists every linked provider plus "Email and password" when the account has a password, instead of only the provider the account was created with. "Refresh identity" is offered only while that provider is still linked.
+
+### Notes
+- **Migrations:** `e87_1738_purge_indexes` (three indexes) and `e88_1752_verified_backfill`, which sets `email_verified_at` for accounts with a linked OAuth provider that do not have it yet (never for `@local`).
+- **New environment variables (optional):** `SECURITY_NOTIFICATION_WINDOW_SECONDS` (60–3600, default 600) and `EMAIL_ACTION_TOKEN_RETENTION_SECONDS` (default 86400).
+- The notices are only delivered with `EMAIL_PROVIDER=resend`; under `logging` each is a log line with the event and a keyed hash of the recipient. They need Redis for coalescing and retries; without it every occurrence is sent at once.
+- **MCP / OAuth clients** lose their tokens when their user resets the password and must run the authorization flow again.
+
 ## [v0.82.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.82.1) — 2026-09-30
 
 Slack connector fixes and the residuals of the v0.82.0 re-audit. The Slack install asks for the scopes the slash command and @mentions need, a Slack team that is already connected is explained in the reader's language, the connector page drops its "coming soon" buttons and its curl sample works as pasted, and `list_analyses` no longer returns failed runs' errors whole.
