@@ -62,7 +62,7 @@ The 401 challenges, the token audience rule and session handling on `/mcp` are i
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `remember` | Store a new memory (summary + content + type; optional `delivery_mode`) | Member+ |
-| `recall` | Search memories with Hybrid Search (supports `trust_tier` filter). Results are Layers 1-2; `related_tags` is `[{tag, count}]`. Every search also updates association strengths and may promote returned memories ([Tool annotations](#tool-annotations)) | Viewer+ |
+| `recall` | Search memories with Hybrid Search (supports `trust_tier` filter). Results are Layers 1-2; `related_tags` is `[{tag, count}]`. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories ([Tool annotations](#tool-annotations)) | Viewer+ |
 | `recall_nearby` | Deterministic WHERE-axis query — memories with `details.location` within `radius_m` of a point, nearest first | Viewer+ |
 | `reference` | Get full 3-layer details of a memory | Viewer+ |
 | `update_memory` | Update an existing memory in-place or upsert by external ID | Member+ |
@@ -357,7 +357,7 @@ The v0.49.0 control plane builds on existing workspace RBAC: agents are registry
 | `get_context_info` | Get context metadata and guidelines | Viewer+ |
 | `list_contexts` | Slim name→id directory of the contexts you can access, most recently used first (details are opt-in — see below) | Viewer+ |
 | `create_context` | Create a new context | Owner/Admin |
-| `update_context` | Update context settings (summary, usage guide, resource_id, is_public). Changing `resource_id` revokes the resource tokens issued for the old slug | Editor+ |
+| `update_context` | Update context settings (summary, usage guide, resource_id, is_public). Changing `resource_id` revokes the resource tokens the caller issued for the old slug | Editor+ |
 | `delete_context` | Delete a context and all its memories | Owner/Admin |
 | `merge_contexts` | Merge memories from source context into target context | Owner/Admin |
 | `update_search_config` | Tune hybrid search weights, reranker settings, and query-intent routing (`routing_mode`) per context | Editor+ |

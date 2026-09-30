@@ -242,9 +242,13 @@ def test_recall_is_destructive_because_it_learns(name):
 @pytest.mark.parametrize(
     ("name", "param", "phrase"),
     [
-        ("recall", None, "updates association strengths and may promote returned memories"),
+        ("recall", None, "may also strengthen associations and promote returned memories"),
         ("secret_put", None, "not listed in grant_pubkey_ids are revoked"),
-        ("update_context", "resource_id", "revokes resource tokens issued for the old slug"),
+        (
+            "update_context",
+            "resource_id",
+            "revokes the resource tokens you issued for the old slug",
+        ),
     ],
 )
 def test_destructive_descriptions_name_their_side_effect(name, param, phrase):

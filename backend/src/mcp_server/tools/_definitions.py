@@ -221,7 +221,7 @@ Returns: {status, memory_id, operation: 'updated'|'created'|'replaced', re_embed
         {
             "name": "recall",
             "readOnly": True,
-            "description": """Search a context's memories by meaning and keywords (hybrid: semantic + BM25, with Neural Memory boosting). Returns ranked summaries (Layers 1-2), not full content. Every search also updates association strengths and may promote returned memories.
+            "description": """Search a context's memories by meaning and keywords (hybrid: semantic + BM25, with Neural Memory boosting). Returns ranked summaries (Layers 1-2), not full content. Searches may also strengthen associations and promote returned memories.
 
 Which tool: recall(query) finds candidates; reference(memory_id) reads one in full; explore(memory_id) walks the graph to its neighbours; load_pinned() returns the pinned set, unranked; recall_upcoming() / recall_nearby() are deterministic time / place queries. Typical flow: recall → reference → explore.
 
@@ -936,7 +936,7 @@ Returns: {status, message, updated_fields, context_id, context_name, context_dis
                     },
                     "resource_id": {
                         "type": "string",
-                        "description": "Resource ID for external ingestion via resource tokens: lowercase alphanumerics and underscores (e.g. 'github_issues'), unique in the workspace. Changing it revokes resource tokens issued for the old slug.",
+                        "description": "Resource ID for external ingestion via resource tokens: lowercase alphanumerics and underscores (e.g. 'github_issues'), unique in the workspace. Changing it revokes the resource tokens you issued for the old slug.",
                     },
                     "is_public": {
                         "type": "boolean",
