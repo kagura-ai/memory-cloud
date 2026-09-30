@@ -1,0 +1,14 @@
+{
+  "connectorTest": {
+    "op": "upsert",
+    "doc_id": "test-1",
+    "version": 1,
+    "payload": { "text": "hello" }
+  },
+  "resourceTokenGuide": {
+    "op": "upsert",
+    "doc_id": "DOC-001",
+    "version": 1,
+    "payload": { "title": "Sample Document", "price": 1000 }
+  }
+}

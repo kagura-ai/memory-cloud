@@ -38,6 +38,7 @@ import { getWorkspacePlan, type WorkspacePlanInfo } from "@/lib/api/workspaces";
 import { ApiError } from "@/lib/api/base";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { MAX_QUOTA_PER_TOKEN } from "@/config/resource-tokens";
+import { resourceTokenGuideCurlSample } from "@/lib/connectors/resourceIngestSample";
 import { Plus, AlertTriangle, ChevronDown } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { Label } from "@/components/ui/label";
@@ -514,18 +515,7 @@ export function ResourceTokensTabPanel({
                         <strong>{t("guide.step2Title")}</strong>
                       </p>
                       <pre className="bg-gray-900 text-gray-100 p-3 rounded text-xs overflow-x-auto">
-                        {`curl -X POST "http://localhost:8080/api/v1/resources/{resource_id}/events" \\
-  -H "X-Resource-API-Key: YOUR_TOKEN_HERE" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-  "op": "upsert",
-  "doc_id": "DOC-001",
-  "version": 1,
-  "payload": {
-    "title": "Sample Document",
-    "price": 1000
-  }
-}'`}
+                        {resourceTokenGuideCurlSample()}
                       </pre>
                       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-blue-700 dark:text-blue-300">
                         <span>

@@ -4104,6 +4104,7 @@
     "devDisclosureTitle": "Developer / CLI testing (optional)",
     "devDisclosureNote": "Not needed if you use the Kagura bot. Only for manual CLI/curl testing or a self-hosted worker. If you lose these, delete and recreate the connector to get fresh values.",
     "curlSampleTitle": "Sample request (resource-ingest API)",
+    "curlSampleNote": "To send it again with the same doc_id, raise version — a version that already exists is refused (409 duplicate version). The test event becomes a memory in this connector's context — delete it afterwards.",
     "copyResourceToken": "Copy resource token",
     "copyKmcApiKey": "Copy KMC write key",
     "kmcApiKeyNote": "Self-hosted worker config only. For human CLI use a personal API key from the API Keys tab instead.",

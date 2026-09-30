@@ -618,6 +618,34 @@ describe("ConnectorsPage RBAC gate", () => {
     expect(screen.getByText("nextStepSelectChannels")).toBeInTheDocument();
   });
 
+  it("shows a versioned curl sample with the re-send note after creation (#1756)", async () => {
+    setWorkspace("admin");
+    mockListAvailableWorkerApps.mockResolvedValue([
+      { platform: "slack", app_key: "sales", display_name: "Sales Slack App" },
+    ]);
+
+    render(<ConnectorsPage />);
+
+    await screen.findByText("manualBindTitle");
+    fireEvent.change(screen.getByLabelText("manualTeamId"), {
+      target: { value: "T01" },
+    });
+    fireEvent.change(screen.getByLabelText("manualBotToken"), {
+      target: { value: "xoxb-install-token" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "manualBind" }));
+
+    // The body shape is pinned in resourceIngestSample.test.ts; here only the
+    // wiring: the created resource and token land in the sample, which carries
+    // a version, and the note sits under it.
+    const title = await screen.findByText("curlSampleTitle");
+    const sample = title.parentElement?.querySelector("pre")?.textContent ?? "";
+    expect(sample).toContain("/api/v1/resources/slack-sales-t01/events");
+    expect(sample).toContain("X-Resource-API-Key: resource-token");
+    expect(sample).toContain('"version":1');
+    expect(screen.getByText("curlSampleNote")).toBeInTheDocument();
+  });
+
   it("managed mode hides the BYO form and drops the LLM requirement (#1426)", async () => {
     setWorkspace("admin");
     mockUseSystemFeatures.mockReturnValue({ managed_connectors: true });

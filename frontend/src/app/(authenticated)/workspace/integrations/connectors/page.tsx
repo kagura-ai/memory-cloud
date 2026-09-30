@@ -73,6 +73,7 @@ import {
 import { cn } from "@/lib/utils/cn";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import { CONNECTOR_PROVIDERS } from "@/lib/connectors/providers";
+import { connectorCurlSample } from "@/lib/connectors/resourceIngestSample";
 import { useToast } from "@/hooks/use-toast";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
@@ -130,18 +131,6 @@ const PII_DEFAULT_DETECTORS = [
 ];
 const PII_REDACTION_MODES = ["mask", "hash", "remove"] as const;
 type PiiRedaction = (typeof PII_REDACTION_MODES)[number];
-
-// #893: copy-pastable curl against the resource-ingest API for manual CLI
-// testing (verify events become memories without a worker). Single-quote the
-// header value so a token with shell metacharacters is safe to paste.
-function curlSample(resourceId: string, token: string): string {
-  return [
-    `curl -X POST '${API_BASE_URL}/api/v1/resources/${resourceId}/events' \\`,
-    `  -H 'X-Resource-API-Key: ${token}' \\`,
-    `  -H 'Content-Type: application/json' \\`,
-    `  -d '{"op":"upsert","doc_id":"test-1","payload":{"text":"hello"}}'`,
-  ].join("\n");
-}
 
 // #1388: one status chip shape for the settings-dialog sections and the
 // list-row aggregate badge — set/unset color language defined once.
@@ -2012,8 +2001,15 @@ export default function ConnectorsPage() {
                   <div>
                     <p className="mb-1 font-medium">{t("curlSampleTitle")}</p>
                     <pre className="overflow-x-auto rounded bg-muted p-2 text-xs">
-                      {curlSample(created.resource_id, created.token)}
+                      {connectorCurlSample(
+                        API_BASE_URL,
+                        created.resource_id,
+                        created.token,
+                      )}
                     </pre>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t("curlSampleNote")}
+                    </p>
                   </div>
                 )}
                 {created?.kmc_api_key && (
