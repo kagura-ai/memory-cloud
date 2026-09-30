@@ -812,6 +812,17 @@ Memory Analysis clusters a context with UMAP + KMeans and labels clusters with t
 
 Since v0.48.0, the REST batch endpoint and MCP `ingest_events` delegate to the same `ResourceIngestService`. Authentication and wire envelopes remain surface-specific, while quota, authoritative Resource resolution, UTF-8 byte-size validation, per-event SAVEPOINT handling, constraint mapping, commit behavior, and post-commit indexer scheduling share one implementation.
 
+### Connector create errors
+
+`POST /api/v1/workspace-connectors` (workspace admin; MCP `setup_connector` raises the same errors). One platform team (for example a Slack workspace) can be connected to one Kagura workspace only; one workspace may connect it under several worker apps. A team that is already connected answers `409` `RES-002` with a stable `details.reason` ([#1753](https://github.com/kagura-ai/memory-cloud/issues/1753)):
+
+| Status | `error` | `details.reason` | When |
+|---|---|---|---|
+| `409` | `RES-002` | `connector_team_connected_here` | This workspace already has a connector for the team under the same worker app. `details.connector_id` and `details.display_name` name it — edit that connector instead of creating another |
+| `409` | `RES-002` | `connector_team_connected_elsewhere` | Another workspace has a connector for the team, under any worker app. The body carries nothing about that workspace (no id, name or owner) and does not echo the team id. To move the team, delete the connector in the original workspace; to share it, join that workspace |
+| `409` | `RES-002` | — | `resource_id` already exists (not connector-owned, or already bound to a connector) |
+| `403` | `FEAT-001` / `CONNECTOR-001` | — | Plan without the `connectors` feature / connector seat cap reached |
+
 ---
 
 ## Public Read API

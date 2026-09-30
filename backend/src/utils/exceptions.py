@@ -213,6 +213,48 @@ class DuplicateFileError(ConflictError):
         self.existing_file: dict[str, Any] | None = None
 
 
+# Platform team already connected (#1753)
+#
+# Both stay ``RES-002`` / 409 — the code a client already sees for this
+# refusal — and gain a stable ``details.reason`` discriminator (the
+# beta-invite convention), so the web UI can explain the conflict in the
+# reader's language instead of echoing the English message.
+
+
+class ConnectorTeamConnectedHereError(ConflictError):
+    """The platform team is already connected in the CALLER's workspace (409).
+
+    The caller can list that connector anyway, so the refusal names it
+    (``connector_id``, ``display_name``) and the UI can point at its editor.
+    """
+
+    def __init__(self, *, connector_type: str, connector_id: Any, display_name: str | None) -> None:
+        name = f" '{display_name}'" if display_name else ""
+        super().__init__(
+            f"This {connector_type} team is already connected in this workspace by "
+            f"connector{name}. Edit that connector instead.",
+            reason="connector_team_connected_here",
+            connector_id=str(connector_id),
+            display_name=display_name,
+        )
+
+
+class ConnectorTeamConnectedElsewhereError(ConflictError):
+    """The platform team is already connected to ANOTHER workspace (409).
+
+    Carries nothing about the other tenant — no connector or workspace id, no
+    name, no owner — and does not echo the team id: the conflict itself is
+    the only thing disclosed.
+    """
+
+    def __init__(self, *, connector_type: str) -> None:
+        super().__init__(
+            f"This {connector_type} team is already connected to another workspace. "
+            "A team can be connected to one workspace only.",
+            reason="connector_team_connected_elsewhere",
+        )
+
+
 class ConfigReadOnlyError(MemoryCloudException):
     """A write to the environment console was refused (409).
 

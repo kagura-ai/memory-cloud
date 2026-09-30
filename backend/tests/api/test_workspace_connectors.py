@@ -41,6 +41,48 @@ async def test_create_workspace_connector_rolls_back_on_service_failure():
 
 
 @pytest.mark.asyncio
+async def test_create_team_conflict_wire_bodies_carry_reason():
+    """#1753: the two team conflicts reach the wire as ``RES-002`` / 409 with a
+    ``details.reason``; the "elsewhere" body carries nothing else."""
+    import json
+
+    from fastapi import Request
+
+    from api.main import memory_cloud_exception_handler
+    from utils.exceptions import (
+        ConnectorTeamConnectedElsewhereError,
+        ConnectorTeamConnectedHereError,
+    )
+
+    connector_id = uuid4()
+    request_stub = MagicMock(spec=Request)
+    request_stub.url.path = "/api/v1/workspace-connectors"
+
+    here = await memory_cloud_exception_handler(
+        request_stub,
+        ConnectorTeamConnectedHereError(
+            connector_type="slack", connector_id=connector_id, display_name="Acme"
+        ),
+    )
+    assert here.status_code == 409
+    assert json.loads(here.body)["error"] == "RES-002"
+    assert json.loads(here.body)["details"] == {
+        "reason": "connector_team_connected_here",
+        "connector_id": str(connector_id),
+        "display_name": "Acme",
+    }
+
+    elsewhere = await memory_cloud_exception_handler(
+        request_stub, ConnectorTeamConnectedElsewhereError(connector_type="slack")
+    )
+    body = json.loads(elsewhere.body)
+    assert elsewhere.status_code == 409
+    assert set(body) == {"error", "message", "details"}
+    assert body["error"] == "RES-002"
+    assert body["details"] == {"reason": "connector_team_connected_elsewhere"}
+
+
+@pytest.mark.asyncio
 async def test_create_rejects_invalid_pii_guardrail_config_before_calling_service():
     # #866: a malformed pii_guardrail_config (typo'd key) must be rejected at the
     # provision path with a 422, before the service / DB is touched.

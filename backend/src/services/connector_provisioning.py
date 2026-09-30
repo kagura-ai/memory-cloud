@@ -27,6 +27,8 @@ from services.resource_lookup import resolve_resource_pk, upsert_resource
 from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,
+    ConnectorTeamConnectedElsewhereError,
+    ConnectorTeamConnectedHereError,
     FeatureNotAvailableError,
     MemoryCloudException,
     NotFoundException,
@@ -831,8 +833,16 @@ class ConnectorProvisioningService:
         app-qualification would otherwise let a second tenant route that
         team's future events to a workspace its owner never authorized.
         Same-workspace multi-app stays allowed (one tenant, several
-        platform apps). Both arms raise the same fixed message — no
-        cross-tenant existence disclosure beyond the conflict itself.
+        platform apps).
+
+        #1753: both are ``RES-002`` / 409 with a ``details.reason``. A team
+        already connected in THIS workspace is
+        ``connector_team_connected_here`` and names that connector (the caller
+        can list it anyway). A team held by ANY other workspace — same app or
+        not — is ``connector_team_connected_elsewhere`` with one fixed message
+        and no other details: no id, name or owner of the other tenant, and
+        no echo of the team id. No cross-tenant disclosure beyond the conflict
+        itself.
         """
         # Serialize concurrent claims on the same (type, team): the
         # cross-tenant arm below is a read-then-write check with NO unique
@@ -853,9 +863,25 @@ class ConnectorProvisioningService:
             app_key=app_key,
         )
         if existing_team is not None:
-            raise ConflictError(
-                f"A {connector_type} connector for team '{external_team_id}' already exists.",
-            )
+            # #1753: split arm (a) by workspace. The caller's own connector is
+            # named (they can list it anyway); a same-app connector in another
+            # workspace answers exactly like the cross-tenant arm below, and
+            # nothing of that tenant is read.
+            if existing_team.workspace_id == workspace_id:
+                display_name = (
+                    await self.db.execute(
+                        select(Resource.name).where(
+                            Resource.id == existing_team.resource_pk,
+                            Resource.workspace_id == workspace_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                raise ConnectorTeamConnectedHereError(
+                    connector_type=connector_type,
+                    connector_id=existing_team.id,
+                    display_name=display_name,
+                )
+            raise ConnectorTeamConnectedElsewhereError(connector_type=connector_type)
         other_tenant = (
             await self.db.execute(
                 select(WorkspaceConnector.id)
@@ -868,9 +894,7 @@ class ConnectorProvisioningService:
             )
         ).scalar_one_or_none()
         if other_tenant is not None:
-            raise ConflictError(
-                f"A {connector_type} connector for team '{external_team_id}' already exists.",
-            )
+            raise ConnectorTeamConnectedElsewhereError(connector_type=connector_type)
 
     async def get_connector(
         self, workspace_id: UUID, connector_id: UUID

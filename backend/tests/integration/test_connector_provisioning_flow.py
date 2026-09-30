@@ -453,6 +453,80 @@ async def test_duplicate_team_id_is_rejected(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
+async def test_team_conflict_here_vs_elsewhere(db_session: AsyncSession):
+    """#1753: the same team in the caller's workspace is "here" and names the
+    connector; the same team held by another workspace (same app or not) is
+    "elsewhere" and carries nothing about that workspace."""
+    from models.worker_app import WorkerAppIdentity
+    from utils.exceptions import ConflictError
+
+    team = f"T{uuid4().hex[:10].upper()}"
+    owner_a, workspace_a = await _seed_workspace(db_session)
+    owner_b, workspace_b = await _seed_workspace(db_session)
+    db_session.add(
+        WorkerAppIdentity(
+            platform="slack",
+            app_key="sales",
+            display_name="Sales app",
+            status="active",
+            active_signing_secret_encrypted="test-ciphertext",
+            active_secret_revision=1,
+            created_by=owner_a,
+        )
+    )
+    await db_session.flush()
+    svc = ConnectorProvisioningService(db_session)
+    first = await svc.provision_connector(
+        workspace_id=workspace_a.id,
+        user_id=owner_a,
+        connector_type="slack",
+        resource_id=f"slack_{uuid4().hex[:8]}",
+        display_name="Acme Slack",
+        external_team_id=team,
+    )
+    await db_session.flush()
+
+    async def _conflict(workspace_id, user_id, app_key):
+        with pytest.raises(ConflictError) as exc:
+            await svc.provision_connector(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                connector_type="slack",
+                app_key=app_key,
+                resource_id=f"slack_{uuid4().hex[:8]}",
+                external_team_id=team,
+            )
+        return exc.value
+
+    here = await _conflict(workspace_a.id, owner_a, "default")
+    assert here.status_code == 409
+    assert here.details == {
+        "reason": "connector_team_connected_here",
+        "connector_id": str(first.connector.id),
+        "display_name": "Acme Slack",
+    }
+
+    for app_key in ("default", "sales"):
+        elsewhere = await _conflict(workspace_b.id, owner_b, app_key)
+        assert elsewhere.status_code == 409
+        assert elsewhere.details == {"reason": "connector_team_connected_elsewhere"}
+        text = f"{elsewhere.message} {elsewhere.details}"
+        for leaked in (team, str(first.connector.id), str(workspace_a.id), owner_a):
+            assert leaked not in text
+        assert "Acme" not in text
+
+    # Same workspace, different app: still allowed (one tenant, several apps).
+    await svc.provision_connector(
+        workspace_id=workspace_a.id,
+        user_id=owner_a,
+        connector_type="slack",
+        app_key="sales",
+        resource_id=f"slack_{uuid4().hex[:8]}",
+        external_team_id=team,
+    )
+
+
+@pytest.mark.asyncio
 async def test_same_team_id_is_allowed_under_two_app_identities(db_session: AsyncSession):
     """The dispatch uniqueness boundary is (platform, app_key, team_id)."""
     from models.worker_app import WorkerAppIdentity

@@ -796,7 +796,9 @@ class TestTeamUniquenessGuard:
         db = MagicMock()
         db.execute = AsyncMock()
         svc = ConnectorProvisioningService(db)
-        svc.get_connector_for_dispatch = AsyncMock(return_value=SimpleNamespace(id=uuid4()))
+        svc.get_connector_for_dispatch = AsyncMock(
+            return_value=SimpleNamespace(id=uuid4(), workspace_id=uuid4(), resource_pk=uuid4())
+        )
 
         with pytest.raises(ConflictError):
             await svc._assert_team_unclaimed(
@@ -810,6 +812,92 @@ class TestTeamUniquenessGuard:
         assert db.execute.await_count == 1
         lock_sql = str(db.execute.await_args_list[0].args[0])
         assert "pg_advisory_xact_lock" in lock_sql
+
+    # #1753: the two arms answer with a machine-readable ``details.reason`` so
+    # the dialog can explain the conflict. "here" names the caller's own
+    # connector; "elsewhere" carries nothing about the other tenant.
+
+    @pytest.mark.asyncio
+    async def test_same_workspace_duplicate_is_connected_here(self):
+        workspace_id = uuid4()
+        existing = SimpleNamespace(id=uuid4(), workspace_id=workspace_id, resource_pk=uuid4())
+        db = MagicMock()
+        # The lock, then the name lookup for the caller's own connector.
+        db.execute = AsyncMock(side_effect=[_result(), _result(one="Acme Slack")])
+        svc = ConnectorProvisioningService(db)
+        svc.get_connector_for_dispatch = AsyncMock(return_value=existing)
+
+        with pytest.raises(ConflictError) as exc:
+            await svc._assert_team_unclaimed(
+                workspace_id=workspace_id,
+                connector_type="slack",
+                app_key="default",
+                external_team_id="T123",
+            )
+
+        assert exc.value.status_code == 409
+        assert exc.value.error_code == "RES-002"
+        assert exc.value.details == {
+            "reason": "connector_team_connected_here",
+            "connector_id": str(existing.id),
+            "display_name": "Acme Slack",
+        }
+        assert "T123" not in exc.value.message
+        # The advisory lock still runs first; the name lookup reads the
+        # caller's own connector resource only.
+        assert "pg_advisory_xact_lock" in str(db.execute.await_args_list[0].args[0])
+        name_sql = str(db.execute.await_args_list[1].args[0])
+        assert "resources" in name_sql
+
+    @pytest.mark.asyncio
+    async def test_same_app_duplicate_in_other_workspace_is_connected_elsewhere(self):
+        other = SimpleNamespace(id=uuid4(), workspace_id=uuid4(), resource_pk=uuid4())
+        db = MagicMock()
+        db.execute = AsyncMock()
+        svc = ConnectorProvisioningService(db)
+        svc.get_connector_for_dispatch = AsyncMock(return_value=other)
+
+        with pytest.raises(ConflictError) as exc:
+            await svc._assert_team_unclaimed(
+                workspace_id=uuid4(),
+                connector_type="slack",
+                app_key="default",
+                external_team_id="T123",
+            )
+
+        _assert_elsewhere(exc.value, other)
+        # Nothing of the other tenant is read — only the lock ran.
+        assert db.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_other_app_in_other_workspace_is_connected_elsewhere(self):
+        other_id = uuid4()
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=_result(one=other_id))
+        svc = ConnectorProvisioningService(db)
+        svc.get_connector_for_dispatch = AsyncMock(return_value=None)
+
+        with pytest.raises(ConflictError) as exc:
+            await svc._assert_team_unclaimed(
+                workspace_id=uuid4(),
+                connector_type="slack",
+                app_key="second-app",
+                external_team_id="T123",
+            )
+
+        _assert_elsewhere(exc.value, SimpleNamespace(id=other_id, workspace_id=None))
+
+
+def _assert_elsewhere(exc: ConflictError, other: SimpleNamespace) -> None:
+    """#1753: the "elsewhere" refusal discloses nothing about the other tenant."""
+    assert exc.status_code == 409
+    assert exc.error_code == "RES-002"
+    assert exc.details == {"reason": "connector_team_connected_elsewhere"}
+    text = f"{exc.message} {exc.details}"
+    assert "T123" not in text
+    assert str(other.id) not in text
+    if other.workspace_id is not None:
+        assert str(other.workspace_id) not in text
 
 
 class _SettingsConn(SimpleNamespace):

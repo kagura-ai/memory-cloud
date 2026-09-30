@@ -24058,6 +24058,11 @@
               }
             }
           },
+          "409": {
+            "content": {
+              "application/json": {}
+            }
+          },
           "422": {
             "content": {
               "application/json": {

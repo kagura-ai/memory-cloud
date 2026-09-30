@@ -298,8 +298,37 @@ class ConnectorChannelsResponse(BaseModel):
     next_cursor: str | None = None
 
 
+_CREATE_CONFLICT_RESPONSE: dict[int | str, dict[str, Any]] = {
+    409: {
+        "description": (
+            "`RES-002`. For a platform team that is already connected, "
+            "`details.reason` says where (#1753): `connector_team_connected_here` "
+            "(this workspace; `details.connector_id` and `details.display_name` "
+            "name the existing connector — edit it instead) or "
+            "`connector_team_connected_elsewhere` (another workspace; no other "
+            "details). A `resource_id` clash is a 409 without `reason`."
+        ),
+        "content": {
+            "application/json": {
+                "example": {
+                    "error": "RES-002",
+                    "message": (
+                        "This slack team is already connected to another workspace. "
+                        "A team can be connected to one workspace only."
+                    ),
+                    "details": {"reason": "connector_team_connected_elsewhere"},
+                }
+            }
+        },
+    }
+}
+
+
 @router.post(
-    "", response_model=WorkspaceConnectorCreateResponse, status_code=status.HTTP_201_CREATED
+    "",
+    response_model=WorkspaceConnectorCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses=_CREATE_CONFLICT_RESPONSE,
 )
 async def create_workspace_connector(
     request: WorkspaceConnectorCreateRequest,
