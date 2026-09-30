@@ -1689,3 +1689,115 @@ def _send_notice(service):
         window_minutes=10,
         profile_page_url="https://app.example/profile",
     )
+
+
+# ---------------------------------------------------------------------------
+# Copilot round 5: per-window claim lock instead of watching the shared due
+# set; a stale backlog larger than one batch
+# ---------------------------------------------------------------------------
+
+
+class TestPerWindowClaimLock:
+    async def _due_window(self, redis, email) -> str:
+        await _notify(email, key_name="first")
+        await _notify(email, key_name="second")
+        email.send_security_notification.reset_mock()
+        wid = await _wid(redis)
+        assert wid is not None
+        return wid
+
+    @pytest.mark.asyncio
+    async def test_unrelated_due_writes_do_not_force_a_claim_retry(
+        self, redis, deliverable, email, monkeypatch
+    ) -> None:
+        wid = await self._due_window(redis, email)
+
+        async def _other_account_opens_a_window() -> None:
+            await redis.zadd(sns._DUE_KEY, {sns._member("someone-else", EVENT, "f" * 32): 1.0})
+
+        state = _conflict_on_read(redis, monkeypatch, _other_account_opens_a_window)
+        claimed = await sns._claim_window(redis, OWNER, EVENT, wid, now=_window_end() + 1)
+
+        assert claimed is True
+        assert state["transactions"] == 2  # one claim attempt (no retry) + the lock release
+        assert await redis.lrange(_k(sns._CLAIM_BUFFER_KEY, wid), 0, -1)
+
+    @pytest.mark.asyncio
+    async def test_a_held_lock_defers_the_claim(self, redis, deliverable, email) -> None:
+        wid = await self._due_window(redis, email)
+        await redis.set(_k(sns._LOCK_KEY, wid), "other-replica")
+
+        claimed = await sns._claim_window(redis, OWNER, EVENT, wid, now=_window_end() + 1)
+
+        assert claimed is False
+        assert await redis.zscore(sns._DUE_KEY, _m(wid)) is not None
+        assert await redis.get(_k(sns._LOCK_KEY, wid)) == "other-replica"
+
+    @pytest.mark.asyncio
+    async def test_the_lock_is_released_after_a_claim(self, redis, deliverable, email) -> None:
+        wid = await self._due_window(redis, email)
+        assert await sns._claim_window(redis, OWNER, EVENT, wid, now=_window_end() + 1)
+        assert await redis.get(_k(sns._LOCK_KEY, wid)) is None
+
+    @pytest.mark.asyncio
+    async def test_sweep_skips_a_window_being_claimed(self, redis, deliverable, email) -> None:
+        wid = await self._due_window(redis, email)
+        await redis.set(_k(sns._LOCK_KEY, wid), "claiming-replica")
+        much_later = _window_end() + sns._STATE_RETENTION_SECONDS + 60
+
+        await sns._expire_stale_windows(redis, now=much_later)
+
+        assert await redis.zscore(sns._DUE_KEY, _m(wid)) is not None
+        assert await redis.lrange(_k(sns._BUFFER_KEY, wid), 0, -1)
+
+    @pytest.mark.asyncio
+    async def test_sweep_is_not_blocked_by_unrelated_due_writes(
+        self, redis, deliverable, email, monkeypatch
+    ) -> None:
+        wid = await self._due_window(redis, email)
+        much_later = _window_end() + sns._STATE_RETENTION_SECONDS + 60
+
+        async def _other_account_opens_a_window() -> None:
+            await redis.zadd(sns._DUE_KEY, {sns._member("someone-else", EVENT, "f" * 32): 1e12})
+
+        _conflict_on_read(redis, monkeypatch, _other_account_opens_a_window, method="get")
+        await sns._expire_stale_windows(redis, now=much_later)
+
+        assert await redis.zscore(sns._DUE_KEY, _m(wid)) is None
+        assert await redis.get(_k(sns._LOCK_KEY, wid)) is None
+
+
+class TestStaleBacklog:
+    @pytest.mark.asyncio
+    async def test_backlog_beyond_one_batch_is_reported_not_delivered(
+        self, redis, deliverable, email, monkeypatch
+    ) -> None:
+        users = [f"user-{i:03d}" for i in range(sns._FLUSH_BATCH + 3)]
+        for user_id in users:
+            await _notify(email, user_id=user_id, key_name="first")
+            await _notify(email, user_id=user_id, key_name="second")
+        email.send_security_notification.reset_mock()
+        logger = MagicMock()
+        monkeypatch.setattr(sns, "logger", logger)
+        much_later = _window_end() + sns._STATE_RETENTION_SECONDS + 60
+
+        def _expired() -> int:
+            return sum(
+                1
+                for c in logger.warning.call_args_list
+                if c.args[0] == "security_notification_window_expired"
+            )
+
+        await sns.flush_due_security_notifications(
+            now_score=much_later, session_factory=_factory(), email_service=email
+        )
+        assert _expired() == sns._FLUSH_BATCH
+        assert await redis.zcard(sns._DUE_KEY) == 3
+        email.send_security_notification.assert_not_awaited()
+
+        await sns.flush_due_security_notifications(
+            now_score=much_later, session_factory=_factory(), email_service=email
+        )
+        assert _expired() == len(users)
+        assert await redis.zcard(sns._DUE_KEY) == 0
+        email.send_security_notification.assert_not_awaited()

@@ -27,8 +27,8 @@ that (user, event)'s pointer, which carries the window id and deadline: it is
 buffered only while the pointer names a window whose deadline has not passed;
 otherwise a new window is opened, pointer and due entry together. When the window closes, the
 every-minute job :func:`flush_due_security_notifications` claims it in one
-transaction too (due entry removed, pointer released if still its own, buffer
-moved to a claim key) and sends one digest. The claim key is deleted once the
+transaction too, under a short per-window lock (due entry removed, pointer
+released if still its own, buffer moved to a claim key), and sends one digest. The claim key is deleted once the
 send is done; a definite failure (the provider refused or raised, the
 recipient lookup failed, Redis failed mid-flush) re-queues the window a
 bounded number of times. A timed-out send is uncertain (the provider call may still complete in
@@ -121,6 +121,11 @@ _CLAIM_BUFFER_KEY = "security_notify:claim:buffer:{user_id}:{event}:{window_id}"
 _CLAIM_COUNT_KEY = "security_notify:claim:count:{user_id}:{event}:{window_id}"
 # Definite failures of the window's digest so far.
 _ATTEMPTS_KEY = "security_notify:attempts:{user_id}:{event}:{window_id}"
+# Held (SET NX, short TTL) by the flush claiming the window or the sweep
+# expiring it, so neither has to watch the shared due set: every change to an
+# existing due entry is made by the lock holder.
+_LOCK_KEY = "security_notify:lock:{user_id}:{event}:{window_id}"
+_LOCK_SECONDS = 30
 # A digest whose send definitely failed is tried this many times, then dropped.
 _DIGEST_MAX_ATTEMPTS = 3
 _DIGEST_RETRY_DELAY_SECONDS = 60
@@ -935,11 +940,14 @@ async def _claim_window(
 
     Only a window whose due score is still ``<= now`` is claimed: a window
     re-queued with a later retry time since this run listed it is left alone.
+    The window's lock is held throughout instead of watching the shared due
+    set, so notices of other accounts never force a retry.
 
     Returns:
-        True when this caller claimed it; False when the due entry is gone
-        (another process claimed it), not due yet (re-queued meanwhile), or
-        the transaction kept conflicting (the entry stays for the next run).
+        True when this caller claimed it; False when the lock is held
+        elsewhere or the due entry is gone (another process claimed it), not
+        due yet (re-queued meanwhile), or the transaction kept conflicting
+        (the entry stays for the next run).
     """
     member = _member(user_id, event_value, window_id)
     open_key = _open_key(user_id, event_value)
@@ -948,10 +956,49 @@ async def _claim_window(
     claim_buffer = _key(_CLAIM_BUFFER_KEY, user_id, event_value, window_id)
     claim_count = _key(_CLAIM_COUNT_KEY, user_id, event_value, window_id)
     ttl = _buffer_ttl()
+    lock_key = _key(_LOCK_KEY, user_id, event_value, window_id)
+    token = await _acquire_lock(client, lock_key)
+    if token is None:
+        return False
+    try:
+        return await _claim_locked(
+            client,
+            member,
+            open_key=open_key,
+            buffer_key=buffer_key,
+            count_key=count_key,
+            claim_buffer=claim_buffer,
+            claim_count=claim_count,
+            window_id=window_id,
+            ttl=ttl,
+            now=now,
+            user_id=user_id,
+            event_value=event_value,
+        )
+    finally:
+        await _release_lock(client, lock_key, token)
+
+
+async def _claim_locked(
+    client: Any,
+    member: str,
+    *,
+    open_key: str,
+    buffer_key: str,
+    count_key: str,
+    claim_buffer: str,
+    claim_count: str,
+    window_id: str,
+    ttl: int,
+    now: float,
+    user_id: str,
+    event_value: str,
+) -> bool:
+    """The claim transaction of :func:`_claim_window`, run under the window lock."""
     for _ in range(_TX_RETRIES):
         try:
             async with client.pipeline(transaction=True) as pipe:
-                await pipe.watch(_DUE_KEY, open_key, buffer_key, count_key, claim_buffer)
+                await pipe.watch(open_key, buffer_key, count_key, claim_buffer)
                 score = await pipe.zscore(_DUE_KEY, member)
                 if score is None or score > now:
                     return False
@@ -980,6 +1027,33 @@ async def _claim_window(
         "security_notification_claim_contended", user_id=user_id, security_event=event_value
     )
     return False
+
+
+async def _acquire_lock(client: Any, lock_key: str) -> str | None:
+    """Take a window lock; its token, or None when another process holds it."""
+    token = uuid.uuid4().hex
+    if await client.set(lock_key, token, nx=True, ex=_LOCK_SECONDS):
+        return token
+    return None
+
+
+async def _release_lock(client: Any, lock_key: str, token: str) -> None:
+    """Release a window lock if this caller still holds it; best effort.
+
+    On failure the lock expires after ``_LOCK_SECONDS`` and the window waits
+    for a later run.
+    """
+    try:
+        async with client.pipeline(transaction=True) as pipe:
+            await pipe.watch(lock_key)
+            if await pipe.get(lock_key) != token:
+                await pipe.unwatch()
+                return
+            pipe.multi()
+            pipe.delete(lock_key)
+            await pipe.execute()
+    except Exception as exc:
+        logger.warning("security_notification_unlock_failed", error_type=type(exc).__name__)
 
 
 async def _close_window(
@@ -1081,6 +1155,7 @@ async def purge_user_notification_state(user_id: str) -> int:
                 _CLAIM_BUFFER_KEY,
                 _CLAIM_COUNT_KEY,
                 _ATTEMPTS_KEY,
+                _LOCK_KEY,
             ):
                 exact_prefix = _key(template, user_id, event, "")
                 async for raw_key in client.scan_iter(match=_glob_escape(exact_prefix) + "*"):
@@ -1222,10 +1297,12 @@ async def flush_due_security_notifications(
 ) -> int:
     """Close every due window and send its digest (the every-minute job).
 
-    Each window is claimed in one optimistic transaction (:func:`_claim_window`:
-    the due entry removed, the pointer released, the buffer moved to the claim
-    keys); only the caller whose transaction removed the entry goes on, so
-    concurrent runs in several processes send each digest once. The claim keys
+    Each window is claimed under its lock in one optimistic transaction
+    (:func:`_claim_window`: the due entry removed, the pointer released, the
+    buffer moved to the claim keys); only the caller that holds the lock and
+    removed the entry goes on, so concurrent runs in several processes send
+    each digest once. Entries older than ``_STATE_RETENTION_SECONDS`` are left
+    to the stale sweep. The claim keys
     are deleted once the digest is done (best effort: a Redis error then only
     leaves them to expire). A definite
     failure — the send, the recipient lookup, or Redis after the claim —
@@ -1247,7 +1324,11 @@ async def flush_due_security_notifications(
     try:
         client = get_redis_client()
         await _expire_stale_windows(client, now=now)
-        due = await client.zrangebyscore(_DUE_KEY, "-inf", now, start=0, num=_FLUSH_BATCH)
+        # Entries past the retention are the sweep's (a backlog larger than
+        # its batch waits for the next run, and is still reported as expired).
+        due = await client.zrangebyscore(
+            _DUE_KEY, now - _STATE_RETENTION_SECONDS, now, start=0, num=_FLUSH_BATCH
+        )
     except Exception as exc:
         logger.warning("security_notification_flush_unavailable", error_type=type(exc).__name__)
         return 0
@@ -1316,11 +1397,11 @@ async def _expire_stale_windows(client: Any, *, now: float) -> None:
     due set forever. Each goes with its pointer (when it still names it) and
     its keys; a warning records the loss.
 
-    The due set is watched too and the entry's score re-read inside the
-    transaction: a replica that claimed the window after the range read (its
-    claim removes the entry and holds the buffer in the claim keys) or
-    re-queued it must keep those keys. A conflict leaves the entry to the
-    next run.
+    The window's lock is taken (as a claim does) and the entry's score
+    re-read under it: a replica that claimed the window after the range read
+    (its claim removes the entry and holds the buffer in the claim keys) or
+    re-queued it must keep those keys. A held lock or a conflict leaves the
+    entry to the next run.
     """
     cutoff = now - _STATE_RETENTION_SECONDS
     stale = await client.zrangebyscore(_DUE_KEY, "-inf", f"({cutoff}", start=0, num=_FLUSH_BATCH)
@@ -1332,9 +1413,13 @@ async def _expire_stale_windows(client: Any, *, now: float) -> None:
             await client.zrem(_DUE_KEY, member)
             continue
         open_key = _open_key(user_id, event_value)
+        lock_key = _key(_LOCK_KEY, user_id, event_value, window_id)
+        token = await _acquire_lock(client, lock_key)
+        if token is None:
+            continue  # a claim is in progress
         try:
             async with client.pipeline(transaction=True) as pipe:
-                await pipe.watch(open_key, _DUE_KEY)
+                await pipe.watch(open_key)
                 pointer = _parse_pointer(await pipe.get(open_key))
                 score = await pipe.zscore(_DUE_KEY, member)
                 if score is None or float(score) >= cutoff:
@@ -1359,6 +1444,8 @@ async def _expire_stale_windows(client: Any, *, now: float) -> None:
                 await pipe.execute()
         except WatchError:
             continue  # the next run tries again
+        finally:
+            await _release_lock(client, lock_key, token)
         logger.warning(
             "security_notification_window_expired",
             user_id=user_id,
