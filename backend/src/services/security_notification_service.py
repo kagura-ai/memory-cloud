@@ -527,6 +527,11 @@ def is_first_client_authorization(
     - an ``oauth_device_codes`` row with ``authorized_at`` set (approved,
       not yet exchanged).
 
+    The check is not serialized with the grant write: two consents racing for
+    the same new client can both count as first. That costs at most one extra
+    notice (the second is coalesced into the window's digest), never a missed
+    one.
+
     Args:
         session: Sync session (the OAuth routes run Authlib on one).
         client_id: The client's ``client_id``.
