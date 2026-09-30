@@ -4,6 +4,7 @@ Issue #481: Lookup-key swap from email to user_id, email/name sync,
 HMAC-keyed audit log, IntegrityError → ConflictError.
 """
 
+from contextlib import suppress
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -623,7 +624,8 @@ class TestEmailChangeNotice:
                 "services.security_notification_service.spawn_email_change_notification"
             ) as spawn,
         ):
-            try:
+            # A colliding address is refused; the caller asserts on the notice.
+            with suppress(ConflictError):
                 await role_manager.ensure_user(
                     email=new_email,
                     user_id="u1",
@@ -632,8 +634,6 @@ class TestEmailChangeNotice:
                     ip_address="192.0.2.7",
                     user_agent="pytest-agent/1.0",
                 )
-            except ConflictError:
-                pass
         return spawn, db
 
     @pytest.mark.asyncio

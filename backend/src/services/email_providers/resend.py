@@ -20,6 +20,7 @@ whole point of the gating work in #469.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from functools import cache
 from typing import TYPE_CHECKING, Any
 
@@ -49,24 +50,18 @@ def _uncertain_error_types() -> tuple[type[BaseException], ...]:
     not dependencies of this project: whichever is missing is skipped.
     """
     types: list[type[BaseException]] = []
-    try:
+    with suppress(ImportError):
         import requests
 
         types += [requests.exceptions.ReadTimeout, requests.exceptions.ChunkedEncodingError]
-    except ImportError:
-        pass
-    try:
+    with suppress(ImportError):
         import urllib3
 
         types.append(urllib3.exceptions.ProtocolError)
-    except ImportError:
-        pass
-    try:
+    with suppress(ImportError):
         import httpx
 
         types += [httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError]
-    except ImportError:
-        pass
     return tuple(types)
 
 
