@@ -852,21 +852,65 @@ class TestFailedOpeningNotice:
         assert await redis.zscore(sns._DUE_KEY, member) is not None
 
     @pytest.mark.asyncio
-    async def test_buffered_occurrences_go_with_the_failed_window(
+    async def test_occurrence_buffered_during_failed_opening_send_is_still_delivered(
+        self, redis, deliverable
+    ) -> None:
+        # A second occurrence is buffered while the opening send is in flight;
+        # that send fails, the window closes, and the buffered one goes out
+        # at once as a normal (non-digest) notice.
+        calls: list[dict] = []
+
+        async def _send(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                await sns._buffer_if_window_open(
+                    OWNER,
+                    SecurityEvent.API_KEY_CREATED,
+                    SecurityOccurrence(occurred_at="t", key_name="in-flight"),
+                )
+                return False
+            return True
+
+        email = AsyncMock()
+        email.send_security_notification = _send
+        await _notify(email, key_name="first")
+
+        assert len(calls) == 2
+        second = calls[1]
+        assert second["digest"] is False
+        assert [o.key_name for o in second["occurrences"]] == ["in-flight"]
+        assert second["total"] == 1
+        assert await redis.exists(sns._buffer_key(OWNER, "api_key_created")) == 0
+        assert await redis.zcard(sns._DUE_KEY) == 0
+
+    @pytest.mark.asyncio
+    async def test_failed_resend_of_buffered_occurrences_is_only_logged(
         self, redis, deliverable, monkeypatch
     ) -> None:
-        # A second occurrence is buffered while the opening send is in flight.
-        email = AsyncMock()
+        attempts = 0
 
-        async def _slow_failing_send(**kwargs):
-            await sns._buffer_if_window_open(
-                OWNER, SecurityEvent.API_KEY_CREATED, SecurityOccurrence(occurred_at="t")
-            )
+        async def _send(**kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                await sns._buffer_if_window_open(
+                    OWNER, SecurityEvent.API_KEY_CREATED, SecurityOccurrence(occurred_at="t")
+                )
             return False
 
-        email.send_security_notification = _slow_failing_send
-        await _notify(email)
-        assert await redis.exists(sns._buffer_key(OWNER, "api_key_created")) == 0
+        email = AsyncMock()
+        email.send_security_notification = _send
+        logger = MagicMock()
+        monkeypatch.setattr(sns, "logger", logger)
+        await _notify(email)  # does not raise
+
+        assert attempts == 2
+        failures = [
+            c
+            for c in logger.error.call_args_list
+            if c.args[0] == "security_notification_send_failed"
+        ]
+        assert len(failures) == 2
         assert await redis.zcard(sns._DUE_KEY) == 0
 
     @pytest.mark.asyncio

@@ -26,7 +26,8 @@ them. The claim key is deleted only after the send succeeded; a failed send
 puts the occurrences back and retries the window a bounded number of times.
 When the first, immediate send of a window fails, the window is closed again,
 so the next occurrence is sent at once rather than as a follow-up to a notice
-that never arrived. When Redis is unavailable the occurrence is sent at once:
+that never arrived; occurrences buffered while that send was in flight are
+sent right away as a notice of their own. When Redis is unavailable the occurrence is sent at once:
 the failure mode is an extra email, never silence.
 
 Known limitation: delivery is at most once. When a process crashes after a
@@ -740,7 +741,19 @@ async def notify_security_event(
         if not sent and outcome == _OPENED:
             # The notice that opened the window never went out: close it, so
             # the next occurrence is sent at once and not as a "follow-up".
-            await _close_window(user_id, event)
+            # Occurrences buffered while that send was in flight are sent now
+            # as a notice of their own (fail open to notifying).
+            buffered, total = await _close_window(user_id, event)
+            if buffered:
+                await _deliver(
+                    recipient,
+                    user_id,
+                    event,
+                    buffered,
+                    digest=False,
+                    email=email_service,
+                    total=total,
+                )
     except Exception as exc:
         # Type only: a driver error's text could echo the address.
         logger.error(
@@ -822,21 +835,38 @@ async def _buffer_if_window_open(
         return _SEND_NOW
 
 
-async def _close_window(user_id: str, event: SecurityEvent) -> None:
-    """Drop a window whose opening notice failed (never raises).
+async def _close_window(user_id: str, event: SecurityEvent) -> tuple[list[SecurityOccurrence], int]:
+    """Close a window whose opening notice failed (never raises).
 
-    Occurrences buffered meanwhile go with it: they would otherwise arrive as
-    a follow-up to an email the owner never got.
+    The due entry, the buffer and its counter go in one transaction; the
+    occurrences buffered meanwhile are returned so the caller sends them as a
+    notice of their own rather than as a follow-up to an email the owner
+    never got.
+
+    Returns:
+        The buffered occurrences and their total (``[], 0`` when none or on
+        a Redis failure).
     """
     try:
         client = get_redis_client()
+        buffer_key = _buffer_key(user_id, event)
+        count_key = _key(_COUNT_KEY, user_id, event)
         pipe = client.pipeline(transaction=True)
         pipe.zrem(_DUE_KEY, _member(user_id, event))
-        pipe.delete(_buffer_key(user_id, event), _key(_COUNT_KEY, user_id, event))
-        await pipe.execute()
+        pipe.lrange(buffer_key, 0, -1)
+        pipe.get(count_key)
+        pipe.delete(buffer_key, count_key)
+        _, raw_items, raw_total, _ = await pipe.execute()
         logger.info(
             "security_notification_window_closed", user_id=user_id, security_event=event.value
         )
+        occurrences: list[SecurityOccurrence] = []
+        for raw in raw_items or []:
+            try:
+                occurrences.append(SecurityOccurrence.from_json(raw))
+            except (ValueError, TypeError):
+                logger.warning("security_notification_bad_buffer_item", security_event=event.value)
+        return occurrences, max(int(raw_total or 0), len(occurrences))
     except Exception as exc:
         logger.warning(
             "security_notification_window_close_failed",
@@ -844,6 +874,7 @@ async def _close_window(user_id: str, event: SecurityEvent) -> None:
             security_event=event.value,
             error_type=type(exc).__name__,
         )
+        return [], 0
 
 
 def _buffer_ttl() -> int:
