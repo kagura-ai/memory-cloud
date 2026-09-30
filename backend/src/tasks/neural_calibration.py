@@ -56,6 +56,7 @@ from models.neural import (
 )
 from neural.config import NeuralMemoryConfig
 from utils.logger import get_logger
+from utils.redis_lock import release_lock
 
 logger = get_logger(__name__)
 
@@ -269,13 +270,6 @@ async def _run_calibration(
 # by another worker) does NOT blow away that other worker's lock. Standard
 # Redis SETNX lock release idiom. Returns 1 when we deleted our key, 0 when
 # the key was missing, held by someone else, or already released.
-_DEDUP_RELEASE_SCRIPT = (
-    "if redis.call('get', KEYS[1]) == ARGV[1] "
-    "then return redis.call('del', KEYS[1]) "
-    "else return 0 end"
-)
-
-
 async def _release_dedup_lock(key: str, token: str) -> None:
     """Compare-and-delete the Redis dedup lock.
 
@@ -287,9 +281,7 @@ async def _release_dedup_lock(key: str, token: str) -> None:
     if not token:
         return
     try:
-        client = get_redis_client()
-        release_script = client.register_script(_DEDUP_RELEASE_SCRIPT)
-        await release_script(keys=[key], args=[token])
+        await release_lock(get_redis_client(), key, token)
     except Exception as exc:
         # Leaving the lock to TTL out is acceptable — next recalibration
         # fires in at most _DEDUP_LOCK_TTL_SEC.

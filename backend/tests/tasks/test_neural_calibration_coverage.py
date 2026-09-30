@@ -360,15 +360,26 @@ class TestReleaseDedupLock:
         called.assert_not_called()
 
     async def test_success_runs_compare_and_delete(self, monkeypatch):
-        script = AsyncMock(return_value=1)
-        redis = MagicMock()
-        redis.register_script = MagicMock(return_value=script)
+        import fakeredis.aioredis
+
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        await redis.set("mykey", "mytoken")
         monkeypatch.setattr(nc, "get_redis_client", lambda: redis)
 
         await _release_dedup_lock("mykey", "mytoken")
 
-        redis.register_script.assert_called_once_with(nc._DEDUP_RELEASE_SCRIPT)
-        script.assert_awaited_once_with(keys=["mykey"], args=["mytoken"])
+        assert await redis.get("mykey") is None
+
+    async def test_another_holders_lock_is_kept(self, monkeypatch):
+        import fakeredis.aioredis
+
+        redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
+        await redis.set("mykey", "someone-else")
+        monkeypatch.setattr(nc, "get_redis_client", lambda: redis)
+
+        await _release_dedup_lock("mykey", "mytoken")
+
+        assert await redis.get("mykey") == "someone-else"
 
     async def test_redis_error_swallowed(self, monkeypatch):
         def boom():
