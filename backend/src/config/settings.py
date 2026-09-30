@@ -411,8 +411,22 @@ class Settings(BaseSettings):
         default="http://localhost:8080/api/v1/connectors/slack/callback",
         description="Slack OAuth redirect URI (must match the Slack app config)",
     )
+    # Bot scopes requested at install, and the feature that needs each (#1758):
+    #   channels:history  — read public-channel messages for ingestion
+    #   channels:read     — list public channels (channel picker)
+    #   groups:history    — read private-channel messages the bot is invited to
+    #   chat:write        — post the worker's replies in Slack
+    #   team:read         — read the Slack workspace (team) info
+    #   users:read        — resolve Slack user info for message authors
+    #   commands          — /kagura slash command (remember / recall)
+    #   app_mentions:read — app_mention events (@mention recall)
+    # Slack does not widen an existing grant: installs made before a scope was
+    # added keep the old grant until a workspace admin reconnects.
     slack_oauth_scopes: str = Field(
-        default="channels:history,channels:read,groups:history,chat:write,team:read,users:read",
+        default=(
+            "channels:history,channels:read,groups:history,chat:write,team:read,users:read,"
+            "commands,app_mentions:read"
+        ),
         description="Comma-separated Slack bot scopes requested at install",
     )
     jwt_secret: str = Field(

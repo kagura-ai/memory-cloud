@@ -65,6 +65,50 @@ async def test_install_redirects_to_slack_and_stores_state():
     assert str(ws_id) in redis.store.values()
 
 
+def test_default_oauth_scopes_include_worker_scopes():
+    """#1758: slash commands and @mention recall need these bot scopes."""
+    from config.settings import Settings
+
+    default = Settings.model_fields["slack_oauth_scopes"].default
+    scopes = default.split(",")
+    for required in (
+        "commands",
+        "app_mentions:read",
+        "channels:history",
+        "channels:read",
+        "groups:history",
+        "chat:write",
+        "team:read",
+        "users:read",
+    ):
+        assert required in scopes
+
+
+@pytest.mark.asyncio
+async def test_install_redirect_scope_includes_commands_and_app_mentions():
+    """#1758: the authorize redirect's ``scope`` carries both worker scopes."""
+    from urllib.parse import parse_qs, urlparse
+
+    from api.routes.connectors_slack import slack_install
+    from config.settings import Settings
+
+    default = Settings.model_fields["slack_oauth_scopes"].default
+    admin = {"user_id": "u1", "current_workspace_id": uuid4()}
+    with (
+        patch(
+            "api.routes.connectors_slack.get_settings",
+            return_value=_settings(slack_oauth_scopes=default),
+        ),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=_FakeRedis()),
+    ):
+        resp = await slack_install(admin)
+
+    query = parse_qs(urlparse(resp.headers["location"]).query)
+    scopes = query["scope"][0].split(",")
+    assert "commands" in scopes
+    assert "app_mentions:read" in scopes
+
+
 @pytest.mark.asyncio
 async def test_install_503_when_unconfigured():
     from fastapi import HTTPException
@@ -123,6 +167,72 @@ async def test_callback_exchanges_code_and_stashes_encrypted_install():
     assert install["team_id"] == "T01"
     assert install["installing_admin_user_id"] == "U01"
     assert str(install["workspace_id"]) == str(ws_id)
+
+
+@pytest.mark.asyncio
+async def test_callback_records_granted_scopes():
+    """#1758: the granted ``scope`` from oauth.v2.access is kept on the bundle."""
+    from api.routes.connectors_slack import slack_callback
+
+    ws_id = uuid4()
+    redis = _FakeRedis({"slack_oauth_state:st": str(ws_id)})
+    admin = {"user_id": "u1", "current_workspace_id": ws_id}
+
+    token_resp = MagicMock()
+    token_resp.raise_for_status = MagicMock()
+    token_resp.json.return_value = {
+        "ok": True,
+        "access_token": "xoxb-123",
+        "scope": "channels:history,chat:write,commands",
+        "team": {"id": "T01", "name": "Acme"},
+        "authed_user": {"id": "U01"},
+    }
+    http_client = MagicMock()
+    http_client.post = AsyncMock(return_value=token_resp)
+    http_ctx = MagicMock()
+    http_ctx.__aenter__ = AsyncMock(return_value=http_client)
+    http_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("api.routes.connectors_slack.get_settings", return_value=_settings()),
+        patch("api.routes.connectors_slack.get_redis_client", return_value=redis),
+        patch("api.routes.connectors_slack.httpx.AsyncClient", return_value=http_ctx),
+        patch("api.routes.connectors_slack.get_encryptor", return_value=_fake_encryptor()),
+    ):
+        await slack_callback(admin=admin, code="abc", state="st")
+
+    install_raw = next(v for k, v in redis.store.items() if k.startswith("slack_install:"))
+    install = json.loads(install_raw)
+    assert install["granted_scopes"] == ["channels:history", "chat:write", "commands"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("granted", "expected"),
+    [
+        (["channels:history", "chat:write"], ["commands", "app_mentions:read"]),
+        (["commands", "chat:write"], ["app_mentions:read"]),
+        (["commands", "app_mentions:read"], []),
+    ],
+)
+async def test_pending_reports_missing_worker_scopes(granted, expected):
+    """#1758: /pending flags the worker scopes the grant lacks."""
+    from api.routes.connectors_slack import slack_pending
+
+    ws_id = uuid4()
+    install = {
+        "workspace_id": str(ws_id),
+        "bot_token_enc": "ENC:xoxb-secret",
+        "team_id": "T01",
+        "granted_scopes": granted,
+    }
+    redis = _FakeRedis({"slack_install:h1": json.dumps(install)})
+    admin = {"user_id": "u1", "current_workspace_id": ws_id}
+
+    with patch("api.routes.connectors_slack.get_redis_client", return_value=redis):
+        result = await slack_pending("h1", admin)
+
+    assert result["missing_scopes"] == expected
 
 
 @pytest.mark.asyncio
@@ -508,6 +618,8 @@ async def test_pending_returns_summary_without_bot_token():
         "team_name": "Acme",
         "installing_admin_user_id": "U01",
         "app_key": "default",
+        # Bundle without a recorded grant (pre-#1758) → nothing to flag.
+        "missing_scopes": [],
     }
     assert "bot_token" not in result
     assert "bot_token_enc" not in result

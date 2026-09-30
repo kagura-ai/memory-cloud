@@ -4019,6 +4019,8 @@
     "manualBind": "インストールを紐づける",
     "createTitle": "Slack コネクタを作成",
     "createDesc": "{team} を接続します。取り込んだ会話を保持するプライベートコンテキストを作成します。",
+    "missingScopesTitle": "コマンドを使うには Slack を再接続してください",
+    "missingScopesDesc": "このインストールでは {scopes} が許可されていません。取り込みは動作しますが、スラッシュコマンドと @メンションへの応答にはこれらのスコープが必要です。Slack アプリがこれらを要求するよう設定し、もう一度 Slack を接続してください。",
     "displayName": "表示名",
     "contextName": "コンテキスト名",
     "contextNameHelp": "英小文字・数字・ハイフン・アンダースコアのみ。",

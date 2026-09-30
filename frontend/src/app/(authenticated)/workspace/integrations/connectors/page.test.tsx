@@ -241,6 +241,7 @@ beforeEach(() => {
     team_name: "Acme",
     installing_admin_user_id: "user-1",
     app_key: "default",
+    missing_scopes: [],
   });
   mockGetContexts.mockResolvedValue({ contexts: [], total: 0 });
 });
@@ -1589,6 +1590,33 @@ describe("ConnectorsPage RBAC gate", () => {
     // Exactly one write-target field: existing mode must NOT auto-create.
     const arg = mockCreateConnector.mock.calls[0][0];
     expect(arg).not.toHaveProperty("auto_create_context_name");
+  });
+
+  it("warns to reconnect when the grant lacks worker scopes (#1758)", async () => {
+    setWorkspace("admin");
+    armInstall();
+    mockGetSlackPendingInstall.mockResolvedValue({
+      team_id: "T01",
+      team_name: "Acme",
+      installing_admin_user_id: "user-1",
+      app_key: "default",
+      missing_scopes: ["commands", "app_mentions:read"],
+    });
+
+    render(<ConnectorsPage />);
+
+    expect(await screen.findByText("missingScopesTitle")).toBeInTheDocument();
+    expect(screen.getByText("missingScopesDesc")).toBeInTheDocument();
+  });
+
+  it("shows no scope notice when the grant is complete (#1758)", async () => {
+    setWorkspace("admin");
+    armInstall();
+
+    render(<ConnectorsPage />);
+
+    await screen.findByRole("button", { name: "createConnector" });
+    expect(screen.queryByText("missingScopesTitle")).not.toBeInTheDocument();
   });
 
   it("creates a new context when switched to create-new mode (auto_create_context_name, no context_id) (#1409)", async () => {

@@ -44,7 +44,7 @@ import {
 } from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   Select,
   SelectContent,
@@ -1752,6 +1752,19 @@ export default function ConnectorsPage() {
             {createError && (
               <Alert variant="destructive">
                 <AlertDescription>{createError}</AlertDescription>
+              </Alert>
+            )}
+            {/* #1758: the grant lacks scopes the slash command / @mention
+                features need. Ingestion still works, so this warns rather
+                than blocks; the fix is to reconnect Slack. */}
+            {pending?.missing_scopes && pending.missing_scopes.length > 0 && (
+              <Alert variant="warning">
+                <AlertTitle>{t("missingScopesTitle")}</AlertTitle>
+                <AlertDescription>
+                  {t("missingScopesDesc", {
+                    scopes: pending.missing_scopes.join(", "),
+                  })}
+                </AlertDescription>
               </Alert>
             )}
             <div>

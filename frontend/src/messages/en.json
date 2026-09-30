@@ -4019,6 +4019,8 @@
     "manualBind": "Bind installation",
     "createTitle": "Create Slack connector",
     "createDesc": "Connecting {team}. A private context will be created to hold ingested conversations.",
+    "missingScopesTitle": "Reconnect Slack to enable commands",
+    "missingScopesDesc": "This install did not grant {scopes}. Ingestion works, but the slash command and @mention replies need these scopes. Make sure the Slack app requests them, then connect Slack again.",
     "displayName": "Display name",
     "contextName": "Context name",
     "contextNameHelp": "Lowercase letters, numbers, hyphen and underscore only.",

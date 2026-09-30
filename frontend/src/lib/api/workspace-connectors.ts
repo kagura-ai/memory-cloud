@@ -156,6 +156,11 @@ export interface SlackPendingInstall {
   team_name: string | null;
   installing_admin_user_id: string | null;
   app_key: string;
+  /**
+   * Bot scopes the Slack worker's slash command / @mention features need that
+   * this grant lacks (#1758). Empty when the grant is complete or unknown.
+   */
+  missing_scopes?: string[];
 }
 
 export interface AvailableWorkerApp {

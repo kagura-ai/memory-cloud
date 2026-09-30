@@ -30,7 +30,8 @@ GET /api/v1/workspace-connectors/{connector_id}/channels?cursor=<c>&q=<query>
 
 `conversations.list` for public channels requires the **`channels:read`**
 scope, which IS in the default install scopes
-(`settings.slack_oauth_scopes` = `channels:history,channels:read,groups:history,chat:write,team:read,users:read`).
+(`settings.slack_oauth_scopes` = `channels:history,channels:read,groups:history,chat:write,team:read,users:read,commands,app_mentions:read`;
+see `docs/ops/slack-public-distribution.md` for what each scope is for).
 Private channels additionally need `groups:read`, which is **not** currently
 requested — so the v1 picker lists public channels only, and private channels
 remain manual-ID entry (document this in the dialog copy).

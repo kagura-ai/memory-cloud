@@ -37,14 +37,40 @@ In **api.slack.com/apps → {the Kagura app} → Manage Distribution**, Slack ga
       OAuth callback; must be HTTPS and exact-match).
 - [ ] **No hardcoded information in install links** — the "Add to Slack" /
       install URL must not embed a static `team` parameter.
-- [ ] At least one **bot scope** requested (Kagura uses `channels:history`,
-      `channels:read`, `groups:history`, `chat:*` per the OAuth consent screen).
+- [ ] At least one **bot scope** requested (Kagura requests the list in
+      [Bot scopes](#bot-scopes) below).
 - [ ] App **name, icon, and short/long description** present (Slack requires the
       basic listing metadata even without App Directory submission).
 
 Activating distribution is sufficient for OAuth-into-any-workspace. Submitting
 to the **App Directory** (public listing + Slack review) is a *separate,
 optional* step and is **not** required for external tenants to connect.
+
+## Bot scopes
+
+The Connect Slack OAuth install requests the scopes in `SLACK_OAUTH_SCOPES`
+(default below). Add the same list under *OAuth & Permissions → Bot Token
+Scopes* of the Slack app, and enable *Slash Commands* and the `app_mention`
+bot event (*Event Subscriptions*) for the features that use them.
+
+| Scope | Needed for |
+|---|---|
+| `channels:history` | Ingesting messages from public channels |
+| `channels:read` | Listing public channels (connector channel picker) |
+| `groups:history` | Ingesting messages from private channels the bot is invited to |
+| `chat:write` | Posting the Slack worker's replies |
+| `team:read` | Reading the Slack workspace (team) info |
+| `users:read` | Resolving Slack user info for message authors |
+| `commands` | The `/kagura` slash command (`remember` / `recall`) |
+| `app_mentions:read` | `app_mention` events (@mention recall) |
+
+Default: `channels:history,channels:read,groups:history,chat:write,team:read,users:read,commands,app_mentions:read`
+
+Slack does not widen an existing grant. A workspace installed before a scope
+was added keeps its old grant — the slash command, for example, does not
+appear there — until a workspace admin runs **Connect Slack** again. When the
+granted scopes returned by `oauth.v2.access` lack `commands` or
+`app_mentions:read`, the connector create dialog shows a reconnect notice.
 
 ## Activation steps
 
@@ -77,7 +103,7 @@ optional* step and is **not** required for external tenants to connect.
 If activating distribution is not desired, an external party can instead bring
 their **own** Slack app:
 
-1. Create a Slack app owned by their workspace, add the bot scopes, install it
+1. Create a Slack app owned by their workspace, add the [bot scopes](#bot-scopes), install it
    into their own workspace (allowed: non-distributed install into the app's
    home team), and copy the `xoxb-…` bot token.
 2. A **system admin** registers that app's signing secret as a worker app
