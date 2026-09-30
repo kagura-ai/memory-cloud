@@ -326,8 +326,9 @@ def render_security_notification(
 
     lines += [
         "Wasn't you?",
-        "Sign in and open your profile page to review your sign-in methods, API",
-        "keys and authorized apps, and remove anything you do not recognize:",
+        "Sign in and review your sign-in methods on your profile page, and your",
+        "keys and apps under Integrations > API Keys and OAuth Apps in your",
+        "workspace. Remove anything you do not recognize:",
         "",
         f"  {profile_page_url}",
         "",
