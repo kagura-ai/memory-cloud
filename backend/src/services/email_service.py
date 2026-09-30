@@ -312,6 +312,7 @@ class EmailService(Protocol):
         digest: bool,
         window_minutes: int,
         profile_page_url: str,
+        total: int | None = None,
     ) -> bool:
         """Tell the owner about a security-sensitive account change (Issue #1752).
 
@@ -329,6 +330,8 @@ class EmailService(Protocol):
             digest: True for the trailing email of a coalescing window.
             window_minutes: The coalescing window, for the digest wording.
             profile_page_url: ``<FRONTEND_URL>/profile`` — no token.
+            total: Occurrences the digest covers (the buffer keeps only the
+                first ones); defaults to ``len(occurrences)``.
 
         Returns:
             True on delivery (or logging fallback), False on hard failure.
@@ -529,6 +532,7 @@ class LoggingEmailService:
         digest: bool,
         window_minutes: int,
         profile_page_url: str,
+        total: int | None = None,
     ) -> bool:
         # Event and counts only: the occurrences carry IPs and user agents,
         # and the recipient is logged as a keyed digest (#1752).
@@ -537,7 +541,7 @@ class LoggingEmailService:
             "security_notification_email",
             recipient_hash=redact_recipient(to_email),
             security_event=event,
-            occurrences=len(occurrences),
+            occurrences=total if total is not None else len(occurrences),
             digest=digest,
             email_dispatch_required=True,
             template="security_notification",

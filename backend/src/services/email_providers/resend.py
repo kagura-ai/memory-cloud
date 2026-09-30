@@ -460,6 +460,7 @@ class ResendEmailService:
         digest: bool,
         window_minutes: int,
         profile_page_url: str,
+        total: int | None = None,
     ) -> bool:
         # The body lists IPs and user agents: it goes to the recipient only,
         # never into log_context; the recipient is logged as a digest.
@@ -471,6 +472,7 @@ class ResendEmailService:
             digest=digest,
             window_minutes=window_minutes,
             profile_page_url=profile_page_url,
+            total=total,
         )
         return await self._send(
             to_email=to_email,
