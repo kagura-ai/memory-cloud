@@ -1452,10 +1452,15 @@ class AccountErasureService:
         if session_manager is not None:
             sessions_deleted = session_manager.delete_user_sessions(user_id)
 
+        # #1752: pending security-notice windows (due entries, buffered
+        # occurrences with IPs / user agents, pointers, claims) go too.
+        from services.security_notification_service import purge_user_notification_state
+
         return {
             "sessions": sessions_deleted,
             "co_act": await clear_co_activations(user_id),
             "rate_limit": await clear_user_rate_limits(user_id),
+            "security_notices": await purge_user_notification_state(user_id),
         }
 
     async def _write_audit_log(
