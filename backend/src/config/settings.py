@@ -195,6 +195,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    email_action_token_retention_seconds: int = Field(
+        default=86400,
+        ge=0,
+        description=(
+            "How long a used or expired email action token row (password reset / "
+            "set-up / email verification link) is kept before the hourly cleanup "
+            "job deletes it (#1738). 0 deletes rows as soon as they are spent."
+        ),
+    )
+
     # OAuth2 - Google
     google_client_id: str = Field(default="", description="Google OAuth2 Client ID")
     google_client_secret: str = Field(default="", description="Google OAuth2 Client Secret")

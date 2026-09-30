@@ -61,6 +61,7 @@ from models.auth import (  # noqa: E402
     OAuth2Client,
     OAuth2DeviceCode,
     OAuth2Token,
+    User,
 )
 from utils.datetime import utcnow  # noqa: E402
 
@@ -513,6 +514,25 @@ class TestRefreshTokenGrant:
 
         result = grant.authenticate_refresh_token("rt-revoked")
         assert result is None
+
+    def test_authenticate_refresh_token_locks_the_owner_first(self) -> None:
+        # #1738: the owner's users row is share-locked before the token row,
+        # in the same order as a password reset, so a reset cannot miss a
+        # token minted by a racing refresh.
+        grant = _make_refresh_grant()
+        session = grant.server.db_session
+        token = _make_token(refresh_token="rt-active", refresh_token_revoked_at=None)
+        session.query().filter_by().scalar.return_value = "owner-1"
+        session.query().filter_by().with_for_update().first.return_value = token
+        session.reset_mock()
+
+        assert grant.authenticate_refresh_token("rt-active") is token
+
+        locks = [c for c in session.mock_calls if c[0].endswith("with_for_update")]
+        assert locks[0].kwargs == {"read": True, "key_share": True}
+        assert locks[-1].kwargs == {}
+        queried = [c.args[0] for c in session.mock_calls if c[0] == "query"]
+        assert queried[1] is User.user_id
 
     def test_authenticate_refresh_token_not_found(self) -> None:
         grant = _make_refresh_grant()

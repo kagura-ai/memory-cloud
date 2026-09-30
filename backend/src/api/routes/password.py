@@ -6,7 +6,8 @@ Public (the emailed link is the credential):
   reset link is emailed only when the address names an account with a
   verified email and a password.
 - ``POST /auth/password/reset`` — set a new password from a reset link; every
-  browser session of the account is revoked. No automatic sign-in.
+  browser session and every OAuth2 / MCP grant (tokens, pending codes) of the
+  account is revoked (#1738). No automatic sign-in.
 - ``POST /auth/password/setup`` — set the first password from a set-up link;
   also marks the email verified; the account's other browser sessions are
   revoked.
@@ -20,9 +21,12 @@ Signed in (browser session only — never an API key):
 - ``DELETE /me/password`` — remove the password (current one required),
   refused while it is the last sign-in method.
 
-None of these creates an account. Only browser sessions are revoked: OAuth /
-MCP tokens and API keys keep working. Revocation runs before the password
-write commits, and a failure answers 503 with the password unchanged. Every
+None of these creates an account. A reset (the compromise-recovery path) also
+revokes the account's OAuth / MCP grants, in the password write's transaction;
+the other flows revoke browser sessions only. API keys, OAuth client secrets,
+share keys and resource tokens are never revoked here — the reset email and
+page point the user at them. Revocation runs before the password write
+commits, and a failure answers 503 with the password unchanged. Every
 completed write emails the owner a security notice (#1752) after the commit.
 """
 

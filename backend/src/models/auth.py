@@ -289,6 +289,9 @@ class EmailActionToken(Base):
             name="valid_email_action_purpose",
         ),
         Index("ix_email_action_tokens_user_purpose", "user_id", "purpose"),
+        # The hourly cleanup's ``used_at < cutoff OR expires_at < cutoff`` (#1738).
+        Index("ix_email_action_tokens_used_at", "used_at"),
+        Index("ix_email_action_tokens_expires_at", "expires_at"),
     )
 
     def __repr__(self) -> str:
@@ -1068,7 +1071,8 @@ class OAuth2DeviceCode(Base):
         nullable=False,
         index=True,
     )
-    user_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Indexed for the password reset's purge by account (#1738).
+    user_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     scope: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)

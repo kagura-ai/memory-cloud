@@ -10,11 +10,13 @@ Implements scheduled tasks for:
 - Semantic edge dead-endpoint sweep (monthly) — Issue #722
 - Expired device code cleanup (hourly) — Issue #1656
 - Security notice digests (every minute) — Issue #1752
+- Used/expired email action token cleanup (hourly) — Issue #1738
 """
 
 from .bm25_drift_tasks import schedule_bm25_drift_tasks
 from .credentials_tasks import schedule_credentials_tasks
 from .device_code_tasks import schedule_device_code_tasks
+from .email_action_token_tasks import schedule_email_action_token_tasks
 from .embedding_tasks import schedule_embedding_tasks
 from .erasure_tasks import schedule_erasure_tasks
 from .file_tasks import schedule_file_tasks
@@ -35,6 +37,7 @@ __all__ = [
     "schedule_credentials_tasks",
     "schedule_device_code_tasks",
     "schedule_security_notification_tasks",
+    "schedule_email_action_token_tasks",
     "schedule_embedding_tasks",
     "schedule_erasure_tasks",
     "schedule_resource_indexer_jobs",

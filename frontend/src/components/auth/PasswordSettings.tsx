@@ -51,6 +51,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiClient, ApiError } from "@/lib/api/base";
 import {
   changePassword,
+  hasPasswordSignIn,
   removePassword,
   requestPasswordSetup,
 } from "@/lib/auth/auth";
@@ -76,9 +77,7 @@ export default function PasswordSettings({
   const { user, refetchUser } = useAuth();
   const { toast } = useToast();
 
-  // `has_password` (#1678) is authoritative; an older backend only sends
-  // `auth_method`, where "password" implied one.
-  const hasPassword = user?.has_password ?? user?.auth_method === "password";
+  const hasPassword = hasPasswordSignIn(user);
 
   const [linkedCount, setLinkedCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);

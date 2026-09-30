@@ -998,6 +998,11 @@ class AccountErasureService:
         user_id = target.user_id
         counts: dict[str, int] = {}
 
+        # Lock the user row before touching its tokens: the refresh grant
+        # share-locks it before the token row (#1738), so taking the same
+        # order here keeps a concurrent refresh from deadlocking the sweep.
+        await self.db.execute(select(User.user_id).where(User.user_id == user_id).with_for_update())
+
         # OAuth2 tokens / authorization codes / clients first — no FK
         # cascade from users to these.
         counts["oauth_tokens"] = await self._count_and_delete(

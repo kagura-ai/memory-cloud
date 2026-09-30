@@ -609,8 +609,8 @@ async def test_password_emails_carry_the_link_but_never_log_it(
 
 
 @pytest.mark.asyncio
-async def test_reset_email_promises_only_browser_sign_out() -> None:
-    """#1678: a reset signs out browser sessions; OAuth/MCP tokens and API keys stay."""
+async def test_reset_email_names_what_the_reset_revokes() -> None:
+    """#1738: a reset signs out browsers and disconnects apps; API keys stay."""
     svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
     with patch.object(resend_module.resend.Emails, "send", return_value={"id": "re_msg_pw"}) as m:
         await svc.send_password_reset(
@@ -621,3 +621,5 @@ async def test_reset_email_promises_only_browser_sign_out() -> None:
     (params,), _ = m.call_args
     assert "everywhere" not in params["text"]
     assert "browser" in params["text"]
+    assert "MCP client" in params["text"]
+    assert "API keys and other integration" in params["text"]

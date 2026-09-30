@@ -48,7 +48,8 @@ vi.mock("@/lib/api/base", () => ({
   apiClient: { get: (...a: unknown[]) => mockGet(...a) },
   ApiError: FakeApiError,
 }));
-vi.mock("@/lib/auth/auth", () => ({
+vi.mock("@/lib/auth/auth", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/auth/auth")>()),
   requestPasswordSetup: (...a: unknown[]) => mockSetupRequest(...a),
   changePassword: (...a: unknown[]) => mockChange(...a),
   removePassword: (...a: unknown[]) => mockRemove(...a),

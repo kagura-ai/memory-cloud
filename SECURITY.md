@@ -26,6 +26,10 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
 - **API Keys** for programmatic access (SHA-256 hashed, Fernet encrypted at rest)
 - **JWT** for session tokens (configurable expiry, HS256)
 - **HttpOnly cookies** for session storage
+- **Email + password** for existing accounts. A password reset signs out every
+  browser session and revokes every OAuth / MCP token and pending grant of the
+  account. API keys and OAuth client secrets are not revoked automatically —
+  review them in Settings after a suspected compromise.
 - **Security-change notification emails** — the account owner is emailed
   (mandatory, no opt-out) when:
   - a password is set, changed or reset with an emailed link;
