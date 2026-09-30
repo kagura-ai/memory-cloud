@@ -83,6 +83,27 @@ def _window_end() -> float:
     return sns._now_score() + sns.get_settings().security_notification_window_seconds
 
 
+EVENT = "api_key_created"
+
+
+async def _wid(redis, user_id: str = OWNER) -> str | None:
+    """The id of the (user, EVENT)'s open window."""
+    return await redis.get(sns._open_key(user_id, EVENT))
+
+
+def _k(template: str, wid: str) -> str:
+    return sns._key(template, OWNER, EVENT, wid)
+
+
+def _m(wid: str) -> str:
+    return sns._member(OWNER, EVENT, wid)
+
+
+async def _window_keys(redis) -> list[str]:
+    """Every notice key left in Redis except the due set."""
+    return sorted(k for k in await redis.keys("security_notify:*") if k != sns._DUE_KEY)
+
+
 # ---------------------------------------------------------------------------
 # Coalescing
 # ---------------------------------------------------------------------------
@@ -103,7 +124,9 @@ class TestCoalescing:
         assert occurrence.ip == "192.0.2.10"
         assert occurrence.occurred_at.endswith(" UTC")
         assert kwargs["profile_page_url"].endswith("/profile")
-        assert await redis.zscore(sns._DUE_KEY, f"{OWNER}|api_key_created") is not None
+        wid = await _wid(redis)
+        assert wid is not None
+        assert await redis.zscore(sns._DUE_KEY, _m(wid)) is not None
 
     @pytest.mark.asyncio
     async def test_repeats_in_the_window_are_buffered(self, redis, deliverable, email) -> None:
@@ -112,7 +135,7 @@ class TestCoalescing:
         await _notify(email, key_name="c")
 
         assert email.send_security_notification.await_count == 1
-        assert await redis.llen(sns._buffer_key(OWNER, "api_key_created")) == 2
+        assert await redis.llen(_k(sns._BUFFER_KEY, await _wid(redis))) == 2
 
     @pytest.mark.asyncio
     async def test_other_events_and_users_have_their_own_windows(
@@ -150,7 +173,7 @@ class TestCoalescing:
         assert kwargs["digest"] is True
         assert [o.key_name for o in kwargs["occurrences"]] == ["second", "third"]
         assert await redis.zcard(sns._DUE_KEY) == 0
-        assert await redis.exists(sns._buffer_key(OWNER, "api_key_created")) == 0
+        assert await _window_keys(redis) == []
 
         # The next occurrence opens a new window and is sent at once.
         email.send_security_notification.reset_mock()
@@ -197,28 +220,34 @@ class TestCoalescing:
         self, redis, deliverable, email, monkeypatch
     ) -> None:
         await _notify(email, key_name="first")
+        wid = await _wid(redis)
         email.send_security_notification.reset_mock()
 
-        # The window is claimed right after our ZADD saw it open.
-        real_zadd = redis.zadd
+        # A flush claims the window (releases its pointer) right after this
+        # occurrence read the pointer and before it checked it again.
+        real_get = redis.get
+        claimed = False
 
-        async def _zadd_then_claim(*args, **kwargs):
-            result = await real_zadd(*args, **kwargs)
-            await redis.zrem(sns._DUE_KEY, f"{OWNER}|api_key_created")
-            return result
+        async def _get_then_claim(key):
+            nonlocal claimed
+            value = await real_get(key)
+            if key == sns._open_key(OWNER, EVENT) and not claimed:
+                claimed = True
+                await redis.delete(key)
+            return value
 
-        monkeypatch.setattr(redis, "zadd", _zadd_then_claim)
+        monkeypatch.setattr(redis, "get", _get_then_claim)
         await _notify(email, key_name="late")
 
         email.send_security_notification.assert_awaited_once()
         (occurrence,) = email.send_security_notification.await_args.kwargs["occurrences"]
         assert occurrence.key_name == "late"
-        assert await redis.llen(sns._buffer_key(OWNER, "api_key_created")) == 0
+        assert await redis.llen(_k(sns._BUFFER_KEY, wid)) == 0
 
     @pytest.mark.asyncio
     async def test_redis_down_sends_at_once(self, monkeypatch, deliverable, email) -> None:
         broken = MagicMock()
-        broken.zadd = AsyncMock(side_effect=ConnectionError("redis down"))
+        broken.get = AsyncMock(side_effect=ConnectionError("redis down"))
         monkeypatch.setattr(sns, "get_redis_client", lambda: broken)
 
         await _notify(email)
@@ -402,10 +431,17 @@ class TestDeliverableAddress:
         user = await _make_user(db_session, made_users, verified=True, provider=False)
         assert await resolve_deliverable_address(db_session, user.user_id) == user.email
 
-    async def test_oauth_only_user_without_verified_at(
+    async def test_linked_provider_alone_is_not_proof(
         self, db_session: AsyncSession, made_users
     ) -> None:
+        # Google can return an unverified address; only email_verified_at counts.
         user = await _make_user(db_session, made_users, verified=False, provider=True)
+        assert await resolve_deliverable_address(db_session, user.user_id) is None
+
+    async def test_oauth_user_verified_on_sign_in(
+        self, db_session: AsyncSession, made_users
+    ) -> None:
+        user = await _make_user(db_session, made_users, verified=True, provider=True)
         assert await resolve_deliverable_address(db_session, user.user_id) == user.email
 
     async def test_unverified_password_only_user(
@@ -674,10 +710,9 @@ class TestBufferCap:
         for i in range(sns._DIGEST_MAX_OCCURRENCES + 6):
             await _notify(email, key_name=f"k{i}")
         buffered = sns._DIGEST_MAX_OCCURRENCES + 5  # all but the first
-        assert await redis.llen(sns._buffer_key(OWNER, "api_key_created")) == (
-            sns._DIGEST_MAX_OCCURRENCES
-        )
-        count_key = sns._key(sns._COUNT_KEY, OWNER, "api_key_created")
+        wid = await _wid(redis)
+        assert await redis.llen(_k(sns._BUFFER_KEY, wid)) == sns._DIGEST_MAX_OCCURRENCES
+        count_key = _k(sns._COUNT_KEY, wid)
         assert int(await redis.get(count_key)) == buffered
         assert await redis.ttl(count_key) > 0
 
@@ -688,7 +723,7 @@ class TestBufferCap:
         kwargs = email.send_security_notification.await_args.kwargs
         assert len(kwargs["occurrences"]) == sns._DIGEST_MAX_OCCURRENCES
         assert kwargs["total"] == buffered
-        assert await redis.exists(count_key) == 0
+        assert await _window_keys(redis) == []
 
     def test_render_reports_the_rest_from_the_total(self) -> None:
         occurrence = SecurityOccurrence(occurred_at="t")
@@ -705,17 +740,20 @@ class TestBufferCap:
 
 
 class TestDigestRetry:
-    async def _open_window_with_two(self, email) -> None:
+    async def _open_window_with_two(self, redis, email) -> str:
         await _notify(email, key_name="first")
         await _notify(email, key_name="second")
         await _notify(email, key_name="third")
         email.send_security_notification.reset_mock()
+        wid = await _wid(redis)
+        assert wid is not None
+        return wid
 
     @pytest.mark.asyncio
     async def test_failed_send_keeps_the_occurrences_and_retries(
         self, redis, deliverable, email
     ) -> None:
-        await self._open_window_with_two(email)
+        wid = await self._open_window_with_two(redis, email)
         email.send_security_notification.return_value = False
         now = _window_end() + 1
 
@@ -726,12 +764,11 @@ class TestDigestRetry:
             == 0
         )
 
-        buffer_key = sns._buffer_key(OWNER, "api_key_created")
-        assert await redis.lrange(buffer_key, 0, -1) != []
-        assert await redis.llen(buffer_key) == 2
-        assert int(await redis.get(sns._key(sns._COUNT_KEY, OWNER, "api_key_created"))) == 2
-        assert await redis.exists(sns._key(sns._CLAIM_BUFFER_KEY, OWNER, "api_key_created")) == 0
-        retry_at = await redis.zscore(sns._DUE_KEY, f"{OWNER}|api_key_created")
+        # The claim keeps them under the window's own keys, re-queued.
+        assert await redis.llen(_k(sns._CLAIM_BUFFER_KEY, wid)) == 2
+        assert int(await redis.get(_k(sns._CLAIM_COUNT_KEY, wid))) == 2
+        assert await redis.exists(_k(sns._BUFFER_KEY, wid)) == 0
+        retry_at = await redis.zscore(sns._DUE_KEY, _m(wid))
         assert retry_at == now + sns._DIGEST_RETRY_DELAY_SECONDS
 
         # Not retried before its time; retried (and sent) after it.
@@ -751,25 +788,24 @@ class TestDigestRetry:
         kwargs = email.send_security_notification.await_args.kwargs
         assert [o.key_name for o in kwargs["occurrences"]] == ["second", "third"]
         assert kwargs["total"] == 2
-        for template in (sns._COUNT_KEY, sns._CLAIM_BUFFER_KEY, sns._ATTEMPTS_KEY):
-            assert await redis.exists(sns._key(template, OWNER, "api_key_created")) == 0
-        assert await redis.exists(buffer_key) == 0
+        assert await _window_keys(redis) == []
+        assert await redis.zcard(sns._DUE_KEY) == 0
 
     @pytest.mark.asyncio
     async def test_recipient_lookup_failure_is_retried(self, redis, deliverable, email) -> None:
-        await self._open_window_with_two(email)
+        wid = await self._open_window_with_two(redis, email)
         deliverable.side_effect = OSError("db down")
         await sns.flush_due_security_notifications(
             now_score=_window_end() + 1, session_factory=_factory(), email_service=email
         )
-        assert await redis.llen(sns._buffer_key(OWNER, "api_key_created")) == 2
-        assert await redis.zscore(sns._DUE_KEY, f"{OWNER}|api_key_created") is not None
+        assert await redis.llen(_k(sns._CLAIM_BUFFER_KEY, wid)) == 2
+        assert await redis.zscore(sns._DUE_KEY, _m(wid)) is not None
 
     @pytest.mark.asyncio
     async def test_dropped_after_the_last_attempt(
         self, redis, deliverable, email, monkeypatch
     ) -> None:
-        await self._open_window_with_two(email)
+        await self._open_window_with_two(redis, email)
         email.send_security_notification.side_effect = RuntimeError("provider down")
         logger = MagicMock()
         monkeypatch.setattr(sns, "logger", logger)
@@ -782,14 +818,7 @@ class TestDigestRetry:
 
         assert email.send_security_notification.await_count == sns._DIGEST_MAX_ATTEMPTS
         assert await redis.zcard(sns._DUE_KEY) == 0
-        for template in (
-            sns._BUFFER_KEY,
-            sns._COUNT_KEY,
-            sns._CLAIM_BUFFER_KEY,
-            sns._CLAIM_COUNT_KEY,
-            sns._ATTEMPTS_KEY,
-        ):
-            assert await redis.exists(sns._key(template, OWNER, "api_key_created")) == 0
+        assert await _window_keys(redis) == []
         dropped = [
             c
             for c in logger.error.call_args_list
@@ -798,23 +827,173 @@ class TestDigestRetry:
         assert len(dropped) == 1
 
     @pytest.mark.asyncio
-    async def test_requeued_items_join_a_newer_open_window(self, redis, deliverable, email) -> None:
-        await self._open_window_with_two(email)
+    async def test_timed_out_digest_counts_as_sent(self, redis, deliverable, email) -> None:
+        # wait_for cannot stop a provider call already running in a thread,
+        # so a timed-out digest may still arrive: never retried.
+        await self._open_window_with_two(redis, email)
+        email.send_security_notification.side_effect = TimeoutError()
+        sent = await sns.flush_due_security_notifications(
+            now_score=_window_end() + 1, session_factory=_factory(), email_service=email
+        )
+        assert sent == 0
+        email.send_security_notification.assert_awaited_once()
+        assert await redis.zcard(sns._DUE_KEY) == 0
+        assert await _window_keys(redis) == []
+
+    @pytest.mark.asyncio
+    async def test_late_occurrence_in_the_retried_window_joins_its_claim(
+        self, redis, deliverable, email
+    ) -> None:
+        wid = await self._open_window_with_two(redis, email)
         email.send_security_notification.return_value = False
         now = _window_end() + 1
         await sns.flush_due_security_notifications(
             now_score=now, session_factory=_factory(), email_service=email
         )
-        # A newer window opened meanwhile would keep its own (later) score.
-        member = f"{OWNER}|api_key_created"
-        await redis.zadd(sns._DUE_KEY, {member: now + 9999})
+        # A pusher that raced the claim left an occurrence in the window's buffer.
+        late = SecurityOccurrence(occurred_at="t", key_name="late").to_json()
+        await redis.rpush(_k(sns._BUFFER_KEY, wid), late)
+        await redis.incr(_k(sns._COUNT_KEY, wid))
+
         email.send_security_notification.return_value = True
         await sns.flush_due_security_notifications(
-            now_score=now + 9999, session_factory=_factory(), email_service=email
+            now_score=now + sns._DIGEST_RETRY_DELAY_SECONDS,
+            session_factory=_factory(),
+            email_service=email,
         )
-        assert [
-            o.key_name for o in email.send_security_notification.await_args.kwargs["occurrences"]
-        ] == ["second", "third"]
+        kwargs = email.send_security_notification.await_args.kwargs
+        assert [o.key_name for o in kwargs["occurrences"]] == ["second", "third", "late"]
+        assert kwargs["total"] == 3
+        assert await _window_keys(redis) == []
+
+
+class TestWindowGenerations:
+    @pytest.mark.asyncio
+    async def test_a_new_window_opened_during_a_flush_keeps_its_own_occurrences(
+        self, redis, deliverable, email
+    ) -> None:
+        await _notify(email, key_name="first")
+        await _notify(email, key_name="second")
+        old = await _wid(redis)
+        email.send_security_notification.reset_mock()
+        opened: list[tuple[str, str | None]] = []
+
+        async def _send(**kwargs):
+            # While the old window's digest is being sent (its pointer already
+            # released), a new occurrence opens a new window and a repeat is
+            # buffered in it.
+            if kwargs["digest"]:
+                for name in ("third", "fourth"):
+                    opened.append(
+                        await sns._buffer_if_window_open(
+                            OWNER,
+                            SecurityEvent.API_KEY_CREATED,
+                            SecurityOccurrence(occurred_at="t", key_name=name),
+                        )
+                    )
+            return True
+
+        email.send_security_notification = AsyncMock(side_effect=_send)
+        await sns.flush_due_security_notifications(
+            now_score=_window_end() + 1, session_factory=_factory(), email_service=email
+        )
+
+        digest = email.send_security_notification.await_args_list[0].kwargs
+        assert [o.key_name for o in digest["occurrences"]] == ["second"]
+        (open_outcome, new), (buffered_outcome, same) = opened
+        assert open_outcome == sns._OPENED and buffered_outcome == sns._BUFFERED
+        assert new == same and new != old
+        # The new window's repeat is untouched by the old flush ...
+        assert await redis.llen(_k(sns._BUFFER_KEY, new)) == 1
+        assert await redis.zscore(sns._DUE_KEY, _m(new)) is not None
+        # ... and goes out in the new window's own digest.
+        email.send_security_notification = AsyncMock(return_value=True)
+        await sns.flush_due_security_notifications(
+            now_score=_window_end() + 1, session_factory=_factory(), email_service=email
+        )
+        kwargs = email.send_security_notification.await_args.kwargs
+        assert [o.key_name for o in kwargs["occurrences"]] == ["fourth"]
+
+
+class TestFlushResilience:
+    @pytest.mark.asyncio
+    async def test_redis_failure_after_the_claim_requeues_the_window(
+        self, redis, deliverable, email, monkeypatch
+    ) -> None:
+        await _notify(email, key_name="first")
+        await _notify(email, key_name="second")
+        wid = await _wid(redis)
+        email.send_security_notification.reset_mock()
+        real_exists = redis.exists
+        failed = False
+
+        async def _exists_once_broken(*keys):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise ConnectionError("redis blip")
+            return await real_exists(*keys)
+
+        monkeypatch.setattr(redis, "exists", _exists_once_broken)
+        now = _window_end() + 1
+        assert (
+            await sns.flush_due_security_notifications(
+                now_score=now, session_factory=_factory(), email_service=email
+            )
+            == 0
+        )
+        retry_at = await redis.zscore(sns._DUE_KEY, _m(wid))
+        assert retry_at == now + sns._DIGEST_RETRY_DELAY_SECONDS
+
+        assert (
+            await sns.flush_due_security_notifications(
+                now_score=retry_at, session_factory=_factory(), email_service=email
+            )
+            == 1
+        )
+        kwargs = email.send_security_notification.await_args.kwargs
+        assert [o.key_name for o in kwargs["occurrences"]] == ["second"]
+        assert await _window_keys(redis) == []
+
+    @pytest.mark.asyncio
+    async def test_failed_requeue_is_logged(self, redis, deliverable, email, monkeypatch) -> None:
+        await _notify(email)
+        await _notify(email)
+        email.send_security_notification.reset_mock()
+        monkeypatch.setattr(redis, "exists", AsyncMock(side_effect=ConnectionError("down")))
+        monkeypatch.setattr(redis, "incr", AsyncMock(side_effect=ConnectionError("down")))
+        logger = MagicMock()
+        monkeypatch.setattr(sns, "logger", logger)
+
+        await sns.flush_due_security_notifications(  # does not raise
+            now_score=_window_end() + 1, session_factory=_factory(), email_service=email
+        )
+        events = [c.args[0] for c in logger.error.call_args_list]
+        assert "security_notification_flush_failed" in events
+        assert "security_notification_requeue_failed" in events
+
+    @pytest.mark.asyncio
+    async def test_a_run_stops_claiming_when_over_its_time_budget(
+        self, redis, deliverable, email, monkeypatch
+    ) -> None:
+        for user in ("u-a", "u-b", "u-c"):
+            await _notify(email, user_id=user)
+            await _notify(email, user_id=user)
+        email.send_security_notification.reset_mock()
+        # The first window fits the budget; then the clock is past it.
+        clock = iter([0.0, 0.0, sns._FLUSH_TIME_BUDGET_SECONDS + 1])
+        monkeypatch.setattr(sns, "_monotonic", lambda: next(clock, 10_000.0))
+
+        sent = await sns.flush_due_security_notifications(
+            now_score=_window_end() + 1, session_factory=_factory(), email_service=email
+        )
+
+        assert sent == 1
+        assert await redis.zcard(sns._DUE_KEY) == 2  # left for the next run
+
+    def test_batch_is_bounded(self) -> None:
+        assert sns._FLUSH_BATCH <= 50
+        assert sns._FLUSH_TIME_BUDGET_SECONDS < 60  # the job runs every minute
 
 
 # ---------------------------------------------------------------------------
@@ -825,12 +1004,8 @@ class TestDigestRetry:
 class TestFailedOpeningNotice:
     @pytest.mark.parametrize(
         "failure",
-        [
-            {"return_value": False},
-            {"side_effect": RuntimeError("provider down")},
-            {"side_effect": TimeoutError()},
-        ],
-        ids=["returned_false", "raised", "timeout"],
+        [{"return_value": False}, {"side_effect": RuntimeError("provider down")}],
+        ids=["returned_false", "raised"],
     )
     @pytest.mark.asyncio
     async def test_window_is_closed_and_the_next_occurrence_sent_at_once(
@@ -839,17 +1014,30 @@ class TestFailedOpeningNotice:
         email.send_security_notification = AsyncMock(**failure)
         await _notify(email, key_name="first")
 
-        member = f"{OWNER}|api_key_created"
-        assert await redis.zscore(sns._DUE_KEY, member) is None
-        for template in (sns._BUFFER_KEY, sns._COUNT_KEY):
-            assert await redis.exists(sns._key(template, OWNER, "api_key_created")) == 0
+        assert await redis.zcard(sns._DUE_KEY) == 0
+        assert await _window_keys(redis) == []
 
         email.send_security_notification = AsyncMock(return_value=True)
         await _notify(email, key_name="second")
         kwargs = email.send_security_notification.await_args.kwargs
         assert kwargs["digest"] is False
         assert [o.key_name for o in kwargs["occurrences"]] == ["second"]
-        assert await redis.zscore(sns._DUE_KEY, member) is not None
+        assert await redis.zcard(sns._DUE_KEY) == 1
+
+    @pytest.mark.asyncio
+    async def test_timed_out_opening_send_keeps_the_window(self, redis, deliverable, email) -> None:
+        # The timed-out email may still arrive, so the window stays open and
+        # the next occurrence is coalesced (no duplicate).
+        email.send_security_notification = AsyncMock(side_effect=TimeoutError())
+        await _notify(email, key_name="first")
+        wid = await _wid(redis)
+        assert wid is not None
+        assert await redis.zscore(sns._DUE_KEY, _m(wid)) is not None
+
+        email.send_security_notification = AsyncMock(return_value=True)
+        await _notify(email, key_name="second")
+        email.send_security_notification.assert_not_awaited()
+        assert await redis.llen(_k(sns._BUFFER_KEY, wid)) == 1
 
     @pytest.mark.asyncio
     async def test_occurrence_buffered_during_failed_opening_send_is_still_delivered(
@@ -880,7 +1068,7 @@ class TestFailedOpeningNotice:
         assert second["digest"] is False
         assert [o.key_name for o in second["occurrences"]] == ["in-flight"]
         assert second["total"] == 1
-        assert await redis.exists(sns._buffer_key(OWNER, "api_key_created")) == 0
+        assert await _window_keys(redis) == []
         assert await redis.zcard(sns._DUE_KEY) == 0
 
     @pytest.mark.asyncio
@@ -928,59 +1116,14 @@ class TestFailedOpeningNotice:
         self, monkeypatch, deliverable
     ) -> None:
         broken = MagicMock()
-        broken.zadd = AsyncMock(side_effect=ConnectionError("redis down"))
+        broken.get = AsyncMock(side_effect=ConnectionError("redis down"))
+        broken.zrem = AsyncMock(side_effect=AssertionError("closed a window it never opened"))
         broken.pipeline = MagicMock(side_effect=AssertionError("closed a window it never opened"))
         monkeypatch.setattr(sns, "get_redis_client", lambda: broken)
         email = AsyncMock()
         email.send_security_notification = AsyncMock(return_value=False)
         await _notify(email)  # does not raise, does not try to close
         broken.pipeline.assert_not_called()
-
-
-class TestOrphanedClaim:
-    async def _orphan(self, redis, *names: str, count: int | None = None) -> None:
-        claim = sns._key(sns._CLAIM_BUFFER_KEY, OWNER, "api_key_created")
-        for name in names:
-            await redis.rpush(claim, SecurityOccurrence(occurred_at="t", key_name=name).to_json())
-        await redis.set(
-            sns._key(sns._CLAIM_COUNT_KEY, OWNER, "api_key_created"), count or len(names)
-        )
-
-    @pytest.mark.asyncio
-    async def test_orphan_is_merged_before_the_new_buffer_not_overwritten(
-        self, redis, deliverable, email
-    ) -> None:
-        await self._orphan(redis, "lost-1", "lost-2", count=5)
-        await _notify(email, key_name="first")
-        await _notify(email, key_name="second")
-        email.send_security_notification.reset_mock()
-
-        sent = await sns.flush_due_security_notifications(
-            now_score=_window_end() + 1, session_factory=_factory(), email_service=email
-        )
-
-        assert sent == 1
-        kwargs = email.send_security_notification.await_args.kwargs
-        assert [o.key_name for o in kwargs["occurrences"]] == ["lost-1", "lost-2", "second"]
-        assert kwargs["total"] == 6
-        for template in (sns._CLAIM_BUFFER_KEY, sns._CLAIM_COUNT_KEY, sns._BUFFER_KEY):
-            assert await redis.exists(sns._key(template, OWNER, "api_key_created")) == 0
-
-    @pytest.mark.asyncio
-    async def test_orphan_is_sent_when_the_window_buffered_nothing(
-        self, redis, deliverable, email
-    ) -> None:
-        await self._orphan(redis, "lost-1")
-        await _notify(email, key_name="first")
-        email.send_security_notification.reset_mock()
-
-        await sns.flush_due_security_notifications(
-            now_score=_window_end() + 1, session_factory=_factory(), email_service=email
-        )
-
-        kwargs = email.send_security_notification.await_args.kwargs
-        assert [o.key_name for o in kwargs["occurrences"]] == ["lost-1"]
-        assert kwargs["total"] == 1
 
 
 class TestAuthorizedWording:

@@ -426,14 +426,17 @@ the account owner is
 emailed a notice (UTC time, IP address, user agent, key or client name, and the
 acting admin for admin actions — never a secret, token or link other than the
 plain `FRONTEND_URL/profile` page). The notices cannot be turned off. They go
-only to an address verified by the password flow or taken from a linked sign-in
-provider, never to `@local`. Repeats of the same event for the same account
+only to a verified address (`users.email_verified_at`: set by an emailed
+password link, or by an OAuth sign-in whose provider attests the address as
+verified — existing OAuth accounts get it on their next sign-in), never to
+`@local`. Repeats of the same event for the same account
 within `SECURITY_NOTIFICATION_WINDOW_SECONDS` (default 600) are sent as one
 digest when the window closes; the first is sent at once. The window lives in
 Redis and a job checks it every minute; when Redis is unavailable every
 occurrence is sent at once. A digest keeps the first 20 occurrences and counts
-the rest; a digest whose send fails is retried up to twice (after one, then two minutes),
-then dropped with a `security_notification_digest_dropped` log line. Operator
+the rest; a digest whose send definitely fails is retried up to twice (after
+one, then two minutes), then dropped with a `security_notification_digest_dropped`
+log line. A send that times out may still be delivered, so it is not retried. Operator
 CLI actions (`reset_password`, `create_admin`) send no notice. A send failure is logged and never affects the
 change. Under `EMAIL_PROVIDER=logging` each notice is one
 `security_notification_email` log line (event and a keyed recipient hash only).

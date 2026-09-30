@@ -45,8 +45,10 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
   keys and OAuth apps and to "Forgot password?". Untrusted names and user
   agents are normalized and defanged so no link survives. Repeats of one
   event within 10 minutes are sent as one follow-up digest. Emails go only to
-  a verified address (password flow or sign-in provider), never to `@local`
-  accounts. Operator CLI actions (`reset_password`, `create_admin`, ...) run
+  a verified address — one proven through an emailed password link, or one an
+  OAuth provider attested as verified at sign-in (a linked provider alone is
+  not enough; accounts created by OAuth that have not signed in since this
+  change are verified on their next sign-in) — never to `@local` accounts. Operator CLI actions (`reset_password`, `create_admin`, ...) run
   outside the API and send no notice. Share keys (read-only, bound to one
   context) and connector resource tokens do not send notices either.
 

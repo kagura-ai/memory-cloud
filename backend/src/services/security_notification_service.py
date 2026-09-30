@@ -15,33 +15,39 @@ never changes the API response and never rolls the change back.
 
 Coalescing: at most one email per (user, event) per window
 (``security_notification_window_seconds``, default 10 minutes). The first
-occurrence is sent at once and opens a window, recorded as a member of a Redis
-sorted set scored by the window's end. Later occurrences in the window are
-buffered in a Redis list (the first ``_DIGEST_MAX_OCCURRENCES`` are kept, a
-counter keeps the total); when the window closes, the every-minute job
+occurrence is sent at once and opens a window: it gets a random window id,
+stored as the (user, event)'s open-window pointer and in a member of a Redis
+sorted set scored by the window's end. Every other Redis key of the window
+(buffer, counter, claim, attempts) carries that id, so a window's flush only
+ever touches its own occurrences, never those of a newer window of the same
+(user, event). Later occurrences in the window are buffered in a Redis list
+(the first ``_DIGEST_MAX_OCCURRENCES`` are kept, a counter keeps the total).
+When the window closes, the every-minute job
 :func:`flush_due_security_notifications` claims it with ``ZREM`` (only the
 caller whose ``ZREM`` removed the member sends, so several API processes can
-run the job), moves the buffer to a claim key and sends one digest listing
-them. The claim key is deleted only after the send succeeded; a failed send
-puts the occurrences back and retries the window a bounded number of times.
-When the first, immediate send of a window fails, the window is closed again,
-so the next occurrence is sent at once rather than as a follow-up to a notice
+run the job), releases the pointer, moves the buffer to a claim key and sends
+one digest listing them. The claim key is deleted only once the send is done;
+a definite failure (the provider refused or raised, the recipient lookup
+failed, Redis failed mid-flush) re-queues the window a bounded number of
+times. A timed-out send is uncertain (the provider call may still complete in
+its thread), so it counts as sent: never a duplicate. When the first,
+immediate send of a window definitely fails, the window is closed again, so
+the next occurrence is sent at once rather than as a follow-up to a notice
 that never arrived; occurrences buffered while that send was in flight are
-sent right away as a notice of their own. When Redis is unavailable the occurrence is sent at once:
-the failure mode is an extra email, never silence.
+sent right away as a notice of their own. A flush run is bounded by
+``_FLUSH_BATCH`` windows and ``_FLUSH_TIME_BUDGET_SECONDS``; the rest wait for
+the next run. When Redis is unavailable the occurrence is sent at once: the
+failure mode is an extra email, never silence.
 
 Known limitation: delivery is at most once. When a process crashes after a
-window was claimed and before its digest was sent, that digest is lost unless
-a later window of the same user and event closes before the claim's TTL ends
-(its flush recovers the orphaned claim).
+window was claimed and before its digest was sent, that digest is lost.
 
-Recipient: the address on the account at send time, when it is known to be
-deliverable — verified by the password flow (``email_verified_at``) or taken
-from a sign-in provider that verified it (a ``user_oauth_providers`` row;
-accounts are created from provider-verified addresses, and a sign-in syncs a
-provider-side email change onto the account, see
-``auth.roles._sync_existing_user``). Local CLI accounts (``@local``) are never
-emailed.
+Recipient: the address on the account at send time, when it is verified
+(``email_verified_at``): by the password flow (following an emailed link) or
+by an OAuth sign-in whose IdP attested the address as verified
+(``auth.roles.RoleManager.ensure_user``; a sign-in also syncs a verified
+provider-side email change onto the account). A linked provider alone is not
+proof. Local CLI accounts (``@local``) are never emailed.
 
 Content safety: client names are set by whoever registers a client (Dynamic
 Client Registration is public), user agents are client-supplied and key names
@@ -56,7 +62,9 @@ import asyncio
 import ipaddress
 import json
 import re
+import time
 import unicodedata
+import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
@@ -64,7 +72,8 @@ from enum import StrEnum
 from typing import Any, cast
 
 from fastapi import BackgroundTasks, Request
-from sqlalchemy import exists, select
+from redis.exceptions import WatchError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -77,7 +86,6 @@ from models.auth import (
     OAuth2DeviceCode,
     OAuth2Token,
     User,
-    UserOAuthProvider,
 )
 from services.email_service import EmailService, get_email_service
 from utils.datetime import utcnow
@@ -89,24 +97,29 @@ logger = get_logger(__name__)
 # background task (or the flush job) open indefinitely.
 _EMAIL_TIMEOUT_SECONDS = 10.0
 
-# Redis layout. The sorted set holds one member per open window,
-# ``"<user_id>|<event>"``, scored by the window's end (epoch seconds); the list
-# holds the occurrences buffered in that window as JSON.
+# Redis layout. ``_OPEN_KEY`` points at the id of the (user, event)'s open
+# window. The sorted set holds one member per window, ``"<user_id>|<event>|<id>"``,
+# scored by the window's end (or retry time; epoch seconds). Every other key is
+# per window id.
+_OPEN_KEY = "security_notify:open:{user_id}:{event}"
 _DUE_KEY = "security_notify:due"
-_BUFFER_KEY = "security_notify:buffer:{user_id}:{event}"
+_BUFFER_KEY = "security_notify:buffer:{user_id}:{event}:{window_id}"
 # Total occurrences buffered in the window (the list itself is capped).
-_COUNT_KEY = "security_notify:count:{user_id}:{event}"
-# Where a flush holds a claimed window's buffer and count until its send succeeds.
-_CLAIM_BUFFER_KEY = "security_notify:claim:buffer:{user_id}:{event}"
-_CLAIM_COUNT_KEY = "security_notify:claim:count:{user_id}:{event}"
-# Failed digest sends of one window so far.
-_ATTEMPTS_KEY = "security_notify:attempts:{user_id}:{event}"
-# A digest whose send failed is retried this many times, then dropped.
+_COUNT_KEY = "security_notify:count:{user_id}:{event}:{window_id}"
+# Where a flush holds a claimed window's buffer and count until its send is done.
+_CLAIM_BUFFER_KEY = "security_notify:claim:buffer:{user_id}:{event}:{window_id}"
+_CLAIM_COUNT_KEY = "security_notify:claim:count:{user_id}:{event}:{window_id}"
+# Definite failures of the window's digest so far.
+_ATTEMPTS_KEY = "security_notify:attempts:{user_id}:{event}:{window_id}"
+# A digest whose send definitely failed is tried this many times, then dropped.
 _DIGEST_MAX_ATTEMPTS = 3
 _DIGEST_RETRY_DELAY_SECONDS = 60
 _MEMBER_SEPARATOR = "|"
-# Windows claimed per job run; the rest wait for the next minute.
-_FLUSH_BATCH = 200
+# Windows claimed per job run, and the time after which a run stops claiming
+# (sends are sequential with a 10 s timeout each); the rest wait for the next
+# minute.
+_FLUSH_BATCH = 50
+_FLUSH_TIME_BUDGET_SECONDS = 45.0
 # Occurrences listed in one digest; the count of the rest is still reported.
 _DIGEST_MAX_OCCURRENCES = 20
 
@@ -426,9 +439,12 @@ def _is_local_address(email: str) -> bool:
 async def resolve_deliverable_address(db: AsyncSession, user_id: str) -> str | None:
     """Return the owner's address when a notice can be delivered to it.
 
-    Deliverable means verified by the password flow (``email_verified_at``)
-    or taken from a sign-in provider that verified it (a linked
-    ``user_oauth_providers`` row). ``@local`` addresses never are.
+    Deliverable means verified: ``email_verified_at`` is set by the password
+    flow (following an emailed link) or by an OAuth sign-in whose IdP attested
+    the address as verified (``RoleManager.ensure_user``). A linked provider
+    alone is not proof — Google can return an unverified address. Accounts
+    created by OAuth since the #1678 back-fill that have not signed in again
+    are verified on their next OAuth sign-in. ``@local`` addresses never are.
 
     Args:
         db: Async session.
@@ -440,12 +456,9 @@ async def resolve_deliverable_address(db: AsyncSession, user_id: str) -> str | N
     user = (await db.execute(select(User).where(User.user_id == user_id))).scalar_one_or_none()
     if user is None or not user.email or "@" not in user.email:
         return None
-    if _is_local_address(user.email):
+    if _is_local_address(user.email) or user.email_verified_at is None:
         return None
-    if user.email_verified_at is not None:
-        return user.email
-    has_provider = await db.scalar(select(exists().where(UserOAuthProvider.user_id == user_id)))
-    return user.email if has_provider else None
+    return user.email
 
 
 async def _actor_label(db: AsyncSession, actor_user_id: str) -> str | None:
@@ -729,21 +742,22 @@ async def notify_security_event(
             sign_in_method=sanitize_display_text(sign_in_method, _NAME_MAX_CHARS),
             actor=actor,
         )
-        outcome = await _buffer_if_window_open(user_id, event, occurrence)
+        outcome, window_id = await _buffer_if_window_open(user_id, event, occurrence)
         if outcome == _BUFFERED:
             logger.info(
                 "security_notification_buffered", user_id=user_id, security_event=event.value
             )
             return
-        sent = await _deliver(
+        result = await _deliver(
             recipient, user_id, event, [occurrence], digest=False, email=email_service
         )
-        if not sent and outcome == _OPENED:
+        if result == _FAILED and outcome == _OPENED and window_id is not None:
             # The notice that opened the window never went out: close it, so
             # the next occurrence is sent at once and not as a "follow-up".
             # Occurrences buffered while that send was in flight are sent now
-            # as a notice of their own (fail open to notifying).
-            buffered, total = await _close_window(user_id, event)
+            # as a notice of their own (fail open to notifying). A timed-out
+            # send may still arrive, so it keeps the window.
+            buffered, total = await _close_window(user_id, event, window_id)
             if buffered:
                 await _deliver(
                     recipient,
@@ -764,16 +778,22 @@ async def notify_security_event(
         )
 
 
-def _member(user_id: str, event: SecurityEvent) -> str:
-    return f"{user_id}{_MEMBER_SEPARATOR}{event.value}"
+def _member(user_id: str, event: SecurityEvent | str, window_id: str) -> str:
+    return _MEMBER_SEPARATOR.join((user_id, str(event), window_id))
 
 
-def _buffer_key(user_id: str, event: SecurityEvent | str) -> str:
-    return _BUFFER_KEY.format(user_id=user_id, event=str(event))
+def _parse_member(member: str) -> tuple[str, str, str]:
+    """``(user_id, event, window_id)``; the user id may itself contain ``|``."""
+    user_id, event_value, window_id = member.rsplit(_MEMBER_SEPARATOR, 2)
+    return user_id, event_value, window_id
 
 
-def _key(template: str, user_id: str, event: SecurityEvent | str) -> str:
-    return template.format(user_id=user_id, event=str(event))
+def _open_key(user_id: str, event: SecurityEvent | str) -> str:
+    return _OPEN_KEY.format(user_id=user_id, event=str(event))
+
+
+def _key(template: str, user_id: str, event: SecurityEvent | str, window_id: str) -> str:
+    return template.format(user_id=user_id, event=str(event), window_id=window_id)
 
 
 def _window_seconds() -> int:
@@ -785,29 +805,45 @@ _OPENED = "opened"  # send now; this occurrence opened the window
 _BUFFERED = "buffered"  # the window's digest will list it
 _SEND_NOW = "send_now"  # send now; no window is ours (Redis down, lost race)
 
+# Outcomes of _deliver.
+_SENT = "sent"
+_FAILED = "failed"  # definite: the provider refused or raised
+_UNCERTAIN = "uncertain"  # timed out; the call may still complete in its thread
+
 
 async def _buffer_if_window_open(
     user_id: str, event: SecurityEvent, occurrence: SecurityOccurrence
-) -> str:
+) -> tuple[str, str | None]:
     """Open a window, or buffer ``occurrence`` in the one already open.
 
     Returns:
-        ``_OPENED`` when this occurrence opened the window (send it now);
-        ``_BUFFERED`` when the digest will list it; ``_SEND_NOW`` when it must
-        be sent now without a window of its own — Redis is unavailable (fail
-        open to notifying) or the window was claimed under it.
+        ``(outcome, window_id)``: ``_OPENED`` when this occurrence opened the
+        window (send it now); ``_BUFFERED`` when the digest will list it;
+        ``_SEND_NOW`` (no window id) when it must be sent now without a window
+        of its own — Redis is unavailable (fail open to notifying) or the
+        window was claimed under it.
     """
     window = _window_seconds()
-    member = _member(user_id, event)
-    buffer_key = _buffer_key(user_id, event)
-    count_key = _key(_COUNT_KEY, user_id, event)
+    open_key = _open_key(user_id, event)
+    opened_id: str | None = None
     try:
         client = get_redis_client()
-        opened = await client.zadd(_DUE_KEY, {member: _now_score() + window}, nx=True)
-        if opened:
-            return _OPENED
-        payload = occurrence.to_json()
         ttl = _buffer_ttl()
+        window_id = cast(str | None, await client.get(open_key))
+        if window_id is None:
+            candidate = uuid.uuid4().hex
+            if await client.set(open_key, candidate, nx=True, ex=ttl):
+                opened_id = candidate
+                await client.zadd(
+                    _DUE_KEY, {_member(user_id, event, candidate): _now_score() + window}
+                )
+                return _OPENED, candidate
+            window_id = cast(str | None, await client.get(open_key))
+            if window_id is None:
+                return _SEND_NOW, None
+        buffer_key = _key(_BUFFER_KEY, user_id, event, window_id)
+        count_key = _key(_COUNT_KEY, user_id, event, window_id)
+        payload = occurrence.to_json()
         pipe = client.pipeline(transaction=True)
         pipe.rpush(buffer_key, payload)
         # Keep the first occurrences only; the counter keeps the total, so a
@@ -818,13 +854,14 @@ async def _buffer_if_window_open(
         pipe.expire(buffer_key, ttl)
         pipe.expire(count_key, ttl)
         await pipe.execute()
-        # The window may have been claimed between the ZADD and the RPUSH; the
-        # claim then missed this occurrence. Take it back and send it now.
-        if await client.zscore(_DUE_KEY, member) is None:
+        # The window may have been claimed (its pointer released) between the
+        # GET and the RPUSH; the claim then missed this occurrence. Take it
+        # back and send it now.
+        if await client.get(open_key) != window_id:
             if await client.lrem(buffer_key, 1, payload):
                 await client.decr(count_key)
-                return _SEND_NOW
-        return _BUFFERED
+                return _SEND_NOW, None
+        return _BUFFERED, window_id
     except Exception as exc:
         logger.warning(
             "security_notification_redis_unavailable",
@@ -832,16 +869,41 @@ async def _buffer_if_window_open(
             security_event=event.value,
             error_type=type(exc).__name__,
         )
-        return _SEND_NOW
+        if opened_id is not None:
+            # The pointer is set but its due entry is not: undo, best effort,
+            # so later occurrences do not buffer into a window nobody flushes.
+            try:
+                await _release_pointer(get_redis_client(), open_key, opened_id)
+            except Exception:  # noqa: BLE001 — the TTL clears it anyway
+                pass
+        return _SEND_NOW, None
 
 
-async def _close_window(user_id: str, event: SecurityEvent) -> tuple[list[SecurityOccurrence], int]:
+async def _release_pointer(client: Any, open_key: str, window_id: str) -> None:
+    """Delete the open-window pointer if it still names ``window_id`` (CAS)."""
+    async with client.pipeline(transaction=True) as pipe:
+        try:
+            await pipe.watch(open_key)
+            if await pipe.get(open_key) != window_id:
+                await pipe.unwatch()
+                return
+            pipe.multi()
+            pipe.delete(open_key)
+            await pipe.execute()
+        except WatchError:
+            # The pointer changed under us, so it is not ours.
+            return
+
+
+async def _close_window(
+    user_id: str, event: SecurityEvent, window_id: str
+) -> tuple[list[SecurityOccurrence], int]:
     """Close a window whose opening notice failed (never raises).
 
-    The due entry, the buffer and its counter go in one transaction; the
-    occurrences buffered meanwhile are returned so the caller sends them as a
-    notice of their own rather than as a follow-up to an email the owner
-    never got.
+    The due entry and the pointer go first, then the buffer and its counter
+    are read and deleted in one transaction; the occurrences buffered
+    meanwhile are returned so the caller sends them as a notice of their own
+    rather than as a follow-up to an email the owner never got.
 
     Returns:
         The buffered occurrences and their total (``[], 0`` when none or on
@@ -849,14 +911,15 @@ async def _close_window(user_id: str, event: SecurityEvent) -> tuple[list[Securi
     """
     try:
         client = get_redis_client()
-        buffer_key = _buffer_key(user_id, event)
-        count_key = _key(_COUNT_KEY, user_id, event)
+        await client.zrem(_DUE_KEY, _member(user_id, event, window_id))
+        await _release_pointer(client, _open_key(user_id, event), window_id)
+        buffer_key = _key(_BUFFER_KEY, user_id, event, window_id)
+        count_key = _key(_COUNT_KEY, user_id, event, window_id)
         pipe = client.pipeline(transaction=True)
-        pipe.zrem(_DUE_KEY, _member(user_id, event))
         pipe.lrange(buffer_key, 0, -1)
         pipe.get(count_key)
         pipe.delete(buffer_key, count_key)
-        _, raw_items, raw_total, _ = await pipe.execute()
+        raw_items, raw_total, _ = await pipe.execute()
         logger.info(
             "security_notification_window_closed", user_id=user_id, security_event=event.value
         )
@@ -878,7 +941,7 @@ async def _close_window(user_id: str, event: SecurityEvent) -> tuple[list[Securi
 
 
 def _buffer_ttl() -> int:
-    """TTL of buffers, counters and claims: outlives every window and retry."""
+    """TTL of pointers, buffers, counters and claims: outlives windows and retries."""
     return 3 * _window_seconds() + (_DIGEST_MAX_ATTEMPTS + 1) * _DIGEST_RETRY_DELAY_SECONDS + 3600
 
 
@@ -891,6 +954,11 @@ def _now_score() -> float:
     return utcnow().replace(tzinfo=UTC).timestamp()
 
 
+def _monotonic() -> float:
+    """Clock for the flush time budget (patched in tests)."""
+    return time.monotonic()
+
+
 async def _deliver(
     recipient: str,
     user_id: str,
@@ -900,8 +968,15 @@ async def _deliver(
     digest: bool,
     email: EmailService | None,
     total: int | None = None,
-) -> bool:
-    """Send one notice; log (never raise) on failure."""
+) -> str:
+    """Send one notice; log (never raise) on failure.
+
+    Returns:
+        ``_SENT``; ``_FAILED`` when the provider returned False or raised;
+        ``_UNCERTAIN`` when the send timed out — ``wait_for`` cancels the
+        coroutine but not a provider call running in a thread, so the email
+        may still go out and must not be retried.
+    """
     service = email or get_email_service()
     try:
         sent = await asyncio.wait_for(
@@ -916,6 +991,14 @@ async def _deliver(
             ),
             timeout=_EMAIL_TIMEOUT_SECONDS,
         )
+    except TimeoutError:
+        logger.warning(
+            "security_notification_send_uncertain",
+            user_id=user_id,
+            security_event=event.value,
+            digest=digest,
+        )
+        return _UNCERTAIN
     except Exception as exc:
         logger.error(
             "security_notification_send_failed",
@@ -923,7 +1006,7 @@ async def _deliver(
             security_event=event.value,
             error_type=type(exc).__name__,
         )
-        return False
+        return _FAILED
     if not sent:
         logger.error(
             "security_notification_send_failed",
@@ -931,7 +1014,7 @@ async def _deliver(
             security_event=event.value,
             error_type="send_returned_false",
         )
-        return False
+        return _FAILED
     logger.info(
         "security_notification_sent",
         user_id=user_id,
@@ -939,7 +1022,7 @@ async def _deliver(
         occurrences=len(occurrences),
         digest=digest,
     )
-    return True
+    return _SENT
 
 
 async def flush_due_security_notifications(
@@ -952,12 +1035,15 @@ async def flush_due_security_notifications(
 
     Each window is claimed with ``ZREM``; only the caller that removed the
     member goes on, so concurrent runs in several processes send each digest
-    once. The claimer renames the buffer and its counter to claim keys and
-    deletes them only after the digest was sent. When the send (or the
-    recipient lookup) fails, the occurrences go back into the window's buffer
-    and the window is re-queued ``_DIGEST_RETRY_DELAY_SECONDS`` later; after
-    ``_DIGEST_MAX_ATTEMPTS`` failures the digest is logged and dropped. A
-    window with nothing buffered sends nothing. Never raises.
+    once. The claimer releases the window's pointer (a newer occurrence then
+    opens a new window with its own keys), moves the buffer and its counter
+    to claim keys and deletes them once the digest is done. A definite
+    failure — the send, the recipient lookup, or Redis after the claim —
+    re-queues the window ``_DIGEST_RETRY_DELAY_SECONDS`` × attempts later;
+    after ``_DIGEST_MAX_ATTEMPTS`` of them the digest is logged and dropped.
+    A timed-out send counts as sent. A window with nothing buffered sends
+    nothing. A run claims at most ``_FLUSH_BATCH`` windows and stops claiming
+    after ``_FLUSH_TIME_BUDGET_SECONDS``. Never raises.
 
     Args:
         now_score: Current epoch seconds (tests pin it).
@@ -975,22 +1061,23 @@ async def flush_due_security_notifications(
         logger.warning("security_notification_flush_unavailable", error_type=type(exc).__name__)
         return 0
 
+    started = _monotonic()
     sent = 0
-    for raw_member in due:
+    for index, raw_member in enumerate(due):
+        if _monotonic() - started > _FLUSH_TIME_BUDGET_SECONDS:
+            logger.warning(
+                "security_notification_flush_budget_exhausted", deferred=len(due) - index
+            )
+            break
         member = cast(str, raw_member)
-        user_id, _, event_value = member.rpartition(_MEMBER_SEPARATOR)
+        try:
+            user_id, event_value, window_id = _parse_member(member)
+        except ValueError:
+            await client.zrem(_DUE_KEY, member)
+            continue
         try:
             if await client.zrem(_DUE_KEY, member) != 1:
                 continue  # claimed by another process
-            if await _flush_window(
-                client,
-                user_id,
-                event_value,
-                now=now,
-                session_factory=session_factory,
-                email_service=email_service,
-            ):
-                sent += 1
         except Exception as exc:
             logger.error(
                 "security_notification_flush_failed",
@@ -998,6 +1085,36 @@ async def flush_due_security_notifications(
                 security_event=event_value,
                 error_type=type(exc).__name__,
             )
+            continue
+        try:
+            if await _flush_window(
+                client,
+                user_id,
+                event_value,
+                window_id,
+                now=now,
+                session_factory=session_factory,
+                email_service=email_service,
+            ):
+                sent += 1
+        except Exception as exc:
+            # Claimed but not finished (Redis failed mid-flush): without a due
+            # entry nothing would ever retry it, so re-queue it.
+            logger.error(
+                "security_notification_flush_failed",
+                user_id=user_id,
+                security_event=event_value,
+                error_type=type(exc).__name__,
+            )
+            try:
+                await _retry_window(client, user_id, event_value, window_id, now=now)
+            except Exception as retry_exc:
+                logger.error(
+                    "security_notification_requeue_failed",
+                    user_id=user_id,
+                    security_event=event_value,
+                    error_type=type(retry_exc).__name__,
+                )
     return sent
 
 
@@ -1005,25 +1122,22 @@ async def _flush_window(
     client: Any,
     user_id: str,
     event_value: str,
+    window_id: str,
     *,
     now: float,
     session_factory: Callable[[], AsyncSession] | None,
     email_service: EmailService | None,
 ) -> bool:
     """Send the digest of one claimed window; True when it was sent."""
-    buffer_key = _buffer_key(user_id, event_value)
-    count_key = _key(_COUNT_KEY, user_id, event_value)
-    claim_buffer = _key(_CLAIM_BUFFER_KEY, user_id, event_value)
-    claim_count = _key(_CLAIM_COUNT_KEY, user_id, event_value)
-    attempts_key = _key(_ATTEMPTS_KEY, user_id, event_value)
+    buffer_key = _key(_BUFFER_KEY, user_id, event_value, window_id)
+    count_key = _key(_COUNT_KEY, user_id, event_value, window_id)
+    claim_buffer = _key(_CLAIM_BUFFER_KEY, user_id, event_value, window_id)
+    claim_count = _key(_CLAIM_COUNT_KEY, user_id, event_value, window_id)
+    attempts_key = _key(_ATTEMPTS_KEY, user_id, event_value, window_id)
 
-    await _recover_orphaned_claim(client, user_id, event_value)
-    if await client.exists(buffer_key):
-        # RENAME keeps the TTL; a missing counter only loses the "N more" total.
-        pipe = client.pipeline(transaction=True)
-        pipe.rename(buffer_key, claim_buffer)
-        pipe.rename(count_key, claim_count)
-        await pipe.execute(raise_on_error=False)
+    # From now on a new occurrence opens a new window with its own keys.
+    await _release_pointer(client, _open_key(user_id, event_value), window_id)
+    await _move_buffer_to_claim(client, buffer_key, count_key, claim_buffer, claim_count)
     raw_items = await client.lrange(claim_buffer, 0, -1)
     if not raw_items:
         await client.delete(claim_buffer, claim_count, attempts_key)
@@ -1053,68 +1167,75 @@ async def _flush_window(
             security_event=event_value,
             error_type=type(exc).__name__,
         )
-        await _requeue_digest(client, user_id, event, raw_items, total, now=now)
+        await _retry_window(client, user_id, event_value, window_id, now=now, total=total)
         return False
     if recipient is None:
         logger.info("security_notification_skipped", user_id=user_id, security_event=event_value)
         await client.delete(claim_buffer, claim_count, attempts_key)
         return False
 
-    if await _deliver(
+    result = await _deliver(
         recipient, user_id, event, occurrences, digest=True, email=email_service, total=total
-    ):
-        await client.delete(claim_buffer, claim_count, attempts_key)
-        return True
-    await _requeue_digest(client, user_id, event, raw_items, total, now=now)
-    return False
+    )
+    if result == _FAILED:
+        await _retry_window(client, user_id, event_value, window_id, now=now, total=total)
+        return False
+    # Sent, or uncertain (a timed-out send may still arrive): never resend.
+    await client.delete(claim_buffer, claim_count, attempts_key)
+    return result == _SENT
 
 
-async def _recover_orphaned_claim(client: Any, user_id: str, event_value: str) -> None:
-    """Put a claim left behind by a crashed flush back in front of the buffer.
+async def _move_buffer_to_claim(
+    client: Any, buffer_key: str, count_key: str, claim_buffer: str, claim_count: str
+) -> None:
+    """Move the window's buffer (and counter) under its claim keys.
 
-    Without this the RENAME below would overwrite it (the occurrences lost)
-    or, with no newer buffer, its items would be sent under this window's
-    count without being accounted for.
+    The first claim is a RENAME (atomic; keeps the TTL). A retried window
+    already has a claim, left by the failed attempt: occurrences that reached
+    the buffer since then are appended to it rather than overwriting it.
     """
-    claim_buffer = _key(_CLAIM_BUFFER_KEY, user_id, event_value)
-    claim_count = _key(_CLAIM_COUNT_KEY, user_id, event_value)
-    orphaned = await client.lrange(claim_buffer, 0, -1)
-    if not orphaned:
-        await client.delete(claim_count)
+    if not await client.exists(buffer_key):
         return
-    orphaned_total = max(int(await client.get(claim_count) or 0), len(orphaned))
-    buffer_key = _buffer_key(user_id, event_value)
-    count_key = _key(_COUNT_KEY, user_id, event_value)
+    if not await client.exists(claim_buffer):
+        pipe = client.pipeline(transaction=True)
+        pipe.rename(buffer_key, claim_buffer)
+        pipe.rename(count_key, claim_count)
+        await pipe.execute(raise_on_error=False)
+        return
+    pipe = client.pipeline(transaction=True)
+    pipe.lrange(buffer_key, 0, -1)
+    pipe.get(count_key)
+    pipe.delete(buffer_key, count_key)
+    late_items, late_total, _ = await pipe.execute()
+    if not late_items:
+        return
     ttl = _buffer_ttl()
     pipe = client.pipeline(transaction=True)
-    pipe.lpush(buffer_key, *reversed(orphaned))
-    pipe.ltrim(buffer_key, 0, _DIGEST_MAX_OCCURRENCES - 1)
-    pipe.incrby(count_key, orphaned_total)
-    pipe.expire(buffer_key, ttl)
-    pipe.expire(count_key, ttl)
-    pipe.delete(claim_buffer, claim_count)
+    pipe.rpush(claim_buffer, *late_items)
+    pipe.ltrim(claim_buffer, 0, _DIGEST_MAX_OCCURRENCES - 1)
+    pipe.incrby(claim_count, max(int(late_total or 0), len(late_items)))
+    pipe.expire(claim_buffer, ttl)
+    pipe.expire(claim_count, ttl)
     await pipe.execute()
-    logger.warning(
-        "security_notification_orphaned_claim_recovered",
-        user_id=user_id,
-        security_event=event_value,
-        occurrences=orphaned_total,
-    )
 
 
-async def _requeue_digest(
+async def _retry_window(
     client: Any,
     user_id: str,
-    event: SecurityEvent,
-    raw_items: list[str],
-    total: int,
+    event_value: str,
+    window_id: str,
     *,
     now: float,
+    total: int | None = None,
 ) -> None:
-    """Put a failed digest back into its window, or drop it after the last try."""
-    claim_buffer = _key(_CLAIM_BUFFER_KEY, user_id, event)
-    claim_count = _key(_CLAIM_COUNT_KEY, user_id, event)
-    attempts_key = _key(_ATTEMPTS_KEY, user_id, event)
+    """Re-queue a claimed window after a definite failure, or drop it at the bound.
+
+    The claim (and any buffer) stays under the window's keys; the next flush
+    of the re-added due entry picks them up.
+    """
+    claim_buffer = _key(_CLAIM_BUFFER_KEY, user_id, event_value, window_id)
+    claim_count = _key(_CLAIM_COUNT_KEY, user_id, event_value, window_id)
+    attempts_key = _key(_ATTEMPTS_KEY, user_id, event_value, window_id)
     ttl = _buffer_ttl()
     attempts = int(await client.incr(attempts_key))
     await client.expire(attempts_key, ttl)
@@ -1122,32 +1243,28 @@ async def _requeue_digest(
         logger.error(
             "security_notification_digest_dropped",
             user_id=user_id,
-            security_event=event.value,
+            security_event=event_value,
             attempts=attempts,
             occurrences=total,
         )
-        await client.delete(claim_buffer, claim_count, attempts_key)
+        await client.delete(
+            claim_buffer,
+            claim_count,
+            attempts_key,
+            _key(_BUFFER_KEY, user_id, event_value, window_id),
+            _key(_COUNT_KEY, user_id, event_value, window_id),
+        )
         return
-    buffer_key = _buffer_key(user_id, event)
-    count_key = _key(_COUNT_KEY, user_id, event)
-    pipe = client.pipeline(transaction=True)
-    # Back in front of anything a newer window buffered meanwhile.
-    pipe.lpush(buffer_key, *reversed(raw_items))
-    pipe.ltrim(buffer_key, 0, _DIGEST_MAX_OCCURRENCES - 1)
-    pipe.incrby(count_key, total)
-    pipe.expire(buffer_key, ttl)
-    pipe.expire(count_key, ttl)
-    pipe.delete(claim_buffer, claim_count)
-    # NX: when a newer window is already open, the items join its digest.
-    pipe.zadd(
+    await client.expire(claim_buffer, ttl)
+    await client.expire(claim_count, ttl)
+    await client.zadd(
         _DUE_KEY,
-        {_member(user_id, event): now + _DIGEST_RETRY_DELAY_SECONDS * attempts},
+        {_member(user_id, event_value, window_id): now + _DIGEST_RETRY_DELAY_SECONDS * attempts},
         nx=True,
     )
-    await pipe.execute()
     logger.warning(
         "security_notification_digest_requeued",
         user_id=user_id,
-        security_event=event.value,
+        security_event=event_value,
         attempts=attempts,
     )

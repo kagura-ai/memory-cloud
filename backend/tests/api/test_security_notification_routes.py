@@ -605,6 +605,7 @@ class TestAdminIsNamed:
             role="user",
             is_initial_admin=False,
             auth_method="oauth",
+            email_verified_at=utcnow(),  # verified on an OAuth sign-in
         )
         admin = User(
             user_id=f"sn-admin-{suffix}",
@@ -638,7 +639,7 @@ class TestAdminIsNamed:
             )
 
             kwargs = email.send_security_notification.await_args.kwargs
-            assert kwargs["to_email"] == owner.email  # OAuth-only owner, no verified_at
+            assert kwargs["to_email"] == owner.email
             (occurrence,) = kwargs["occurrences"]
             assert occurrence.actor is not None
             assert occurrence.actor.startswith("Ada Admin (admin-")
