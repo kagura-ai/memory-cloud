@@ -21,6 +21,7 @@ from api.routes import password as password_routes
 from auth.dependencies import require_session_auth
 from db.base import get_db
 from services import password_account_service as password_service_module
+from services import security_notification_service
 from utils.exceptions import MemoryCloudException, RateLimitError, RedisError
 
 
@@ -215,7 +216,9 @@ class TestSessionRevocation:
     @pytest.mark.asyncio
     async def test_reset_revokes_every_session(self, counters, service, sessions) -> None:
         body = password_routes.PasswordLinkBody(token="t" * 43, new_password="x")
-        response = await password_routes.reset_password(body, _request(cookie="mine"), db=None)
+        response = await password_routes.reset_password(
+            body, _request(cookie="mine"), db=None, background_tasks=BackgroundTasks()
+        )
         assert response.status_code == 204
         sessions.delete_user_sessions.assert_called_once_with(
             "u-1", exclude_session_id=None, strict=True
@@ -224,7 +227,9 @@ class TestSessionRevocation:
     @pytest.mark.asyncio
     async def test_setup_keeps_this_browser(self, counters, service, sessions) -> None:
         body = password_routes.PasswordLinkBody(token="t" * 43, new_password="x")
-        await password_routes.setup_password(body, _request(cookie="mine"), db=None)
+        await password_routes.setup_password(
+            body, _request(cookie="mine"), db=None, background_tasks=BackgroundTasks()
+        )
         sessions.delete_user_sessions.assert_called_once_with(
             "u-1", exclude_session_id="mine", strict=True
         )
@@ -233,7 +238,11 @@ class TestSessionRevocation:
     async def test_change_keeps_the_current_session(self, counters, service, sessions) -> None:
         body = password_routes.PasswordChangeBody(current_password="a", new_password="b")
         response = await password_routes.change_password(
-            body, _request(cookie="current"), {"user_id": "u-1"}, db=None
+            body,
+            _request(cookie="current"),
+            {"user_id": "u-1"},
+            db=None,
+            background_tasks=BackgroundTasks(),
         )
         assert response.status_code == 204
         sessions.delete_user_sessions.assert_called_once_with(
@@ -244,7 +253,11 @@ class TestSessionRevocation:
     async def test_remove_keeps_the_current_session(self, counters, service, sessions) -> None:
         body = password_routes.PasswordRemoveBody(current_password="a")
         await password_routes.remove_password(
-            body, _request(cookie="current"), {"user_id": "u-1"}, db=None
+            body,
+            _request(cookie="current"),
+            {"user_id": "u-1"},
+            db=None,
+            background_tasks=BackgroundTasks(),
         )
         sessions.delete_user_sessions.assert_called_once_with(
             "u-1", exclude_session_id="current", strict=True
@@ -256,7 +269,11 @@ class TestSessionRevocation:
         body = password_routes.PasswordChangeBody(current_password="a", new_password="b")
         with pytest.raises(RuntimeError):
             await password_routes.change_password(
-                body, _request(cookie="current"), {"user_id": "u-1"}, db=None
+                body,
+                _request(cookie="current"),
+                {"user_id": "u-1"},
+                db=None,
+                background_tasks=BackgroundTasks(),
             )
         sessions.delete_user_sessions.assert_not_called()
 
@@ -276,19 +293,25 @@ class TestRevocationFailure:
     async def test_each_flow_answers_503(self, flow, counters, service, broken_sessions) -> None:
         link = password_routes.PasswordLinkBody(token="t" * 43, new_password="x")
         calls = {
-            "reset": lambda: password_routes.reset_password(link, _request(), db=None),
-            "setup": lambda: password_routes.setup_password(link, _request(), db=None),
+            "reset": lambda: password_routes.reset_password(
+                link, _request(), db=None, background_tasks=BackgroundTasks()
+            ),
+            "setup": lambda: password_routes.setup_password(
+                link, _request(), db=None, background_tasks=BackgroundTasks()
+            ),
             "change": lambda: password_routes.change_password(
                 password_routes.PasswordChangeBody(current_password="a", new_password="b"),
                 _request(),
                 {"user_id": "u-1"},
                 db=None,
+                background_tasks=BackgroundTasks(),
             ),
             "remove": lambda: password_routes.remove_password(
                 password_routes.PasswordRemoveBody(current_password="a"),
                 _request(),
                 {"user_id": "u-1"},
                 db=None,
+                background_tasks=BackgroundTasks(),
             ),
         }
         with pytest.raises(MemoryCloudException) as exc_info:
@@ -301,7 +324,9 @@ class TestRevocationFailure:
     async def test_revocation_is_handed_to_the_service(self, counters, service, sessions) -> None:
         # The service calls it before its commit, so a failure rolls back.
         body = password_routes.PasswordChangeBody(current_password="a", new_password="b")
-        await password_routes.change_password(body, _request(), {"user_id": "u-1"}, db=None)
+        await password_routes.change_password(
+            body, _request(), {"user_id": "u-1"}, db=None, background_tasks=BackgroundTasks()
+        )
         assert callable(service.change.await_args.kwargs["revoke_sessions"])
 
 
@@ -310,13 +335,16 @@ class TestLimits:
     async def test_current_password_guesses_are_limited(self, counters, service, sessions) -> None:
         body = password_routes.PasswordChangeBody(current_password="a", new_password="b")
         for _ in range(password_routes._CURRENT_PASSWORD_ATTEMPTS_PER_USER):
-            await password_routes.change_password(body, _request(), {"user_id": "u-1"}, db=None)
+            await password_routes.change_password(
+                body, _request(), {"user_id": "u-1"}, db=None, background_tasks=BackgroundTasks()
+            )
         with pytest.raises(RateLimitError):
             await password_routes.remove_password(
                 password_routes.PasswordRemoveBody(current_password="a"),
                 _request(),
                 {"user_id": "u-1"},
                 db=None,
+                background_tasks=BackgroundTasks(),
             )
 
     @pytest.mark.asyncio
@@ -393,3 +421,76 @@ def test_revocation_fails_closed_without_a_session_manager(monkeypatch) -> None:
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.error_code == "AUTH-304"
+
+
+class TestSecurityNotices:
+    """Each completed password write schedules an owner notice (#1752)."""
+
+    @staticmethod
+    def _notices(tasks: BackgroundTasks) -> list[tuple[tuple, dict]]:
+        return [
+            (task.args, dict(task.kwargs))
+            for task in tasks.tasks
+            if task.func is security_notification_service.notify_security_event
+        ]
+
+    @pytest.mark.parametrize(
+        ("flow", "event", "method"),
+        [
+            ("reset", "password_reset", None),
+            ("setup", "password_set", None),
+            ("change", "password_changed", None),
+            ("remove", "sign_in_method_removed", "Password"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_each_flow_schedules_a_notice(
+        self, flow, event, method, counters, service, sessions
+    ) -> None:
+        tasks = BackgroundTasks()
+        link = password_routes.PasswordLinkBody(token="t" * 43, new_password="x")
+        calls = {
+            "reset": lambda: password_routes.reset_password(
+                link, _request(), db=None, background_tasks=tasks
+            ),
+            "setup": lambda: password_routes.setup_password(
+                link, _request(), db=None, background_tasks=tasks
+            ),
+            "change": lambda: password_routes.change_password(
+                password_routes.PasswordChangeBody(current_password="a", new_password="b"),
+                _request(),
+                {"user_id": "u-1"},
+                db=None,
+                background_tasks=tasks,
+            ),
+            "remove": lambda: password_routes.remove_password(
+                password_routes.PasswordRemoveBody(current_password="a"),
+                _request(),
+                {"user_id": "u-1"},
+                db=None,
+                background_tasks=tasks,
+            ),
+        }
+        response = await calls[flow]()
+
+        assert response.status_code == 204
+        ((args, kwargs),) = self._notices(tasks)
+        assert args == ("u-1", event)
+        assert kwargs["ip"] == "192.0.2.10"
+        assert kwargs["user_agent"] == "pytest"
+        assert kwargs["sign_in_method"] == method
+        assert kwargs["actor_user_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_failed_write_schedules_nothing(self, counters, service, sessions) -> None:
+        service.change.side_effect = RuntimeError("wrong password")
+        tasks = BackgroundTasks()
+        with pytest.raises(RuntimeError):
+            await password_routes.change_password(
+                password_routes.PasswordChangeBody(current_password="a", new_password="b"),
+                _request(),
+                {"user_id": "u-1"},
+                db=None,
+                background_tasks=tasks,
+            )
+        assert self._notices(tasks) == []

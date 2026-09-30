@@ -22,7 +22,8 @@ Signed in (browser session only — never an API key):
 
 None of these creates an account. Only browser sessions are revoked: OAuth /
 MCP tokens and API keys keep working. Revocation runs before the password
-write commits, and a failure answers 503 with the password unchanged.
+write commits, and a failure answers 503 with the password unchanged. Every
+completed write emails the owner a security notice (#1752) after the commit.
 """
 
 from __future__ import annotations
@@ -43,6 +44,10 @@ from services.password_account_service import (
     PasswordAccountService,
     normalize_email,
     process_reset_request,
+)
+from services.security_notification_service import (
+    SecurityEvent,
+    schedule_security_notification,
 )
 from utils.exceptions import MemoryCloudException, RateLimitError, RedisError
 from utils.logger import get_logger
@@ -211,22 +216,27 @@ async def request_password_reset(
 async def reset_password(
     body: PasswordLinkBody,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     """Set a new password from a reset link; sign out every browser session.
 
     Returns 204; the person then signs in with the new password. 400 for an
     unknown, expired or used link; 422 when the password breaks the policy.
+    The owner is emailed a security notice once the reset has committed.
     """
     ip = auth_module._login_client_ip(request)
     if await _over_limit(f"pw_link_ip:{ip}", _LINK_ATTEMPTS_PER_IP):
         raise RateLimitError("Too many attempts. Please try again later.")
-    await PasswordAccountService(db).complete_reset(
+    user_id = await PasswordAccountService(db).complete_reset(
         raw_token=body.token,
         new_password=body.new_password,
         ip_address=ip,
         user_agent=request.headers.get("user-agent"),
         revoke_sessions=_session_revoker(keep_session_id=None),
+    )
+    schedule_security_notification(
+        background_tasks, user_id=user_id, event=SecurityEvent.PASSWORD_RESET, request=request
     )
     return Response(status_code=204)
 
@@ -235,18 +245,19 @@ async def reset_password(
 async def setup_password(
     body: PasswordLinkBody,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     """Set the first password from a set-up link.
 
     Following the link proves the mailbox, so the email is marked verified.
     The account's other browser sessions are revoked; a session in this browser (the
-    one that asked for the link) is kept.
+    one that asked for the link) is kept. The owner is emailed a security notice.
     """
     ip = auth_module._login_client_ip(request)
     if await _over_limit(f"pw_link_ip:{ip}", _LINK_ATTEMPTS_PER_IP):
         raise RateLimitError("Too many attempts. Please try again later.")
-    await PasswordAccountService(db).complete_setup(
+    user_id = await PasswordAccountService(db).complete_setup(
         raw_token=body.token,
         new_password=body.new_password,
         ip_address=ip,
@@ -254,6 +265,9 @@ async def setup_password(
         revoke_sessions=_session_revoker(
             keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME)
         ),
+    )
+    schedule_security_notification(
+        background_tasks, user_id=user_id, event=SecurityEvent.PASSWORD_SET, request=request
     )
     return Response(status_code=204)
 
@@ -293,12 +307,14 @@ async def change_password(
     body: PasswordChangeBody,
     request: Request,
     user: SessionUser,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     """Change the password; every other browser session is revoked.
 
     403 when ``current_password`` is wrong; 409 when there is no password;
-    422 when the new password breaks the policy.
+    422 when the new password breaks the policy. The owner is emailed a
+    security notice.
     """
     user_id = user["user_id"]
     if await _over_limit(f"pw_current_user:{user_id}", _CURRENT_PASSWORD_ATTEMPTS_PER_USER):
@@ -313,6 +329,9 @@ async def change_password(
             keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME)
         ),
     )
+    schedule_security_notification(
+        background_tasks, user_id=user_id, event=SecurityEvent.PASSWORD_CHANGED, request=request
+    )
     return Response(status_code=204)
 
 
@@ -321,12 +340,13 @@ async def remove_password(
     body: PasswordRemoveBody,
     request: Request,
     user: SessionUser,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     """Remove the password. Refused (409) while no OAuth provider is linked.
 
     403 when ``current_password`` is wrong. Every other browser session is
-    revoked.
+    revoked. The owner is emailed a security notice (sign-in method removed).
     """
     user_id = user["user_id"]
     if await _over_limit(f"pw_current_user:{user_id}", _CURRENT_PASSWORD_ATTEMPTS_PER_USER):
@@ -339,5 +359,12 @@ async def remove_password(
         revoke_sessions=_session_revoker(
             keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME)
         ),
+    )
+    schedule_security_notification(
+        background_tasks,
+        user_id=user_id,
+        event=SecurityEvent.SIGN_IN_METHOD_REMOVED,
+        request=request,
+        sign_in_method="Password",
     )
     return Response(status_code=204)
