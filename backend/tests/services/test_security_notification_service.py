@@ -1801,3 +1801,89 @@ class TestStaleBacklog:
         assert _expired() == len(users)
         assert await redis.zcard(sns._DUE_KEY) == 0
         email.send_security_notification.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Copilot round 6: response-read failures are uncertain; erasure scans once
+# ---------------------------------------------------------------------------
+
+
+def _requests_connection_error(context: Exception) -> Exception:
+    """requests.ConnectionError raised while handling a urllib3 error."""
+    import requests
+
+    outer = requests.exceptions.ConnectionError(context)
+    outer.__context__ = context
+    return outer
+
+
+def _uncertain_errors() -> list[Exception]:
+    import httpx
+    import requests
+    import urllib3
+
+    return [
+        requests.exceptions.ChunkedEncodingError("response ended early"),
+        _requests_connection_error(
+            urllib3.exceptions.ProtocolError("Connection aborted.", ConnectionResetError())
+        ),
+        httpx.ReadError("read failed"),
+        httpx.RemoteProtocolError("peer closed connection"),
+    ]
+
+
+def _definite_errors() -> list[Exception]:
+    import httpx
+    import urllib3
+
+    return [
+        _requests_connection_error(
+            urllib3.exceptions.NewConnectionError(None, "connection refused")
+        ),
+        httpx.ConnectError("connection refused"),
+        httpx.ConnectTimeout("connect timed out"),
+    ]
+
+
+class TestProviderReadErrors:
+    def _send_with(self, monkeypatch, inner: Exception):
+        import services.email_providers.resend as resend_module
+        from services.email_providers.resend import ResendEmailService
+
+        monkeypatch.setattr(resend_module.resend.Emails, "send", _sdk_http_error(inner))
+        service = ResendEmailService(api_key="re_test", from_email="noreply@example.test")
+        return _send_notice(service)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("index", range(4))
+    async def test_response_read_failures_are_uncertain(self, monkeypatch, index) -> None:
+        with pytest.raises(TimeoutError):
+            await self._send_with(monkeypatch, _uncertain_errors()[index])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("index", range(3))
+    async def test_connection_failures_stay_definite(self, monkeypatch, index) -> None:
+        assert await self._send_with(monkeypatch, _definite_errors()[index]) is False
+
+
+class TestPurgeScansOnce:
+    @pytest.mark.asyncio
+    async def test_erasure_scans_the_keyspace_once(
+        self, redis, deliverable, email, monkeypatch
+    ) -> None:
+        await _notify(email, key_name="first")
+        await _notify(email, key_name="second")
+        await _notify(email, SecurityEvent.PASSWORD_CHANGED)
+        await redis.set(_k(sns._LOCK_KEY, "b" * 32), "held")
+        real_scan = redis.scan_iter
+        calls: list[object] = []
+
+        def _counting_scan(*args, **kwargs):
+            calls.append(kwargs.get("match"))
+            return real_scan(*args, **kwargs)
+
+        monkeypatch.setattr(redis, "scan_iter", _counting_scan)
+        await sns.purge_user_notification_state(OWNER)
+
+        assert len(calls) == 1
+        assert await _window_keys(redis) == []

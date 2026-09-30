@@ -1894,14 +1894,16 @@ def _first_authorization_of(client_id: str | None, user_id: str | None) -> bool:
     """
     if not client_id or not user_id:
         return False
-    session = get_sync_session()
+    session = None
     try:
+        session = get_sync_session()
         return is_first_client_authorization(session, client_id=client_id, user_id=user_id)
     except Exception as exc:
         logger.warning("oauth_first_authorization_check_failed", error_type=type(exc).__name__)
         return True
     finally:
-        session.close()
+        if session is not None:
+            session.close()
 
 
 def _grant_issued(location: str) -> bool:

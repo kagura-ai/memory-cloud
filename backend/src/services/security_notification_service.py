@@ -1119,7 +1119,8 @@ async def purge_user_notification_state(user_id: str) -> int:
     """Delete every security-notice key of ``user_id`` (account erasure).
 
     Removes the user's due entries, open-window pointers and every per-window
-    buffer, counter, claim and attempts key. Keys are matched exactly (the
+    buffer, counter, claim, attempts and lock key, with one ``ZSCAN`` of the
+    due set and one ``SCAN`` of the keyspace. Keys are matched exactly (the
     window id is the last segment), so another user whose id shares a prefix
     is never touched. Never raises.
 
@@ -1146,9 +1147,12 @@ async def purge_user_notification_state(user_id: str) -> int:
         if members:
             removed += int(await client.zrem(_DUE_KEY, *members))
 
-        keys: set[str] = set()
-        for event in SecurityEvent:
-            keys.add(_open_key(user_id, event))
+        # One keyspace pass: every key of the user has ":<user_id>:" after its
+        # type; the exact per-window prefixes are then checked locally.
+        keys: set[str] = {_open_key(user_id, event) for event in SecurityEvent}
+        window_prefixes = tuple(
+            _key(template, user_id, event, "")
+            for event in SecurityEvent
             for template in (
                 _BUFFER_KEY,
                 _COUNT_KEY,
@@ -1156,13 +1160,15 @@ async def purge_user_notification_state(user_id: str) -> int:
                 _CLAIM_COUNT_KEY,
                 _ATTEMPTS_KEY,
                 _LOCK_KEY,
-            ):
-                exact_prefix = _key(template, user_id, event, "")
-                async for raw_key in client.scan_iter(match=_glob_escape(exact_prefix) + "*"):
-                    key = cast(str, raw_key)
-                    window_id = key[len(exact_prefix) :]
-                    if key.startswith(exact_prefix) and _WINDOW_ID_RE.fullmatch(window_id):
-                        keys.add(key)
+            )
+        )
+        match = f"security_notify:*:{_glob_escape(user_id)}:*"
+        async for raw_key in client.scan_iter(match=match, count=1000):
+            key = cast(str, raw_key)
+            for prefix in window_prefixes:
+                if key.startswith(prefix) and _WINDOW_ID_RE.fullmatch(key[len(prefix) :]):
+                    keys.add(key)
+                    break
         if keys:
             removed += int(await client.delete(*keys))
     except Exception as exc:

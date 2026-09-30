@@ -977,3 +977,11 @@ class TestCommitBeforeNotice:
         assert [c[0] for c in order.mock_calls] == ["commit", "schedule"]
         ((args, _),) = _notices(tasks)
         assert args == ("u-1", "password_changed")
+
+
+class TestFirstAuthorizationSessionFailure:
+    def test_session_acquisition_failure_fails_open(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            oauth_routes, "get_sync_session", MagicMock(side_effect=OSError("pool exhausted"))
+        )
+        assert oauth_routes._first_authorization_of("cid", "u-1") is True

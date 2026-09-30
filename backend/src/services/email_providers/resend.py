@@ -38,18 +38,28 @@ def _may_have_been_delivered(exc: BaseException) -> bool:
 
     The SDK wraps transport errors (``ResendError`` raised while handling a
     ``RuntimeError`` caused by the ``requests`` / ``httpx`` exception), so the
-    whole chain is searched. Only a read timeout is uncertain: the request was
-    sent and the answer never came. A connect timeout, a refused connection or
-    an API error response are definite failures.
+    whole chain is searched. A failure while waiting for or reading the
+    response is uncertain: a read timeout, a read error, a response cut short,
+    or the connection dropped mid-request. Failing to connect (refused, DNS,
+    connect timeout) and an API error response are definite failures.
     """
     import httpx
     import requests
+    import urllib3
 
+    uncertain = (
+        requests.exceptions.ReadTimeout,
+        requests.exceptions.ChunkedEncodingError,
+        urllib3.exceptions.ProtocolError,
+        httpx.ReadTimeout,
+        httpx.ReadError,
+        httpx.RemoteProtocolError,
+    )
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, (requests.exceptions.ReadTimeout, httpx.ReadTimeout)):
+        if isinstance(current, uncertain):
             return True
         current = current.__cause__ or current.__context__
     return False
