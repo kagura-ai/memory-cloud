@@ -42,8 +42,9 @@ the next run. When Redis is unavailable the occurrence is sent at once: the
 failure mode is an extra email, never silence.
 
 Pending state (pointers, buffers, counters, claims) is kept for
-``_STATE_RETENTION_SECONDS`` (7 days), so a stalled scheduler does not lose
-committed repeats; a due entry older than that is dropped with a
+``_STATE_RETENTION_SECONDS`` (7 days) past its window's deadline, so a stalled
+scheduler does not lose committed repeats; a due entry older than that is
+dropped with a
 ``security_notification_window_expired`` warning, and a claimed window whose
 details expired still gets a digest that reports how many occurrences could
 not be listed.
@@ -1095,8 +1096,14 @@ def _glob_escape(text: str) -> str:
 
 
 def _buffer_ttl() -> int:
-    """TTL of pointers, buffers, counters and claims (``_STATE_RETENTION_SECONDS``)."""
-    return _STATE_RETENTION_SECONDS
+    """TTL of pointers, buffers, counters and claims.
+
+    A window's keys are written up to one window before its deadline, and a
+    window counts as stale only ``_STATE_RETENTION_SECONDS`` after that
+    deadline. The TTL covers both plus an hour of retry backoff, so a
+    pending repeat never expires before the stale sweep reports it.
+    """
+    return _STATE_RETENTION_SECONDS + _window_seconds() + 60 * 60
 
 
 def _pointer_value(window_id: str, deadline: float) -> str:

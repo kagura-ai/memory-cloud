@@ -1411,7 +1411,10 @@ class TestRequeuedWindowNotClaimedEarly:
 
 class TestStalledScheduler:
     def test_pending_state_outlives_a_stalled_job(self) -> None:
-        assert sns._buffer_ttl() == sns._STATE_RETENTION_SECONDS >= 7 * 24 * 60 * 60
+        assert sns._STATE_RETENTION_SECONDS >= 7 * 24 * 60 * 60
+        # Keys outlive the stale cutoff (deadline + retention) even when
+        # written at the window's start (Copilot review).
+        assert sns._buffer_ttl() >= sns._STATE_RETENTION_SECONDS + sns._window_seconds()
 
     @pytest.mark.asyncio
     async def test_buffer_ttl_is_the_retention(self, redis, deliverable, email) -> None:
@@ -1419,7 +1422,7 @@ class TestStalledScheduler:
         await _notify(email, key_name="second")
         wid = await _wid(redis)
         ttl = await redis.ttl(_k(sns._BUFFER_KEY, wid))
-        assert sns._STATE_RETENTION_SECONDS - 5 < ttl <= sns._STATE_RETENTION_SECONDS
+        assert sns._buffer_ttl() - 5 < ttl <= sns._buffer_ttl()
         assert await redis.ttl(sns._open_key(OWNER, EVENT)) > 24 * 60 * 60
 
     @pytest.mark.asyncio
