@@ -239,6 +239,23 @@ def test_recall_is_destructive_because_it_learns(name):
     assert "readOnly" not in _by_name()[name]
 
 
+@pytest.mark.parametrize(
+    ("name", "param", "phrase"),
+    [
+        ("recall", None, "updates association strengths and may promote returned memories"),
+        ("secret_put", None, "not listed in grant_pubkey_ids are revoked"),
+        ("update_context", "resource_id", "revokes resource tokens issued for the old slug"),
+    ],
+)
+def test_destructive_descriptions_name_their_side_effect(name, param, phrase):
+    """A destructiveHint says a change happens; the description must say which
+    (#1749, Directory Policy 2.B)."""
+    tool = _by_name()[name]
+    assert tool["annotations"]["destructiveHint"] is True
+    text = tool["inputSchema"]["properties"][param]["description"] if param else tool["description"]
+    assert phrase in text
+
+
 def test_an_audited_read_stays_read_only():
     """secret_get writes a tamper-evident audit entry and nothing else; audit
     logging does not count as modifying the environment."""

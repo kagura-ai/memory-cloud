@@ -63,6 +63,10 @@ SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 # parameters (limit / cursor / max_chars / include_details on eleven tools)
 # and one line per tool naming the truncation flags. Schema, not prose: full
 # list 99,472, core list 33,113, recall 6,782, remember 6,176.
+#
+# #1749 named the side effect of recall, secret_put and update_context's
+# resource_id in one sentence each: full list 99,688, core list 33,196, recall
+# 6,865. Every ceiling still holds, so none moved.
 FULL_LIST_BUDGET = 100_500  # (#1743) was 96,000
 CORE_LIST_BUDGET = 33_600  # (#1743) was 32,500
 RECALL_BUDGET = 6_900  # (#1743) was 6,600

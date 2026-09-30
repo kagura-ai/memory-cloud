@@ -62,7 +62,7 @@ The 401 challenges, the token audience rule and session handling on `/mcp` are i
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `remember` | Store a new memory (summary + content + type; optional `delivery_mode`) | Member+ |
-| `recall` | Search memories with Hybrid Search (supports `trust_tier` filter). Results are Layers 1-2; `related_tags` is `[{tag, count}]` | Viewer+ |
+| `recall` | Search memories with Hybrid Search (supports `trust_tier` filter). Results are Layers 1-2; `related_tags` is `[{tag, count}]`. Every search also updates association strengths and may promote returned memories ([Tool annotations](#tool-annotations)) | Viewer+ |
 | `recall_nearby` | Deterministic WHERE-axis query — memories with `details.location` within `radius_m` of a point, nearest first | Viewer+ |
 | `reference` | Get full 3-layer details of a memory | Viewer+ |
 | `update_memory` | Update an existing memory in-place or upsert by external ID | Member+ |
@@ -357,7 +357,7 @@ The v0.49.0 control plane builds on existing workspace RBAC: agents are registry
 | `get_context_info` | Get context metadata and guidelines | Viewer+ |
 | `list_contexts` | Slim name→id directory of the contexts you can access, most recently used first (details are opt-in — see below) | Viewer+ |
 | `create_context` | Create a new context | Owner/Admin |
-| `update_context` | Update context settings (summary, usage guide, resource_id, is_public) | Editor+ |
+| `update_context` | Update context settings (summary, usage guide, resource_id, is_public). Changing `resource_id` revokes the resource tokens issued for the old slug | Editor+ |
 | `delete_context` | Delete a context and all its memories | Owner/Admin |
 | `merge_contexts` | Merge memories from source context into target context | Owner/Admin |
 | `update_search_config` | Tune hybrid search weights, reranker settings, and query-intent routing (`routing_mode`) per context | Editor+ |
@@ -429,7 +429,7 @@ Zero-knowledge secret store: the server holds only `age` public recipient keys a
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `secret_register_pubkey` | Register your own `age` recipient public key (starts pending; an owner approves it before it can receive grants) | Member+ |
-| `secret_put` | Store age-encrypted ciphertext + grant approved recipients (`recipients_snapshot` must match `grant_pubkey_ids`) | Owner/Admin |
+| `secret_put` | Store age-encrypted ciphertext + grant approved recipients (`recipients_snapshot` must match `grant_pubkey_ids`); an existing secret's grants not listed in `grant_pubkey_ids` are revoked | Owner/Admin |
 | `secret_get` | Fetch ciphertext you hold an active grant for (decrypt locally; every fetch is recorded in a tamper-evident audit log) | Member+ |
 | `secret_list` | List secret names + metadata (status, version, grant count, rotation flag) — never values | Owner/Admin |
 | `secret_revoke_grant` | Revoke a recipient's grant and flag the secret `rotation_needed` (not retroactive — rotate upstream) | Owner/Admin |

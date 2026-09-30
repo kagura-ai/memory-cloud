@@ -221,7 +221,7 @@ Returns: {status, memory_id, operation: 'updated'|'created'|'replaced', re_embed
         {
             "name": "recall",
             "readOnly": True,
-            "description": """Search a context's memories by meaning and keywords (hybrid: semantic + BM25, with Neural Memory boosting). Returns ranked summaries (Layers 1-2), not full content.
+            "description": """Search a context's memories by meaning and keywords (hybrid: semantic + BM25, with Neural Memory boosting). Returns ranked summaries (Layers 1-2), not full content. Every search also updates association strengths and may promote returned memories.
 
 Which tool: recall(query) finds candidates; reference(memory_id) reads one in full; explore(memory_id) walks the graph to its neighbours; load_pinned() returns the pinned set, unranked; recall_upcoming() / recall_nearby() are deterministic time / place queries. Typical flow: recall → reference → explore.
 
@@ -936,7 +936,7 @@ Returns: {status, message, updated_fields, context_id, context_name, context_dis
                     },
                     "resource_id": {
                         "type": "string",
-                        "description": "Resource ID for external ingestion via resource tokens: lowercase alphanumerics and underscores (e.g. 'github_issues'), unique in the workspace.",
+                        "description": "Resource ID for external ingestion via resource tokens: lowercase alphanumerics and underscores (e.g. 'github_issues'), unique in the workspace. Changing it revokes resource tokens issued for the old slug.",
                     },
                     "is_public": {
                         "type": "boolean",
@@ -2339,7 +2339,7 @@ Returns: {status, pubkey_id, fingerprint, status: 'pending'}.""",
         },
         {
             "name": "secret_put",
-            "description": """Store an age-encrypted secret and grant recipients (owner/admin). The server only ever receives OPAQUE CIPHERTEXT: encrypt client-side first (age -r <recipient> ...) to exactly the granted recipients. NEVER pass a plaintext value. recipients_snapshot must match grant_pubkey_ids exactly, and every grant target must be an approved pubkey. An existing name gets a new version.
+            "description": """Store an age-encrypted secret and grant recipients (owner/admin). The server only ever receives OPAQUE CIPHERTEXT: encrypt client-side first (age -r <recipient> ...) to exactly the granted recipients. NEVER pass a plaintext value. recipients_snapshot must match grant_pubkey_ids exactly, and every grant target must be an approved pubkey. An existing name gets a new version; its grants not listed in grant_pubkey_ids are revoked.
 
 Returns: {status, name, version_number, status, rotation_needed}.""",
             "inputSchema": {
