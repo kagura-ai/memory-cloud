@@ -1624,16 +1624,17 @@ class TestProviderTimeout:
     async def test_read_timeout_is_uncertain(self, monkeypatch) -> None:
         import requests
 
-        send = self._send_with(monkeypatch, requests.exceptions.ReadTimeout("read timed out"))
         with pytest.raises(TimeoutError):
-            await send
+            await self._send_with(monkeypatch, requests.exceptions.ReadTimeout("read timed out"))
 
     @pytest.mark.asyncio
     async def test_connect_timeout_is_a_definite_failure(self, monkeypatch) -> None:
         import requests
 
-        send = self._send_with(monkeypatch, requests.exceptions.ConnectTimeout("connect timed out"))
-        assert await send is False
+        sent = await self._send_with(
+            monkeypatch, requests.exceptions.ConnectTimeout("connect timed out")
+        )
+        assert sent is False
 
     @pytest.mark.asyncio
     async def test_other_emails_keep_returning_false_on_a_read_timeout(self, monkeypatch) -> None:
