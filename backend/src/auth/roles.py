@@ -435,7 +435,9 @@ class RoleManager:
         ``email_verified_at`` (#1752) is set when a verified email is synced,
         and when the IdP attests the unchanged current address as verified
         while it is still unset (verified on sign-in). An unverified
-        assertion never sets it.
+        assertion never sets it. After a synced email change commits, the
+        previous address — when it was verified — is sent a security notice
+        (``spawn_email_change_notification``).
         """
         from sqlalchemy.exc import IntegrityError
 
@@ -460,6 +462,7 @@ class RoleManager:
         # greenlet context torn down. Reading the values up front into
         # plain locals avoids the lazy-load entirely.
         existing_email = user.email
+        existing_email_verified = user.email_verified_at is not None
         user_user_id = user.user_id
         user_role = user.role
 
@@ -490,6 +493,20 @@ class RoleManager:
                 user.name = new_name
             user.last_login_at = utcnow()
             await db.commit()
+            if sync_email and existing_email_verified:
+                # #1752: notices follow the account's address, so the previous
+                # (verified) address is told that it no longer gets them.
+                from services.security_notification_service import (
+                    spawn_email_change_notification,
+                )
+
+                spawn_email_change_notification(
+                    user_id=user_user_id,
+                    old_email=existing_email,
+                    ip=ip_address,
+                    user_agent=user_agent,
+                    auth_provider=auth_provider,
+                )
             return Role(user_role)
         except IntegrityError as exc:
             await db.rollback()

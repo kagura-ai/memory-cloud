@@ -610,3 +610,90 @@ class TestEmailVerifiedAt:
         assert existing.email == "alice@new.com"
         assert existing.email_verified_at is not None
         assert existing.email_verified_at != earlier
+
+
+class TestEmailChangeNotice:
+    """#1752: the previous address is told when a sign-in changes the email."""
+
+    async def _sync(self, role_manager, existing, *, new_email="alice@new.com", db=None):
+        db = db or _make_db_mock(_execute_returns(_oauth_link_row(), existing))
+        with (
+            _patch_get_db(db),
+            patch(
+                "services.security_notification_service.spawn_email_change_notification"
+            ) as spawn,
+        ):
+            try:
+                await role_manager.ensure_user(
+                    email=new_email,
+                    user_id="u1",
+                    auth_provider="google",
+                    email_verified=True,
+                    ip_address="192.0.2.7",
+                    user_agent="pytest-agent/1.0",
+                )
+            except ConflictError:
+                pass
+        return spawn, db
+
+    @pytest.mark.asyncio
+    async def test_verified_previous_address_is_notified_after_the_commit(self, role_manager):
+        from datetime import datetime
+
+        existing = _user_row(email="alice@old.com")
+        existing.email_verified_at = datetime(2026, 1, 1)
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
+        order: list[str] = []
+        db.commit.side_effect = lambda: order.append("commit")
+
+        with (
+            _patch_get_db(db),
+            patch(
+                "services.security_notification_service.spawn_email_change_notification",
+                side_effect=lambda **kwargs: order.append("notice"),
+            ) as spawn,
+        ):
+            await role_manager.ensure_user(
+                email="alice@new.com",
+                user_id="u1",
+                auth_provider="google",
+                email_verified=True,
+                ip_address="192.0.2.7",
+                user_agent="pytest-agent/1.0",
+            )
+
+        assert order == ["commit", "notice"]
+        assert spawn.call_args.kwargs == {
+            "user_id": "u1",
+            "old_email": "alice@old.com",
+            "ip": "192.0.2.7",
+            "user_agent": "pytest-agent/1.0",
+            "auth_provider": "google",
+        }
+
+    @pytest.mark.asyncio
+    async def test_unverified_previous_address_is_not_notified(self, role_manager):
+        existing = _user_row(email="alice@old.com")
+        existing.email_verified_at = None
+        spawn, _db = await self._sync(role_manager, existing)
+        spawn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unchanged_email_notifies_nothing(self, role_manager):
+        from datetime import datetime
+
+        existing = _user_row(email="alice@old.com")
+        existing.email_verified_at = datetime(2026, 1, 1)
+        spawn, _db = await self._sync(role_manager, existing, new_email="alice@old.com")
+        spawn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_change_notifies_nothing(self, role_manager):
+        from datetime import datetime
+
+        existing = _user_row(email="alice@old.com")
+        existing.email_verified_at = datetime(2026, 1, 1)
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
+        db.commit = AsyncMock(side_effect=_email_unique_violation())
+        spawn, _db = await self._sync(role_manager, existing, db=db)
+        spawn.assert_not_called()

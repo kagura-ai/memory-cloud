@@ -31,6 +31,12 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# Upper bound callers put on one send (``asyncio.wait_for``): a stuck provider
+# must not hold a request, a background task or a job open. Providers keep
+# their own transport timeouts below it, so a failure is reported by the
+# provider (connect vs. read) before this backstop fires.
+EMAIL_SEND_TIMEOUT_SECONDS = 10.0
+
 
 def redact_recipient(email: str) -> str:
     """Return a short keyed digest of ``email`` for log correlation (#1678).

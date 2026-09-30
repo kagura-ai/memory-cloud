@@ -69,7 +69,7 @@ from models.auth import OAuth2Client, OAuth2DeviceCode, OAuth2Token, User, gener
 from models.schemas import TokenIntrospectionResponse
 from services.security_notification_service import (
     SecurityEvent,
-    is_first_client_authorization,
+    is_new_client_authorization,
     schedule_security_notification,
 )
 from utils.datetime import to_utc_iso, utcnow
@@ -1886,18 +1886,23 @@ def _run_oauth_sync(action: str, request, **kwargs):
         db_session.close()
 
 
-def _first_authorization_of(client_id: str | None, user_id: str | None) -> bool:
-    """Whether ``user_id`` has never authorized ``client_id`` (Issue #1752).
+def _consent_is_new(client_id: str | None, user_id: str | None, scope: str | None) -> bool:
+    """Whether this consent grants ``client_id`` something new (Issue #1752).
 
-    Runs on its own sync session (call it via ``asyncio.to_thread``). A failed
-    check answers True: an extra notice is better than a missed one.
+    New means a first authorization, a scope the user has not granted this
+    client before, or a client changed since the user's last grant
+    (:func:`is_new_client_authorization`). Runs on its own sync session (call
+    it via ``asyncio.to_thread``). A failed check answers True: an extra
+    notice is better than a missed one.
     """
     if not client_id or not user_id:
         return False
     session = None
     try:
         session = get_sync_session()
-        return is_first_client_authorization(session, client_id=client_id, user_id=user_id)
+        return is_new_client_authorization(
+            session, client_id=client_id, user_id=user_id, scope=scope
+        )
     except Exception as exc:
         logger.warning("oauth_first_authorization_check_failed", error_type=type(exc).__name__)
         return True
@@ -1923,10 +1928,12 @@ async def oauth_authorize_post(
     not in POST body. This is required by Authlib 1.6.5 which generates
     payload from query params for authorization endpoint.
 
-    Issue #1752: the first time a user authorizes a client, the user is
-    emailed a security notice once the authorization code is stored. Only
-    the first time: the code can only reach the client's registered
-    redirect URI, so a repeat consent to a known client adds little.
+    Issue #1752: the user is emailed a security notice once the
+    authorization code is stored, when the consent grants the client
+    something new — a first authorization, a scope the user has not granted
+    it before, or a client changed (name, redirect URIs, scope) since the
+    user's last grant. An unchanged repeat consent adds little: the code can
+    only reach the client's registered redirect URI.
     """
     import asyncio
 
@@ -1975,7 +1982,9 @@ async def oauth_authorize_post(
         )
 
     # Decided before the grant writes its authorization code (Issue #1752).
-    first_authorization = await asyncio.to_thread(_first_authorization_of, client_id, user.user_id)
+    new_authorization = await asyncio.to_thread(
+        _consent_is_new, client_id, user.user_id, request.query_params.get("scope")
+    )
 
     # Run Authlib operations in thread pool to avoid blocking event loop
     try:
@@ -1986,7 +1995,7 @@ async def oauth_authorize_post(
         # Use 303 See Other to convert POST to GET redirect
         # Claude.ai callback expects GET, not POST
         if hasattr(response, "location") and response.location:
-            if first_authorization and user.user_id and _grant_issued(response.location):
+            if new_authorization and user.user_id and _grant_issued(response.location):
                 schedule_security_notification(
                     background_tasks,
                     user_id=user.user_id,

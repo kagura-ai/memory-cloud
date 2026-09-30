@@ -13,35 +13,43 @@ committed. It adds :func:`notify_security_event` to the request's
 failure anywhere (DB, Redis, email provider) is logged and swallowed: a notice
 never changes the API response and never rolls the change back.
 
-Coalescing: at most one email per (user, event) per window
-(``security_notification_window_seconds``, default 10 minutes). The first
-occurrence is sent at once and opens a window: it gets a random window id,
-stored as the (user, event)'s open-window pointer and in a member of a Redis
-sorted set scored by the window's end. Every other Redis key of the window
-(buffer, counter, claim, attempts) carries that id, so a window's flush only
-ever touches its own occurrences, never those of a newer window of the same
-(user, event). Later occurrences in the window are buffered in a Redis list
-(the first ``_DIGEST_MAX_OCCURRENCES`` are kept, a counter keeps the total).
-Recording an occurrence is one optimistic Redis transaction watching only
-that (user, event)'s pointer, which carries the window id and deadline: it is
-buffered only while the pointer names a window whose deadline has not passed;
-otherwise a new window is opened, pointer and due entry together. When the window closes, the
-every-minute job :func:`flush_due_security_notifications` claims it in one
-transaction too, under a short per-window lock (due entry removed, pointer
-released if still its own, buffer moved to a claim key), and sends one digest. The claim key is deleted once the
-send is done; a definite failure (the provider refused or raised, the
-recipient lookup failed, Redis failed mid-flush) re-queues the window a
-bounded number of times. A timed-out send is uncertain (the provider call may still complete in
-its thread), so it counts as sent: never a duplicate. When the first,
-immediate send of a window definitely fails, the window is closed again, so
-the next occurrence is sent at once rather than as a follow-up to a notice
-that never arrived; occurrences buffered while that send was in flight are
-sent right away as a notice of their own. A flush run is bounded by
-``_FLUSH_BATCH`` windows and ``_FLUSH_TIME_BUDGET_SECONDS``; the rest wait for
-the next run. When Redis is unavailable the occurrence is sent at once: the
-failure mode is an extra email, never silence.
+Coalescing: a (user, event) gets at most ``_IMMEDIATE_PER_WINDOW`` emails at
+once per window (``security_notification_window_seconds``, default 10 minutes,
+at most an hour) plus one digest. The first occurrence is sent at once and
+opens a window: it gets a random window id, stored with the window's deadline
+in the (user, event)'s open-window pointer, which expires by itself soon after
+the deadline. The next occurrences are sent at once too, until the pointer's
+count reaches the budget — a change someone else makes shortly after the
+owner's own is not held back. Later ones are buffered in a Redis list (the
+first ``_DIGEST_MAX_OCCURRENCES`` are kept, a counter keeps the total), and
+the first of them adds the window to a Redis sorted set scored by the
+deadline: a window nobody repeats in leaves nothing for the flush job. Every
+other Redis key of the window (buffer, counter, claim, attempts, meta) carries
+its id, so a window's flush only ever touches its own occurrences, never those
+of a newer window of the same (user, event). Recording an occurrence is one
+optimistic Redis transaction watching only that (user, event)'s pointer.
 
-Pending state (pointers, buffers, counters, claims) is kept for
+When the window closes, the every-minute job
+:func:`flush_due_security_notifications` claims it in one transaction too,
+under a short per-window lock (due entry removed, pointer released if still
+its own, buffer moved to a claim key), and sends one digest. The claim key is
+deleted once the send is done; a definite failure (the provider refused or
+raised, the recipient lookup failed, Redis failed mid-flush) re-queues the
+window a bounded number of times. An uncertain send (the provider's answer
+never came, or the send timed out) counts as sent: never a duplicate.
+
+A notice sent at once whose send definitely fails is retried by the same job
+as often as a digest: its occurrence is parked under a window id of its own,
+marked so the retry is worded as a notice and not as a follow-up. When it was
+the notice that opened the window, the window is closed first — the next
+occurrence is sent at once rather than as a follow-up to a notice that never
+arrived — and what was buffered meanwhile is retried with it. A flush run is
+bounded by ``_FLUSH_BATCH`` windows and ``_FLUSH_TIME_BUDGET_SECONDS``; the
+rest wait for the next run. When Redis is unavailable the occurrence is sent
+at once and cannot be retried: the failure mode is an extra email or a logged
+loss, never a blocked request.
+
+Pending state (buffers, counters, claims) is kept for
 ``_STATE_RETENTION_SECONDS`` (7 days) past its window's deadline, so a stalled
 scheduler does not lose committed repeats; a due entry older than that is
 dropped with a
@@ -50,14 +58,17 @@ details expired still gets a digest that reports how many occurrences could
 not be listed.
 
 Known limitation: delivery is at most once. When a process crashes after a
-window was claimed and before its digest was sent, that digest is lost.
+window was claimed and before its email was sent, that email is lost.
 
 Recipient: the address on the account at send time, when it is verified
 (``email_verified_at``): by the password flow (following an emailed link) or
 by an OAuth sign-in whose IdP attested the address as verified
-(``auth.roles.RoleManager.ensure_user``; a sign-in also syncs a verified
-provider-side email change onto the account). A linked provider alone is not
-proof. Local CLI accounts (``@local``) are never emailed.
+(``auth.roles.RoleManager.ensure_user``; migration ``e88_1752`` back-filled the
+OAuth accounts created before sign-in set it). A linked provider alone is not
+proof. Local CLI accounts (``@local``) are never emailed. A sign-in also syncs
+a verified provider-side email change onto the account; the previous address
+is then told (:func:`notify_email_changed`) and the windows still pending are
+pinned to it, so a changed address cannot silently take over the notices.
 
 Content safety: client names are set by whoever registers a client (Dynamic
 Client Registration is public), user agents are client-supplied and key names
@@ -83,7 +94,7 @@ from typing import Any, cast
 
 from fastapi import BackgroundTasks, Request
 from redis.exceptions import WatchError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -97,20 +108,28 @@ from models.auth import (
     OAuth2Token,
     User,
 )
-from services.email_service import EmailService, get_email_service
+from services.email_service import (
+    EMAIL_SEND_TIMEOUT_SECONDS,
+    EmailService,
+    get_email_service,
+)
+from services.password_account_service import is_local_address
 from utils.datetime import utcnow
 from utils.logger import get_logger
+from utils.redis_lock import acquire_lock, release_lock
 
 logger = get_logger(__name__)
 
-# Same bound as the password emails: a stuck provider must not hold the
-# background task (or the flush job) open indefinitely.
-_EMAIL_TIMEOUT_SECONDS = 10.0
+# A stuck provider must not hold the background task (or the flush job) open
+# indefinitely. The provider's own transport timeouts are shorter, so this is
+# a backstop: normally the provider reports the failure first.
+_EMAIL_TIMEOUT_SECONDS = EMAIL_SEND_TIMEOUT_SECONDS
 
 # Redis layout. ``_OPEN_KEY`` names the (user, event)'s open window as
-# ``"<window id>:<deadline>"``. The sorted set holds one member per window, ``"<user_id>|<event>|<id>"``,
-# scored by the window's end (or retry time; epoch seconds). Every other key is
-# per window id.
+# ``"<window id>:<deadline>:<notices sent at once>"``. The sorted set holds one
+# member, ``"<user_id>|<event>|<id>"``, per window that has something to send
+# later (buffered repeats, or a notice waiting for its retry), scored by the
+# window's end (or retry time; epoch seconds). Every other key is per window id.
 _OPEN_KEY = "security_notify:open:{user_id}:{event}"
 _DUE_KEY = "security_notify:due"
 _BUFFER_KEY = "security_notify:buffer:{user_id}:{event}:{window_id}"
@@ -119,15 +138,35 @@ _COUNT_KEY = "security_notify:count:{user_id}:{event}:{window_id}"
 # Where a flush holds a claimed window's buffer and count until its send is done.
 _CLAIM_BUFFER_KEY = "security_notify:claim:buffer:{user_id}:{event}:{window_id}"
 _CLAIM_COUNT_KEY = "security_notify:claim:count:{user_id}:{event}:{window_id}"
-# Definite failures of the window's digest so far.
+# Definite failures of the window's email so far.
 _ATTEMPTS_KEY = "security_notify:attempts:{user_id}:{event}:{window_id}"
+# JSON about how the window's email is sent, when not as a plain digest:
+# ``{"initial": true}`` for a first notice waiting for its retry (worded as a
+# notice, not a follow-up) and ``{"recipient": "<address>"}`` when the address
+# is pinned (the account email changed while the window was pending).
+_META_KEY = "security_notify:meta:{user_id}:{event}:{window_id}"
+# Every per-window key except the lock.
+_WINDOW_KEY_TEMPLATES = (
+    _BUFFER_KEY,
+    _COUNT_KEY,
+    _CLAIM_BUFFER_KEY,
+    _CLAIM_COUNT_KEY,
+    _ATTEMPTS_KEY,
+    _META_KEY,
+)
 # Held (SET NX, short TTL) by the flush claiming the window or the sweep
 # expiring it, so neither has to watch the shared due set: every change to an
 # existing due entry is made by the lock holder.
 _LOCK_KEY = "security_notify:lock:{user_id}:{event}:{window_id}"
 _LOCK_SECONDS = 30
-# A digest whose send definitely failed is tried this many times, then dropped.
+# An email whose send definitely failed is tried this many times in all (a
+# first notice's immediate send counts), then dropped.
 _DIGEST_MAX_ATTEMPTS = 3
+# Occurrences of a window emailed at once before the rest are buffered for the
+# digest. More than one, so a change someone else makes shortly after the
+# owner's own (a second device approval, a second key) is not held back until
+# the window closes; bounded, so a burst cannot flood the mailbox.
+_IMMEDIATE_PER_WINDOW = 3
 _DIGEST_RETRY_DELAY_SECONDS = 60
 _MEMBER_SEPARATOR = "|"
 # Windows claimed per job run, and the time after which a run stops claiming
@@ -162,7 +201,14 @@ class SecurityEvent(StrEnum):
     SIGN_IN_METHOD_REMOVED = "sign_in_method_removed"
     SIGN_IN_METHOD_ADDED = "sign_in_method_added"
     OAUTH_CLIENT_CREATED = "oauth_client_created"
+    EMAIL_CHANGED = "email_changed"
 
+
+# The label of the sign-in method line, per event.
+_SIGN_IN_METHOD_LABELS: dict[SecurityEvent, str] = {
+    SecurityEvent.SIGN_IN_METHOD_ADDED: "Added:  ",
+    SecurityEvent.EMAIL_CHANGED: "Via:    ",
+}
 
 # How a linked / unlinked sign-in provider is named in a notice.
 PROVIDER_SIGN_IN_LABELS = {"google": "Google sign-in", "github": "GitHub sign-in"}
@@ -211,6 +257,12 @@ _EVENT_TEXT: dict[SecurityEvent, tuple[str, str]] = {
         "A new OAuth app was registered on your Kagura account",
         "A new OAuth app (with a client secret) was registered.",
     ),
+    # Sent to the previous address (see notify_email_changed).
+    SecurityEvent.EMAIL_CHANGED: (
+        "The email address of your Kagura account was changed",
+        "The account's email address was changed to the one a sign-in provider "
+        "reported. Security notices now go to the new address, not to this one.",
+    ),
 }
 
 
@@ -237,8 +289,11 @@ _WWW_RE = re.compile(r"(?i)\bwww\.")
 # ``例え.jp``, ``evil.рф``, ``a.xn--p1ai``). Version numbers such as ``1.2.3``
 # do not match.
 _HOST_RE = re.compile(r"(?:[\w-]+\.)+(?:[^\W\d_]{2,}|xn--[\w-]+)\b")
-# A dotted-quad IPv4 address (``1.2.3.4/login``).
-_IPV4_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+# A dotted-quad IPv4 address (``1.2.3.4/login``). A four-part version after a
+# product token (``Chrome/126.0.0.0``, in every Chromium user agent) is left
+# alone unless a path or port follows it (``Go/1.2.3.4/login``).
+_IPV4_QUAD = r"\d{1,3}(?:\.\d{1,3}){3}"
+_IPV4_RE = re.compile(rf"(?:(?<![A-Za-z]/)|(?={_IPV4_QUAD}[/:]))\b{_IPV4_QUAD}\b")
 
 
 def _strip_unsafe_chars(text: str) -> str:
@@ -404,9 +459,9 @@ def render_security_notification(
     if digest:
         subject = f"{subject} ({count} more {'time' if count == 1 else 'times'})"
         lines += [
-            "This is a follow-up to a security notice we sent you a few minutes ago.",
-            f"The same change happened {count} more {'time' if count == 1 else 'times'} "
-            f"in the {window_minutes} minutes after it:",
+            "This is a follow-up to the security notices we sent you a few minutes ago.",
+            f"Since then the same change happened {count} more "
+            f"{'time' if count == 1 else 'times'}, within {window_minutes} minutes of the first:",
         ]
     else:
         lines += [
@@ -425,7 +480,7 @@ def render_security_notification(
         if occurrence.key_name:
             lines.append(f'    Key name:    "{occurrence.key_name}"')
         if occurrence.sign_in_method:
-            label = "Added:  " if event is SecurityEvent.SIGN_IN_METHOD_ADDED else "Removed:"
+            label = _SIGN_IN_METHOD_LABELS.get(event, "Removed:")
             lines.append(f"    {label}     {occurrence.sign_in_method}")
         if occurrence.actor:
             lines.append(f"    Done by:     {occurrence.actor}, an administrator of your")
@@ -464,19 +519,15 @@ def render_security_notification(
 # ---------------------------------------------------------------------------
 
 
-def _is_local_address(email: str) -> bool:
-    return email.strip().lower().endswith("@local")
-
-
 async def resolve_deliverable_address(db: AsyncSession, user_id: str) -> str | None:
     """Return the owner's address when a notice can be delivered to it.
 
     Deliverable means verified: ``email_verified_at`` is set by the password
     flow (following an emailed link) or by an OAuth sign-in whose IdP attested
     the address as verified (``RoleManager.ensure_user``). A linked provider
-    alone is not proof — Google can return an unverified address. Accounts
-    created by OAuth since the #1678 back-fill that have not signed in again
-    are verified on their next OAuth sign-in. ``@local`` addresses never are.
+    alone is not proof — Google can return an unverified address. OAuth
+    accounts created before sign-in set the column were back-filled by
+    migration ``e88_1752``. ``@local`` addresses never are.
 
     Args:
         db: Async session.
@@ -488,7 +539,7 @@ async def resolve_deliverable_address(db: AsyncSession, user_id: str) -> str | N
     user = (await db.execute(select(User).where(User.user_id == user_id))).scalar_one_or_none()
     if user is None or not user.email or "@" not in user.email:
         return None
-    if _is_local_address(user.email) or user.email_verified_at is None:
+    if is_local_address(user.email) or user.email_verified_at is None:
         return None
     return user.email
 
@@ -515,68 +566,77 @@ async def _client_name(db: AsyncSession, client_id: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# First authorization of an OAuth client
+# A consent that grants an OAuth client something new
 # ---------------------------------------------------------------------------
 
 
-def is_first_client_authorization(
+def is_new_client_authorization(
     session: Session,
     *,
     client_id: str,
     user_id: str,
+    scope: str | None,
 ) -> bool:
-    """Whether ``user_id`` has never authorized ``client_id`` before.
+    """Whether this consent gives ``client_id`` something ``user_id`` has not granted before.
 
     Used for authorization-code consent (device-flow approvals notify every
-    time). Called before the new grant is written. A user has authorized a
-    client before when any of these exists for the pair:
+    time). Called before the new grant is written. Earlier grants of the pair
+    are its ``oauth_tokens`` rows, revoked or not (rows are only deleted with
+    the client or the account, so they remember every past grant), its
+    ``oauth_authorization_codes`` rows (consented, not yet exchanged) and its
+    ``oauth_device_codes`` rows with ``authorized_at`` set. The consent is new
+    when:
 
-    - an ``oauth_tokens`` row, revoked or not (rows are only deleted with the
-      client or the account, so this remembers every past grant);
-    - an ``oauth_authorization_codes`` row (consented, not yet exchanged);
-    - an ``oauth_device_codes`` row with ``authorized_at`` set (approved,
-      not yet exchanged).
+    - no earlier grant exists;
+    - the scope it grants (the client's rule applied to the requested scope)
+      includes a scope no earlier grant carried; or
+    - the client row changed after the latest earlier grant
+      (``oauth_clients.updated_at``: its name, redirect URIs, scope or secret
+      — any update counts, which costs at most one extra notice).
 
     The check is not serialized with the grant write: two consents racing for
-    the same new client can both count as first. That costs at most one extra
-    notice (the second is coalesced into the window's digest), never a missed
-    one.
+    the same new client can both count as new. That costs at most one extra
+    notice, never a missed one.
 
     Args:
         session: Sync session (the OAuth routes run Authlib on one).
         client_id: The client's ``client_id``.
         user_id: The consenting user.
+        scope: The scope the authorization request asks for.
 
     Returns:
-        True when no earlier grant exists.
+        True when the owner should be told about this consent.
     """
-    if (
-        session.query(OAuth2Token.id)
-        .filter(OAuth2Token.client_id == client_id, OAuth2Token.user_id == user_id)
-        .first()
-        is not None
-    ):
-        return False
-    if (
-        session.query(OAuth2AuthorizationCode.id)
-        .filter(
-            OAuth2AuthorizationCode.client_id == client_id,
-            OAuth2AuthorizationCode.user_id == user_id,
-        )
-        .first()
-        is not None
-    ):
-        return False
-    return (
-        session.query(OAuth2DeviceCode.id)
-        .filter(
-            OAuth2DeviceCode.client_id == client_id,
-            OAuth2DeviceCode.user_id == user_id,
+    grants: list[tuple[str | None, datetime | None]] = []
+    for scope_column, time_column, *conditions in (
+        (OAuth2Token.scope, OAuth2Token.issued_at),
+        (OAuth2AuthorizationCode.scope, OAuth2AuthorizationCode.auth_time),
+        (
+            OAuth2DeviceCode.scope,
+            OAuth2DeviceCode.authorized_at,
             OAuth2DeviceCode.authorized_at.is_not(None),
+        ),
+    ):
+        model = scope_column.class_
+        rows = (
+            session.query(scope_column, func.max(time_column))
+            .filter(model.client_id == client_id, model.user_id == user_id, *conditions)
+            .group_by(scope_column)
+            .all()
         )
-        .first()
-        is None
-    )
+        grants += [(row[0], row[1]) for row in rows]
+    if not grants:
+        return True
+
+    client = session.query(OAuth2Client).filter(OAuth2Client.client_id == client_id).first()
+    if client is None:
+        return True  # no grant can be issued; nothing is sent then
+    granted = set((client.get_allowed_scope(scope) or "").split())
+    earlier = {part for grant_scope, _ in grants for part in (grant_scope or "").split()}
+    if not granted <= earlier:
+        return True
+    latest = max((granted_at for _, granted_at in grants if granted_at is not None), default=None)
+    return client.updated_at is not None and (latest is None or client.updated_at > latest)
 
 
 # ---------------------------------------------------------------------------
@@ -694,6 +754,139 @@ def spawn_security_notification(
         )
 
 
+def spawn_email_change_notification(
+    *,
+    user_id: str,
+    old_email: str,
+    ip: str | None = None,
+    user_agent: str | None = None,
+    auth_provider: str | None = None,
+) -> None:
+    """Start :func:`notify_email_changed` for a committed email change.
+
+    Same never-raise contract as :func:`schedule_security_notification`.
+    """
+    try:
+        task = asyncio.get_running_loop().create_task(
+            notify_email_changed(
+                user_id,
+                old_email,
+                ip=ip,
+                user_agent=user_agent,
+                auth_provider=auth_provider,
+                occurred_at=utcnow(),
+            )
+        )
+        _spawned.add(task)
+        task.add_done_callback(_spawned.discard)
+    except Exception as exc:
+        logger.error(
+            "security_notification_schedule_failed",
+            user_id=user_id,
+            security_event=SecurityEvent.EMAIL_CHANGED.value,
+            error_type=type(exc).__name__,
+        )
+
+
+async def notify_email_changed(
+    user_id: str,
+    old_email: str,
+    *,
+    ip: str | None,
+    user_agent: str | None,
+    auth_provider: str | None = None,
+    occurred_at: datetime | None = None,
+    email_service: EmailService | None = None,
+) -> None:
+    """Tell the previous address that the account's email was changed.
+
+    Notices go to the address on the account at send time, so a changed
+    address would silently take over the notice stream — including the
+    digests still pending for changes made before it. The caller passes the
+    previous address (only when it was verified). This pins every pending
+    window of the user to it and makes them due now, then emails it the
+    change itself: at once, never coalesced, and retried by the flush job
+    (pinned too) when the send definitely fails. A flush that claimed a
+    window just before the pin may still resolve the new address.
+
+    Runs after the change's commit; never raises.
+
+    Args:
+        user_id: The account.
+        old_email: The address the account had before the change.
+        ip: Client IP of the sign-in that changed it.
+        user_agent: Client user agent (untrusted).
+        auth_provider: The sign-in provider that reported the new address.
+        occurred_at: When it happened (naive UTC); defaults to now.
+        email_service: Override for tests; defaults to the configured one.
+    """
+    event = SecurityEvent.EMAIL_CHANGED
+    try:
+        if "@" not in old_email or is_local_address(old_email):
+            return
+        await _pin_pending_windows(user_id, old_email)
+        provider = PROVIDER_SIGN_IN_LABELS.get(auth_provider or "", auth_provider)
+        occurrence = SecurityOccurrence(
+            occurred_at=format_occurred_at(occurred_at or utcnow()),
+            ip=sanitize_ip(ip),
+            user_agent=sanitize_display_text(user_agent, _USER_AGENT_MAX_CHARS),
+            sign_in_method=sanitize_display_text(provider, _NAME_MAX_CHARS),
+        )
+        result = await _deliver(
+            old_email, user_id, event, [occurrence], digest=False, email=email_service
+        )
+        if result == _FAILED:
+            await _park_for_retry(user_id, event, [occurrence], 1, recipient=old_email)
+    except Exception as exc:
+        logger.error(
+            "security_notification_failed",
+            user_id=user_id,
+            security_event=event.value,
+            error_type=type(exc).__name__,
+        )
+
+
+async def _pin_pending_windows(user_id: str, recipient: str) -> int:
+    """Pin the user's pending windows to ``recipient`` and make them due now.
+
+    Each is changed under its window lock; one a flush is claiming is skipped,
+    and one already pinned keeps its address. Never raises.
+
+    Returns:
+        Number of windows pinned.
+    """
+    pinned = 0
+    try:
+        client = get_redis_client()
+        now = _now_score()
+        ttl = _buffer_ttl()
+        for member in await _user_due_members(client, user_id):
+            _user, event_value, window_id = _parse_member(member)
+            lock_key = _key(_LOCK_KEY, user_id, event_value, window_id)
+            token = await acquire_lock(client, lock_key, _LOCK_SECONDS)
+            if token is None:
+                continue
+            try:
+                meta_key = _key(_META_KEY, user_id, event_value, window_id)
+                meta = _parse_meta(await client.get(meta_key))
+                score = await client.zscore(_DUE_KEY, member)
+                if score is None or meta.get("recipient"):
+                    continue
+                meta["recipient"] = recipient
+                async with client.pipeline(transaction=True) as pipe:
+                    pipe.set(meta_key, json.dumps(meta), ex=ttl)
+                    pipe.zadd(_DUE_KEY, {member: min(float(score), now)}, xx=True)
+                    await pipe.execute()
+                pinned += 1
+            finally:
+                await _release_lock(client, lock_key, token)
+    except Exception as exc:
+        logger.warning(
+            "security_notification_pin_failed", user_id=user_id, error_type=type(exc).__name__
+        )
+    return pinned
+
+
 def _notice_kwargs(
     user_id: str,
     *,
@@ -741,7 +934,8 @@ async def notify_security_event(
 ) -> None:
     """Email the owner about one occurrence, or buffer it in an open window.
 
-    Runs after the response; never raises.
+    Runs after the response; never raises. A send that definitely fails is
+    handed to the flush job for its retries.
 
     Args:
         user_id: The account owner.
@@ -788,23 +982,19 @@ async def notify_security_event(
         result = await _deliver(
             recipient, user_id, event, [occurrence], digest=False, email=email_service
         )
-        if result == _FAILED and outcome == _OPENED and window_id is not None:
-            # The notice that opened the window never went out: close it, so
-            # the next occurrence is sent at once and not as a "follow-up".
-            # Occurrences buffered while that send was in flight are sent now
-            # as a notice of their own (fail open to notifying). A timed-out
-            # send may still arrive, so it keeps the window.
-            buffered, total = await _close_window(user_id, event, window_id)
-            if buffered:
-                await _deliver(
-                    recipient,
-                    user_id,
-                    event,
-                    buffered,
-                    digest=False,
-                    email=email_service,
-                    total=total,
-                )
+        if result == _FAILED:
+            # A definite failure is retried by the flush job, like a digest.
+            # When this notice opened the window, the window is closed first:
+            # the next occurrence is then sent at once and not held for a
+            # "follow-up" to an email that never arrived, and what was
+            # buffered meanwhile is retried together with this occurrence. A
+            # timed-out send may still arrive, so it keeps the window.
+            occurrences, total = [occurrence], 1
+            if outcome == _OPENED and window_id is not None:
+                buffered, buffered_total = await _close_window(user_id, event, window_id)
+                occurrences += buffered
+                total += buffered_total
+            await _park_for_retry(user_id, event, occurrences, total)
     except Exception as exc:
         # Type only: a driver error's text could echo the address.
         logger.error(
@@ -839,6 +1029,7 @@ def _window_seconds() -> int:
 
 # Outcomes of _buffer_if_window_open.
 _OPENED = "opened"  # send now; this occurrence opened the window
+_IMMEDIATE = "immediate"  # send now; an early occurrence of an open window
 _BUFFERED = "buffered"  # the window's digest will list it
 _SEND_NOW = "send_now"  # send now; no window is ours (Redis down, lost race)
 
@@ -857,13 +1048,16 @@ _TX_RETRIES = 5
 async def _buffer_if_window_open(
     user_id: str, event: SecurityEvent, occurrence: SecurityOccurrence
 ) -> tuple[str, str | None]:
-    """Buffer ``occurrence`` in the open window, or open a new one — atomically.
+    """Decide how ``occurrence`` is sent and record it — atomically.
 
     One optimistic transaction watches only the (user, event)'s open-window
-    pointer, whose value is ``"<window id>:<deadline>"``. The occurrence is
-    buffered only when the pointer names a window whose deadline has not
-    passed; otherwise — no pointer, an unreadable one, or an expired window —
-    a new window is opened (pointer and due entry written together). Every
+    pointer, whose value is ``"<window id>:<deadline>:<sent at once>"``.
+    Without a pointer naming a window whose deadline has not passed (none, an
+    unreadable one, an expired window) a new window is opened. In an open
+    window the first ``_IMMEDIATE_PER_WINDOW`` occurrences are sent at once
+    (the pointer counts them); later ones are buffered, and the first of
+    those adds the window's due entry — a window nobody repeats in leaves
+    nothing for the flush job and its pointer simply expires. Every
     transition that ends a window (claim, close, expiry) deletes the pointer
     in its own MULTI when it names that window, so this WATCH fires on it. An
     expired window keeps its own due entry and buffer, so its digest still
@@ -871,10 +1065,11 @@ async def _buffer_if_window_open(
 
     Returns:
         ``(outcome, window_id)``: ``_OPENED`` when this occurrence opened the
-        window (send it now); ``_BUFFERED`` when the digest will list it;
-        ``_SEND_NOW`` (no window id) when it must be sent now without a window
-        — Redis is unavailable or the transaction kept conflicting (fail open
-        to notifying).
+        window and ``_IMMEDIATE`` when it is an early occurrence of an open
+        one (send it now either way); ``_BUFFERED`` when the digest will list
+        it; ``_SEND_NOW`` (no window id) when it must be sent now without a
+        window — Redis is unavailable or the transaction kept conflicting
+        (fail open to notifying).
     """
     open_key = _open_key(user_id, event)
     try:
@@ -893,7 +1088,15 @@ async def _buffer_if_window_open(
                     now = _now_score()
                     pipe.multi()
                     if parsed is not None and parsed[1] > now:
-                        window_id = parsed[0]
+                        window_id, deadline, sent = parsed
+                        if sent < _IMMEDIATE_PER_WINDOW:
+                            pipe.set(
+                                open_key,
+                                _pointer_value(window_id, deadline, sent + 1),
+                                keepttl=True,
+                            )
+                            await pipe.execute()
+                            return _IMMEDIATE, window_id
                         buffer_key = _key(_BUFFER_KEY, user_id, event, window_id)
                         count_key = _key(_COUNT_KEY, user_id, event, window_id)
                         pipe.rpush(buffer_key, payload)
@@ -903,12 +1106,12 @@ async def _buffer_if_window_open(
                         pipe.incr(count_key)
                         pipe.expire(buffer_key, ttl)
                         pipe.expire(count_key, ttl)
+                        pipe.zadd(_DUE_KEY, {_member(user_id, event, window_id): deadline}, nx=True)
                         await pipe.execute()
                         return _BUFFERED, window_id
                     new_id = uuid.uuid4().hex
                     deadline = now + _window_seconds()
-                    pipe.set(open_key, _pointer_value(new_id, deadline), ex=ttl)
-                    pipe.zadd(_DUE_KEY, {_member(user_id, event, new_id): deadline})
+                    pipe.set(open_key, _pointer_value(new_id, deadline), ex=_pointer_ttl())
                     await pipe.execute()
                     return _OPENED, new_id
             except WatchError:
@@ -925,6 +1128,64 @@ async def _buffer_if_window_open(
             error_type=type(exc).__name__,
         )
         return _SEND_NOW, None
+
+
+async def _park_for_retry(
+    user_id: str,
+    event: SecurityEvent,
+    occurrences: list[SecurityOccurrence],
+    total: int,
+    *,
+    recipient: str | None = None,
+) -> None:
+    """Hand a notice whose immediate send definitely failed to the flush job.
+
+    The occurrences go under a window id of their own (claim keys, no
+    pointer), marked ``initial`` so the retry is worded as a notice and not as
+    a follow-up, with the failed send counted as the first attempt and a due
+    entry one retry delay from now. Never raises: when Redis is unavailable
+    too, the notice is lost and that is logged.
+
+    Args:
+        user_id: The account owner.
+        event: What happened.
+        occurrences: What the notice lists.
+        total: How many occurrences it covers.
+        recipient: The address to pin (the account's previous address for an
+            email change); by default the retry resolves it again.
+    """
+    window_id = uuid.uuid4().hex
+    try:
+        client = get_redis_client()
+        ttl = _buffer_ttl()
+        claim_buffer = _key(_CLAIM_BUFFER_KEY, user_id, event, window_id)
+        meta: dict[str, Any] = {"initial": True}
+        if recipient:
+            meta["recipient"] = recipient
+        async with client.pipeline(transaction=True) as pipe:
+            pipe.rpush(claim_buffer, *(o.to_json() for o in occurrences[:_DIGEST_MAX_OCCURRENCES]))
+            pipe.expire(claim_buffer, ttl)
+            pipe.set(_key(_CLAIM_COUNT_KEY, user_id, event, window_id), total, ex=ttl)
+            pipe.set(_key(_ATTEMPTS_KEY, user_id, event, window_id), 1, ex=ttl)
+            pipe.set(_key(_META_KEY, user_id, event, window_id), json.dumps(meta), ex=ttl)
+            pipe.zadd(
+                _DUE_KEY,
+                {_member(user_id, event, window_id): _now_score() + _DIGEST_RETRY_DELAY_SECONDS},
+            )
+            await pipe.execute()
+        logger.warning(
+            "security_notification_retry_scheduled",
+            user_id=user_id,
+            security_event=event.value,
+            occurrences=total,
+        )
+    except Exception as exc:
+        logger.error(
+            "security_notification_retry_unavailable",
+            user_id=user_id,
+            security_event=event.value,
+            error_type=type(exc).__name__,
+        )
 
 
 async def _claim_window(
@@ -957,7 +1218,7 @@ async def _claim_window(
     claim_count = _key(_CLAIM_COUNT_KEY, user_id, event_value, window_id)
     ttl = _buffer_ttl()
     lock_key = _key(_LOCK_KEY, user_id, event_value, window_id)
-    token = await _acquire_lock(client, lock_key)
+    token = await acquire_lock(client, lock_key, _LOCK_SECONDS)
     if token is None:
         return False
     try:
@@ -1029,14 +1290,6 @@ async def _claim_locked(
     return False
 
 
-async def _acquire_lock(client: Any, lock_key: str) -> str | None:
-    """Take a window lock; its token, or None when another process holds it."""
-    token = uuid.uuid4().hex
-    if await client.set(lock_key, token, nx=True, ex=_LOCK_SECONDS):
-        return token
-    return None
-
-
 async def _release_lock(client: Any, lock_key: str, token: str) -> None:
     """Release a window lock if this caller still holds it; best effort.
 
@@ -1044,14 +1297,7 @@ async def _release_lock(client: Any, lock_key: str, token: str) -> None:
     for a later run.
     """
     try:
-        async with client.pipeline(transaction=True) as pipe:
-            await pipe.watch(lock_key)
-            if await pipe.get(lock_key) != token:
-                await pipe.unwatch()
-                return
-            pipe.multi()
-            pipe.delete(lock_key)
-            await pipe.execute()
+        await release_lock(client, lock_key, token)
     except Exception as exc:
         logger.warning("security_notification_unlock_failed", error_type=type(exc).__name__)
 
@@ -1064,7 +1310,7 @@ async def _close_window(
     Removes the due entry, releases the pointer if it still names this
     window, and reads and deletes the buffer and its counter together, so a
     transient failure cannot strand the pointer. The occurrences buffered
-    meanwhile are returned so the caller sends them as a notice of their own
+    meanwhile are returned so the caller retries them with the failed notice
     rather than as a follow-up to an email the owner never got.
 
     Returns:
@@ -1119,7 +1365,7 @@ async def purge_user_notification_state(user_id: str) -> int:
     """Delete every security-notice key of ``user_id`` (account erasure).
 
     Removes the user's due entries, open-window pointers and every per-window
-    buffer, counter, claim, attempts and lock key, with one ``ZSCAN`` of the
+    buffer, counter, claim, attempts, meta and lock key, with one ``ZSCAN`` of the
     due set and one ``SCAN`` of the keyspace. Keys are matched exactly (the
     window id is the last segment), so another user whose id shares a prefix
     is never touched. Never raises.
@@ -1133,17 +1379,7 @@ async def purge_user_notification_state(user_id: str) -> int:
     removed = 0
     try:
         client = get_redis_client()
-        prefix = f"{user_id}{_MEMBER_SEPARATOR}"
-        members: list[str] = []
-        async for raw_member, _score in client.zscan_iter(_DUE_KEY):
-            member = cast(str, raw_member)
-            if not member.startswith(prefix):
-                continue
-            try:
-                if _parse_member(member)[0] == user_id:
-                    members.append(member)
-            except ValueError:
-                continue
+        members = await _user_due_members(client, user_id)
         if members:
             removed += int(await client.zrem(_DUE_KEY, *members))
 
@@ -1153,14 +1389,7 @@ async def purge_user_notification_state(user_id: str) -> int:
         window_prefixes = tuple(
             _key(template, user_id, event, "")
             for event in SecurityEvent
-            for template in (
-                _BUFFER_KEY,
-                _COUNT_KEY,
-                _CLAIM_BUFFER_KEY,
-                _CLAIM_COUNT_KEY,
-                _ATTEMPTS_KEY,
-                _LOCK_KEY,
-            )
+            for template in (*_WINDOW_KEY_TEMPLATES, _LOCK_KEY)
         )
         match = f"security_notify:*:{_glob_escape(user_id)}:*"
         async for raw_key in client.scan_iter(match=match, count=1000):
@@ -1176,6 +1405,33 @@ async def purge_user_notification_state(user_id: str) -> int:
             "security_notification_purge_failed", user_id=user_id, error_type=type(exc).__name__
         )
     return removed
+
+
+async def _user_due_members(client: Any, user_id: str) -> list[str]:
+    """The due-set members of ``user_id`` (one ``ZSCAN``; exact user match)."""
+    prefix = f"{user_id}{_MEMBER_SEPARATOR}"
+    members: list[str] = []
+    async for raw_member, _score in client.zscan_iter(_DUE_KEY):
+        member = cast(str, raw_member)
+        if not member.startswith(prefix):
+            continue
+        try:
+            if _parse_member(member)[0] == user_id:
+                members.append(member)
+        except ValueError:
+            continue
+    return members
+
+
+def _parse_meta(raw: object) -> dict[str, Any]:
+    """A window's meta (``_META_KEY``); empty when absent or unreadable."""
+    if not isinstance(raw, str):
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 _WINDOW_ID_RE = re.compile(r"[0-9a-f]{32}")
@@ -1197,20 +1453,30 @@ def _buffer_ttl() -> int:
     return _STATE_RETENTION_SECONDS + _window_seconds() + 60 * 60
 
 
-def _pointer_value(window_id: str, deadline: float) -> str:
-    """The open-window pointer: ``"<window id>:<deadline epoch seconds>"``."""
-    return f"{window_id}:{deadline!r}"
+def _pointer_ttl() -> int:
+    """TTL of an open-window pointer: the window plus a minute of slack.
+
+    A pointer past its deadline is ignored anyway; the TTL only removes the
+    pointers of windows that never got a due entry.
+    """
+    return _window_seconds() + 60
 
 
-def _parse_pointer(raw: object) -> tuple[str, float] | None:
-    """``(window id, deadline)`` from a pointer, or None when absent or unreadable."""
+def _pointer_value(window_id: str, deadline: float, sent: int = 1) -> str:
+    """The open-window pointer: ``"<window id>:<deadline epoch seconds>:<sent at once>"``."""
+    return f"{window_id}:{deadline!r}:{sent}"
+
+
+def _parse_pointer(raw: object) -> tuple[str, float, int] | None:
+    """``(window id, deadline, notices sent at once)``, or None when absent or unreadable."""
     if not isinstance(raw, str):
         return None
-    window_id, _, deadline = raw.partition(":")
+    window_id, _, rest = raw.partition(":")
     if not _WINDOW_ID_RE.fullmatch(window_id):
         return None
+    deadline, _, sent = rest.partition(":")
     try:
-        return window_id, float(deadline)
+        return window_id, float(deadline), int(sent)
     except ValueError:
         return None
 
@@ -1241,9 +1507,15 @@ async def _deliver(
 ) -> str:
     """Send one notice; log (never raise) on failure.
 
+    The provider bounds its own connect and read (well under
+    ``_EMAIL_TIMEOUT_SECONDS``) and tells them apart, so an unreachable
+    provider is a definite failure and only a lost answer is uncertain. The
+    ``wait_for`` here is the backstop for a provider that does neither.
+
     Returns:
         ``_SENT``; ``_FAILED`` when the provider returned False or raised;
-        ``_UNCERTAIN`` when the send timed out — ``wait_for`` cancels the
+        ``_UNCERTAIN`` when the provider raised ``TimeoutError`` (its answer
+        never came) or the backstop fired — ``wait_for`` cancels the
         coroutine but not a provider call running in a thread, so the email
         may still go out and must not be retried.
     """
@@ -1420,7 +1692,7 @@ async def _expire_stale_windows(client: Any, *, now: float) -> None:
             continue
         open_key = _open_key(user_id, event_value)
         lock_key = _key(_LOCK_KEY, user_id, event_value, window_id)
-        token = await _acquire_lock(client, lock_key)
+        token = await acquire_lock(client, lock_key, _LOCK_SECONDS)
         if token is None:
             continue  # a claim is in progress
         try:
@@ -1438,13 +1710,7 @@ async def _expire_stale_windows(client: Any, *, now: float) -> None:
                 pipe.delete(
                     *(
                         _key(template, user_id, event_value, window_id)
-                        for template in (
-                            _BUFFER_KEY,
-                            _COUNT_KEY,
-                            _CLAIM_BUFFER_KEY,
-                            _CLAIM_COUNT_KEY,
-                            _ATTEMPTS_KEY,
-                        )
+                        for template in _WINDOW_KEY_TEMPLATES
                     )
                 )
                 await pipe.execute()
@@ -1469,16 +1735,23 @@ async def _flush_window(
     session_factory: Callable[[], AsyncSession] | None,
     email_service: EmailService | None,
 ) -> bool:
-    """Send the digest of one claimed window; True when it was sent."""
+    """Send the email of one claimed window; True when it was sent.
+
+    Normally a digest to the address resolved now. The window's meta changes
+    that: ``initial`` words it as a first notice (a retry of one whose
+    immediate send failed) and ``recipient`` pins the address.
+    """
     claim_buffer = _key(_CLAIM_BUFFER_KEY, user_id, event_value, window_id)
     claim_count = _key(_CLAIM_COUNT_KEY, user_id, event_value, window_id)
     attempts_key = _key(_ATTEMPTS_KEY, user_id, event_value, window_id)
+    meta_key = _key(_META_KEY, user_id, event_value, window_id)
 
     raw_items = await client.lrange(claim_buffer, 0, -1)
     raw_total = await client.get(claim_count)
     if not raw_items and not int(raw_total or 0):
-        await client.delete(claim_buffer, claim_count, attempts_key)
+        await client.delete(claim_buffer, claim_count, attempts_key, meta_key)
         return False
+    meta = _parse_meta(await client.get(meta_key))
 
     occurrences: list[SecurityOccurrence] = []
     for raw in raw_items:
@@ -1491,26 +1764,37 @@ async def _flush_window(
     total = max(int(raw_total or 0), len(raw_items))
 
     event = SecurityEvent(event_value)
-    try:
-        factory = session_factory or _get_session_factory()
-        async with factory() as db:
-            recipient = await resolve_deliverable_address(db, user_id)
-    except Exception as exc:
-        logger.error(
-            "security_notification_flush_failed",
-            user_id=user_id,
-            security_event=event_value,
-            error_type=type(exc).__name__,
-        )
-        await _retry_window(client, user_id, event_value, window_id, now=now, total=total)
-        return False
+    pinned = meta.get("recipient")
+    recipient: str | None
+    if isinstance(pinned, str) and pinned:
+        recipient = pinned
+    else:
+        try:
+            factory = session_factory or _get_session_factory()
+            async with factory() as db:
+                recipient = await resolve_deliverable_address(db, user_id)
+        except Exception as exc:
+            logger.error(
+                "security_notification_flush_failed",
+                user_id=user_id,
+                security_event=event_value,
+                error_type=type(exc).__name__,
+            )
+            await _retry_window(client, user_id, event_value, window_id, now=now, total=total)
+            return False
     if recipient is None:
         logger.info("security_notification_skipped", user_id=user_id, security_event=event_value)
-        await client.delete(claim_buffer, claim_count, attempts_key)
+        await client.delete(claim_buffer, claim_count, attempts_key, meta_key)
         return False
 
     result = await _deliver(
-        recipient, user_id, event, occurrences, digest=True, email=email_service, total=total
+        recipient,
+        user_id,
+        event,
+        occurrences,
+        digest=not meta.get("initial"),
+        email=email_service,
+        total=total,
     )
     if result == _FAILED:
         await _retry_window(client, user_id, event_value, window_id, now=now, total=total)
@@ -1519,7 +1803,7 @@ async def _flush_window(
     # The cleanup is best effort — a Redis error here must not re-queue a
     # digest that went out; the claim keys then expire with their TTL.
     try:
-        await client.delete(claim_buffer, claim_count, attempts_key)
+        await client.delete(claim_buffer, claim_count, attempts_key, meta_key)
     except Exception as exc:
         logger.warning(
             "security_notification_cleanup_failed",
@@ -1559,15 +1843,12 @@ async def _retry_window(
             occurrences=total,
         )
         await client.delete(
-            claim_buffer,
-            claim_count,
-            attempts_key,
-            _key(_BUFFER_KEY, user_id, event_value, window_id),
-            _key(_COUNT_KEY, user_id, event_value, window_id),
+            *(_key(template, user_id, event_value, window_id) for template in _WINDOW_KEY_TEMPLATES)
         )
         return
     await client.expire(claim_buffer, ttl)
     await client.expire(claim_count, ttl)
+    await client.expire(_key(_META_KEY, user_id, event_value, window_id), ttl)
     await client.zadd(
         _DUE_KEY,
         {_member(user_id, event_value, window_id): now + _DIGEST_RETRY_DELAY_SECONDS * attempts},

@@ -1,10 +1,11 @@
 """Every-minute digest of coalesced security notices (Issue #1752).
 
-``services.security_notification_service`` emails the first occurrence of a
-security event at once and buffers repeats for a window in Redis. This job
-closes the windows that have ended and sends one digest per window. Each
-window is claimed with ``ZREM``, so a run from more than one API process at
-once sends each digest once.
+``services.security_notification_service`` emails the first occurrences of a
+security event at once and buffers later repeats for a window in Redis. This
+job closes the windows that have ended and sends one digest per window; it
+also retries a notice whose immediate send failed. Each window is claimed
+under a short per-window lock, so a run from more than one API process at once
+sends each email once.
 """
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler

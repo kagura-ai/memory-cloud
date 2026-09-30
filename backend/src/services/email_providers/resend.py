@@ -20,6 +20,7 @@ whole point of the gating work in #469.
 from __future__ import annotations
 
 import asyncio
+from functools import cache
 from typing import TYPE_CHECKING, Any
 
 import resend
@@ -33,6 +34,42 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+# Timeout of one SDK HTTP request, applied to the connect and to the read
+# separately. Twice it stays under ``EMAIL_SEND_TIMEOUT_SECONDS``, so the SDK
+# reports a connect failure (definite) or a read failure (uncertain) itself
+# before a caller's ``wait_for`` backstop has to guess.
+_HTTP_TIMEOUT_SECONDS = 4
+
+
+@cache
+def _uncertain_error_types() -> tuple[type[BaseException], ...]:
+    """Transport errors raised while waiting for or reading the response.
+
+    ``requests`` and ``urllib3`` come with the SDK's default client and are
+    not dependencies of this project: whichever is missing is skipped.
+    """
+    types: list[type[BaseException]] = []
+    try:
+        import requests
+
+        types += [requests.exceptions.ReadTimeout, requests.exceptions.ChunkedEncodingError]
+    except ImportError:
+        pass
+    try:
+        import urllib3
+
+        types.append(urllib3.exceptions.ProtocolError)
+    except ImportError:
+        pass
+    try:
+        import httpx
+
+        types += [httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError]
+    except ImportError:
+        pass
+    return tuple(types)
+
+
 def _may_have_been_delivered(exc: BaseException) -> bool:
     """Whether a send failure may have happened after Resend took the request.
 
@@ -43,18 +80,7 @@ def _may_have_been_delivered(exc: BaseException) -> bool:
     or the connection dropped mid-request. Failing to connect (refused, DNS,
     connect timeout) and an API error response are definite failures.
     """
-    import httpx
-    import requests
-    import urllib3
-
-    uncertain = (
-        requests.exceptions.ReadTimeout,
-        requests.exceptions.ChunkedEncodingError,
-        urllib3.exceptions.ProtocolError,
-        httpx.ReadTimeout,
-        httpx.ReadError,
-        httpx.RemoteProtocolError,
-    )
+    uncertain = _uncertain_error_types()
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
@@ -86,6 +112,11 @@ class ResendEmailService:
         # this attribute and the email_service singleton via
         # services.email_service.reset_email_service_for_testing.
         resend.api_key = normalized_api_key
+        # Also process-wide: bound the SDK's requests (its default is 30 s per
+        # phase, longer than any caller waits).
+        client_class = getattr(resend, "RequestsClient", None)
+        if client_class is not None:
+            resend.default_http_client = client_class(timeout=_HTTP_TIMEOUT_SECONDS)
         self._from_email = normalized_from_email
 
     async def _send(

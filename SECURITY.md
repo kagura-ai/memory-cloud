@@ -35,24 +35,29 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
   - a password is set, changed or reset with an emailed link;
   - a sign-in method is added (a Google / GitHub identity linked) or removed
     (the password, or an unlinked identity);
-  - an OAuth / MCP client is authorized: by browser consent the first time the
-    user authorizes that client (the code only reaches the client's registered
-    redirect URI), by device-flow approval every time (a device code can be
-    phished — an attacker starts the flow and gets the victim to approve it);
+  - an OAuth / MCP client is authorized: by browser consent when it grants
+    the client something new — the first authorization, a scope the user has
+    not granted it before, or a client whose name, redirect URIs or scope
+    changed since the user's last grant (an unchanged repeat consent sends
+    nothing: the code only reaches the client's registered redirect URI) — and
+    by device-flow approval every time (a device code can be phished — an
+    attacker starts the flow and gets the victim to approve it);
   - an API key is created or regenerated (including a connector's write key),
     an OAuth client is registered or its secret regenerated — also when a
-    workspace admin or owner does it, whom the email then names.
+    workspace admin or owner does it, whom the email then names;
+  - a provider sign-in changes the account's email address: the previous
+    address is told, and the notices still pending go to it.
 
   Each email lists the UTC time, IP address, user agent and the key or client
   name. It never carries a secret, token, key value or action link; the
   "Wasn't you?" paragraph points to the pages that list sign-in methods, API
   keys and OAuth apps and to "Forgot password?". Untrusted names and user
-  agents are normalized and defanged so no link survives. Repeats of one
-  event within 10 minutes are sent as one follow-up digest. Emails go only to
-  a verified address — one proven through an emailed password link, or one an
-  OAuth provider attested as verified at sign-in (a linked provider alone is
-  not enough; accounts created by OAuth that have not signed in since this
-  change are verified on their next sign-in) — never to `@local` accounts. Operator CLI actions (`reset_password`, `create_admin`, ...) run
+  agents are normalized and defanged so no link survives. The first three
+  occurrences of one event within 10 minutes are each sent at once; later
+  ones are sent as one follow-up digest. A notice whose send fails is retried
+  twice. Emails go only to a verified address — one proven through an emailed
+  password link, or one an OAuth provider attested as verified at sign-in (a
+  linked provider alone is not enough) — never to `@local` accounts. Operator CLI actions (`reset_password`, `create_admin`, ...) run
   outside the API and send no notice. Share keys (read-only, bound to one
   context) and connector resource tokens do not send notices either.
 

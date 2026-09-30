@@ -60,7 +60,11 @@ from services.email_action_token_service import (
     EmailActionTokenService,
     token_ttl,
 )
-from services.email_service import EmailService, get_email_service
+from services.email_service import (
+    EMAIL_SEND_TIMEOUT_SECONDS,
+    EmailService,
+    get_email_service,
+)
 from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,
@@ -77,7 +81,7 @@ logger = get_logger(__name__)
 
 # Same bound as the erasure confirmation email: a stuck provider must not hold
 # the request open indefinitely. No transaction is open during a send.
-_EMAIL_TIMEOUT_SECONDS = 10.0
+_EMAIL_TIMEOUT_SECONDS = EMAIL_SEND_TIMEOUT_SECONDS
 
 # ``audit_logs.user_email`` carries an actor label, not the subject's mutable
 # email: the subject is identified by ``user_id``, which erasure pseudonymizes.

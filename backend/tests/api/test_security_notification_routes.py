@@ -389,7 +389,7 @@ class TestOAuthRoutes:
         # A device code can be phished, so approvals are not limited to the
         # first grant (unlike consent); no first-time lookup runs at all.
         check = MagicMock()
-        monkeypatch.setattr(oauth_routes, "is_first_client_authorization", check)
+        monkeypatch.setattr(oauth_routes, "is_new_client_authorization", check)
         for _ in range(2):
             self._device_session(monkeypatch, self._device())
             tasks = BackgroundTasks()
@@ -448,6 +448,7 @@ class TestOAuthRoutes:
             "client_id": "cid-7",
             "redirect_uri": "https://cb.example/cb",
             "state": "s",
+            "scope": "memory:read",
         }
         request.state.form_data = {"confirm": "yes"}
         monkeypatch.setattr(oauth_routes, "preload_form", AsyncMock())
@@ -460,7 +461,13 @@ class TestOAuthRoutes:
         monkeypatch.setattr(
             oauth_routes, "_validate_authorize_redirect_uri", lambda *args, **kwargs: True
         )
-        monkeypatch.setattr(oauth_routes, "_first_authorization_of", lambda c, u: first)
+        self.checked: list[tuple] = []
+
+        def _consent_is_new(client_id, user_id, scope):
+            self.checked.append((client_id, user_id, scope))
+            return first
+
+        monkeypatch.setattr(oauth_routes, "_consent_is_new", _consent_is_new)
         monkeypatch.setattr(
             oauth_routes,
             "_run_oauth_sync",
@@ -477,7 +484,7 @@ class TestOAuthRoutes:
         ],
     )
     @pytest.mark.asyncio
-    async def test_consent_notifies_only_a_first_successful_grant(
+    async def test_consent_notifies_only_a_new_successful_grant(
         self, monkeypatch, first, location, expected
     ) -> None:
         request = self._authorize(monkeypatch, first=first, location=location)
@@ -486,6 +493,8 @@ class TestOAuthRoutes:
         response = await oauth_routes.oauth_authorize_post(request, tasks)
 
         assert response.status_code == 303
+        # The check gets the requested scope (a broader scope is a new grant).
+        assert self.checked == [("cid-7", "u-7", "memory:read")]
         notices = _notices(tasks)
         assert len(notices) == expected
         if notices:
@@ -510,6 +519,7 @@ async def oauth_rows(db_session: AsyncSession) -> AsyncIterator[dict]:
             client_name="Notice Test",
             redirect_uris=["https://cb.example/cb"],
             grant_types=["authorization_code"],
+            scope="memory:read memory:write",
         )
     )
     await db_session.commit()
@@ -523,11 +533,21 @@ async def oauth_rows(db_session: AsyncSession) -> AsyncIterator[dict]:
     await db_session.commit()
 
 
-async def _is_first(db: AsyncSession, rows: dict, **kwargs) -> bool:
+async def _is_first(db: AsyncSession, rows: dict, scope: str | None = "memory:read") -> bool:
     return await db.run_sync(
-        lambda session: sns.is_first_client_authorization(
-            session, client_id=rows["client_id"], user_id=rows["user_id"], **kwargs
+        lambda session: sns.is_new_client_authorization(
+            session, client_id=rows["client_id"], user_id=rows["user_id"], scope=scope
         )
+    )
+
+
+def _token(rows: dict, *, scope: str | None = "memory:read", **kwargs) -> OAuth2Token:
+    return OAuth2Token(
+        client_id=rows["client_id"],
+        user_id=kwargs.pop("user_id", rows["user_id"]),
+        access_token=f"at-{uuid4().hex}",
+        scope=scope,
+        **kwargs,
     )
 
 
@@ -538,14 +558,7 @@ class TestFirstClientAuthorization:
         assert await _is_first(db_session, oauth_rows) is True
 
     async def test_revoked_token_still_counts(self, db_session: AsyncSession, oauth_rows) -> None:
-        db_session.add(
-            OAuth2Token(
-                client_id=oauth_rows["client_id"],
-                user_id=oauth_rows["user_id"],
-                access_token=f"at-{uuid4().hex}",
-                revoked=True,
-            )
-        )
+        db_session.add(_token(oauth_rows, revoked=True))
         await db_session.commit()
         assert await _is_first(db_session, oauth_rows) is False
 
@@ -558,6 +571,7 @@ class TestFirstClientAuthorization:
                 client_id=oauth_rows["client_id"],
                 user_id=oauth_rows["user_id"],
                 redirect_uri="https://cb.example/cb",
+                scope="memory:read",
                 expires_at=utcnow(),
             )
         )
@@ -570,6 +584,7 @@ class TestFirstClientAuthorization:
             user_code=uuid4().hex[:8].upper(),
             client_id=oauth_rows["client_id"],
             user_id=oauth_rows["user_id"],
+            scope="memory:read",
             expires_at=utcnow(),
             authorized_at=utcnow(),
         )
@@ -580,15 +595,69 @@ class TestFirstClientAuthorization:
     async def test_another_users_grant_does_not_count(
         self, db_session: AsyncSession, oauth_rows
     ) -> None:
-        db_session.add(
-            OAuth2Token(
-                client_id=oauth_rows["client_id"],
-                user_id="someone-else",
-                access_token=f"at-{uuid4().hex}",
-            )
-        )
+        db_session.add(_token(oauth_rows, user_id="someone-else"))
         await db_session.commit()
         assert await _is_first(db_session, oauth_rows) is True
+
+    async def test_a_broader_scope_is_a_new_grant(
+        self, db_session: AsyncSession, oauth_rows
+    ) -> None:
+        db_session.add(_token(oauth_rows, scope="memory:read"))
+        await db_session.commit()
+        assert await _is_first(db_session, oauth_rows, "memory:read") is False
+        assert await _is_first(db_session, oauth_rows, "memory:read memory:write") is True
+
+    async def test_scopes_granted_across_earlier_grants_add_up(
+        self, db_session: AsyncSession, oauth_rows
+    ) -> None:
+        db_session.add(_token(oauth_rows, scope="memory:read"))
+        db_session.add(_token(oauth_rows, scope="memory:write"))
+        await db_session.commit()
+        assert await _is_first(db_session, oauth_rows, "memory:write memory:read") is False
+
+    async def test_no_requested_scope_means_the_registered_scope(
+        self, db_session: AsyncSession, oauth_rows
+    ) -> None:
+        # The client's rule grants its registered scope (read + write) then.
+        db_session.add(_token(oauth_rows, scope="memory:read"))
+        await db_session.commit()
+        assert await _is_first(db_session, oauth_rows, None) is True
+
+    async def test_a_scope_the_client_may_not_have_is_not_granted(
+        self, db_session: AsyncSession, oauth_rows
+    ) -> None:
+        db_session.add(_token(oauth_rows, scope="memory:read"))
+        await db_session.commit()
+        assert await _is_first(db_session, oauth_rows, "memory:read memory:admin") is False
+
+    async def test_a_client_changed_since_the_last_grant_is_a_new_grant(
+        self, db_session: AsyncSession, oauth_rows
+    ) -> None:
+        db_session.add(_token(oauth_rows, scope="memory:read"))
+        await db_session.commit()
+        assert await _is_first(db_session, oauth_rows) is False
+
+        client = (
+            await db_session.execute(
+                select(OAuth2Client).where(OAuth2Client.client_id == oauth_rows["client_id"])
+            )
+        ).scalar_one()
+        client.redirect_uris = ["https://elsewhere.example/cb"]
+        await db_session.commit()
+        assert await _is_first(db_session, oauth_rows) is True
+
+        # A grant after the change settles it again.
+        db_session.add(_token(oauth_rows, scope="memory:read"))
+        await db_session.commit()
+        assert await _is_first(db_session, oauth_rows) is False
+
+    async def test_unknown_client_fails_toward_notifying(
+        self, db_session: AsyncSession, oauth_rows
+    ) -> None:
+        db_session.add(_token(oauth_rows, scope="memory:read"))
+        await db_session.commit()
+        unknown = {"client_id": "no-such-client", "user_id": oauth_rows["user_id"]}
+        assert await _is_first(db_session, unknown) is True
 
 
 class TestAdminIsNamed:
@@ -901,29 +970,33 @@ class TestDeviceApprovalCommitsDespiteNoticeFailure:
 # ---------------------------------------------------------------------------
 
 
-class TestFirstAuthorizationOf:
+class TestConsentIsNew:
     def test_db_error_fails_open_to_notifying(self, monkeypatch) -> None:
         session = MagicMock()
         monkeypatch.setattr(oauth_routes, "get_sync_session", lambda: session)
         monkeypatch.setattr(
-            oauth_routes, "is_first_client_authorization", MagicMock(side_effect=OSError("db"))
+            oauth_routes, "is_new_client_authorization", MagicMock(side_effect=OSError("db"))
         )
-        assert oauth_routes._first_authorization_of("cid", "u-1") is True
+        assert oauth_routes._consent_is_new("cid", "u-1", "memory:read") is True
         session.close.assert_called_once()
 
     @pytest.mark.parametrize(("client_id", "user_id"), [(None, "u-1"), ("cid", None), ("", "")])
     def test_missing_ids_never_notify(self, monkeypatch, client_id, user_id) -> None:
         opened = MagicMock()
         monkeypatch.setattr(oauth_routes, "get_sync_session", opened)
-        assert oauth_routes._first_authorization_of(client_id, user_id) is False
+        assert oauth_routes._consent_is_new(client_id, user_id, None) is False
         opened.assert_not_called()
 
     def test_passes_the_answer_through(self, monkeypatch) -> None:
         monkeypatch.setattr(oauth_routes, "get_sync_session", MagicMock)
         check = MagicMock(return_value=False)
-        monkeypatch.setattr(oauth_routes, "is_first_client_authorization", check)
-        assert oauth_routes._first_authorization_of("cid", "u-1") is False
-        assert check.call_args.kwargs == {"client_id": "cid", "user_id": "u-1"}
+        monkeypatch.setattr(oauth_routes, "is_new_client_authorization", check)
+        assert oauth_routes._consent_is_new("cid", "u-1", "memory:read") is False
+        assert check.call_args.kwargs == {
+            "client_id": "cid",
+            "user_id": "u-1",
+            "scope": "memory:read",
+        }
 
 
 class TestCommitBeforeNotice:
@@ -984,4 +1057,4 @@ class TestFirstAuthorizationSessionFailure:
         monkeypatch.setattr(
             oauth_routes, "get_sync_session", MagicMock(side_effect=OSError("pool exhausted"))
         )
-        assert oauth_routes._first_authorization_of("cid", "u-1") is True
+        assert oauth_routes._consent_is_new("cid", "u-1", None) is True
