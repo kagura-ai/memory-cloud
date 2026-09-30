@@ -20,12 +20,15 @@ whole point of the gating work in #469.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import resend
 
 from services.email_service import redact_recipient
 from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from services.security_notification_service import SecurityOccurrence
 
 logger = get_logger(__name__)
 
@@ -445,5 +448,39 @@ class ResendEmailService:
                 "recipient_hash": redact_recipient(to_email),
                 "purpose": "set_password",
                 "template": "password_setup",
+            },
+        )
+
+    async def send_security_notification(
+        self,
+        *,
+        to_email: str,
+        event: str,
+        occurrences: list[SecurityOccurrence],
+        digest: bool,
+        window_minutes: int,
+        profile_page_url: str,
+    ) -> bool:
+        # The body lists IPs and user agents: it goes to the recipient only,
+        # never into log_context; the recipient is logged as a digest.
+        from services.security_notification_service import render_security_notification
+
+        subject, text = render_security_notification(
+            event,
+            occurrences,
+            digest=digest,
+            window_minutes=window_minutes,
+            profile_page_url=profile_page_url,
+        )
+        return await self._send(
+            to_email=to_email,
+            subject=subject,
+            text=text,
+            log_event="security_notification_email",
+            log_context={
+                "recipient_hash": redact_recipient(to_email),
+                "security_event": event,
+                "digest": digest,
+                "template": "security_notification",
             },
         )

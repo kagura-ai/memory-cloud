@@ -22,9 +22,12 @@ caller code in ``AccountErasureService`` does not change.
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from services.security_notification_service import SecurityOccurrence
 
 logger = get_logger(__name__)
 
@@ -300,6 +303,38 @@ class EmailService(Protocol):
         """
         ...
 
+    async def send_security_notification(
+        self,
+        *,
+        to_email: str,
+        event: str,
+        occurrences: list[SecurityOccurrence],
+        digest: bool,
+        window_minutes: int,
+        profile_page_url: str,
+    ) -> bool:
+        """Tell the owner about a security-sensitive account change (Issue #1752).
+
+        Sent after the change committed; a delivery failure changes nothing.
+        The body (``render_security_notification``) lists each occurrence with
+        its UTC time, IP, user agent and the client / key name or acting admin
+        where set. It never carries a secret, token, key value or action link.
+        Implementations SHOULD NOT log the recipient in the clear nor the
+        occurrences (IP and user agent are personal data).
+
+        Args:
+            to_email: The owner's deliverable address.
+            event: A ``SecurityEvent`` value.
+            occurrences: The occurrences to list (sanitized display text).
+            digest: True for the trailing email of a coalescing window.
+            window_minutes: The coalescing window, for the digest wording.
+            profile_page_url: ``<FRONTEND_URL>/profile`` — no token.
+
+        Returns:
+            True on delivery (or logging fallback), False on hard failure.
+        """
+        ...
+
 
 class LoggingEmailService:
     """Default stub implementation: structured logs only, no SMTP.
@@ -482,6 +517,30 @@ class LoggingEmailService:
             expires_in_minutes=expires_in_minutes,
             email_dispatch_required=True,
             template="password_setup",
+        )
+        return True
+
+    async def send_security_notification(
+        self,
+        *,
+        to_email: str,
+        event: str,
+        occurrences: list[SecurityOccurrence],
+        digest: bool,
+        window_minutes: int,
+        profile_page_url: str,
+    ) -> bool:
+        # Event and counts only: the occurrences carry IPs and user agents,
+        # and the recipient is logged as a keyed digest (#1752).
+        del window_minutes, profile_page_url
+        logger.info(
+            "security_notification_email",
+            recipient_hash=redact_recipient(to_email),
+            security_event=event,
+            occurrences=len(occurrences),
+            digest=digest,
+            email_dispatch_required=True,
+            template="security_notification",
         )
         return True
 

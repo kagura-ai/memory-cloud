@@ -9,6 +9,7 @@ Implements scheduled tasks for:
 - Resource indexer (every 5 minutes) - Issue #238
 - Semantic edge dead-endpoint sweep (monthly) — Issue #722
 - Expired device code cleanup (hourly) — Issue #1656
+- Security notice digests (every minute) — Issue #1752
 """
 
 from .bm25_drift_tasks import schedule_bm25_drift_tasks
@@ -21,6 +22,7 @@ from .mcp_tasks import schedule_mcp_tasks
 from .neural_tasks import schedule_neural_tasks
 from .resource_indexer_job import schedule_resource_indexer_jobs
 from .scheduler import get_scheduler, shutdown_scheduler, start_scheduler
+from .security_notification_tasks import schedule_security_notification_tasks
 from .semantic_edge_reverify import schedule_semantic_edge_reverify_tasks
 from .sleep_tasks import schedule_sleep_tasks
 
@@ -32,6 +34,7 @@ __all__ = [
     "schedule_mcp_tasks",
     "schedule_credentials_tasks",
     "schedule_device_code_tasks",
+    "schedule_security_notification_tasks",
     "schedule_embedding_tasks",
     "schedule_erasure_tasks",
     "schedule_resource_indexer_jobs",

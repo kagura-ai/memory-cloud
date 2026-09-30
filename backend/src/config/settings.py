@@ -1236,6 +1236,19 @@ class Settings(BaseSettings):
         le=7 * 24,
         description="Lifetime of an email-verification link (hours).",
     )
+    # Security-change notification emails (Issue #1752): at most one email per
+    # (user, event) per window; later occurrences go out as one digest when the
+    # window closes (checked every minute).
+    security_notification_window_seconds: int = Field(
+        default=600,
+        ge=60,
+        le=24 * 60 * 60,
+        description=(
+            "Coalescing window for security-change notification emails (seconds). "
+            "The first occurrence is emailed at once; repeats of the same event "
+            "for the same user within the window are sent as one digest when it closes."
+        ),
+    )
 
     # Memory Analysis allowlist (Issue #496) — kill switch.
     # Empty (default) → feature 403 globally. Comma-separated UUIDs → only listed
