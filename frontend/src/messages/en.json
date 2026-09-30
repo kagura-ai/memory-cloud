@@ -4133,7 +4133,6 @@
     "memoryLinkTemplateNote": "Makes recalled memories clickable in chat. Keep '{context_id}' and '{memory_id}' as placeholders — they are filled per result. Leave empty to show no link (a broken link is worse than none).",
     "missingListSeparator": " / ",
     "connectProvider": "Connect {name}",
-    "comingSoon": "Coming soon",
     "manualBindIntro": "Normally, connect Slack via the OAuth connect button. This form is only for binding your own Slack app installation.",
     "manualTeamIdHelp": "The Slack workspace ID starting with “T” — or “E” for an Enterprise Grid org install (e.g. T0123ABC).",
     "manualBotTokenHelp": "The “xoxb-”-prefixed token issued when the app is installed — find it at api.slack.com/apps → OAuth & Permissions → Bot User OAuth Token.",

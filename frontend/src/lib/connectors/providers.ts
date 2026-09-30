@@ -18,7 +18,7 @@ export interface ConnectorProviderDescriptor {
   icon: LucideIcon;
   /** How a new connector of this provider gets created today. */
   connectFlow: "oauth" | "manual";
-  /** false → rendered as a disabled "coming soon" affordance. */
+  /** false → not rendered in the connector picker (#1757). */
   enabled: boolean;
   /**
    * Starts this provider's connect flow. Present iff enabled — routing

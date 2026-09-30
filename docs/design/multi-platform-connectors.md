@@ -10,7 +10,7 @@
 
 | Layer | Generalization status |
 |---|---|
-| Frontend connect CTA / rows | Driven by the `CONNECTOR_PROVIDERS` descriptor (`frontend/src/lib/connectors/providers.ts`, landed with #1389) — Slack enabled, Discord/Teams rendered as disabled "coming soon" |
+| Frontend connect CTA / rows | Driven by the `CONNECTOR_PROVIDERS` descriptor (`frontend/src/lib/connectors/providers.ts`, landed with #1389) — Slack enabled; Discord/Teams descriptor entries are `enabled: false` and not rendered in the picker (#1757) |
 | Frontend settings dialog | Slack-vocabulary labels (`channelsLabel`, helpers reference Slack UI) |
 | Callback / error params | Slack-specific: `?slack_install=`, `?slack_error=`, `slackCancelled*` / `slackFailed*` / `slackExpired*` i18n keys |
 | Backend routing | `/api/v1/connectors/slack/*` (OAuth install, callback, pending-install) |

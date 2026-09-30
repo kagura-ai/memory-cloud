@@ -1063,7 +1063,7 @@ describe("ConnectorsPage RBAC gate", () => {
     expect(await screen.findByText("settingsTitle")).toBeInTheDocument();
   });
 
-  it("renders the provider picker with disabled coming-soon providers (#1389)", async () => {
+  it("renders only enabled providers in the picker (#1389, #1757)", async () => {
     setWorkspace("admin");
     render(<ConnectorsPage />);
 
@@ -1072,11 +1072,15 @@ describe("ConnectorsPage RBAC gate", () => {
       name: /connectProvider/,
     });
     expect(slackCta.length).toBeGreaterThan(0);
-    // …while Discord / Teams render as disabled coming-soon affordances.
-    const discord = screen.getByRole("button", { name: /Discord/ });
-    const teams = screen.getByRole("button", { name: /Microsoft Teams/ });
-    expect(discord).toBeDisabled();
-    expect(teams).toBeDisabled();
+    // …while disabled descriptor entries (Discord / Teams) are not rendered
+    // at all: no public "coming soon" promise without a committed date.
+    expect(
+      screen.queryByRole("button", { name: /Discord/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Microsoft Teams/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/comingSoon/)).not.toBeInTheDocument();
   });
 
   it("rejects a manual bind token without the xoxb- prefix client-side (#1389)", async () => {

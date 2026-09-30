@@ -4133,7 +4133,6 @@
     "memoryLinkTemplateNote": "チャットの検索結果から記憶へリンクできるようになります。'{context_id}' と '{memory_id}' はプレースホルダのまま残してください（結果ごとに埋められます）。空欄にするとリンクを表示しません（壊れたリンクより無い方が良いため）。",
     "missingListSeparator": "・",
     "connectProvider": "{name} を接続",
-    "comingSoon": "近日対応",
     "manualBindIntro": "通常は OAuth の接続ボタンから Slack を接続してください。このフォームは自前の Slack アプリを紐づける場合のみ使います。",
     "manualTeamIdHelp": "T で始まる Slack ワークスペース ID(Enterprise Grid の組織インストールは E 始まり。例: T0123ABC)。",
     "manualBotTokenHelp": "アプリをインストールすると発行される xoxb- で始まるトークンです。api.slack.com/apps → OAuth & Permissions → Bot User OAuth Token で確認できます。",
