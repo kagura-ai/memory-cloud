@@ -436,7 +436,10 @@ Redis and a job checks it every minute; when Redis is unavailable every
 occurrence is sent at once. A digest keeps the first 20 occurrences and counts
 the rest; a digest whose send definitely fails is retried up to twice (after
 one, then two minutes), then dropped with a `security_notification_digest_dropped`
-log line. A send that times out may still be delivered, so it is not retried. Operator
+log line. A send that times out may still be delivered, so it is not retried.
+Pending windows are kept in Redis for 7 days, so a stalled job loses nothing
+that recent; a window older than that is dropped with a
+`security_notification_window_expired` warning. Operator
 CLI actions (`reset_password`, `create_admin`) send no notice. A send failure is logged and never affects the
 change. Under `EMAIL_PROVIDER=logging` each notice is one
 `security_notification_email` log line (event and a keyed recipient hash only).

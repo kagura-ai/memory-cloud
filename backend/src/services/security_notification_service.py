@@ -22,10 +22,10 @@ sorted set scored by the window's end. Every other Redis key of the window
 ever touches its own occurrences, never those of a newer window of the same
 (user, event). Later occurrences in the window are buffered in a Redis list
 (the first ``_DIGEST_MAX_OCCURRENCES`` are kept, a counter keeps the total).
-Recording an occurrence is one optimistic Redis transaction (WATCH on the
-pointer and the due set): it is buffered only while the pointer names a window
-whose due entry exists and whose deadline has not passed; otherwise a new
-window is opened, pointer and due entry together. When the window closes, the
+Recording an occurrence is one optimistic Redis transaction watching only
+that (user, event)'s pointer, which carries the window id and deadline: it is
+buffered only while the pointer names a window whose deadline has not passed;
+otherwise a new window is opened, pointer and due entry together. When the window closes, the
 every-minute job :func:`flush_due_security_notifications` claims it in one
 transaction too (due entry removed, pointer released if still its own, buffer
 moved to a claim key) and sends one digest. The claim key is deleted once the
@@ -40,6 +40,13 @@ sent right away as a notice of their own. A flush run is bounded by
 ``_FLUSH_BATCH`` windows and ``_FLUSH_TIME_BUDGET_SECONDS``; the rest wait for
 the next run. When Redis is unavailable the occurrence is sent at once: the
 failure mode is an extra email, never silence.
+
+Pending state (pointers, buffers, counters, claims) is kept for
+``_STATE_RETENTION_SECONDS`` (7 days), so a stalled scheduler does not lose
+committed repeats; a due entry older than that is dropped with a
+``security_notification_window_expired`` warning, and a claimed window whose
+details expired still gets a digest that reports how many occurrences could
+not be listed.
 
 Known limitation: delivery is at most once. When a process crashes after a
 window was claimed and before its digest was sent, that digest is lost.
@@ -99,8 +106,8 @@ logger = get_logger(__name__)
 # background task (or the flush job) open indefinitely.
 _EMAIL_TIMEOUT_SECONDS = 10.0
 
-# Redis layout. ``_OPEN_KEY`` points at the id of the (user, event)'s open
-# window. The sorted set holds one member per window, ``"<user_id>|<event>|<id>"``,
+# Redis layout. ``_OPEN_KEY`` names the (user, event)'s open window as
+# ``"<window id>:<deadline>"``. The sorted set holds one member per window, ``"<user_id>|<event>|<id>"``,
 # scored by the window's end (or retry time; epoch seconds). Every other key is
 # per window id.
 _OPEN_KEY = "security_notify:open:{user_id}:{event}"
@@ -122,6 +129,11 @@ _MEMBER_SEPARATOR = "|"
 # minute.
 _FLUSH_BATCH = 50
 _FLUSH_TIME_BUDGET_SECONDS = 45.0
+# How long pending notice state is kept: the TTL of pointers, buffers,
+# counters and claims, and the age after which a due entry the job never got
+# to is dropped (with a ``security_notification_window_expired`` warning).
+# Long, so a stalled scheduler does not silently lose committed repeats.
+_STATE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 # Occurrences listed in one digest; the count of the rest is still reported.
 _DIGEST_MAX_OCCURRENCES = 20
 
@@ -408,7 +420,14 @@ def render_security_notification(
             lines.append(f"    Done by:     {occurrence.actor}, an administrator of your")
             lines.append("                 workspace, on your account")
         lines.append("")
-    if count > len(listed):
+    if not listed:
+        lines += [
+            f"  {count} {'occurrence' if count == 1 else 'occurrences'} of this change "
+            "could not be listed: their details",
+            "  expired before this email was sent.",
+            "",
+        ]
+    elif count > len(listed):
         lines += [f"  ... and {count - len(listed)} more.", ""]
 
     lines += [
@@ -824,12 +843,14 @@ async def _buffer_if_window_open(
 ) -> tuple[str, str | None]:
     """Buffer ``occurrence`` in the open window, or open a new one — atomically.
 
-    One optimistic transaction watches the (user, event)'s open-window
-    pointer and the due set. The occurrence is buffered only when the pointer
-    names a window whose due entry exists and whose deadline has not passed;
-    otherwise — no pointer, a stranded pointer (no due entry) or an expired
-    window — a new window is opened (pointer and due entry written together).
-    An expired window keeps its own due entry and buffer, so its digest still
+    One optimistic transaction watches only the (user, event)'s open-window
+    pointer, whose value is ``"<window id>:<deadline>"``. The occurrence is
+    buffered only when the pointer names a window whose deadline has not
+    passed; otherwise — no pointer, an unreadable one, or an expired window —
+    a new window is opened (pointer and due entry written together). Every
+    transition that ends a window (claim, close, expiry) deletes the pointer
+    in its own MULTI when it names that window, so this WATCH fires on it. An
+    expired window keeps its own due entry and buffer, so its digest still
     goes out on its own.
 
     Returns:
@@ -847,16 +868,16 @@ async def _buffer_if_window_open(
         for _ in range(_TX_RETRIES):
             try:
                 async with client.pipeline(transaction=True) as pipe:
-                    await pipe.watch(open_key, _DUE_KEY)
-                    window_id = cast(str | None, await pipe.get(open_key))
-                    deadline = (
-                        await pipe.zscore(_DUE_KEY, _member(user_id, event, window_id))
-                        if window_id
-                        else None
-                    )
+                    # Only this (user, event)'s pointer is watched: other
+                    # users' windows never force a retry. Claim / close /
+                    # expiry rewrite the pointer inside their own MULTI when it
+                    # names their window, which fires this WATCH.
+                    await pipe.watch(open_key)
+                    parsed = _parse_pointer(await pipe.get(open_key))
                     now = _now_score()
                     pipe.multi()
-                    if window_id and deadline is not None and deadline > now:
+                    if parsed is not None and parsed[1] > now:
+                        window_id = parsed[0]
                         buffer_key = _key(_BUFFER_KEY, user_id, event, window_id)
                         count_key = _key(_COUNT_KEY, user_id, event, window_id)
                         pipe.rpush(buffer_key, payload)
@@ -869,8 +890,9 @@ async def _buffer_if_window_open(
                         await pipe.execute()
                         return _BUFFERED, window_id
                     new_id = uuid.uuid4().hex
-                    pipe.set(open_key, new_id, ex=ttl)
-                    pipe.zadd(_DUE_KEY, {_member(user_id, event, new_id): now + _window_seconds()})
+                    deadline = now + _window_seconds()
+                    pipe.set(open_key, _pointer_value(new_id, deadline), ex=ttl)
+                    pipe.zadd(_DUE_KEY, {_member(user_id, event, new_id): deadline})
                     await pipe.execute()
                     return _OPENED, new_id
             except WatchError:
@@ -889,7 +911,9 @@ async def _buffer_if_window_open(
         return _SEND_NOW, None
 
 
-async def _claim_window(client: Any, user_id: str, event_value: str, window_id: str) -> bool:
+async def _claim_window(
+    client: Any, user_id: str, event_value: str, window_id: str, *, now: float
+) -> bool:
     """Claim a due window for its flush — one optimistic transaction.
 
     Removes the due entry, releases the open-window pointer if it still names
@@ -898,10 +922,13 @@ async def _claim_window(client: Any, user_id: str, event_value: str, window_id: 
     buffer is watched, so no occurrence can slip in between the read and the
     move.
 
+    Only a window whose due score is still ``<= now`` is claimed: a window
+    re-queued with a later retry time since this run listed it is left alone.
+
     Returns:
         True when this caller claimed it; False when the due entry is gone
-        (another process claimed it) or the transaction kept conflicting
-        (the entry stays for the next run).
+        (another process claimed it), not due yet (re-queued meanwhile), or
+        the transaction kept conflicting (the entry stays for the next run).
     """
     member = _member(user_id, event_value, window_id)
     open_key = _open_key(user_id, event_value)
@@ -914,20 +941,24 @@ async def _claim_window(client: Any, user_id: str, event_value: str, window_id: 
         try:
             async with client.pipeline(transaction=True) as pipe:
                 await pipe.watch(_DUE_KEY, open_key, buffer_key, count_key, claim_buffer)
-                if await pipe.zscore(_DUE_KEY, member) is None:
+                score = await pipe.zscore(_DUE_KEY, member)
+                if score is None or score > now:
                     return False
-                pointer = await pipe.get(open_key)
+                pointer = _parse_pointer(await pipe.get(open_key))
                 items = await pipe.lrange(buffer_key, 0, -1)
                 total = max(int(await pipe.get(count_key) or 0), len(items))
                 pipe.multi()
                 pipe.zrem(_DUE_KEY, member)
-                if pointer == window_id:
+                if pointer is not None and pointer[0] == window_id:
                     pipe.delete(open_key)
                 if items:
                     pipe.rpush(claim_buffer, *items)
                     pipe.ltrim(claim_buffer, 0, _DIGEST_MAX_OCCURRENCES - 1)
-                    pipe.incrby(claim_count, total)
                     pipe.expire(claim_buffer, ttl)
+                if total:
+                    # Carried even without items (they may have expired), so
+                    # the digest can still say how many there were.
+                    pipe.incrby(claim_count, total)
                     pipe.expire(claim_count, ttl)
                 pipe.delete(buffer_key, count_key)
                 await pipe.execute()
@@ -964,13 +995,13 @@ async def _close_window(
         for _ in range(_TX_RETRIES):
             try:
                 async with client.pipeline(transaction=True) as pipe:
-                    await pipe.watch(_DUE_KEY, open_key, buffer_key, count_key)
-                    pointer = await pipe.get(open_key)
+                    await pipe.watch(open_key, buffer_key, count_key)
+                    pointer = _parse_pointer(await pipe.get(open_key))
                     raw_items = await pipe.lrange(buffer_key, 0, -1)
                     raw_total = await pipe.get(count_key)
                     pipe.multi()
                     pipe.zrem(_DUE_KEY, member)
-                    if pointer == window_id:
+                    if pointer is not None and pointer[0] == window_id:
                         pipe.delete(open_key)
                     pipe.delete(buffer_key, count_key)
                     await pipe.execute()
@@ -1064,8 +1095,26 @@ def _glob_escape(text: str) -> str:
 
 
 def _buffer_ttl() -> int:
-    """TTL of pointers, buffers, counters and claims: outlives windows and retries."""
-    return 3 * _window_seconds() + (_DIGEST_MAX_ATTEMPTS + 1) * _DIGEST_RETRY_DELAY_SECONDS + 3600
+    """TTL of pointers, buffers, counters and claims (``_STATE_RETENTION_SECONDS``)."""
+    return _STATE_RETENTION_SECONDS
+
+
+def _pointer_value(window_id: str, deadline: float) -> str:
+    """The open-window pointer: ``"<window id>:<deadline epoch seconds>"``."""
+    return f"{window_id}:{deadline!r}"
+
+
+def _parse_pointer(raw: object) -> tuple[str, float] | None:
+    """``(window id, deadline)`` from a pointer, or None when absent or unreadable."""
+    if not isinstance(raw, str):
+        return None
+    window_id, _, deadline = raw.partition(":")
+    if not _WINDOW_ID_RE.fullmatch(window_id):
+        return None
+    try:
+        return window_id, float(deadline)
+    except ValueError:
+        return None
 
 
 def _now_score() -> float:
@@ -1180,6 +1229,7 @@ async def flush_due_security_notifications(
     now = now_score if now_score is not None else _now_score()
     try:
         client = get_redis_client()
+        await _expire_stale_windows(client, now=now)
         due = await client.zrangebyscore(_DUE_KEY, "-inf", now, start=0, num=_FLUSH_BATCH)
     except Exception as exc:
         logger.warning("security_notification_flush_unavailable", error_type=type(exc).__name__)
@@ -1200,7 +1250,7 @@ async def flush_due_security_notifications(
             await client.zrem(_DUE_KEY, member)
             continue
         try:
-            if not await _claim_window(client, user_id, event_value, window_id):
+            if not await _claim_window(client, user_id, event_value, window_id, now=now):
                 continue  # claimed by another process (or contended: next run)
         except Exception as exc:
             logger.error(
@@ -1242,6 +1292,54 @@ async def flush_due_security_notifications(
     return sent
 
 
+async def _expire_stale_windows(client: Any, *, now: float) -> None:
+    """Drop due entries older than ``_STATE_RETENTION_SECONDS``, loudly.
+
+    Their buffers have expired by then; the entry would otherwise sit in the
+    due set forever. Each goes with its pointer (when it still names it) and
+    its keys; a warning records the loss.
+    """
+    stale = await client.zrangebyscore(
+        _DUE_KEY, "-inf", f"({now - _STATE_RETENTION_SECONDS}", start=0, num=_FLUSH_BATCH
+    )
+    for raw_member in stale:
+        member = cast(str, raw_member)
+        try:
+            user_id, event_value, window_id = _parse_member(member)
+        except ValueError:
+            await client.zrem(_DUE_KEY, member)
+            continue
+        open_key = _open_key(user_id, event_value)
+        try:
+            async with client.pipeline(transaction=True) as pipe:
+                await pipe.watch(open_key)
+                pointer = _parse_pointer(await pipe.get(open_key))
+                pipe.multi()
+                pipe.zrem(_DUE_KEY, member)
+                if pointer is not None and pointer[0] == window_id:
+                    pipe.delete(open_key)
+                pipe.delete(
+                    *(
+                        _key(template, user_id, event_value, window_id)
+                        for template in (
+                            _BUFFER_KEY,
+                            _COUNT_KEY,
+                            _CLAIM_BUFFER_KEY,
+                            _CLAIM_COUNT_KEY,
+                            _ATTEMPTS_KEY,
+                        )
+                    )
+                )
+                await pipe.execute()
+        except WatchError:
+            continue  # the next run tries again
+        logger.warning(
+            "security_notification_window_expired",
+            user_id=user_id,
+            security_event=event_value,
+        )
+
+
 async def _flush_window(
     client: Any,
     user_id: str,
@@ -1258,10 +1356,10 @@ async def _flush_window(
     attempts_key = _key(_ATTEMPTS_KEY, user_id, event_value, window_id)
 
     raw_items = await client.lrange(claim_buffer, 0, -1)
-    if not raw_items:
+    raw_total = await client.get(claim_count)
+    if not raw_items and not int(raw_total or 0):
         await client.delete(claim_buffer, claim_count, attempts_key)
         return False
-    raw_total = await client.get(claim_count)
 
     occurrences: list[SecurityOccurrence] = []
     for raw in raw_items:
@@ -1269,10 +1367,9 @@ async def _flush_window(
             occurrences.append(SecurityOccurrence.from_json(raw))
         except (ValueError, TypeError):
             logger.warning("security_notification_bad_buffer_item", security_event=event_value)
+    # Occurrences whose details are gone (expired buffer, unreadable items)
+    # are still reported by number in the digest, never dropped silently.
     total = max(int(raw_total or 0), len(raw_items))
-    if not occurrences:
-        await client.delete(claim_buffer, claim_count, attempts_key)
-        return False
 
     event = SecurityEvent(event_value)
     try:
