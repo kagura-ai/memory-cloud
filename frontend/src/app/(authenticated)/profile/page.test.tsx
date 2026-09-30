@@ -4,7 +4,7 @@
  * Covers:
  *   - getSignInMethodLabel helper (4+1 branches)            — #514
  *   - render: "Sign-in method" Input shows the right label  — #514
- *   - getRefreshProviderName helper (3+2 branches)          — #515
+ *   - getProviderName / getRefreshProviderName helpers      — #515 / #1751
  *   - render: refresh button visible for google/github only — #515
  *   - click: POST /me/refresh-oauth → window.location set   — #515
  *   - click error: 429 → "rate limited" toast               — #515
@@ -20,6 +20,7 @@ import { resetConsumedSearchParams } from "@/hooks/useConsumeSearchParams";
 import ProfilePage from "./page";
 import {
   getSignInMethodLabel,
+  getProviderName,
   getRefreshProviderName,
   hasPasswordSignIn,
 } from "./signInLabels";
@@ -275,15 +276,15 @@ describe("hasPasswordSignIn (#1751)", () => {
   });
 });
 
-// ---------- getRefreshProviderName (#515) -----------------------------------
+// ---------- getProviderName (#515) ------------------------------------------
 
-describe("getRefreshProviderName", () => {
+describe("getProviderName", () => {
   it("returns the i18n-resolved Google label for OAuth + google", () => {
     // Helper now routes through t() so brand display can be localized
     // (Copilot loop 3 #4). Stub translator surfaces the i18n key for
     // assertion symmetry with the existing fixture pattern.
     expect(
-      getRefreshProviderName(
+      getProviderName(
         { auth_method: "oauth", auth_provider: "google" },
         stableTranslator,
       ),
@@ -292,7 +293,7 @@ describe("getRefreshProviderName", () => {
 
   it("returns the i18n-resolved GitHub label for OAuth + github", () => {
     expect(
-      getRefreshProviderName(
+      getProviderName(
         { auth_method: "oauth", auth_provider: "github" },
         stableTranslator,
       ),
@@ -301,7 +302,7 @@ describe("getRefreshProviderName", () => {
 
   it("returns null for password user (no IdP to refresh from)", () => {
     expect(
-      getRefreshProviderName(
+      getProviderName(
         { auth_method: "password", auth_provider: null },
         stableTranslator,
       ),
@@ -311,7 +312,7 @@ describe("getRefreshProviderName", () => {
   it("returns null for legacy OAuth user with null provider", () => {
     // Pre-#361 — backend would 400 anyway. UI hides the button.
     expect(
-      getRefreshProviderName(
+      getProviderName(
         { auth_method: "oauth", auth_provider: null },
         stableTranslator,
       ),
@@ -319,7 +320,37 @@ describe("getRefreshProviderName", () => {
   });
 
   it("returns null when both fields are undefined", () => {
-    expect(getRefreshProviderName({}, stableTranslator)).toBeNull();
+    expect(getProviderName({}, stableTranslator)).toBeNull();
+  });
+});
+
+// ---------- getRefreshProviderName (#515 / #1751) ---------------------------
+
+describe("getRefreshProviderName", () => {
+  const google = { auth_method: "oauth" as const, auth_provider: "google" as const };
+
+  it("names auth_provider while it is linked", () => {
+    expect(getRefreshProviderName(google, stableTranslator, ["google"])).toBe(
+      "signInMethodGoogle",
+    );
+  });
+
+  it("fails closed while the linked providers are unknown", () => {
+    expect(getRefreshProviderName(google, stableTranslator, null)).toBeNull();
+  });
+
+  it("returns null once auth_provider is no longer linked", () => {
+    expect(getRefreshProviderName(google, stableTranslator, ["github"])).toBeNull();
+  });
+
+  it("returns null for a password account", () => {
+    expect(
+      getRefreshProviderName(
+        { auth_method: "password", auth_provider: null },
+        stableTranslator,
+        [],
+      ),
+    ).toBeNull();
   });
 });
 
@@ -473,6 +504,8 @@ describe("ProfilePage — sign-in method from linked providers (#1751)", () => {
         (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
       ).toBe("signInMethodGitHub"),
     );
+    // The label falls back; the refresh action fails closed.
+    expect(screen.queryByText(/refreshFromIdP\|/)).toBeNull();
   });
 
   it("does not show one user's providers to the next user", async () => {
@@ -594,7 +627,17 @@ describe("ProfilePage — sign-in method from linked providers (#1751)", () => {
 // ---------- ProfilePage render: refresh button (#515) -----------------------
 
 describe("ProfilePage — refresh-from-IdP button visibility (#515)", () => {
-  it("renders the refresh button for an OAuth + google user", () => {
+  // #1751: the refresh block needs the loaded providers to include
+  // auth_provider, so serve the user's own provider as linked.
+  beforeEach(() => {
+    mockApiGet.mockImplementation(async () => ({
+      providers: mockUser?.auth_provider
+        ? [{ provider: mockUser.auth_provider }]
+        : [],
+    }));
+  });
+
+  it("renders the refresh button for an OAuth + google user", async () => {
     mockUser = {
       id: "u-1",
       email: "u@example.com",
@@ -604,15 +647,15 @@ describe("ProfilePage — refresh-from-IdP button visibility (#515)", () => {
     };
     render(<ProfilePage />);
     // Translator interpolates {provider} → label is "key|Google".
-    expect(screen.getByText("refreshFromIdP|signInMethodGoogle")).toBeTruthy();
+    expect(await screen.findByText("refreshFromIdP|signInMethodGoogle")).toBeTruthy();
     expect(
-      screen.getByRole("button", {
+      await screen.findByRole("button", {
         name: /refreshFromIdPButton\|signInMethodGoogle/,
       }),
     ).toBeTruthy();
   });
 
-  it("renders the refresh button for an OAuth + github user", () => {
+  it("renders the refresh button for an OAuth + github user", async () => {
     mockUser = {
       id: "u-1",
       email: "u@example.com",
@@ -621,10 +664,10 @@ describe("ProfilePage — refresh-from-IdP button visibility (#515)", () => {
       auth_provider: "github",
     };
     render(<ProfilePage />);
-    expect(screen.getByText("refreshFromIdP|signInMethodGitHub")).toBeTruthy();
+    expect(await screen.findByText("refreshFromIdP|signInMethodGitHub")).toBeTruthy();
   });
 
-  it("does NOT render the refresh button for a password user", () => {
+  it("does NOT render the refresh button for a password user", async () => {
     mockUser = {
       id: "u-2",
       email: "u@example.com",
@@ -633,10 +676,11 @@ describe("ProfilePage — refresh-from-IdP button visibility (#515)", () => {
       auth_provider: null,
     };
     render(<ProfilePage />);
+    await waitFor(() => expect(mockApiGet).toHaveBeenCalled());
     expect(screen.queryByText(/refreshFromIdP\|/)).toBeNull();
   });
 
-  it("does NOT render the refresh button for a legacy OAuth user (null provider)", () => {
+  it("does NOT render the refresh button for a legacy OAuth user (null provider)", async () => {
     mockUser = {
       id: "u-3",
       email: "u@example.com",
@@ -645,6 +689,7 @@ describe("ProfilePage — refresh-from-IdP button visibility (#515)", () => {
       auth_provider: null,
     };
     render(<ProfilePage />);
+    await waitFor(() => expect(mockApiGet).toHaveBeenCalled());
     expect(screen.queryByText(/refreshFromIdP\|/)).toBeNull();
   });
 });
@@ -652,6 +697,16 @@ describe("ProfilePage — refresh-from-IdP button visibility (#515)", () => {
 // ---------- ProfilePage refresh-button click flow (#515) --------------------
 
 describe("ProfilePage — refresh button click (#515)", () => {
+  // #1751: the refresh block needs the loaded providers to include
+  // auth_provider, so serve the user's own provider as linked.
+  beforeEach(() => {
+    mockApiGet.mockImplementation(async () => ({
+      providers: mockUser?.auth_provider
+        ? [{ provider: mockUser.auth_provider }]
+        : [],
+    }));
+  });
+
   // Restore window.location after every test in this block so the patched
   // proxy can't leak into other test files in the same vitest worker
   // (Copilot review #2: shared-worker state contamination is a real
@@ -707,7 +762,7 @@ describe("ProfilePage — refresh button click (#515)", () => {
 
     render(<ProfilePage />);
 
-    const button = screen.getByRole("button", {
+    const button = await screen.findByRole("button", {
       name: /refreshFromIdPButton\|signInMethodGoogle/,
     });
     fireEvent.click(button);
@@ -734,7 +789,7 @@ describe("ProfilePage — refresh button click (#515)", () => {
 
     render(<ProfilePage />);
 
-    const button = screen.getByRole("button", {
+    const button = await screen.findByRole("button", {
       name: /refreshFromIdPButton\|signInMethodGitHub/,
     });
     fireEvent.click(button);
@@ -762,7 +817,7 @@ describe("ProfilePage — refresh button click (#515)", () => {
     render(<ProfilePage />);
 
     fireEvent.click(
-      screen.getByRole("button", {
+      await screen.findByRole("button", {
         name: /refreshFromIdPButton\|signInMethodGoogle/,
       }),
     );

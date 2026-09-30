@@ -52,21 +52,34 @@ export function getSignInMethodLabel(
 }
 
 /**
- * Issue #515: localized provider name for i18n message interpolation.
- * Returns null when refresh is not available for the user (password auth,
- * legacy OAuth row with no recorded provider, or — #1751 — a recorded
- * provider that is no longer linked). The brand name itself comes from
- * ``signInMethodGoogle`` / ``signInMethodGitHub`` so all user-visible
- * text — even brand names — flows through next-intl.
+ * Issue #515: localized name of the provider the account signed up with
+ * (`auth_provider`), for messages about an IdP refresh. Null for password
+ * accounts and legacy OAuth rows with no recorded provider. The brand name
+ * itself comes from ``signInMethodGoogle`` / ``signInMethodGitHub`` so all
+ * user-visible text — even brand names — flows through next-intl.
  */
-export function getRefreshProviderName(
+export function getProviderName(
   user: Pick<AuthUser, "auth_method" | "auth_provider">,
   t: (key: string) => string,
-  linkedProviders: readonly string[] | null = null,
 ): string | null {
   if (user.auth_method !== "oauth") return null;
   const provider = user.auth_provider;
   if (!provider || !isKnownProvider(provider)) return null;
-  if (linkedProviders && !linkedProviders.includes(provider)) return null;
   return t(PROVIDER_LABEL_KEYS[provider]);
+}
+
+/**
+ * Issue #515 / #1751: the provider "Refresh identity" can use, or null to
+ * hide it. `POST /me/refresh-oauth` refreshes from `auth_provider`, so it must
+ * still be linked. Fails closed: while the linked providers are loading, or if
+ * they could not be read (`linkedProviders === null`), there is no refresh.
+ */
+export function getRefreshProviderName(
+  user: Pick<AuthUser, "auth_method" | "auth_provider">,
+  t: (key: string) => string,
+  linkedProviders: readonly string[] | null,
+): string | null {
+  if (!linkedProviders || !user.auth_provider) return null;
+  if (!linkedProviders.includes(user.auth_provider)) return null;
+  return getProviderName(user, t);
 }

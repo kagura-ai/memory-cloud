@@ -39,7 +39,11 @@ import { PageContainer } from "@/components/common/PageContainer";
 import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
 import PasswordSettings from "@/components/auth/PasswordSettings";
 import { DeleteAccountSection } from "@/components/account/DeleteAccountSection";
-import { getSignInMethodLabel, getRefreshProviderName } from "./signInLabels";
+import {
+  getSignInMethodLabel,
+  getProviderName,
+  getRefreshProviderName,
+} from "./signInLabels";
 
 export default function ProfilePage() {
   const t = useTranslations("profile");
@@ -68,6 +72,9 @@ export default function ProfilePage() {
   useEffect(() => {
     if (!userId) return;
     let cancelled = false;
+    // A refetch means the list may be stale (e.g. after an unlink): drop it
+    // so the refresh block stays hidden until the new list arrives.
+    setProvidersState(null);
     apiClient
       .get<{ providers?: { provider: string }[] }>(
         "/api/v1/me/account/providers",
@@ -111,7 +118,7 @@ export default function ProfilePage() {
       if (!isRefreshParam && !isLinkParam) return false;
 
       const provider =
-        getRefreshProviderName(user ?? {}, t) ?? t("signInProviderFallback");
+        getProviderName(user ?? {}, t) ?? t("signInProviderFallback");
 
       if (refreshed === "1") {
         toast({
@@ -156,7 +163,7 @@ export default function ProfilePage() {
   );
 
   const handleRefreshFromIdP = async () => {
-    const provider = getRefreshProviderName(user ?? {}, t);
+    const provider = getRefreshProviderName(user ?? {}, t, linkedProviders);
     if (!provider) return; // Defensive: button is hidden in this state
     setIsRefreshing(true);
     try {
@@ -334,11 +341,12 @@ export default function ProfilePage() {
               </div>
 
               {/* Issue #515: manual IdP refresh — only visible to OAuth
-                  users whose recorded provider is still linked (#1751).
-                  POST /me/refresh-oauth refreshes from `auth_provider`, so
-                  a provider linked later (link never sets it) gets no
-                  block. Password users and pre-#361 null-provider users
-                  see nothing. */}
+                  users whose recorded provider is in the loaded linked
+                  providers (#1751) — hidden while they load or if they
+                  cannot be read. POST /me/refresh-oauth refreshes from
+                  `auth_provider`, so a provider linked later (link never
+                  sets it) gets no block. Password users and pre-#361
+                  null-provider users see nothing. */}
               {(() => {
                 const refreshProvider = getRefreshProviderName(
                   user,
