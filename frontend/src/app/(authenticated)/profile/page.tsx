@@ -51,6 +51,44 @@ export default function ProfilePage() {
   // #1678: bumped when Connected Accounts unlinks a provider, so the Password
   // section re-reads how many sign-in methods would remain.
   const [providersVersion, setProvidersVersion] = useState(0);
+  // #1751: the linked OAuth providers, for the Sign-in method field and the
+  // refresh-from-IdP block, tagged with the user they were read for. Until
+  // they load for the current user (or when the fetch fails) the helpers fall
+  // back to the `auth_provider` pointer.
+  const [providersState, setProvidersState] = useState<{
+    userId: string;
+    providers: string[];
+  } | null>(null);
+  const userId = user?.id;
+  const linkedProviders =
+    providersState && providersState.userId === userId
+      ? providersState.providers
+      : null;
+
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    apiClient
+      .get<{ providers?: { provider: string }[] }>(
+        "/api/v1/me/account/providers",
+      )
+      .then((data) => {
+        if (!cancelled) {
+          setProvidersState({
+            userId,
+            providers: (data.providers ?? []).map((p) => p.provider),
+          });
+        }
+      })
+      .catch(() => {
+        // Drop a list that may be stale (e.g. read before an unlink) and fall
+        // back to auth_provider; Connected accounts shows the load error.
+        if (!cancelled) setProvidersState(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, providersVersion]);
 
   // Wait for useAuth() to finish its initial /auth/me fetch before
   // surfacing the refreshed=1 / error=refresh_* toast (enabled: !!user).
@@ -286,7 +324,7 @@ export default function ProfilePage() {
                 <Label htmlFor="sign-in-method">{t("signInMethod")}</Label>
                 <Input
                   id="sign-in-method"
-                  value={getSignInMethodLabel(user, t)}
+                  value={getSignInMethodLabel(user, t, linkedProviders)}
                   disabled
                   className="bg-slate-50 dark:bg-slate-900"
                 />
@@ -296,10 +334,17 @@ export default function ProfilePage() {
               </div>
 
               {/* Issue #515: manual IdP refresh — only visible to OAuth
-                  users with a known provider. Password users and pre-#361
-                  null-provider users see nothing. */}
+                  users whose recorded provider is still linked (#1751).
+                  POST /me/refresh-oauth refreshes from `auth_provider`, so
+                  a provider linked later (link never sets it) gets no
+                  block. Password users and pre-#361 null-provider users
+                  see nothing. */}
               {(() => {
-                const refreshProvider = getRefreshProviderName(user, t);
+                const refreshProvider = getRefreshProviderName(
+                  user,
+                  t,
+                  linkedProviders,
+                );
                 if (!refreshProvider) return null;
                 return (
                   <div className="space-y-2 rounded-md border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/30 p-3">
@@ -419,7 +464,11 @@ export default function ProfilePage() {
           (current method display + IdP profile refresh) from this management
           section, so removing them was judged riskier than additive mounting. */}
       <ConnectedAccounts
-        onProvidersChanged={() => setProvidersVersion((v) => v + 1)}
+        onProvidersChanged={() => {
+          setProvidersVersion((v) => v + 1);
+          // Unlinking repoints `auth_provider` server-side (#1751).
+          void refetchUser();
+        }}
       />
 
       {/* Password (Issue #1678): set up / change / remove. */}

@@ -7,37 +7,66 @@
  * tests import them while page.tsx exports only its default component. See #855.
  */
 
-import type { User as AuthUser } from "@/lib/auth/auth";
+import { hasPasswordSignIn, type User as AuthUser } from "@/lib/auth/auth";
+
+export { hasPasswordSignIn };
+
+/** OAuth providers the profile page can name, in display order. */
+const PROVIDER_LABEL_KEYS = {
+  google: "signInMethodGoogle",
+  github: "signInMethodGitHub",
+} as const;
+
+type KnownProvider = keyof typeof PROVIDER_LABEL_KEYS;
+
+function isKnownProvider(provider: string): provider is KnownProvider {
+  return Object.prototype.hasOwnProperty.call(PROVIDER_LABEL_KEYS, provider);
+}
 
 /**
- * Issue #514: derive the i18n label for the user's sign-in method.
- * Password users always show "Email + Password" regardless of auth_provider.
- * OAuth users with a known provider show that provider's name.
- * Pre-#361 OAuth users may have auth_provider=null; fall back to "Other".
+ * Issue #514 / #1751: derive the i18n label for how the user can sign in.
+ *
+ * - CLI admin accounts (`auth_method === "password"`) keep the single
+ *   "Password" label.
+ * - Everyone else gets every linked OAuth provider (Google first), plus
+ *   "Email and password" when a password is set, joined by the localized
+ *   separator.
+ * - `linkedProviders` is the `/me/account/providers` list; until it loads (or
+ *   if it fails) the legacy `auth_provider` pointer stands in for it.
+ * - Nothing to name (pre-#361 OAuth row with no provider) → "Other".
  */
 export function getSignInMethodLabel(
-  user: Pick<AuthUser, "auth_method" | "auth_provider">,
+  user: Pick<AuthUser, "auth_method" | "auth_provider" | "has_password">,
   t: (key: string) => string,
+  linkedProviders: readonly string[] | null = null,
 ): string {
   if (user.auth_method === "password") return t("signInMethodPassword");
-  if (user.auth_provider === "google") return t("signInMethodGoogle");
-  if (user.auth_provider === "github") return t("signInMethodGitHub");
-  return t("signInMethodOther");
+  const providers =
+    linkedProviders ?? (user.auth_provider ? [user.auth_provider] : []);
+  const labels = (Object.keys(PROVIDER_LABEL_KEYS) as KnownProvider[])
+    .filter((provider) => providers.includes(provider))
+    .map((provider) => t(PROVIDER_LABEL_KEYS[provider]));
+  if (hasPasswordSignIn(user)) labels.push(t("signInMethodEmailPassword"));
+  if (labels.length === 0) return t("signInMethodOther");
+  return labels.join(t("signInMethodSeparator"));
 }
 
 /**
  * Issue #515: localized provider name for i18n message interpolation.
- * Returns null when refresh is not available for the user (password auth
- * or legacy OAuth row with no recorded provider). The brand name itself
- * comes from ``signInMethodGoogle`` / ``signInMethodGitHub`` so all
- * user-visible text — even brand names — flows through next-intl.
+ * Returns null when refresh is not available for the user (password auth,
+ * legacy OAuth row with no recorded provider, or — #1751 — a recorded
+ * provider that is no longer linked). The brand name itself comes from
+ * ``signInMethodGoogle`` / ``signInMethodGitHub`` so all user-visible
+ * text — even brand names — flows through next-intl.
  */
 export function getRefreshProviderName(
   user: Pick<AuthUser, "auth_method" | "auth_provider">,
   t: (key: string) => string,
+  linkedProviders: readonly string[] | null = null,
 ): string | null {
   if (user.auth_method !== "oauth") return null;
-  if (user.auth_provider === "google") return t("signInMethodGoogle");
-  if (user.auth_provider === "github") return t("signInMethodGitHub");
-  return null;
+  const provider = user.auth_provider;
+  if (!provider || !isKnownProvider(provider)) return null;
+  if (linkedProviders && !linkedProviders.includes(provider)) return null;
+  return t(PROVIDER_LABEL_KEYS[provider]);
 }

@@ -49,6 +49,17 @@ export interface User {
   terms_version?: string | null;
 }
 
+/**
+ * #1678: whether the account can sign in with a password. `has_password` is
+ * authoritative (an OAuth user may have added one); an older backend only
+ * sends `auth_method`, where "password" implied one.
+ */
+export function hasPasswordSignIn(
+  user: Pick<User, "auth_method" | "has_password"> | null | undefined,
+): boolean {
+  return user?.has_password ?? user?.auth_method === "password";
+}
+
 export interface AuthResponse {
   user: User;
   token?: string;

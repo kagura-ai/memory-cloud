@@ -42,6 +42,7 @@ import { LoadingState } from "@/components/common/LoadingState";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiClient, ApiError } from "@/lib/api/base";
+import { hasPasswordSignIn } from "@/lib/auth/auth";
 import { CONNECTED_ACCOUNTS_TEST_IDS } from "@/components/auth/connected-accounts.testids";
 import { Link2, Loader2 } from "lucide-react";
 
@@ -155,9 +156,8 @@ export default function ConnectedAccounts({
   // unlinking the last OAuth provider is safe. An OAuth-only user with a single
   // linked provider must keep it — disable Disconnect to pre-empt the backend
   // 409 (which is still handled defensively in handleDisconnectConfirm).
-  // #1678: `has_password` is authoritative (an OAuth user may have added a
-  // password); an older backend only sends `auth_method`.
-  const hasPassword = user?.has_password ?? user?.auth_method === "password";
+  // #1678: an OAuth user may have added a password.
+  const hasPassword = hasPasswordSignIn(user);
   const isOnlyMethod = !hasPassword && linkedSet.size <= 1;
 
   const handleConnect = async (provider: Provider) => {

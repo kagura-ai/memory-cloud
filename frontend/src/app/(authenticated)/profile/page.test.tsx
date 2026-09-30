@@ -10,6 +10,7 @@
  *   - click error: 429 → "rate limited" toast               — #515
  *   - search-param effect: refreshed=1 → success toast      — #515
  *   - search-param effect: error=refresh_* → destructive    — #515
+ *   - sign-in method lists linked providers + email/password — #1751
  */
 
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
@@ -17,7 +18,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { resetConsumedSearchParams } from "@/hooks/useConsumeSearchParams";
 
 import ProfilePage from "./page";
-import { getSignInMethodLabel, getRefreshProviderName } from "./signInLabels";
+import {
+  getSignInMethodLabel,
+  getRefreshProviderName,
+  hasPasswordSignIn,
+} from "./signInLabels";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -25,6 +30,8 @@ const stableTranslator = (key: string, values?: Record<string, unknown>) => {
   // Translator stub: surfaces the key plus any interpolated provider arg
   // so the test can assert on both the i18n key choice AND the value.
   if (values && "provider" in values) return `${key}|${values.provider}`;
+  // #1751: a readable separator so joined sign-in methods stay assertable.
+  if (key === "signInMethodSeparator") return ", ";
   return key;
 };
 vi.mock("next-intl", () => ({
@@ -65,6 +72,7 @@ let mockUser: {
   timezone?: string;
   auth_method?: "password" | "oauth";
   auth_provider?: "google" | "github" | null;
+  has_password?: boolean;
 } | null = null;
 const mockRefetchUser = vi.fn();
 vi.mock("@/contexts/AuthContext", () => ({
@@ -79,7 +87,7 @@ vi.mock("@/hooks/use-toast", () => ({
   useToast: () => ({ toast: mockToast }),
 }));
 
-const { mockApiPost, mockApiPut, FakeApiError } = vi.hoisted(() => {
+const { mockApiGet, mockApiPost, mockApiPut, FakeApiError } = vi.hoisted(() => {
   class FakeApiError extends Error {
     readonly status: number;
     constructor(status: number, message = "fake-error") {
@@ -89,6 +97,7 @@ const { mockApiPost, mockApiPut, FakeApiError } = vi.hoisted(() => {
     }
   }
   return {
+    mockApiGet: vi.fn(),
     mockApiPost: vi.fn(),
     mockApiPut: vi.fn(),
     FakeApiError,
@@ -96,6 +105,7 @@ const { mockApiPost, mockApiPut, FakeApiError } = vi.hoisted(() => {
 });
 vi.mock("@/lib/api/base", () => ({
   apiClient: {
+    get: (...args: unknown[]) => mockApiGet(...args),
     post: (...args: unknown[]) => mockApiPost(...args),
     put: (...args: unknown[]) => mockApiPut(...args),
   },
@@ -123,6 +133,10 @@ beforeEach(() => {
   mockRefetchUser.mockClear();
   mockToast.mockClear();
   mockApiPost.mockReset();
+  // #1751: the providers fetch fails by default, so the page falls back to
+  // `auth_provider` and the pre-#1751 cases keep their expectations.
+  mockApiGet.mockReset();
+  mockApiGet.mockRejectedValue(new FakeApiError(500));
   mockRouterReplace.mockClear();
   mockSearchParamsValue = new URLSearchParams("");
 });
@@ -170,6 +184,84 @@ describe("getSignInMethodLabel", () => {
     expect(getSignInMethodLabel({}, stableTranslator)).toBe(
       "signInMethodOther",
     );
+  });
+});
+
+// ---------- getSignInMethodLabel with a password + linked providers (#1751) -
+
+describe("getSignInMethodLabel — email and password (#1751)", () => {
+  it("lists Google and email/password for an OAuth user who set a password", () => {
+    expect(
+      getSignInMethodLabel(
+        { auth_method: "oauth", auth_provider: "google", has_password: true },
+        stableTranslator,
+        ["google"],
+      ),
+    ).toBe("signInMethodGoogle, signInMethodEmailPassword");
+  });
+
+  it("shows only email/password once every OAuth provider is unlinked", () => {
+    expect(
+      getSignInMethodLabel(
+        { auth_method: "oauth", auth_provider: null, has_password: true },
+        stableTranslator,
+        [],
+      ),
+    ).toBe("signInMethodEmailPassword");
+  });
+
+  it("lists every linked provider, Google first, whatever auth_provider says", () => {
+    expect(
+      getSignInMethodLabel(
+        { auth_method: "oauth", auth_provider: "github", has_password: false },
+        stableTranslator,
+        ["github", "google"],
+      ),
+    ).toBe("signInMethodGoogle, signInMethodGitHub");
+  });
+
+  it("falls back to auth_provider until the providers are loaded", () => {
+    expect(
+      getSignInMethodLabel(
+        { auth_method: "oauth", auth_provider: "google", has_password: true },
+        stableTranslator,
+        null,
+      ),
+    ).toBe("signInMethodGoogle, signInMethodEmailPassword");
+  });
+
+  it("keeps the CLI admin label for auth_method=password", () => {
+    expect(
+      getSignInMethodLabel(
+        { auth_method: "password", auth_provider: null, has_password: true },
+        stableTranslator,
+        [],
+      ),
+    ).toBe("signInMethodPassword");
+  });
+
+  it("uses the translated separator", () => {
+    const ja = (key: string) => (key === "signInMethodSeparator" ? "、" : key);
+    expect(
+      getSignInMethodLabel(
+        { auth_method: "oauth", auth_provider: "google", has_password: true },
+        ja,
+        ["google"],
+      ),
+    ).toBe("signInMethodGoogle、signInMethodEmailPassword");
+  });
+});
+
+describe("hasPasswordSignIn (#1751)", () => {
+  it("trusts has_password when the backend sends it", () => {
+    expect(hasPasswordSignIn({ auth_method: "oauth", has_password: true })).toBe(true);
+    expect(hasPasswordSignIn({ auth_method: "password", has_password: false })).toBe(false);
+  });
+
+  it("falls back to auth_method=password for an older backend", () => {
+    expect(hasPasswordSignIn({ auth_method: "password" })).toBe(true);
+    expect(hasPasswordSignIn({ auth_method: "oauth" })).toBe(false);
+    expect(hasPasswordSignIn(null)).toBe(false);
   });
 });
 
@@ -253,6 +345,207 @@ describe("ProfilePage — sign-in method section (#514)", () => {
 
     const input = screen.getByLabelText("signInMethod") as HTMLInputElement;
     expect(input.value).toBe("signInMethodPassword");
+  });
+});
+
+// ---------- ProfilePage render: providers + password (#1751) ----------------
+
+describe("ProfilePage — sign-in method from linked providers (#1751)", () => {
+  it("shows Google and email/password once the providers load", async () => {
+    mockUser = {
+      id: "u-1",
+      email: "u@example.com",
+      name: "Test",
+      auth_method: "oauth",
+      auth_provider: "google",
+      has_password: true,
+    };
+    mockApiGet.mockResolvedValue({ providers: [{ provider: "google" }] });
+
+    render(<ProfilePage />);
+
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
+      ).toBe("signInMethodGoogle, signInMethodEmailPassword"),
+    );
+    expect(mockApiGet).toHaveBeenCalledWith("/api/v1/me/account/providers");
+  });
+
+  it("shows email/password and hides the refresh block with no provider linked", async () => {
+    mockUser = {
+      id: "u-1",
+      email: "u@example.com",
+      name: "Test",
+      auth_method: "oauth",
+      auth_provider: null,
+      has_password: true,
+    };
+    mockApiGet.mockResolvedValue({ providers: [] });
+
+    render(<ProfilePage />);
+
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
+      ).toBe("signInMethodEmailPassword"),
+    );
+    expect(screen.queryByText(/refreshFromIdP\|/)).toBeNull();
+  });
+
+  it("hides the refresh block when auth_provider is no longer linked", async () => {
+    mockUser = {
+      id: "u-1",
+      email: "u@example.com",
+      name: "Test",
+      auth_method: "oauth",
+      auth_provider: "google",
+      has_password: true,
+    };
+    mockApiGet.mockResolvedValue({ providers: [{ provider: "github" }] });
+
+    render(<ProfilePage />);
+
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
+      ).toBe("signInMethodGitHub, signInMethodEmailPassword"),
+    );
+    expect(screen.queryByText(/refreshFromIdP\|/)).toBeNull();
+  });
+
+  it("hides the refresh block for a provider linked later (auth_provider unset)", async () => {
+    mockUser = {
+      id: "u-1",
+      email: "u@example.com",
+      name: "Test",
+      auth_method: "oauth",
+      auth_provider: null,
+      has_password: true,
+    };
+    mockApiGet.mockResolvedValue({ providers: [{ provider: "google" }] });
+
+    render(<ProfilePage />);
+
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
+      ).toBe("signInMethodGoogle, signInMethodEmailPassword"),
+    );
+    expect(screen.queryByText(/refreshFromIdP\|/)).toBeNull();
+  });
+
+  it("falls back to auth_provider when a refetch fails", async () => {
+    mockUser = {
+      id: "u-1",
+      email: "u@example.com",
+      name: "Test",
+      auth_method: "oauth",
+      auth_provider: "github",
+      has_password: false,
+    };
+    mockApiGet.mockResolvedValue({
+      providers: [{ provider: "google" }, { provider: "github" }],
+    });
+
+    render(<ProfilePage />);
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
+      ).toBe("signInMethodGoogle, signInMethodGitHub"),
+    );
+
+    mockApiGet.mockRejectedValue(new FakeApiError(500));
+    fireEvent.click(screen.getByText("connected-accounts-stub"));
+
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
+      ).toBe("signInMethodGitHub"),
+    );
+  });
+
+  it("does not show one user's providers to the next user", async () => {
+    mockUser = {
+      id: "u-1",
+      email: "u@example.com",
+      name: "Test",
+      auth_method: "oauth",
+      auth_provider: "google",
+      has_password: false,
+    };
+    mockApiGet.mockResolvedValue({
+      providers: [{ provider: "google" }, { provider: "github" }],
+    });
+    const { rerender } = render(<ProfilePage />);
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
+      ).toBe("signInMethodGoogle, signInMethodGitHub"),
+    );
+
+    mockApiGet.mockReturnValue(new Promise(() => {}));
+    mockUser = {
+      id: "u-2",
+      email: "v@example.com",
+      name: "Other",
+      auth_method: "oauth",
+      auth_provider: "github",
+      has_password: false,
+    };
+    rerender(<ProfilePage />);
+
+    expect(
+      (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
+    ).toBe("signInMethodGitHub");
+  });
+
+  it("updates the field when a password is added (user refetched)", () => {
+    mockUser = {
+      id: "u-1",
+      email: "u@example.com",
+      name: "Test",
+      auth_method: "oauth",
+      auth_provider: "google",
+      has_password: false,
+    };
+    const { rerender } = render(<ProfilePage />);
+    expect(
+      (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
+    ).toBe("signInMethodGoogle");
+
+    mockUser = { ...mockUser, has_password: true };
+    rerender(<ProfilePage />);
+
+    expect(
+      (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
+    ).toBe("signInMethodGoogle, signInMethodEmailPassword");
+  });
+
+  it("re-reads the providers and the user after Connected Accounts changes them", async () => {
+    mockUser = {
+      id: "u-1",
+      email: "u@example.com",
+      name: "Test",
+      auth_method: "oauth",
+      auth_provider: "google",
+      has_password: true,
+    };
+    mockApiGet.mockResolvedValue({ providers: [{ provider: "google" }] });
+
+    render(<ProfilePage />);
+    await waitFor(() => expect(mockApiGet).toHaveBeenCalledTimes(1));
+
+    mockApiGet.mockResolvedValue({ providers: [] });
+    fireEvent.click(screen.getByText("connected-accounts-stub"));
+
+    await waitFor(() => expect(mockApiGet).toHaveBeenCalledTimes(2));
+    expect(mockRefetchUser).toHaveBeenCalled();
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("signInMethod") as HTMLInputElement).value,
+      ).toBe("signInMethodEmailPassword"),
+    );
   });
 });
 
