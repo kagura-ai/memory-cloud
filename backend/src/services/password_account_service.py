@@ -18,6 +18,14 @@ and the request's cookie): each write takes a ``revoke_sessions`` callback and
 runs it after the write and BEFORE the commit, so a failed revocation rolls the
 write back instead of leaving a new password beside the old sessions.
 
+A **reset** is the compromise-recovery path, so it also revokes every OAuth2 /
+MCP grant of the account in the same transaction (#1738): access and refresh
+tokens, authorization codes not yet exchanged, and device codes. A change or
+set-up (the caller proves the current password or the mailbox while signed
+in) keeps them. API keys, OAuth client secrets, share keys and resource tokens
+are integration credentials and are never revoked here; the reset page and
+email tell the user to review them.
+
 bcrypt (``hash_password`` / ``verify_password``) runs in a worker thread: it
 is CPU-bound and would otherwise stall the event loop.
 
@@ -31,14 +39,21 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.password import hash_password, verify_password
 from auth.password_policy import PasswordPolicyError, validate_password_policy
 from config.settings import get_settings
 from db.base import _get_session_factory
-from models.auth import AuditLog, User, UserOAuthProvider
+from models.auth import (
+    AuditLog,
+    OAuth2AuthorizationCode,
+    OAuth2DeviceCode,
+    OAuth2Token,
+    User,
+    UserOAuthProvider,
+)
 from services.email_action_token_service import (
     PASSWORD_LINK_PURPOSES,
     EmailActionPurpose,
@@ -258,6 +273,8 @@ class PasswordAccountService:
             ip_address: Client IP for the audit row.
             user_agent: Client user agent for the audit row.
             revoke_sessions: Signs the account out; run before the commit.
+                Every OAuth2 / MCP grant of the account is revoked in the same
+                transaction (#1738), so it rolls back with the password.
 
         Returns:
             The user_id whose password was reset.
@@ -272,9 +289,12 @@ class PasswordAccountService:
         user = await self._consume_for_user(raw_token, "reset_password")
         user.password_hash = password_hash
         await self._invalidate_password_links(user.user_id)
+        tokens_revoked = await self._revoke_oauth_grants(user.user_id)
         self._audit(user.user_id, _AUDIT_ACTOR_LINK, "password_reset", ip_address, user_agent)
         await self._revoke_then_commit(user.user_id, revoke_sessions)
-        logger.info("password_reset_completed", user_id=user.user_id)
+        logger.info(
+            "password_reset_completed", user_id=user.user_id, oauth_tokens_revoked=tokens_revoked
+        )
         return user.user_id
 
     # ------------------------------------------------------------------
@@ -523,6 +543,31 @@ class PasswordAccountService:
             await self.db.commit()  # keep the link burned
             raise PasswordLinkInvalidError()
         return user
+
+    async def _revoke_oauth_grants(self, user_id: str) -> int:
+        """Revoke every OAuth2 / MCP grant of the account (#1738).
+
+        Runs inside the reset's transaction, while ``_consume_for_user`` holds
+        the ``users`` row lock. The refresh grant takes that lock (shared)
+        before it reads a refresh token, so a refresh racing the reset either
+        commits first — and its new token is revoked here — or waits and then
+        finds its refresh token revoked. Bearer checks read the token row on
+        every request, so nothing else needs invalidating.
+
+        Returns:
+            The number of tokens revoked.
+        """
+        now = utcnow()
+        result = await self.db.execute(
+            update(OAuth2Token)
+            .where(OAuth2Token.user_id == user_id, OAuth2Token.revoked.is_(False))
+            .values(revoked=True, access_token_revoked_at=now, refresh_token_revoked_at=now)
+        )
+        await self.db.execute(
+            delete(OAuth2AuthorizationCode).where(OAuth2AuthorizationCode.user_id == user_id)
+        )
+        await self.db.execute(delete(OAuth2DeviceCode).where(OAuth2DeviceCode.user_id == user_id))
+        return int(getattr(result, "rowcount", 0) or 0)
 
     async def _invalidate_password_links(self, user_id: str) -> None:
         await EmailActionTokenService(self.db).invalidate(

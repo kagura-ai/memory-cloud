@@ -4396,7 +4396,7 @@
       "submit": "Reset password",
       "submitting": "Saving…",
       "successTitle": "Password updated",
-      "successBody": "Your password was changed and every browser session was signed out. Sign in with your new password.",
+      "successBody": "Your password was changed. Every browser session was signed out and every connected app or MCP client was disconnected. Sign in with your new password. API keys keep working — if someone else may have had access, review them in Settings.",
       "signIn": "Sign in",
       "invalidTitle": "This link can't be used",
       "invalidBody": "The link is invalid, was already used, or has expired. Request a new one.",

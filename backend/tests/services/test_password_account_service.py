@@ -20,8 +20,18 @@ import structlog
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from auth.oauth2_bearer import find_active_oauth_token
 from auth.password import hash_password, verify_password
-from models.auth import AuditLog, EmailActionToken, User, UserOAuthProvider
+from models.auth import (
+    AuditLog,
+    EmailActionToken,
+    OAuth2AuthorizationCode,
+    OAuth2Client,
+    OAuth2DeviceCode,
+    OAuth2Token,
+    User,
+    UserOAuthProvider,
+)
 from services import password_account_service as password_service_module
 from services.email_action_token_service import EmailActionTokenService
 from services.email_service import LoggingEmailService
@@ -245,6 +255,158 @@ class TestReset:
         pending = await service.request_reset(email=user.email)
         assert pending is not None
         await service.send_reset_email(pending)  # does not raise
+
+
+# ---------------------------------------------------------------------------
+# Reset revokes OAuth grants (#1738)
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def oauth_client(db_session: AsyncSession) -> AsyncIterator[str]:
+    client_id = f"pw-reset-{uuid4().hex[:10]}"
+    db_session.add(
+        OAuth2Client(
+            client_id=client_id,
+            client_secret_hash="",
+            client_name="Reset test client",
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            scope="memory:read",
+            redirect_uris=["https://client.example/cb"],
+            token_endpoint_auth_method="none",
+            provider="claude",
+        )
+    )
+    await db_session.commit()
+    yield client_id
+    await db_session.rollback()
+    # Tokens and device codes cascade with the client; codes have no FK.
+    await db_session.execute(
+        delete(OAuth2AuthorizationCode).where(OAuth2AuthorizationCode.client_id == client_id)
+    )
+    await db_session.execute(delete(OAuth2Client).where(OAuth2Client.client_id == client_id))
+    await db_session.commit()
+
+
+async def _grants(db: AsyncSession, client_id: str, user_id: str) -> str:
+    """Give ``user_id`` a live token, a pending code and an approved device code.
+
+    Returns the access token (plain values only: the rows expire on commit).
+    """
+    suffix = uuid4().hex
+    db.add(
+        OAuth2Token(
+            client_id=client_id,
+            user_id=user_id,
+            access_token=f"at-{suffix}",
+            refresh_token=f"rt-{suffix}",
+            scope="memory:read",
+            expires_in=3600,
+        )
+    )
+    db.add(
+        OAuth2AuthorizationCode(
+            code=f"code-{suffix}",
+            client_id=client_id,
+            user_id=user_id,
+            redirect_uri="https://client.example/cb",
+            scope="memory:read",
+            expires_at=utcnow() + timedelta(minutes=5),
+        )
+    )
+    db.add(
+        OAuth2DeviceCode(
+            device_code=f"dc-{suffix}",
+            user_code=suffix[:8].upper(),
+            client_id=client_id,
+            user_id=user_id,
+            scope="memory:read",
+            expires_at=utcnow() + timedelta(minutes=10),
+            authorized_at=utcnow(),
+        )
+    )
+    await db.commit()
+    return f"at-{suffix}"
+
+
+async def _pending_grants(db: AsyncSession, user_id: str) -> tuple[int, int]:
+    codes = await db.scalar(
+        select(func.count())
+        .select_from(OAuth2AuthorizationCode)
+        .where(OAuth2AuthorizationCode.user_id == user_id)
+    )
+    devices = await db.scalar(
+        select(func.count())
+        .select_from(OAuth2DeviceCode)
+        .where(OAuth2DeviceCode.user_id == user_id)
+    )
+    return int(codes or 0), int(devices or 0)
+
+
+class TestResetRevokesOAuthGrants:
+    async def test_reset_revokes_the_users_tokens_and_pending_grants(
+        self, db_session: AsyncSession, made: _Made, oauth_client: str
+    ) -> None:
+        user = await _user(db_session, made)
+        other = await _user(db_session, made)
+        uid, other_uid = user.user_id, other.user_id
+        access = await _grants(db_session, oauth_client, uid)
+        theirs = await _grants(db_session, oauth_client, other_uid)
+        service = PasswordAccountService(db_session, email_service=_email())
+        pending = await service.request_reset(email=user.email)
+        assert pending is not None
+
+        await service.complete_reset(raw_token=_token_from(pending.reset_url), new_password=NEW)
+
+        db_session.expire_all()
+        assert await find_active_oauth_token(access, db_session) is None
+        revoked = (
+            await db_session.execute(select(OAuth2Token).where(OAuth2Token.access_token == access))
+        ).scalar_one()
+        assert revoked.revoked is True
+        assert revoked.access_token_revoked_at is not None
+        assert revoked.refresh_token_revoked_at is not None
+        assert not revoked.is_refresh_token_active()
+        assert await _pending_grants(db_session, uid) == (0, 0)
+        # Another account's grants are untouched.
+        assert await find_active_oauth_token(theirs, db_session) is not None
+        assert await _pending_grants(db_session, other_uid) == (1, 1)
+
+    async def test_revocation_rolls_back_with_the_reset(
+        self, db_session: AsyncSession, made: _Made, oauth_client: str
+    ) -> None:
+        user = await _user(db_session, made)
+        uid = user.user_id
+        token = await _grants(db_session, oauth_client, uid)
+        service = PasswordAccountService(db_session, email_service=_email())
+        pending = await service.request_reset(email=user.email)
+        assert pending is not None
+
+        def fail(_user_id: str) -> None:
+            raise _RevocationFailed()
+
+        with pytest.raises(_RevocationFailed):
+            await service.complete_reset(
+                raw_token=_token_from(pending.reset_url), new_password=NEW, revoke_sessions=fail
+            )
+
+        db_session.expire_all()
+        assert await find_active_oauth_token(token, db_session) is not None
+        assert await _pending_grants(db_session, uid) == (1, 1)
+
+    async def test_change_keeps_oauth_tokens(
+        self, db_session: AsyncSession, made: _Made, oauth_client: str
+    ) -> None:
+        user = await _user(db_session, made)
+        token = await _grants(db_session, oauth_client, user.user_id)
+
+        await PasswordAccountService(db_session).change(
+            user_id=user.user_id, current_password=OLD, new_password=NEW
+        )
+
+        db_session.expire_all()
+        assert await find_active_oauth_token(token, db_session) is not None
 
 
 class TestBackgroundResetRequest:

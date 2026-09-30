@@ -755,14 +755,25 @@ class RefreshTokenGrant(_ResourceBoundGrant, grants.RefreshTokenGrant):
         (``SELECT ... FOR UPDATE``) until the refresh commits, so a concurrent
         refresh with the same token waits for it and then finds it revoked.
 
+        The owner's ``users`` row is locked first, in share mode (#1738): a
+        password reset holds it exclusively while it revokes every token of
+        the account, so a refresh either commits before the reset (whose
+        revocation then covers the new token) or waits and finds this refresh
+        token revoked. Locking the user before the token matches the reset's
+        order, so the two cannot deadlock.
+
         Args:
             refresh_token: Refresh token value
 
         Returns:
             OAuth2Token or None
         """
+        session = self.server.db_session
+        owner = session.query(OAuth2Token.user_id).filter_by(refresh_token=refresh_token).scalar()
+        if owner is not None:
+            session.query(User.user_id).filter_by(user_id=owner).with_for_update(read=True).first()
         token = (
-            self.server.db_session.query(OAuth2Token)
+            session.query(OAuth2Token)
             .filter_by(refresh_token=refresh_token)
             .with_for_update()
             .first()

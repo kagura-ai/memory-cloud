@@ -391,7 +391,7 @@ that does not forward the client address it would lock everyone out.
 | Endpoint | Auth | What it does |
 |----------|------|--------------|
 | `POST /api/v1/auth/password/reset-request` `{email}` | public | Always `202` with the same body. Emails a reset link only to an account with that verified email and a password. 10 per client address and 3 per address per 15 minutes (the per-address limit is silent). |
-| `POST /api/v1/auth/password/reset` `{token, new_password}` | the link | Sets the password and **signs out every browser session** of the account; the person then signs in. |
+| `POST /api/v1/auth/password/reset` `{token, new_password}` | the link | Sets the password, **signs out every browser session** and **revokes every OAuth / MCP grant** of the account (see below); the person then signs in. |
 | `POST /api/v1/me/password/setup-request` | browser session | For an account without a password: emails a set-a-password link to the account's address (`409` if it has one, `400` for `@local`). |
 | `POST /api/v1/auth/password/setup` `{token, new_password}` | the link | Sets the first password, marks the email verified, signs out the account's other browser sessions. |
 | `POST /api/v1/me/password/change` `{current_password, new_password}` | browser session | Signs out the account's other browser sessions. |
@@ -407,9 +407,18 @@ was sent. Links point at `FRONTEND_URL` (`/password/reset?token=…`,
 are not indexed. New passwords follow the admin CLI policy (12+ characters,
 upper- and lower-case letter, digit, symbol, at most 72 bytes).
 
-Only browser sessions are signed out by a reset, set-up, change or removal:
-OAuth / MCP access and refresh tokens and API keys issued to the account keep
-working until they expire or are revoked.
+A **reset** is the recovery path after a compromise, so it also revokes, in
+the same transaction as the new password (#1738): every OAuth / MCP access and
+refresh token issued to the account, authorization codes not yet exchanged,
+and device-flow codes. Connected clients (Claude Code, ChatGPT, the CLI) must
+sign in again. A set-up, change or removal signs out browser sessions only.
+
+API keys, OAuth client secrets, share keys and resource tokens are **not**
+revoked by any password flow: they are integration credentials, and revoking
+them would silently break integrations. The reset email and the reset page tell
+the person to review them in Settings. Used and expired `email_action_tokens`
+rows are deleted by an hourly job once they are
+`EMAIL_ACTION_TOKEN_RETENTION_SECONDS` (default `86400`) past use or expiry.
 
 **Email delivery.** The links need `EMAIL_PROVIDER=resend`. The default
 `logging` provider writes one `email_dispatch_required=true` line per email with
