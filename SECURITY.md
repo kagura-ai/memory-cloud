@@ -26,6 +26,22 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
 - **API Keys** for programmatic access (SHA-256 hashed, Fernet encrypted at rest)
 - **JWT** for session tokens (configurable expiry, HS256)
 - **HttpOnly cookies** for session storage
+- **Security-change notification emails** — the account owner is emailed
+  (mandatory, no opt-out) when:
+  - a password is set, changed or reset with an emailed link;
+  - a sign-in method is removed (the password, or an unlinked Google / GitHub
+    identity);
+  - an OAuth / MCP client is authorized for the first time (browser consent or
+    device-flow approval);
+  - an API key is created or regenerated, or an OAuth client secret is
+    regenerated — including by a workspace admin or owner, whom the email names.
+
+  Each email lists the UTC time, IP address, user agent and the key or client
+  name. It never carries a secret, token, key value or action link; the
+  "Wasn't you?" paragraph points to the profile page and to "Forgot password?".
+  Repeats of one event within 10 minutes are sent as one follow-up digest.
+  Emails go only to a verified address (password flow or sign-in provider),
+  never to `@local` accounts.
 
 ### Authorization (RBAC)
 
