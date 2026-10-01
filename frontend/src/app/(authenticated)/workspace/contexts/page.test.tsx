@@ -1196,6 +1196,15 @@ function setupWithOwnedAndSharedContexts() {
         created_by: "u-carol",
         created_by_name: "Carol",
       },
+      {
+        ...baseFields,
+        id: "ctx-nameless",
+        name: "ctx-nameless",
+        display_name: "Nameless Creator",
+        is_private: false,
+        created_by: "u-dave",
+        created_by_name: null,
+      },
     ],
   });
 }
@@ -1218,7 +1227,7 @@ describe("ContextsPage workspace scope, owner and filter (#1755)", () => {
     await waitFor(() => expect(screen.getByText("Mine")).toBeInTheDocument());
 
     expect(
-      screen.getByRole("columnheader", { name: "owner" }),
+      screen.getByRole("columnheader", { name: "createdBy" }),
     ).toBeInTheDocument();
     const rowOf = (name: string) =>
       screen.getByText(name).closest("tr") as HTMLTableRowElement;
@@ -1232,6 +1241,11 @@ describe("ContextsPage workspace scope, owner and filter (#1755)", () => {
     expect(within(rowOf("From Bob")).getAllByRole("cell")[1]).toHaveTextContent(
       "Bob",
     );
+    // A shared context whose creator has no display name is still shared,
+    // and reads differently from "no recorded creator".
+    expect(
+      within(rowOf("Nameless Creator")).getAllByRole("cell")[1],
+    ).toHaveTextContent("ownerUnnamed");
   });
 
   it("filters the list by owner; a context with no creator is neither mine nor shared", async () => {
@@ -1253,8 +1267,10 @@ describe("ContextsPage workspace scope, owner and filter (#1755)", () => {
     fireEvent.click(button("ownerFilter.shared"));
     expect(screen.queryByText("Mine")).toBeNull();
     expect(screen.getByText("From Bob")).toBeInTheDocument();
-    // A public context someone else created is shared with me too.
+    // A public context someone else created is shared with me too, as is
+    // one whose creator has no display name.
     expect(screen.getByText("Public Docs")).toBeInTheDocument();
+    expect(screen.getByText("Nameless Creator")).toBeInTheDocument();
     expect(screen.queryByText("Legacy")).toBeNull();
 
     fireEvent.click(button("ownerFilter.all"));
@@ -1294,6 +1310,13 @@ describe("ContextsPage workspace scope, owner and filter (#1755)", () => {
     expect(screen.queryByText("Mine")).toBeNull();
     expect(screen.getByText("ownerFilter.empty")).toBeInTheDocument();
     expect(screen.queryByText("noContextsYet")).toBeNull();
+
+    // The empty state offers the way back.
+    fireEvent.click(screen.getByRole("button", { name: "ownerFilter.showAll" }));
+    expect(screen.getByText("Mine")).toBeInTheDocument();
+    expect(
+      within(group).getByRole("button", { name: "ownerFilter.all" }),
+    ).toHaveAttribute("aria-pressed", "true");
   });
 });
 

@@ -78,6 +78,30 @@ afterEach(() => {
   });
 });
 
+/**
+ * Stubs the download path and returns the CSV text the next export writes.
+ * Restored in afterEach.
+ */
+function captureCsvExport(): () => Promise<string> {
+  const blobs: Blob[] = [];
+  Object.defineProperty(URL, "createObjectURL", {
+    value: (b: Blob) => {
+      blobs.push(b);
+      return "blob:csv";
+    },
+    configurable: true,
+  });
+  Object.defineProperty(URL, "revokeObjectURL", {
+    value: vi.fn(),
+    configurable: true,
+  });
+  vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+  return () => {
+    expect(blobs).toHaveLength(1);
+    return blobs[0].text();
+  };
+}
+
 describe("ContextBreakdownTable", () => {
   it("renders 3 default columns (name, memories, last activity)", () => {
     render(
@@ -106,6 +130,7 @@ describe("ContextBreakdownTable", () => {
         contexts={mockContexts}
         totalMemories={300}
         contextStats={mockContextStats}
+        currentUserId="viewer"
       />,
     );
 
@@ -204,6 +229,19 @@ describe("ContextBreakdownTable", () => {
     expect(rowOf("prod")).toHaveTextContent("privateContext");
   });
 
+  it("attributes no owner while the viewer is unknown (auth hydrating)", () => {
+    render(
+      <ContextBreakdownTable
+        contexts={mockContexts}
+        totalMemories={300}
+        contextStats={mockContextStats}
+      />,
+    );
+    fireEvent.click(screen.getByText("showDetails"));
+    expect(screen.queryByText("Alice")).toBeNull();
+    expect(screen.queryByText("ownerYou")).toBeNull();
+  });
+
   it("shows You in the Owner column for the current user's contexts", () => {
     render(
       <ContextBreakdownTable
@@ -222,22 +260,7 @@ describe("ContextBreakdownTable", () => {
   });
 
   it("exports Owner and Visibility columns in the CSV", () => {
-    const blobs: Blob[] = [];
-    const createObjectURL = vi.fn((b: Blob) => {
-      blobs.push(b);
-      return "blob:csv";
-    });
-    Object.defineProperty(URL, "createObjectURL", {
-      value: createObjectURL,
-      configurable: true,
-    });
-    Object.defineProperty(URL, "revokeObjectURL", {
-      value: vi.fn(),
-      configurable: true,
-    });
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
-      () => {},
-    );
+    const exported = captureCsvExport();
 
     render(
       <ContextBreakdownTable
@@ -249,8 +272,7 @@ describe("ContextBreakdownTable", () => {
     );
     fireEvent.click(screen.getByText(/Export CSV/));
 
-    expect(blobs).toHaveLength(1);
-    return blobs[0].text().then((csv) => {
+    return exported().then((csv) => {
       const lines = csv.split("\n");
       expect(lines[0]).toBe(
         "Context Name,Memory Count,Last Activity,Members,Owner,Visibility",
@@ -266,21 +288,7 @@ describe("ContextBreakdownTable", () => {
   });
 
   it("escapes quotes and neutralises leading formula characters in CSV cells", () => {
-    const blobs: Blob[] = [];
-    Object.defineProperty(URL, "createObjectURL", {
-      value: (b: Blob) => {
-        blobs.push(b);
-        return "blob:csv";
-      },
-      configurable: true,
-    });
-    Object.defineProperty(URL, "revokeObjectURL", {
-      value: vi.fn(),
-      configurable: true,
-    });
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
-      () => {},
-    );
+    const exported = captureCsvExport();
 
     render(
       <ContextBreakdownTable
@@ -315,7 +323,7 @@ describe("ContextBreakdownTable", () => {
     );
     fireEvent.click(screen.getByText(/Export CSV/));
 
-    return blobs[0].text().then((csv) => {
+    return exported().then((csv) => {
       expect(csv.split("\n")[1]).toBe(
         `"'=HYPERLINK(""x"")","1","Never","1","Bob ""B"" Smith","Shared"`,
       );
@@ -325,21 +333,7 @@ describe("ContextBreakdownTable", () => {
   it.each(["+SUM(1)", "-1", "@cmd", "\tTabbed", "\rCR"])(
     "prefixes a cell starting with a formula character (%j) with a quote",
     (name) => {
-      const blobs: Blob[] = [];
-      Object.defineProperty(URL, "createObjectURL", {
-        value: (b: Blob) => {
-          blobs.push(b);
-          return "blob:csv";
-        },
-        configurable: true,
-      });
-      Object.defineProperty(URL, "revokeObjectURL", {
-        value: vi.fn(),
-        configurable: true,
-      });
-      vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
-        () => {},
-      );
+      const exported = captureCsvExport();
       render(
         <ContextBreakdownTable
           contexts={[
@@ -372,7 +366,7 @@ describe("ContextBreakdownTable", () => {
         />,
       );
       fireEvent.click(screen.getByText(/Export CSV/));
-      return blobs[0].text().then((csv) => {
+      return exported().then((csv) => {
         expect(csv.split("\n")[1]).toContain(`"'${name}"`);
       });
     },

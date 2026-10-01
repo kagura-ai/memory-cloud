@@ -220,12 +220,14 @@ async def get_workspace_stats(
 
             if is_accessible:
                 # Fetch creator's name (only for accessible contexts)
-                # Use pre-fetched creators dict (no query needed)
+                # Use pre-fetched creators dict (no query needed). The name
+                # only — the same rule as GET /contexts — so a member who has
+                # not set one is not shown (or exported, #1755) by email.
                 created_by_name = None
                 if context.created_by:
                     creator = creators_by_id.get(context.created_by)
                     if creator:
-                        created_by_name = creator.name or creator.email
+                        created_by_name = creator.name or None
 
                 accessible_contexts.append(
                     ContextStats(

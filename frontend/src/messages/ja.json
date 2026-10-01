@@ -1076,6 +1076,7 @@
     "contextName": "コンテキスト名",
     "owner": "オーナー",
     "ownerYou": "自分",
+    "ownerUnnamed": "他のメンバー",
     "memoriesCount": "メモリー数",
     "storageMB": "ストレージ (MB)",
     "lastActivity": "最終アクティビティ",
@@ -1593,12 +1594,14 @@
     "workspaceRole": "ワークスペースロール",
     "owner": "オーナー",
     "ownerYou": "自分",
+    "ownerUnnamed": "他のメンバー",
     "ownerFilter": {
       "label": "作成者で絞り込み",
       "all": "すべて",
       "mine": "自分が作成",
       "shared": "共有されたもの",
-      "empty": "この条件に一致するコンテキストはありません。"
+      "empty": "この条件に一致するコンテキストはありません。",
+      "showAll": "すべて表示"
     },
     "admin": "管理者",
     "member": "メンバー",

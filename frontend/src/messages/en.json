@@ -1076,6 +1076,7 @@
     "contextName": "Context Name",
     "owner": "Owner",
     "ownerYou": "You",
+    "ownerUnnamed": "Another member",
     "memoriesCount": "Memories",
     "storageMB": "Storage (MB)",
     "lastActivity": "Last Activity",
@@ -1593,12 +1594,14 @@
     "workspaceRole": "Workspace Role",
     "owner": "Owner",
     "ownerYou": "You",
+    "ownerUnnamed": "Another member",
     "ownerFilter": {
       "label": "Filter by owner",
       "all": "All",
       "mine": "Created by me",
       "shared": "Shared with me",
-      "empty": "No contexts match this filter."
+      "empty": "No contexts match this filter.",
+      "showAll": "Show all"
     },
     "admin": "Admin",
     "member": "Member",

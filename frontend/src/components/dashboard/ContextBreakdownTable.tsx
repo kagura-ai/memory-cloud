@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/table";
 import { Download, ArrowUpDown, Lock, Users, Eye, EyeOff } from "lucide-react";
 import { formatRelativeTime } from "@/lib/utils/datetime";
+import { contextOwnerKind, contextOwnerLabel } from "@/lib/utils/contextOwner";
 import Link from "next/link";
 import type {
   ContextStatsResponse,
@@ -37,7 +38,10 @@ type SortColumn = "name" | "memory" | "activity";
 /**
  * One quoted CSV cell. Doubles embedded quotes, and neutralises a leading
  * formula character so a context or user named `=HYPERLINK(...)` does not
- * execute when the export is opened in a spreadsheet (#1755).
+ * execute when the export is opened in a spreadsheet (#1755). The prefix is
+ * the OWASP CSV-injection mitigation; some importers keep the apostrophe,
+ * so a name such as `@bob` reads `'@bob` in the sheet — accepted over
+ * running a formula.
  */
 function csvCell(value: string): string {
   const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
@@ -84,13 +88,15 @@ export function ContextBreakdownTable({
   const tDashboard = useTranslations("dashboard");
   const locale = useLocale();
 
-  // #1755: owner as the table shows it — "You", the creator's name, or a
-  // dash when the context has no recorded creator (the same three states
-  // the Contexts list shows).
+  // #1755: owner as the table shows it — the rule the Contexts list uses
+  // (lib/utils/contextOwner.ts): "You", the creator's name, a stand-in for a
+  // nameless creator, or a dash when nothing is known.
   const ownerLabel = (context: DashboardContextStats) =>
-    context.created_by && context.created_by === currentUserId
-      ? t("ownerYou")
-      : context.created_by_name || "—";
+    contextOwnerLabel(
+      contextOwnerKind(context.created_by, currentUserId),
+      context.created_by_name,
+      { you: t("ownerYou"), unnamed: t("ownerUnnamed") },
+    );
   const visibilityLabel = (context: DashboardContextStats) =>
     context.is_private ? t("privateContext") : t("sharedContext");
 

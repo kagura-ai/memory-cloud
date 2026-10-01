@@ -93,6 +93,8 @@ import { gateFromFacts, quotaGate } from "@/lib/gates/featureGates";
 import type { Context, ContextStats } from "@/lib/types/context";
 import { CONTEXT_TEMPLATES, getTemplate } from "@/lib/templates/usage-guide";
 import { createExternalAPIKey } from "@/lib/api/external-keys";
+import { contextOwnerKind, contextOwnerLabel } from "@/lib/utils/contextOwner";
+import { EmptyState } from "@/components/ui/empty-state";
 import { useToast } from "@/hooks/use-toast";
 import { Label } from "@/components/ui/label";
 import {
@@ -152,19 +154,15 @@ export default function ContextsPage() {
   const [contexts, setContexts] = useState<Context[]>([]);
   const [loading, setLoading] = useState(true);
 
-  // #1755: who made a context, as the list shows it. A context with no
-  // creator (legacy rows, system-created defaults) is neither "mine" nor
-  // "shared with me", so the owner filter never claims it for someone. The
-  // same holds while the viewer is still unknown (auth hydrating): without
-  // an id to compare, nothing may be called shared.
-  type OwnerKind = "mine" | "shared" | "unknown";
-  const ownerKindOf = (context: Context): OwnerKind =>
-    !context.created_by || !user?.id
-      ? "unknown"
-      : context.created_by === user.id
-        ? "mine"
-        : "shared";
-  const [ownerFilter, setOwnerFilter] = useState<"all" | OwnerKind>("all");
+  // #1755: who made a context, as the list shows it (rule in
+  // lib/utils/contextOwner.ts, shared with the dashboard breakdown). The
+  // filter offers only the two states a row can be attributed to; a row
+  // with an unknown creator matches neither.
+  const ownerKindOf = (context: Context) =>
+    contextOwnerKind(context.created_by, user?.id);
+  const OWNER_FILTERS = ["all", "mine", "shared"] as const;
+  const [ownerFilter, setOwnerFilter] =
+    useState<(typeof OWNER_FILTERS)[number]>("all");
   const visibleContexts =
     ownerFilter === "all"
       ? contexts
@@ -1048,7 +1046,7 @@ export default function ContextsPage() {
             aria-label={t("ownerFilter.label")}
             className="flex flex-wrap items-center gap-1 px-4 py-2 border-b border-gray-200 dark:border-gray-700"
           >
-            {(["all", "mine", "shared"] as const).map((kind) => (
+            {OWNER_FILTERS.map((kind) => (
               <Button
                 key={kind}
                 size="sm"
@@ -1067,7 +1065,7 @@ export default function ContextsPage() {
                   {t("contextName")}
                 </th>
                 <th className="px-4 py-3 text-left font-medium text-gray-600 dark:text-gray-300">
-                  {t("owner")}
+                  {t("createdBy")}
                 </th>
                 <th className="px-4 py-3 text-right font-medium text-gray-600 dark:text-gray-300">
                   {t("memories")}
@@ -1089,11 +1087,15 @@ export default function ContextsPage() {
             <tbody>
               {visibleContexts.length === 0 && (
                 <tr>
-                  <td
-                    colSpan={7}
-                    className="px-4 py-8 text-center text-sm text-gray-500 dark:text-gray-400"
-                  >
-                    {t("ownerFilter.empty")}
+                  <td colSpan={7} className="p-4">
+                    <EmptyState
+                      compact
+                      icon={FolderOpen}
+                      title={t("ownerFilter.empty")}
+                      description={t("ownerFilter.label")}
+                      actionLabel={t("ownerFilter.showAll")}
+                      onAction={() => setOwnerFilter("all")}
+                    />
                   </td>
                 </tr>
               )}
@@ -1149,20 +1151,26 @@ export default function ContextsPage() {
                       </div>
                     </td>
 
-                    {/* #1755: Owner — "You", the creator's name, or a dash */}
+                    {/* #1755: Created by — "You", the creator's name, a
+                        stand-in for a nameless creator, or a dash */}
                     <td className="px-4 py-3 text-sm text-gray-700 dark:text-gray-300">
-                      {ownerKind === "mine" ? (
-                        <span className="font-medium">{t("ownerYou")}</span>
-                      ) : ownerKind === "shared" && context.created_by_name ? (
-                        <span
-                          className="truncate max-w-[160px] inline-block align-bottom"
-                          title={context.created_by_name}
-                        >
-                          {context.created_by_name}
-                        </span>
-                      ) : (
-                        <span className="text-gray-400">—</span>
-                      )}
+                      <span
+                        className={cn(
+                          "truncate max-w-[160px] inline-block align-bottom",
+                          ownerKind === "mine" && "font-medium",
+                          ownerKind === "unknown" && "text-gray-400",
+                        )}
+                        title={
+                          ownerKind === "shared"
+                            ? (context.created_by_name ?? undefined)
+                            : undefined
+                        }
+                      >
+                        {contextOwnerLabel(ownerKind, context.created_by_name, {
+                          you: t("ownerYou"),
+                          unnamed: t("ownerUnnamed"),
+                        })}
+                      </span>
                     </td>
 
                     {/* Memories count */}
