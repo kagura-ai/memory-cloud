@@ -1275,3 +1275,77 @@ stored keys (#1613).
 ## Redis Connection Pool (rate limits and daily quotas) — Issue #1556
 
 Per-minute rate limits and the daily MCP / REST / Public API quotas above are counters in Redis, incremented by `RateLimitMiddleware` on every authenticated request. The singleton client (`backend/src/db/redis.py`) uses a `BlockingConnectionPool`: when all pooled connections are checked out, a request waits up to `REDIS_POOL_TIMEOUT_SECONDS` (default `2.0`) for one to free up instead of failing immediately. Size the pool with `REDIS_MAX_CONNECTIONS` (default `50`, per API worker process). Quota checks are **fail-open** by design — if Redis is down, or the pool wait times out, the request is allowed and the counter update is lost (or, if Redis fails between the `INCR` and the `EXPIRE` that follows it, only partially applied). Each such miss logs exactly one `quota_check_failed_open` warning with `quota` (`per_minute`, `daily_mcp`, `daily_public`, `daily_rest`), `key_prefix` and `error_class` fields. Alert on that event: a sustained stream of it means quotas are not being enforced and either Redis or the pool size needs attention.
+
+## Redis Password (single-server compose) — Issue #1794
+
+The single-server compose files run Redis without a password by default: it
+listens only on the compose network (and, on a split host, on the data VM's
+private address through the `data-expose` overlay). Set `REDIS_PASSWORD` to
+make Redis refuse unauthenticated commands. The API reads the password from
+`REDIS_URL`, so both go into `.env.prod`:
+
+```bash
+# .env.prod — single quotes keep the values literal
+REDIS_PASSWORD='<password>'
+REDIS_URL='redis://:<password, URL-encoded>@redis:6379'
+```
+
+- **Generate it with `openssl rand -hex 32`.** A hex password needs no
+  URL-encoding and no quoting care. Any other password has to be
+  percent-encoded in `REDIS_URL` — `@`, `:`, `/`, `#` and `%` all break the URL
+  otherwise:
+  `python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' '<password>'`.
+- **`REDIS_URL` replaces the whole URL**, so it also replaces `REDIS_HOST`: on a
+  split-host app VM write the data VM's address into it
+  (`redis://:<password>@192.168.10.20:6379`). Unset, the URL is built from
+  `REDIS_HOST` as before.
+- **Where it ends up.** Redis gets the password as its `--requirepass` argument
+  and as `REDISCLI_AUTH`, so the healthcheck and
+  `docker compose … exec redis redis-cli` authenticate without typing it. Like
+  the PostgreSQL password, it is visible to anyone who can run `docker inspect`
+  on the host; Redis rewrites its process title, so `ps` does not show it.
+- **Unset or empty** keeps the old behaviour exactly: an empty `requirepass`
+  means no auth.
+
+### Turning it on
+
+Redis restarts with the new configuration and every client has to reconnect
+with the password, so do it in a maintenance window. Between the Redis restart
+and the API recreate, every request that needs Redis fails: session lookups
+(signed-in pages, OAuth) error, and rate limits and quotas fail open. Run the
+two steps back to back.
+
+```bash
+cd /opt/kagura-memory/src/terraform/single-server
+# 1. Add REDIS_PASSWORD and REDIS_URL to .env.prod (above), then check the
+#    render without printing the secrets — both lines should say True:
+docker compose -f docker-compose.prod.yml --env-file .env.prod config --format json | python3 -c '
+import json, sys; s = json.load(sys.stdin)["services"]
+print(s["redis"]["command"][-1] != "", s["api-blue"]["environment"]["REDIS_URL"].startswith("redis://:"))'
+
+# 2. Restart Redis with the password, then recreate every running API color so
+#    it reconnects with the new URL (add --no-build on a registry-mode host):
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps redis
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps --force-recreate \
+  $(docker ps --format '{{.Names}}' | grep -oE 'api-(blue|green)$')
+
+# 3. Verify: Redis healthy, refuses a client without the password, API ready.
+docker inspect -f '{{.State.Health.Status}}' kagura-redis                # healthy
+docker exec kagura-redis sh -c 'unset REDISCLI_AUTH; redis-cli ping'      # NOAUTH Authentication required.
+./scripts/deploy.sh --status
+```
+
+On a split host, step 2 runs in two places: Redis on the data VM
+(`DATA_BIND_ADDR=… docker compose -f docker-compose.data.yml -f docker-compose.data-expose.yml --env-file .env.prod up -d --no-deps redis`,
+with `REDIS_PASSWORD` in that VM's `.env.prod`), then the API colors on the app
+VM with `-f docker-compose.app.yml` (with `REDIS_URL` in its `.env.prod`).
+
+**What survives the restart.** Redis runs with `--appendonly yes` on the
+`kagura_redis_data` volume, and a compose recreate stops it with SIGTERM, which
+flushes the append-only file. Sessions (`session:*`) and the embedding spend
+counters (`embed_spend:*`) are reloaded with their TTLs — nobody is signed out
+and no spend is forgotten. `scripts/tests/compose_redis_auth.bats` checks this
+against the image the compose files pin.
+
+To rotate the password, change both lines and run steps 2–3 again. To turn auth
+off, remove both lines and do the same.
