@@ -501,7 +501,10 @@ of its content. One `audit_logs` row (`context_creator_transferred`) is
 written per moved context, and re-running after `--apply` changes 0 rows.
 Vector-store updates run after the database commit; if any fail the command
 exits 1 and lists the memory ids — the memory list is already right, recall
-may miss those memories until their payload is repaired.
+may miss those memories until their payload is repaired. Re-run with
+`--apply --yes --repair-payloads` to re-point the vector payload of every
+live memory `--to` owns in the workspace's contexts it now created
+(idempotent; a plain re-run finds 0 contexts to move).
 
 The command does not move API keys: mint a new key for `--to` if MCP clients
 should keep seeing the private contexts afterwards. It also leaves other

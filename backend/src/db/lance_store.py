@@ -640,7 +640,19 @@ class LanceVectorStore:
         collection_name: str = DEFAULT_COLLECTION,
         delete_keys: list[str] | None = None,
     ) -> None:
-        mirror_cols = ("scope", "type", "importance", "tags", "created_at", "updated_at")
+        # Columns that build_lance_filter reads directly (not from payload_json):
+        # a payload update that changes one must change the column too, or
+        # recall keeps filtering on the stale value. #1783 added user_id —
+        # transfer_context_creator re-points it when a context changes hands.
+        mirror_cols = (
+            "user_id",
+            "scope",
+            "type",
+            "importance",
+            "tags",
+            "created_at",
+            "updated_at",
+        )
         where = f"id = {_sql_str(str(memory_id))}"
 
         def _run() -> None:

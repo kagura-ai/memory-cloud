@@ -11,21 +11,25 @@ env: DATABASE_URL, the vector store), e.g. inside the API container::
 
     python -m src.cli.transfer_context_creator --from local:admin --to <sub> --workspace <uuid>
     python -m src.cli.transfer_context_creator --from local:admin --to <sub> --workspace <uuid> --apply --yes
+    python -m src.cli.transfer_context_creator --from local:admin --to <sub> --workspace <uuid> --apply --yes --repair-payloads
 
 What moves, per live context in the workspace whose ``created_by`` is ``--from``:
 
 * ``contexts.created_by``;
-* every memory in it authored by ``--from`` — ``memories.user_id`` and the
-  ``user_id`` field of its vector-store point. A private context shows its
-  owner only the memories whose ``user_id`` matches, so without this step the
-  new owner would see the context and none of its content.
+* every memory in it authored by ``--from`` (tombstones included, so a
+  restore stays consistent) — ``memories.user_id`` and, for live memories,
+  the ``user_id`` field of the vector-store point. A private context shows
+  its owner only the memories whose ``user_id`` matches, so without this
+  step the new owner would see the context and none of its content.
 
 ``--to`` must be the workspace owner or an ``admin`` member — anyone else
 could end up owning a private context they cannot list. One ``audit_logs``
 row is written per transferred context. Running again after ``--apply``
 changes 0 rows. Vector-store updates run after the database commit and are
 reported if any fail (exit 1): the memory list is already right, recall may
-miss those memories until the payload is repaired.
+miss those memories until the payload is repaired — re-run with
+``--repair-payloads`` to re-point the vector point of every live memory
+``--to`` owns in the workspace's contexts it now created (idempotent).
 
 What this does NOT do: move API keys (mint a new key for ``--to`` if MCP
 clients should keep seeing the private contexts), touch other ``created_by``
@@ -66,12 +70,12 @@ _PAYLOAD_BATCH = 32
 
 @dataclass(frozen=True)
 class PlanLine:
-    """One context in scope: its live memories by ``--from`` move with it."""
+    """One context in scope and how many memory rows by ``--from`` move with it."""
 
     context_id: UUID
     name: str
     is_private: bool
-    memory_count: int
+    memory_count: int  # every row, tombstones included — what the UPDATE touches
 
 
 @dataclass
@@ -172,6 +176,7 @@ async def transfer_context_creator(
     to_user_id: str,
     workspace_id: UUID,
     dry_run: bool = True,
+    repair_payloads: bool = False,
 ) -> TransferResult:
     """Move the workspace's live contexts, and their memories, between two users.
 
@@ -183,6 +188,9 @@ async def transfer_context_creator(
             workspace owner or an admin member.
         workspace_id: The workspace whose contexts are in scope.
         dry_run: Plan only — nothing is written.
+        repair_payloads: After the write, also re-point the vector payloads
+            of every live memory ``to`` owns in the workspace's contexts it
+            created — the re-run path after an earlier payload failure.
 
     Returns:
         TransferResult with one PlanLine per context in scope and, after a
@@ -228,11 +236,7 @@ async def transfer_context_creator(
             await db.scalar(
                 select(func.count())
                 .select_from(Memory)
-                .where(
-                    Memory.context_id == context.id,
-                    Memory.user_id == from_user_id,
-                    Memory.deleted_at.is_(None),
-                )
+                .where(Memory.context_id == context.id, Memory.user_id == from_user_id)
             )
             or 0
         )
@@ -268,11 +272,34 @@ async def transfer_context_creator(
             )
         )
 
-    if not dry_run and result.transferred:
+    if dry_run:
+        return result
+    if result.transferred:
         await db.commit()
-        result.payload_failures = await _repoint_payloads(
-            db, context_ids=result.transferred_ids, to_user_id=to_user_id
-        )
+    payload_scope = list(result.transferred_ids)
+    if repair_payloads:
+        owned = (
+            await db.execute(
+                select(Context.id).where(
+                    Context.workspace_id == workspace_id,
+                    Context.created_by == to_user_id,
+                    Context.deleted_at.is_(None),
+                )
+            )
+        ).scalars()
+        payload_scope.extend(cid for cid in owned if cid not in payload_scope)
+    if payload_scope:
+        try:
+            result.payload_failures = await _repoint_payloads(
+                db, context_ids=payload_scope, to_user_id=to_user_id
+            )
+        except Exception as exc:
+            # The database write is committed; only the vector payloads are
+            # behind. Say so instead of looking like the whole run failed.
+            raise RuntimeError(
+                "database write committed, but the vector-store update stopped "
+                f"({exc}); re-run with --repair-payloads"
+            ) from exc
     return result
 
 
@@ -288,7 +315,10 @@ def _print_plan(result: TransferResult) -> None:
             f"({line.memory_count} memor{'y' if line.memory_count == 1 else 'ies'})"
         )
     verb = "would transfer" if result.dry_run else "transferred"
-    print(f"{verb} {result.transferred} context(s), {result.memories} memor(ies)")
+    print(
+        f"{verb} {result.transferred} context(s), {result.memories} memory row(s) "
+        "(tombstones included)"
+    )
     if result.payload_failures:
         print(
             f"vector payload NOT updated for {len(result.payload_failures)} memor(ies) — "
@@ -309,6 +339,7 @@ async def _main(args: argparse.Namespace) -> int:
             to_user_id=args.to_user,
             workspace_id=args.workspace,
             dry_run=dry_run,
+            repair_payloads=args.repair_payloads,
         )
         if not dry_run:
             outcome["applied"] = result
@@ -350,6 +381,12 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
         "--apply", action="store_true", help="re-point created_by and memories, write audit rows"
     )
     parser.add_argument("--yes", action="store_true", help="no confirmation prompt")
+    parser.add_argument(
+        "--repair-payloads",
+        action="store_true",
+        help="with --apply: also re-point the vector payloads of every live memory --to "
+        "already owns in the workspace (re-run path after a payload failure)",
+    )
     return parser.parse_args(argv)
 
 

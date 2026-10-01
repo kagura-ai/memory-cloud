@@ -187,8 +187,9 @@ async def test_dry_run_plans_contexts_with_memory_counts_and_writes_nothing(
 
     assert set(result.transferred_ids) == {s["private_ctx"].id, s["shared_ctx"].id}
     counts = {line.context_id: line.memory_count for line in result.lines}
-    assert counts == {s["private_ctx"].id: 2, s["shared_ctx"].id: 1}  # live, by --from
-    assert result.memories == 3
+    # Every row by --from, the tombstone included — what the UPDATE will touch.
+    assert counts == {s["private_ctx"].id: 3, s["shared_ctx"].id: 1}
+    assert result.memories == 4
     # Nothing written: every row still names the CLI admin, no audit rows.
     for key in ("private_ctx", "shared_ctx", "deleted_ctx", "far_ctx"):
         assert await _created_by(db_session, s[key].id) == s["cli_admin"].user_id
@@ -245,6 +246,10 @@ async def test_apply_moves_contexts_and_their_memories(db_session, scenario, vec
         and r.user_metadata["to_user_id"] == s["web_user"].user_id
         for r in rows
     )
+    assert {r.resource: r.user_metadata["memories"] for r in rows} == {
+        f"context:{s['private_ctx'].id}": 3,  # tombstone counted: its row moved too
+        f"context:{s['shared_ctx'].id}": 1,
+    }
 
     # Idempotent: a second run finds nothing left to move.
     again = await transfer_context_creator(
@@ -279,6 +284,55 @@ async def test_payload_failures_are_reported_after_the_commit(db_session, scenar
     )
     assert result.payload_failures == [bad]
     assert await _author(db_session, bad) == s["web_user"].user_id
+
+
+@pytest.mark.asyncio
+async def test_repair_payloads_converges_after_a_failed_run(db_session, scenario, vector_store):
+    """A re-run finds 0 contexts to move (created_by already moved) but, with
+    --repair-payloads, re-points the vector payloads of every live memory the
+    target now owns in the contexts it created."""
+    s, m = scenario, scenario["memories"]
+    first = await transfer_context_creator(
+        db_session,
+        from_user_id=s["cli_admin"].user_id,
+        to_user_id=s["web_user"].user_id,
+        workspace_id=s["ws"].id,
+        dry_run=False,
+    )
+    assert first.transferred == 2
+    vector_store.reset_mock()
+
+    again = await transfer_context_creator(
+        db_session,
+        from_user_id=s["cli_admin"].user_id,
+        to_user_id=s["web_user"].user_id,
+        workspace_id=s["ws"].id,
+        dry_run=False,
+        repair_payloads=True,
+    )
+    assert again.transferred == 0
+    assert again.payload_failures == []
+    repointed = {call.kwargs["memory_id"] for call in vector_store.await_args_list}
+    assert repointed == {m["private_a"].id, m["private_b"].id, m["shared_a"].id}
+
+
+@pytest.mark.asyncio
+async def test_payload_step_exception_names_the_committed_write(db_session, scenario, vector_store):
+    s = scenario
+    with patch(
+        "cli.transfer_context_creator.resolve_collection_name",
+        AsyncMock(side_effect=RuntimeError("config lookup failed")),
+    ):
+        with pytest.raises(RuntimeError, match="database write committed.*--repair-payloads"):
+            await transfer_context_creator(
+                db_session,
+                from_user_id=s["cli_admin"].user_id,
+                to_user_id=s["web_user"].user_id,
+                workspace_id=s["ws"].id,
+                dry_run=False,
+            )
+    # The write did land.
+    assert await _created_by(db_session, s["private_ctx"].id) == s["web_user"].user_id
 
 
 @pytest.mark.asyncio
@@ -342,13 +396,17 @@ async def test_unknown_workspace_and_same_user_are_errors(db_session, scenario):
 def test_parse_requires_both_users_and_a_workspace():
     ws = uuid4()
     args = _parse(["--from", "local:admin", "--to", "123", "--workspace", str(ws), "--apply"])
-    assert (args.from_user, args.to_user, args.workspace, args.apply, args.yes) == (
-        "local:admin",
-        "123",
-        ws,
-        True,
-        False,
-    )
+    assert (
+        args.from_user,
+        args.to_user,
+        args.workspace,
+        args.apply,
+        args.yes,
+        args.repair_payloads,
+    ) == ("local:admin", "123", ws, True, False, False)
+    assert _parse(
+        ["--from", "a", "--to", "b", "--workspace", str(ws), "--apply", "--repair-payloads"]
+    ).repair_payloads
     with pytest.raises(SystemExit):
         _parse(["--from", "local:admin", "--to", "123"])  # no workspace
     with pytest.raises(SystemExit):
