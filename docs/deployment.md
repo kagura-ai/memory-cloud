@@ -502,9 +502,16 @@ written per moved context, and re-running after `--apply` changes 0 rows.
 Vector-store updates run after the database commit; if any fail the command
 exits 1 and lists the memory ids — the memory list is already right, recall
 may miss those memories until their payload is repaired. Re-run with
-`--apply --yes --repair-payloads` to re-point the vector payload of every
-live memory `--to` owns in the workspace's contexts it now created
-(idempotent; a plain re-run finds 0 contexts to move).
+`--apply --yes --repair-payloads`: in every context `--to` now created it
+moves any memory still authored by `--from` and re-points the vector payload
+of every live memory `--to` owns (idempotent; a plain re-run finds 0
+contexts to move).
+
+The command is **not fenced** against concurrent writers: a `remember` by the
+`--from` identity that was authorized before the flip, or an embedding worker
+that loaded the old `user_id`, can land after it. Run it while the `--from`
+identity's clients (its API key, MCP sessions) are idle, then run it once more
+with `--repair-payloads` to sweep anything that slipped in.
 
 The command does not move API keys: mint a new key for `--to` if MCP clients
 should keep seeing the private contexts afterwards. It also leaves other

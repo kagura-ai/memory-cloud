@@ -28,8 +28,15 @@ row is written per transferred context. Running again after ``--apply``
 changes 0 rows. Vector-store updates run after the database commit and are
 reported if any fail (exit 1): the memory list is already right, recall may
 miss those memories until the payload is repaired — re-run with
-``--repair-payloads`` to re-point the vector point of every live memory
-``--to`` owns in the workspace's contexts it now created (idempotent).
+``--repair-payloads``, which converges: in every context ``--to`` now
+created it moves any memory still authored by ``--from`` and re-points the
+vector point of every live memory ``--to`` owns (idempotent).
+
+The command is not fenced against concurrent writes: a ``remember`` by the
+``--from`` identity that was authorized before the flip, or an embedding
+worker that loaded the old ``user_id``, can land after it. Run it while the
+``--from`` identity's clients (the API key, MCP) are idle, then run it once
+more with ``--repair-payloads`` to sweep anything that slipped in.
 
 What this does NOT do: move API keys (mint a new key for ``--to`` if MCP
 clients should keep seeing the private contexts), touch other ``created_by``
@@ -87,8 +94,10 @@ class TransferResult:
     workspace_id: UUID
     dry_run: bool
     lines: list[PlanLine] = field(default_factory=list)
-    # --repair-payloads: live memories ``to`` already owns (in contexts it
-    # created) whose vector payload the run re-points; 0 without the flag.
+    # --repair-payloads, over the contexts ``to`` already created: memories
+    # still authored by ``from`` that move, and live memories ``to`` owns whose
+    # vector payload is re-pointed. Both 0 without the flag.
+    repair_moved: int = 0
     repair_memories: int = 0
     payload_failures: list[UUID] = field(default_factory=list)
 
@@ -107,7 +116,7 @@ class TransferResult:
     @property
     def planned(self) -> int:
         """Units of work the run would do: contexts to move plus repairs."""
-        return self.transferred + self.repair_memories
+        return self.transferred + self.repair_moved + self.repair_memories
 
 
 async def _require_owner_or_admin(db: AsyncSession, *, workspace_id: UUID, user_id: str) -> None:
@@ -293,6 +302,15 @@ async def transfer_context_creator(
         ).scalars()
         repair_scope = [cid for cid in owned if cid not in result.transferred_ids]
         if repair_scope:
+            # Late writes by ``from`` (see the module docstring) — swept here.
+            result.repair_moved = (
+                await db.scalar(
+                    select(func.count())
+                    .select_from(Memory)
+                    .where(Memory.context_id.in_(repair_scope), Memory.user_id == from_user_id)
+                )
+                or 0
+            )
             result.repair_memories = (
                 await db.scalar(
                     select(func.count())
@@ -308,7 +326,28 @@ async def transfer_context_creator(
 
     if dry_run:
         return result
-    if result.transferred:
+    if repair_scope and result.repair_moved:
+        await db.execute(
+            update(Memory)
+            .where(Memory.context_id.in_(repair_scope), Memory.user_id == from_user_id)
+            .values(user_id=to_user_id)
+        )
+        db.add(
+            AuditLog(
+                user_email=AUDIT_ACTOR_EMAIL,
+                user_id=AUDIT_ACTOR_ID,
+                action=AUDIT_ACTION,
+                resource=f"workspace:{workspace_id}",
+                user_metadata={
+                    "from_user_id": from_user_id,
+                    "to_user_id": to_user_id,
+                    "workspace_id": str(workspace_id),
+                    "memories": result.repair_moved,
+                    "sweep": True,
+                },
+            )
+        )
+    if result.transferred or result.repair_moved:
         await db.commit()
     payload_scope = list(result.transferred_ids) + repair_scope
     if payload_scope:
@@ -342,6 +381,12 @@ def _print_plan(result: TransferResult) -> None:
         f"{verb} {result.transferred} context(s), {result.memories} memory row(s) "
         "(tombstones included)"
     )
+    if result.repair_moved:
+        verb = "would move" if result.dry_run else "moved"
+        print(
+            f"repair: {verb} {result.repair_moved} memory row(s) still authored by "
+            f"{result.from_user_id!r} in contexts {result.to_user_id!r} already created"
+        )
     if result.repair_memories:
         verb = "would re-point" if result.dry_run else "re-pointed"
         print(
@@ -413,8 +458,9 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--repair-payloads",
         action="store_true",
-        help="with --apply: also re-point the vector payloads of every live memory --to "
-        "already owns in the workspace (re-run path after a payload failure)",
+        help="with --apply: in contexts --to already created, also move memories still "
+        "authored by --from and re-point the vector payloads of every live memory --to owns "
+        "(the re-run path after a payload failure or a late write)",
     )
     return parser.parse_args(argv)
 

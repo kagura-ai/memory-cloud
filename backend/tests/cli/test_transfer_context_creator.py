@@ -332,12 +332,28 @@ async def test_repair_payloads_converges_after_a_failed_run(
     assert await _main(_parse(argv)) == 0
     vector_store.assert_not_awaited()
 
+    # A late write: a memory committed by --from after the flip (the command
+    # is not fenced against concurrent writers).
+    late = _memory(s["private_ctx"], s["cli_admin"].user_id)
+    db_session.add(late)
+    await db_session.flush()
+
     assert await _main(_parse([*argv, "--repair-payloads"])) == 0
+    assert await _author(db_session, late.id) == s["web_user"].user_id
     repointed = {call.kwargs["memory_id"] for call in vector_store.await_args_list}
-    assert repointed == {m["private_a"].id, m["private_b"].id, m["shared_a"].id}
+    assert repointed == {m["private_a"].id, m["private_b"].id, m["shared_a"].id, late.id}
     out = capsys.readouterr().out
+    assert "would move 1 memory row(s) still authored by" in out
     assert "would re-point the vector payload of 3 live memor(ies)" in out
-    assert "changed 3 item(s)" in out
+    assert "changed 4 item(s)" in out
+    sweep = await db_session.scalar(
+        select(AuditLog).where(
+            AuditLog.action == AUDIT_ACTION,
+            AuditLog.resource == f"workspace:{s['ws'].id}",
+        )
+    )
+    assert sweep is not None and sweep.user_metadata["sweep"] is True
+    assert sweep.user_metadata["memories"] == 1
 
 
 @pytest.mark.asyncio
