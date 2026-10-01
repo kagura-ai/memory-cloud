@@ -4,6 +4,19 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.86.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.86.1) — 2026-10-01
+
+The one-shot operator commands log quietly, and their live-database tests run in CI.
+
+### Changed
+- **Quiet one-shot commands** ([#1788](https://github.com/kagura-ai/memory-cloud/issues/1788)): `transfer_context_creator` and `apply_rerank_defaults` configure logging the way the API does. Diagnostics go to stderr at `--log-level` (default `INFO`), so stdout stays the plan report; `--apply` on a large workspace no longer prints one vector-store debug line and one HTTP request line per memory. The explicit level wins over `LOG_LEVEL` in the environment, and qdrant-client's insecure-connection warning is shown once per run instead of repeating.
+
+### Fixed
+- **CLI live-database tests run in CI** ([#1785](https://github.com/kagura-ai/memory-cloud/issues/1785)): the integration job and `make test-integration` collect `tests/cli`, and a change under `backend/tests/cli/**` triggers the job. The tests for both one-shot commands skipped in the unit job and were never collected by the integration job.
+
+### Notes
+- No migration, no new environment variables, no operator action.
+
 ## [v0.86.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.86.0) — 2026-10-01
 
 The connector channel picker lists the private channels the bot is in, and an operator command hands a workspace's contexts from a CLI admin to the same person's OAuth account.
