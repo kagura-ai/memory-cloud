@@ -205,6 +205,24 @@ class Settings(BaseSettings):
         ),
     )
 
+    known_device_retention_days: int = Field(
+        default=180,
+        ge=1,
+        description=(
+            "How long a browser stays a known device after its last sign-in "
+            "(#1769). The daily job deletes rows not seen for this long; the "
+            "next sign-in from that browser is treated as a new device."
+        ),
+    )
+    known_device_max_per_user: int = Field(
+        default=20,
+        ge=1,
+        description=(
+            "Known devices kept per account (#1769). Registering one more deletes "
+            "the least recently seen."
+        ),
+    )
+
     # OAuth2 - Google
     google_client_id: str = Field(default="", description="Google OAuth2 Client ID")
     google_client_secret: str = Field(default="", description="Google OAuth2 Client Secret")

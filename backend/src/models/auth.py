@@ -298,6 +298,52 @@ class EmailActionToken(Base):
         return f"<EmailActionToken(user_id='{self.user_id}', purpose='{self.purpose}')>"
 
 
+class UserKnownDevice(Base):
+    """A browser that has signed in to an account before (Issue #1769).
+
+    A sign-in from a browser not in this table emails the owner. The browser
+    is identified by a long-lived device cookie; only the keyed HMAC of its
+    value is stored, so the table identifies nothing without the server key.
+    No IP address and no user agent are kept — they appear in the notice
+    email only.
+
+    Attributes:
+        id: Primary key (UUID).
+        user_id: The account (``ON DELETE CASCADE``).
+        device_hash: HMAC-SHA256 hex digest of the device cookie value.
+        first_seen: Naive UTC time of the first sign-in from this browser.
+        last_seen: Naive UTC time of the latest sign-in; the retention job
+            deletes rows not seen for ``known_device_retention_days``.
+    """
+
+    __tablename__ = "user_known_devices"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    device_hash: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    first_seen: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    last_seen: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "device_hash", name="user_known_devices_user_device_key"),
+        # The retention job's ``last_seen < cutoff`` range scan.
+        Index("ix_user_known_devices_last_seen", "last_seen"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<UserKnownDevice(user_id='{self.user_id}')>"
+
+
 class AuditLog(Base):
     """Audit log model for security-sensitive operations.
 

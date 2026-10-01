@@ -20,6 +20,7 @@ from .email_action_token_tasks import schedule_email_action_token_tasks
 from .embedding_tasks import schedule_embedding_tasks
 from .erasure_tasks import schedule_erasure_tasks
 from .file_tasks import schedule_file_tasks
+from .known_device_tasks import schedule_known_device_tasks
 from .mcp_tasks import schedule_mcp_tasks
 from .neural_tasks import schedule_neural_tasks
 from .resource_indexer_job import schedule_resource_indexer_jobs
@@ -38,6 +39,7 @@ __all__ = [
     "schedule_device_code_tasks",
     "schedule_security_notification_tasks",
     "schedule_email_action_token_tasks",
+    "schedule_known_device_tasks",
     "schedule_embedding_tasks",
     "schedule_erasure_tasks",
     "schedule_resource_indexer_jobs",

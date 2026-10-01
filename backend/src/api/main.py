@@ -102,6 +102,7 @@ async def lifespan(app: FastAPI):
         schedule_embedding_tasks,
         schedule_erasure_tasks,
         schedule_file_tasks,
+        schedule_known_device_tasks,
         schedule_mcp_tasks,
         schedule_neural_tasks,
         schedule_resource_indexer_jobs,
@@ -118,6 +119,7 @@ async def lifespan(app: FastAPI):
     schedule_device_code_tasks(scheduler)
     schedule_security_notification_tasks(scheduler)
     schedule_email_action_token_tasks(scheduler)
+    schedule_known_device_tasks(scheduler)
     schedule_embedding_tasks(scheduler)
     schedule_resource_indexer_jobs(scheduler)
     schedule_sleep_tasks(scheduler)

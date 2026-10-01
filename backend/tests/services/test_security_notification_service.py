@@ -580,6 +580,31 @@ class TestRender:
         assert "2 more times, within 10 minutes of the first" in text
         assert text.count("Your password was changed.") == 2
 
+    def test_new_device_sign_in_reads_as_a_sign_in_not_a_change(self) -> None:
+        # #1769: the opening line and the digest say "sign-in"; the method
+        # line names how the browser signed in.
+        subject, text = render_security_notification(
+            SecurityEvent.NEW_DEVICE_SIGN_IN,
+            [self._occurrence(sign_in_method="GitHub")],
+            digest=False,
+            window_minutes=10,
+            profile_page_url="https://app.example/profile",
+        )
+        assert "unrecognized device" in subject
+        assert "signed in to from a device we had not" in text
+        assert "security-sensitive change was made" not in text
+        assert "Via:" in text and "GitHub" in text
+        assert "cookies were cleared" in text
+
+        _, digest = render_security_notification(
+            SecurityEvent.NEW_DEVICE_SIGN_IN,
+            [self._occurrence(), self._occurrence()],
+            digest=True,
+            window_minutes=10,
+            profile_page_url="https://app.example/profile",
+        )
+        assert "the same sign-in happened 2 more times" in digest
+
     def test_long_digest_is_capped(self) -> None:
         _, text = render_security_notification(
             SecurityEvent.API_KEY_CREATED,

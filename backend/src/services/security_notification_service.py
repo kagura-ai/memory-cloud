@@ -202,13 +202,19 @@ class SecurityEvent(StrEnum):
     SIGN_IN_METHOD_ADDED = "sign_in_method_added"
     OAUTH_CLIENT_CREATED = "oauth_client_created"
     EMAIL_CHANGED = "email_changed"
+    NEW_DEVICE_SIGN_IN = "new_device_sign_in"
 
 
 # The label of the sign-in method line, per event.
 _SIGN_IN_METHOD_LABELS: dict[SecurityEvent, str] = {
     SecurityEvent.SIGN_IN_METHOD_ADDED: "Added:  ",
     SecurityEvent.EMAIL_CHANGED: "Via:    ",
+    SecurityEvent.NEW_DEVICE_SIGN_IN: "Via:    ",
 }
+
+# Events that are a sign-in, not a change to the account (#1769): the email's
+# opening line and the digest wording say so.
+_SIGN_IN_EVENTS = frozenset({SecurityEvent.NEW_DEVICE_SIGN_IN})
 
 # How a linked / unlinked sign-in provider is named in a notice.
 PROVIDER_SIGN_IN_LABELS = {"google": "Google sign-in", "github": "GitHub sign-in"}
@@ -262,6 +268,11 @@ _EVENT_TEXT: dict[SecurityEvent, tuple[str, str]] = {
         "The email address of your Kagura account was changed",
         "The account's email address was changed to the one a sign-in provider "
         "reported. Security notices now go to the new address, not to this one.",
+    ),
+    # #1769: a browser sign-in from a device the account had not used before.
+    SecurityEvent.NEW_DEVICE_SIGN_IN: (
+        "New sign-in to your Kagura account from an unrecognized device",
+        "Your account was signed in to from a browser it had not been used on before.",
     ),
 }
 
@@ -455,13 +466,20 @@ def render_security_notification(
     count = max(total or 0, len(occurrences))
     listed = occurrences[:_DIGEST_MAX_OCCURRENCES]
 
+    what = "sign-in" if event in _SIGN_IN_EVENTS else "change"
     lines: list[str] = []
     if digest:
         subject = f"{subject} ({count} more {'time' if count == 1 else 'times'})"
         lines += [
             "This is a follow-up to the security notices we sent you a few minutes ago.",
-            f"Since then the same change happened {count} more "
+            f"Since then the same {what} happened {count} more "
             f"{'time' if count == 1 else 'times'}, within {window_minutes} minutes of the first:",
+        ]
+    elif event in _SIGN_IN_EVENTS:
+        lines += [
+            "Your Kagura Memory Cloud account was signed in to from a device we had not",
+            "seen before. If this was you — a new browser, computer or phone, or a browser",
+            "whose cookies were cleared — no action is needed.",
         ]
     else:
         lines += [
