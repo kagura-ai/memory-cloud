@@ -89,6 +89,32 @@ class TestListUsersIncludeWorkspaces:
             "soft-deleted workspace must NOT appear in admin user listing (#681)"
         )
 
+    @pytest.mark.asyncio
+    async def test_workspaces_array_carries_plan_name(
+        self,
+        db_session: AsyncSession,
+        user_with_mixed_workspaces: dict,
+    ) -> None:
+        """The list's badges show each workspace's plan (#1754)."""
+        response = await list_users(
+            user=mock_admin(),
+            db=db_session,
+            **{**_LIST_DEFAULTS, "include_workspaces": True},
+        )
+
+        target = next(
+            (u for u in response.users if u.id == user_with_mixed_workspaces["user_id"]),
+            None,
+        )
+        assert target is not None, "test user not present in admin listing"
+
+        active = next(
+            ws
+            for ws in target.workspaces
+            if ws["workspace_id"] == user_with_mixed_workspaces["active_workspace_id"]
+        )
+        assert active["plan_name"] == "pro"
+
 
 class TestGetUserDetail:
     """``GET /admin/users/{user_id}`` ``workspaces`` excludes soft-deleted (L398-404)."""

@@ -281,6 +281,7 @@ async def _attach_user_workspaces(db: AsyncSession, user_infos: list, users_list
                 "workspace_id": str(workspace.id),
                 "workspace_name": workspace.name,
                 "role": member.role,
+                "plan_name": workspace.plan_name,  # #1754: shown on the list's badges
                 "is_primary": bool(user_obj and user_obj.current_workspace_id == workspace.id),
                 "joined_at": to_utc_iso(member.joined_at),
             }

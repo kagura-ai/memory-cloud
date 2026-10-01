@@ -138,6 +138,16 @@ describe("WorkspacePlanBadges", () => {
     expect(tooltip).toHaveTextContent("Personal · Owner · Max");
   });
 
+  it("shows a role with no translation as the raw string", async () => {
+    render(
+      <WorkspacePlanBadges workspaces={[ws("w1", "Lab", "free", "viewer")]} />,
+    );
+    fireEvent.focus(screen.getByTestId(WORKSPACE_BADGE_TEST_IDS.badge));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Lab · viewer · S",
+    );
+  });
+
   it("collapses the third and later workspaces into a focusable +N trigger that lists them with plans", async () => {
     render(
       <WorkspacePlanBadges
@@ -184,7 +194,12 @@ describe("WorkspacePlanBadges", () => {
     // tooltip on pointerdown, so the sequence matters.
     tap(overflow);
     expect(onRowClick).not.toHaveBeenCalled();
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("Three");
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent("Three");
+    // The tooltip body renders in a portal, but React events still bubble
+    // through the component tree to the row.
+    fireEvent.click(within(tooltip).getByText("Three · Member · L"));
+    expect(onRowClick).not.toHaveBeenCalled();
     tap(overflow);
     expect(overflow).toHaveAttribute("data-state", "closed");
     expect(onRowClick).not.toHaveBeenCalled();
