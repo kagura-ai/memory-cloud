@@ -28,9 +28,11 @@ row is written per transferred context. Running again after ``--apply``
 changes 0 rows. Vector-store updates run after the database commit and are
 reported if any fail (exit 1): the memory list is already right, recall may
 miss those memories until the payload is repaired — re-run with
-``--repair-payloads``, which converges: in every context ``--to`` now
-created it moves any memory still authored by ``--from`` and re-points the
-vector point of every live memory ``--to`` owns (idempotent).
+``--repair-payloads``, which converges: in every context an earlier run
+moved to ``--to`` (found by its audit row) it moves any memory still
+authored by ``--from`` and re-points the vector point of every live memory
+``--to`` owns (idempotent). A context ``--to`` owned all along is never
+touched — ``--from`` may legitimately have authored memories in a shared one.
 
 The command is not fenced against concurrent writes: a ``remember`` by the
 ``--from`` identity that was authorized before the flip, or an embedding
@@ -94,9 +96,9 @@ class TransferResult:
     workspace_id: UUID
     dry_run: bool
     lines: list[PlanLine] = field(default_factory=list)
-    # --repair-payloads, over the contexts ``to`` already created: memories
-    # still authored by ``from`` that move, and live memories by either
-    # identity whose vector payload is re-pointed. Both 0 without the flag.
+    # --repair-payloads, over the contexts an earlier run moved to ``to``:
+    # memories still authored by ``from`` that move, and live memories by
+    # either identity whose vector payload is re-pointed. Both 0 without the flag.
     repair_moved: int = 0
     repair_memories: int = 0
     payload_failures: list[UUID] = field(default_factory=list)
@@ -186,6 +188,47 @@ async def _repoint_payloads(
     return failed
 
 
+async def _previously_transferred(
+    db: AsyncSession, *, from_user_id: str, to_user_id: str, workspace_id: UUID
+) -> list[UUID]:
+    """Live contexts an earlier run of this command moved from ``from`` to ``to``.
+
+    Identified by their audit rows, so the repair pass never touches a context
+    ``to`` owned all along — ``from`` may legitimately have authored memories
+    in a shared one, and those must keep their author.
+    """
+    rows = (
+        await db.execute(
+            select(AuditLog.resource).where(
+                AuditLog.action == AUDIT_ACTION,
+                AuditLog.resource.like("context:%"),
+                AuditLog.user_metadata["from_user_id"].as_string() == from_user_id,
+                AuditLog.user_metadata["to_user_id"].as_string() == to_user_id,
+                AuditLog.user_metadata["workspace_id"].as_string() == str(workspace_id),
+            )
+        )
+    ).scalars()
+    moved: list[UUID] = []
+    for resource in rows:
+        try:
+            moved.append(UUID(resource.removeprefix("context:")))
+        except ValueError:
+            continue
+    if not moved:
+        return []
+    live = (
+        await db.execute(
+            select(Context.id).where(
+                Context.id.in_(moved),
+                Context.workspace_id == workspace_id,
+                Context.created_by == to_user_id,
+                Context.deleted_at.is_(None),
+            )
+        )
+    ).scalars()
+    return list(live)
+
+
 async def transfer_context_creator(
     db: AsyncSession,
     *,
@@ -205,9 +248,11 @@ async def transfer_context_creator(
             workspace owner or an admin member.
         workspace_id: The workspace whose contexts are in scope.
         dry_run: Plan only — nothing is written.
-        repair_payloads: After the write, also re-point the vector payloads
-            of every live memory ``to`` owns in the workspace's contexts it
-            created — the re-run path after an earlier payload failure.
+        repair_payloads: Also sweep the contexts an earlier run moved to
+            ``to`` (per their audit rows): move memories still authored by
+            ``from`` and re-point the vector payloads of every live memory
+            ``to`` owns there — the re-run path after a payload failure or
+            a late write.
 
     Returns:
         TransferResult with one PlanLine per context in scope and, after a
@@ -291,16 +336,13 @@ async def transfer_context_creator(
 
     repair_scope: list[UUID] = []
     if repair_payloads:
-        owned = (
-            await db.execute(
-                select(Context.id).where(
-                    Context.workspace_id == workspace_id,
-                    Context.created_by == to_user_id,
-                    Context.deleted_at.is_(None),
-                )
+        repair_scope = [
+            cid
+            for cid in await _previously_transferred(
+                db, from_user_id=from_user_id, to_user_id=to_user_id, workspace_id=workspace_id
             )
-        ).scalars()
-        repair_scope = [cid for cid in owned if cid not in result.transferred_ids]
+            if cid not in result.transferred_ids
+        ]
         if repair_scope:
             # Late writes by ``from`` (see the module docstring) — swept here.
             result.repair_moved = (
@@ -387,7 +429,7 @@ def _print_plan(result: TransferResult) -> None:
         verb = "would move" if result.dry_run else "moved"
         print(
             f"repair: {verb} {result.repair_moved} memory row(s) still authored by "
-            f"{result.from_user_id!r} in contexts {result.to_user_id!r} already created"
+            f"{result.from_user_id!r} in contexts an earlier run moved to {result.to_user_id!r}"
         )
     if result.repair_memories:
         verb = "would re-point" if result.dry_run else "re-pointed"
@@ -460,9 +502,9 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--repair-payloads",
         action="store_true",
-        help="with --apply: in contexts --to already created, also move memories still "
-        "authored by --from and re-point the vector payloads of every live memory --to owns "
-        "(the re-run path after a payload failure or a late write)",
+        help="with --apply: in contexts an earlier run moved to --to, also move memories "
+        "still authored by --from and re-point the vector payloads of every live memory "
+        "--to owns (the re-run path after a payload failure or a late write)",
     )
     return parser.parse_args(argv)
 

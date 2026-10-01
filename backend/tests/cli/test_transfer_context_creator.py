@@ -114,7 +114,10 @@ async def scenario(db_session: AsyncSession):
     deleted_ctx = _context(ws, cli_admin.user_id, private=False, deleted=True)
     others_ctx = _context(ws, other.user_id, private=True)
     far_ctx = _context(far_ws, cli_admin.user_id, private=True)
-    db_session.add_all([private_ctx, shared_ctx, deleted_ctx, others_ctx, far_ctx])
+    # A shared context --to owned all along, with a memory --from legitimately
+    # authored there: no run may re-attribute it.
+    pre_owned_ctx = _context(ws, web_user.user_id, private=False)
+    db_session.add_all([private_ctx, shared_ctx, deleted_ctx, others_ctx, far_ctx, pre_owned_ctx])
     await db_session.flush()
 
     memories = {
@@ -124,6 +127,7 @@ async def scenario(db_session: AsyncSession):
         "private_by_other": _memory(private_ctx, other.user_id),
         "shared_a": _memory(shared_ctx, cli_admin.user_id),
         "far_a": _memory(far_ctx, cli_admin.user_id),
+        "pre_owned_by_from": _memory(pre_owned_ctx, cli_admin.user_id),
     }
     db_session.add_all(memories.values())
     await db_session.flush()
@@ -141,6 +145,7 @@ async def scenario(db_session: AsyncSession):
         "deleted_ctx": deleted_ctx,
         "others_ctx": others_ctx,
         "far_ctx": far_ctx,
+        "pre_owned_ctx": pre_owned_ctx,
         "memories": memories,
     }
 
@@ -342,6 +347,10 @@ async def test_repair_payloads_converges_after_a_failed_run(
     assert await _author(db_session, late.id) == s["web_user"].user_id
     repointed = {call.kwargs["memory_id"] for call in vector_store.await_args_list}
     assert repointed == {m["private_a"].id, m["private_b"].id, m["shared_a"].id, late.id}
+    # The context --to owned all along is outside the sweep: --from's memory
+    # there keeps its author and its payload is not touched.
+    assert await _author(db_session, m["pre_owned_by_from"].id) == s["cli_admin"].user_id
+    assert m["pre_owned_by_from"].id not in repointed
     out = capsys.readouterr().out
     assert "would move 1 memory row(s) still authored by" in out
     # The swept row is re-pointed too, so the plan says 4 — what the run does.
