@@ -12,6 +12,10 @@ Security invariants
   never logged (log events carry counts / cursors only) and never returned.
 * The response is minimized to ``id`` / ``name`` / ``is_private`` — no member
   counts, topics, purposes, or other channel metadata.
+* Since #1778 that minimized page can carry the names of private channels the
+  bot is in. The route caches it in Redis for a minute, in plaintext like the
+  public names — no message content, and nothing the bot's ``groups:history``
+  grant does not already read.
 
 Slack error mapping (never a raw 5xx):
 * ``missing_scope`` on the public-only listing -> :class:`ConnectorScopeError`
@@ -110,6 +114,7 @@ async def fetch_slack_channels(
     *,
     bot_token: str,
     cursor: str | None = None,
+    public_only: bool = False,
 ) -> SlackChannelsPage:
     """Fetch one page of channels (public + private) from ``conversations.list``.
 
@@ -125,6 +130,11 @@ async def fetch_slack_channels(
             outbound ``Authorization: Bearer`` header; never logged or returned.
         cursor: Slack's opaque pagination cursor from a prior page, or ``None``
             for the first page.
+        public_only: Skip the mixed request and ask for public channels
+            straight away — the caller already learned (from an earlier page)
+            that this token lacks ``groups:read``. Saves the second Tier-2
+            call per page and never replays a public-only cursor into a
+            mixed request.
 
     Returns:
         A :class:`SlackChannelsPage` with minimized channels, the next cursor
@@ -142,17 +152,20 @@ async def fetch_slack_channels(
     # the async worker indefinitely (mirrors connectors_slack._exchange_slack_code).
     timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=2.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            return await _conversations_list(
-                client, bot_token=bot_token, cursor=cursor, types=SLACK_CHANNEL_TYPES_ALL
-            )
-        except _MissingScope as exc:
-            # Pre-#1778 grant: one public-only retry, never a third request —
-            # and none at all when Slack says ``channels:read`` itself is
-            # missing, since the retry could only fail the same way.
-            if PUBLIC_CHANNELS_SCOPE in exc.needed:
-                raise ConnectorScopeError() from None
-            logger.info("slack_conversations_list_private_scope_missing")
+        if not public_only:
+            try:
+                return await _conversations_list(
+                    client, bot_token=bot_token, cursor=cursor, types=SLACK_CHANNEL_TYPES_ALL
+                )
+            except _MissingScope as exc:
+                # Pre-#1778 grant: one public-only retry, never a third
+                # request — and none at all when Slack's ``provided`` shows
+                # the token lacks ``channels:read`` too, since the retry could
+                # only fail the same way. (``needed`` is not the signal: Slack
+                # fills it with the method's whole any-of scope family.)
+                if exc.provided is not None and PUBLIC_CHANNELS_SCOPE not in exc.provided:
+                    raise ConnectorScopeError() from None
+                logger.info("slack_conversations_list_private_scope_missing")
         try:
             return await _conversations_list(
                 client, bot_token=bot_token, cursor=cursor, types=SLACK_CHANNEL_TYPES_PUBLIC
@@ -162,21 +175,22 @@ async def fetch_slack_channels(
 
 
 class _MissingScope(Exception):
-    """Slack answered ``missing_scope``; ``needed`` is the scope set it named.
+    """Slack answered ``missing_scope``; ``provided`` is the token's scope set.
 
     Internal to this module: ``fetch_slack_channels`` turns it into the
     public-only retry or the 409 ``ConnectorScopeError`` the route expects.
+    ``provided`` is ``None`` when Slack's body did not carry the field.
     """
 
-    def __init__(self, needed: frozenset[str]) -> None:
+    def __init__(self, provided: frozenset[str] | None) -> None:
         super().__init__("Slack bot token lacks a required scope")
-        self.needed = needed
+        self.provided = provided
 
 
-def _parse_needed(value: object) -> frozenset[str]:
-    """Scopes from Slack's comma-separated ``needed`` field (empty when absent)."""
+def _parse_scope_list(value: object) -> frozenset[str] | None:
+    """Scopes from a comma-separated Slack scope field (``None`` when absent)."""
     if not isinstance(value, str):
-        return frozenset()
+        return None
     return frozenset(s.strip() for s in value.split(",") if s.strip())
 
 
@@ -214,7 +228,7 @@ async def _conversations_list(
     if not data.get("ok"):
         error = str(data.get("error") or "unknown")
         if error == "missing_scope":
-            raise _MissingScope(_parse_needed(data.get("needed")))
+            raise _MissingScope(_parse_scope_list(data.get("provided")))
         if error in ("ratelimited", "rate_limited"):
             raise SlackRateLimited(None)
         # A concrete Slack error code (e.g. invalid_auth) — safe, non-secret —

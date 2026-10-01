@@ -36,6 +36,7 @@ from services.security_notification_service import (
 )
 from services.slack_channels import (
     PRIVATE_CHANNELS_SCOPE,
+    SLACK_CHANNEL_TYPES_PUBLIC,
     SlackChannel,
     SlackChannelsPage,
     SlackRateLimited,
@@ -755,8 +756,17 @@ async def list_connector_channels(
             page = None
 
     if page is None:
+        # #1778: a connector whose last page came from the public-only retry
+        # is marked for the cache TTL, so its next pages ask for public
+        # channels straight away — one Tier-2 call per page, and a public-only
+        # cursor is never replayed into a mixed request. Same TTL as the pages
+        # so a reconnect that just widened the grant is picked up within it.
+        types_key = f"slack_channels_types:{connector_id}"
+        public_only = (await get_cache(types_key)) == SLACK_CHANNEL_TYPES_PUBLIC
         try:
-            page = await fetch_slack_channels(bot_token=bot_token, cursor=cursor)
+            page = await fetch_slack_channels(
+                bot_token=bot_token, cursor=cursor, public_only=public_only
+            )
         except SlackRateLimited as exc:
             # Surface Slack's Tier-2 rate limit as a 429 with Retry-After
             # passthrough so the frontend shows the manual-entry fallback
@@ -795,6 +805,10 @@ async def list_connector_channels(
                     }
                 ),
             )
+            if not page.private_listing:
+                await get_redis_client().setex(
+                    types_key, _CHANNELS_CACHE_TTL_SECONDS, SLACK_CHANNEL_TYPES_PUBLIC
+                )
         except Exception:
             logger.warning("slack_channels_cache_write_failed", connector_id=str(connector_id))
 

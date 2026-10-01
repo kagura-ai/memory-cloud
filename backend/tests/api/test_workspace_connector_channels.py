@@ -313,8 +313,15 @@ async def test_missing_scope_on_mixed_listing_retries_public_only():
     absent instead of degrading to manual entry."""
     admin = _admin()
     connector_id = uuid4()
+    # Slack's ``needed`` is the method's whole any-of scope family, not the
+    # missing subset — only ``provided`` says what the token actually holds.
     denied = _slack_response(
-        json_body={"ok": False, "error": "missing_scope", "needed": "groups:read"}
+        json_body={
+            "ok": False,
+            "error": "missing_scope",
+            "needed": "channels:read,groups:read,mpim:read,im:read",
+            "provided": "channels:history,channels:read,chat:write",
+        }
     )
     public_only = _slack_response(
         json_body={
@@ -347,9 +354,48 @@ async def test_missing_scope_on_mixed_listing_retries_public_only():
     assert [c.id for c in result.channels] == ["C01"]
     assert result.next_cursor == "NEXT"
     assert result.missing_scopes == ["groups:read"]
-    # The degraded page is cached too, so a repeat open costs no Slack calls.
+    # The degraded page is cached too, so a repeat open costs no Slack calls…
     cached = json.loads(redis.store[f"slack_channels:{connector_id}:CUR"])
     assert cached["private_listing"] is False
+    # …and the connector is marked public-only so the next page goes straight
+    # to ``public_channel`` instead of paying the mixed request again.
+    assert redis.store[f"slack_channels_types:{connector_id}"] == "public_channel"
+
+
+@pytest.mark.asyncio
+async def test_public_only_marker_skips_the_mixed_request():
+    """#1778: within the marker's TTL a legacy install's later pages cost one
+    Slack call each (and never replay a public-only cursor into a mixed
+    request)."""
+    admin = _admin()
+    connector_id = uuid4()
+    public_only = _slack_response(
+        json_body={
+            "ok": True,
+            "channels": [{"id": "C02", "name": "random", "is_private": False, "is_member": True}],
+            "response_metadata": {"next_cursor": ""},
+        }
+    )
+    ctx, http_client = _http_ctx(public_only)
+
+    async def _cache(key):
+        return "public_channel" if key == f"slack_channels_types:{connector_id}" else None
+
+    with (
+        patch("api.routes.workspace_connectors.ConnectorProvisioningService") as svc,
+        patch("services.slack_channels.httpx.AsyncClient", return_value=ctx),
+        patch("api.routes.workspace_connectors.get_cache", AsyncMock(side_effect=_cache)),
+        patch("api.routes.workspace_connectors.get_redis_client", return_value=_FakeRedis()),
+    ):
+        svc.return_value.get_connector = AsyncMock(return_value=_connector())
+        result = await list_connector_channels(
+            connector_id, admin, cursor="PAGE2", q=None, db=MagicMock()
+        )
+
+    http_client.get.assert_awaited_once()
+    assert http_client.get.call_args.kwargs["params"]["types"] == "public_channel"
+    assert [c.id for c in result.channels] == ["C02"]
+    assert result.missing_scopes == ["groups:read"]
 
 
 @pytest.mark.asyncio
@@ -444,16 +490,17 @@ async def test_missing_scope_on_public_retry_still_maps_to_409_connector_scope()
 
 
 @pytest.mark.asyncio
-async def test_missing_scope_naming_channels_read_skips_the_public_retry():
-    """When Slack's ``needed`` says ``channels:read`` itself is missing, a
+async def test_missing_scope_without_channels_read_provided_skips_the_public_retry():
+    """When Slack's ``provided`` shows the token lacks ``channels:read``, a
     public-only retry cannot succeed — it is skipped so a scope-less legacy
-    token costs one Tier-2 call per open, not two."""
+    token costs one Tier-2 call per open, not two. (``needed`` is not the
+    signal: Slack fills it with the method's whole any-of scope family.)"""
     admin = _admin()
     resp = _slack_response(
         json_body={
             "ok": False,
             "error": "missing_scope",
-            "needed": "channels:read,groups:read",
+            "needed": "channels:read,groups:read,mpim:read,im:read",
             "provided": "chat:write",
         }
     )

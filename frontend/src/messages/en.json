@@ -4043,7 +4043,7 @@
     "teamConflict": {
       "subjectNamed": "The Slack workspace “{name}”",
       "subjectUnnamed": "This Slack workspace",
-      "here": "{subject} is already connected in this workspace by the connector “{connector}”. To change its settings, edit the existing connector.",
+      "here": "{subject} is already connected in this workspace by the connector “{connector}”. Its Slack permissions were refreshed by this sign-in; the channel list picks that up within a minute. To change its settings, edit the existing connector.",
       "elsewhere": "{subject} is already connected to another Kagura workspace. A Slack workspace can be connected to only one Kagura workspace. To move it, delete the connector in the original workspace. To share it, ask a member of the original workspace to invite you.",
       "editExisting": "Edit the existing connector"
     },

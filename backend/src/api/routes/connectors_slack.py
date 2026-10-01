@@ -48,7 +48,7 @@ _INSTALL_TTL_SECONDS = 600
 # recall, ``groups:read`` for the private-channel listing in the channel
 # picker (#1778). A grant without them still installs (ingestion works), but
 # the pending-install summary flags them so the UI can prompt a reconnect.
-_WORKER_FEATURE_SCOPES = ("commands", "app_mentions:read", "groups:read")
+_FEATURE_SCOPES = ("commands", "app_mentions:read", "groups:read")
 
 
 def _state_key(state: str) -> str:
@@ -161,15 +161,15 @@ def _parse_scopes(raw: Any) -> list[str] | None:
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
-def _missing_worker_scopes(granted: Any) -> list[str]:
-    """Worker-feature scopes absent from ``granted``.
+def _missing_feature_scopes(granted: Any) -> list[str]:
+    """Optional-feature scopes (#1758, #1778) absent from ``granted``.
 
     An unknown grant (bundle without ``granted_scopes``) flags nothing — a
     notice is only shown when Slack actually reported the granted scopes.
     """
     if not isinstance(granted, list):
         return []
-    return [s for s in _WORKER_FEATURE_SCOPES if s not in granted]
+    return [s for s in _FEATURE_SCOPES if s not in granted]
 
 
 def _connectors_page_url(frontend_url: str) -> str:
@@ -327,7 +327,7 @@ async def slack_callback(
         "team_name": team.get("name"),
         "installing_admin_user_id": authed_user.get("id"),
         # Granted bot scopes (oauth.v2.access ``scope``, comma-separated) so
-        # /pending can flag worker scopes the install lacks (#1758).
+        # /pending can flag feature scopes the install lacks (#1758).
         "granted_scopes": _parse_scopes(data.get("scope")),
     }
     handle = secrets.token_urlsafe(24)
@@ -378,5 +378,5 @@ async def slack_pending(handle: str, admin: WorkspaceAdmin) -> dict[str, Any]:
         "app_key": install.get("app_key") or "default",
         # Non-empty → the grant lacks scopes the Slack worker's slash command
         # / @mention features need; the UI suggests reconnecting (#1758).
-        "missing_scopes": _missing_worker_scopes(install.get("granted_scopes")),
+        "missing_scopes": _missing_feature_scopes(install.get("granted_scopes")),
     }

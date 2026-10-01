@@ -115,7 +115,7 @@ describe("TeamConflictAlert", () => {
 
     expect(
       screen.getByText(
-        "この Slack ワークスペースは、このワークスペースのコネクタ『Acme Slack』で接続済みです。設定を変えるときは既存のコネクタを編集してください。",
+        "この Slack ワークスペースは、このワークスペースのコネクタ『Acme Slack』で接続済みです。今回のサインインで Slack の権限は更新され、チャンネル一覧には 1 分以内に反映されます。設定を変えるときは既存のコネクタを編集してください。",
       ),
     ).toBeInTheDocument();
     fireEvent.click(
@@ -156,7 +156,7 @@ describe("TeamConflictAlert", () => {
 
     expect(
       screen.getByText(
-        "The Slack workspace “Acme” is already connected in this workspace by the connector “Acme Slack”. To change its settings, edit the existing connector.",
+        "The Slack workspace “Acme” is already connected in this workspace by the connector “Acme Slack”. Its Slack permissions were refreshed by this sign-in; the channel list picks that up within a minute. To change its settings, edit the existing connector.",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
