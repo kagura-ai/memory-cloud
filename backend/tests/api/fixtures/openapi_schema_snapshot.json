@@ -9889,6 +9889,25 @@
         ],
         "type": "object"
       },
+      "UserWorkspaceInfo": {
+        "properties": {
+          "is_primary": {},
+          "joined_at": {},
+          "plan_name": {},
+          "role": {},
+          "workspace_id": {},
+          "workspace_name": {}
+        },
+        "required": [
+          "is_primary",
+          "joined_at",
+          "plan_name",
+          "role",
+          "workspace_id",
+          "workspace_name"
+        ],
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {

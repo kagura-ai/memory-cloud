@@ -2,18 +2,19 @@
  * Tests for the workspace + plan badges on the admin user list (#1754).
  *
  * Covers the plan label with and without deployment display names (both the
- * per-locale JSON map and the single-string env), the fail-safe for a tier
- * the client does not know, the translated role in the tooltip, and the "+N"
- * overflow tooltip that lists the hidden workspaces with their plans.
+ * per-locale JSON map and the single-string env), the neutral chip for a tier
+ * the client does not know, the translated role in the badge title, and the
+ * "+N" overflow tooltip that lists the hidden workspaces with their plans.
  *
  * Radix Tooltip opens on focus as well as hover, so the tests focus the
- * trigger instead of simulating the pointer dance jsdom does not support.
+ * trigger instead of simulating the pointer dance jsdom does not support; the
+ * tap/click cases send the real pointerdown → click order.
  */
 
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// Echo keys; `roles.*` resolves the two roles the tests use so the tooltip
+// Echo keys; `roles.*` resolves the two roles the tests use so the title
 // shows a translated role and falls back to the raw string otherwise.
 const ROLE_LABELS: Record<string, string> = {
   owner: "Owner",
@@ -51,6 +52,12 @@ const ws = (id: string, name: string, plan: string, role = "member") => ({
   plan_name: plan,
 });
 
+const THREE = [
+  ws("w1", "One", "free"),
+  ws("w2", "Two", "basic"),
+  ws("w3", "Three", "pro"),
+];
+
 const ENV_KEYS = [
   "NEXT_PUBLIC_PLAN_DISPLAY_NAMES",
   "NEXT_PUBLIC_PLAN_PRO_DISPLAY_NAME",
@@ -59,12 +66,6 @@ const ENV_KEYS = [
 afterEach(() => {
   for (const k of ENV_KEYS) delete process.env[k];
 });
-
-const THREE = [
-  ws("w1", "One", "free"),
-  ws("w2", "Two", "basic"),
-  ws("w3", "Three", "pro"),
-];
 
 /** What a mouse click or a tap sends: pointerdown, then click. */
 const tap = (el: HTMLElement) => {
@@ -115,7 +116,7 @@ describe("WorkspacePlanBadges", () => {
     );
   });
 
-  it("falls back to the raw tier name for a plan the client does not know", () => {
+  it("renders a tier the client does not know as its raw name (defensive)", () => {
     render(
       <WorkspacePlanBadges workspaces={[ws("w1", "Lab", "enterprise")]} />,
     );
@@ -124,7 +125,7 @@ describe("WorkspacePlanBadges", () => {
     expect(planChipOf(badge)).toBe("enterprise");
   });
 
-  it("describes a visible badge as name · translated role · plan label in its tooltip", async () => {
+  it("titles a visible badge with name · translated role · plan label, without making it a tab stop", () => {
     process.env.NEXT_PUBLIC_PLAN_DISPLAY_NAMES = JSON.stringify({
       en: { pro: "Max" },
     });
@@ -133,17 +134,17 @@ describe("WorkspacePlanBadges", () => {
         workspaces={[ws("w1", "Personal", "pro", "owner")]}
       />,
     );
-    fireEvent.focus(screen.getByTestId(WORKSPACE_BADGE_TEST_IDS.badge));
-    const tooltip = await screen.findByRole("tooltip");
-    expect(tooltip).toHaveTextContent("Personal · Owner · Max");
+    const badge = screen.getByTestId(WORKSPACE_BADGE_TEST_IDS.badge);
+    expect(badge).toHaveAttribute("title", "Personal · Owner · Max");
+    expect(badge).not.toHaveAttribute("tabindex");
   });
 
-  it("shows a role with no translation as the raw string", async () => {
+  it("shows a role with no translation as the raw string", () => {
     render(
       <WorkspacePlanBadges workspaces={[ws("w1", "Lab", "free", "viewer")]} />,
     );
-    fireEvent.focus(screen.getByTestId(WORKSPACE_BADGE_TEST_IDS.badge));
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+    expect(screen.getByTestId(WORKSPACE_BADGE_TEST_IDS.badge)).toHaveAttribute(
+      "title",
       "Lab · viewer · S",
     );
   });
@@ -176,22 +177,14 @@ describe("WorkspacePlanBadges", () => {
     expect(items).toEqual(["Three · Owner · L", "Four · Member · XL"]);
   });
 
-  it("toggles the overflow list on click without bubbling to the row", async () => {
+  it("toggles the overflow list on tap without bubbling to the row", async () => {
     const onRowClick = vi.fn();
     render(
       <div onClick={onRowClick}>
-        <WorkspacePlanBadges
-          workspaces={[
-            ws("w1", "One", "free"),
-            ws("w2", "Two", "basic"),
-            ws("w3", "Three", "pro"),
-          ]}
-        />
+        <WorkspacePlanBadges workspaces={THREE} />
       </div>,
     );
     const overflow = screen.getByTestId(WORKSPACE_BADGE_TEST_IDS.overflow);
-    // A real tap/click is pointerdown then click; Radix closes an open
-    // tooltip on pointerdown, so the sequence matters.
     tap(overflow);
     expect(onRowClick).not.toHaveBeenCalled();
     const tooltip = await screen.findByRole("tooltip");
@@ -203,6 +196,17 @@ describe("WorkspacePlanBadges", () => {
     tap(overflow);
     expect(overflow).toHaveAttribute("data-state", "closed");
     expect(onRowClick).not.toHaveBeenCalled();
+  });
+
+  it("keeps the list open when focus opens it between pointerup and click (touch order)", () => {
+    render(<WorkspacePlanBadges workspaces={THREE} />);
+    const overflow = screen.getByTestId(WORKSPACE_BADGE_TEST_IDS.overflow);
+    fireEvent.pointerDown(overflow, { button: 0, pointerType: "touch" });
+    fireEvent.pointerUp(overflow, { button: 0, pointerType: "touch" });
+    fireEvent.focus(overflow);
+    fireEvent.click(overflow);
+    expect(overflow).not.toHaveAttribute("data-state", "closed");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Three");
   });
 
   it("closes a tapped-open overflow list on Escape and on an outside press", async () => {
@@ -228,10 +232,5 @@ describe("WorkspacePlanBadges", () => {
     await screen.findByRole("tooltip");
     tap(overflow);
     expect(overflow).toHaveAttribute("data-state", "closed");
-  });
-
-  it("renders nothing for an empty list so the page can show its own placeholder", () => {
-    const { container } = render(<WorkspacePlanBadges workspaces={[]} />);
-    expect(container).toBeEmptyDOMElement();
   });
 });

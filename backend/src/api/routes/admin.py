@@ -35,6 +35,7 @@ from models.memory import Memory
 from models.schemas import (
     UpdateWorkspaceSlotBonusRequest,
     UpdateWorkspaceSlotBonusResponse,
+    UserWorkspaceInfo,
 )
 from services.email_service import get_email_service
 from services.workspace_ownership_service import WorkspaceOwnershipService
@@ -89,7 +90,9 @@ class UserInfo(TZAwareBaseModel):
     is_active: bool
     timezone: str = "UTC"  # Issue #175: User timezone preference
     auth_provider: str | None = None  # Issue #361: Registration provider
-    workspaces: list[dict] = []  # Issue #164: Workspace memberships
+    # Issue #164: Workspace memberships. Typed since #1754 — the same model the
+    # detail endpoint returns, so the list cannot silently drop a field again.
+    workspaces: list[UserWorkspaceInfo] = []
 
     # Issue #695: owned-workspace cap summary (mirrors WorkspaceSummary fields
     # used in /admin/users/{id} detail — same field names ``base_cap`` /
@@ -273,18 +276,18 @@ async def _attach_user_workspaces(db: AsyncSession, user_infos: list, users_list
     )
 
     by_user_id = {u.user_id: u for u in users_list}
-    user_workspaces_map: dict[str, list[dict[str, Any]]] = {}
+    user_workspaces_map: dict[str, list[UserWorkspaceInfo]] = {}
     for member, workspace in result.all():
         user_obj = by_user_id.get(member.user_id)
         user_workspaces_map.setdefault(member.user_id, []).append(
-            {
-                "workspace_id": str(workspace.id),
-                "workspace_name": workspace.name,
-                "role": member.role,
-                "plan_name": workspace.plan_name,  # #1754: shown on the list's badges
-                "is_primary": bool(user_obj and user_obj.current_workspace_id == workspace.id),
-                "joined_at": to_utc_iso(member.joined_at),
-            }
+            UserWorkspaceInfo(
+                workspace_id=str(workspace.id),
+                workspace_name=workspace.name,
+                role=member.role,
+                is_primary=bool(user_obj and user_obj.current_workspace_id == workspace.id),
+                joined_at=member.joined_at,
+                plan_name=workspace.plan_name,  # #1754: shown on the list's badges
+            )
         )
 
     for user_info in user_infos:

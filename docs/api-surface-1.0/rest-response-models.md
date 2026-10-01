@@ -31,7 +31,7 @@ Notes:
 - `is_active: bool` — required
 - `timezone: str` — optional (default `'UTC'`)
 - `auth_provider: str | None` — optional
-- `workspaces: list[dict]` — optional (default `[]`)
+- `workspaces: list[UserWorkspaceInfo]` — optional (default `[]`; typed since #1754, same model as the detail endpoint)
 - `owned_count: int` — optional (default `0`)
 - `workspace_slot_bonus: int` — optional (default `0`)
 - `base_cap: int` — optional (default `BASE_CAP`)
@@ -1733,5 +1733,5 @@ Issue #622 allows at most 2 follow-up sub-issues; candidates below are grouped i
 | Candidate | Priority | Action |
 |---|---|---|
 | `APIKeyResponse.id`, `ExternalKeyResponse.id`, `ResourceTokenResponse.id`, `WorkspaceConnectorCreateResponse.token_id` (all `int`) | ✅ DECIDED (#991) → tracked #1008 | **Frozen into the 1.0 contract** rather than replaced. Replacement is a breaking migration spanning URL paths (`/{token_id}`), request params, DB lookups, and response shapes across 4 models / 3+ route files — out of scope for a pre-1.0 cleanup. The enumeration existence-oracle is already closed (owner-scope + uniform not-found); residual exposure is row-count *magnitude* only. Opaque-ID replacement deferred to #1008 (post-1.0, breaking/major). |
-| Untyped `dict` fields on freezable responses: `PublicSearchResult.metadata`, `GraphStats.top_connections`/`recent_edges`, `GraphDataResponse.stats`, `UserStats.*`, `WorkspacePlanInfo.usage`/`quotas` (workspace_plan.py), `AvailablePlanInfo.quotas`, `TelemetryResponse.memory_stats`/`neural_memory`, `SleepReportDetail.*_result`, `UserInfo.workspaces` | P2 | Type them with explicit models, or mark them explicitly non-frozen in the 1.0 contract |
+| Untyped `dict` fields on freezable responses: `PublicSearchResult.metadata`, `GraphStats.top_connections`/`recent_edges`, `GraphDataResponse.stats`, `UserStats.*`, `WorkspacePlanInfo.usage`/`quotas` (workspace_plan.py), `AvailablePlanInfo.quotas`, `TelemetryResponse.memory_stats`/`neural_memory`, `SleepReportDetail.*_result` | P2 | Type them with explicit models, or mark them explicitly non-frozen in the 1.0 contract |
 | Duplicate class names across route files | ✅ DONE (#991) | Renamed the `admin_plans.py` / `workspaces.py` copies → `AdminWorkspacePlanInfo`, `AdminUpdatePlanRequest`, `WorkspaceContextStatsResponse`; `workspace_plan.py` / `contexts.py` keep the canonical names. Also removed the dead `APIKeyCreate`/`APIKeyResponse`/`APIKeyCreateResponse` duplicates from `models/schemas.py` (zero callers; live versions are in `api_keys.py`). OpenAPI now emits distinct component names per endpoint; field JSON unchanged. |

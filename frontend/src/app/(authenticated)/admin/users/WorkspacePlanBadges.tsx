@@ -5,17 +5,18 @@
  *
  * Each visible badge names the workspace and nests a `PlanBadge`, so the tier
  * color carries only the plan: the workspace part is an outline badge, which
- * also keeps the gray `free` chip visible against it. The third and later
- * workspaces collapse into a "+N" button whose tooltip lists them with their
- * plans — a button, not a styled div, so the list is reachable from the
- * keyboard, and a click toggles it because Radix Tooltip does not open on
- * tap. Every badge is a tooltip trigger as well, replacing the native `title`
- * the badges used before.
+ * also keeps the gray `free` chip visible against it. The badge's `title`
+ * adds the role; it is not a tab stop (a list page would otherwise gain a
+ * few hundred focusable badges that do nothing on Enter).
  *
- * `plan_name` arrives as a plain string: `/plans/tiers` can serve
- * operator-defined tiers the client's `PlanTier` union has never heard of
- * (#1645), so an unknown tier renders its raw name in a neutral chip instead
- * of an unstyled `PlanBadge`.
+ * The third and later workspaces collapse into a "+N" button whose tooltip
+ * lists them with their plans. It is a button so the list is reachable from
+ * the keyboard, and a click toggles it because Radix Tooltip never opens on
+ * tap.
+ *
+ * `plan_name` is a `string` on the wire while the DB constrains it to the four
+ * canonical tiers; `PlanBadge` renders anything else as a neutral chip, so
+ * the component is safe if that constraint is ever relaxed (#1645).
  */
 
 import { useRef, useState, type MouseEvent } from "react";
@@ -30,7 +31,7 @@ import {
 } from "@/components/ui/tooltip";
 import { PlanBadge } from "@/components/common/PlanBadge";
 import { useLocale } from "@/i18n";
-import { isPlanTier, planLabelForTier } from "@/lib/utils/planLabel";
+import { planLabelForTier } from "@/lib/utils/planLabel";
 import { WORKSPACE_BADGE_TEST_IDS } from "./testids";
 
 export interface WorkspaceMembership {
@@ -46,20 +47,6 @@ interface WorkspacePlanBadgesProps {
   maxVisible?: number;
 }
 
-/** The table row navigates on click; nothing inside the badges may. */
-const stopClick = (e: MouseEvent) => e.stopPropagation();
-
-function PlanChip({ planName, label }: { planName: string; label: string }) {
-  if (isPlanTier(planName)) {
-    return <PlanBadge planName={planName} size="sm" className="px-1.5 py-0" />;
-  }
-  return (
-    <Badge className="bg-gray-100 px-1.5 py-0 text-xs font-semibold text-gray-700 dark:bg-gray-800 dark:text-gray-200">
-      {label}
-    </Badge>
-  );
-}
-
 export function WorkspacePlanBadges({
   workspaces,
   maxVisible = 2,
@@ -67,62 +54,57 @@ export function WorkspacePlanBadges({
   const t = useTranslations("admin.users.table");
   const tRoles = useTranslations("admin.users.detail.roles");
   const { locale } = useLocale();
-  // Radix Tooltip never opens on tap, so the "+N" list would be unreachable
-  // on touch. The state is controlled and a click sets it to the opposite of
-  // what it was at pointerdown: Radix's own pointerdown handler has already
-  // closed an open tooltip by the time the click fires, so reading the state
-  // then would reopen it. Outside press, Escape and blur still close it
-  // through onOpenChange as usual.
+
+  // The "+N" tooltip is controlled. A click sets the opposite of the state at
+  // pointerdown — Radix's own pointerdown handler has already closed an open
+  // tooltip by the time the click fires — and preventDefault stops Radix's
+  // composed onClick from closing it again (it skips a default-prevented
+  // event). On touch, focus between pointerup and click can open it first;
+  // the click then leaves it open. Escape, outside press and blur still
+  // close it through onOpenChange.
   const [overflowOpen, setOverflowOpen] = useState(false);
   const openAtPointerDown = useRef(false);
   const toggleOverflow = (e: MouseEvent) => {
-    stopClick(e);
+    // The table row navigates on click; nothing in here may.
+    e.stopPropagation();
+    e.preventDefault();
     setOverflowOpen(!openAtPointerDown.current);
     openAtPointerDown.current = false;
   };
 
-  if (workspaces.length === 0) return null;
-
-  // Deployment display names, then S/M/L/XL, then the raw tier (#1645).
-  const planLabel = (planName: string) =>
-    planLabelForTier(planName, undefined, locale);
-  const roleLabel = (role: string) => (tRoles.has(role) ? tRoles(role) : role);
   const describe = (workspace: WorkspaceMembership) =>
     t("workspaceTooltip", {
       name: workspace.workspace_name,
-      role: roleLabel(workspace.role),
-      plan: planLabel(workspace.plan_name),
+      role: tRoles.has(workspace.role)
+        ? tRoles(workspace.role)
+        : workspace.role,
+      plan: planLabelForTier(workspace.plan_name, undefined, locale),
     });
 
   const visible = workspaces.slice(0, maxVisible);
   const hidden = workspaces.slice(maxVisible);
 
   return (
-    <TooltipProvider delayDuration={200}>
-      <div className="flex flex-wrap gap-1">
-        {visible.map((workspace) => (
-          <Tooltip key={workspace.workspace_id}>
-            <TooltipTrigger asChild>
-              <Badge
-                variant="outline"
-                tabIndex={0}
-                data-testid={WORKSPACE_BADGE_TEST_IDS.badge}
-                className="gap-1 text-xs font-medium text-gray-700 dark:text-gray-200"
-              >
-                <Building2 className="h-3 w-3" />
-                {workspace.workspace_name}
-                <PlanChip
-                  planName={workspace.plan_name}
-                  label={planLabel(workspace.plan_name)}
-                />
-              </Badge>
-            </TooltipTrigger>
-            <TooltipContent onClick={stopClick}>
-              {describe(workspace)}
-            </TooltipContent>
-          </Tooltip>
-        ))}
-        {hidden.length > 0 && (
+    <div className="flex flex-wrap gap-1">
+      {visible.map((workspace) => (
+        <Badge
+          key={workspace.workspace_id}
+          variant="outline"
+          title={describe(workspace)}
+          data-testid={WORKSPACE_BADGE_TEST_IDS.badge}
+          className="gap-1 text-xs font-medium text-gray-700 dark:text-gray-200"
+        >
+          <Building2 className="h-3 w-3" />
+          {workspace.workspace_name}
+          <PlanBadge
+            planName={workspace.plan_name}
+            size="sm"
+            className="px-1.5 py-0"
+          />
+        </Badge>
+      ))}
+      {hidden.length > 0 && (
+        <TooltipProvider delayDuration={200}>
           <Tooltip open={overflowOpen} onOpenChange={setOverflowOpen}>
             <TooltipTrigger asChild>
               <button
@@ -138,7 +120,7 @@ export function WorkspacePlanBadges({
                 +{hidden.length}
               </button>
             </TooltipTrigger>
-            <TooltipContent onClick={stopClick}>
+            <TooltipContent onClick={(e) => e.stopPropagation()}>
               <ul className="space-y-0.5">
                 {hidden.map((workspace) => (
                   <li key={workspace.workspace_id}>{describe(workspace)}</li>
@@ -146,8 +128,8 @@ export function WorkspacePlanBadges({
               </ul>
             </TooltipContent>
           </Tooltip>
-        )}
-      </div>
-    </TooltipProvider>
+        </TooltipProvider>
+      )}
+    </div>
   );
 }

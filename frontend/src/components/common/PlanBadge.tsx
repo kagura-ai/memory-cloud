@@ -13,13 +13,24 @@
 
 import { Badge } from "@/components/ui/badge";
 import { useLocale } from "@/i18n";
-import { planLabelFromEnv, type PlanTier } from "@/lib/utils/planLabel";
+import {
+  isPlanTier,
+  planLabelForTier,
+  planLabelFromEnv,
+  type PlanTier,
+} from "@/lib/utils/planLabel";
 import { cn } from "@/styles/design-tokens";
 
 export type { PlanTier };
 
 interface PlanBadgeProps {
-  planName: PlanTier;
+  /**
+   * A canonical tier gets its color and env-resolved label. Any other
+   * string (the wire type is `string`; #1645 lets `/plans/tiers` serve
+   * operator-defined tiers) renders as a neutral chip with the raw name,
+   * so callers can pass `plan_name` straight from the API.
+   */
+  planName: string;
   size?: "sm" | "md" | "lg";
   className?: string;
 }
@@ -30,6 +41,9 @@ const PLAN_COLORS: Record<PlanTier, string> = {
   pro: "bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-100",
   promax: "bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-100",
 };
+
+const UNKNOWN_TIER_COLOR =
+  "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-200";
 
 const SIZE_CLASSES = {
   sm: "text-xs px-2 py-0.5",
@@ -43,16 +57,19 @@ export function PlanBadge({
   className,
 }: PlanBadgeProps) {
   const { locale } = useLocale();
+  const known = isPlanTier(planName);
   return (
     <Badge
       className={cn(
-        PLAN_COLORS[planName],
+        known ? PLAN_COLORS[planName] : UNKNOWN_TIER_COLOR,
         SIZE_CLASSES[size],
         "font-semibold",
         className,
       )}
     >
-      {planLabelFromEnv(planName, locale)}
+      {known
+        ? planLabelFromEnv(planName, locale)
+        : planLabelForTier(planName, undefined, locale)}
     </Badge>
   );
 }

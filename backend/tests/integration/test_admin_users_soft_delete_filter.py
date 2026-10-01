@@ -83,7 +83,7 @@ class TestListUsersIncludeWorkspaces:
         )
         assert target is not None, "test user not present in admin listing"
 
-        workspace_ids = {ws["workspace_id"] for ws in target.workspaces}
+        workspace_ids = {ws.workspace_id for ws in target.workspaces}
         assert user_with_mixed_workspaces["active_workspace_id"] in workspace_ids
         assert user_with_mixed_workspaces["deleted_workspace_id"] not in workspace_ids, (
             "soft-deleted workspace must NOT appear in admin user listing (#681)"
@@ -111,9 +111,10 @@ class TestListUsersIncludeWorkspaces:
         active = next(
             ws
             for ws in target.workspaces
-            if ws["workspace_id"] == user_with_mixed_workspaces["active_workspace_id"]
+            if ws.workspace_id == user_with_mixed_workspaces["active_workspace_id"]
         )
-        assert active["plan_name"] == "pro"
+        assert active.plan_name == "pro"
+        assert active.role == "owner"
 
 
 class TestGetUserDetail:
