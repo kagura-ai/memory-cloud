@@ -479,7 +479,7 @@ the browser — the **Created by me** filter is empty and the private ones are
 hidden — because `created_by` is compared with the session's `user_id`.
 
 To hand those contexts to the identity that should own them, run the one-shot
-command where the API runs (same env: `DATABASE_URL`):
+command where the API runs (same env: `DATABASE_URL` and the vector store):
 
 ```bash
 # inside the API container / venv, from backend/
@@ -488,18 +488,26 @@ python -m src.cli.transfer_context_creator --from local:admin --to <user_id> --w
 ```
 
 Find the two `user_id`s with `SELECT user_id, name, email FROM users` (the
-browser identity is the `id` returned by `GET /api/v1/auth/me`). Only live
-contexts in that workspace whose `created_by` is `--from` move; a context is
-left alone when `--to` is neither a member nor the owner of the workspace,
-since a private context would otherwise be visible to nobody. One
-`audit_logs` row (`context_creator_transferred`) is written per moved context,
-and re-running after `--apply` changes 0 rows.
+browser identity is the `id` returned by `GET /api/v1/auth/me`). `--to` must
+be the workspace owner or an `admin` member — a member or viewer could end up
+owning a private context they cannot list.
+
+For every live context in the workspace whose `created_by` is `--from`, the
+command moves `created_by` **and the memories in it authored by `--from`**:
+`memories.user_id` and the `user_id` field on each memory's vector-store
+point. A private context shows its owner only the memories whose `user_id`
+matches, so without that step the new owner would see the context and none
+of its content. One `audit_logs` row (`context_creator_transferred`) is
+written per moved context, and re-running after `--apply` changes 0 rows.
+Vector-store updates run after the database commit; if any fail the command
+exits 1 and lists the memory ids — the memory list is already right, recall
+may miss those memories until their payload is repaired.
 
 The command does not move API keys: mint a new key for `--to` if MCP clients
 should keep seeing the private contexts afterwards. It also leaves other
-`created_by` columns (resources, agents, files, secrets), the memories' own
-`user_id` (visibility is decided per context, not per memory) and the two user rows
-untouched — linking the accounts is a separate feature.
+`created_by` columns (resources, agents, files, secrets), per-user retrieval
+history (neural edges, feedback, sleep reports — boosting starts over) and the
+two user rows untouched — linking the accounts is a separate feature (#1784).
 
 ## Hosted-mode UI gates (Issue #1571)
 

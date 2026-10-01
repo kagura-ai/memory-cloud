@@ -34,8 +34,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlalchemy import select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
+from cli._oneshot import run_plan_apply  # noqa: E402
 from config.settings import Settings, get_settings  # noqa: E402
-from db.base import get_db  # noqa: E402
 from models.auth import Context  # noqa: E402
 from models.config import ContextSearchConfig  # noqa: E402
 from repositories.config_repository import search_config_defaults  # noqa: E402
@@ -169,33 +169,17 @@ def _print_plan(result: ApplyResult) -> None:
     print(f"{result.scanned} context(s): {verb} {result.converted}, left alone {result.skipped}")
 
 
-def _confirm(prompt: str, assume_yes: bool) -> bool:
-    if assume_yes:
-        return True
-    answer = input(f"{prompt} [y/N] ").strip().lower()
-    return answer in ("y", "yes")
-
-
 async def _main(args: argparse.Namespace) -> int:
-    try:
-        async for db in get_db():
-            plan = await apply_rerank_defaults(db, workspace_id=args.workspace, dry_run=True)
-            _print_plan(plan)
-            if not args.apply:
-                if plan.converted:
-                    print("dry run — pass --apply to write")
-                return 0
-            if not plan.converted:
-                return 0
-            if not _confirm(f"Convert {plan.converted} context(s)?", args.yes):
-                print("  skipped")
-                return 0
-            applied = await apply_rerank_defaults(db, workspace_id=args.workspace, dry_run=False)
-            print(f"converted {applied.converted} context(s)")
-    except Exception as exc:  # noqa: BLE001 - CLI boundary: report and exit non-zero
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    return 0
+    return await run_plan_apply(
+        run=lambda db, dry_run: apply_rerank_defaults(
+            db, workspace_id=args.workspace, dry_run=dry_run
+        ),
+        print_plan=_print_plan,
+        changes=lambda result: result.converted,
+        noun="context",
+        apply=args.apply,
+        assume_yes=args.yes,
+    )
 
 
 def _parse(argv: list[str] | None = None) -> argparse.Namespace:

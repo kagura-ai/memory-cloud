@@ -2,15 +2,17 @@
 
 Needs a live Postgres (``TEST_DATABASE_URL``, ``*_test`` suffixed); the
 ``db_session`` fixture skips otherwise. Pins the acceptance bullets: the ops
-command re-points only the named user's live contexts in the named workspace,
-refuses a target that cannot see the workspace, writes nothing in dry-run,
-leaves an audit row per moved context, and is a no-op when re-run.
+command re-points only the named user's live contexts in the named workspace
+together with their memories (SQL rows and vector payloads), refuses a target
+that is not the workspace owner or an admin member, writes nothing in
+dry-run, leaves an audit row per moved context, and is a no-op when re-run.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
@@ -18,7 +20,9 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import AuditLog, Context, User, Workspace, WorkspaceMember, WorkspaceRole
+from auth.workspace_roles import WorkspaceRole
+from models.auth import AuditLog, Context, User, Workspace, WorkspaceMember
+from models.memory import Memory
 from utils.datetime import utcnow
 
 _BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
@@ -59,17 +63,49 @@ def _context(ws: Workspace, owner: str, *, private: bool, deleted: bool = False)
     )
 
 
+def _memory(ctx: Context, author: str, *, deleted: bool = False) -> Memory:
+    return Memory(
+        id=uuid4(),
+        user_id=author,
+        workspace_id=ctx.workspace_id,
+        context_id=ctx.id,
+        summary="s",
+        content="c",
+        type="note",
+        client="test",
+        deleted_at=utcnow() if deleted else None,
+    )
+
+
+def _member(ws: Workspace, user: User, role: WorkspaceRole, allowed=None) -> WorkspaceMember:
+    return WorkspaceMember(
+        workspace_id=ws.id, user_id=user.user_id, role=role, allowed_context_ids=allowed
+    )
+
+
 @pytest_asyncio.fixture
 async def scenario(db_session: AsyncSession):
-    """Two workspaces. ``cli_admin`` created everything; ``web_user`` is a
-    member of ``ws`` only. ``other`` owns one context that must not move."""
-    cli_admin, web_user, other = _user("cli"), _user("web"), _user("other")
+    """``cli_admin`` owns both workspaces and created everything. ``web_user``
+    is an admin member of ``ws`` only; ``suspended`` a member with no
+    whitelist; ``viewer`` a viewer. ``other`` owns one context that must not
+    move."""
+    cli_admin, web_user, suspended, viewer, other = (
+        _user("cli"),
+        _user("web"),
+        _user("susp"),
+        _user("view"),
+        _user("other"),
+    )
     ws = _workspace(cli_admin.user_id)
     far_ws = _workspace(cli_admin.user_id)
-    db_session.add_all([cli_admin, web_user, other, ws, far_ws])
+    db_session.add_all([cli_admin, web_user, suspended, viewer, other, ws, far_ws])
     await db_session.flush()
-    db_session.add(
-        WorkspaceMember(workspace_id=ws.id, user_id=web_user.user_id, role=WorkspaceRole.MEMBER)
+    db_session.add_all(
+        [
+            _member(ws, web_user, WorkspaceRole.ADMIN),
+            _member(ws, suspended, WorkspaceRole.MEMBER, allowed=None),
+            _member(ws, viewer, WorkspaceRole.VIEWER),
+        ]
     )
 
     private_ctx = _context(ws, cli_admin.user_id, private=True)
@@ -80,9 +116,22 @@ async def scenario(db_session: AsyncSession):
     db_session.add_all([private_ctx, shared_ctx, deleted_ctx, others_ctx, far_ctx])
     await db_session.flush()
 
+    memories = {
+        "private_a": _memory(private_ctx, cli_admin.user_id),
+        "private_b": _memory(private_ctx, cli_admin.user_id),
+        "private_tombstone": _memory(private_ctx, cli_admin.user_id, deleted=True),
+        "private_by_other": _memory(private_ctx, other.user_id),
+        "shared_a": _memory(shared_ctx, cli_admin.user_id),
+        "far_a": _memory(far_ctx, cli_admin.user_id),
+    }
+    db_session.add_all(memories.values())
+    await db_session.flush()
+
     return {
         "cli_admin": cli_admin,
         "web_user": web_user,
+        "suspended": suspended,
+        "viewer": viewer,
         "other": other,
         "ws": ws,
         "far_ws": far_ws,
@@ -91,15 +140,42 @@ async def scenario(db_session: AsyncSession):
         "deleted_ctx": deleted_ctx,
         "others_ctx": others_ctx,
         "far_ctx": far_ctx,
+        "memories": memories,
     }
+
+
+@pytest.fixture
+def vector_store():
+    """The vector-store payload update, recorded instead of performed."""
+    with (
+        patch(
+            "cli.transfer_context_creator.resolve_collection_name",
+            AsyncMock(return_value="test_collection"),
+        ),
+        patch(
+            "cli.transfer_context_creator.update_memory_payload_in_qdrant", AsyncMock()
+        ) as update_payload,
+    ):
+        yield update_payload
 
 
 async def _created_by(db: AsyncSession, context_id) -> str | None:
     return await db.scalar(select(Context.created_by).where(Context.id == context_id))
 
 
+async def _author(db: AsyncSession, memory_id) -> str | None:
+    return await db.scalar(select(Memory.user_id).where(Memory.id == memory_id))
+
+
+def _audit_rows_for(scenario):
+    resources = [f"context:{scenario[k].id}" for k in ("private_ctx", "shared_ctx", "far_ctx")]
+    return select(AuditLog).where(AuditLog.resource.in_(resources))
+
+
 @pytest.mark.asyncio
-async def test_dry_run_plans_the_live_contexts_and_writes_nothing(db_session, scenario):
+async def test_dry_run_plans_contexts_with_memory_counts_and_writes_nothing(
+    db_session, scenario, vector_store
+):
     s = scenario
     result = await transfer_context_creator(
         db_session,
@@ -109,22 +185,21 @@ async def test_dry_run_plans_the_live_contexts_and_writes_nothing(db_session, sc
         dry_run=True,
     )
 
-    assert result.transferred == 2
     assert set(result.transferred_ids) == {s["private_ctx"].id, s["shared_ctx"].id}
-    assert result.skipped == 0
-    # Nothing written: every row still names the CLI admin.
+    counts = {line.context_id: line.memory_count for line in result.lines}
+    assert counts == {s["private_ctx"].id: 2, s["shared_ctx"].id: 1}  # live, by --from
+    assert result.memories == 3
+    # Nothing written: every row still names the CLI admin, no audit rows.
     for key in ("private_ctx", "shared_ctx", "deleted_ctx", "far_ctx"):
         assert await _created_by(db_session, s[key].id) == s["cli_admin"].user_id
-    assert (
-        await db_session.scalar(select(AuditLog.id).where(AuditLog.action == AUDIT_ACTION)) is None
-    )
+    assert await _author(db_session, s["memories"]["private_a"].id) == s["cli_admin"].user_id
+    assert (await db_session.execute(_audit_rows_for(s))).scalars().first() is None
+    vector_store.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_apply_moves_only_the_named_users_live_contexts_in_the_workspace(
-    db_session, scenario
-):
-    s = scenario
+async def test_apply_moves_contexts_and_their_memories(db_session, scenario, vector_store):
+    s, m = scenario, scenario["memories"]
     result = await transfer_context_creator(
         db_session,
         from_user_id=s["cli_admin"].user_id,
@@ -134,25 +209,39 @@ async def test_apply_moves_only_the_named_users_live_contexts_in_the_workspace(
     )
 
     assert result.transferred == 2
+    assert result.payload_failures == []
     assert await _created_by(db_session, s["private_ctx"].id) == s["web_user"].user_id
     assert await _created_by(db_session, s["shared_ctx"].id) == s["web_user"].user_id
-    # Out of scope: deleted, another creator, another workspace.
+    # Out of scope: deleted context, another creator, another workspace.
     assert await _created_by(db_session, s["deleted_ctx"].id) == s["cli_admin"].user_id
     assert await _created_by(db_session, s["others_ctx"].id) == s["other"].user_id
     assert await _created_by(db_session, s["far_ctx"].id) == s["cli_admin"].user_id
 
-    # One audit row per moved context, naming both identities.
-    rows = list(
-        (await db_session.execute(select(AuditLog).where(AuditLog.action == AUDIT_ACTION)))
-        .scalars()
-        .all()
+    # Memories by --from in the moved contexts follow, tombstones included;
+    # another author's memory and the far workspace's stay put.
+    for key in ("private_a", "private_b", "private_tombstone", "shared_a"):
+        assert await _author(db_session, m[key].id) == s["web_user"].user_id
+    assert await _author(db_session, m["private_by_other"].id) == s["other"].user_id
+    assert await _author(db_session, m["far_a"].id) == s["cli_admin"].user_id
+
+    # Vector payloads re-pointed for the live moved memories only.
+    repointed = {call.kwargs["memory_id"] for call in vector_store.await_args_list}
+    assert repointed == {m["private_a"].id, m["private_b"].id, m["shared_a"].id}
+    assert all(
+        call.kwargs["payload_updates"] == {"user_id": s["web_user"].user_id}
+        and call.kwargs["collection_name"] == "test_collection"
+        for call in vector_store.await_args_list
     )
+
+    # One audit row per moved context, naming both identities and the count.
+    rows = list((await db_session.execute(_audit_rows_for(s))).scalars().all())
     assert {r.resource for r in rows} == {
         f"context:{s['private_ctx'].id}",
         f"context:{s['shared_ctx'].id}",
     }
     assert all(
-        r.user_metadata["from_user_id"] == s["cli_admin"].user_id
+        r.action == AUDIT_ACTION
+        and r.user_metadata["from_user_id"] == s["cli_admin"].user_id
         and r.user_metadata["to_user_id"] == s["web_user"].user_id
         for r in rows
     )
@@ -165,32 +254,51 @@ async def test_apply_moves_only_the_named_users_live_contexts_in_the_workspace(
         workspace_id=s["ws"].id,
         dry_run=False,
     )
-    assert again.scanned == 0
+    assert again.transferred == 0
 
 
 @pytest.mark.asyncio
-async def test_target_outside_the_workspace_is_refused_per_context(db_session, scenario):
-    """A private context handed to someone who cannot see the workspace would
-    be visible to nobody — the run reports it as skipped and moves nothing."""
-    s = scenario
+async def test_payload_failures_are_reported_after_the_commit(db_session, scenario, vector_store):
+    """The database write is not rolled back by a vector-store failure — the
+    memory list is right, recall is repaired by hand — but the failure is
+    surfaced with the memory ids."""
+    s, m = scenario, scenario["memories"]
+    bad = m["private_b"].id
+
+    async def flaky(*, memory_id, **_):
+        if memory_id == bad:
+            raise RuntimeError("qdrant down")
+
+    vector_store.side_effect = flaky
     result = await transfer_context_creator(
         db_session,
         from_user_id=s["cli_admin"].user_id,
         to_user_id=s["web_user"].user_id,
-        workspace_id=s["far_ws"].id,
+        workspace_id=s["ws"].id,
         dry_run=False,
     )
-
-    assert result.scanned == 1
-    assert result.transferred == 0
-    assert result.lines[0].action == "skip"
-    assert "not a member" in (result.lines[0].reason or "")
-    assert await _created_by(db_session, s["far_ctx"].id) == s["cli_admin"].user_id
+    assert result.payload_failures == [bad]
+    assert await _author(db_session, bad) == s["web_user"].user_id
 
 
 @pytest.mark.asyncio
-async def test_workspace_owner_counts_as_able_to_see(db_session, scenario):
-    """The owner of a workspace need not hold a member row to receive contexts."""
+@pytest.mark.parametrize("target", ["suspended", "viewer", "other"])
+async def test_target_that_cannot_list_every_context_is_refused(db_session, scenario, target):
+    """A suspended member, a viewer or a non-member could end up owning a
+    private context they cannot list: refused before anything is planned."""
+    s = scenario
+    with pytest.raises(ValueError, match="owner or an admin member"):
+        await transfer_context_creator(
+            db_session,
+            from_user_id=s["cli_admin"].user_id,
+            to_user_id=s[target].user_id,
+            workspace_id=s["ws"].id,
+        )
+    assert await _created_by(db_session, s["private_ctx"].id) == s["cli_admin"].user_id
+
+
+@pytest.mark.asyncio
+async def test_workspace_owner_needs_no_member_row(db_session, scenario, vector_store):
     s = scenario
     result = await transfer_context_creator(
         db_session,
@@ -199,7 +307,6 @@ async def test_workspace_owner_counts_as_able_to_see(db_session, scenario):
         workspace_id=s["ws"].id,
         dry_run=True,
     )
-    assert result.transferred == 1
     assert result.transferred_ids == [s["others_ctx"].id]
 
 
@@ -207,17 +314,14 @@ async def test_workspace_owner_counts_as_able_to_see(db_session, scenario):
 @pytest.mark.parametrize("missing", ["from", "to"])
 async def test_unknown_user_is_an_error(db_session, scenario, missing):
     s = scenario
-    kwargs = {
-        "from_user_id": s["cli_admin"].user_id,
-        "to_user_id": s["web_user"].user_id,
-    }
+    kwargs = {"from_user_id": s["cli_admin"].user_id, "to_user_id": s["web_user"].user_id}
     kwargs[f"{missing}_user_id"] = "nobody_here"
     with pytest.raises(ValueError, match="nobody_here"):
         await transfer_context_creator(db_session, workspace_id=s["ws"].id, **kwargs)
 
 
 @pytest.mark.asyncio
-async def test_same_user_is_an_error(db_session, scenario):
+async def test_unknown_workspace_and_same_user_are_errors(db_session, scenario):
     s = scenario
     with pytest.raises(ValueError, match="same user"):
         await transfer_context_creator(
@@ -225,6 +329,13 @@ async def test_same_user_is_an_error(db_session, scenario):
             from_user_id=s["cli_admin"].user_id,
             to_user_id=s["cli_admin"].user_id,
             workspace_id=s["ws"].id,
+        )
+    with pytest.raises(ValueError, match="no workspace"):
+        await transfer_context_creator(
+            db_session,
+            from_user_id=s["cli_admin"].user_id,
+            to_user_id=s["web_user"].user_id,
+            workspace_id=uuid4(),
         )
 
 
