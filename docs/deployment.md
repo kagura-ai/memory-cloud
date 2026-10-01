@@ -497,7 +497,8 @@ and re-running after `--apply` changes 0 rows.
 
 The command does not move API keys: mint a new key for `--to` if MCP clients
 should keep seeing the private contexts afterwards. It also leaves other
-`created_by` columns (resources, agents, files, secrets) and the two user rows
+`created_by` columns (resources, agents, files, secrets), the memories' own
+`user_id` (visibility is decided per context, not per memory) and the two user rows
 untouched — linking the accounts is a separate feature.
 
 ## Hosted-mode UI gates (Issue #1571)
