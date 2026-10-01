@@ -1078,6 +1078,7 @@
     "ownerYou": "自分",
     "ownerUnnamed": "他のメンバー",
     "sharedBy": "共有元: {name}",
+    "createdByName": "作成者: {name}",
     "memoriesCount": "メモリー数",
     "storageMB": "ストレージ (MB)",
     "lastActivity": "最終アクティビティ",

@@ -254,6 +254,21 @@ describe("ContextBreakdownTable", () => {
     expect(row).toHaveTextContent("ownerUnnamed");
   });
 
+  it("names the creator without 'shared by' on another member's private context (owner privilege)", () => {
+    // A workspace owner sees members' private contexts; nobody shared them.
+    render(
+      <ContextBreakdownTable
+        contexts={mockContexts}
+        totalMemories={300}
+        contextStats={mockContextStats}
+        currentUserId="user-1"
+      />,
+    );
+    const row = screen.getByText("prod").closest("tr") as HTMLTableRowElement;
+    expect(row).toHaveTextContent("createdByName:Bob");
+    expect(row).not.toHaveTextContent("sharedBy");
+  });
+
   it("shows no shared-by marker while the viewer is unknown (auth hydrating)", () => {
     render(
       <ContextBreakdownTable

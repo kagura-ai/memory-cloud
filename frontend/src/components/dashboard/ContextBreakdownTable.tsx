@@ -97,15 +97,20 @@ export function ContextBreakdownTable({
       context.created_by_name,
       { you: t("ownerYou"), unnamed: t("ownerUnnamed") },
     );
-  // #1777: beside the name, only a context someone else created and shared
-  // with the viewer gets a marker — who shared it. The viewer's own rows and
-  // rows with no known creator show nothing extra.
-  const sharedByLabel = (context: DashboardContextStats): string | null =>
-    contextOwnerKind(context.created_by, currentUserId) === "shared"
-      ? t("sharedBy", {
-          name: context.created_by_name || t("ownerUnnamed"),
-        })
-      : null;
+  // #1777: beside the name, only a context someone else created gets a
+  // marker. A workspace-shared one reads "Shared by {creator}"; another
+  // member's private context — which a workspace owner sees by privilege,
+  // not because anyone shared it — reads "Created by {creator}". The
+  // viewer's own rows and rows with no known creator show nothing extra.
+  const creatorMarker = (context: DashboardContextStats): string | null => {
+    if (contextOwnerKind(context.created_by, currentUserId) !== "shared") {
+      return null;
+    }
+    const name = context.created_by_name || t("ownerUnnamed");
+    return context.is_private
+      ? t("createdByName", { name })
+      : t("sharedBy", { name });
+  };
 
   const [sortBy, setSortBy] = useState<SortColumn>("memory");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
@@ -329,11 +334,11 @@ export function ContextBreakdownTable({
                             >
                               {context.context_name}
                             </Link>
-                            {/* #1777: who shared this context, when it is
-                                not the viewer's own */}
-                            {sharedByLabel(context) && (
+                            {/* #1777: who this context came from, when it
+                                is not the viewer's own */}
+                            {creatorMarker(context) && (
                               <span className="text-xs text-gray-500 dark:text-gray-400">
-                                {sharedByLabel(context)}
+                                {creatorMarker(context)}
                               </span>
                             )}
                           </div>
