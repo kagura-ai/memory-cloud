@@ -257,9 +257,13 @@ version Y.Y.Y`** (raised by `qdrant_client/async_qdrant_remote.py`):
 the client and server have drifted more than one minor version apart.
 `backend/pyproject.toml` caps `qdrant-client` to the window the pinned
 server image accepts (#1535), so this means either the install bypassed
-that pin or the server image moved without the cap being bumped. Fix the
-pin rather than passing `check_compatibility=False` — that flag also
-hides a real incompatibility. The measurement itself is not affected.
+that pin or the server image moved without the cap being bumped
+(`terraform/single-server/scripts/tests/qdrant_pin_consistency.bats` catches
+the second in CI). It also shows while a deployment's server is part-way
+through a one-minor-at-a-time upgrade — see
+[`qdrant-upgrade-runbook.md`](qdrant-upgrade-runbook.md) for the order that
+avoids it. Fix the pin rather than passing `check_compatibility=False` — that
+flag also hides a real incompatibility. The measurement itself is not affected.
 
 **`UserWarning: Api key is used with an insecure connection`** (raised
 by `src/db/qdrant.py`): informational — production Qdrant runs over

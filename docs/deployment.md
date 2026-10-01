@@ -119,7 +119,7 @@ release that carries the block:
 | `api-blue` / `api-green` | `deploy.sh` recreates the color it deploys to on every run — nothing to do (the other color follows with the next deploy). |
 | `web` | Recreated by `deploy.sh --web`, or once by hand (below). |
 | `caddy` | **Never recreated by `deploy.sh`** (it only restarts Caddy) — recreate it once by hand (below). |
-| `postgres` / `qdrant` / `redis` (and `ollama`) | Recreating them **restarts the database**, so do it in a maintenance window. Their logs are small; it can wait for the next planned one. |
+| `postgres` / `qdrant` / `redis` (and `ollama`) | Recreating them **restarts the database**, so do it in a maintenance window. Their logs are small; it can wait for the next planned one. Recreating `qdrant` also moves it to the image the compose file pins: a volume from before v0.87.0 must first be upgraded one minor at a time ([Qdrant upgrade runbook](ops/qdrant-upgrade-runbook.md)), or Qdrant crash-loops. |
 
 ```bash
 cd /opt/kagura-memory/src/terraform/single-server
@@ -136,7 +136,8 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod \
 docker inspect -f '{{json .HostConfig.LogConfig}}' kagura-caddy
 # {"Type":"json-file","Config":{"max-file":"3","max-size":"50m"}}
 
-# Data tier — maintenance window only (volumes are kept, the services restart):
+# Data tier — maintenance window only (volumes are kept, the services restart).
+# Qdrant still on 1.15 / 1.16? Run docs/ops/qdrant-upgrade-runbook.md first.
 # docker compose -f docker-compose.prod.yml --env-file .env.prod \
 #   up -d --no-deps --force-recreate postgres qdrant redis
 ```

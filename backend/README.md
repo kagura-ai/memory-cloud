@@ -127,7 +127,7 @@ backend/
 - **Web Framework**: FastAPI 0.133+
 - **ASGI Server**: Uvicorn
 - **Database**: PostgreSQL 18+ (SQLAlchemy 2.1 + asyncpg; CI/local/production all run the digest-pinned 18.4 — the 15→18 migration record lives in `docs/ops/postgres-18-migration-runbook.md`)
-- **Vector DB**: Qdrant 1.15+
+- **Vector DB**: Qdrant 1.19 (qdrant-client 1.18 accepts servers 1.17–1.19; a volume from an older server is upgraded one minor at a time — `docs/ops/qdrant-upgrade-runbook.md`)
 - **Cache**: Redis 7+
 - **Graph Memory**: NetworkX 3.0+
 - **Authentication**: OAuth2 and JWT (Authlib 1.8)

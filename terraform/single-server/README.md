@@ -475,7 +475,9 @@ docker inspect -f '{{json .HostConfig.LogConfig}}' kagura-caddy   # max-size 50m
 
 Recreating a container also discards its old, possibly oversized, log file.
 The data services (`postgres` / `qdrant` / `redis`) restart when recreated — do
-those in a maintenance window. Full procedure, including the split-host files:
+those in a maintenance window, and upgrade a pre-v0.87.0 Qdrant volume first
+([Qdrant upgrade runbook](../../docs/ops/qdrant-upgrade-runbook.md)): recreating
+`qdrant` starts the pinned image on it. Full procedure, including the split-host files:
 [`docs/deployment.md` → Container log rotation](../../docs/deployment.md#container-log-rotation).
 
 **Invite tokens (#1591).** The `log` block in `Caddyfile.tpl` scrubs closed-beta
@@ -521,6 +523,13 @@ be ready, switches Caddy, then drains and stops the old color.
 > README instructed editing it directly), copy those edits into `Caddyfile.tpl`
 > **first** — otherwise the regenerated file reverts to the template's default
 > domain.
+
+> ⚠️ **One-time — v0.87.0 moves Qdrant from 1.15 to 1.19.1 (#1793).** A
+> routine `deploy.sh` never recreates Qdrant, so the deploy itself is safe, but
+> the server stays on 1.15 until you upgrade it, and Qdrant only upgrades one
+> minor version at a time — 1.19.1 started on a 1.15 volume crash-loops. Follow
+> [`docs/ops/qdrant-upgrade-runbook.md`](../../docs/ops/qdrant-upgrade-runbook.md),
+> which puts the v0.87.0 deploy between the 1.17 and 1.18 steps.
 
 ```bash
 # On the VM
