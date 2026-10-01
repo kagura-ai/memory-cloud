@@ -166,10 +166,35 @@ async def test_reset_keeps_the_account_armed(db_session: AsyncSession) -> None:
     assert user.known_devices_since == now
 
 
-async def test_concurrent_first_sign_ins_cannot_both_be_first(db_session: AsyncSession) -> None:
-    # Serialized by the users row lock: the second one in sees the marker.
-    uid = await _user(db_session)
+async def test_concurrent_first_sign_ins_cannot_both_be_first(async_engine) -> None:
+    """Two independent transactions: the second waits on the users row lock
+    and, once the first commits, sees the marker — so it is NEW_DEVICE, not a
+    second FIRST_DEVICE. Would fail without ``with_for_update()``."""
+    import asyncio
+
+    from sqlalchemy import delete
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    async with maker() as setup:
+        uid = await _user(setup)
+        await setup.commit()
     now = utcnow()
-    first = await record_sign_in(db_session, user_id=uid, digest="a" * 64, now=now)
-    second = await record_sign_in(db_session, user_id=uid, digest="b" * 64, now=now)
-    assert (first, second) == (SignIn.FIRST_DEVICE, SignIn.NEW_DEVICE)
+    try:
+        async with maker() as a, maker() as b:
+            first = await record_sign_in(a, user_id=uid, digest="a" * 64, now=now)
+            assert first is SignIn.FIRST_DEVICE
+            # b blocks on a's FOR UPDATE lock until a commits.
+            second_task = asyncio.create_task(
+                record_sign_in(b, user_id=uid, digest="b" * 64, now=now)
+            )
+            await asyncio.sleep(0.2)
+            assert not second_task.done()
+            await a.commit()
+            second = await asyncio.wait_for(second_task, timeout=10)
+            await b.commit()
+        assert second is SignIn.NEW_DEVICE
+    finally:
+        async with maker() as cleanup:
+            await cleanup.execute(delete(User).where(User.user_id == uid))
+            await cleanup.commit()

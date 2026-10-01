@@ -76,6 +76,9 @@ OPERATIONAL_TABLES: frozenset[str] = frozenset(
         "memory_access_events",
         "users",
         "user_oauth_providers",
+        # Known browsers for new-device sign-in alerts (#1769): keyed hashes of
+        # device cookies, deleted with the account.
+        "user_known_devices",
         "oauth_authorization_codes",
         "oauth_clients",
         "oauth_device_codes",

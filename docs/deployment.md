@@ -423,7 +423,9 @@ rows are deleted by an hourly job once they are
 **New-device sign-in alerts.** A browser sign-in from a device the account has
 not used before emails the owner (same pipeline and mandatory like the other
 security notices). The device is a long-lived `kagura_device` cookie whose
-keyed HMAC is stored in `user_known_devices`; no IP address is stored. A daily
+keyed HMAC is stored in `user_known_devices`; no IP address is stored there (the
+IP and user agent go into the email and, while a notice is coalesced or retried,
+into the notice queue in Redis). A daily
 job forgets devices not seen for `KNOWN_DEVICE_RETENTION_DAYS` (default `180`),
 and at most `KNOWN_DEVICE_MAX_PER_USER` (default `20`) devices are kept per
 account. After the upgrade every account's next sign-in registers its browser

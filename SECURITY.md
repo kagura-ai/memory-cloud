@@ -52,9 +52,11 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
   - a browser signs in (password, with or without MFA, Google or GitHub)
     from a device the account has not signed in from before. The browser is
     recognized by a long-lived HttpOnly device cookie; only the keyed HMAC of
-    its value is stored, with first/last sign-in times, and never the IP
-    address or user agent (those appear in the email only). The user agent
-    is not part of the match — it is spoofable. An account's first browser
+    its value is stored, with first/last sign-in times — not the IP address
+    or user agent. Those go into the email and, like every notice's details,
+    sit in the notice queue (Redis) only while a notice is coalesced or
+    retried, at most about eight days. The user agent is not part of the
+    match — it is spoofable. An account's first browser
     sign-in ever registers the device silently (so the device the account
     was created from sends nothing); from then on the account stays armed. A
     password reset forgets every known device but not that the account is

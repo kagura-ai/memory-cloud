@@ -9,8 +9,9 @@ first sign-in and re-issued on every later one so its lifetime slides. Only
 the keyed HMAC of the cookie value is stored (``user_known_devices``), so the
 table identifies nothing without the server key. The user agent is not part
 of the key — it is spoofable, so a match on it must not silence an alert —
-and the IP address is neither a key nor stored: both appear in the notice
-email only.
+and the IP address is neither a key nor stored here: both go into the notice
+email, and sit in the notice pipeline's Redis buffer only while a notice is
+coalesced or retried (see ``security_notification_service``).
 
 Rules:
 
@@ -159,12 +160,15 @@ async def record_sign_in(db: AsyncSession, *, user_id: str, digest: str, now: da
     if first:
         return SignIn.FIRST_DEVICE
 
+    # Keep the new row plus the ``cap - 1`` most recently seen others, so the
+    # account never holds more than ``cap`` rows even when the new row's
+    # ``now`` is older than a concurrent sign-in's (it waited on the lock).
     cap = get_settings().known_device_max_per_user
     keep = (
         select(UserKnownDevice.id)
-        .where(UserKnownDevice.user_id == user_id)
+        .where(UserKnownDevice.user_id == user_id, UserKnownDevice.id != inserted_id)
         .order_by(UserKnownDevice.last_seen.desc(), UserKnownDevice.id)
-        .limit(cap)
+        .limit(cap - 1)
     )
     await db.execute(
         delete(UserKnownDevice).where(

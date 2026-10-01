@@ -113,12 +113,62 @@ async def test_mfa_login_records_the_device_only_after_the_second_factor(
 
 
 @pytest.mark.parametrize(
-    ("handler", "method"),
-    [(auth_routes.google_callback, "Google"), (auth_routes.github_callback, "GitHub")],
+    ("handler", "provider", "method"),
+    [
+        (auth_routes.google_callback, "google", "Google"),
+        (auth_routes.github_callback, "github", "GitHub"),
+    ],
 )
-def test_oauth_callbacks_record_the_device_after_the_cookie(handler, method: str) -> None:
+def test_oauth_callbacks_record_the_device_after_the_cookie(
+    handler, provider: str, method: str
+) -> None:
     source = inspect.getsource(handler)
     cookie_at = source.index("_set_session_cookie(redirect, session_id)")
-    note_at = source.index("await note_browser_sign_in(")
+    note_at = source.index("await _note_provider_sign_in(")
     assert cookie_at < note_at
-    assert f'sign_in_method="{method}"' in source[note_at:]
+    assert f'provider="{provider}"' in source[note_at:]
+    assert f'method="{method}"' in source[note_at:]
+
+
+@pytest.mark.asyncio
+async def test_provider_sign_in_is_recorded_for_the_owning_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A Google identity linked to another account (#517) signs in to that
+    # account: the device is recorded under the owner's user_id, not the sub.
+    async def _fake_db():
+        yield MagicMock()
+
+    monkeypatch.setattr(auth_routes, "get_db", _fake_db)
+    monkeypatch.setattr(
+        auth_routes, "_owning_user", AsyncMock(return_value=("owner-1", "o@example.test"))
+    )
+    note = AsyncMock()
+    monkeypatch.setattr(auth_routes, "note_browser_sign_in", note)
+    response = MagicMock()
+
+    await auth_routes._note_provider_sign_in(
+        _request(), response, provider="google", idp_sub="google-sub-9", method="Google"
+    )
+
+    note.assert_awaited_once()
+    assert note.await_args.kwargs == {"user_id": "owner-1", "sign_in_method": "Google"}
+
+
+@pytest.mark.asyncio
+async def test_provider_sign_in_falls_back_to_the_sub_when_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _broken_db():
+        raise RuntimeError("db down")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(auth_routes, "get_db", _broken_db)
+    note = AsyncMock()
+    monkeypatch.setattr(auth_routes, "note_browser_sign_in", note)
+
+    await auth_routes._note_provider_sign_in(
+        _request(), MagicMock(), provider="github", idp_sub="gh-7", method="GitHub"
+    )
+
+    assert note.await_args.kwargs == {"user_id": "gh-7", "sign_in_method": "GitHub"}

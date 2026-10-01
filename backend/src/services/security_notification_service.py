@@ -517,8 +517,11 @@ def render_security_notification(
     lines.append("Wasn't you?")
     if event in _SIGN_IN_EVENTS:
         lines += [
-            "Change your password now: that signs every browser out, and a reset",
-            "also revokes the account's connected apps. Then review your sign-in",
+            'If the account has a password, reset it with "Forgot password?" on the',
+            "sign-in page: a reset signs every browser out and revokes the account's",
+            "connected apps (changing the password from your profile keeps this",
+            "browser signed in). If you sign in with Google or GitHub, secure that",
+            "account first — its password and its sessions. Then review your sign-in",
             "methods on your profile page, and your keys and apps under",
             "Integrations > API Keys and OAuth Apps in your workspace. Remove",
             "anything you do not recognize:",

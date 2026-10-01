@@ -595,6 +595,11 @@ class TestRender:
         assert "security-sensitive change was made" not in text
         assert "Via:" in text and "GitHub" in text
         assert "cookies were cleared" in text
+        # Recovery guidance fits every account: a reset (not a change) when a
+        # password exists, the provider account for Google / GitHub sign-ins.
+        assert 'reset it with "Forgot password?"' in text
+        assert "Google or GitHub, secure that" in text
+        assert "Change your password now" not in text
 
         _, digest = render_security_notification(
             SecurityEvent.NEW_DEVICE_SIGN_IN,

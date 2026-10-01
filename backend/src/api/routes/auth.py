@@ -1014,8 +1014,8 @@ async def google_callback(
         # change.
         _set_session_cookie(redirect, session_id)
         # #1769: alert the owner when this browser has not signed in before.
-        await note_browser_sign_in(
-            request, redirect, user_id=user_info["sub"], sign_in_method="Google"
+        await _note_provider_sign_in(
+            request, redirect, provider="google", idp_sub=user_info["sub"], method="Google"
         )
 
         logger.info(f"OAuth2 login successful: {user_info['email']} (role={role})")
@@ -1485,6 +1485,30 @@ async def _owning_user(db: AsyncSession, provider: str, idp_sub: str) -> tuple[s
             )
         ).first()
     return (row[0], row[1]) if row is not None else None
+
+
+async def _note_provider_sign_in(
+    request: Request, response: Response, *, provider: str, idp_sub: str, method: str
+) -> None:
+    """Record the device of an OAuth sign-in for the account that owns the identity.
+
+    A provider linked to another account (#517) signs in to that account's
+    ``user_id``, not to the sub, so the owner is resolved the way
+    :func:`_owning_user` does before the device is recorded (#1769). Never
+    raises — the sign-in stands.
+    """
+    owner_id = idp_sub
+    try:
+        async for db in get_db():
+            owner = await _owning_user(db, provider, idp_sub)
+            if owner is not None:
+                owner_id = owner[0]
+            break
+    except Exception as exc:
+        logger.error(
+            "sign_in_owner_lookup_failed", provider=provider, error_type=type(exc).__name__
+        )
+    await note_browser_sign_in(request, response, user_id=owner_id, sign_in_method=method)
 
 
 async def _record_terms_acceptance(
@@ -2075,8 +2099,8 @@ async def github_callback(
         # production. Route it through the shared helper.
         _set_session_cookie(redirect, session_id)
         # #1769: alert the owner when this browser has not signed in before.
-        await note_browser_sign_in(
-            request, redirect, user_id=user_info["sub"], sign_in_method="GitHub"
+        await _note_provider_sign_in(
+            request, redirect, provider="github", idp_sub=user_info["sub"], method="GitHub"
         )
 
         logger.info(f"GitHub OAuth2 login successful: {user_info['email']} (role={role})")
