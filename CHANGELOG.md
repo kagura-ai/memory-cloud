@@ -4,6 +4,21 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.86.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.86.0) — 2026-10-01
+
+The connector channel picker lists the private channels the bot is in, and an operator command hands a workspace's contexts from a CLI admin to the same person's OAuth account.
+
+### Added
+- **Private channels in the connector channel picker** ([#1778](https://github.com/kagura-ai/memory-cloud/issues/1778)): the picker lists the private channels the bot is a member of (🔒) next to the public ones; `groups:read` joins the default install scopes. An install granted before that keeps its public listing — the service retries once with public channels only — and the picker says private channels need a reconnect (the listing response carries `missing_scopes`); the pending-install notice names `groups:read` too, and the team-conflict alert says the sign-in refreshed the existing connector's Slack permissions.
+- **`transfer_context_creator` operator command** ([#1783](https://github.com/kagura-ai/memory-cloud/issues/1783)): identities are keyed by `user_id` and never linked by email, so contexts created through a CLI admin's API key read as another creator in the browser — the "Created by me" filter is empty and the private ones are hidden. `python -m src.cli.transfer_context_creator --from … --to … --workspace …` moves a workspace's live contexts, with the memories the source identity authored in them (database rows and vector-store payloads), to the workspace owner or an admin member. Dry-run by default, one audit row per moved context, idempotent, with a `--repair-payloads` re-run path; see `docs/deployment.md`.
+
+### Fixed
+- **Lance payload updates keep the filter column current** ([#1783](https://github.com/kagura-ai/memory-cloud/issues/1783)): `LanceVectorStore.update_payload` now mirrors `user_id` into the column recall filters on, so a changed owner takes effect on Kagura Lite deployments.
+
+### Notes
+- No migration. **Default `SLACK_OAUTH_SCOPES` now includes `groups:read`**: add it under *OAuth & Permissions → Bot Token Scopes* of a self-hosted Slack app before upgrading, or Connect Slack fails with `invalid_scope`; deployments that set `SLACK_OAUTH_SCOPES` explicitly must add it too. Existing workspaces keep their grant until an admin reconnects; the picker tells them so.
+- Fixing an existing "two accounts, one person" workspace is one run of `transfer_context_creator` by an operator (`docs/deployment.md`, *One person, two accounts*); the command does not move API keys — mint one for the target identity if MCP clients should keep seeing the private contexts.
+
 ## [v0.85.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.85.0) — 2026-10-01
 
 The account owner is told when a browser they have not used before signs in, and the dashboard's context breakdown names who shared a context instead of repeating its visibility.
