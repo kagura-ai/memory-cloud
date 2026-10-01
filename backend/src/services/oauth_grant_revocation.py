@@ -18,7 +18,11 @@ follows (#1770):
   finds no session and writes nothing; a writer that got there first
   commits before the reset's statements run, which then cover its grant.
 - The code and device-code exchanges lock their own grant row and never
-  the user, so they cannot form a cycle with any of the above.
+  the user, so they cannot form a cycle with any of the above. That holds
+  because ``oauth_authorization_codes``, ``oauth_device_codes`` and
+  ``oauth_tokens`` have no foreign key to ``users``: an INSERT into them
+  takes no implicit KEY SHARE on the user row. Adding such a key would put
+  the exchanges into this order too — give them the user lock first.
 
 Nothing here commits: the caller owns the transaction.
 """

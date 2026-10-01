@@ -2680,11 +2680,7 @@ def _confirm_device_sync(
             )
 
         if approve:
-            if not user_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="User ID not found in session",
-                )
+            # user_id is set here: an approval without one was refused above.
             device.user_id = user_id
             device.authorized_at = utcnow()
             status_str = "approved"
