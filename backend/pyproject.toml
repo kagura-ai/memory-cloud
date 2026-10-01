@@ -38,12 +38,16 @@ dependencies = [
     "alembic>=1.13.0",
 
     # Vector Database (Qdrant)
-    # Both bounds track the pinned server image (qdrant/qdrant:v1.15.0 in
+    # Both bounds track the pinned server image (qdrant/qdrant:v1.19.1 in
     # docker-compose.yml, .github/workflows/eval-nightly.yml and
     # terraform/single-server/docker-compose.*.yml): the client warns unless
-    # major matches and minor differs by <= 1, so only 1.14-1.16 are inside
-    # the window. Bump them together (#1535).
-    "qdrant-client>=1.14.0,<1.17",
+    # major matches and minor differs by <= 1. A 1.18 client is inside the
+    # window for servers 1.17, 1.18 and 1.19, so the same release runs before,
+    # during and after a one-minor-at-a-time server upgrade; a 1.19 client
+    # would warn against 1.17. Bump them together (#1535, #1793) —
+    # terraform/single-server/scripts/tests/qdrant_pin_consistency.bats fails
+    # when they drift apart.
+    "qdrant-client>=1.18.0,<1.19",
     "mmh3>=4.0.0",             # MurmurHash3 for sparse vector token hashing (Issue #16)
     "numpy>=1.24.0",           # Cosine similarity in neural memory (neural/utils.py)
 

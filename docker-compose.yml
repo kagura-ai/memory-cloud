@@ -56,9 +56,12 @@ services:
 
   # Qdrant (Vector DB)
   qdrant:
-    image: qdrant/qdrant:v1.15.0
+    # Pinned together with qdrant-client in backend/pyproject.toml (#1535,
+    # #1793). A volume from an older release cannot start on this image
+    # directly: upgrade it one minor at a time — docs/ops/qdrant-upgrade-runbook.md
+    image: qdrant/qdrant:v1.19.1
     container_name: kagura-qdrant
-    # Qdrant 1.15 opens many files per segment; under eval-scale ingest/delete
+    # Qdrant opens many files per segment (seen on 1.15); under eval-scale ingest/delete
     # churn the default container nofile limit is exhausted (EMFILE crash-loop
     # at actix worker startup, os error 24 — observed 2026-07-08 on a GB10 rig
     # after the collection grew to 8 segments). 65536 gives ample headroom.

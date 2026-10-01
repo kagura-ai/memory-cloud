@@ -54,7 +54,10 @@ services:
       start_period: 30s
 
   qdrant:
-    image: qdrant/qdrant:v1.15.0
+    # Pinned together with qdrant-client in backend/pyproject.toml (#1535,
+    # #1793). A volume from an older release cannot start on this image
+    # directly: upgrade it one minor at a time — docs/ops/qdrant-upgrade-runbook.md
+    image: qdrant/qdrant:v1.19.1
     container_name: kagura-qdrant
     restart: always
     logging: *default-logging
