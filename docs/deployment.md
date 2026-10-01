@@ -420,6 +420,15 @@ the person to review them in Settings. Used and expired `email_action_tokens`
 rows are deleted by an hourly job once they are
 `EMAIL_ACTION_TOKEN_RETENTION_SECONDS` (default `86400`) past use or expiry.
 
+**New-device sign-in alerts.** A browser sign-in from a device the account has
+not used before emails the owner (same pipeline and mandatory like the other
+security notices). The device is a long-lived `kagura_device` cookie whose
+keyed HMAC is stored in `user_known_devices`; no IP address is stored. A daily
+job forgets devices not seen for `KNOWN_DEVICE_RETENTION_DAYS` (default `180`),
+and at most `KNOWN_DEVICE_MAX_PER_USER` (default `20`) devices are kept per
+account. After the upgrade every account's next sign-in registers its browser
+silently (no known device yet), so the alerts start with the second browser.
+
 **Email delivery.** The links need `EMAIL_PROVIDER=resend`. The default
 `logging` provider writes one `email_dispatch_required=true` line per email with
 the purpose and a keyed hash of the recipient — never the address, the token or

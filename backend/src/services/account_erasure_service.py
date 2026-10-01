@@ -55,6 +55,7 @@ from models.auth import (
     ExternalAPIKey,
     OAuth2Client,
     User,
+    UserKnownDevice,
     Workspace,
     WorkspaceInvitation,
     WorkspaceMember,
@@ -1018,6 +1019,11 @@ class AccountErasureService:
         counts["oauth_device_codes"] = revoked.device_codes
 
         # Direct per-user tables.
+        # #1769: the FK cascades too; counted here so the erasure summary
+        # lists them.
+        counts["user_known_devices"] = await self._count_and_delete(
+            UserKnownDevice, UserKnownDevice.user_id == user_id
+        )
         counts["external_api_keys"] = await self._count_and_delete(
             ExternalAPIKey, ExternalAPIKey.user_id == user_id
         )

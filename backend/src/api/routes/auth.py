@@ -52,6 +52,7 @@ from db.base import get_db
 from models.auth import User
 from services.account_linking_service import AccountLinkingService
 from services.beta_invite_service import BETA_INVITE_TOKEN_PATTERN
+from services.known_device_service import note_browser_sign_in
 from services.password_account_service import find_password_user_by_email
 from services.security_notification_service import (
     PROVIDER_SIGN_IN_LABELS,
@@ -1012,6 +1013,10 @@ async def google_callback(
         # the divergence — and gives multi-account (#1488) a single place to
         # change.
         _set_session_cookie(redirect, session_id)
+        # #1769: alert the owner when this browser has not signed in before.
+        await note_browser_sign_in(
+            request, redirect, user_id=user_info["sub"], sign_in_method="Google"
+        )
 
         logger.info(f"OAuth2 login successful: {user_info['email']} (role={role})")
 
@@ -2069,6 +2074,10 @@ async def github_callback(
         # `secure=False`, so the OAuth session cookie had no Secure attribute in
         # production. Route it through the shared helper.
         _set_session_cookie(redirect, session_id)
+        # #1769: alert the owner when this browser has not signed in before.
+        await note_browser_sign_in(
+            request, redirect, user_id=user_info["sub"], sign_in_method="GitHub"
+        )
 
         logger.info(f"GitHub OAuth2 login successful: {user_info['email']} (role={role})")
         return redirect
@@ -2485,6 +2494,8 @@ async def password_login(
         media_type="application/json",
     )
     _set_session_cookie(response, session_id)
+    # #1769: alert the owner when this browser has not signed in before.
+    await note_browser_sign_in(request, response, user_id=user.user_id, sign_in_method="Password")
 
     logger.info("password_login_successful", user_id=user.user_id)
     return response
@@ -2552,6 +2563,8 @@ async def mfa_verify(
         media_type="application/json",
     )
     _set_session_cookie(response, session_id)
+    # #1769: the second factor passed — only now is this a sign-in to record.
+    await note_browser_sign_in(request, response, user_id=user.user_id, sign_in_method="Password")
 
     logger.info(f"MFA verification successful: {user.email}")
     return response

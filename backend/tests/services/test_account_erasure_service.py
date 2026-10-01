@@ -957,6 +957,24 @@ class TestDeletePostgresSweep:
         assert ContextReadAttribution in swept_models
 
     @pytest.mark.asyncio
+    async def test_sweep_covers_known_devices(self):
+        # #1769: the FK cascades, but the sweep deletes and counts them so the
+        # erasure summary lists the browsers that were forgotten.
+        from models.auth import UserKnownDevice
+
+        svc = _service()
+        svc._count_and_delete = AsyncMock(return_value=2)
+        svc._pseudonymize_field = AsyncMock(return_value=0)
+        svc.db.delete = AsyncMock()
+        svc.db.commit = AsyncMock()
+
+        counts = await svc._delete_postgres(_user())
+
+        assert counts["user_known_devices"] == 2
+        swept_models = [call.args[0] for call in svc._count_and_delete.await_args_list]
+        assert UserKnownDevice in swept_models
+
+    @pytest.mark.asyncio
     async def test_sweep_pseudonymizes_surviving_agents(self):
         """#1274 (RFC-0002 P0-1): agents.owner_user_id must be pseudonymized
         for erased subjects whose registry rows survive (agents in co-owned,

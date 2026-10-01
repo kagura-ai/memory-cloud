@@ -404,6 +404,40 @@ class TestResetRevokesOAuthGrants:
         assert await find_active_oauth_token(theirs, db_session) is not None
         assert await _pending_grants(db_session, other_uid) == (1, 1)
 
+    async def test_reset_forgets_the_accounts_known_devices(
+        self, db_session: AsyncSession, made: _Made
+    ) -> None:
+        # #1769: after a reset every browser is a new device again — the next
+        # sign-in from each, the attacker's included, emails the owner.
+        from models.auth import UserKnownDevice
+
+        user = await _user(db_session, made)
+        other = await _user(db_session, made)
+        now = utcnow()
+        for uid in (user.user_id, other.user_id):
+            db_session.add(
+                UserKnownDevice(user_id=uid, device_hash="d" * 64, first_seen=now, last_seen=now)
+            )
+        await db_session.flush()
+        service = PasswordAccountService(db_session, email_service=_email())
+        pending = await service.request_reset(email=user.email)
+        assert pending is not None
+
+        await service.complete_reset(raw_token=_token_from(pending.reset_url), new_password=NEW)
+
+        remaining = (
+            (
+                await db_session.execute(
+                    select(UserKnownDevice.user_id).where(
+                        UserKnownDevice.user_id.in_([user.user_id, other.user_id])
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert remaining == [other.user_id]
+
     async def test_revocation_rolls_back_with_the_reset(
         self, db_session: AsyncSession, made: _Made, oauth_client: str
     ) -> None:

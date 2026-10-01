@@ -48,7 +48,20 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
     an OAuth client is registered or its secret regenerated — also when a
     workspace admin or owner does it, whom the email then names;
   - a provider sign-in changes the account's email address: the previous
-    address is told, and the notices still pending go to it.
+    address is told, and the notices still pending go to it;
+  - a browser signs in (password, with or without MFA, Google or GitHub)
+    from a device the account has not signed in from before. The browser is
+    recognized by a long-lived HttpOnly device cookie; only the keyed HMAC of
+    its value is stored, with first/last sign-in times, and never the IP
+    address or user agent (those appear in the email only). The user agent
+    is not part of the match — it is spoofable. The account's first browser
+    sign-in registers the device silently, so the device the account was
+    created from sends nothing. A password reset forgets every known device,
+    so the next sign-in from each browser is reported again; devices not
+    seen for `KNOWN_DEVICE_RETENTION_DAYS` (default 180) are forgotten by a
+    daily job, at most `KNOWN_DEVICE_MAX_PER_USER` (default 20) are kept per
+    account, and account erasure deletes them. CLI / MCP sign-ins (device
+    flow, token endpoint) carry no cookie and are not covered.
 
   Each email lists the UTC time, IP address, user agent and the key or client
   name. It never carries a secret, token, key value or action link; the
