@@ -84,6 +84,11 @@ def test_http_client_per_request_lines_are_held_back_below_debug(name):
     configure_logging("INFO")
     assert not http_logger.isEnabledFor(logging.INFO)
     assert http_logger.isEnabledFor(logging.WARNING)
+    # An explicit child level is not re-filtered by the root's: ERROR must
+    # not let the client's warnings through.
+    configure_logging("ERROR")
+    assert not http_logger.isEnabledFor(logging.WARNING)
+    assert http_logger.isEnabledFor(logging.ERROR)
     configure_logging("DEBUG")
     assert http_logger.isEnabledFor(logging.DEBUG)
 

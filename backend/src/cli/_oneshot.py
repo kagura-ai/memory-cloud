@@ -62,7 +62,13 @@ def configure_logging(level: str = "INFO") -> None:
         level: One of ``LOG_LEVELS``.
     """
     setup_logger(level, enable_colors=sys.stderr.isatty(), stream=sys.stderr)
-    per_request = logging.NOTSET if level == "DEBUG" else logging.WARNING
+    # An explicit level on a child logger is not re-filtered by the root's, so
+    # never set it below the level asked for (--log-level ERROR).
+    per_request = (
+        logging.NOTSET
+        if level == "DEBUG"
+        else max(logging.WARNING, logging.getLevelNamesMapping()[level])
+    )
     for name in _PER_REQUEST_LOGGERS:
         logging.getLogger(name).setLevel(per_request)
     warnings.filterwarnings(
