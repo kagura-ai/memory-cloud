@@ -1125,3 +1125,207 @@ describe("ContextsPage create errors: a quota refusal is the gate notice (#1646)
     expect(within(dialog).queryByText(/^quota\.title/)).toBeNull();
   });
 });
+
+// ---------- Issue #1755: workspace scope, owner column, owner filter --------
+
+function setupWithOwnedAndSharedContexts() {
+  mockUseAuth.mockReturnValue({
+    user: { id: "me", current_workspace_id: WORKSPACE_ID },
+    refetchUser: vi.fn(),
+  });
+  mockUseWorkspace.mockReturnValue({
+    currentWorkspace: {
+      id: WORKSPACE_ID,
+      name: "Team Workspace",
+      plan_name: "pro",
+      current_user_role: "owner",
+    },
+  });
+  mockCheckOpenAIKeyStatus.mockResolvedValue({ has_key: true });
+  mockGetEmbeddingModels.mockResolvedValue({
+    models: [],
+    default_model: "small",
+  });
+  const baseFields = {
+    description: "",
+    memory_count: 0,
+    last_activity_at: null,
+    is_default: false,
+    is_locked: false,
+    is_public: false,
+    embedding_model: "small",
+    resource_id: null,
+    sleep_mode: "full",
+  };
+  mockGetContexts.mockResolvedValue({
+    contexts: [
+      {
+        ...baseFields,
+        id: "ctx-mine",
+        name: "ctx-mine",
+        display_name: "Mine",
+        is_private: true,
+        created_by: "me",
+        created_by_name: "Me Myself",
+      },
+      {
+        ...baseFields,
+        id: "ctx-bob",
+        name: "ctx-bob",
+        display_name: "From Bob",
+        is_private: false,
+        created_by: "u-bob",
+        created_by_name: "Bob",
+      },
+      {
+        ...baseFields,
+        id: "ctx-legacy",
+        name: "ctx-legacy",
+        display_name: "Legacy",
+        is_private: false,
+        created_by: null,
+        created_by_name: null,
+      },
+    ],
+  });
+}
+
+describe("ContextsPage workspace scope, owner and filter (#1755)", () => {
+  it("names the current workspace in the page description", async () => {
+    setupWithOwnedAndSharedContexts();
+    render(<ContextsPage />);
+    await waitFor(() => expect(screen.getByText("Mine")).toBeInTheDocument());
+
+    expect(
+      screen.getByText('subtitleInWorkspace {"workspace":"Team Workspace"}'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("subtitle")).toBeNull();
+  });
+
+  it("shows an Owner column: You for own contexts, the creator's name for shared ones, a dash when unknown", async () => {
+    setupWithOwnedAndSharedContexts();
+    render(<ContextsPage />);
+    await waitFor(() => expect(screen.getByText("Mine")).toBeInTheDocument());
+
+    expect(
+      screen.getByRole("columnheader", { name: "owner" }),
+    ).toBeInTheDocument();
+    const rowOf = (name: string) =>
+      screen.getByText(name).closest("tr") as HTMLTableRowElement;
+    expect(rowOf("Mine")).toHaveTextContent("ownerYou");
+    expect(rowOf("Mine")).not.toHaveTextContent("Me Myself");
+    expect(rowOf("From Bob")).toHaveTextContent("Bob");
+    // The Owner column is the second cell (Last Activity also shows a dash).
+    expect(within(rowOf("Legacy")).getAllByRole("cell")[1]).toHaveTextContent(
+      "—",
+    );
+    expect(within(rowOf("From Bob")).getAllByRole("cell")[1]).toHaveTextContent(
+      "Bob",
+    );
+  });
+
+  it("filters the list by owner; a context with no creator is neither mine nor shared", async () => {
+    setupWithOwnedAndSharedContexts();
+    render(<ContextsPage />);
+    await waitFor(() => expect(screen.getByText("Mine")).toBeInTheDocument());
+
+    const group = screen.getByRole("group", { name: "ownerFilter.label" });
+    const button = (name: string) =>
+      within(group).getByRole("button", { name });
+    expect(button("ownerFilter.all")).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(button("ownerFilter.mine"));
+    expect(screen.getByText("Mine")).toBeInTheDocument();
+    expect(screen.queryByText("From Bob")).toBeNull();
+    expect(screen.queryByText("Legacy")).toBeNull();
+    expect(button("ownerFilter.mine")).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(button("ownerFilter.shared"));
+    expect(screen.queryByText("Mine")).toBeNull();
+    expect(screen.getByText("From Bob")).toBeInTheDocument();
+    expect(screen.queryByText("Legacy")).toBeNull();
+
+    fireEvent.click(button("ownerFilter.all"));
+    expect(screen.getByText("Legacy")).toBeInTheDocument();
+  });
+
+  it("shows a filtered-empty row instead of the no-contexts empty state", async () => {
+    setupWithOwnedAndSharedContexts();
+    mockGetContexts.mockResolvedValue({
+      contexts: [
+        {
+          description: "",
+          memory_count: 0,
+          last_activity_at: null,
+          is_default: false,
+          is_locked: false,
+          is_public: false,
+          is_private: true,
+          embedding_model: "small",
+          resource_id: null,
+          sleep_mode: "full",
+          id: "ctx-mine",
+          name: "ctx-mine",
+          display_name: "Mine",
+          created_by: "me",
+          created_by_name: "Me",
+        },
+      ],
+    });
+    render(<ContextsPage />);
+    await waitFor(() => expect(screen.getByText("Mine")).toBeInTheDocument());
+
+    const group = screen.getByRole("group", { name: "ownerFilter.label" });
+    fireEvent.click(
+      within(group).getByRole("button", { name: "ownerFilter.shared" }),
+    );
+    expect(screen.queryByText("Mine")).toBeNull();
+    expect(screen.getByText("ownerFilter.empty")).toBeInTheDocument();
+    expect(screen.queryByText("noContextsYet")).toBeNull();
+  });
+});
+
+describe("ContextsPage owner filter resets and hydration (#1755)", () => {
+  it("treats every context as unknown-owner while the viewer is not loaded yet", async () => {
+    setupWithOwnedAndSharedContexts();
+    mockUseAuth.mockReturnValue({ user: null, refetchUser: vi.fn() });
+    render(<ContextsPage />);
+    await waitFor(() => expect(screen.getByText("Mine")).toBeInTheDocument());
+
+    const rowOf = (name: string) =>
+      screen.getByText(name).closest("tr") as HTMLTableRowElement;
+    // Nothing is called "You" or attributed to a creator without an id to
+    // compare against.
+    expect(rowOf("Mine")).not.toHaveTextContent("ownerYou");
+    expect(within(rowOf("From Bob")).getAllByRole("cell")[1]).toHaveTextContent(
+      "—",
+    );
+  });
+
+  it("resets the owner filter to All when the workspace changes", async () => {
+    setupWithOwnedAndSharedContexts();
+    const { rerender } = render(<ContextsPage />);
+    await waitFor(() => expect(screen.getByText("Mine")).toBeInTheDocument());
+
+    const group = () => screen.getByRole("group", { name: "ownerFilter.label" });
+    fireEvent.click(
+      within(group()).getByRole("button", { name: "ownerFilter.mine" }),
+    );
+    expect(screen.queryByText("From Bob")).toBeNull();
+
+    mockUseWorkspace.mockReturnValue({
+      currentWorkspace: {
+        id: "ws-2",
+        name: "Other Workspace",
+        plan_name: "pro",
+        current_user_role: "owner",
+      },
+    });
+    rerender(<ContextsPage />);
+    await waitFor(() =>
+      expect(
+        within(group()).getByRole("button", { name: "ownerFilter.all" }),
+      ).toHaveAttribute("aria-pressed", "true"),
+    );
+  });
+});

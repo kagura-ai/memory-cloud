@@ -171,4 +171,140 @@ describe("ContextBreakdownTable", () => {
     // Desc by name: prod > dev
     expect(rowsAfterSort[1]).toHaveTextContent("prod");
   });
+
+  // ---------- Issue #1755: visibility text, "You" as owner, CSV columns ----
+
+  it("labels each row's visibility with text next to the icon", () => {
+    render(
+      <ContextBreakdownTable
+        contexts={mockContexts}
+        totalMemories={300}
+        contextStats={mockContextStats}
+      />,
+    );
+    const rowOf = (name: string) =>
+      screen.getByText(name).closest("tr") as HTMLTableRowElement;
+    expect(rowOf("dev")).toHaveTextContent("sharedContext");
+    expect(rowOf("prod")).toHaveTextContent("privateContext");
+  });
+
+  it("shows You in the Owner column for the current user's contexts", () => {
+    render(
+      <ContextBreakdownTable
+        contexts={mockContexts}
+        totalMemories={300}
+        contextStats={mockContextStats}
+        currentUserId="user-2"
+      />,
+    );
+    fireEvent.click(screen.getByText("showDetails"));
+    const rowOf = (name: string) =>
+      screen.getByText(name).closest("tr") as HTMLTableRowElement;
+    expect(rowOf("prod")).toHaveTextContent("ownerYou");
+    expect(rowOf("prod")).not.toHaveTextContent("Bob");
+    expect(rowOf("dev")).toHaveTextContent("Alice");
+  });
+
+  it("exports Owner and Visibility columns in the CSV", () => {
+    const blobs: Blob[] = [];
+    const createObjectURL = vi.fn((b: Blob) => {
+      blobs.push(b);
+      return "blob:csv";
+    });
+    Object.defineProperty(URL, "createObjectURL", {
+      value: createObjectURL,
+      configurable: true,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      value: vi.fn(),
+      configurable: true,
+    });
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
+
+    render(
+      <ContextBreakdownTable
+        contexts={mockContexts}
+        totalMemories={300}
+        contextStats={mockContextStats}
+        currentUserId="user-1"
+      />,
+    );
+    fireEvent.click(screen.getByText(/Export CSV/));
+
+    expect(blobs).toHaveLength(1);
+    return blobs[0].text().then((csv) => {
+      const lines = csv.split("\n");
+      expect(lines[0]).toBe(
+        "Context Name,Memory Count,Last Activity,Members,Owner,Visibility",
+      );
+      // Locale-neutral: the creator's name, never the localized "You".
+      expect(lines[1]).toBe(
+        '"dev","100","2026-04-10T00:00:00Z","2","Alice","Shared"',
+      );
+      expect(lines[2]).toBe(
+        '"prod","200","2026-04-09T00:00:00Z","5","Bob","Private"',
+      );
+      click.mockRestore();
+    });
+  });
+
+  it("escapes quotes and neutralises leading formula characters in CSV cells", () => {
+    const blobs: Blob[] = [];
+    Object.defineProperty(URL, "createObjectURL", {
+      value: (b: Blob) => {
+        blobs.push(b);
+        return "blob:csv";
+      },
+      configurable: true,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      value: vi.fn(),
+      configurable: true,
+    });
+    const click = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
+
+    render(
+      <ContextBreakdownTable
+        contexts={[
+          {
+            context_id: "ctx-x",
+            context_name: '=HYPERLINK("x")',
+            created_by: "u",
+            created_by_name: 'Bob "B" Smith',
+            memory_count: 1,
+            is_private: false,
+          },
+        ]}
+        totalMemories={1}
+        contextStats={{
+          contexts: [
+            {
+              context_id: "ctx-x",
+              context_name: '=HYPERLINK("x")',
+              memory_count: 1,
+              last_activity: null,
+              member_count: 1,
+              api_calls_week: 0,
+              active_users_week: 0,
+              avg_response_time_ms: 0,
+            },
+          ],
+          total_contexts: 1,
+          workspace_totals: { memory_count: 1 },
+        }}
+      />,
+    );
+    fireEvent.click(screen.getByText(/Export CSV/));
+
+    return blobs[0].text().then((csv) => {
+      expect(csv.split("\n")[1]).toBe(
+        `"'=HYPERLINK(""x"")","1","Never","1","Bob ""B"" Smith","Shared"`,
+      );
+      click.mockRestore();
+    });
+  });
 });

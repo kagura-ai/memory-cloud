@@ -28,9 +28,21 @@ interface ContextBreakdownTableProps {
   privateAggregation?: PrivateContextAggregation | null;
   contextStats: ContextStatsResponse | null;
   workspaceName?: string;
+  /** #1755: the viewer's user id, so their own contexts read "You". */
+  currentUserId?: string | null;
 }
 
 type SortColumn = "name" | "memory" | "activity";
+
+/**
+ * One quoted CSV cell. Doubles embedded quotes, and neutralises a leading
+ * formula character so a context or user named `=HYPERLINK(...)` does not
+ * execute when the export is opened in a spreadsheet (#1755).
+ */
+function csvCell(value: string): string {
+  const safe = /^[=+\-@]/.test(value) ? `'${value}` : value;
+  return `"${safe.replace(/"/g, '""')}"`;
+}
 
 function SortableHead({
   column,
@@ -66,10 +78,21 @@ export function ContextBreakdownTable({
   privateAggregation,
   contextStats,
   workspaceName,
+  currentUserId,
 }: ContextBreakdownTableProps) {
   const t = useTranslations("workspace");
   const tDashboard = useTranslations("dashboard");
   const locale = useLocale();
+
+  // #1755: owner as the table shows it — "You", the creator's name, or a
+  // dash when the context has no recorded creator (the same three states
+  // the Contexts list shows).
+  const ownerLabel = (context: DashboardContextStats) =>
+    context.created_by && context.created_by === currentUserId
+      ? t("ownerYou")
+      : context.created_by_name || "—";
+  const visibilityLabel = (context: DashboardContextStats) =>
+    context.is_private ? t("privateContext") : t("sharedContext");
 
   const [sortBy, setSortBy] = useState<SortColumn>("memory");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
@@ -125,24 +148,36 @@ export function ContextBreakdownTable({
   const exportToCSV = () => {
     if (!contextStats) return;
 
+    // #1755: owner and visibility come from the dashboard rows, which the
+    // stats endpoint does not carry; a context missing there exports blank.
+    // The file stays locale-neutral like its headers: the creator's name
+    // (not "You") and English visibility values.
+    const byId = new Map(contexts.map((c) => [c.context_id, c]));
     const headers = [
       "Context Name",
       "Memory Count",
       "Last Activity",
       "Members",
+      "Owner",
+      "Visibility",
     ];
-    const rows = contextStats.contexts.map((ctx) => [
-      ctx.context_name,
-      ctx.memory_count.toString(),
-      ctx.last_activity || "Never",
-      ctx.member_count.toString(),
-    ]);
+    const rows = contextStats.contexts.map((ctx) => {
+      const row = byId.get(ctx.context_id);
+      return [
+        ctx.context_name,
+        ctx.memory_count.toString(),
+        ctx.last_activity || "Never",
+        ctx.member_count.toString(),
+        row?.created_by_name ?? "",
+        row ? (row.is_private ? "Private" : "Shared") : "",
+      ];
+    });
 
     const csv = [
       headers.join(","),
-      ...rows.map((row) => row.map((cell) => `"${cell}"`).join(",")),
+      ...rows.map((row) => row.map(csvCell).join(",")),
       "",
-      `Total,${contextStats.workspace_totals.memory_count},,`,
+      `Total,${contextStats.workspace_totals.memory_count},,,,`,
     ].join("\n");
 
     const blob = new Blob([csv], { type: "text/csv" });
@@ -262,17 +297,17 @@ export function ContextBreakdownTable({
                       <TableRow key={context.context_id}>
                         <TableCell className="font-medium">
                           <div className="flex items-center gap-2">
+                            {/* Decorative: the text label beside the name
+                                says the same thing (#1755). */}
                             {context.is_private ? (
                               <Lock
                                 className="h-3 w-3 text-gray-400"
-                                aria-label={t("privateContext")}
-                                role="img"
+                                aria-hidden="true"
                               />
                             ) : (
                               <Users
                                 className="h-3 w-3 text-blue-500"
-                                aria-label={t("sharedContext")}
-                                role="img"
+                                aria-hidden="true"
                               />
                             )}
                             <Link
@@ -281,6 +316,10 @@ export function ContextBreakdownTable({
                             >
                               {context.context_name}
                             </Link>
+                            {/* #1755: the icon alone did not say what it meant */}
+                            <span className="text-xs text-gray-500 dark:text-gray-400">
+                              {visibilityLabel(context)}
+                            </span>
                           </div>
                         </TableCell>
                         <TableCell className="text-right">
@@ -297,9 +336,7 @@ export function ContextBreakdownTable({
                         {showDetails && (
                           <>
                             <TableCell className="text-sm text-gray-600 dark:text-gray-400">
-                              {context.created_by_name ||
-                                context.created_by ||
-                                t("notAvailable")}
+                              {ownerLabel(context)}
                             </TableCell>
                             <TableCell className="text-right">
                               <span

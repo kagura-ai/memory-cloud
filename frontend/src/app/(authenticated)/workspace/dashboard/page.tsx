@@ -33,6 +33,7 @@ import { PlanBadge } from "@/components/common/PlanBadge";
 import type { PlanTier } from "@/lib/utils/planLabel";
 import { OnboardingCard } from "@/components/onboarding/OnboardingCard";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
+import { useAuth } from "@/contexts/AuthContext";
 import {
   getContextStats,
   ContextStatsResponse,
@@ -50,6 +51,7 @@ export default function WorkspaceStatsPage() {
     currentWorkspaceId,
     loading: workspaceLoading,
   } = useWorkspace();
+  const { user } = useAuth();
 
   // Issue #398: viewer cannot read workspace stats (backend 403's on
   // /workspaces/{id}/contexts/stats with required_role="member"). Send
@@ -172,6 +174,13 @@ export default function WorkspaceStatsPage() {
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-3xl font-bold">{t("overview")}</h1>
+            {/* #1755: the numbers below are this workspace's; name it. */}
+            {currentWorkspace?.name && (
+              <span className="text-xl text-muted-foreground truncate max-w-[16rem]">
+                <span aria-hidden="true">· </span>
+                {currentWorkspace.name}
+              </span>
+            )}
             {stats && (
               <PlanBadge
                 planName={stats.plan_name as PlanTier}
@@ -299,6 +308,7 @@ export default function WorkspaceStatsPage() {
               privateAggregation={stats.private_aggregation}
               contextStats={contextStats}
               workspaceName={currentWorkspace?.name}
+              currentUserId={user?.id}
             />
           )}
 

@@ -1075,6 +1075,7 @@
     "memoryUsageByContext": "コンテキスト別メモリー使用状況",
     "contextName": "コンテキスト名",
     "owner": "オーナー",
+    "ownerYou": "自分",
     "memoriesCount": "メモリー数",
     "storageMB": "ストレージ (MB)",
     "lastActivity": "最終アクティビティ",
@@ -1368,6 +1369,7 @@
   "contexts": {
     "title": "コンテキスト",
     "subtitle": "メモリーコレクションを管理します。各コンテキストはメモリーを別の名前空間に保存します。",
+    "subtitleInWorkspace": "{workspace} のコンテキスト。各コンテキストはメモリーを別の名前空間に保存します。",
     "create": "コンテキストを作成",
     "edit": "コンテキストを編集",
     "delete": "コンテキストを削除",
@@ -1590,6 +1592,14 @@
     "closeTemplate": "閉じる",
     "workspaceRole": "ワークスペースロール",
     "owner": "オーナー",
+    "ownerYou": "自分",
+    "ownerFilter": {
+      "label": "作成者で絞り込み",
+      "all": "すべて",
+      "mine": "自分が作成",
+      "shared": "共有されたもの",
+      "empty": "この条件に一致するコンテキストはありません。"
+    },
     "admin": "管理者",
     "member": "メンバー",
     "viewer": "閲覧者",
