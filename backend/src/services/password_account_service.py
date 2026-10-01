@@ -39,7 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.password import hash_password, verify_password
@@ -48,9 +48,6 @@ from config.settings import get_settings
 from db.base import _get_session_factory
 from models.auth import (
     AuditLog,
-    OAuth2AuthorizationCode,
-    OAuth2DeviceCode,
-    OAuth2Token,
     User,
     UserOAuthProvider,
 )
@@ -65,6 +62,7 @@ from services.email_service import (
     EmailService,
     get_email_service,
 )
+from services.oauth_grant_revocation import revoke_oauth_grants
 from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,
@@ -552,46 +550,15 @@ class PasswordAccountService:
         """Revoke every OAuth2 / MCP grant of the account (#1738).
 
         Runs inside the reset's transaction, while ``_consume_for_user`` holds
-        the ``users`` row lock. Order closes the races with in-flight grants:
-
-        - The codes go first. A code or device-code exchange locks its code
-          row until it has stored its token, so the DELETE waits for an
-          exchange already under way; the token UPDATE, a later statement
-          with a fresh snapshot, then sees (and revokes) that token. An
-          exchange that starts later finds no code.
-        - The refresh grant share-locks the ``users`` row before it reads a
-          refresh token, so a refresh racing the reset either commits first —
-          and its new token is revoked here — or waits and then finds its
-          refresh token revoked.
-
-        Bearer checks read the token row on every request, so nothing else
-        needs invalidating. Timestamps already set (a rotated or revoked
-        token) are kept, so the revocation history survives.
+        the ``users`` row lock; the shared revoker re-takes it (a no-op) and
+        owns the statement order that closes the races with in-flight grants
+        (``services/oauth_grant_revocation.py``, #1770). Bearer checks read
+        the token row on every request, so nothing else needs invalidating.
 
         Returns:
             The number of tokens revoked.
         """
-        await self.db.execute(
-            delete(OAuth2AuthorizationCode).where(OAuth2AuthorizationCode.user_id == user_id)
-        )
-        await self.db.execute(delete(OAuth2DeviceCode).where(OAuth2DeviceCode.user_id == user_id))
-        now = utcnow()
-        result = await self.db.execute(
-            update(OAuth2Token)
-            .where(
-                OAuth2Token.user_id == user_id,
-                or_(
-                    OAuth2Token.access_token_revoked_at.is_(None),
-                    OAuth2Token.refresh_token_revoked_at.is_(None),
-                ),
-            )
-            .values(
-                revoked=True,
-                access_token_revoked_at=func.coalesce(OAuth2Token.access_token_revoked_at, now),
-                refresh_token_revoked_at=func.coalesce(OAuth2Token.refresh_token_revoked_at, now),
-            )
-        )
-        return int(getattr(result, "rowcount", 0) or 0)
+        return await revoke_oauth_grants(self.db, user_id)
 
     async def _invalidate_password_links(self, user_id: str) -> None:
         await EmailActionTokenService(self.db).invalidate(

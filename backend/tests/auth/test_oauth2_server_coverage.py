@@ -42,6 +42,7 @@ if str(_BACKEND_SRC) not in sys.path:
     sys.path.insert(0, str(_BACKEND_SRC))
 
 import pytest  # noqa: E402
+from authlib.oauth2.rfc6749.errors import AccessDeniedError  # noqa: E402
 from authlib.oauth2.rfc6749.requests import BasicOAuth2Payload  # noqa: E402
 
 from auth import oauth2_server as mod  # noqa: E402
@@ -52,6 +53,7 @@ from auth.oauth2_server import (  # noqa: E402
     RefreshTokenGrant,
     _generate_token_with_expiry,
     _OAuthUser,
+    browser_session_is_live,
     create_authorization_server,
     query_client,
     save_token,
@@ -328,7 +330,8 @@ class TestSaveAuthorizationCode:
     def _request(self, params: dict[str, str], **kw: Any) -> SimpleNamespace:
         base: dict[str, Any] = {
             "client": _make_client(),
-            "user": SimpleNamespace(user_id="user-abc"),
+            # The consent's browser session is still live (#1770).
+            "user": SimpleNamespace(user_id="user-abc", session_is_live=lambda: True),
             "payload": BasicOAuth2Payload(
                 {"redirect_uri": "https://example.com/cb", "scope": "memory:read", **params}
             ),
@@ -402,6 +405,105 @@ class TestSaveAuthorizationCode:
         with pytest.raises(ValueError, match="User ID required for authorization"):
             grant.save_authorization_code("authcode-x", request)
         grant.server.db_session.add.assert_not_called()
+
+    def test_share_locks_the_owner_before_checking_the_session(self) -> None:
+        # #1770: users FOR KEY SHARE first (the order the reset and every
+        # other grant path keep), then the session re-check, then the INSERT.
+        grant = _make_authz_grant()
+        order: list[str] = []
+        session = grant.server.db_session
+        session.query.return_value.filter_by.return_value.with_for_update.side_effect = (
+            lambda **kw: order.append(f"lock:{kw}") or MagicMock()
+        )
+        request = self._request(
+            {},
+            user=SimpleNamespace(
+                user_id="user-abc", session_is_live=lambda: order.append("check") or True
+            ),
+        )
+        session.add.side_effect = lambda code: order.append("add")
+
+        grant.save_authorization_code("authcode-5", request)
+
+        assert order == ["lock:{'read': True, 'key_share': True}", "check", "add"]
+        session.query.return_value.filter_by.assert_called_with(user_id="user-abc")
+
+    def test_refuses_the_code_when_the_session_is_gone(self) -> None:
+        # The reset deleted the browser sessions before releasing the owner
+        # lock: once this consent gets the lock it must not write a code the
+        # reset could not see. Authlib turns the error into access_denied.
+        grant = _make_authz_grant()
+        request = self._request(
+            {}, user=SimpleNamespace(user_id="user-abc", session_is_live=lambda: False)
+        )
+
+        with pytest.raises(AccessDeniedError):
+            grant.save_authorization_code("authcode-6", request)
+        grant.server.db_session.add.assert_not_called()
+        grant.server.db_session.commit.assert_not_called()
+
+    def test_refuses_a_user_object_that_cannot_vouch_for_its_session(self) -> None:
+        # No hook at all (not our _OAuthUser) → fail closed.
+        grant = _make_authz_grant()
+        request = self._request({}, user=SimpleNamespace(user_id="user-abc"))
+
+        with pytest.raises(AccessDeniedError):
+            grant.save_authorization_code("authcode-7", request)
+        grant.server.db_session.add.assert_not_called()
+
+
+# ===========================================================================
+# browser_session_is_live (#1770)
+# ===========================================================================
+
+
+class TestBrowserSessionIsLive:
+    """Fails closed: no cookie, no store, no session, another user → False."""
+
+    def _manager(self, monkeypatch: pytest.MonkeyPatch, data: dict | None) -> MagicMock:
+        from api.routes import auth as auth_routes
+
+        manager = MagicMock()
+        manager.get_session.return_value = data
+        monkeypatch.setattr(auth_routes, "get_session_manager", lambda: manager)
+        return manager
+
+    def test_live_session_of_the_same_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        manager = self._manager(monkeypatch, {"user_id": "u-1"})
+        assert browser_session_is_live("sid", "u-1") is True
+        # The re-check must not extend the session's TTL.
+        manager.get_session.assert_called_once_with("sid", update_access=False)
+
+    def test_legacy_sub_claim_counts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._manager(monkeypatch, {"sub": "u-1"})
+        assert browser_session_is_live("sid", "u-1") is True
+
+    def test_no_cookie(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._manager(monkeypatch, {"user_id": "u-1"})
+        assert browser_session_is_live(None, "u-1") is False
+        assert browser_session_is_live("", "u-1") is False
+
+    def test_session_gone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._manager(monkeypatch, None)
+        assert browser_session_is_live("sid", "u-1") is False
+
+    def test_session_of_another_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._manager(monkeypatch, {"user_id": "u-2"})
+        assert browser_session_is_live("sid", "u-1") is False
+
+    def test_no_session_store(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from api.routes import auth as auth_routes
+
+        monkeypatch.setattr(auth_routes, "get_session_manager", lambda: None)
+        assert browser_session_is_live("sid", "u-1") is False
+
+    def test_oauth_user_delegates_with_its_own_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager = self._manager(monkeypatch, {"user_id": "u-1"})
+        assert _OAuthUser("u-1", "a@b", session_id="sid-9").session_is_live() is True
+        manager.get_session.assert_called_once_with("sid-9", update_access=False)
+        assert _OAuthUser("u-1", "a@b").session_is_live() is False
 
 
 # ===========================================================================

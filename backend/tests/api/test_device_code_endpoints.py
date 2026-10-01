@@ -35,6 +35,13 @@ def _under_rate_limit():
         yield counter
 
 
+@pytest.fixture(autouse=True)
+def _browser_session_live():
+    """The approving browser session is still there (#1770 re-check)."""
+    with patch("api.routes.oauth.browser_session_is_live", return_value=True) as live:
+        yield live
+
+
 def _device_settings(**overrides):
     values = {
         "oauth_device_code_expires_in": 600,
@@ -305,6 +312,88 @@ class TestDeviceConfirmEndpoint:
         data = resp.json()
         assert data["status"] == "denied"
         assert test_device_code.denied_at is not None
+
+    def test_confirm_approve_refuses_when_the_session_is_gone(
+        self, test_device_code, _browser_session_live
+    ):
+        # #1770: the owner lock is granted only after a racing reset has
+        # committed — and it deleted the browser sessions first. Approve
+        # nothing, roll back, do not commit.
+        _browser_session_live.return_value = False
+        with patch("api.routes.oauth._get_user_from_session") as mock_get_user:
+            mock_get_user.return_value = {"user_id": "test_user_123"}
+            with patch("api.routes.oauth.get_sync_session") as mock_session_fn:
+                mock_db = MagicMock()
+                mock_q = MagicMock()
+                mock_q.filter_by().with_for_update().first.return_value = test_device_code
+                mock_db.query.return_value = mock_q
+                mock_session_fn.return_value = mock_db
+
+                client = TestClient(app)
+                resp = client.post(
+                    "/api/v1/oauth/device/confirm",
+                    json={"user_code": "TST12345", "approve": True},
+                )
+
+        assert resp.status_code == 401
+        assert test_device_code.authorized_at is None
+        assert test_device_code.user_id is None
+        mock_db.rollback.assert_called_once()
+        mock_db.commit.assert_not_called()
+        _browser_session_live.assert_called_once()
+        assert _browser_session_live.call_args.args[1] == "test_user_123"
+
+    def test_confirm_approve_share_locks_the_owner_before_the_device_row(self, test_device_code):
+        # #1770: users → codes, the order every grant path and the reset keep.
+        order: list[str] = []
+        with patch("api.routes.oauth._get_user_from_session") as mock_get_user:
+            mock_get_user.return_value = {"user_id": "test_user_123"}
+            with patch("api.routes.oauth.get_sync_session") as mock_session_fn:
+                mock_db = MagicMock()
+
+                def query(model):
+                    q = MagicMock()
+                    name = getattr(model, "__name__", None) or str(model)
+                    q.filter_by.return_value.with_for_update.side_effect = lambda **kw: (
+                        order.append((name, kw)) or q
+                    )
+                    q.first.return_value = test_device_code
+                    return q
+
+                mock_db.query.side_effect = query
+                mock_session_fn.return_value = mock_db
+
+                client = TestClient(app)
+                resp = client.post(
+                    "/api/v1/oauth/device/confirm",
+                    json={"user_code": "TST12345", "approve": True},
+                )
+
+        assert resp.status_code == 200
+        assert len(order) == 2
+        assert order[0][1] == {"read": True, "key_share": True}
+        assert "user_id" in order[0][0]  # the users.user_id column
+        assert order[1][1] == {}  # the device-code row, FOR UPDATE
+
+    def test_confirm_deny_takes_no_owner_lock(self, test_device_code):
+        # A denial writes no grant, so it does not serialize with the reset.
+        with patch("api.routes.oauth._get_user_from_session") as mock_get_user:
+            mock_get_user.return_value = {"user_id": "test_user_123"}
+            with patch("api.routes.oauth.get_sync_session") as mock_session_fn:
+                mock_db = MagicMock()
+                mock_q = MagicMock()
+                mock_q.filter_by().with_for_update().first.return_value = test_device_code
+                mock_db.query.return_value = mock_q
+                mock_session_fn.return_value = mock_db
+
+                client = TestClient(app)
+                resp = client.post(
+                    "/api/v1/oauth/device/confirm",
+                    json={"user_code": "TST12345", "approve": False},
+                )
+
+        assert resp.status_code == 200
+        assert mock_db.query.call_count == 1
 
     def test_confirm_unauthenticated(self):
         with patch("api.routes.oauth._get_user_from_session") as mock_get_user:

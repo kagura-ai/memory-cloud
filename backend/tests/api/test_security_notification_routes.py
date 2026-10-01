@@ -382,6 +382,8 @@ class TestOAuthRoutes:
         monkeypatch.setattr(
             oauth_routes, "_get_user_from_session", lambda request: {"user_id": "u-1"}
         )
+        # The approving browser session is still there (#1770 re-check).
+        monkeypatch.setattr(oauth_routes, "browser_session_is_live", lambda sid, uid: True)
         return session
 
     @pytest.mark.asyncio
@@ -946,6 +948,7 @@ class TestDeviceApprovalCommitsDespiteNoticeFailure:
             "_get_user_from_session",
             lambda request: {"user_id": oauth_rows["user_id"]},
         )
+        monkeypatch.setattr(oauth_routes, "browser_session_is_live", lambda sid, uid: True)
         tasks = MagicMock()
         tasks.add_task.side_effect = RuntimeError("queue broken")
 

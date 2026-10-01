@@ -136,10 +136,12 @@ def api(db_factory: sessionmaker, monkeypatch: pytest.MonkeyPatch) -> Iterator[T
     monkeypatch.setenv("FRONTEND_URL", FRONTEND)
     monkeypatch.delenv("MCP_BASE_PATH", raising=False)
     monkeypatch.setattr(get_settings(), "oauth_pkce_required", True)
-    user = _OAuthUser(user_id=USER_ID, email="flow-user@example.test")
+    user = _OAuthUser(user_id=USER_ID, email="flow-user@example.test", session_id="sid-flow")
     with (
         patch("api.routes.oauth.get_sync_session", side_effect=db_factory),
         patch("api.routes.oauth.get_current_user_from_session", return_value=user),
+        # The consent's browser session is still live (#1770 re-check).
+        patch("auth.oauth2_server.browser_session_is_live", return_value=True),
     ):
         # Authlib refuses the OAuth endpoints over plain http.
         yield TestClient(app, base_url="https://testserver")

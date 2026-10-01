@@ -109,6 +109,8 @@ def api(db_factory: sessionmaker, monkeypatch: pytest.MonkeyPatch) -> Iterator[T
             "api.routes.oauth._get_user_from_session",
             return_value={"user_id": "device-user", "email": "device-user@example.test"},
         ),
+        # The approving browser session is still there (#1770 re-check).
+        patch("api.routes.oauth.browser_session_is_live", return_value=True),
     ):
         # Authlib refuses the token endpoint over plain http.
         yield TestClient(app, base_url="https://testserver")

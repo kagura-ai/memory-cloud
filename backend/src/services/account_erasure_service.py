@@ -76,6 +76,7 @@ from models.erasure import (
 )
 from models.memory import Memory
 from services.email_service import EmailService, get_email_service
+from services.oauth_grant_revocation import revoke_oauth_grants
 from services.system_admin_service import SystemAdminService
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
@@ -998,10 +999,14 @@ class AccountErasureService:
         user_id = target.user_id
         counts: dict[str, int] = {}
 
-        # Lock the user row before touching its tokens: the refresh grant
-        # share-locks it before the token row (#1738), so taking the same
-        # order here keeps a concurrent refresh from deadlocking the sweep.
-        await self.db.execute(select(User.user_id).where(User.user_id == user_id).with_for_update())
+        # Revoke the OAuth grants first, through the one revoker that owns
+        # the lock order (users → codes → device codes → tokens, #1770): it
+        # takes the user row FOR UPDATE, which every grant writer share-locks
+        # before it writes (#1738), so a consent, device approval or refresh
+        # racing this sweep either lands before it and is revoked here, or
+        # waits and then finds its session gone. The rows are then deleted
+        # below as before — this is an erasure, revocation alone keeps them.
+        await revoke_oauth_grants(self.db, user_id)
 
         # OAuth2 tokens / authorization codes / clients first — no FK
         # cascade from users to these.

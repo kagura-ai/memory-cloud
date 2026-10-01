@@ -55,6 +55,7 @@ from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth2_server import (
     TOKEN_REQUEST_SINGLE_VALUED,
     _OAuthUser,
+    browser_session_is_live,
     create_authorization_server,
     repeated_parameter,
     validate_authorization_parameters,
@@ -1446,10 +1447,17 @@ async def list_oauth2_providers(
 # OAuth2 Authorization Flow Endpoints (Phase 1.4 Part B)
 # ============================================================================
 
+# The browser session cookie SessionMiddleware reads (Issue #115); the name
+# lives in api.routes.auth, which this module does not import at load time.
+_SESSION_COOKIE_NAME = "kagura_session"
+
 
 # Helper function: Get current user from session
 def get_current_user_from_session(request: Request) -> _OAuthUser | None:
     """Get authenticated user from SessionMiddleware.
+
+    Carries the browser session id too, so a grant written on this user's
+    behalf can re-check the session under the owner lock (#1770).
 
     Args:
         request: FastAPI request with request.state.user
@@ -1461,16 +1469,19 @@ def get_current_user_from_session(request: Request) -> _OAuthUser | None:
         return None
 
     user_data = request.state.user
+    session_id = request.cookies.get(_SESSION_COOKIE_NAME)
 
     if isinstance(user_data, dict):
         return _OAuthUser(
             user_id=user_data.get("user_id") or user_data.get("sub") or user_data.get("email"),
             email=user_data.get("email"),
+            session_id=session_id,
         )
     else:
         return _OAuthUser(
             user_id=getattr(user_data, "user_id", None) or getattr(user_data, "email", None),
             email=getattr(user_data, "email", None),
+            session_id=session_id,
         )
 
 
@@ -2620,6 +2631,33 @@ async def device_confirm(
     db_session = get_sync_session()
 
     try:
+        if body.approve:
+            # #1770: before the device-code row (users → codes, the order every
+            # grant path keeps), share-lock the owner so this approval
+            # serializes with a password reset, then make sure the session is
+            # still there. A reset holds the user row FOR UPDATE until it has
+            # dropped the account's device codes AND its browser sessions, so
+            # a session gone once this lock is granted means the reset ran:
+            # approve nothing. An approval that locked first commits before
+            # the reset's DELETE, which then removes the approved code.
+            approving_user_id = user.get("user_id") or user.get("sub")
+            if approving_user_id:
+                db_session.query(User.user_id).filter_by(user_id=approving_user_id).with_for_update(
+                    read=True, key_share=True
+                ).first()
+            if not approving_user_id or not browser_session_is_live(
+                request.cookies.get(_SESSION_COOKIE_NAME), approving_user_id
+            ):
+                db_session.rollback()
+                logger.warning(
+                    "device_authorization_refused_session_gone",
+                    user_code_prefix=body.user_code[:4],
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Authentication required",
+                )
+
         device = (
             db_session.query(OAuth2DeviceCode)
             .filter_by(user_code=body.user_code.upper())

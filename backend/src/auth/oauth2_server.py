@@ -39,6 +39,7 @@ from typing import Any, cast
 from authlib.oauth2 import OAuth2Request
 from authlib.oauth2.rfc6749 import grants
 from authlib.oauth2.rfc6749.errors import (
+    AccessDeniedError,
     InvalidGrantError,
     InvalidRequestError,
     InvalidScopeError,
@@ -303,19 +304,51 @@ class S256CodeChallenge(CodeChallenge):
             raise InvalidGrantError(description="Code challenge failed.")
 
 
+def browser_session_is_live(session_id: str | None, user_id: str) -> bool:
+    """Is ``session_id`` a live browser session of ``user_id``, right now?
+
+    The check a grant writer runs AFTER it has taken the owner's ``users``
+    row ``FOR KEY SHARE`` (#1770): a password reset deletes the account's
+    sessions before it commits and releases its ``FOR UPDATE``, so a writer
+    that waited on the lock asks this and is told no. The read does not
+    refresh the session's TTL, and a session that belongs to another account
+    (the browser signed in as someone else meanwhile) is not this user's.
+    Fails closed: no cookie, no session store, no session, wrong user → False.
+    """
+    if not session_id:
+        return False
+    # Lazy: the routes package imports this module's siblings at load time.
+    from api.routes.auth import get_session_manager
+
+    manager = get_session_manager()
+    if manager is None:
+        logger.error("grant_session_check_unavailable", user_id=user_id)
+        return False
+    data = manager.get_session(session_id, update_access=False)
+    if not data:
+        return False
+    return (data.get("user_id") or data.get("sub")) == user_id
+
+
 class _OAuthUser:
     """Minimal user object for Authlib grant interfaces.
 
     Provides both ``user_id`` attribute (used by ``save_token``) and
     ``get_user_id()`` method (used by ``DeviceCodeGrant.query_user_grant``).
+    ``session_id`` is the browser session the consent was given in;
+    ``save_authorization_code`` re-checks it under the owner lock (#1770).
     """
 
-    def __init__(self, user_id: str = "", email: str | None = None):
+    def __init__(self, user_id: str = "", email: str | None = None, session_id: str | None = None):
         self.user_id = user_id
         self.email = email
+        self.session_id = session_id
 
     def get_user_id(self) -> str:
         return self.user_id
+
+    def session_is_live(self) -> bool:
+        return browser_session_is_live(self.session_id, self.user_id)
 
 
 # ============================================================================
@@ -581,6 +614,26 @@ class AuthorizationCodeGrant(_ResourceBoundGrant, grants.AuthorizationCodeGrant)
         if not user_id:
             logger.error("Cannot save authorization code: user_id not found")
             raise ValueError("User ID required for authorization")
+
+        # #1770: serialize with a password reset, then make sure the consent
+        # is still backed by a live session. The owner's ``users`` row is
+        # share-locked first (users → codes, the order every grant path keeps;
+        # see services/oauth_grant_revocation.py). A reset that got there
+        # first holds it FOR UPDATE until it has deleted the codes AND the
+        # browser sessions, so once this lock is granted a vanished session
+        # means the reset ran: write nothing and send the client access_denied
+        # instead of a code the reset could not see. A consent that locked
+        # first commits before the reset's DELETE, which then covers it.
+        session = self.server.db_session
+        session.query(User.user_id).filter_by(user_id=user_id).with_for_update(
+            read=True, key_share=True
+        ).first()
+        check = getattr(request.user, "session_is_live", None)
+        if check is None or not check():
+            logger.warning(
+                "authorization_code_refused_session_gone", client_id=client_id, user_id=user_id
+            )
+            raise AccessDeniedError(description="The session is no longer valid.")
 
         # Create authorization code record (expires in 10 minutes)
         auth_code = OAuth2AuthorizationCode(
