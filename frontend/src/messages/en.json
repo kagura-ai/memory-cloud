@@ -1077,6 +1077,7 @@
     "owner": "Owner",
     "ownerYou": "You",
     "ownerUnnamed": "Another member",
+    "sharedBy": "Shared by {name}",
     "memoriesCount": "Memories",
     "storageMB": "Storage (MB)",
     "lastActivity": "Last Activity",

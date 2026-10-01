@@ -1077,6 +1077,7 @@
     "owner": "オーナー",
     "ownerYou": "自分",
     "ownerUnnamed": "他のメンバー",
+    "sharedBy": "共有元: {name}",
     "memoriesCount": "メモリー数",
     "storageMB": "ストレージ (MB)",
     "lastActivity": "最終アクティビティ",

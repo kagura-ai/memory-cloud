@@ -97,8 +97,15 @@ export function ContextBreakdownTable({
       context.created_by_name,
       { you: t("ownerYou"), unnamed: t("ownerUnnamed") },
     );
-  const visibilityLabel = (context: DashboardContextStats) =>
-    context.is_private ? t("privateContext") : t("sharedContext");
+  // #1777: beside the name, only a context someone else created and shared
+  // with the viewer gets a marker — who shared it. The viewer's own rows and
+  // rows with no known creator show nothing extra.
+  const sharedByLabel = (context: DashboardContextStats): string | null =>
+    contextOwnerKind(context.created_by, currentUserId) === "shared"
+      ? t("sharedBy", {
+          name: context.created_by_name || t("ownerUnnamed"),
+        })
+      : null;
 
   const [sortBy, setSortBy] = useState<SortColumn>("memory");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
@@ -303,17 +310,17 @@ export function ContextBreakdownTable({
                       <TableRow key={context.context_id}>
                         <TableCell className="font-medium">
                           <div className="flex items-center gap-2">
-                            {/* Decorative: the text label beside the name
-                                says the same thing (#1755). */}
                             {context.is_private ? (
                               <Lock
                                 className="h-3 w-3 text-gray-400"
-                                aria-hidden="true"
+                                aria-label={t("privateContext")}
+                                role="img"
                               />
                             ) : (
                               <Users
                                 className="h-3 w-3 text-blue-500"
-                                aria-hidden="true"
+                                aria-label={t("sharedContext")}
+                                role="img"
                               />
                             )}
                             <Link
@@ -322,10 +329,13 @@ export function ContextBreakdownTable({
                             >
                               {context.context_name}
                             </Link>
-                            {/* #1755: the icon alone did not say what it meant */}
-                            <span className="text-xs text-gray-500 dark:text-gray-400">
-                              {visibilityLabel(context)}
-                            </span>
+                            {/* #1777: who shared this context, when it is
+                                not the viewer's own */}
+                            {sharedByLabel(context) && (
+                              <span className="text-xs text-gray-500 dark:text-gray-400">
+                                {sharedByLabel(context)}
+                              </span>
+                            )}
                           </div>
                         </TableCell>
                         <TableCell className="text-right">

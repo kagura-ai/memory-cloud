@@ -4,7 +4,11 @@ import { ContextBreakdownTable } from "./ContextBreakdownTable";
 import type { ContextStatsResponse } from "@/lib/api/workspaces";
 
 vi.mock("next-intl", () => ({
-  useTranslations: (_ns: string) => (key: string) => key,
+  // Keys echo back; an interpolated value is appended so a test can see
+  // which name a message was given (e.g. "sharedBy:Alice").
+  useTranslations:
+    (_ns: string) => (key: string, values?: Record<string, unknown>) =>
+      values && "name" in values ? `${key}:${String(values.name)}` : key,
   useLocale: () => "en",
 }));
 
@@ -213,9 +217,44 @@ describe("ContextBreakdownTable", () => {
     expect(rowsAfterSort[1]).toHaveTextContent("prod");
   });
 
-  // ---------- Issue #1755: visibility text, "You" as owner, CSV columns ----
+  // ---------- Issue #1755 / #1777: creator beside shared rows, "You" as
+  // owner, CSV columns ----
 
-  it("labels each row's visibility with text next to the icon", () => {
+  it("names the creator beside a context someone else shared, nothing beside the viewer's own (#1777)", () => {
+    render(
+      <ContextBreakdownTable
+        contexts={mockContexts}
+        totalMemories={300}
+        contextStats={mockContextStats}
+        currentUserId="user-2"
+      />,
+    );
+    const rowOf = (name: string) =>
+      screen.getByText(name).closest("tr") as HTMLTableRowElement;
+    // dev was created by user-1 (Alice) — shared with the viewer.
+    expect(rowOf("dev")).toHaveTextContent("sharedBy");
+    expect(rowOf("dev")).toHaveTextContent("Alice");
+    // prod is the viewer's own: no marker, and no visibility text either.
+    expect(rowOf("prod")).not.toHaveTextContent("sharedBy");
+    expect(rowOf("prod")).not.toHaveTextContent("privateContext");
+    expect(rowOf("dev")).not.toHaveTextContent("sharedContext");
+  });
+
+  it("falls back to the unnamed stand-in when a shared context's creator has no name", () => {
+    render(
+      <ContextBreakdownTable
+        contexts={[{ ...mockContexts[0], created_by_name: null }]}
+        totalMemories={100}
+        contextStats={mockContextStats}
+        currentUserId="user-2"
+      />,
+    );
+    const row = screen.getByText("dev").closest("tr") as HTMLTableRowElement;
+    expect(row).toHaveTextContent("sharedBy");
+    expect(row).toHaveTextContent("ownerUnnamed");
+  });
+
+  it("shows no shared-by marker while the viewer is unknown (auth hydrating)", () => {
     render(
       <ContextBreakdownTable
         contexts={mockContexts}
@@ -223,10 +262,22 @@ describe("ContextBreakdownTable", () => {
         contextStats={mockContextStats}
       />,
     );
-    const rowOf = (name: string) =>
-      screen.getByText(name).closest("tr") as HTMLTableRowElement;
-    expect(rowOf("dev")).toHaveTextContent("sharedContext");
-    expect(rowOf("prod")).toHaveTextContent("privateContext");
+    expect(screen.queryByText(/sharedBy/)).toBeNull();
+  });
+
+  it("keeps the visibility icon labelled now that the text beside the name is gone", () => {
+    render(
+      <ContextBreakdownTable
+        contexts={mockContexts}
+        totalMemories={300}
+        contextStats={mockContextStats}
+        currentUserId="user-2"
+      />,
+    );
+    expect(screen.getByLabelText("sharedContext")).toBeInTheDocument();
+    // prod is private; the aggregated "others private" row is absent here,
+    // so the one private icon is prod's.
+    expect(screen.getByLabelText("privateContext")).toBeInTheDocument();
   });
 
   it("attributes no owner while the viewer is unknown (auth hydrating)", () => {
