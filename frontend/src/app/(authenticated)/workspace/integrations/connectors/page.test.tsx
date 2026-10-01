@@ -820,6 +820,66 @@ describe("ConnectorsPage RBAC gate", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("lists private channels the bot is in with a lock marker (#1778)", async () => {
+    setWorkspace("admin");
+    mockListConnectorChannels.mockResolvedValue({
+      channels: [
+        { id: "C1", name: "general", is_private: false, is_member: true },
+        { id: "G1", name: "leadership", is_private: true, is_member: true },
+      ],
+      next_cursor: null,
+      missing_scopes: [],
+    });
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ channel_ids: [], llm_config_present: true }),
+    ]);
+
+    render(<ConnectorsPage />);
+    await screen.findByText("connectProvider");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: /🔒 leadership/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("channelsPrivateUnavailable"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says private channels need a reconnect when the grant lacks groups:read (#1778)", async () => {
+    setWorkspace("admin");
+    // A pre-#1778 install: the server fell back to the public listing and
+    // names the missing scope. The picker stays usable (no manual-entry
+    // fallback) and tells the admin why nothing private is listed.
+    mockListConnectorChannels.mockResolvedValue({
+      channels: [
+        { id: "C1", name: "general", is_private: false, is_member: true },
+      ],
+      next_cursor: null,
+      missing_scopes: ["groups:read"],
+    });
+    mockListConnectors.mockResolvedValue([
+      makeConnector({ channel_ids: [], llm_config_present: true }),
+    ]);
+
+    render(<ConnectorsPage />);
+    await screen.findByText("connectProvider");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "editSettings" }),
+    );
+
+    expect(
+      await screen.findByText("channelsPrivateUnavailable"),
+    ).toBeInTheDocument();
+    // The public listing is still a picker, not the manual lane.
+    expect(screen.getByRole("button", { name: /general/ })).toBeInTheDocument();
+    expect(
+      screen.queryByText("channelsPickerFallback"),
+    ).not.toBeInTheDocument();
+  });
+
   it("states ingest activity as fact, without grading it (#1449)", async () => {
     setWorkspace("admin");
     // A connector that has not written in days — the exact shape of the

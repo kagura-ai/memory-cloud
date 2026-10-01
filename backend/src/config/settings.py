@@ -445,6 +445,7 @@ class Settings(BaseSettings):
     #   channels:history  — read public-channel messages for ingestion
     #   channels:read     — list public channels (channel picker)
     #   groups:history    — read private-channel messages the bot is invited to
+    #   groups:read       — list private channels the bot is in (channel picker, #1778)
     #   chat:write        — post the worker's replies in Slack
     #   team:read         — read the Slack workspace (team) info
     #   users:read        — resolve Slack user info for message authors
@@ -454,8 +455,8 @@ class Settings(BaseSettings):
     # added keep the old grant until a workspace admin reconnects.
     slack_oauth_scopes: str = Field(
         default=(
-            "channels:history,channels:read,groups:history,chat:write,team:read,users:read,"
-            "commands,app_mentions:read"
+            "channels:history,channels:read,groups:history,groups:read,chat:write,team:read,"
+            "users:read,commands,app_mentions:read"
         ),
         description="Comma-separated Slack bot scopes requested at install",
     )

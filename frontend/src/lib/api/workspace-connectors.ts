@@ -279,12 +279,18 @@ export interface ConnectorChannel {
 export interface ConnectorChannelsPage {
   channels: ConnectorChannel[];
   next_cursor: string | null;
+  // #1778: scopes the listing lacked. ["groups:read"] = the install predates
+  // the private-channel listing, so this page is public-only; the picker says
+  // so and points at reconnecting Slack. Optional only for a server that
+  // predates the field (rolling deploy) — treat absent as none missing.
+  missing_scopes?: string[];
 }
 
-// #1391: list a connector's public Slack channels for the settings-dialog
-// picker. Server-side proxy of Slack conversations.list. Throws on non-2xx —
-// the picker degrades to manual channel-ID entry on any failure (missing scope
-// / rate limit / transport), per the design's fallback lane.
+// #1391 / #1778: list a connector's Slack channels (public + private the bot
+// is in) for the settings-dialog picker. Server-side proxy of Slack
+// conversations.list. Throws on non-2xx — the picker degrades to manual
+// channel-ID entry on any failure (missing scope / rate limit / transport),
+// per the design's fallback lane.
 export async function listConnectorChannels(
   connectorId: string,
   opts: { cursor?: string; q?: string } = {},

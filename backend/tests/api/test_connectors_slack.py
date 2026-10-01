@@ -210,9 +210,11 @@ async def test_callback_records_granted_scopes():
 @pytest.mark.parametrize(
     ("granted", "expected"),
     [
-        (["channels:history", "chat:write"], ["commands", "app_mentions:read"]),
-        (["commands", "chat:write"], ["app_mentions:read"]),
-        (["commands", "app_mentions:read"], []),
+        (["channels:history", "chat:write"], ["commands", "app_mentions:read", "groups:read"]),
+        (["commands", "chat:write", "groups:read"], ["app_mentions:read"]),
+        # #1778: private-channel listing needs groups:read.
+        (["commands", "app_mentions:read"], ["groups:read"]),
+        (["commands", "app_mentions:read", "groups:read"], []),
     ],
 )
 async def test_pending_reports_missing_worker_scopes(granted, expected):

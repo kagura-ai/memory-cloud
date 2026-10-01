@@ -58,19 +58,27 @@ bot event (*Event Subscriptions*) for the features that use them.
 | `channels:history` | Ingesting messages from public channels |
 | `channels:read` | Listing public channels (connector channel picker) |
 | `groups:history` | Ingesting messages from private channels the bot is invited to |
+| `groups:read` | Listing the private channels the bot is invited to (connector channel picker). The picker only lists channels the bot is already a member of; it reads no messages and cannot see channels the bot has not been invited to. |
 | `chat:write` | Posting the Slack worker's replies |
 | `team:read` | Reading the Slack workspace (team) info |
 | `users:read` | Resolving Slack user info for message authors |
 | `commands` | The `/kagura` slash command (`remember` / `recall`) |
 | `app_mentions:read` | `app_mention` events (@mention recall) |
 
-Default: `channels:history,channels:read,groups:history,chat:write,team:read,users:read,commands,app_mentions:read`
+Default: `channels:history,channels:read,groups:history,groups:read,chat:write,team:read,users:read,commands,app_mentions:read`
+
+The Slack app must request every scope in `SLACK_OAUTH_SCOPES`: an install
+that asks for a scope the app does not declare fails with `invalid_scope`.
+After adding a scope here, add it under *Bot Token Scopes* too.
 
 Slack does not widen an existing grant. A workspace installed before a scope
 was added keeps its old grant — the slash command, for example, does not
 appear there — until a workspace admin runs **Connect Slack** again. When the
-granted scopes returned by `oauth.v2.access` lack `commands` or
-`app_mentions:read`, the connector create dialog shows a reconnect notice.
+granted scopes returned by `oauth.v2.access` lack `commands`,
+`app_mentions:read` or `groups:read`, the connector create dialog shows a
+reconnect notice. An existing install without `groups:read` keeps listing
+public channels in the picker, with a note that private channels need a
+reconnect.
 
 ## Activation steps
 

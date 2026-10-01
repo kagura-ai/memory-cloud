@@ -35,17 +35,21 @@ logger = get_logger(__name__)
 # route's short Redis cache absorbs repeated dialog opens.
 SLACK_CONVERSATIONS_LIST_URL = "https://slack.com/api/conversations.list"
 
-# v1 lists public channels only: ``conversations.list`` for public channels
-# needs the ``channels:read`` scope (in the default install set); private
-# channels would additionally need ``groups:read``, which is not requested, so
-# they stay on the manual-ID entry lane (#1391 design note).
+# ``conversations.list`` needs ``channels:read`` for public channels and
+# ``groups:read`` for the private channels the bot is a member of (both in the
+# default install set since #1778; #1391 shipped public-only). Slack does not
+# widen an existing grant, so a pre-#1778 install answers the mixed request
+# with ``missing_scope`` — ``fetch_slack_channels`` then retries public-only
+# once and reports the scope the reconnect would add. DMs / group DMs stay out.
 _SLACK_PAGE_LIMIT = 200
-_SLACK_CHANNEL_TYPES = "public_channel"
+SLACK_CHANNEL_TYPES_ALL = "public_channel,private_channel"
+SLACK_CHANNEL_TYPES_PUBLIC = "public_channel"
+PRIVATE_CHANNELS_SCOPE = "groups:read"
 
 
 @dataclass(frozen=True)
 class SlackChannel:
-    """A single public channel, minimized to the picker's needs."""
+    """A single channel, minimized to the picker's needs."""
 
     id: str
     name: str
@@ -67,6 +71,13 @@ class SlackChannelsPage:
 
     channels: list[SlackChannel]
     next_cursor: str | None
+    # #1778: False when the mixed listing was refused for lack of ``groups:read``
+    # and this page came from the public-only retry — the route tells the
+    # picker which scope a reconnect would add. Deliberately has NO default
+    # (the #1451 pattern): a page cached before this field existed is
+    # public-only by construction and must raise on rehydrate so a reconnect
+    # that just granted the scope is not served the stale listing.
+    private_listing: bool
 
 
 class SlackRateLimited(Exception):
@@ -98,7 +109,14 @@ async def fetch_slack_channels(
     bot_token: str,
     cursor: str | None = None,
 ) -> SlackChannelsPage:
-    """Fetch one page of public channels from Slack ``conversations.list``.
+    """Fetch one page of channels (public + private) from ``conversations.list``.
+
+    Asks for both channel types first. When Slack refuses that with
+    ``missing_scope`` — an install granted before ``groups:read`` was
+    requested — it retries once with public channels only, so an older
+    install keeps the listing it had, and marks the page
+    ``private_listing=False``. If even the public-only request lacks its
+    scope the error is raised as before.
 
     Args:
         bot_token: The connector's decrypted Slack bot token. Sent only as the
@@ -107,30 +125,55 @@ async def fetch_slack_channels(
             for the first page.
 
     Returns:
-        A :class:`SlackChannelsPage` with minimized channels and the next
-        cursor (``None`` when Slack reports no further pages).
+        A :class:`SlackChannelsPage` with minimized channels, the next cursor
+        (``None`` when Slack reports no further pages) and whether private
+        channels were included.
 
     Raises:
-        ConnectorScopeError: Slack returned ``missing_scope`` (409).
+        ConnectorScopeError: Slack returned ``missing_scope`` for the
+            public-only listing too (409).
         SlackRateLimited: Slack rate-limited the token (HTTP 429 or
             ``ratelimited`` body error).
         ExternalServiceError: any other transport or Slack API failure (502).
     """
+    # Explicit connect + read timeouts so a stalled Slack endpoint cannot block
+    # the async worker indefinitely (mirrors connectors_slack._exchange_slack_code).
+    timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=2.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            return await _conversations_list(
+                client, bot_token=bot_token, cursor=cursor, types=SLACK_CHANNEL_TYPES_ALL
+            )
+        except ConnectorScopeError:
+            # Pre-#1778 grant: one public-only retry, never a third request.
+            logger.info("slack_conversations_list_private_scope_missing")
+        page = await _conversations_list(
+            client, bot_token=bot_token, cursor=cursor, types=SLACK_CHANNEL_TYPES_PUBLIC
+        )
+        return SlackChannelsPage(
+            channels=page.channels, next_cursor=page.next_cursor, private_listing=False
+        )
+
+
+async def _conversations_list(
+    client: httpx.AsyncClient,
+    *,
+    bot_token: str,
+    cursor: str | None,
+    types: str,
+) -> SlackChannelsPage:
+    """One ``conversations.list`` request for ``types``; see ``fetch_slack_channels``."""
     params: dict[str, str | int] = {
         "limit": _SLACK_PAGE_LIMIT,
-        "types": _SLACK_CHANNEL_TYPES,
+        "types": types,
         "exclude_archived": "true",
     }
     if cursor:
         params["cursor"] = cursor
     headers = {"Authorization": f"Bearer {bot_token}"}
 
-    # Explicit connect + read timeouts so a stalled Slack endpoint cannot block
-    # the async worker indefinitely (mirrors connectors_slack._exchange_slack_code).
-    timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=2.0)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(SLACK_CONVERSATIONS_LIST_URL, params=params, headers=headers)
+        resp = await client.get(SLACK_CONVERSATIONS_LIST_URL, params=params, headers=headers)
         if resp.status_code == 429:
             raise SlackRateLimited(_parse_retry_after(resp.headers.get("Retry-After")))
         resp.raise_for_status()
@@ -172,5 +215,10 @@ async def fetch_slack_channels(
         channel_count=len(channels),
         has_cursor=cursor is not None,
         has_next=next_cursor is not None,
+        types=types,
     )
-    return SlackChannelsPage(channels=channels, next_cursor=next_cursor)
+    return SlackChannelsPage(
+        channels=channels,
+        next_cursor=next_cursor,
+        private_listing=types == SLACK_CHANNEL_TYPES_ALL,
+    )

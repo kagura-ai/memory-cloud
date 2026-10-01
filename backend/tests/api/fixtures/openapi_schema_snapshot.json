@@ -2021,6 +2021,12 @@
             },
             "type": "array"
           },
+          "missing_scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "next_cursor": {
             "anyOf": [
               {

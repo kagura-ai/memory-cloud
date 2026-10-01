@@ -36,6 +36,14 @@ Private channels additionally need `groups:read`, which is **not** currently
 requested — so the v1 picker lists public channels only, and private channels
 remain manual-ID entry (document this in the dialog copy).
 
+> **Update (#1778):** `groups:read` is now in the default scopes and the
+> listing asks for `public_channel,private_channel`. An install granted
+> before that answers `missing_scope`; the service retries once with
+> `public_channel` only and the response carries
+> `missing_scopes: ["groups:read"]`, which the picker renders as a reconnect
+> hint. The cached page records `private_listing` (no default, the #1451
+> pattern) so a reconnect is never served a stale public-only page.
+
 Behavior when the token lacks the scope (legacy installs, manual binds of
 older apps): Slack returns `missing_scope`. The endpoint maps this to a
 structured `409 {error_code: "CONNECTOR-SCOPE"}`; the frontend degrades to the

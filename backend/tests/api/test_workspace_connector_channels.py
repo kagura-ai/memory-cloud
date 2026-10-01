@@ -160,6 +160,7 @@ async def test_cache_hit_skips_slack_call_and_applies_q():
                 {"id": "C02", "name": "random", "is_private": False, "is_member": False},
             ],
             "next_cursor": "NEXT",
+            "private_listing": True,
         }
     )
     ctx, http_client = _http_ctx(_slack_response(json_body={"ok": True}))
@@ -267,15 +268,164 @@ async def test_bot_membership_passes_through_from_slack():
 
 
 # ---------------------------------------------------------------------------
+# Private channels (#1778)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_lists_private_channels_the_bot_is_in():
+    """#1778: the listing asks Slack for both channel types and ``is_private``
+    reaches the picker verbatim; a grant with ``groups:read`` flags nothing."""
+    admin = _admin()
+    resp = _slack_response(
+        json_body={
+            "ok": True,
+            "channels": [
+                {"id": "C01", "name": "general", "is_private": False, "is_member": True},
+                {"id": "G01", "name": "leadership", "is_private": True, "is_member": True},
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+    )
+    ctx, http_client = _http_ctx(resp)
+
+    with (
+        patch("api.routes.workspace_connectors.ConnectorProvisioningService") as svc,
+        patch("services.slack_channels.httpx.AsyncClient", return_value=ctx),
+        patch("api.routes.workspace_connectors.get_cache", AsyncMock(return_value=None)),
+        patch("api.routes.workspace_connectors.get_redis_client", return_value=_FakeRedis()),
+    ):
+        svc.return_value.get_connector = AsyncMock(return_value=_connector())
+        result = await list_connector_channels(uuid4(), admin, cursor=None, q=None, db=MagicMock())
+
+    http_client.get.assert_awaited_once()
+    _, kwargs = http_client.get.call_args
+    assert kwargs["params"]["types"] == "public_channel,private_channel"
+    assert [(c.id, c.is_private) for c in result.channels] == [("C01", False), ("G01", True)]
+    assert result.missing_scopes == []
+
+
+@pytest.mark.asyncio
+async def test_missing_scope_on_mixed_listing_retries_public_only():
+    """#1778: an install granted before ``groups:read`` was requested keeps its
+    public listing — one public-only retry — and the response names the scope
+    a reconnect would add, so the picker can say why private channels are
+    absent instead of degrading to manual entry."""
+    admin = _admin()
+    connector_id = uuid4()
+    denied = _slack_response(json_body={"ok": False, "error": "missing_scope"})
+    public_only = _slack_response(
+        json_body={
+            "ok": True,
+            "channels": [{"id": "C01", "name": "general", "is_private": False, "is_member": True}],
+            "response_metadata": {"next_cursor": "NEXT"},
+        }
+    )
+    ctx, http_client = _http_ctx(denied)
+    http_client.get = AsyncMock(side_effect=[denied, public_only])
+    redis = _FakeRedis()
+
+    with (
+        patch("api.routes.workspace_connectors.ConnectorProvisioningService") as svc,
+        patch("services.slack_channels.httpx.AsyncClient", return_value=ctx),
+        patch("api.routes.workspace_connectors.get_cache", AsyncMock(return_value=None)),
+        patch("api.routes.workspace_connectors.get_redis_client", return_value=redis),
+    ):
+        svc.return_value.get_connector = AsyncMock(return_value=_connector())
+        result = await list_connector_channels(
+            connector_id, admin, cursor="CUR", q=None, db=MagicMock()
+        )
+
+    assert http_client.get.await_count == 2
+    first_params = http_client.get.await_args_list[0].kwargs["params"]
+    retry_params = http_client.get.await_args_list[1].kwargs["params"]
+    assert first_params["types"] == "public_channel,private_channel"
+    assert retry_params["types"] == "public_channel"
+    assert retry_params["cursor"] == "CUR"  # the page cursor survives the retry
+    assert [c.id for c in result.channels] == ["C01"]
+    assert result.next_cursor == "NEXT"
+    assert result.missing_scopes == ["groups:read"]
+    # The degraded page is cached too, so a repeat open costs no Slack calls.
+    cached = json.loads(redis.store[f"slack_channels:{connector_id}:CUR"])
+    assert cached["private_listing"] is False
+
+
+@pytest.mark.asyncio
+async def test_cached_public_only_page_reports_missing_scope_without_slack_call():
+    admin = _admin()
+    cached = json.dumps(
+        {
+            "channels": [{"id": "C01", "name": "general", "is_private": False, "is_member": True}],
+            "next_cursor": None,
+            "private_listing": False,
+        }
+    )
+    ctx, http_client = _http_ctx(_slack_response(json_body={"ok": True}))
+
+    with (
+        patch("api.routes.workspace_connectors.ConnectorProvisioningService") as svc,
+        patch("services.slack_channels.httpx.AsyncClient", return_value=ctx),
+        patch("api.routes.workspace_connectors.get_cache", AsyncMock(return_value=cached)),
+        patch("api.routes.workspace_connectors.get_redis_client", return_value=_FakeRedis()),
+    ):
+        svc.return_value.get_connector = AsyncMock(return_value=_connector())
+        result = await list_connector_channels(uuid4(), admin, cursor=None, q=None, db=MagicMock())
+
+    http_client.get.assert_not_awaited()
+    assert result.missing_scopes == ["groups:read"]
+
+
+@pytest.mark.asyncio
+async def test_pre_1778_cache_entry_is_refetched_not_defaulted():
+    """#1778: a page cached before ``private_listing`` existed is public-only
+    by construction. Rehydrating it must miss (the #1451 pattern — no default
+    on the new field) so a reconnect that just granted ``groups:read`` is not
+    served a stale public-only page for the cache TTL."""
+    admin = _admin()
+    legacy_cached = json.dumps(
+        {
+            "channels": [{"id": "C01", "name": "general", "is_private": False, "is_member": True}],
+            "next_cursor": None,
+        }
+    )
+    resp = _slack_response(
+        json_body={
+            "ok": True,
+            "channels": [
+                {"id": "C01", "name": "general", "is_private": False, "is_member": True},
+                {"id": "G01", "name": "leadership", "is_private": True, "is_member": True},
+            ],
+            "response_metadata": {"next_cursor": ""},
+        }
+    )
+    ctx, http_client = _http_ctx(resp)
+
+    with (
+        patch("api.routes.workspace_connectors.ConnectorProvisioningService") as svc,
+        patch("services.slack_channels.httpx.AsyncClient", return_value=ctx),
+        patch("api.routes.workspace_connectors.get_cache", AsyncMock(return_value=legacy_cached)),
+        patch("api.routes.workspace_connectors.get_redis_client", return_value=_FakeRedis()),
+    ):
+        svc.return_value.get_connector = AsyncMock(return_value=_connector())
+        result = await list_connector_channels(uuid4(), admin, cursor=None, q=None, db=MagicMock())
+
+    http_client.get.assert_awaited_once()  # legacy entry treated as a miss
+    assert [c.id for c in result.channels] == ["C01", "G01"]
+    assert result.missing_scopes == []
+
+
+# ---------------------------------------------------------------------------
 # Error mapping
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_missing_scope_maps_to_409_connector_scope():
+async def test_missing_scope_on_public_retry_still_maps_to_409_connector_scope():
+    """A token lacking even ``channels:read``: the public-only retry fails the
+    same way and the picker falls back to manual entry (409), as before #1778."""
     admin = _admin()
     resp = _slack_response(json_body={"ok": False, "error": "missing_scope"})
-    ctx, _ = _http_ctx(resp)
+    ctx, http_client = _http_ctx(resp)
 
     with (
         patch("api.routes.workspace_connectors.ConnectorProvisioningService") as svc,
@@ -286,6 +436,7 @@ async def test_missing_scope_maps_to_409_connector_scope():
         with pytest.raises(ConnectorScopeError) as exc:
             await list_connector_channels(uuid4(), admin, cursor=None, q=None, db=MagicMock())
 
+    assert http_client.get.await_count == 2  # mixed, then public-only — never a third
     assert exc.value.status_code == 409
     assert exc.value.error_code == "CONNECTOR-SCOPE"
 

@@ -43,11 +43,12 @@ _SLACK_AUTHORIZE_URL = "https://slack.com/oauth/v2/authorize"
 _SLACK_TOKEN_URL = "https://slack.com/api/oauth.v2.access"
 _STATE_TTL_SECONDS = 600
 _INSTALL_TTL_SECONDS = 600
-# Bot scopes the Slack worker's user-facing features depend on (#1758):
+# Bot scopes that user-facing features depend on beyond ingestion (#1758):
 # ``commands`` for the slash command, ``app_mentions:read`` for @mention
-# recall. A grant without them still installs (ingestion works), but the
-# pending-install summary flags them so the UI can prompt a reconnect.
-_WORKER_FEATURE_SCOPES = ("commands", "app_mentions:read")
+# recall, ``groups:read`` for the private-channel listing in the channel
+# picker (#1778). A grant without them still installs (ingestion works), but
+# the pending-install summary flags them so the UI can prompt a reconnect.
+_WORKER_FEATURE_SCOPES = ("commands", "app_mentions:read", "groups:read")
 
 
 def _state_key(state: str) -> str:
