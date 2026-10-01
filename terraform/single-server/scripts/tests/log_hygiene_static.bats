@@ -184,6 +184,7 @@ ENVEOF
         if ! (cd "$work/single-server" \
                 && env -u QDRANT_API_KEY -u DB_PASSWORD -u KAGURA_DOMAIN \
                        -u POSTGRES_HOST -u QDRANT_HOST -u REDIS_HOST \
+                       -u REDIS_PASSWORD -u REDIS_URL \
                        -u COMPOSE_PROJECT_NAME -u COMPOSE_FILE \
                        DATA_BIND_ADDR=192.0.2.10 \
                     docker compose -p single-server $files --env-file .env.prod \

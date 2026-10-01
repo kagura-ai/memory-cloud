@@ -46,7 +46,8 @@ ENVEOF
     # json` + the stdlib json module keeps the suite dependency-free.
     #
     # Scrub every variable compose would prefer over the env file. QDRANT_API_KEY
-    # is scrubbed so a real operator key can never be printed into a diff; the
+    # (and REDIS_PASSWORD / REDIS_URL, #1794) are scrubbed so a real operator
+    # secret can never be printed into a diff; the
     # *_HOST vars are scrubbed because they are exactly what the split layout
     # sets, and an operator who has them exported would otherwise make the
     # single-host render disagree with itself.
@@ -54,6 +55,7 @@ ENVEOF
         (cd "$WORK/single-server" \
             && env -u QDRANT_API_KEY -u DB_PASSWORD -u KAGURA_DOMAIN \
                    -u POSTGRES_HOST -u QDRANT_HOST -u REDIS_HOST \
+                   -u REDIS_PASSWORD -u REDIS_URL \
                    -u COMPOSE_PROJECT_NAME -u COMPOSE_FILE \
                 docker compose -p single-server "$@" --env-file .env.prod config --format json)
     }
