@@ -64,7 +64,7 @@ from sqlalchemy import func, select, update  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from auth.workspace_roles import WorkspaceRole  # noqa: E402
-from cli._oneshot import run_plan_apply  # noqa: E402
+from cli._oneshot import add_log_level_argument, configure_logging, run_plan_apply  # noqa: E402
 from db.qdrant import update_memory_payload_in_qdrant  # noqa: E402
 from models.auth import AuditLog, Context, User, Workspace, WorkspaceMember  # noqa: E402
 from models.memory import Memory  # noqa: E402
@@ -448,6 +448,7 @@ def _print_plan(result: TransferResult) -> None:
 
 
 async def _main(args: argparse.Namespace) -> int:
+    configure_logging(args.log_level)
     outcome: dict[str, TransferResult] = {}
 
     async def run(db: AsyncSession, dry_run: bool) -> TransferResult:
@@ -499,6 +500,7 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
         "--apply", action="store_true", help="re-point created_by and memories, write audit rows"
     )
     parser.add_argument("--yes", action="store_true", help="no confirmation prompt")
+    add_log_level_argument(parser)
     parser.add_argument(
         "--repair-payloads",
         action="store_true",

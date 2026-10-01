@@ -487,6 +487,10 @@ python -m src.cli.transfer_context_creator --from local:admin --to <user_id> --w
 python -m src.cli.transfer_context_creator --from local:admin --to <user_id> --workspace <uuid> --apply --yes  # write
 ```
 
+The report goes to stdout; diagnostics go to stderr at `--log-level` (default
+`INFO`; `DEBUG` also prints one vector-store line per memory, which on a large
+workspace is megabytes of output).
+
 Find the two `user_id`s with `SELECT user_id, name, email FROM users` (the
 browser identity is the `id` returned by `GET /api/v1/auth/me`). `--to` must
 be the workspace owner or an `admin` member — a member or viewer could end up
@@ -875,6 +879,8 @@ already exist (one-shot, idempotent):
 python -m src.cli.apply_rerank_defaults --all                # plan: convert/skip per context, writes nothing
 python -m src.cli.apply_rerank_defaults --all --apply --yes  # write; --workspace <uuid> narrows the scope
 ```
+
+The report goes to stdout; diagnostics go to stderr at `--log-level` (default `INFO`).
 
 Only rows still carrying the **code default** (`use_rerank=false`,
 `reranker_provider=voyage`, `reranker_model` `rerank-2` or `rerank-2-lite`) are

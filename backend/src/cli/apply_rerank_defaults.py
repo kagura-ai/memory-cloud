@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from sqlalchemy import select  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
-from cli._oneshot import run_plan_apply  # noqa: E402
+from cli._oneshot import add_log_level_argument, configure_logging, run_plan_apply  # noqa: E402
 from config.settings import Settings, get_settings  # noqa: E402
 from models.auth import Context  # noqa: E402
 from models.config import ContextSearchConfig  # noqa: E402
@@ -170,6 +170,7 @@ def _print_plan(result: ApplyResult) -> None:
 
 
 async def _main(args: argparse.Namespace) -> int:
+    configure_logging(args.log_level)
     return await run_plan_apply(
         run=lambda db, dry_run: apply_rerank_defaults(
             db, workspace_id=args.workspace, dry_run=dry_run
@@ -197,6 +198,7 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
         "--apply", action="store_true", help="write the deployment default to default-valued rows"
     )
     parser.add_argument("--yes", action="store_true", help="no confirmation prompt")
+    add_log_level_argument(parser)
     return parser.parse_args(argv)
 
 

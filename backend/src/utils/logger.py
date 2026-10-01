@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+from typing import TextIO
 
 import structlog
 
@@ -113,16 +114,29 @@ def _redacting_console_traceback(sio, exc_info) -> None:
     sio.write(_PG_DETAIL_RE.sub(_REDACTED, buffer.getvalue()))
 
 
-def setup_logger(log_level: str = "INFO", enable_colors: bool = True) -> None:
+def setup_logger(
+    log_level: str = "INFO",
+    enable_colors: bool = True,
+    *,
+    stream: TextIO | None = None,
+    level_from_env: bool = True,
+) -> None:
     """Setup structured logger with color support.
 
     Args:
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         enable_colors: Enable color output (default: True)
+        stream: Where rendered log lines go (default: stdout). A one-shot CLI
+            passes ``sys.stderr`` so stdout stays its report (#1788).
+        level_from_env: ``LOG_LEVEL`` in the environment wins over
+            ``log_level`` (default, the API's contract). ``False`` makes the
+            argument authoritative — a CLI's explicit ``--log-level``.
     """
     # Get log level from environment or parameter
-    level_str = os.getenv("LOG_LEVEL", log_level).upper()
+    level_str = (os.getenv("LOG_LEVEL", log_level) if level_from_env else log_level).upper()
     level = getattr(logging, level_str, logging.INFO)
+    if stream is None:
+        stream = sys.stdout
 
     # Configure stdlib logging so DB-error DETAIL payloads logged via plain
     # ``logging.getLogger(__name__)`` (the secret store, MCP transport, auth,
@@ -141,7 +155,7 @@ def setup_logger(log_level: str = "INFO", enable_colors: bool = True) -> None:
             if not isinstance(handler.formatter, _RedactingStdlibFormatter):
                 handler.setFormatter(_RedactingStdlibFormatter(handler.formatter))
     else:
-        stdlib_handler = logging.StreamHandler(sys.stdout)
+        stdlib_handler = logging.StreamHandler(stream)
         stdlib_handler.setFormatter(_RedactingStdlibFormatter(logging.Formatter("%(message)s")))
         root_logger.addHandler(stdlib_handler)
 
@@ -195,7 +209,7 @@ def setup_logger(log_level: str = "INFO", enable_colors: bool = True) -> None:
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(level),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(),
+        logger_factory=structlog.PrintLoggerFactory(file=stream),
         cache_logger_on_first_use=True,
     )
 

@@ -8,15 +8,72 @@ handling lands in every command at once.
 
 from __future__ import annotations
 
+import argparse
+import re
 import sys
+import warnings
 from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.database import get_qdrant_url
+from config.settings import get_settings
 from db.base import get_db
+from utils.logger import setup_logger
 
 R = TypeVar("R")
+
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+# qdrant-client's wording (qdrant_remote.py); it fires when an api_key meets
+# a plain-http URL, which is the normal shape on a private network.
+INSECURE_QDRANT_WARNING = "Api key is used with an insecure connection."
+
+
+def add_log_level_argument(parser: argparse.ArgumentParser) -> None:
+    """``--log-level`` for a one-shot command (default INFO, see configure_logging)."""
+    parser.add_argument(
+        "--log-level",
+        choices=LOG_LEVELS,
+        default="INFO",
+        help="diagnostics go to stderr at this level (default INFO; DEBUG also prints "
+        "one vector-store line per memory)",
+    )
+
+
+def configure_logging(level: str = "INFO") -> None:
+    """Configure logging for a one-shot command the way ``api/main.py`` does (#1788).
+
+    Without this a CLI process leaves structlog unconfigured — every level,
+    debug included, rendered to stdout — so ``transfer_context_creator
+    --apply`` printed one ``memory_payload_updated_in_qdrant`` line per
+    memory on top of its report. Diagnostics go to stderr so stdout stays
+    the plan report; the explicit level wins over ``LOG_LEVEL`` in the
+    environment, which is the API's setting, not the operator's. Call it
+    before the first log line (``setup_logger`` caches loggers on first use).
+
+    Args:
+        level: One of ``LOG_LEVELS``.
+    """
+    setup_logger(level, stream=sys.stderr, level_from_env=False)
+    silence_insecure_qdrant_warning(get_qdrant_url(), get_settings().qdrant_api_key)
+
+
+def silence_insecure_qdrant_warning(url: str, api_key: str) -> None:
+    """Drop qdrant-client's insecure-connection warning when plain http is the setup.
+
+    Only that one message, and only when it would fire: an api_key on an
+    ``http://`` URL. On ``https`` nothing changes, so a deployment that lost
+    TLS by mistake still gets the warning.
+
+    Args:
+        url: The configured Qdrant URL.
+        api_key: The configured Qdrant API key ("" when unset).
+    """
+    if api_key and url.startswith("http://"):
+        warnings.filterwarnings(
+            "ignore", message=re.escape(INSECURE_QDRANT_WARNING), category=UserWarning
+        )
 
 
 def confirm(prompt: str, assume_yes: bool) -> bool:
