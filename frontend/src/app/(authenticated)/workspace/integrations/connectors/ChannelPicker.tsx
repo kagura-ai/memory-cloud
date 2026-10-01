@@ -80,9 +80,9 @@ export function ChannelPicker({
           next ? [...(prev ?? []), ...page.channels] : page.channels,
         );
         setCursor(page.next_cursor);
-        setPrivateUnavailable(
-          (page.missing_scopes ?? []).includes("groups:read"),
-        );
+        // Any scope the server reports missing means the list is partial;
+        // today that is only groups:read (private channels).
+        setPrivateUnavailable((page.missing_scopes ?? []).length > 0);
       } catch {
         // Any failure → manual lane (never a dead field). #1391 fallback.
         setFellBack(true);
@@ -138,14 +138,14 @@ export function ChannelPicker({
   const visible = (channels ?? []).filter((c) =>
     query ? c.name.toLowerCase().includes(query.toLowerCase()) : true,
   );
-  // Selected ids not present in the fetched list (e.g. private channels) —
-  // shown as removable chips so a save never silently drops them.
+  // Selected ids not present in the fetched list (manual entry, a later Slack
+  // page, a private channel on an install without groups:read) — shown as
+  // removable chips so a save never silently drops them.
   const listedIds = new Set((channels ?? []).map((c) => c.id));
   const unlisted = value.filter((id) => !listedIds.has(id));
   // #1451: selections that Slack will never deliver events for. Counted only
-  // over channels we actually fetched — an unlisted id (private channel, manual
-  // entry) has unknown membership, and claiming it is not ingesting would be a
-  // guess dressed as a fact.
+  // over channels we actually fetched — an unlisted id has unknown membership,
+  // and claiming it is not ingesting would be a guess dressed as a fact.
   const notJoinedCount = (channels ?? []).filter(
     (c) => selected.has(c.id) && !c.is_member,
   ).length;

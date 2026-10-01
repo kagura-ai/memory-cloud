@@ -313,7 +313,9 @@ async def test_missing_scope_on_mixed_listing_retries_public_only():
     absent instead of degrading to manual entry."""
     admin = _admin()
     connector_id = uuid4()
-    denied = _slack_response(json_body={"ok": False, "error": "missing_scope"})
+    denied = _slack_response(
+        json_body={"ok": False, "error": "missing_scope", "needed": "groups:read"}
+    )
     public_only = _slack_response(
         json_body={
             "ok": True,
@@ -439,6 +441,35 @@ async def test_missing_scope_on_public_retry_still_maps_to_409_connector_scope()
     assert http_client.get.await_count == 2  # mixed, then public-only — never a third
     assert exc.value.status_code == 409
     assert exc.value.error_code == "CONNECTOR-SCOPE"
+
+
+@pytest.mark.asyncio
+async def test_missing_scope_naming_channels_read_skips_the_public_retry():
+    """When Slack's ``needed`` says ``channels:read`` itself is missing, a
+    public-only retry cannot succeed — it is skipped so a scope-less legacy
+    token costs one Tier-2 call per open, not two."""
+    admin = _admin()
+    resp = _slack_response(
+        json_body={
+            "ok": False,
+            "error": "missing_scope",
+            "needed": "channels:read,groups:read",
+            "provided": "chat:write",
+        }
+    )
+    ctx, http_client = _http_ctx(resp)
+
+    with (
+        patch("api.routes.workspace_connectors.ConnectorProvisioningService") as svc,
+        patch("services.slack_channels.httpx.AsyncClient", return_value=ctx),
+        patch("api.routes.workspace_connectors.get_cache", AsyncMock(return_value=None)),
+    ):
+        svc.return_value.get_connector = AsyncMock(return_value=_connector())
+        with pytest.raises(ConnectorScopeError) as exc:
+            await list_connector_channels(uuid4(), admin, cursor=None, q=None, db=MagicMock())
+
+    http_client.get.assert_awaited_once()
+    assert exc.value.status_code == 409
 
 
 @pytest.mark.asyncio

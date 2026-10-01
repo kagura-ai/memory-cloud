@@ -14,7 +14,8 @@ Security invariants
   counts, topics, purposes, or other channel metadata.
 
 Slack error mapping (never a raw 5xx):
-* ``missing_scope`` -> :class:`ConnectorScopeError` (409 ``CONNECTOR-SCOPE``).
+* ``missing_scope`` on the public-only listing -> :class:`ConnectorScopeError`
+  (409 ``CONNECTOR-SCOPE``); on the mixed listing it is the #1778 retry trigger.
 * HTTP 429 / ``ratelimited`` -> :class:`SlackRateLimited` (the route surfaces a
   429 with ``Retry-After`` passthrough).
 * any other transport / API failure -> :class:`ExternalServiceError` (502).
@@ -44,6 +45,7 @@ SLACK_CONVERSATIONS_LIST_URL = "https://slack.com/api/conversations.list"
 _SLACK_PAGE_LIMIT = 200
 SLACK_CHANNEL_TYPES_ALL = "public_channel,private_channel"
 SLACK_CHANNEL_TYPES_PUBLIC = "public_channel"
+PUBLIC_CHANNELS_SCOPE = "channels:read"
 PRIVATE_CHANNELS_SCOPE = "groups:read"
 
 
@@ -144,12 +146,38 @@ async def fetch_slack_channels(
             return await _conversations_list(
                 client, bot_token=bot_token, cursor=cursor, types=SLACK_CHANNEL_TYPES_ALL
             )
-        except ConnectorScopeError:
-            # Pre-#1778 grant: one public-only retry, never a third request.
+        except _MissingScope as exc:
+            # Pre-#1778 grant: one public-only retry, never a third request —
+            # and none at all when Slack says ``channels:read`` itself is
+            # missing, since the retry could only fail the same way.
+            if PUBLIC_CHANNELS_SCOPE in exc.needed:
+                raise ConnectorScopeError() from None
             logger.info("slack_conversations_list_private_scope_missing")
-        return await _conversations_list(
-            client, bot_token=bot_token, cursor=cursor, types=SLACK_CHANNEL_TYPES_PUBLIC
-        )
+        try:
+            return await _conversations_list(
+                client, bot_token=bot_token, cursor=cursor, types=SLACK_CHANNEL_TYPES_PUBLIC
+            )
+        except _MissingScope:
+            raise ConnectorScopeError() from None
+
+
+class _MissingScope(Exception):
+    """Slack answered ``missing_scope``; ``needed`` is the scope set it named.
+
+    Internal to this module: ``fetch_slack_channels`` turns it into the
+    public-only retry or the 409 ``ConnectorScopeError`` the route expects.
+    """
+
+    def __init__(self, needed: frozenset[str]) -> None:
+        super().__init__("Slack bot token lacks a required scope")
+        self.needed = needed
+
+
+def _parse_needed(value: object) -> frozenset[str]:
+    """Scopes from Slack's comma-separated ``needed`` field (empty when absent)."""
+    if not isinstance(value, str):
+        return frozenset()
+    return frozenset(s.strip() for s in value.split(",") if s.strip())
 
 
 async def _conversations_list(
@@ -186,7 +214,7 @@ async def _conversations_list(
     if not data.get("ok"):
         error = str(data.get("error") or "unknown")
         if error == "missing_scope":
-            raise ConnectorScopeError()
+            raise _MissingScope(_parse_needed(data.get("needed")))
         if error in ("ratelimited", "rate_limited"):
             raise SlackRateLimited(None)
         # A concrete Slack error code (e.g. invalid_auth) — safe, non-secret —

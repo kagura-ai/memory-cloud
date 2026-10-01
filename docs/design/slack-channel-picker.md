@@ -32,17 +32,17 @@ GET /api/v1/workspace-connectors/{connector_id}/channels?cursor=<c>&q=<query>
 scope, which IS in the default install scopes
 (`settings.slack_oauth_scopes` = `channels:history,channels:read,groups:history,chat:write,team:read,users:read,commands,app_mentions:read`;
 see `docs/ops/slack-public-distribution.md` for what each scope is for).
-Private channels additionally need `groups:read`, which is **not** currently
-requested — so the v1 picker lists public channels only, and private channels
-remain manual-ID entry (document this in the dialog copy).
-
-> **Update (#1778):** `groups:read` is now in the default scopes and the
-> listing asks for `public_channel,private_channel`. An install granted
-> before that answers `missing_scope`; the service retries once with
-> `public_channel` only and the response carries
-> `missing_scopes: ["groups:read"]`, which the picker renders as a reconnect
-> hint. The cached page records `private_listing` (no default, the #1451
-> pattern) so a reconnect is never served a stale public-only page.
+Private channels additionally need `groups:read`. v1 (#1391) did not request
+it and listed public channels only; since #1778 it is in the default scopes
+and the listing asks for `public_channel,private_channel`, so the private
+channels the bot is a member of appear with a lock marker. An install granted
+before #1778 answers the mixed request with `missing_scope`; the service
+retries once with `public_channel` only (skipped when Slack's `needed` says
+`channels:read` itself is missing) and the response carries
+`missing_scopes: ["groups:read"]`, which the picker renders as a reconnect
+hint next to the still-usable public list. The cached page records
+`private_listing` with no default (the #1451 pattern) so a page cached before
+the field existed is refetched rather than served as current.
 
 Behavior when the token lacks the scope (legacy installs, manual binds of
 older apps): Slack returns `missing_scope`. The endpoint maps this to a
@@ -84,8 +84,9 @@ worker may also need:
 
 ## Non-goals
 
-- No `groups:read` scope expansion in v1 (private-channel listing is a
-  follow-up decision — scope creep on installed apps forces re-consent).
+- No `groups:read` scope expansion in v1 (private-channel listing was a
+  follow-up decision — scope creep on installed apps forces re-consent;
+  shipped in #1778 with the public-only retry for older grants).
 - No provider-generic picker abstraction yet — Discord/Teams pickers have
   different hierarchy shapes and arrive with their providers (see
   [multi-platform readiness](multi-platform-connectors.md)).
