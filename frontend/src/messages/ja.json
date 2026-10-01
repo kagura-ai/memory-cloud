@@ -4039,7 +4039,7 @@
     "createTitle": "Slack コネクタを作成",
     "createDesc": "{team} を接続します。取り込んだ会話を保持するプライベートコンテキストを作成します。",
     "missingScopesTitle": "すべての機能を使うには Slack を再接続してください",
-    "missingScopesDesc": "このインストールでは {scopes} が許可されていません。取り込みは動作しますが、スラッシュコマンド・@メンションへの応答・private チャンネルの一覧にはこれらのスコープが必要です。Slack アプリがこれらを要求するよう設定し、もう一度 Slack を接続してください。",
+    "missingScopesDesc": "このインストールでは {scopes} が許可されていません。取り込みは動作しますが、各スコープは次の機能に必要です — commands: スラッシュコマンド / app_mentions:read: @メンションへの応答 / groups:read: チャンネル選択での private チャンネル一覧。Slack アプリがこれらを要求するよう設定し、もう一度 Slack を接続してください。",
     "teamConflict": {
       "subjectNamed": "Slack ワークスペース「{name}」",
       "subjectUnnamed": "この Slack ワークスペース",

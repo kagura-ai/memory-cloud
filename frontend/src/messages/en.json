@@ -4039,7 +4039,7 @@
     "createTitle": "Create Slack connector",
     "createDesc": "Connecting {team}. A private context will be created to hold ingested conversations.",
     "missingScopesTitle": "Reconnect Slack to enable all features",
-    "missingScopesDesc": "This install did not grant {scopes}. Ingestion works, but the slash command, @mention replies and the private-channel list need these scopes. Make sure the Slack app requests them, then connect Slack again.",
+    "missingScopesDesc": "This install did not grant {scopes}. Ingestion works, but each of these scopes enables one feature — commands: the slash command; app_mentions:read: @mention replies; groups:read: private channels in the channel picker. Make sure the Slack app requests them, then connect Slack again.",
     "teamConflict": {
       "subjectNamed": "The Slack workspace “{name}”",
       "subjectUnnamed": "This Slack workspace",
