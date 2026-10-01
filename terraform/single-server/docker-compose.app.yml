@@ -52,11 +52,13 @@ x-api-env: &api-env
   DATABASE_URL: postgresql+asyncpg://kagura:${DB_PASSWORD}@${POSTGRES_HOST:-postgres}:5432/kagura
   QDRANT_URL: http://${QDRANT_HOST:-qdrant}:6333
   QDRANT_API_KEY: ${QDRANT_API_KEY}
-  # #1794: REDIS_URL from the env file wins, so the API can reach a Redis that
-  # runs with REDIS_PASSWORD: redis://:<password, URL-encoded>@<host>:6379.
-  # It goes through interpolation because a literal here would beat env_file.
-  # Unset, the URL is built from REDIS_HOST as before.
-  REDIS_URL: ${REDIS_URL:-redis://${REDIS_HOST:-redis}:6379}
+  # #1794: with REDIS_PASSWORD set, the default URL carries it, so the one
+  # variable turns auth on for Redis and the API alike. REDIS_URL from the env
+  # file still wins — needed when the password has characters a URL reserves
+  # (percent-encode them there). Interpolated because a literal here would beat
+  # env_file.
+  # Without either, the URL is built from REDIS_HOST as before.
+  REDIS_URL: ${REDIS_URL:-redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}${REDIS_HOST:-redis}:6379}
   API_HOST: 0.0.0.0
   API_PORT: 8080
   ENVIRONMENT: production

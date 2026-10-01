@@ -798,9 +798,11 @@ you want `destroy` to remove it, or set
   network as in `docs/ops/postgres-18-migration-runbook.md`. The static guard
   `scripts/tests/compose_port_bind.bats` fails CI if a data-store port is ever
   published without a bind address.
-- Redis runs without a password unless `REDIS_PASSWORD` and `REDIS_URL` are set
-  in `.env.prod` (#1794) — worth doing on a split host, where Redis listens on
-  the data VM's private address. Turning it on restarts Redis; sessions survive.
+- Redis runs without a password unless `REDIS_PASSWORD` is set in `.env.prod`
+  (#1794) — worth doing on a split host, where Redis listens on the data VM's
+  private address. Turning it on restarts Redis; sessions survive. With a
+  password, `exec redis redis-cli` needs it:
+  `exec redis sh -c 'REDISCLI_AUTH="$REDIS_PASSWORD" exec redis-cli'`.
   Procedure: [`docs/deployment.md` → Redis Password](../../docs/deployment.md#redis-password-single-server-compose--issue-1794).
 - Secrets in `.env.prod` are VM-local. Moving them to GCP Secret Manager is
   a follow-up issue.

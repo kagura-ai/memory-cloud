@@ -1280,32 +1280,53 @@ Per-minute rate limits and the daily MCP / REST / Public API quotas above are co
 
 The single-server compose files run Redis without a password by default: it
 listens only on the compose network (and, on a split host, on the data VM's
-private address through the `data-expose` overlay). Set `REDIS_PASSWORD` to
-make Redis refuse unauthenticated commands. The API reads the password from
-`REDIS_URL`, so both go into `.env.prod`:
+private address through the `data-expose` overlay). Set `REDIS_PASSWORD` in
+`.env.prod` and Redis refuses unauthenticated commands; the API's default
+`REDIS_URL` is built from the same variable, so on a single host that one line
+is all:
 
 ```bash
-# .env.prod — single quotes keep the values literal
-REDIS_PASSWORD='<password>'
-REDIS_URL='redis://:<password, URL-encoded>@redis:6379'
+# .env.prod
+REDIS_PASSWORD=<output of: openssl rand -hex 32>
 ```
 
-- **Generate it with `openssl rand -hex 32`.** A hex password needs no
-  URL-encoding and no quoting care. Any other password has to be
-  percent-encoded in `REDIS_URL` — `@`, `:`, `/`, `#` and `%` all break the URL
-  otherwise:
-  `python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' '<password>'`.
-- **`REDIS_URL` replaces the whole URL**, so it also replaces `REDIS_HOST`: on a
-  split-host app VM write the data VM's address into it
-  (`redis://:<password>@192.168.10.20:6379`). Unset, the URL is built from
-  `REDIS_HOST` as before.
+- **Use a hex password.** It needs no quoting in `.env.prod` and no encoding in
+  a URL. Any other value has to be single-quoted in `.env.prod` — unquoted, the
+  env-file parser expands `$` and cuts the value at ` #`; double-quoted, it
+  still expands `$` — and needs an explicit `REDIS_URL` (below).
+- **`REDIS_URL` in `.env.prod` overrides the built URL**, whole: scheme,
+  password, host and port. Set it when the password has characters a URL
+  reserves (`@ : / # %` and the like — percent-encode them) or when Redis is
+  somewhere else. To encode without the password landing in your shell history:
+  `read -rs P && printf '%s' "$P" | python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))'`,
+  then `REDIS_URL='redis://:<encoded>@redis:6379'`.
+- **Split host:** the data VM's `.env.prod` needs `REDIS_PASSWORD` (Redis
+  enforces it), the app VM's needs `REDIS_PASSWORD` too, or a `REDIS_URL` with
+  the data VM's address — the built URL uses `REDIS_HOST`.
+- **A password only in `REDIS_URL` protects nothing.** The API authenticates
+  against a Redis without a password just as well, so `/readiness` stays green
+  while Redis is open. `REDIS_PASSWORD` is what turns auth on; step 3 below is
+  the proof.
+- **Your shell wins over `.env.prod`.** Compose prefers a `REDIS_PASSWORD` or
+  `REDIS_URL` exported in the shell that runs it; `unset` them first.
 - **Where it ends up.** Redis gets the password as its `--requirepass` argument
-  and as `REDISCLI_AUTH`, so the healthcheck and
-  `docker compose … exec redis redis-cli` authenticate without typing it. Like
-  the PostgreSQL password, it is visible to anyone who can run `docker inspect`
-  on the host; Redis rewrites its process title, so `ps` does not show it.
+  and as `REDIS_PASSWORD` in its environment, which its healthcheck uses. For
+  an interactive client:
+  `docker compose -f docker-compose.prod.yml exec redis sh -c 'REDISCLI_AUTH="$REDIS_PASSWORD" exec redis-cli'`.
+  Like the PostgreSQL password, it is visible to anyone who can run
+  `docker inspect` on the host; Redis rewrites its process title, so `ps` does
+  not show it.
 - **Unset or empty** keeps the old behaviour exactly: an empty `requirepass`
   means no auth.
+
+**Upgrading to the release that ships this (v0.87.0).** The Redis service
+definition changed, so the next whole-stack `docker compose up -d` — including
+the `kagura-memory` unit at boot — recreates Redis once: a restart, data kept.
+And `REDIS_URL` / `REDIS_PASSWORD` lines already in `.env.prod`, which the
+compose files used to ignore, now apply — check with
+`grep -nE '^(REDIS_URL|REDIS_PASSWORD)=' .env.prod` before you deploy and
+remove any you did not mean (a `REDIS_URL` copied from the development
+`.env.example`, for instance, points the API at its own container).
 
 ### Turning it on
 
@@ -1313,39 +1334,41 @@ Redis restarts with the new configuration and every client has to reconnect
 with the password, so do it in a maintenance window. Between the Redis restart
 and the API recreate, every request that needs Redis fails: session lookups
 (signed-in pages, OAuth) error, and rate limits and quotas fail open. Run the
-two steps back to back.
+two commands of step 2 back to back.
 
 ```bash
 cd /opt/kagura-memory/src/terraform/single-server
-# 1. Add REDIS_PASSWORD and REDIS_URL to .env.prod (above), then check the
-#    render without printing the secrets — both lines should say True:
+# 1. Add REDIS_PASSWORD to .env.prod (above), then check the render without
+#    printing the secret. It should print "True True":
 docker compose -f docker-compose.prod.yml --env-file .env.prod config --format json | python3 -c '
 import json, sys; s = json.load(sys.stdin)["services"]
 print(s["redis"]["command"][-1] != "", s["api-blue"]["environment"]["REDIS_URL"].startswith("redis://:"))'
 
-# 2. Restart Redis with the password, then recreate every running API color so
-#    it reconnects with the new URL (add --no-build on a registry-mode host):
+# 2. Restart Redis with the password, then recreate the running API colors so
+#    they reconnect (xargs -r: with no color running, recreate nothing rather
+#    than the whole stack; add --no-build on a registry-mode host):
 docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps redis
-docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps --force-recreate \
-  $(docker ps --format '{{.Names}}' | grep -oE 'api-(blue|green)$')
+docker ps --format '{{.Names}}' | grep -oE 'api-(blue|green)$' \
+  | xargs -r docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps --force-recreate
 
-# 3. Verify: Redis healthy, refuses a client without the password, API ready.
-docker inspect -f '{{.State.Health.Status}}' kagura-redis                # healthy
-docker exec kagura-redis sh -c 'unset REDISCLI_AUTH; redis-cli ping'      # NOAUTH Authentication required.
+# 3. Verify — required: Redis healthy, refuses a client without the password,
+#    API ready.
+docker inspect -f '{{.State.Health.Status}}' kagura-redis      # healthy
+docker exec kagura-redis redis-cli ping                        # NOAUTH Authentication required.
 ./scripts/deploy.sh --status
 ```
 
 On a split host, step 2 runs in two places: Redis on the data VM
-(`DATA_BIND_ADDR=… docker compose -f docker-compose.data.yml -f docker-compose.data-expose.yml --env-file .env.prod up -d --no-deps redis`,
-with `REDIS_PASSWORD` in that VM's `.env.prod`), then the API colors on the app
-VM with `-f docker-compose.app.yml` (with `REDIS_URL` in its `.env.prod`).
+(`DATA_BIND_ADDR=… docker compose -f docker-compose.data.yml -f docker-compose.data-expose.yml --env-file .env.prod up -d --no-deps redis`),
+then the API colors on the app VM with `-f docker-compose.app.yml`.
 
-**What survives the restart.** Redis runs with `--appendonly yes` on the
-`kagura_redis_data` volume, and a compose recreate stops it with SIGTERM, which
-flushes the append-only file. Sessions (`session:*`) and the embedding spend
-counters (`embed_spend:*`) are reloaded with their TTLs — nobody is signed out
-and no spend is forgotten. `scripts/tests/compose_redis_auth.bats` checks this
-against the image the compose files pin.
+**What survives the restart.** Redis keeps its data on the `kagura_redis_data`
+volume — an append-only file (`--appendonly yes`) plus the snapshot Redis
+writes when it stops cleanly, and a compose recreate stops it with SIGTERM.
+Sessions (`session:*`) and the embedding spend counters (`embed_spend:*`) are
+reloaded with their TTLs: nobody is signed out and no spend is forgotten.
+`scripts/tests/compose_redis_auth.bats` checks this against the image the
+compose files pin.
 
-To rotate the password, change both lines and run steps 2–3 again. To turn auth
-off, remove both lines and do the same.
+To rotate the password, change it and run steps 2–3 again. To turn auth off,
+remove it and do the same.

@@ -39,10 +39,12 @@ x-api-env: &api-env
   DATABASE_URL: postgresql+asyncpg://kagura:${DB_PASSWORD}@postgres:5432/kagura
   QDRANT_URL: http://qdrant:6333
   QDRANT_API_KEY: ${QDRANT_API_KEY}
-  # #1794: REDIS_URL from the env file wins, so the API can reach a Redis that
-  # runs with REDIS_PASSWORD: redis://:<password, URL-encoded>@<host>:6379.
-  # It goes through interpolation because a literal here would beat env_file.
-  REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+  # #1794: with REDIS_PASSWORD set, the default URL carries it, so the one
+  # variable turns auth on for Redis and the API alike. REDIS_URL from the env
+  # file still wins — needed when the password has characters a URL reserves
+  # (percent-encode them there). Interpolated because a literal here would beat
+  # env_file.
+  REDIS_URL: ${REDIS_URL:-redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379}
   API_HOST: 0.0.0.0
   API_PORT: 8080
   ENVIRONMENT: production
@@ -136,18 +138,19 @@ services:
     logging: *default-logging
     # Optional password (#1794). REDIS_PASSWORD unset or empty renders an empty
     # requirepass — no auth, as before; set, Redis refuses unauthenticated
-    # commands and the API needs the same password in REDIS_URL (x-api-env).
-    # Keep the command exec-form with redis-server first: the image's
-    # entrypoint drops root only for that shape.
+    # commands and the API's default REDIS_URL carries the same password
+    # (x-api-env). Keep the command exec-form with redis-server first: the
+    # image's entrypoint drops root only for that shape.
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-}"]
     environment:
-      REDISCLI_AUTH: ${REDIS_PASSWORD:-}
+      # For the healthcheck. Not REDISCLI_AUTH: an empty one would make every
+      # interactive redis-cli print a failed AUTH on a Redis without a password.
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
     volumes:
       - redis_data:/data
     healthcheck:
-      # Match the reply: redis-cli exits 0 on NOAUTH / WRONGPASS as well. An
-      # empty REDISCLI_AUTH is unset, so without a password no AUTH is sent.
-      test: ["CMD-SHELL", "[ -n \"$$REDISCLI_AUTH\" ] || unset REDISCLI_AUTH; redis-cli ping | grep -q PONG"]
+      # Match the reply: redis-cli exits 0 on NOAUTH / WRONGPASS as well.
+      test: ["CMD-SHELL", "[ -z \"$$REDIS_PASSWORD\" ] || export REDISCLI_AUTH=\"$$REDIS_PASSWORD\"; redis-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 5
