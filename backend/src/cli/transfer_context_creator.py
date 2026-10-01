@@ -87,6 +87,9 @@ class TransferResult:
     workspace_id: UUID
     dry_run: bool
     lines: list[PlanLine] = field(default_factory=list)
+    # --repair-payloads: live memories ``to`` already owns (in contexts it
+    # created) whose vector payload the run re-points; 0 without the flag.
+    repair_memories: int = 0
     payload_failures: list[UUID] = field(default_factory=list)
 
     @property
@@ -100,6 +103,11 @@ class TransferResult:
     @property
     def memories(self) -> int:
         return sum(line.memory_count for line in self.lines)
+
+    @property
+    def planned(self) -> int:
+        """Units of work the run would do: contexts to move plus repairs."""
+        return self.transferred + self.repair_memories
 
 
 async def _require_owner_or_admin(db: AsyncSession, *, workspace_id: UUID, user_id: str) -> None:
@@ -272,11 +280,7 @@ async def transfer_context_creator(
             )
         )
 
-    if dry_run:
-        return result
-    if result.transferred:
-        await db.commit()
-    payload_scope = list(result.transferred_ids)
+    repair_scope: list[UUID] = []
     if repair_payloads:
         owned = (
             await db.execute(
@@ -287,7 +291,26 @@ async def transfer_context_creator(
                 )
             )
         ).scalars()
-        payload_scope.extend(cid for cid in owned if cid not in payload_scope)
+        repair_scope = [cid for cid in owned if cid not in result.transferred_ids]
+        if repair_scope:
+            result.repair_memories = (
+                await db.scalar(
+                    select(func.count())
+                    .select_from(Memory)
+                    .where(
+                        Memory.context_id.in_(repair_scope),
+                        Memory.user_id == to_user_id,
+                        Memory.deleted_at.is_(None),
+                    )
+                )
+                or 0
+            )
+
+    if dry_run:
+        return result
+    if result.transferred:
+        await db.commit()
+    payload_scope = list(result.transferred_ids) + repair_scope
     if payload_scope:
         try:
             result.payload_failures = await _repoint_payloads(
@@ -319,6 +342,12 @@ def _print_plan(result: TransferResult) -> None:
         f"{verb} {result.transferred} context(s), {result.memories} memory row(s) "
         "(tombstones included)"
     )
+    if result.repair_memories:
+        verb = "would re-point" if result.dry_run else "re-pointed"
+        print(
+            f"repair: {verb} the vector payload of {result.repair_memories} live memor(ies) "
+            f"{result.to_user_id!r} already owns"
+        )
     if result.payload_failures:
         print(
             f"vector payload NOT updated for {len(result.payload_failures)} memor(ies) — "
@@ -348,8 +377,8 @@ async def _main(args: argparse.Namespace) -> int:
     code = await run_plan_apply(
         run=run,
         print_plan=_print_plan,
-        changes=lambda result: result.transferred,
-        noun="context",
+        changes=lambda result: result.planned,
+        noun="item",
         apply=args.apply,
         assume_yes=args.yes,
     )

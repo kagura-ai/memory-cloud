@@ -31,6 +31,7 @@ if str(_BACKEND_SRC) not in sys.path:
 
 from cli.transfer_context_creator import (  # noqa: E402
     AUDIT_ACTION,
+    _main,
     _parse,
     transfer_context_creator,
 )
@@ -286,11 +287,26 @@ async def test_payload_failures_are_reported_after_the_commit(db_session, scenar
     assert await _author(db_session, bad) == s["web_user"].user_id
 
 
+@pytest.fixture
+def cli_db(db_session):
+    """Route the command's ``get_db()`` to the test session."""
+
+    async def _get_db():
+        yield db_session
+
+    with patch("cli._oneshot.get_db", _get_db):
+        yield db_session
+
+
 @pytest.mark.asyncio
-async def test_repair_payloads_converges_after_a_failed_run(db_session, scenario, vector_store):
-    """A re-run finds 0 contexts to move (created_by already moved) but, with
-    --repair-payloads, re-points the vector payloads of every live memory the
-    target now owns in the contexts it created."""
+async def test_repair_payloads_converges_after_a_failed_run(
+    db_session, scenario, vector_store, cli_db, capsys
+):
+    """A re-run finds 0 contexts to move (created_by already moved). Driven
+    through ``_main`` — the plan→confirm→apply scaffold skips the write when
+    the plan is empty, so repair work has to count as planned work — the
+    command re-points the vector payloads of every live memory the target
+    now owns in the contexts it created."""
     s, m = scenario, scenario["memories"]
     first = await transfer_context_creator(
         db_session,
@@ -302,18 +318,26 @@ async def test_repair_payloads_converges_after_a_failed_run(db_session, scenario
     assert first.transferred == 2
     vector_store.reset_mock()
 
-    again = await transfer_context_creator(
-        db_session,
-        from_user_id=s["cli_admin"].user_id,
-        to_user_id=s["web_user"].user_id,
-        workspace_id=s["ws"].id,
-        dry_run=False,
-        repair_payloads=True,
-    )
-    assert again.transferred == 0
-    assert again.payload_failures == []
+    argv = [
+        "--from",
+        s["cli_admin"].user_id,
+        "--to",
+        s["web_user"].user_id,
+        "--workspace",
+        str(s["ws"].id),
+        "--apply",
+        "--yes",
+    ]
+    # Plain re-run: nothing planned, nothing touched.
+    assert await _main(_parse(argv)) == 0
+    vector_store.assert_not_awaited()
+
+    assert await _main(_parse([*argv, "--repair-payloads"])) == 0
     repointed = {call.kwargs["memory_id"] for call in vector_store.await_args_list}
     assert repointed == {m["private_a"].id, m["private_b"].id, m["shared_a"].id}
+    out = capsys.readouterr().out
+    assert "would re-point the vector payload of 3 live memor(ies)" in out
+    assert "changed 3 item(s)" in out
 
 
 @pytest.mark.asyncio
