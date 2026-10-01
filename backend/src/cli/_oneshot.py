@@ -9,6 +9,7 @@ handling lands in every command at once.
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import sys
 import warnings
@@ -17,17 +18,18 @@ from typing import TypeVar
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.database import get_qdrant_url
-from config.settings import get_settings
 from db.base import get_db
 from utils.logger import setup_logger
 
 R = TypeVar("R")
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
-# qdrant-client's wording (qdrant_remote.py); it fires when an api_key meets
-# a plain-http URL, which is the normal shape on a private network.
+# qdrant-client's wording (qdrant_remote.py). It fires when an api_key meets
+# a plain-http URL — the normal shape on a private network, and also what a
+# deployment that lost TLS by mistake looks like, so it is kept, once.
 INSECURE_QDRANT_WARNING = "Api key is used with an insecure connection."
+# Log one line per HTTP request, i.e. one per memory on a payload sweep.
+_PER_REQUEST_LOGGERS = ("httpx", "httpcore")
 
 
 def add_log_level_argument(parser: argparse.ArgumentParser) -> None:
@@ -48,32 +50,24 @@ def configure_logging(level: str = "INFO") -> None:
     debug included, rendered to stdout — so ``transfer_context_creator
     --apply`` printed one ``memory_payload_updated_in_qdrant`` line per
     memory on top of its report. Diagnostics go to stderr so stdout stays
-    the plan report; the explicit level wins over ``LOG_LEVEL`` in the
-    environment, which is the API's setting, not the operator's. Call it
-    before the first log line (``setup_logger`` caches loggers on first use).
+    the plan report (colored only on a terminal), and the level given here
+    wins over ``LOG_LEVEL`` in the environment, which is the API's setting,
+    not the operator's. Below DEBUG the HTTP client's per-request lines are
+    held at WARNING — they are per-memory too — and qdrant-client's
+    insecure-connection warning is shown once per run instead of repeating.
+    Call it before the first log line (``setup_logger`` caches loggers on
+    first use).
 
     Args:
         level: One of ``LOG_LEVELS``.
     """
-    setup_logger(level, stream=sys.stderr, level_from_env=False)
-    silence_insecure_qdrant_warning(get_qdrant_url(), get_settings().qdrant_api_key)
-
-
-def silence_insecure_qdrant_warning(url: str, api_key: str) -> None:
-    """Drop qdrant-client's insecure-connection warning when plain http is the setup.
-
-    Only that one message, and only when it would fire: an api_key on an
-    ``http://`` URL. On ``https`` nothing changes, so a deployment that lost
-    TLS by mistake still gets the warning.
-
-    Args:
-        url: The configured Qdrant URL.
-        api_key: The configured Qdrant API key ("" when unset).
-    """
-    if api_key and url.startswith("http://"):
-        warnings.filterwarnings(
-            "ignore", message=re.escape(INSECURE_QDRANT_WARNING), category=UserWarning
-        )
+    setup_logger(level, enable_colors=sys.stderr.isatty(), stream=sys.stderr)
+    per_request = logging.NOTSET if level == "DEBUG" else logging.WARNING
+    for name in _PER_REQUEST_LOGGERS:
+        logging.getLogger(name).setLevel(per_request)
+    warnings.filterwarnings(
+        "once", message=re.escape(INSECURE_QDRANT_WARNING), category=UserWarning
+    )
 
 
 def confirm(prompt: str, assume_yes: bool) -> bool:

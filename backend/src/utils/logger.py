@@ -115,25 +115,25 @@ def _redacting_console_traceback(sio, exc_info) -> None:
 
 
 def setup_logger(
-    log_level: str = "INFO",
+    log_level: str | None = None,
     enable_colors: bool = True,
     *,
     stream: TextIO | None = None,
-    level_from_env: bool = True,
 ) -> None:
     """Setup structured logger with color support.
 
     Args:
-        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+            ``None`` (default) reads ``LOG_LEVEL`` from the environment and
+            falls back to INFO; an explicit value wins over the environment.
         enable_colors: Enable color output (default: True)
-        stream: Where rendered log lines go (default: stdout). A one-shot CLI
-            passes ``sys.stderr`` so stdout stays its report (#1788).
-        level_from_env: ``LOG_LEVEL`` in the environment wins over
-            ``log_level`` (default, the API's contract). ``False`` makes the
-            argument authoritative — a CLI's explicit ``--log-level``.
+        stream: Where rendered structlog lines go, and the stdlib root
+            handler when this call installs one (default: stdout). Handlers
+            the host runtime already installed keep their own destination.
+            A one-shot CLI passes ``sys.stderr`` so stdout stays its report
+            (#1788).
     """
-    # Get log level from environment or parameter
-    level_str = (os.getenv("LOG_LEVEL", log_level) if level_from_env else log_level).upper()
+    level_str = (log_level or os.getenv("LOG_LEVEL", "INFO")).upper()
     level = getattr(logging, level_str, logging.INFO)
     if stream is None:
         stream = sys.stdout
