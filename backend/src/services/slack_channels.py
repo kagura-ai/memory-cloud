@@ -147,11 +147,8 @@ async def fetch_slack_channels(
         except ConnectorScopeError:
             # Pre-#1778 grant: one public-only retry, never a third request.
             logger.info("slack_conversations_list_private_scope_missing")
-        page = await _conversations_list(
+        return await _conversations_list(
             client, bot_token=bot_token, cursor=cursor, types=SLACK_CHANNEL_TYPES_PUBLIC
-        )
-        return SlackChannelsPage(
-            channels=page.channels, next_cursor=page.next_cursor, private_listing=False
         )
 
 
