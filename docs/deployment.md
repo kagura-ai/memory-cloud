@@ -469,6 +469,37 @@ CLI actions (`reset_password`, `create_admin`) send no notice. A send failure is
 change. Under `EMAIL_PROVIDER=logging` each notice is one
 `security_notification_email` log line (event and a keyed recipient hash only).
 
+## One person, two accounts — moving context ownership (Issue #1783)
+
+Identities are keyed by `user_id` and are never linked by email: a CLI admin
+(`local:<login>`, created by `create_admin`) and an OAuth sign-in (the IdP
+`sub`) are two users even when they belong to one person. Contexts created
+through the CLI admin's API key (MCP clients) then read as another creator in
+the browser — the **Created by me** filter is empty and the private ones are
+hidden — because `created_by` is compared with the session's `user_id`.
+
+To hand those contexts to the identity that should own them, run the one-shot
+command where the API runs (same env: `DATABASE_URL`):
+
+```bash
+# inside the API container / venv, from backend/
+python -m src.cli.transfer_context_creator --from local:admin --to <user_id> --workspace <uuid>               # plan, writes nothing
+python -m src.cli.transfer_context_creator --from local:admin --to <user_id> --workspace <uuid> --apply --yes  # write
+```
+
+Find the two `user_id`s with `SELECT user_id, name, email FROM users` (the
+browser identity is the `id` returned by `GET /api/v1/auth/me`). Only live
+contexts in that workspace whose `created_by` is `--from` move; a context is
+left alone when `--to` is neither a member nor the owner of the workspace,
+since a private context would otherwise be visible to nobody. One
+`audit_logs` row (`context_creator_transferred`) is written per moved context,
+and re-running after `--apply` changes 0 rows.
+
+The command does not move API keys: mint a new key for `--to` if MCP clients
+should keep seeing the private contexts afterwards. It also leaves other
+`created_by` columns (resources, agents, files, secrets) and the two user rows
+untouched — linking the accounts is a separate feature.
+
 ## Hosted-mode UI gates (Issue #1571)
 
 The web UI reads `GET /api/v1/system/info` → `features.*` at runtime, so a

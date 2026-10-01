@@ -202,6 +202,7 @@ docker compose up -d
 | `python3 -m src.cli.create_admin` | Create admin + workspace + API key + `.mcp.json` + embedding setup |
 | `python3 -m src.cli.reset_password` | Reset password and/or MFA |
 | `python3 -m src.cli.delete_admin` | Delete admin (for re-creation) |
+| `python3 -m src.cli.transfer_context_creator` | Move contexts created by one user to another (CLI admin → OAuth account, see docs/deployment.md) |
 
 > Run from `backend/` directory. Docker API container must be running.
 
