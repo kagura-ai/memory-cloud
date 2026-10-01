@@ -441,7 +441,7 @@ jobs:
           MINIO_TEST_ACCESS_KEY: minioadmin
           MINIO_TEST_SECRET_KEY: minioadmin
           MINIO_TEST_BUCKET: kagura-files-test
-        run: cd backend && pytest tests/integration/ tests/smoke/test_all_routes.py tests/services/test_password_account_service.py -v --timeout=120 --maxfail=3
+        run: cd backend && pytest tests/integration/ tests/cli/ tests/smoke/test_all_routes.py tests/services/test_password_account_service.py -v --timeout=120 --maxfail=3
 
   # Authenticated a11y (color-contrast) lane (#840). Unlike the hermetic
   # frontend-a11y job (next dev only), the e2e/authed-a11y/ specs need a LIVE
