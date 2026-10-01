@@ -615,25 +615,39 @@ class AuthorizationCodeGrant(_ResourceBoundGrant, grants.AuthorizationCodeGrant)
             logger.error("Cannot save authorization code: user_id not found")
             raise ValueError("User ID required for authorization")
 
-        # #1770: serialize with a password reset, then make sure the consent
-        # is still backed by a live session. The owner's ``users`` row is
-        # share-locked first (users → codes, the order every grant path keeps;
-        # see services/oauth_grant_revocation.py). A reset that got there
-        # first holds it FOR UPDATE until it has deleted the codes AND the
-        # browser sessions, so once this lock is granted a vanished session
-        # means the reset ran: write nothing and send the client access_denied
-        # instead of a code the reset could not see. A consent that locked
-        # first commits before the reset's DELETE, which then covers it.
+        # #1770: serialize with a password reset or an account erasure, then
+        # make sure the consent is still backed by a live session of a user
+        # who still exists. The owner's ``users`` row is share-locked first
+        # (users → codes, the order every grant path keeps; see
+        # services/oauth_grant_revocation.py). A reset that got there first
+        # holds it FOR UPDATE until it has deleted the codes AND the browser
+        # sessions, so once this lock is granted a vanished session means the
+        # reset ran; an erasure deletes the row itself. Either way: write
+        # nothing and send the client access_denied — with the redirect URI
+        # the request validated, so Authlib answers with the redirect and not
+        # a bare error body — instead of a code the revocation could not see.
+        # A consent that locked first commits before the reset's DELETE,
+        # which then covers it.
         session = self.server.db_session
-        session.query(User.user_id).filter_by(user_id=user_id).with_for_update(
-            read=True, key_share=True
-        ).first()
+        owner = (
+            session.query(User.user_id)
+            .filter_by(user_id=user_id)
+            .with_for_update(read=True, key_share=True)
+            .first()
+        )
         check = getattr(request.user, "session_is_live", None)
-        if check is None or not check():
+        if owner is None or check is None or not check():
             logger.warning(
-                "authorization_code_refused_session_gone", client_id=client_id, user_id=user_id
+                "authorization_code_refused",
+                client_id=client_id,
+                user_id=user_id,
+                reason="user_gone" if owner is None else "session_gone",
             )
-            raise AccessDeniedError(description="The session is no longer valid.")
+            raise AccessDeniedError(
+                description="The session is no longer valid.",
+                redirect_uri=request_data.get("redirect_uri"),
+                state=request_data.get("state"),
+            )
 
         # Create authorization code record (expires in 10 minutes)
         auth_code = OAuth2AuthorizationCode(

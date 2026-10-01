@@ -73,6 +73,17 @@ def db_factory() -> Iterator[sessionmaker]:
     with factory() as db:
         db.add_all(
             [
+                # The approving user must exist: the approval share-locks the
+                # owner's row and refuses when it is gone (#1770).
+                User(
+                    user_id="device-user",
+                    email="device-user@example.test",
+                    name="Device User",
+                    role="user",
+                    is_initial_admin=False,
+                    auth_method="oauth",
+                    auth_provider="google",
+                ),
                 OAuth2Client(
                     client_id=CLI_CLIENT, client_name="Test CLI", scope=CLI_SCOPE, **common
                 ),

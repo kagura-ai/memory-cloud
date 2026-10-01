@@ -25,6 +25,8 @@ Nothing here commits: the caller owns the transaction.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,7 +34,16 @@ from models.auth import OAuth2AuthorizationCode, OAuth2DeviceCode, OAuth2Token, 
 from utils.datetime import utcnow
 
 
-async def revoke_oauth_grants(db: AsyncSession, user_id: str) -> int:
+@dataclass(frozen=True)
+class RevokedGrants:
+    """What one revocation removed or revoked, per table."""
+
+    authorization_codes: int
+    device_codes: int
+    tokens: int
+
+
+async def revoke_oauth_grants(db: AsyncSession, user_id: str) -> RevokedGrants:
     """Lock the owner, drop the pending codes, revoke the tokens.
 
     Runs inside the caller's transaction and locks the ``users`` row
@@ -45,15 +56,15 @@ async def revoke_oauth_grants(db: AsyncSession, user_id: str) -> int:
     on a token (a rotated or revoked pair) are kept, so the history survives.
 
     Returns:
-        The number of tokens revoked.
+        The rows deleted (codes) and revoked (tokens), per table.
     """
     await db.execute(select(User.user_id).where(User.user_id == user_id).with_for_update())
-    await db.execute(
+    codes = await db.execute(
         delete(OAuth2AuthorizationCode).where(OAuth2AuthorizationCode.user_id == user_id)
     )
-    await db.execute(delete(OAuth2DeviceCode).where(OAuth2DeviceCode.user_id == user_id))
+    devices = await db.execute(delete(OAuth2DeviceCode).where(OAuth2DeviceCode.user_id == user_id))
     now = utcnow()
-    result = await db.execute(
+    tokens = await db.execute(
         update(OAuth2Token)
         .where(
             OAuth2Token.user_id == user_id,
@@ -68,4 +79,12 @@ async def revoke_oauth_grants(db: AsyncSession, user_id: str) -> int:
             refresh_token_revoked_at=func.coalesce(OAuth2Token.refresh_token_revoked_at, now),
         )
     )
+    return RevokedGrants(
+        authorization_codes=_rowcount(codes),
+        device_codes=_rowcount(devices),
+        tokens=_rowcount(tokens),
+    )
+
+
+def _rowcount(result: object) -> int:
     return int(getattr(result, "rowcount", 0) or 0)

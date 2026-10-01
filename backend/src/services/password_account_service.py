@@ -558,7 +558,7 @@ class PasswordAccountService:
         Returns:
             The number of tokens revoked.
         """
-        return await revoke_oauth_grants(self.db, user_id)
+        return (await revoke_oauth_grants(self.db, user_id)).tokens
 
     async def _invalidate_password_links(self, user_id: str) -> None:
         await EmailActionTokenService(self.db).invalidate(

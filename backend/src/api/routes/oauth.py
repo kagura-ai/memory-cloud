@@ -50,6 +50,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.orm import Session
 from starlette.requests import ClientDisconnect
 
+from api.routes import auth as auth_module
 from auth.dependencies import SessionUser, require_admin
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth2_server import (
@@ -1447,10 +1448,6 @@ async def list_oauth2_providers(
 # OAuth2 Authorization Flow Endpoints (Phase 1.4 Part B)
 # ============================================================================
 
-# The browser session cookie SessionMiddleware reads (Issue #115); the name
-# lives in api.routes.auth, which this module does not import at load time.
-_SESSION_COOKIE_NAME = "kagura_session"
-
 
 # Helper function: Get current user from session
 def get_current_user_from_session(request: Request) -> _OAuthUser | None:
@@ -1469,7 +1466,7 @@ def get_current_user_from_session(request: Request) -> _OAuthUser | None:
         return None
 
     user_data = request.state.user
-    session_id = request.cookies.get(_SESSION_COOKIE_NAME)
+    session_id = request.cookies.get(auth_module.SESSION_COOKIE_NAME)
 
     if isinstance(user_data, dict):
         return _OAuthUser(
@@ -2608,50 +2605,43 @@ def _get_user_from_session(request: Request) -> dict | None:
     return {"user_id": user_stub.user_id, "email": user_stub.email}
 
 
-@router.post("/device/confirm", response_model=DeviceConfirmResponse)
-async def device_confirm(
-    request: Request,
-    body: DeviceConfirmRequest,
-    background_tasks: BackgroundTasks,
-) -> DeviceConfirmResponse:
-    """User consent endpoint for device authorization.
+def _confirm_device_sync(
+    *, user_id: str | None, session_id: str | None, user_code: str, approve: bool
+) -> tuple[str, str | None, str]:
+    """Approve or deny a device code; the sync body of ``device_confirm``.
 
-    Requires session authentication. Sets authorized_at or denied_at on the
-    device code record so the polling CLI receives the decision. Every
-    approval emails the user a security notice after the commit (Issue #1752):
-    a device code can be phished (the attacker starts the flow and gets the
-    victim to approve the code), so unlike authorization-code consent this is
-    not limited to the first grant; coalescing bounds the volume. Scheduling
-    the notice touches no DB, so nothing here runs sync DB work for it.
+    Runs in a worker thread: the owner lock below may wait on a password
+    reset that is itself an ``await``-ing coroutine on the event loop, so
+    blocking the loop here would hold the lock the reset needs to finish.
+
+    Returns ``(status, approving user id, client id)``; raises HTTPException.
     """
-    user = _get_user_from_session(request)
-    if not user:
-        raise AuthenticationError("Authentication required")
-
     db_session = get_sync_session()
-
     try:
-        if body.approve:
+        if approve:
             # #1770: before the device-code row (users → codes, the order every
             # grant path keeps), share-lock the owner so this approval
-            # serializes with a password reset, then make sure the session is
-            # still there. A reset holds the user row FOR UPDATE until it has
-            # dropped the account's device codes AND its browser sessions, so
-            # a session gone once this lock is granted means the reset ran:
-            # approve nothing. An approval that locked first commits before
-            # the reset's DELETE, which then removes the approved code.
-            approving_user_id = user.get("user_id") or user.get("sub")
-            if approving_user_id:
-                db_session.query(User.user_id).filter_by(user_id=approving_user_id).with_for_update(
-                    read=True, key_share=True
-                ).first()
-            if not approving_user_id or not browser_session_is_live(
-                request.cookies.get(_SESSION_COOKIE_NAME), approving_user_id
-            ):
-                db_session.rollback()
+            # serializes with a password reset or an erasure, then make sure
+            # the session is still there and the user still exists. A reset
+            # holds the user row FOR UPDATE until it has dropped the account's
+            # device codes AND its browser sessions; an erasure deletes the row.
+            # Either way, once this lock is granted a gone session or a gone
+            # user means a revocation ran: approve nothing. An approval that
+            # locked first commits before the reset's DELETE, which then
+            # removes the approved code.
+            owner = (
+                db_session.query(User.user_id)
+                .filter_by(user_id=user_id)
+                .with_for_update(read=True, key_share=True)
+                .first()
+                if user_id
+                else None
+            )
+            if owner is None or not browser_session_is_live(session_id, user_id or ""):
                 logger.warning(
-                    "device_authorization_refused_session_gone",
-                    user_code_prefix=body.user_code[:4],
+                    "device_authorization_refused",
+                    user_code_prefix=user_code[:4],
+                    reason="user_gone" if owner is None else "session_gone",
                 )
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -2660,7 +2650,7 @@ async def device_confirm(
 
         device = (
             db_session.query(OAuth2DeviceCode)
-            .filter_by(user_code=body.user_code.upper())
+            .filter_by(user_code=user_code.upper())
             .with_for_update()
             .first()
         )
@@ -2689,8 +2679,7 @@ async def device_confirm(
                 detail="This code has already been denied",
             )
 
-        if body.approve:
-            user_id = user.get("user_id") or user.get("sub")
+        if approve:
             if not user_id:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -2704,25 +2693,10 @@ async def device_confirm(
             status_str = "denied"
 
         db_session.commit()
-        if status_str == "approved" and device.user_id:
-            schedule_security_notification(
-                background_tasks,
-                user_id=device.user_id,
-                event=SecurityEvent.OAUTH_CLIENT_AUTHORIZED,
-                request=request,
-                client_id=device.client_id,
-            )
-
-        # A user_code is logged by its prefix, as /device/audit-unauth does (#779).
-        logger.info(
-            "device_authorization_" + status_str,
-            user_code_prefix=body.user_code[:4],
-            user_id=device.user_id,
-        )
-
-        return DeviceConfirmResponse(status=status_str, user_code=body.user_code)
+        return status_str, device.user_id, device.client_id
 
     except HTTPException:
+        db_session.rollback()
         raise
     except Exception as e:
         db_session.rollback()
@@ -2733,6 +2707,58 @@ async def device_confirm(
         ) from e
     finally:
         db_session.close()
+
+
+@router.post("/device/confirm", response_model=DeviceConfirmResponse)
+async def device_confirm(
+    request: Request,
+    body: DeviceConfirmRequest,
+    background_tasks: BackgroundTasks,
+) -> DeviceConfirmResponse:
+    """User consent endpoint for device authorization.
+
+    Requires session authentication. Sets authorized_at or denied_at on the
+    device code record so the polling CLI receives the decision. Every
+    approval emails the user a security notice after the commit (Issue #1752):
+    a device code can be phished (the attacker starts the flow and gets the
+    victim to approve the code), so unlike authorization-code consent this is
+    not limited to the first grant; coalescing bounds the volume. Scheduling
+    the notice touches no DB, so nothing here runs sync DB work for it.
+
+    The database work runs in a worker thread (#1770): the approval
+    share-locks the owner's ``users`` row and may wait on a reset holding it.
+    """
+    import asyncio
+
+    user = _get_user_from_session(request)
+    if not user:
+        raise AuthenticationError("Authentication required")
+
+    status_str, device_user_id, client_id = await asyncio.to_thread(
+        _confirm_device_sync,
+        user_id=user.get("user_id") or user.get("sub"),
+        session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME),
+        user_code=body.user_code,
+        approve=body.approve,
+    )
+
+    if status_str == "approved" and device_user_id:
+        schedule_security_notification(
+            background_tasks,
+            user_id=device_user_id,
+            event=SecurityEvent.OAUTH_CLIENT_AUTHORIZED,
+            request=request,
+            client_id=client_id,
+        )
+
+    # A user_code is logged by its prefix, as /device/audit-unauth does (#779).
+    logger.info(
+        "device_authorization_" + status_str,
+        user_code_prefix=body.user_code[:4],
+        user_id=device_user_id,
+    )
+
+    return DeviceConfirmResponse(status=status_str, user_code=body.user_code)
 
 
 _CLIENT_AUTH_CHALLENGE = 'Basic realm="Kagura Memory Cloud OAuth"'

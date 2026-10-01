@@ -442,6 +442,24 @@ class TestSaveAuthorizationCode:
         grant.server.db_session.add.assert_not_called()
         grant.server.db_session.commit.assert_not_called()
 
+    def test_refuses_the_code_when_the_user_row_is_gone(self) -> None:
+        # An erasure deleted the users row in the transaction that held it;
+        # a consent that waited finds no owner even with a live session.
+        grant = _make_authz_grant()
+        session = grant.server.db_session
+        session.query.return_value.filter_by.return_value.with_for_update.return_value.first.return_value = None
+        request = self._request(
+            {"state": "st-1"},
+            user=SimpleNamespace(user_id="user-abc", session_is_live=lambda: True),
+        )
+
+        with pytest.raises(AccessDeniedError) as excinfo:
+            grant.save_authorization_code("authcode-8", request)
+        session.add.assert_not_called()
+        # Carried so Authlib answers with the redirect, not a bare error body.
+        assert excinfo.value.redirect_uri == "https://example.com/cb"
+        assert excinfo.value.state == "st-1"
+
     def test_refuses_a_user_object_that_cannot_vouch_for_its_session(self) -> None:
         # No hook at all (not our _OAuthUser) → fail closed.
         grant = _make_authz_grant()

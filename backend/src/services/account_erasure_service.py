@@ -53,9 +53,7 @@ from models.auth import (
     Context,
     ContextMember,
     ExternalAPIKey,
-    OAuth2AuthorizationCode,
     OAuth2Client,
-    OAuth2DeviceCode,
     OAuth2Token,
     User,
     Workspace,
@@ -1002,19 +1000,18 @@ class AccountErasureService:
         # Revoke the OAuth grants first, through the one revoker that owns
         # the lock order (users → codes → device codes → tokens, #1770): it
         # takes the user row FOR UPDATE, which every grant writer share-locks
-        # before it writes (#1738), so a consent, device approval or refresh
+        # before it writes (#1738). A consent, device approval or refresh
         # racing this sweep either lands before it and is revoked here, or
-        # waits and then finds its session gone. The rows are then deleted
-        # below as before — this is an erasure, revocation alone keeps them.
-        await revoke_oauth_grants(self.db, user_id)
+        # waits on the row and — since this transaction deletes the row
+        # below — then finds no user to grant for and writes nothing. The
+        # codes are gone with this call; the tokens are deleted below as
+        # before (this is an erasure, revocation alone keeps the rows).
+        revoked = await revoke_oauth_grants(self.db, user_id)
+        counts["oauth_authorization_codes"] = revoked.authorization_codes
 
-        # OAuth2 tokens / authorization codes / clients first — no FK
-        # cascade from users to these.
+        # OAuth2 tokens / clients — no FK cascade from users to these.
         counts["oauth_tokens"] = await self._count_and_delete(
             OAuth2Token, OAuth2Token.user_id == user_id
-        )
-        counts["oauth_authorization_codes"] = await self._count_and_delete(
-            OAuth2AuthorizationCode, OAuth2AuthorizationCode.user_id == user_id
         )
         counts["oauth_clients"] = await self._count_and_delete(
             OAuth2Client, OAuth2Client.owner_id == user_id
@@ -1022,9 +1019,7 @@ class AccountErasureService:
         # #1365 review sweep: device-authorization-flow rows cascade on client
         # deletion only, so the subject's raw sub in user_id survives an
         # OAuth-token erasure. Transient per-user rows — delete the subject's.
-        counts["oauth_device_codes"] = await self._count_and_delete(
-            OAuth2DeviceCode, OAuth2DeviceCode.user_id == user_id
-        )
+        counts["oauth_device_codes"] = revoked.device_codes
 
         # Direct per-user tables.
         counts["external_api_keys"] = await self._count_and_delete(

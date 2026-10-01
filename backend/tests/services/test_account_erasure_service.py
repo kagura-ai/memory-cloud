@@ -1151,8 +1151,11 @@ class TestErasureResiduals1365:
         """v0.54..v0.57 review sweep: per-user rows with no user-scoped cascade
         (or dead ACL grants) must be deleted so the raw sub can't outlive
         erasure — context_members (F8), oauth_device_codes, llm_call_logs."""
-        from models.auth import ContextMember, OAuth2DeviceCode
+        from unittest.mock import patch
+
+        from models.auth import ContextMember
         from models.llm_call_log import LLMCallLog
+        from services.oauth_grant_revocation import RevokedGrants
 
         svc = _service()
         svc._count_and_delete = AsyncMock(return_value=0)
@@ -1162,11 +1165,20 @@ class TestErasureResiduals1365:
         svc.db.commit = AsyncMock()
         target = _user()
 
-        await svc._delete_postgres(target)
+        # #1770: the OAuth codes and device codes go through the shared
+        # revoker (users → codes → device codes → tokens), whose counts land
+        # in the summary.
+        revoke = AsyncMock(
+            return_value=RevokedGrants(authorization_codes=1, device_codes=2, tokens=3)
+        )
+        with patch("services.account_erasure_service.revoke_oauth_grants", revoke):
+            counts = await svc._delete_postgres(target)
 
+        revoke.assert_awaited_once_with(svc.db, target.user_id)
+        assert counts["oauth_authorization_codes"] == 1
+        assert counts["oauth_device_codes"] == 2
         deleted_models = {c.args[0] for c in svc._count_and_delete.await_args_list}
         assert ContextMember in deleted_models
-        assert OAuth2DeviceCode in deleted_models
         assert LLMCallLog in deleted_models
 
     @pytest.mark.asyncio

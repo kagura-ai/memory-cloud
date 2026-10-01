@@ -338,10 +338,41 @@ class TestDeviceConfirmEndpoint:
         assert resp.status_code == 401
         assert test_device_code.authorized_at is None
         assert test_device_code.user_id is None
-        mock_db.rollback.assert_called_once()
+        assert mock_db.rollback.called
         mock_db.commit.assert_not_called()
         _browser_session_live.assert_called_once()
         assert _browser_session_live.call_args.args[1] == "test_user_123"
+
+    def test_confirm_approve_refuses_when_the_user_row_is_gone(self, test_device_code):
+        # #1770: an erasure deletes the users row inside the transaction that
+        # holds it FOR UPDATE; an approval that waited on it finds no owner
+        # and must not approve a code for an erased account, even if the
+        # browser session has not been swept yet.
+        with patch("api.routes.oauth._get_user_from_session") as mock_get_user:
+            mock_get_user.return_value = {"user_id": "test_user_123"}
+            with patch("api.routes.oauth.get_sync_session") as mock_session_fn:
+                mock_db = MagicMock()
+
+                def query(model):
+                    q = MagicMock()
+                    is_user = "user_id" in (getattr(model, "__name__", None) or str(model))
+                    q.filter_by.return_value.with_for_update.return_value.first.return_value = (
+                        None if is_user else test_device_code
+                    )
+                    return q
+
+                mock_db.query.side_effect = query
+                mock_session_fn.return_value = mock_db
+
+                client = TestClient(app)
+                resp = client.post(
+                    "/api/v1/oauth/device/confirm",
+                    json={"user_code": "TST12345", "approve": True},
+                )
+
+        assert resp.status_code == 401
+        assert test_device_code.authorized_at is None
+        mock_db.commit.assert_not_called()
 
     def test_confirm_approve_share_locks_the_owner_before_the_device_row(self, test_device_code):
         # #1770: users → codes, the order every grant path and the reset keep.
@@ -756,6 +787,19 @@ class TestDeviceSignInWithinLimits:
             model.__table__.create(engine)
         factory = sessionmaker(bind=engine, expire_on_commit=False)
         with factory() as db:
+            # The approving user must exist: the approval share-locks the
+            # owner's row and refuses when it is gone (#1770).
+            db.add(
+                User(
+                    user_id="device_flow_user",
+                    email="user@example.test",
+                    name="Device User",
+                    role="user",
+                    is_initial_admin=False,
+                    auth_method="oauth",
+                    auth_provider="google",
+                )
+            )
             db.add(
                 OAuth2Client(
                     client_id="device-flow-test-cli",

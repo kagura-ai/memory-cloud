@@ -83,6 +83,17 @@ def db_factory() -> Iterator[sessionmaker]:
     with factory() as db:
         db.add_all(
             [
+                # The consenting user must exist: the consent share-locks the
+                # owner's row and refuses when it is gone (#1770).
+                User(
+                    user_id=USER_ID,
+                    email="flow-user@example.test",
+                    name="Flow User",
+                    role="user",
+                    is_initial_admin=False,
+                    auth_method="oauth",
+                    auth_provider="google",
+                ),
                 # A DCR registration: public client, the DCR default scope.
                 OAuth2Client(
                     client_id=PUBLIC_CLIENT,
@@ -270,6 +281,44 @@ def _public_tokens(api: TestClient, *, resource: str | None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Token-endpoint logging
 # ---------------------------------------------------------------------------
+
+
+class TestConsentRacingARevocation:
+    """A consent whose session is gone by the time it holds the owner lock (#1770)."""
+
+    def test_refused_consent_redirects_with_access_denied_and_stores_no_code(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        verifier, challenge = _pkce()
+        params = _authorize_params(challenge=challenge, state="after-reset")
+        # The owner lock was granted only after a reset deleted the sessions.
+        with patch("auth.oauth2_server.browser_session_is_live", return_value=False):
+            refused = _submit_consent(api, params)
+
+        assert refused.status_code == 303, refused.text[:300]
+        redirect = _redirect_params(refused)
+        assert redirect["error"] == "access_denied"
+        assert redirect["state"] == "after-reset"
+        assert "code" not in redirect
+        with db_factory() as db:
+            assert db.query(OAuth2AuthorizationCode).count() == 0
+
+    def test_refused_consent_when_the_user_row_is_gone(
+        self, api: TestClient, db_factory: sessionmaker
+    ) -> None:
+        # An erasure deleted the users row inside the transaction that held
+        # it; a consent that waited finds no owner and must not write a code
+        # even though its session has not been swept yet.
+        with db_factory() as db:
+            db.query(User).filter_by(user_id=USER_ID).delete()
+            db.commit()
+        verifier, challenge = _pkce()
+        refused = _submit_consent(api, _authorize_params(challenge=challenge))
+
+        assert refused.status_code == 303, refused.text[:300]
+        assert _redirect_params(refused)["error"] == "access_denied"
+        with db_factory() as db:
+            assert db.query(OAuth2AuthorizationCode).count() == 0
 
 
 class TestTokenEndpointLogging:
