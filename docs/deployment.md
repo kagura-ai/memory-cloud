@@ -137,7 +137,7 @@ docker inspect -f '{{json .HostConfig.LogConfig}}' kagura-caddy
 # {"Type":"json-file","Config":{"max-file":"3","max-size":"50m"}}
 
 # Data tier — maintenance window only (volumes are kept, the services restart).
-# Qdrant still on 1.15 / 1.16? Run docs/ops/qdrant-upgrade-runbook.md first.
+# Qdrant older than 1.18? Run docs/ops/qdrant-upgrade-runbook.md first.
 # docker compose -f docker-compose.prod.yml --env-file .env.prod \
 #   up -d --no-deps --force-recreate postgres qdrant redis
 ```

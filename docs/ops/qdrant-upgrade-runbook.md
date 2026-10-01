@@ -6,11 +6,18 @@ ships `qdrant-client` 1.18. A Qdrant volume created by an earlier release
 minor version at a time. This runbook is that procedure for the single-server
 stack (single-host and split-host layouts) and for a local development stack.
 
-A routine `./scripts/deploy.sh` never recreates Qdrant (`--no-deps`), so
-deploying the release does not by itself touch the volume. What does is any
-command that recreates the `qdrant` service from the new compose files: the
-data-tier recreate in [Container log rotation](../deployment.md#container-log-rotation),
-a first `docker compose up -d` on a data VM, or `make up` on a dev machine.
+A routine `./scripts/deploy.sh` never recreates Qdrant (`--no-deps`), so the
+deploy itself does not touch the volume. What does is any command that
+recreates the `qdrant` service from the new compose files:
+
+- the `kagura-memory` systemd unit, which runs a whole-stack `up -d` at boot —
+  once the checkout is on v0.87.0, the next reboot is enough;
+- the data-tier recreate in [Container log rotation](../deployment.md#container-log-rotation);
+- the data VM's `docker compose … up -d` on a split host;
+- `make up` on a dev machine.
+
+So deploy v0.87.0 as step 3 of this runbook, inside one maintenance window,
+rather than on its own.
 
 ## Why this is not an image-tag bump
 
@@ -62,22 +69,48 @@ step 3, one on 1.16 at step 2.
 
 ## Before you start
 
+Run everything on the VM from `/opt/kagura-memory/src/terraform/single-server`,
+in **one shell session** — the helpers below live in it.
+
 - **Maintenance window.** Each step restarts Qdrant. While it loads, recall and
   any write that needs the vector store fail; the restart takes seconds on a
   small collection and grows with its size.
-- **Back up the disk** — [Manual snapshot](../../terraform/single-server/README.md#manual-snapshot)
-  on GCE, or stop Qdrant and copy the `kagura_qdrant_data` volume elsewhere.
-- Run the commands below on the VM from `/opt/kagura-memory/src/terraform/single-server`.
+- **Disable the boot unit for the window** — re-enable it after step 5:
+
+  ```bash
+  sudo systemctl disable kagura-memory
+  ```
+
+- **Back up the Qdrant volume.** Check `df -h /var/lib/docker` first; the archive
+  is about the size of the collections.
+
+  ```bash
+  docker stop kagura-qdrant
+  sudo tar -C "$(docker volume inspect -f '{{.Mountpoint}}' kagura_qdrant_data)" \
+    -czf "/var/backups/qdrant-$(date +%Y%m%d-%H%M).tgz" .
+  docker start kagura-qdrant
+  ```
+
+  A [disk snapshot](../../terraform/single-server/README.md#manual-snapshot)
+  works too, but restoring one also rewinds PostgreSQL and Redis.
 
 ## Procedure — single host
 
-Two helpers. `qdrant_status` reads the server through a running API container
-(the Qdrant image has no curl; the API container has the URL and the key in its
-environment) and prints the version and each collection's status and point
-count. The overlay swaps only the image, so the intermediate steps run from the
-same service definition — network, volume, API key — as the real one.
+Helpers: an overlay that swaps only the image (so every step runs from the same
+service definition — network, volume, API key — as the real one);
+`qdrant_status`, which reads the server through a running API container (the
+Qdrant image has no curl; the API container has the URL and the key in its
+environment) and prints its version and each collection's status and point
+count; `wait_qdrant`, which waits until a given version serves; and
+`qdrant_step`, which runs one overlay step and waits for it.
 
 ```bash
+W="$(mktemp -d)"
+cat > "$W/qdrant-step.yml" <<'EOF'
+services:
+  qdrant:
+    image: qdrant/qdrant:${QDRANT_STEP_TAG:?set QDRANT_STEP_TAG}
+EOF
 qdrant_status() {
   docker exec -i "$(docker ps -q -f name=^kagura-api- | head -n1)" python - <<'PY'
 import os, httpx
@@ -90,27 +123,29 @@ for c in httpx.get(base + "/collections", headers=h).json()["result"]["collectio
     print(c["name"], r["status"], r["points_count"])
 PY
 }
-wait_qdrant() {  # up to 5 minutes; a crash loop never gets ready
-  for _ in $(seq 1 60); do qdrant_status 2>/dev/null && return 0; sleep 5; done
-  echo "Qdrant did not become ready" >&2; docker logs --tail 30 kagura-qdrant; return 1
+wait_qdrant() {  # $1 = the version that must be serving, e.g. 1.16.3; up to 5 minutes
+  local out
+  for _ in $(seq 1 60); do
+    if out="$(qdrant_status 2>/dev/null)" && [ "$(head -n1 <<<"$out")" = "version $1" ]; then
+      printf '%s\n' "$out"; return 0
+    fi
+    sleep 5
+  done
+  echo "Qdrant $1 is not serving: see 'If a step does not come up'" >&2; return 1
 }
-cat > /tmp/qdrant-step.yml <<'EOF'
-services:
-  qdrant:
-    image: qdrant/qdrant:${QDRANT_STEP_TAG:?set QDRANT_STEP_TAG}
-EOF
+qdrant_step() {  # $1 = version, e.g. 1.16.3
+  QDRANT_STEP_TAG="v$1" docker compose -f docker-compose.prod.yml -f "$W/qdrant-step.yml" \
+    --env-file .env.prod up -d --no-deps qdrant && wait_qdrant "$1"
+}
 
-qdrant_status | tee /tmp/qdrant-before.txt
+qdrant_status | tee "$W/before.txt"
 ```
 
-Steps 1–2, with your current API still serving:
+Steps 1–2, with your current API still serving. `&&` stops at the first step
+that does not come up — never go on from a failed step:
 
 ```bash
-for tag in v1.16.3 v1.17.1; do
-  QDRANT_STEP_TAG=$tag docker compose -f docker-compose.prod.yml -f /tmp/qdrant-step.yml \
-    --env-file .env.prod up -d --no-deps qdrant
-  wait_qdrant || break
-done
+qdrant_step 1.16.3 && qdrant_step 1.17.1
 ```
 
 Step 3 — deploy v0.87.0 as usual ([Update to a new release](../../terraform/single-server/README.md#update-to-a-new-release-zero-downtime)):
@@ -124,60 +159,104 @@ Steps 4–5. The last one uses the compose file alone, which leaves the service
 exactly as the release defines it:
 
 ```bash
-QDRANT_STEP_TAG=v1.18.3 docker compose -f docker-compose.prod.yml -f /tmp/qdrant-step.yml \
-  --env-file .env.prod up -d --no-deps qdrant && wait_qdrant \
-&& docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps qdrant \
-&& wait_qdrant | tee /tmp/qdrant-after.txt
-diff <(tail -n +2 /tmp/qdrant-before.txt) <(tail -n +2 /tmp/qdrant-after.txt) && echo "collections unchanged"
+qdrant_step 1.18.3 \
+  && docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps qdrant \
+  && wait_qdrant 1.19.1 > "$W/after.txt" && cat "$W/after.txt" \
+  && diff <(tail -n +2 "$W/before.txt") <(tail -n +2 "$W/after.txt") && echo "collections unchanged"
 ```
 
 Every collection should read `green` with the point count it had before. A
 count that moved because the API took writes during the window is expected;
-one that dropped to zero is not — stop and restore the snapshot.
-
-## Procedure — split host
-
-Run the `up` commands on the **data VM** with the data-tier files, and the
-helpers on the **app VM** (they need an API container):
+one that dropped to zero is not — see the next section. When it all reads
+right, re-enable the boot unit:
 
 ```bash
-# data VM — e.g. step 1 (DATA_BIND_ADDR as in README "Optional: split-host layout")
-DATA_BIND_ADDR=192.168.10.20 QDRANT_STEP_TAG=v1.16.3 docker compose \
-  -f docker-compose.data.yml -f docker-compose.data-expose.yml -f /tmp/qdrant-step.yml \
-  --env-file .env.prod up -d --no-deps qdrant
+sudo systemctl enable kagura-memory
 ```
-
-The order of the steps and the deploy in step 3 (on the app VM) are the same.
 
 ## If a step does not come up
 
-`docker logs --tail 50 kagura-qdrant` names the failure. A `rocks_db` panic
-means a minor was skipped: go back to the step after the last one that loaded
-(the failed start did not change the volume in the test above) and continue
-from there. Anything else, or a collection that loads with fewer points: stop
-Qdrant and restore the disk snapshot, then start again from the version the
-snapshot was taken on.
+`docker logs --tail 50 kagura-qdrant` (on the data VM for a split host) names
+the failure.
+
+- **A `rocks_db` panic** means a minor was skipped. Run the step after the last
+  version that served, then continue in order — in the test above the failed
+  start did not change the volume.
+- **A failed image pull** leaves the previous version running; `wait_qdrant`
+  reports that it is not the expected version. Fix the pull and rerun the step.
+- **Anything else, or a collection with fewer points:** restore the backup and
+  start again from the version it was taken on:
+
+  ```bash
+  docker stop kagura-qdrant
+  D="$(docker volume inspect -f '{{.Mountpoint}}' kagura_qdrant_data)"
+  sudo find "$D" -mindepth 1 -delete
+  sudo tar -C "$D" -xzf /var/backups/qdrant-<timestamp>.tgz
+  qdrant_step 1.15.0     # the version the backup was taken on
+  ```
+
+## Procedure — split host
+
+The Qdrant container runs on the **data VM**; the helpers need an API container
+and run on the **app VM**. Disable whatever runs a whole-stack `up -d` at boot
+on both VMs for the window.
+
+On the data VM, in the directory with `docker-compose.data.yml` and its
+`.env.prod` (`DATA_BIND_ADDR` as in README "Optional: split-host layout"):
+
+```bash
+W="$(mktemp -d)"
+cat > "$W/qdrant-step.yml" <<'EOF'
+services:
+  qdrant:
+    image: qdrant/qdrant:${QDRANT_STEP_TAG:?set QDRANT_STEP_TAG}
+EOF
+data_step() {  # $1 = version, e.g. 1.16.3
+  DATA_BIND_ADDR=192.168.10.20 QDRANT_STEP_TAG="v$1" docker compose \
+    -f docker-compose.data.yml -f docker-compose.data-expose.yml -f "$W/qdrant-step.yml" \
+    --env-file .env.prod up -d --no-deps qdrant
+}
+```
+
+Then, one step at a time, confirming each on the app VM (with `qdrant_status`
+and `wait_qdrant` defined there as above) before the next:
+
+| Step | Data VM | App VM |
+|---|---|---|
+| 1 | `data_step 1.16.3` | `wait_qdrant 1.16.3` |
+| 2 | `data_step 1.17.1` | `wait_qdrant 1.17.1` |
+| 3 | — | deploy v0.87.0 as README "Optional: split-host layout" describes |
+| 4 | `data_step 1.18.3` | `wait_qdrant 1.18.3` |
+| 5 | update the data VM's compose files to the release (e.g. `git fetch && git reset --hard origin/main` in its checkout), then `DATA_BIND_ADDR=192.168.10.20 docker compose -f docker-compose.data.yml -f docker-compose.data-expose.yml --env-file .env.prod up -d --no-deps qdrant` | `wait_qdrant 1.19.1` |
+
+Step 5 needs the updated files: with the old ones, that command would start
+Qdrant 1.15.0 on a volume that 1.18 has already written.
 
 ## Local development stack
 
 `docker-compose.yml` pins the same image. Its volume is
 `<project>_qdrant_data`, where the project is the checkout's directory name
 unless `COMPOSE_PROJECT_NAME` is set (`docker volume ls | grep qdrant_data`
-lists them). A volume that holds collections made before v0.87.0 crash-loops
-the new image after `make up`. Either step it through — the dev stack publishes Qdrant on
-loopback without an API key, so no helper is needed:
+lists them). On a volume that holds collections made before v0.87.0, the new
+image fails to start after `make up` (the dev service has no restart policy, so
+the container just exits). Either step it through — the dev stack publishes
+Qdrant on loopback without an API key, so no helper is needed:
 
 ```bash
-cat > /tmp/qdrant-step.yml <<'EOF'
+W="$(mktemp -d)"
+cat > "$W/qdrant-step.yml" <<'EOF'
 services:
   qdrant:
     image: qdrant/qdrant:${QDRANT_STEP_TAG:?set QDRANT_STEP_TAG}
 EOF
-for tag in v1.16.3 v1.17.1 v1.18.3; do
-  QDRANT_STEP_TAG=$tag docker compose -f docker-compose.yml -f /tmp/qdrant-step.yml up -d --no-deps qdrant
-  timeout 300 sh -c 'until curl -fs http://127.0.0.1:6333/readyz >/dev/null; do sleep 2; done' || break
+ok=1
+for tag in 1.16.3 1.17.1 1.18.3; do
+  QDRANT_STEP_TAG="v$tag" docker compose -f docker-compose.yml -f "$W/qdrant-step.yml" up -d --no-deps qdrant \
+    && timeout 300 sh -c 'until curl -fs http://127.0.0.1:6333/readyz >/dev/null; do sleep 2; done' \
+    && curl -fs http://127.0.0.1:6333/ | grep -q "\"version\":\"$tag\"" \
+    || { ok=0; echo "stopped at $tag"; break; }
 done
-docker compose up -d --no-deps qdrant   # v1.19.1
+[ "$ok" = 1 ] && docker compose up -d --no-deps qdrant   # v1.19.1
 ```
 
 or, for disposable data, drop the volume and let the stack create a fresh one

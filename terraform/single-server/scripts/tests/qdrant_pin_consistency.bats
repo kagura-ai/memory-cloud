@@ -23,10 +23,14 @@ IMAGE_FILES=(
     "terraform/single-server/docker-compose.data.yml"
 )
 
-# The one server tag every tracked YAML file pins (empty when they disagree).
+# Every distinct Qdrant tag the tracked YAML files reference outside comments,
+# one per line. Quotes, a registry prefix, a digest (@sha256:...) and a
+# trailing comment are not part of the tag.
 server_tag() {
-    git -C "$REPO_ROOT" grep -hoE 'image: *qdrant/qdrant:[^"[:space:]]+' -- '*.yml' '*.yaml' \
-        | sed -E 's/.*qdrant\/qdrant://' | sort -u
+    local pat="qdrant/qdrant:[^\"'[:space:]@#]+"
+    git -C "$REPO_ROOT" grep -hE 'qdrant/qdrant:' -- '*.yml' '*.yaml' \
+        | grep -vE '^[[:space:]]*#' \
+        | grep -oE "$pat" | sed -E 's/^qdrant\/qdrant://' | sort -u
 }
 
 @test "every tracked YAML file pins the same Qdrant image tag" {
@@ -39,7 +43,7 @@ server_tag() {
 @test "each listed site pins the image (guard not vacuous)" {
     cd "$REPO_ROOT"
     for f in "${IMAGE_FILES[@]}"; do
-        run grep -cE '^[[:space:]]*image: *qdrant/qdrant:v[0-9]+\.[0-9]+\.[0-9]+[[:space:]]*$' "$f"
+        run grep -cE "^[[:space:]]*image:[[:space:]]*[\"']?([a-z0-9.-]+/)?qdrant/qdrant:v[0-9]+\.[0-9]+\.[0-9]+(@sha256:[0-9a-f]{64})?[\"']?[[:space:]]*(#.*)?$" "$f"
         [ "$status" -eq 0 ]
         [ "$output" -ge 1 ]
     done
@@ -60,10 +64,14 @@ s_major, s_minor = int(tag[1]), int(tag[2])
 
 with open("backend/pyproject.toml", "rb") as fh:
     deps = tomllib.load(fh)["project"]["dependencies"]
-specs = [d.replace(" ", "") for d in deps if re.match(r"qdrant-client(\[|>|<|=|~|!|$)", d)]
+specs = [
+    d.split(";")[0].replace(" ", "")  # drop environment markers and spaces
+    for d in deps
+    if re.match(r"qdrant-client\s*(\[|>|<|=|~|!|;|$)", d)
+]
 if len(specs) != 1:
     sys.exit(f"expected one qdrant-client requirement, found {specs}")
-rng = re.fullmatch(r"qdrant-client>=(\d+)\.(\d+)\.(\d+),<(\d+)\.(\d+)", specs[0])
+rng = re.fullmatch(r"qdrant-client(?:\[[^\]]*\])?>=(\d+)\.(\d+)\.(\d+),<(\d+)\.(\d+)", specs[0])
 if not rng:
     sys.exit(f"expected a '>=X.Y.Z,<X.Y' range, found {specs[0]!r}")
 lo_major, lo_minor, _, hi_major, hi_minor = map(int, rng.groups())
@@ -97,7 +105,7 @@ PYEOF
     [ "$output" = "OK" ]
 }
 
-@test "the window check rejects a server two minors past the client" {
+@test "the window check rejects a server tag three minors past the pinned one" {
     # Self-test: proves check_window can fail, so the test above is not vacuous.
     tag="$(server_tag)"
     major="$(echo "$tag" | cut -d. -f1)"

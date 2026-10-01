@@ -524,12 +524,13 @@ be ready, switches Caddy, then drains and stops the old color.
 > **first** — otherwise the regenerated file reverts to the template's default
 > domain.
 
-> ⚠️ **One-time — v0.87.0 moves Qdrant from 1.15 to 1.19.1 (#1793).** A
-> routine `deploy.sh` never recreates Qdrant, so the deploy itself is safe, but
-> the server stays on 1.15 until you upgrade it, and Qdrant only upgrades one
-> minor version at a time — 1.19.1 started on a 1.15 volume crash-loops. Follow
+> ⚠️ **One-time — v0.87.0 moves Qdrant from 1.15 to 1.19.1 (#1793).** Qdrant
+> only upgrades one minor version at a time, and 1.19.1 started on a 1.15
+> volume crash-loops. `deploy.sh` never recreates Qdrant, but once the checkout
+> is on v0.87.0 any whole-stack `up -d` does — including the `kagura-memory`
+> unit at the next boot. So deploy v0.87.0 as step 3 of
 > [`docs/ops/qdrant-upgrade-runbook.md`](../../docs/ops/qdrant-upgrade-runbook.md),
-> which puts the v0.87.0 deploy between the 1.17 and 1.18 steps.
+> in one maintenance window with the boot unit disabled, rather than on its own.
 
 ```bash
 # On the VM
