@@ -4,6 +4,22 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.87.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.87.0) — 2026-10-01
+
+The data layer moves forward: Qdrant 1.19.1 with a 1.18 client, and a single-server Redis that can require a password.
+
+### Added
+- **Optional Redis password for the single-server stack** ([#1794](https://github.com/kagura-ai/memory-cloud/issues/1794)): set `REDIS_PASSWORD` in `.env.prod` and Redis refuses unauthenticated commands. The API's Redis URL is built from the same variable, so on a single host that one line is all. A `REDIS_URL` in `.env.prod` now overrides the built URL (the compose files used to ignore it), for a password that needs URL-encoding. The Redis healthcheck matches the reply instead of trusting `redis-cli`'s exit code, which stays 0 on `NOAUTH`. With nothing set, nothing changes.
+
+### Changed
+- **Qdrant 1.19.1 and qdrant-client 1.18** ([#1793](https://github.com/kagura-ai/memory-cloud/issues/1793)): the compose files and the nightly eval pin `qdrant/qdrant:v1.19.1`, and the backend ships qdrant-client 1.18.0 (range `>=1.18.0,<1.19`). That client accepts servers 1.17, 1.18 and 1.19, so one release runs through a stepwise server upgrade without the "incompatible" warning. A CI guard fails when the image and the client range drift apart.
+
+### Notes
+- **Qdrant: upgrade an existing volume one minor at a time** — 1.15 → 1.16.3 → 1.17.1 → 1.18.3 → 1.19.1. Started directly on a 1.15 volume, 1.19.1 panics (`unknown variant 'rocks_db'`) and crash-loops. `deploy.sh` never recreates Qdrant, but once the checkout is on v0.87.0 any whole-stack `up -d` does, including the `kagura-memory` boot unit after a reboot. So deploy v0.87.0 as step 3 of `docs/ops/qdrant-upgrade-runbook.md`, in one maintenance window with the boot unit disabled. Local development volumes created before this release need the same steps, or a fresh volume, before `make up`.
+- **Redis:** turning a password on restarts Redis; recreate the running API colors right after, as described in `docs/deployment.md` (*Redis Password*). Sessions and embedding spend counters survive the restart, so nobody is signed out. Requests that need Redis fail between the two steps.
+- **Redis, on upgrade:** the Redis service definition changed, so the next whole-stack `up -d` recreates Redis once, keeping its data. `REDIS_URL` / `REDIS_PASSWORD` lines already in `.env.prod`, ignored until now, apply from this release; check them with `grep -nE '^(REDIS_URL|REDIS_PASSWORD)=' .env.prod` before deploying.
+- No migration. New optional environment variable: `REDIS_PASSWORD`.
+
 ## [v0.86.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.86.1) — 2026-10-01
 
 The one-shot operator commands log quietly, and their live-database tests run in CI.
