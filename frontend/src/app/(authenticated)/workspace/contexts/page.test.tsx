@@ -1186,6 +1186,16 @@ function setupWithOwnedAndSharedContexts() {
         created_by: null,
         created_by_name: null,
       },
+      {
+        ...baseFields,
+        id: "ctx-public",
+        name: "ctx-public",
+        display_name: "Public Docs",
+        is_private: false,
+        is_public: true,
+        created_by: "u-carol",
+        created_by_name: "Carol",
+      },
     ],
   });
 }
@@ -1243,6 +1253,8 @@ describe("ContextsPage workspace scope, owner and filter (#1755)", () => {
     fireEvent.click(button("ownerFilter.shared"));
     expect(screen.queryByText("Mine")).toBeNull();
     expect(screen.getByText("From Bob")).toBeInTheDocument();
+    // A public context someone else created is shared with me too.
+    expect(screen.getByText("Public Docs")).toBeInTheDocument();
     expect(screen.queryByText("Legacy")).toBeNull();
 
     fireEvent.click(button("ownerFilter.all"));

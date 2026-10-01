@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from "@testing-library/react";
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { ContextBreakdownTable } from "./ContextBreakdownTable";
 import type { ContextStatsResponse } from "@/lib/api/workspaces";
 
@@ -61,6 +61,22 @@ const mockContextStats: ContextStatsResponse = {
   total_contexts: 2,
   workspace_totals: { memory_count: 300 },
 };
+
+const ORIGINAL_URL = {
+  createObjectURL: URL.createObjectURL,
+  revokeObjectURL: URL.revokeObjectURL,
+};
+afterEach(() => {
+  vi.restoreAllMocks();
+  Object.defineProperty(URL, "createObjectURL", {
+    value: ORIGINAL_URL.createObjectURL,
+    configurable: true,
+  });
+  Object.defineProperty(URL, "revokeObjectURL", {
+    value: ORIGINAL_URL.revokeObjectURL,
+    configurable: true,
+  });
+});
 
 describe("ContextBreakdownTable", () => {
   it("renders 3 default columns (name, memories, last activity)", () => {
@@ -219,9 +235,9 @@ describe("ContextBreakdownTable", () => {
       value: vi.fn(),
       configurable: true,
     });
-    const click = vi
-      .spyOn(HTMLAnchorElement.prototype, "click")
-      .mockImplementation(() => {});
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
+      () => {},
+    );
 
     render(
       <ContextBreakdownTable
@@ -246,7 +262,6 @@ describe("ContextBreakdownTable", () => {
       expect(lines[2]).toBe(
         '"prod","200","2026-04-09T00:00:00Z","5","Bob","Private"',
       );
-      click.mockRestore();
     });
   });
 
@@ -263,9 +278,9 @@ describe("ContextBreakdownTable", () => {
       value: vi.fn(),
       configurable: true,
     });
-    const click = vi
-      .spyOn(HTMLAnchorElement.prototype, "click")
-      .mockImplementation(() => {});
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
+      () => {},
+    );
 
     render(
       <ContextBreakdownTable
@@ -304,7 +319,62 @@ describe("ContextBreakdownTable", () => {
       expect(csv.split("\n")[1]).toBe(
         `"'=HYPERLINK(""x"")","1","Never","1","Bob ""B"" Smith","Shared"`,
       );
-      click.mockRestore();
     });
   });
+
+  it.each(["+SUM(1)", "-1", "@cmd", "\tTabbed", "\rCR"])(
+    "prefixes a cell starting with a formula character (%j) with a quote",
+    (name) => {
+      const blobs: Blob[] = [];
+      Object.defineProperty(URL, "createObjectURL", {
+        value: (b: Blob) => {
+          blobs.push(b);
+          return "blob:csv";
+        },
+        configurable: true,
+      });
+      Object.defineProperty(URL, "revokeObjectURL", {
+        value: vi.fn(),
+        configurable: true,
+      });
+      vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
+        () => {},
+      );
+      render(
+        <ContextBreakdownTable
+          contexts={[
+            {
+              context_id: "c",
+              context_name: "ctx",
+              created_by: "u",
+              created_by_name: name,
+              memory_count: 0,
+              is_private: true,
+            },
+          ]}
+          totalMemories={0}
+          contextStats={{
+            contexts: [
+              {
+                context_id: "c",
+                context_name: "ctx",
+                memory_count: 0,
+                last_activity: null,
+                member_count: 0,
+                api_calls_week: 0,
+                active_users_week: 0,
+                avg_response_time_ms: 0,
+              },
+            ],
+            total_contexts: 1,
+            workspace_totals: { memory_count: 0 },
+          }}
+        />,
+      );
+      fireEvent.click(screen.getByText(/Export CSV/));
+      return blobs[0].text().then((csv) => {
+        expect(csv.split("\n")[1]).toContain(`"'${name}"`);
+      });
+    },
+  );
 });

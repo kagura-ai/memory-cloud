@@ -40,7 +40,7 @@ type SortColumn = "name" | "memory" | "activity";
  * execute when the export is opened in a spreadsheet (#1755).
  */
 function csvCell(value: string): string {
-  const safe = /^[=+\-@]/.test(value) ? `'${value}` : value;
+  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
   return `"${safe.replace(/"/g, '""')}"`;
 }
 
