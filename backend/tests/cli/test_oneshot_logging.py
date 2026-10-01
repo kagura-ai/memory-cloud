@@ -80,17 +80,18 @@ def test_http_client_per_request_lines_are_held_back_below_debug(name):
     # httpx logs "HTTP Request: PUT .../points/payload" at INFO for every
     # request — one per memory on a payload sweep, the very noise #1788 is
     # about, through stdlib logging instead of structlog.
+    # Asserted on the effective level, not isEnabledFor(): alembic's
+    # fileConfig (run by the migration tests earlier in the integration job)
+    # leaves existing loggers ``disabled``, which isEnabledFor() also reports.
     http_logger = logging.getLogger(name)
     configure_logging("INFO")
-    assert not http_logger.isEnabledFor(logging.INFO)
-    assert http_logger.isEnabledFor(logging.WARNING)
+    assert http_logger.getEffectiveLevel() == logging.WARNING
     # An explicit child level is not re-filtered by the root's: ERROR must
     # not let the client's warnings through.
     configure_logging("ERROR")
-    assert not http_logger.isEnabledFor(logging.WARNING)
-    assert http_logger.isEnabledFor(logging.ERROR)
+    assert http_logger.getEffectiveLevel() == logging.ERROR
     configure_logging("DEBUG")
-    assert http_logger.isEnabledFor(logging.DEBUG)
+    assert http_logger.getEffectiveLevel() == logging.DEBUG
 
 
 def test_insecure_qdrant_warning_is_shown_once_not_dropped():
