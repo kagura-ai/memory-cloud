@@ -439,6 +439,29 @@ class SessionManager:
             logger.error(f"Failed to mutate session: {e}")
             return False
 
+    def session_holds_user(self, session_id: str, user_id: str) -> bool:
+        """Is ``user_id`` one of the accounts signed in on this session? (#1770)
+
+        The membership rule ``delete_user_sessions`` applies, so a grant
+        writer re-checking its session after a reset agrees with the reset:
+        the whole container goes when any of its accounts resets, and an
+        account that merely stopped being the active one is still signed in.
+        Reads the record without refreshing its TTL. Missing, unusable or
+        unreadable → False.
+        """
+        try:
+            raw = self._redis.get(f"session:{session_id}")
+            if not raw:
+                return False
+            stored = json.loads(raw)  # type: ignore[arg-type]
+            container = stored if is_container(stored) else to_container(stored)
+            if project_active(container) is None:
+                return False
+            return session_owns_user(container, user_id)
+        except Exception as e:
+            logger.error(f"Failed to check session membership: {e}")
+            return False
+
     def list_accounts(self, session_id: str) -> list[dict[str, Any]]:
         """Identities signed in on this session, active one flagged.
 

@@ -55,10 +55,12 @@ from auth.dependencies import SessionUser, require_admin
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth2_server import (
     TOKEN_REQUEST_SINGLE_VALUED,
+    OwnerLockTimeout,
     _OAuthUser,
     browser_session_is_live,
     create_authorization_server,
     repeated_parameter,
+    share_lock_owner,
     validate_authorization_parameters,
 )
 from auth.oauth_scope import client_registered_scope, granted_scope, registration_scope
@@ -2598,11 +2600,19 @@ async def device_audit_unauth(request: Request, body: DeviceUnauthAuditRequest) 
 
 
 def _get_user_from_session(request: Request) -> dict | None:
-    """Extract user info from session (delegates to get_current_user_from_session)."""
+    """Extract user info from session (delegates to get_current_user_from_session).
+
+    Carries the session id the user was authenticated with, so the approval
+    re-checks the same session (#1770) rather than reading the cookie again.
+    """
     user_stub = get_current_user_from_session(request)
     if user_stub is None:
         return None
-    return {"user_id": user_stub.user_id, "email": user_stub.email}
+    return {
+        "user_id": user_stub.user_id,
+        "email": user_stub.email,
+        "session_id": user_stub.session_id,
+    }
 
 
 def _confirm_device_sync(
@@ -2629,19 +2639,24 @@ def _confirm_device_sync(
             # user means a revocation ran: approve nothing. An approval that
             # locked first commits before the reset's DELETE, which then
             # removes the approved code.
-            owner = (
-                db_session.query(User.user_id)
-                .filter_by(user_id=user_id)
-                .with_for_update(read=True, key_share=True)
-                .first()
-                if user_id
-                else None
-            )
-            if owner is None or not browser_session_is_live(session_id, user_id or ""):
+            try:
+                owner_exists = bool(user_id) and share_lock_owner(db_session, user_id or "")
+            except OwnerLockTimeout:
                 logger.warning(
                     "device_authorization_refused",
                     user_code_prefix=user_code[:4],
-                    reason="user_gone" if owner is None else "session_gone",
+                    reason="owner_lock_timeout",
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="The account is being updated; please try again.",
+                    headers={"Retry-After": "5"},
+                ) from None
+            if not owner_exists or not browser_session_is_live(session_id, user_id or ""):
+                logger.warning(
+                    "device_authorization_refused",
+                    user_code_prefix=user_code[:4],
+                    reason="session_gone" if owner_exists else "user_gone",
                 )
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -2733,7 +2748,7 @@ async def device_confirm(
     status_str, device_user_id, client_id = await asyncio.to_thread(
         _confirm_device_sync,
         user_id=user.get("user_id") or user.get("sub"),
-        session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME),
+        session_id=user.get("session_id"),
         user_code=body.user_code,
         approve=body.approve,
     )

@@ -374,6 +374,29 @@ class TestDeviceConfirmEndpoint:
         assert test_device_code.authorized_at is None
         mock_db.commit.assert_not_called()
 
+    def test_confirm_approve_answers_503_when_the_owner_lock_times_out(self, test_device_code):
+        # A reset or erasure held the owner row past the grant's wait.
+        from auth.oauth2_server import OwnerLockTimeout
+
+        with patch("api.routes.oauth._get_user_from_session") as mock_get_user:
+            mock_get_user.return_value = {"user_id": "test_user_123", "session_id": "sid"}
+            with (
+                patch("api.routes.oauth.get_sync_session") as mock_session_fn,
+                patch("api.routes.oauth.share_lock_owner", side_effect=OwnerLockTimeout()),
+            ):
+                mock_db = MagicMock()
+                mock_session_fn.return_value = mock_db
+                client = TestClient(app)
+                resp = client.post(
+                    "/api/v1/oauth/device/confirm",
+                    json={"user_code": "TST12345", "approve": True},
+                )
+
+        assert resp.status_code == 503
+        assert resp.headers.get("retry-after") == "5"
+        assert test_device_code.authorized_at is None
+        mock_db.commit.assert_not_called()
+
     def test_confirm_approve_share_locks_the_owner_before_the_device_row(self, test_device_code):
         # #1770: users → codes, the order every grant path and the reset keep.
         order: list[str] = []

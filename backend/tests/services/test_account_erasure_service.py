@@ -1174,9 +1174,10 @@ class TestErasureResiduals1365:
         with patch("services.account_erasure_service.revoke_oauth_grants", revoke):
             counts = await svc._delete_postgres(target)
 
-        revoke.assert_awaited_once_with(svc.db, target.user_id)
+        revoke.assert_awaited_once_with(svc.db, target.user_id, delete_tokens=True)
         assert counts["oauth_authorization_codes"] == 1
         assert counts["oauth_device_codes"] == 2
+        assert counts["oauth_tokens"] == 3
         deleted_models = {c.args[0] for c in svc._count_and_delete.await_args_list}
         assert ContextMember in deleted_models
         assert LLMCallLog in deleted_models

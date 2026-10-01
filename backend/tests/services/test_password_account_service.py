@@ -354,14 +354,19 @@ async def _wait_until_blocked(
     """
     factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
     deadline = asyncio.get_running_loop().time() + timeout
-    where = "datname = current_database() AND wait_event_type = 'Lock'"
-    if blocked_by is not None:
-        where += f" AND pg_blocking_pids(pid) @> ARRAY[{int(blocked_by)}]"
+    query = text(
+        "SELECT count(*) FROM pg_stat_activity "
+        "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+        + (
+            " AND pg_blocking_pids(pid) @> ARRAY[CAST(:pid AS int)]"
+            if blocked_by is not None
+            else ""
+        )
+    )
+    params = {"pid": blocked_by} if blocked_by is not None else {}
     async with factory() as probe:
         while True:
-            waiting = await probe.scalar(
-                text(f"SELECT count(*) FROM pg_stat_activity WHERE {where}")
-            )
+            waiting = await probe.scalar(query, params)
             await probe.rollback()
             if waiting:
                 return
@@ -620,7 +625,9 @@ def _fake_session_store(monkeypatch, uid: str) -> dict[str, dict]:
     from api.routes import auth as auth_routes
 
     sessions: dict[str, dict] = {"sid-1": {"user_id": uid}}
-    manager = SimpleNamespace(get_session=lambda sid, update_access=True: sessions.get(sid))
+    manager = SimpleNamespace(
+        session_holds_user=lambda sid, uid: sessions.get(sid, {}).get("user_id") == uid
+    )
     monkeypatch.setattr(auth_routes, "get_session_manager", lambda: manager)
     return sessions
 

@@ -47,16 +47,20 @@ from authlib.oauth2.rfc6749.requests import BasicOAuth2Payload  # noqa: E402
 
 from auth import oauth2_server as mod  # noqa: E402
 from auth.oauth2_server import (  # noqa: E402
+    _PG_LOCK_NOT_AVAILABLE,
     AuthorizationCodeGrant,
     DeviceAuthorizationGrant,
     OAuth2AuthorizationServer,
+    OwnerLockTimeout,
     RefreshTokenGrant,
+    TemporarilyUnavailableError,
     _generate_token_with_expiry,
     _OAuthUser,
     browser_session_is_live,
     create_authorization_server,
     query_client,
     save_token,
+    share_lock_owner,
 )
 from models.auth import (  # noqa: E402
     OAuth2AuthorizationCode,
@@ -412,6 +416,7 @@ class TestSaveAuthorizationCode:
         grant = _make_authz_grant()
         order: list[str] = []
         session = grant.server.db_session
+        session.get_bind.return_value.dialect.name = "sqlite"
         session.query.return_value.filter_by.return_value.with_for_update.side_effect = (
             lambda **kw: order.append(f"lock:{kw}") or MagicMock()
         )
@@ -456,9 +461,32 @@ class TestSaveAuthorizationCode:
         with pytest.raises(AccessDeniedError) as excinfo:
             grant.save_authorization_code("authcode-8", request)
         session.add.assert_not_called()
-        # Carried so Authlib answers with the redirect, not a bare error body.
+        # Carried so Authlib answers with the redirect, not a bare error body
+        # (Authlib copies the request's state onto the error itself).
         assert excinfo.value.redirect_uri == "https://example.com/cb"
-        assert excinfo.value.state == "st-1"
+
+    def test_owner_lock_timeout_is_temporarily_unavailable(self) -> None:
+        # A reset or erasure held the owner row past the grant's wait: the
+        # client is told to retry, nothing is written.
+        from sqlalchemy.exc import OperationalError
+
+        grant = _make_authz_grant()
+        session = grant.server.db_session
+        session.get_bind.return_value.dialect.name = "postgresql"
+        orig = Exception("lock timeout")
+        orig.pgcode = _PG_LOCK_NOT_AVAILABLE  # type: ignore[attr-defined]
+        session.query.return_value.filter_by.return_value.with_for_update.return_value.first.side_effect = OperationalError(
+            "SELECT", {}, orig
+        )
+        request = self._request(
+            {}, user=SimpleNamespace(user_id="user-abc", session_is_live=lambda: True)
+        )
+
+        with pytest.raises(TemporarilyUnavailableError) as excinfo:
+            grant.save_authorization_code("authcode-9", request)
+        assert excinfo.value.error == "temporarily_unavailable"
+        assert excinfo.value.redirect_uri == "https://example.com/cb"
+        session.add.assert_not_called()
 
     def test_refuses_a_user_object_that_cannot_vouch_for_its_session(self) -> None:
         # No hook at all (not our _OAuthUser) → fail closed.
@@ -476,37 +504,32 @@ class TestSaveAuthorizationCode:
 
 
 class TestBrowserSessionIsLive:
-    """Fails closed: no cookie, no store, no session, another user → False."""
+    """Fails closed: no cookie, no store, not a member → False; never refreshes a TTL."""
 
-    def _manager(self, monkeypatch: pytest.MonkeyPatch, data: dict | None) -> MagicMock:
+    def _manager(self, monkeypatch: pytest.MonkeyPatch, holds: bool) -> MagicMock:
         from api.routes import auth as auth_routes
 
         manager = MagicMock()
-        manager.get_session.return_value = data
+        manager.session_holds_user.return_value = holds
         monkeypatch.setattr(auth_routes, "get_session_manager", lambda: manager)
         return manager
 
-    def test_live_session_of_the_same_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        manager = self._manager(monkeypatch, {"user_id": "u-1"})
+    def test_member_of_the_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        manager = self._manager(monkeypatch, True)
         assert browser_session_is_live("sid", "u-1") is True
-        # The re-check must not extend the session's TTL.
-        manager.get_session.assert_called_once_with("sid", update_access=False)
-
-    def test_legacy_sub_claim_counts(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._manager(monkeypatch, {"sub": "u-1"})
-        assert browser_session_is_live("sid", "u-1") is True
+        # Membership, judged as the reset judges it; get_session (which
+        # refreshes the TTL) is not what is asked.
+        manager.session_holds_user.assert_called_once_with("sid", "u-1")
+        manager.get_session.assert_not_called()
 
     def test_no_cookie(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._manager(monkeypatch, {"user_id": "u-1"})
+        manager = self._manager(monkeypatch, True)
         assert browser_session_is_live(None, "u-1") is False
         assert browser_session_is_live("", "u-1") is False
+        manager.session_holds_user.assert_not_called()
 
-    def test_session_gone(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._manager(monkeypatch, None)
-        assert browser_session_is_live("sid", "u-1") is False
-
-    def test_session_of_another_user(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self._manager(monkeypatch, {"user_id": "u-2"})
+    def test_not_a_member_or_session_gone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._manager(monkeypatch, False)
         assert browser_session_is_live("sid", "u-1") is False
 
     def test_no_session_store(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -518,10 +541,62 @@ class TestBrowserSessionIsLive:
     def test_oauth_user_delegates_with_its_own_session(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        manager = self._manager(monkeypatch, {"user_id": "u-1"})
+        manager = self._manager(monkeypatch, True)
         assert _OAuthUser("u-1", "a@b", session_id="sid-9").session_is_live() is True
-        manager.get_session.assert_called_once_with("sid-9", update_access=False)
+        manager.session_holds_user.assert_called_once_with("sid-9", "u-1")
         assert _OAuthUser("u-1", "a@b").session_is_live() is False
+
+
+class TestShareLockOwner:
+    """users FOR KEY SHARE with a bounded wait (#1770)."""
+
+    def _session(self, dialect: str) -> MagicMock:
+        session = MagicMock()
+        session.get_bind.return_value.dialect.name = dialect
+        return session
+
+    def test_sets_the_lock_timeout_on_postgres_then_locks(self) -> None:
+        session = self._session("postgresql")
+        assert share_lock_owner(session, "u-1") is True
+        assert "lock_timeout" in str(session.execute.call_args.args[0])
+        session.query.return_value.filter_by.assert_called_once_with(user_id="u-1")
+        session.query.return_value.filter_by.return_value.with_for_update.assert_called_once_with(
+            read=True, key_share=True
+        )
+
+    def test_skips_the_timeout_statement_off_postgres(self) -> None:
+        session = self._session("sqlite")
+        share_lock_owner(session, "u-1")
+        session.execute.assert_not_called()
+
+    def test_reports_a_missing_row(self) -> None:
+        session = self._session("postgresql")
+        session.query.return_value.filter_by.return_value.with_for_update.return_value.first.return_value = None
+        assert share_lock_owner(session, "u-1") is False
+
+    def test_lock_wait_timeout_becomes_owner_lock_timeout(self) -> None:
+        from sqlalchemy.exc import OperationalError
+
+        session = self._session("postgresql")
+        orig = Exception("canceling statement due to lock timeout")
+        orig.pgcode = _PG_LOCK_NOT_AVAILABLE  # type: ignore[attr-defined]
+        session.query.return_value.filter_by.return_value.with_for_update.return_value.first.side_effect = OperationalError(
+            "SELECT", {}, orig
+        )
+        with pytest.raises(OwnerLockTimeout):
+            share_lock_owner(session, "u-1")
+
+    def test_other_database_errors_propagate(self) -> None:
+        from sqlalchemy.exc import OperationalError
+
+        session = self._session("postgresql")
+        orig = Exception("connection lost")
+        orig.pgcode = "57P01"  # type: ignore[attr-defined]
+        session.query.return_value.filter_by.return_value.with_for_update.return_value.first.side_effect = OperationalError(
+            "SELECT", {}, orig
+        )
+        with pytest.raises(OperationalError):
+            share_lock_owner(session, "u-1")
 
 
 # ===========================================================================

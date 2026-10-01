@@ -574,3 +574,34 @@ class TestAddingAnAccountMustNotDestroyItsOwnSession:
         unrelated = manager.create_session({**USER, "sub": "google_9", "user_id": "google_9"})
         assert manager.delete_user_sessions("google_1", exclude_session_id=unrelated) == 1
         assert manager.get_session(mine) is None
+
+
+class TestSessionHoldsUser:
+    """Membership for a grant writer's re-check (#1770): the reset's rule, no TTL refresh."""
+
+    def test_active_and_inactive_members_both_count(self, manager):
+        sid = manager.create_session(USER)
+        assert manager.add_account(sid, OTHER) is True  # OTHER is now active
+        assert manager.session_holds_user(sid, "google_1") is True
+        assert manager.session_holds_user(sid, "google_2") is True
+
+    def test_a_stranger_does_not(self, manager):
+        sid = manager.create_session(USER)
+        assert manager.session_holds_user(sid, "google_9") is False
+
+    def test_missing_session(self, manager):
+        assert manager.session_holds_user("nope", "google_1") is False
+
+    def test_does_not_refresh_the_ttl_or_rewrite(self, manager):
+        sid = manager.create_session(USER)
+        writes = manager._redis.writes[f"session:{sid}"]
+        manager.session_holds_user(sid, "google_1")
+        assert manager._redis.writes[f"session:{sid}"] == writes
+        assert manager._redis.expires.get(f"session:{sid}", 0) == 0
+
+    def test_legacy_flat_record(self, manager):
+        manager._redis.store["session:legacy"] = json.dumps(
+            {"sub": "google_1", "user_id": "google_1", "email": "a@example.com"}
+        )
+        assert manager.session_holds_user("legacy", "google_1") is True
+        assert manager.session_holds_user("legacy", "google_2") is False

@@ -509,7 +509,11 @@ class PasswordAccountService:
         """
         if revoke_sessions is not None:
             try:
-                revoke_sessions(user_id)
+                # The revoker is synchronous Redis work (a scan of the session
+                # keys); run it off the event loop so the loop — and the grant
+                # writers waiting on this transaction's user lock in worker
+                # threads (#1770) — keep moving while it runs.
+                await asyncio.to_thread(revoke_sessions, user_id)
             except BaseException:
                 await self.db.rollback()
                 raise

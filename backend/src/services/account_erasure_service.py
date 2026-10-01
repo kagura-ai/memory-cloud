@@ -54,7 +54,6 @@ from models.auth import (
     ContextMember,
     ExternalAPIKey,
     OAuth2Client,
-    OAuth2Token,
     User,
     Workspace,
     WorkspaceInvitation,
@@ -997,22 +996,19 @@ class AccountErasureService:
         user_id = target.user_id
         counts: dict[str, int] = {}
 
-        # Revoke the OAuth grants first, through the one revoker that owns
+        # Remove the OAuth grants first, through the one revoker that owns
         # the lock order (users → codes → device codes → tokens, #1770): it
         # takes the user row FOR UPDATE, which every grant writer share-locks
         # before it writes (#1738). A consent, device approval or refresh
-        # racing this sweep either lands before it and is revoked here, or
+        # racing this sweep either lands before it and is removed here, or
         # waits on the row and — since this transaction deletes the row
-        # below — then finds no user to grant for and writes nothing. The
-        # codes are gone with this call; the tokens are deleted below as
-        # before (this is an erasure, revocation alone keeps the rows).
-        revoked = await revoke_oauth_grants(self.db, user_id)
+        # below — then finds no user to grant for and writes nothing. This is
+        # an erasure, so the tokens are deleted rather than revoked.
+        revoked = await revoke_oauth_grants(self.db, user_id, delete_tokens=True)
         counts["oauth_authorization_codes"] = revoked.authorization_codes
+        counts["oauth_tokens"] = revoked.tokens
 
-        # OAuth2 tokens / clients — no FK cascade from users to these.
-        counts["oauth_tokens"] = await self._count_and_delete(
-            OAuth2Token, OAuth2Token.user_id == user_id
-        )
+        # OAuth2 clients — no FK cascade from users to these.
         counts["oauth_clients"] = await self._count_and_delete(
             OAuth2Client, OAuth2Client.owner_id == user_id
         )
