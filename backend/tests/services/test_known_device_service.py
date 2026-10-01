@@ -83,75 +83,80 @@ class TestCookie:
 # ---------------------------------------------------------------------------
 
 
-def _db(*, existing: bool, count: int, inserted: bool = True) -> AsyncMock:
-    """A session whose three statements answer in order: SELECT, COUNT, INSERT."""
-    db = AsyncMock()
-    select_result = MagicMock()
-    select_result.scalar_one_or_none.return_value = (
-        SimpleNamespace(last_seen=datetime(2026, 1, 1)) if existing else None
-    )
-    db.known_row = select_result.scalar_one_or_none.return_value
-    count_result = MagicMock()
-    count_result.scalar_one.return_value = count
-    insert_result = MagicMock()
-    insert_result.rowcount = 1 if inserted else 0
+def _db(*, armed: bool, inserted: bool) -> tuple[AsyncMock, SimpleNamespace]:
+    """A session whose statements answer in order: user lock, upsert, prune."""
+    user = SimpleNamespace(known_devices_since=datetime(2026, 1, 1) if armed else None)
+    lock_result = MagicMock()
+    lock_result.scalar_one.return_value = user
+    upsert_result = MagicMock()
+    upsert_result.one.return_value = ("row-id", inserted)
     prune_result = MagicMock()
     prune_result.rowcount = 0
-    db.execute.side_effect = [select_result, count_result, insert_result, prune_result]
-    return db
+    db = AsyncMock()
+    db.execute.side_effect = [lock_result, upsert_result, prune_result]
+    return db, user
 
 
 @pytest.mark.asyncio
-async def test_known_device_only_refreshes_last_seen() -> None:
-    db = _db(existing=True, count=1)
-    now = datetime(2026, 10, 1, 12, 0, 0)
+async def test_known_device_is_one_upsert_that_updated() -> None:
+    db, user = _db(armed=True, inserted=False)
+
+    outcome = await record_sign_in(db, user_id="u1", digest="d" * 64, now=datetime(2026, 10, 1))
+
+    assert outcome == SignIn.KNOWN
+    assert db.execute.await_count == 2  # lock + upsert, no prune
+    assert user.known_devices_since == datetime(2026, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_first_device_arms_the_account_without_alert() -> None:
+    db, user = _db(armed=False, inserted=True)
+    now = datetime(2026, 10, 1, 12)
 
     outcome = await record_sign_in(db, user_id="u1", digest="d" * 64, now=now)
 
-    assert outcome == SignIn.KNOWN
-    assert db.execute.await_count == 1  # the SELECT only; last_seen is set on the row
-    assert db.known_row.last_seen == now
-
-
-@pytest.mark.asyncio
-async def test_first_device_is_registered_without_alert() -> None:
-    db = _db(existing=False, count=0)
-
-    outcome = await record_sign_in(db, user_id="u1", digest="d" * 64, now=datetime(2026, 10, 1))
-
     assert outcome == SignIn.FIRST_DEVICE
-    assert db.execute.await_count == 3  # SELECT, COUNT, INSERT (no prune needed)
+    assert user.known_devices_since == now
+    assert db.execute.await_count == 2
 
 
 @pytest.mark.asyncio
-async def test_unknown_device_with_known_others_is_new() -> None:
-    db = _db(existing=False, count=2)
+async def test_unknown_device_on_an_armed_account_is_new_and_prunes() -> None:
+    db, _ = _db(armed=True, inserted=True)
 
     outcome = await record_sign_in(db, user_id="u1", digest="d" * 64, now=datetime(2026, 10, 1))
 
     assert outcome == SignIn.NEW_DEVICE
+    assert db.execute.await_count == 3  # lock + upsert + prune to the cap
 
 
 @pytest.mark.asyncio
-async def test_insert_race_lost_counts_as_known() -> None:
-    # Another request registered the same device between the SELECT and the
-    # INSERT: ON CONFLICT DO NOTHING inserts no row, so nobody is alerted twice.
-    db = _db(existing=False, count=2, inserted=False)
+async def test_after_a_reset_the_first_sign_in_back_is_reported() -> None:
+    # The reset deleted the rows but left known_devices_since set: an
+    # attacker who signs in first is not treated as the account's first device.
+    db, _ = _db(armed=True, inserted=True)
 
-    outcome = await record_sign_in(db, user_id="u1", digest="d" * 64, now=datetime(2026, 10, 1))
-
-    assert outcome == SignIn.KNOWN
-
-
-@pytest.mark.asyncio
-async def test_cap_prunes_the_oldest_rows() -> None:
-    # cap is 3 (fixture); the user has 3 known devices and signs in from a 4th.
-    db = _db(existing=False, count=3)
-
-    outcome = await record_sign_in(db, user_id="u1", digest="d" * 64, now=datetime(2026, 10, 1))
+    outcome = await record_sign_in(db, user_id="u1", digest="x" * 64, now=datetime(2026, 10, 1))
 
     assert outcome == SignIn.NEW_DEVICE
-    assert db.execute.await_count == 4  # ... plus the prune DELETE
+
+
+def test_upsert_locks_the_user_row_and_returns_whether_it_inserted() -> None:
+    # Statement shapes, compiled for PostgreSQL.
+    from sqlalchemy.dialects import postgresql
+
+    db, _ = _db(armed=True, inserted=True)
+    import asyncio
+
+    asyncio.run(record_sign_in(db, user_id="u1", digest="d" * 64, now=datetime(2026, 10, 1)))
+    lock_stmt, upsert_stmt, prune_stmt = (c.args[0] for c in db.execute.await_args_list)
+    lock_sql = str(lock_stmt.compile(dialect=postgresql.dialect()))
+    upsert_sql = str(upsert_stmt.compile(dialect=postgresql.dialect()))
+    prune_sql = str(prune_stmt.compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in lock_sql
+    assert "ON CONFLICT ON CONSTRAINT user_known_devices_user_device_key DO UPDATE" in upsert_sql
+    assert "RETURNING user_known_devices.id, (xmax = 0)" in upsert_sql
+    assert "DELETE FROM user_known_devices" in prune_sql and "LIMIT" in prune_sql
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +182,10 @@ def pipeline(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
     spawn = MagicMock()
     monkeypatch.setattr(svc, "get_db", _get_db)
     monkeypatch.setattr(svc, "record_sign_in", record)
-    monkeypatch.setattr(svc, "spawn_security_notification", spawn)
+    # The notice module is imported lazily inside note_browser_sign_in.
+    import services.security_notification_service as notices
+
+    monkeypatch.setattr(notices, "spawn_security_notification", spawn)
     return {"db": db, "record": record, "spawn": spawn}
 
 
@@ -207,8 +215,9 @@ async def test_new_device_alerts_with_ip_ua_and_method(pipeline) -> None:
     kwargs = pipeline["spawn"].call_args.kwargs
     assert kwargs["user_id"] == "u1"
     assert kwargs["event"] == SecurityEvent.NEW_DEVICE_SIGN_IN
-    assert kwargs["ip"] == "203.0.113.5"
-    assert kwargs["user_agent"] == "pytest UA"
+    # IP and user agent are read from the request by the notice pipeline.
+    assert kwargs["request"].client.host == "203.0.113.5"
+    assert kwargs["request"].headers["user-agent"] == "pytest UA"
     assert kwargs["sign_in_method"] == "Google"
     # No cookie came in: a fresh one is minted and its hash is what was stored.
     issued = response.headers["set-cookie"].split(";")[0].split("=", 1)[1]

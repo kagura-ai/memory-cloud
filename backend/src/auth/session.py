@@ -7,6 +7,7 @@ Provides secure session storage using Redis with singleton pattern.
 
 import json
 import logging
+import os
 import secrets
 from typing import Any
 
@@ -16,6 +17,22 @@ logger = logging.getLogger(__name__)
 
 # Singleton Redis client cache (shared across all instances)
 _redis_client_cache: dict[str, Any] = {}
+
+
+def browser_cookie_attrs() -> dict[str, Any]:
+    """Attributes shared by every cookie the API sets on the browser.
+
+    The session cookie and the device cookie (#1769) must not diverge — #1487
+    was an open-coded ``set_cookie`` that shipped without ``Secure`` in
+    production. ``Secure`` follows ``ENVIRONMENT=production``.
+    """
+    return {
+        "path": "/",
+        "httponly": True,
+        "secure": os.getenv("ENVIRONMENT", "development") == "production",
+        "samesite": "lax",
+    }
+
 
 # ---------------------------------------------------------------------------
 # Session record shape (#1488 Phase 1)

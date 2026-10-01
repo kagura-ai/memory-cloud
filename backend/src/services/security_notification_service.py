@@ -506,7 +506,7 @@ def render_security_notification(
         lines.append("")
     if not listed:
         lines += [
-            f"  {count} {'occurrence' if count == 1 else 'occurrences'} of this change "
+            f"  {count} {'occurrence' if count == 1 else 'occurrences'} of this {what} "
             "could not be listed: their details",
             "  expired before this email was sent.",
             "",
@@ -514,11 +514,22 @@ def render_security_notification(
     elif count > len(listed):
         lines += [f"  ... and {count - len(listed)} more.", ""]
 
+    lines.append("Wasn't you?")
+    if event in _SIGN_IN_EVENTS:
+        lines += [
+            "Change your password now: that signs every browser out, and a reset",
+            "also revokes the account's connected apps. Then review your sign-in",
+            "methods on your profile page, and your keys and apps under",
+            "Integrations > API Keys and OAuth Apps in your workspace. Remove",
+            "anything you do not recognize:",
+        ]
+    else:
+        lines += [
+            "Sign in and review your sign-in methods on your profile page, and your",
+            "keys and apps under Integrations > API Keys and OAuth Apps in your",
+            "workspace. Remove anything you do not recognize:",
+        ]
     lines += [
-        "Wasn't you?",
-        "Sign in and review your sign-in methods on your profile page, and your",
-        "keys and apps under Integrations > API Keys and OAuth Apps in your",
-        "workspace. Remove anything you do not recognize:",
         "",
         f"  {profile_page_url}",
         "",
@@ -527,7 +538,8 @@ def render_security_notification(
         "password. We never ask for your password or keys by email.",
         "",
         "You receive this notice for every security-sensitive change to your",
-        "account; it cannot be turned off.",
+        "account and every sign-in from an unrecognized device; it cannot be",
+        "turned off.",
     ]
     return subject, "\n".join(lines) + "\n"
 
@@ -730,6 +742,7 @@ def spawn_security_notification(
     *,
     user_id: str,
     event: SecurityEvent,
+    request: Request | Any = None,
     ip: str | None = None,
     user_agent: str | None = None,
     key_name: str | None = None,
@@ -740,8 +753,9 @@ def spawn_security_notification(
 ) -> None:
     """Start the notice for a committed change made outside an HTTP route.
 
-    For callers without ``BackgroundTasks`` (MCP tools). Same arguments and
-    the same never-raise contract as :func:`schedule_security_notification`.
+    For callers without ``BackgroundTasks`` (MCP tools, or a route that has
+    already built its response). Same arguments and the same never-raise
+    contract as :func:`schedule_security_notification`.
     """
     try:
         task = asyncio.get_running_loop().create_task(
@@ -750,7 +764,7 @@ def spawn_security_notification(
                 event,
                 **_notice_kwargs(
                     user_id,
-                    request=None,
+                    request=request,
                     ip=ip,
                     user_agent=user_agent,
                     key_name=key_name,

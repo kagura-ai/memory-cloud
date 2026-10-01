@@ -6,7 +6,13 @@ in the table emails the owner. Rows cascade with the account; the daily
 retention job deletes rows whose ``last_seen`` is older than
 ``known_device_retention_days`` (``ix_user_known_devices_last_seen``).
 
-Downgrade drops the table.
+``users.known_devices_since`` records when the account's first browser was
+registered. While it is NULL the first sign-in registers silently (every
+existing account at upgrade time); once set it stays, so a password reset —
+which deletes the device rows — makes the next sign-in from every browser a
+reported one.
+
+Downgrade drops the column and the table.
 
 Revision ID: e89_1769_known_devices
 Revises: e88_1752_verified_backfill
@@ -48,8 +54,10 @@ def upgrade() -> None:
         sa.UniqueConstraint("user_id", "device_hash", name="user_known_devices_user_device_key"),
     )
     op.create_index("ix_user_known_devices_last_seen", "user_known_devices", ["last_seen"])
+    op.add_column("users", sa.Column("known_devices_since", sa.DateTime(), nullable=True))
 
 
 def downgrade() -> None:
+    op.drop_column("users", "known_devices_since")
     op.drop_index("ix_user_known_devices_last_seen", table_name="user_known_devices")
     op.drop_table("user_known_devices")

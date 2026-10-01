@@ -86,6 +86,11 @@ class User(Base):
         created_at: Account creation timestamp
         updated_at: Last modification timestamp
         last_login_at: Last login timestamp
+        known_devices_since: When the first browser was registered as a known
+            device (#1769). NULL until then: the first browser sign-in registers
+            silently. Set once and never cleared — a password reset deletes the
+            device rows but keeps this, so the next sign-in from every browser
+            is reported.
     """
 
     __tablename__ = "users"
@@ -149,6 +154,7 @@ class User(Base):
         DateTime, nullable=True, onupdate=func.now()
     )
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    known_devices_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     auth_provider: Mapped[str | None] = mapped_column(
         String(20), nullable=True
     )  # Issue #361: google, github

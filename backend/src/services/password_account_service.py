@@ -39,7 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.password import hash_password, verify_password
@@ -49,7 +49,6 @@ from db.base import _get_session_factory
 from models.auth import (
     AuditLog,
     User,
-    UserKnownDevice,
     UserOAuthProvider,
 )
 from services.email_action_token_service import (
@@ -63,6 +62,7 @@ from services.email_service import (
     EmailService,
     get_email_service,
 )
+from services.known_device_service import known_devices_delete
 from services.oauth_grant_revocation import revoke_oauth_grants
 from utils.datetime import utcnow
 from utils.exceptions import (
@@ -295,11 +295,7 @@ class PasswordAccountService:
         tokens_revoked = await self._revoke_oauth_grants(user.user_id)
         # #1769: forget every known browser, so the next sign-in from each —
         # the attacker's included — is a new device and emails the owner.
-        # (``delete`` here, not ``known_device_service``: that module imports
-        # the notice pipeline, which imports this one.)
-        await self.db.execute(
-            delete(UserKnownDevice).where(UserKnownDevice.user_id == user.user_id)
-        )
+        await self.db.execute(known_devices_delete(user.user_id))
         self._audit(user.user_id, _AUDIT_ACTOR_LINK, "password_reset", ip_address, user_agent)
         await self._revoke_then_commit(user.user_id, revoke_sessions)
         logger.info(

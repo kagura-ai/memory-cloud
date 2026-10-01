@@ -149,3 +149,27 @@ async def test_rows_cascade_with_the_account(db_session: AsyncSession) -> None:
         )
     ).scalar_one()
     assert count == 0
+
+
+async def test_reset_keeps_the_account_armed(db_session: AsyncSession) -> None:
+    # Rows deleted (as complete_reset does) but known_devices_since kept: the
+    # very next sign-in — from any browser — is a new device, not the first.
+    uid = await _user(db_session)
+    now = utcnow()
+    await record_sign_in(db_session, user_id=uid, digest="a" * 64, now=now)
+    await db_session.execute(svc.known_devices_delete(uid))
+
+    outcome = await record_sign_in(db_session, user_id=uid, digest="b" * 64, now=now)
+
+    assert outcome is SignIn.NEW_DEVICE
+    user = (await db_session.execute(select(User).where(User.user_id == uid))).scalar_one()
+    assert user.known_devices_since == now
+
+
+async def test_concurrent_first_sign_ins_cannot_both_be_first(db_session: AsyncSession) -> None:
+    # Serialized by the users row lock: the second one in sees the marker.
+    uid = await _user(db_session)
+    now = utcnow()
+    first = await record_sign_in(db_session, user_id=uid, digest="a" * 64, now=now)
+    second = await record_sign_in(db_session, user_id=uid, digest="b" * 64, now=now)
+    assert (first, second) == (SignIn.FIRST_DEVICE, SignIn.NEW_DEVICE)

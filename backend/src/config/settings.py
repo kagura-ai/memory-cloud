@@ -208,10 +208,12 @@ class Settings(BaseSettings):
     known_device_retention_days: int = Field(
         default=180,
         ge=1,
+        le=365,
         description=(
             "How long a browser stays a known device after its last sign-in "
             "(#1769). The daily job deletes rows not seen for this long; the "
-            "next sign-in from that browser is treated as a new device."
+            "next sign-in from that browser is treated as a new device. At most "
+            "365: the device cookie itself lives one year."
         ),
     )
     known_device_max_per_user: int = Field(

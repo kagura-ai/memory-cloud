@@ -68,4 +68,4 @@ def schedule_known_device_tasks(scheduler: AsyncIOScheduler) -> None:
         name="Cleanup stale known devices (#1769)",
         replace_existing=True,
     )
-    logger.info("scheduled_known_device_cleanup", interval_hours=24)
+    logger.info("scheduled_known_device_cleanup", cron="04:40 UTC")

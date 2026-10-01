@@ -45,7 +45,7 @@ from auth.dependencies import SessionUser
 from auth.oauth2 import OAuth2Manager
 from auth.password import hash_password, verify_password
 from auth.roles import get_role_manager
-from auth.session import SessionManager
+from auth.session import SessionManager, browser_cookie_attrs
 from auth.totp import verify_totp
 from config.settings import TERMS_VERSION_RE
 from db.base import get_db
@@ -2189,15 +2189,11 @@ def _set_session_cookie(response: Response, session_id: str) -> None:
     """Set session cookie on response."""
     if not _session_manager:
         return
-    is_production = os.getenv("ENVIRONMENT", "development") == "production"
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=session_id,
-        path="/",
-        httponly=True,
-        secure=is_production,
-        samesite="lax",
         max_age=_session_manager.session_ttl,
+        **browser_cookie_attrs(),
     )
 
 

@@ -1019,8 +1019,8 @@ class AccountErasureService:
         counts["oauth_device_codes"] = revoked.device_codes
 
         # Direct per-user tables.
-        # #1769: the FK cascades too; counted here so the erasure summary
-        # lists them.
+        # #1769: the FK cascades too; deleted and counted here so the erasure
+        # summary lists them (the same statement the password reset runs).
         counts["user_known_devices"] = await self._count_and_delete(
             UserKnownDevice, UserKnownDevice.user_id == user_id
         )

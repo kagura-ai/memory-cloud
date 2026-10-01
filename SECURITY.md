@@ -54,14 +54,20 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
     recognized by a long-lived HttpOnly device cookie; only the keyed HMAC of
     its value is stored, with first/last sign-in times, and never the IP
     address or user agent (those appear in the email only). The user agent
-    is not part of the match — it is spoofable. The account's first browser
-    sign-in registers the device silently, so the device the account was
-    created from sends nothing. A password reset forgets every known device,
-    so the next sign-in from each browser is reported again; devices not
-    seen for `KNOWN_DEVICE_RETENTION_DAYS` (default 180) are forgotten by a
-    daily job, at most `KNOWN_DEVICE_MAX_PER_USER` (default 20) are kept per
-    account, and account erasure deletes them. CLI / MCP sign-ins (device
-    flow, token endpoint) carry no cookie and are not covered.
+    is not part of the match — it is spoofable. An account's first browser
+    sign-in ever registers the device silently (so the device the account
+    was created from sends nothing); from then on the account stays armed. A
+    password reset forgets every known device but not that the account is
+    armed, so the next sign-in from each browser — the attacker's included,
+    even when it comes first — is reported. Devices not seen for
+    `KNOWN_DEVICE_RETENTION_DAYS` (default 180, at most 365) are forgotten by
+    a daily job and reported again on their next sign-in, at most
+    `KNOWN_DEVICE_MAX_PER_USER` (default 20) are kept per account, and
+    account erasure deletes them. An authenticated password change keeps the
+    known devices: it already signs the other browsers out, and forgetting
+    them would report every one of the owner's own browsers again. CLI / MCP
+    sign-ins (device flow, token endpoint) carry no cookie and are not
+    covered.
 
   Each email lists the UTC time, IP address, user agent and the key or client
   name. It never carries a secret, token, key value or action link; the

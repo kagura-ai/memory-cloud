@@ -14,19 +14,22 @@ email only.
 
 Rules:
 
-- no known device yet (the account's first browser sign-in) → register the
-  browser, send nothing; this also covers the browser the account was
-  created from;
+- the account has never had a known device (``users.known_devices_since`` is
+  NULL — every account at upgrade time, and new accounts) → register the
+  browser, set the marker, send nothing; this also covers the browser the
+  account was created from;
 - known browser → refresh ``last_seen``, send nothing;
-- unknown browser while others are known → register it and alert. The
+- unknown browser once the marker is set → register it and alert. The
   browser is registered before the notice is attempted, so a delivery
   failure does not alert again on the next sign-in from it;
 - the alert is mandatory, like every #1752 notice;
-- a password reset deletes the account's known devices (the next sign-in
-  from every browser, the attacker's included, is a new device) and account
-  erasure deletes them with the account;
-- rows not seen for ``known_device_retention_days`` are deleted daily, and
-  at most ``known_device_max_per_user`` are kept.
+- a password reset deletes the account's known devices but keeps the marker,
+  so the next sign-in from every browser — the attacker's included, even
+  when it comes first — is a new device; account erasure deletes the rows
+  with the account;
+- rows not seen for ``known_device_retention_days`` are deleted daily (a
+  browser away that long is reported again), and at most
+  ``known_device_max_per_user`` are kept.
 
 CLI / MCP sign-ins (device flow, token endpoint) carry no cookie and are out
 of scope.
@@ -34,26 +37,21 @@ of scope.
 
 from __future__ import annotations
 
-import os
 import re
 import secrets
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, cast
+from typing import Any
 
 from fastapi import Request, Response
-from sqlalchemy import Delete, delete, func, select
+from sqlalchemy import Boolean, Delete, delete, literal_column, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.session import browser_cookie_attrs
 from config.settings import get_settings
 from db.base import get_db
-from models.auth import UserKnownDevice
-from services.security_notification_service import (
-    SecurityEvent,
-    spawn_security_notification,
-)
+from models.auth import User, UserKnownDevice
 from utils.datetime import utcnow
 from utils.hashing import hmac_sha256_hex
 from utils.logger import get_logger
@@ -61,8 +59,9 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 DEVICE_COOKIE_NAME = "kagura_device"
-# One year: a browser that does not sign in for that long re-registers (and
-# alerts) — the retention job will have forgotten it well before then anyway.
+# One year, the ceiling of ``known_device_retention_days``: a browser's row is
+# forgotten no later than its cookie expires, so a known row never meets a
+# cookie-less request from the same browser.
 DEVICE_COOKIE_MAX_AGE = 365 * 24 * 3600
 # ``secrets.token_urlsafe(32)`` is 43 chars; accept a generous range so the
 # format can grow, but reject anything that is not a URL-safe token.
@@ -99,16 +98,12 @@ def read_device_cookie(request: Request | Any) -> str | None:
 
 
 def set_device_cookie(response: Response, value: str) -> None:
-    """(Re-)issue the device cookie with the same attributes as the session cookie."""
-    is_production = os.getenv("ENVIRONMENT", "development") == "production"
+    """(Re-)issue the device cookie with the session cookie's attributes."""
     response.set_cookie(
         key=DEVICE_COOKIE_NAME,
         value=value,
-        path="/",
-        httponly=True,
-        secure=is_production,
-        samesite="lax",
         max_age=DEVICE_COOKIE_MAX_AGE,
+        **browser_cookie_attrs(),
     )
 
 
@@ -125,7 +120,10 @@ def device_hash(cookie_value: str) -> str:
 async def record_sign_in(db: AsyncSession, *, user_id: str, digest: str, now: datetime) -> SignIn:
     """Register the browser for the account, or refresh it, and say which.
 
-    Caller owns commit/rollback.
+    Locks the ``users`` row ``FOR UPDATE`` so two sign-ins of one account
+    serialize here (two unknown browsers cannot both pass as the first), then
+    upserts the device row: one statement, so a concurrent retention DELETE
+    of a stale row cannot strand an ORM UPDATE. Caller owns commit/rollback.
 
     Args:
         db: Async session.
@@ -134,54 +132,48 @@ async def record_sign_in(db: AsyncSession, *, user_id: str, digest: str, now: da
         now: Naive UTC time of the sign-in.
 
     Returns:
-        ``KNOWN`` when the browser was already registered (or another request
-        registered it concurrently), ``FIRST_DEVICE`` when the account had no
-        known device yet, ``NEW_DEVICE`` otherwise.
+        ``KNOWN`` when the browser was already registered, ``FIRST_DEVICE``
+        when the account had never had a known device, ``NEW_DEVICE``
+        otherwise.
     """
-    known = (
-        await db.execute(
-            select(UserKnownDevice).where(
-                UserKnownDevice.user_id == user_id, UserKnownDevice.device_hash == digest
-            )
-        )
-    ).scalar_one_or_none()
-    if known is not None:
-        known.last_seen = now
-        return SignIn.KNOWN
-
-    count = (
-        await db.execute(
-            select(func.count())
-            .select_from(UserKnownDevice)
-            .where(UserKnownDevice.user_id == user_id)
-        )
+    user = (
+        await db.execute(select(User).where(User.user_id == user_id).with_for_update())
     ).scalar_one()
+    first = user.known_devices_since is None
+    if first:
+        user.known_devices_since = now
 
-    inserted = await db.execute(
+    # ``xmax = 0`` is true for a row this statement inserted, false for one it
+    # updated (PostgreSQL sets xmax on the old version of an updated row).
+    upsert = (
         pg_insert(UserKnownDevice)
         .values(user_id=user_id, device_hash=digest, first_seen=now, last_seen=now)
-        .on_conflict_do_nothing(constraint="user_known_devices_user_device_key")
+        .on_conflict_do_update(
+            constraint="user_known_devices_user_device_key", set_={"last_seen": now}
+        )
+        .returning(UserKnownDevice.id, literal_column("(xmax = 0)", Boolean))
     )
-    if not cast(CursorResult[Any], inserted).rowcount:
-        # Lost the race with a concurrent sign-in from the same browser.
+    inserted_id, inserted = (await db.execute(upsert)).one()
+    if not inserted:
         return SignIn.KNOWN
+    if first:
+        return SignIn.FIRST_DEVICE
 
     cap = get_settings().known_device_max_per_user
-    if count >= cap:
-        # Keep the ``cap`` most recently seen rows (the new one included).
-        keep = (
-            select(UserKnownDevice.id)
-            .where(UserKnownDevice.user_id == user_id)
-            .order_by(UserKnownDevice.last_seen.desc(), UserKnownDevice.id)
-            .limit(cap)
+    keep = (
+        select(UserKnownDevice.id)
+        .where(UserKnownDevice.user_id == user_id)
+        .order_by(UserKnownDevice.last_seen.desc(), UserKnownDevice.id)
+        .limit(cap)
+    )
+    await db.execute(
+        delete(UserKnownDevice).where(
+            UserKnownDevice.user_id == user_id,
+            UserKnownDevice.id != inserted_id,
+            UserKnownDevice.id.not_in(keep),
         )
-        await db.execute(
-            delete(UserKnownDevice).where(
-                UserKnownDevice.user_id == user_id, UserKnownDevice.id.not_in(keep)
-            )
-        )
-
-    return SignIn.FIRST_DEVICE if count == 0 else SignIn.NEW_DEVICE
+    )
+    return SignIn.NEW_DEVICE
 
 
 def known_devices_delete(user_id: str) -> Delete:
@@ -219,6 +211,10 @@ async def note_browser_sign_in(
         user_id: The account that signed in.
         sign_in_method: ``Password`` / ``Google`` / ``GitHub``, for the email.
     """
+    # Imported here: the notice module imports the password service, which
+    # imports this module for ``known_devices_delete``.
+    from services import security_notification_service as notices
+
     cookie = read_device_cookie(request) or new_device_cookie_value()
     set_device_cookie(response, cookie)
     try:
@@ -234,13 +230,10 @@ async def note_browser_sign_in(
                 raise
             break
         if outcome == SignIn.NEW_DEVICE:
-            client = getattr(request, "client", None)
-            headers = getattr(request, "headers", None) or {}
-            spawn_security_notification(
+            notices.spawn_security_notification(
                 user_id=user_id,
-                event=SecurityEvent.NEW_DEVICE_SIGN_IN,
-                ip=getattr(client, "host", None) if client else None,
-                user_agent=headers.get("user-agent"),
+                event=notices.SecurityEvent.NEW_DEVICE_SIGN_IN,
+                request=request,
                 sign_in_method=sign_in_method,
             )
         logger.info("sign_in_device_recorded", user_id=user_id, outcome=outcome.value)
