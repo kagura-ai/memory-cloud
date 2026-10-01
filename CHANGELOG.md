@@ -4,6 +4,20 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.85.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.85.0) — 2026-10-01
+
+The account owner is told when a browser they have not used before signs in, and the dashboard's context breakdown names who shared a context instead of repeating its visibility.
+
+### Added
+- **New-device sign-in alerts** ([#1769](https://github.com/kagura-ai/memory-cloud/issues/1769)): a browser sign-in — password, password + MFA, Google or GitHub — from a device the account has not signed in from before emails the owner through the security-notice pipeline (`new_device_sign_in`; mandatory like the other notices). The browser is recognized by a long-lived HttpOnly `kagura_device` cookie whose keyed HMAC is stored in the new `user_known_devices` table; the IP address and user agent are not stored there (they go into the email, and sit in the notice queue in Redis only while a notice is coalesced or retried), and the user agent is not part of the match. An account's first browser sign-in registers silently; a password reset forgets the account's known devices so the next sign-in from every browser is reported; a daily job forgets devices not seen for `KNOWN_DEVICE_RETENTION_DAYS` (default 180, at most 365), at most `KNOWN_DEVICE_MAX_PER_USER` (default 20) are kept, and account erasure deletes them. The sign-in email tells a password account to reset (not change) its password and a Google / GitHub account to secure the provider account.
+
+### Fixed
+- **Creator beside shared contexts on the dashboard** ([#1777](https://github.com/kagura-ai/memory-cloud/issues/1777)): the Context breakdown no longer prints "Shared context" / "Private context" beside every name. A context someone else created reads "Shared by {creator}" when it is workspace-shared, or "Created by {creator}" when it is another member's private context the workspace owner sees by privilege; the viewer's own rows and rows with no known creator show nothing extra, and the visibility icon carries its accessible label again.
+
+### Notes
+- Migration `e89_1769_known_devices` creates `user_known_devices` and adds `users.known_devices_since`; run `alembic upgrade head`. After the upgrade every account's next browser sign-in registers its device silently, so the alerts start with the second browser.
+- **New environment variables (optional):** `KNOWN_DEVICE_RETENTION_DAYS` (1–365, default 180) and `KNOWN_DEVICE_MAX_PER_USER` (default 20).
+
 ## [v0.84.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.84.0) — 2026-10-01
 
 Who owns what, at a glance: the admin user list shows each workspace's plan, the Contexts list and the dashboard show who created a context and how it is shared, and the last race between a password reset and a client authorization is closed.
