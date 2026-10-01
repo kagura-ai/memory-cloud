@@ -344,8 +344,9 @@ async def test_repair_payloads_converges_after_a_failed_run(
     assert repointed == {m["private_a"].id, m["private_b"].id, m["shared_a"].id, late.id}
     out = capsys.readouterr().out
     assert "would move 1 memory row(s) still authored by" in out
-    assert "would re-point the vector payload of 3 live memor(ies)" in out
-    assert "changed 4 item(s)" in out
+    # The swept row is re-pointed too, so the plan says 4 — what the run does.
+    assert "would re-point the vector payload of 4 live memor(ies)" in out
+    assert "changed 5 item(s)" in out
     sweep = await db_session.scalar(
         select(AuditLog).where(
             AuditLog.action == AUDIT_ACTION,

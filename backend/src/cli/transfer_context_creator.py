@@ -95,8 +95,8 @@ class TransferResult:
     dry_run: bool
     lines: list[PlanLine] = field(default_factory=list)
     # --repair-payloads, over the contexts ``to`` already created: memories
-    # still authored by ``from`` that move, and live memories ``to`` owns whose
-    # vector payload is re-pointed. Both 0 without the flag.
+    # still authored by ``from`` that move, and live memories by either
+    # identity whose vector payload is re-pointed. Both 0 without the flag.
     repair_moved: int = 0
     repair_memories: int = 0
     payload_failures: list[UUID] = field(default_factory=list)
@@ -311,13 +311,15 @@ async def transfer_context_creator(
                 )
                 or 0
             )
+            # Live rows by either identity: the swept ones are owned by ``to``
+            # by the time the payload pass runs, so they are re-pointed too.
             result.repair_memories = (
                 await db.scalar(
                     select(func.count())
                     .select_from(Memory)
                     .where(
                         Memory.context_id.in_(repair_scope),
-                        Memory.user_id == to_user_id,
+                        Memory.user_id.in_([from_user_id, to_user_id]),
                         Memory.deleted_at.is_(None),
                     )
                 )
