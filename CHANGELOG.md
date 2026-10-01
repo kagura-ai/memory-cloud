@@ -4,6 +4,22 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.84.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.84.0) — 2026-10-01
+
+Who owns what, at a glance: the admin user list shows each workspace's plan, the Contexts list and the dashboard show who created a context and how it is shared, and the last race between a password reset and a client authorization is closed.
+
+### Added
+- **Plan on the admin user list** ([#1754](https://github.com/kagura-ai/memory-cloud/issues/1754)): each workspace badge on `/admin/users` carries the workspace's plan in the deployment's display names (S / M / L / XL by default), with the role in its tooltip; the third and later workspaces fold into a "+N" button that lists them with their plans, also on touch. `GET /api/v1/admin/users?include_workspaces=true` now returns `plan_name` on each membership (it was only on the detail endpoint before), typed as the same `UserWorkspaceInfo` model.
+- **Context owner and sharing state** ([#1755](https://github.com/kagura-ai/memory-cloud/issues/1755)): the Contexts page names the workspace it lists, shows a **Created by** column ("You", the creator's name, "Another member" for a creator without a display name, or a dash when nothing is recorded) and filters the list to All / Created by me / Shared with me. The dashboard names the workspace, labels each context's visibility in text next to the icon, shows "You" in its Owner column, and its CSV export gains Owner and Visibility columns. CSV cells are now quoted with embedded quotes doubled and a leading formula character neutralised.
+
+### Fixed
+- **A consent or device approval racing a password reset can no longer leave a usable grant** ([#1770](https://github.com/kagura-ai/memory-cloud/issues/1770)): the browser consent and the device-flow approval share-lock the account's row before they write, then re-check that the browser session is still live (judged by the session's accounts, as the reset judges it) and that the user still exists; a writer that waited on a reset or an erasure is refused — the client gets `access_denied` (or `temporarily_unavailable` if the account stayed locked for more than 5 seconds), the device approval 401 (or 503 with `Retry-After`). One revoker now owns "revoke every OAuth grant of a user" for the reset and account erasure. The device approval runs its database work off the event loop, as the consent already did.
+- **Dashboard owner names** ([#1755](https://github.com/kagura-ai/memory-cloud/issues/1755)): the workspace stats endpoint no longer falls back to a member's email address when they have no display name — the same rule the contexts list already applied — so the new CSV export cannot carry a member's address.
+
+### Notes
+- No migration, no new environment variables, no operator action.
+- `make test-integration` and the CI integration job now also run `backend/tests/services/test_password_account_service.py`, so the two-session reset races (this release's and v0.83.0's) run against Postgres in CI.
+
 ## [v0.83.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.83.0) — 2026-09-30
 
 Account security for email + password sign-in. The account owner is emailed when a security-sensitive change is made to the account, a password reset now also disconnects every OAuth / MCP client, and the profile shows email and password as a sign-in method.

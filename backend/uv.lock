@@ -1867,7 +1867,7 @@ wheels = [
 
 [[package]]
 name = "kagura-memory-cloud"
-version = "0.83.0"
+version = "0.84.0"
 source = { editable = "." }
 dependencies = [
     { name = "aioboto3" },
