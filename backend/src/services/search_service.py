@@ -179,11 +179,11 @@ class SearchService:
 
         # #1784: in a private context the vector filter matches the author.
         # The caller's own includes what an account linked to it wrote there.
-        owner_kwargs: dict[str, Any] = {}
+        owner_ids: list[str] | None = None
         if not is_shared_context:
             linked = await linked_user_ids(self.db, user_id)
             if len(linked) > 1:
-                owner_kwargs["owner_ids"] = sorted(linked)
+                owner_ids = sorted(linked)
 
         # Redundant workspace-membership probe — only runs for single-context
         # same-workspace reads of a shared context. Under
@@ -306,7 +306,7 @@ class SearchService:
                     is_shared_context=is_shared_context,
                     collection_name=collection,
                     include_vectors=include_vectors,
-                    **owner_kwargs,
+                    owner_ids=owner_ids,
                 )
             except ExternalServiceError as exc:
                 # The semantic arm is down (embedding provider or vector
@@ -351,7 +351,7 @@ class SearchService:
                 filters=filters,
                 is_shared_context=is_shared_context,
                 collection_name=collection,
-                **owner_kwargs,
+                owner_ids=owner_ids,
             )
 
         # Merge results based on the mode actually served. That is

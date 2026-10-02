@@ -12,7 +12,7 @@ import pytest
 from qdrant_client.models import MatchAny, MatchValue
 
 from db.lance_store import build_lance_filter
-from db.qdrant import _build_search_filter, _owner_ids_kwarg
+from db.qdrant import _build_search_filter
 
 WS = "11111111-1111-4111-8111-111111111111"
 CTX = "22222222-2222-4222-8222-222222222222"
@@ -46,11 +46,6 @@ class TestQdrantFilter:
         )
 
         assert all(c.key != "user_id" for c in qdrant_filter.must)
-
-    def test_the_store_kwarg_is_absent_without_links(self):
-        assert _owner_ids_kwarg(None) == {}
-        assert _owner_ids_kwarg([]) == {}
-        assert _owner_ids_kwarg([ME, OTHER]) == {"owner_ids": [ME, OTHER]}
 
 
 class TestLanceFilter:
@@ -122,8 +117,8 @@ class TestRecallPassesTheLinkSet:
         assert fulltext.await_args.kwargs["owner_ids"] == sorted([ME, OTHER])
 
     @pytest.mark.asyncio
-    async def test_no_links_passes_nothing_extra(self):
+    async def test_no_links_passes_no_owner_ids(self):
         fulltext, _ = await self._recall(shared=False, linked=frozenset({ME}))
 
         fulltext.assert_awaited_once()
-        assert "owner_ids" not in fulltext.await_args.kwargs
+        assert fulltext.await_args.kwargs["owner_ids"] is None

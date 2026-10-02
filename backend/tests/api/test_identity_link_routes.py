@@ -1,6 +1,6 @@
 """#1784: the identity-link endpoints — the proof is the browser session.
 
-The service is covered in ``tests/services/test_identity_link_service.py``.
+The service is covered in ``tests/integration/test_identity_links_db.py``.
 These pin the route layer: an account can be linked only when this session
 holds it, and an id it does not hold answers 404 whatever exists.
 """
@@ -109,6 +109,7 @@ class TestLinkIdentity:
             await link_identity(
                 IdentityLinkTarget(user_id=OTHER),
                 _request(cookie=None),
+                MagicMock(),
                 {"user_id": ME},
                 AsyncMock(),
             )

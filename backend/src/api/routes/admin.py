@@ -1042,6 +1042,13 @@ async def delete_user(
         )
         api_key_count = api_key_count_result.scalar() or 0
 
+        # #1784: a private context this user created may hold memories a
+        # linked account wrote. It passes to that account before the contexts
+        # the user still owns are deleted below; the user leaves its link set.
+        from services.identity_link_service import hand_over_private_contexts
+
+        await hand_over_private_contexts(db, user_id)
+
         # Delete memories and API keys
         await db.execute(delete(Memory).where(Memory.user_id == user_id))
         await db.execute(delete(APIKey).where(APIKey.user_id == user_id))

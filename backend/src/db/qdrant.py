@@ -202,15 +202,6 @@ def extract_score_threshold(filters: dict[str, Any] | None) -> float | None:
     return value
 
 
-def _owner_ids_kwarg(owner_ids: Sequence[str] | None) -> dict[str, Any]:
-    """``owner_ids`` as a keyword for the alternative store, or nothing.
-
-    Passed only when there is a link set (#1784), so a caller with no links
-    reaches the store exactly as before.
-    """
-    return {"owner_ids": owner_ids} if owner_ids else {}
-
-
 def _build_search_filter(
     workspace_id: str,
     context_id: str | list[str],
@@ -553,7 +544,7 @@ async def search_memories_qdrant(
             is_shared_context,
             collection_name,
             include_vectors,
-            **_owner_ids_kwarg(owner_ids),
+            owner_ids=owner_ids,
         )
 
     client = get_qdrant_client()
@@ -757,7 +748,7 @@ async def search_memories_fulltext(
             filters,
             is_shared_context,
             collection_name,
-            **_owner_ids_kwarg(owner_ids),
+            owner_ids=owner_ids,
         )
 
     client = get_qdrant_client()

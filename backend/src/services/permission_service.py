@@ -592,11 +592,15 @@ class PermissionService:
         context_id: UUID,
         required_role: ContextRole | str = ContextRole.VIEWER,
     ) -> tuple[Context, ContextRole]:
-        """The pre-#1275 RBAC decision core of ``check_context_access``.
+        """The RBAC decision core of ``check_context_access``.
 
-        Kept verbatim so the binding intersection is a strict wrapper — the
-        backward-compat matrix's "byte-for-byte unchanged without agent_id"
-        guarantee reduces to "this method did not change".
+        ``check_context_access`` wraps it with the agent-binding intersection
+        (#1275) and adds nothing else, so a caller without ``agent_id`` gets
+        exactly this decision.
+
+        #1784: a private context is also open to an account linked to its
+        creator — as that account: its own workspace membership, whitelist
+        and role decide what it may do there.
         """
         from sqlalchemy import select
 
@@ -1077,8 +1081,12 @@ class PermissionService:
             # link, with the caller's own workspace membership) and so is the
             # memory's author.
             if await is_same_owner(self.db, user_id, memory_user_id):
+                # A write needs what a write into the context needs: a
+                # workspace viewer reads a linked account's memories and
+                # cannot change or delete them.
+                needed = ContextRole.EDITOR if access == "write" else ContextRole.VIEWER
                 try:
-                    await self._check_context_access_rbac(user_id, context_id)
+                    await self._check_context_access_rbac(user_id, context_id, needed)
                 except (AuthorizationError, NotFoundException):
                     await _emit_rbac_denied()
                     return False

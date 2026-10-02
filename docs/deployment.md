@@ -481,9 +481,10 @@ hidden — because `created_by` is compared with the session's `user_id`.
 
 When the person keeps using both accounts, link them:
 
-1. Sign in to the web UI with one account.
+1. Sign in to the web UI with the password account (the CLI admin). A
+   password sign-in always starts a new browser session, so it comes first.
 2. From the account switcher, choose **Add another account** and sign in with
-   the other one. The browser session now holds both.
+   the OAuth account. The browser session now holds both.
 3. Open **Profile Settings**, find **Linked accounts**, and link the other account.
 
 That browser session is the proof: each account entered it through its own
@@ -503,25 +504,44 @@ What it does not do:
 - **Roles and membership stay per account.** A link never makes an account a
   system admin, and never lets it reach a workspace it is not a member of.
   The caller is checked as itself: a workspace viewer reads the linked
-  account's private context but does not own it, a member needs the context
-  in its `allowed_context_ids`, and an API key keeps its workspace scope.
-  The memory list and stats with no context stay the caller's own.
+  account's private context and cannot write to it or change its memories, a
+  member needs the context in its `allowed_context_ids`, and a
+  workspace-scoped API key cannot open a context outside its workspace. The
+  memory list and stats with no context stay the caller's own.
 - **Rows keep their author.** `created_by` and `memories.user_id` are not
   rewritten. After an unlink, a memory one account wrote in the other's
   private context is hidden from the context's creator again.
 - **Per-account history stays separate**: the graph view and its edges, Sleep
-  maintenance (each account's memories are maintained on their own), and
+  maintenance (each account's memories are maintained on their own, with no
+  de-duplication across the two), memory health, access patterns and
   retrieval feedback.
+- **Writes that name another memory stay per account**: an `external_id`
+  upsert replaces only the caller's own earlier memory, and `supersedes` /
+  linked memory ids must point at the caller's own memories. Two accounts
+  that upsert the same `external_id` into one private context keep two rows.
+- A share key recalls as the account that issued it, so it also returns what
+  a linked account wrote in that account's private context.
 
 Either account can unlink from **Profile Settings**; the other one does not
 have to be signed in. At most 4 accounts can be linked together. Every link
 and unlink writes an `audit_logs` row (`identity_linked`,
-`identity_unlinked`) on both accounts and emails both a security notice.
+`identity_unlinked`) on both accounts and emails both a security notice. An
+unlink takes effect at once; tag suggestions can keep the other account's tag
+names for up to two minutes.
 
-Erasing an account takes it out of its link set. Its private contexts pass to
-a linked account that is a member of the same workspace, so what that account
-wrote there stays readable; the erased account's own memories are handled as
-for any erased account. `delete_admin` only removes the user row and its link.
+A link outlives the browser session it was made in. Anyone who can use a
+browser where both accounts are signed in can make one, so treat a shared
+browser as you would for any signed-in session, and unlink from **Profile
+Settings** if a notice arrives that you did not expect.
+
+Erasing an account, or deleting a user from the admin API, takes it out of
+its link set. A private context it created passes to a linked account that
+wrote memories there and could own it as a linked account (a workspace owner
+or admin, or a member whose `allowed_context_ids` names it), so what that
+account wrote stays readable. The leaving account's own memories in that
+context are deleted. A context no linked account wrote in is handled as for
+any erased or deleted account. The `delete_admin` command only removes the
+user row and its link.
 
 The endpoints, for a deployment that scripts it: `GET`/`POST
 /api/v1/me/account/identity-links` and `POST

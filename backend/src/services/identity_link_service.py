@@ -60,9 +60,16 @@ _LINK_LOCK_SQL = text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))")
 )
 
 
+async def lock_identity_links(db: AsyncSession) -> None:
+    """Serialize with every other link, unlink and hand-over until this
+    transaction ends. Take it AFTER any ``users`` row lock."""
+    await db.execute(_LINK_LOCK_SQL)
+
+
 def _forget_cached_tags() -> None:
-    """Drop the tag-vocabulary cache, which is keyed by one user id and would
-    otherwise keep serving a former link's tags until its TTL."""
+    """Drop this process's tag-vocabulary cache, which is keyed by one user id
+    and would otherwise keep serving a former link's tags until its TTL.
+    Other API processes keep theirs for that TTL (two minutes)."""
     from services.tag_resolution import clear_vocabulary_cache
 
     clear_vocabulary_cache()
@@ -168,8 +175,9 @@ class IdentityLinkService:
         if user_id == other_user_id:
             raise ValidationError("An account cannot be linked to itself")
 
-        await self.db.execute(_LINK_LOCK_SQL)
-        # Both rows are locked too, in a fixed order: an account being erased
+        # User rows first, then the link lock — the order account erasure
+        # takes them in, so a link racing an erasure waits instead of
+        # deadlocking. Both rows, in a fixed order: an account being erased
         # or deleted is seen here, not after the link is written.
         users = {
             u.user_id: u
@@ -184,6 +192,7 @@ class IdentityLinkService:
         }
         if user_id not in users or other_user_id not in users:
             raise NotFoundException("Account")
+        await lock_identity_links(self.db)
 
         groups = {
             row.user_id: row.group_id
@@ -246,9 +255,11 @@ class IdentityLinkService:
                 (also for an account that does not exist — the answer does
                 not say which).
         """
-        if user_id == other_user_id:
+        if user_id == other_user_id or not await is_same_owner(self.db, user_id, other_user_id):
+            # Answered before the deployment-wide lock is taken: a caller
+            # naming accounts it is not linked to never queues behind it.
             raise NotFoundException("Linked account")
-        await self.db.execute(_LINK_LOCK_SQL)
+        await lock_identity_links(self.db)
         rows = (
             (
                 await self.db.execute(
@@ -312,22 +323,34 @@ async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str
 
     A private context is readable through its creator. When the creator goes,
     a linked account that wrote memories in it would lose them along with the
-    context. So each live private context ``user_id`` created passes to a
-    linked account that is a member of the context's workspace — the same
-    person, by the link. Contexts with no such account are left for the
-    caller to handle as before.
+    context. So a live private context ``user_id`` created passes to a linked
+    account when both hold:
+
+    * a linked account wrote memories in it — otherwise there is nothing of
+      the survivor's to keep, and the context is left for the caller to
+      handle as before; and
+    * that account could own it today as a linked account: a workspace owner
+      or admin, or a member whose ``allowed_context_ids`` names the context.
+      The hand-over never gives an account more than the link already did.
+
+    The leaving account's own memories in a context that is handed over are
+    deleted here. They are its private data, and the new owner could
+    otherwise publish them by making the context shared.
 
     Then ``user_id`` leaves its set, a set left with one account is removed,
     and ``linked_by`` no longer names ``user_id`` on any row.
 
-    Does not commit: it runs inside the caller's transaction.
+    Does not commit: it runs inside the caller's transaction, after the
+    caller has locked the ``users`` row.
 
     Returns:
         ``{"contexts_handed_over": n, "identity_links_removed": n}``.
     """
+    from auth.workspace_roles import WorkspaceRole
     from models.auth import Context, WorkspaceMember
+    from models.memory import Memory
 
-    await db.execute(_LINK_LOCK_SQL)
+    await lock_identity_links(db)
     others = sorted((await linked_user_ids(db, user_id)) - {user_id})
     handed_over = 0
     if others:
@@ -345,20 +368,59 @@ async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str
             .all()
         )
         for context in contexts:
-            heir = (
-                await db.execute(
-                    select(WorkspaceMember.user_id)
-                    .where(
-                        WorkspaceMember.workspace_id == context.workspace_id,
-                        WorkspaceMember.user_id.in_(others),
+            authors = set(
+                (
+                    await db.execute(
+                        select(Memory.user_id)
+                        .where(
+                            Memory.context_id == context.id,
+                            Memory.user_id.in_(others),
+                            Memory.deleted_at.is_(None),
+                        )
+                        .distinct()
                     )
-                    .order_by(WorkspaceMember.user_id)
-                    .limit(1)
                 )
-            ).scalar_one_or_none()
-            if heir is not None:
-                context.created_by = heir
-                handed_over += 1
+                .scalars()
+                .all()
+            )
+            if not authors:
+                continue
+            members = (
+                (
+                    await db.execute(
+                        select(WorkspaceMember).where(
+                            WorkspaceMember.workspace_id == context.workspace_id,
+                            WorkspaceMember.user_id.in_(authors),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+            def rank(member: WorkspaceMember, context_id: uuid.UUID = context.id) -> int | None:
+                """0 for a workspace owner/admin, 1 for a member whose whitelist
+                names the context, None for an account that could not own it."""
+                if member.role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
+                    return 0
+                if (
+                    member.role == WorkspaceRole.MEMBER
+                    and member.allowed_context_ids is not None
+                    and context_id in member.allowed_context_ids
+                ):
+                    return 1
+                return None
+
+            eligible = sorted(
+                ((rank(m), m.user_id) for m in members if rank(m) is not None),
+            )
+            if not eligible:
+                continue
+            await db.execute(
+                delete(Memory).where(Memory.context_id == context.id, Memory.user_id == user_id)
+            )
+            context.created_by = eligible[0][1]
+            handed_over += 1
 
     group_id = (
         await db.execute(select(IdentityLink.group_id).where(IdentityLink.user_id == user_id))

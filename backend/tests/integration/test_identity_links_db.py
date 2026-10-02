@@ -596,11 +596,18 @@ class TestErasingOneLinkedAccount:
         mine = await _memory(db_session, context, oauth)
         await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
 
+        own = await _memory(db_session, context, admin)
+        own_id = own.id
+
         counts = await hand_over_private_contexts(db_session, admin.user_id)
         await db_session.flush()
 
         assert counts == {"contexts_handed_over": 1, "identity_links_removed": 2}
         assert context.created_by == oauth.user_id
+        # The leaving account's own memories in that context are deleted: the
+        # new owner could otherwise publish them by making the context shared.
+        gone = await db_session.execute(select(Memory.id).where(Memory.id == own_id))
+        assert gone.scalar_one_or_none() is None
         assert await linked_user_ids(db_session, oauth.user_id) == {oauth.user_id}
         # The survivor reads its own memory through its own id from here on.
         _, role = await PermissionService(db_session).check_context_access(
@@ -663,3 +670,223 @@ class TestErasingOneLinkedAccount:
         assert len(rows) == 2
         assert all(row.linked_by != a.user_id for row in rows)
         assert await linked_user_ids(db_session, b.user_id) == {b.user_id, c.user_id}
+
+    @pytest.mark.asyncio
+    async def test_a_context_the_survivor_never_wrote_in_is_left_alone(self, db_session):
+        """Nothing of the survivor's to keep: the context is the caller's to
+        handle as for any erased account."""
+        from services.identity_link_service import hand_over_private_contexts
+
+        admin, oauth = await _user(db_session), await _user(db_session)
+        workspace = await _workspace(db_session, admin, oauth)
+        context = await _private_context(db_session, workspace, admin)
+        await _memory(db_session, context, admin)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        counts = await hand_over_private_contexts(db_session, admin.user_id)
+
+        assert counts["contexts_handed_over"] == 0
+        assert context.created_by == admin.user_id
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("role", "whitelisted", "inherits"),
+        [
+            (WorkspaceRole.VIEWER, None, False),
+            (WorkspaceRole.MEMBER, False, False),
+            (WorkspaceRole.MEMBER, True, True),
+        ],
+    )
+    async def test_the_heir_must_be_able_to_own_the_context_as_a_linked_account(
+        self, db_session, role, whitelisted, inherits
+    ):
+        """The hand-over never gives an account more than the link did."""
+        from services.identity_link_service import hand_over_private_contexts
+
+        admin, oauth = await _user(db_session), await _user(db_session)
+        workspace = await _workspace(db_session, admin)
+        context = await _private_context(db_session, workspace, admin)
+        allowed = None if whitelisted is None else ([context.id] if whitelisted else [])
+        await _member(db_session, workspace, oauth, role, allowed)
+        await _memory(db_session, context, oauth)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        counts = await hand_over_private_contexts(db_session, admin.user_id)
+
+        assert counts["contexts_handed_over"] == (1 if inherits else 0)
+        assert context.created_by == (oauth.user_id if inherits else admin.user_id)
+
+
+class TestWritesByMemoryId:
+    """PATCH and forget address a memory by id and rely on ``can_access_memory``."""
+
+    @pytest.mark.asyncio
+    async def test_a_linked_viewer_reads_but_cannot_write(self, db_session):
+        admin, oauth = await _user(db_session), await _user(db_session)
+        workspace = await _workspace(db_session, admin)
+        context = await _private_context(db_session, workspace, admin)
+        memory = await _memory(db_session, context, admin)
+        await _member(db_session, workspace, oauth, WorkspaceRole.VIEWER)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+        permissions = PermissionService(db_session)
+
+        async def can(access: str) -> bool:
+            return await permissions.can_access_memory(
+                user_id=oauth.user_id,
+                memory_user_id=memory.user_id,
+                workspace_id=workspace.id,
+                context_id=context.id,
+                access=access,
+            )
+
+        assert await can("read")
+        assert not await can("write")
+
+    @pytest.mark.asyncio
+    async def test_a_linked_admin_writes(self, db_session):
+        admin, oauth = await _user(db_session), await _user(db_session)
+        workspace = await _workspace(db_session, admin, oauth)
+        context = await _private_context(db_session, workspace, admin)
+        memory = await _memory(db_session, context, admin)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        assert await PermissionService(db_session).can_access_memory(
+            user_id=oauth.user_id,
+            memory_user_id=memory.user_id,
+            workspace_id=workspace.id,
+            context_id=context.id,
+            access="write",
+        )
+
+
+class TestTheReadSurfacesInsideALinkedPrivateContext:
+    """Each widened call site, driven through its own entry point."""
+
+    @staticmethod
+    async def _seed(db):
+        admin, oauth = await _user(db), await _user(db)
+        workspace = await _workspace(db, admin, oauth)
+        context = await _private_context(db, workspace, admin)
+        by_admin = await _memory(db, context, admin)
+        by_oauth = await _memory(db, context, oauth)
+        await IdentityLinkService(db).link(admin.user_id, oauth.user_id)
+        return admin, oauth, workspace, context, by_admin, by_oauth
+
+    @pytest.mark.asyncio
+    async def test_the_memory_list_of_the_context_shows_both_authors(self, db_session):
+        from api.routes.memory import list_memories
+
+        _, oauth, _, context, by_admin, by_oauth = await self._seed(db_session)
+
+        listed = await list_memories(
+            user={"user_id": oauth.user_id},
+            db=db_session,
+            scope=None,
+            type=None,
+            context_id=context.id,
+            q=None,
+            tags=None,
+            tags_match="any",
+            trigger_from=None,
+            trigger_until=None,
+            lat_min=None,
+            lat_max=None,
+            lon_min=None,
+            lon_max=None,
+            order_by="created_at",
+            limit=50,
+            offset=0,
+        )
+
+        assert {str(m.id) for m in listed.memories} == {str(by_admin.id), str(by_oauth.id)}
+
+    @pytest.mark.asyncio
+    async def test_stats_of_the_context_count_both_authors(self, db_session):
+        from services.memory_service import MemoryService
+
+        _, oauth, workspace, context, _, _ = await self._seed(db_session)
+
+        stats = await MemoryService(db_session).get_stats(
+            user_id=oauth.user_id,
+            workspace_id=str(workspace.id),
+            context_id=str(context.id),
+            include_details=False,
+        )
+
+        assert stats.total_count == 2
+
+    @pytest.mark.asyncio
+    async def test_the_dashboard_counts_both_authors_for_a_member(self, db_session):
+        from services.workspace_service import WorkspaceService
+
+        _, oauth, workspace, context, _, _ = await self._seed(db_session)
+
+        stats = await WorkspaceService(db_session).get_collection_memory_stats(
+            oauth.user_id, [context], is_workspace_owner=False
+        )
+
+        assert stats[str(context.id)][0] == 2
+
+
+class TestErasingThroughTheService:
+    """``AccountErasureService`` runs the hand-over before it pseudonymizes
+    ``created_by`` — the wiring, not only the helper."""
+
+    @pytest.mark.asyncio
+    async def test_the_postgres_sweep_hands_the_context_over(self, db_session):
+        from services.account_erasure_service import AccountErasureService
+
+        admin, oauth, third = [await _user(db_session) for _ in range(3)]
+        workspace = await _workspace(db_session, third, admin, oauth)
+        context = await _private_context(db_session, workspace, admin)
+        mine = await _memory(db_session, context, oauth)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        counts = await AccountErasureService(db_session)._delete_postgres(admin)
+        await db_session.flush()
+        await db_session.refresh(context)
+
+        assert counts["contexts_handed_over"] == 1
+        assert context.created_by == oauth.user_id
+        assert await linked_user_ids(db_session, oauth.user_id) == {oauth.user_id}
+        permissions = PermissionService(db_session)
+        _, role = await permissions.check_context_access(oauth.user_id, context.id)
+        assert role.value == "owner"
+        assert await permissions.can_access_memory(
+            user_id=oauth.user_id,
+            memory_user_id=mine.user_id,
+            workspace_id=workspace.id,
+            context_id=context.id,
+        )
+        listed = await permissions.get_accessible_contexts(third.user_id, workspace.id)
+        assert context.id not in {c.id for c in listed}
+
+
+class TestConcurrentLinks:
+    @pytest.mark.asyncio
+    async def test_the_cap_holds_under_concurrent_links(self, db_session, async_engine):
+        """Five links into one set at once: the set ends at the cap, in one group."""
+        import asyncio
+
+        hub = await _user(db_session)
+        others = [await _user(db_session) for _ in range(5)]
+        await db_session.commit()
+
+        async def link(other: User) -> bool:
+            async with AsyncSession(async_engine, expire_on_commit=False) as session:
+                try:
+                    await IdentityLinkService(session).link(hub.user_id, other.user_id)
+                    return True
+                except ConflictError:
+                    await session.rollback()
+                    return False
+
+        results = await asyncio.gather(*(link(o) for o in others))
+
+        assert sum(results) == MAX_LINKED_IDENTITIES - 1
+        members = await linked_user_ids(db_session, hub.user_id)
+        assert len(members) == MAX_LINKED_IDENTITIES
+        groups = await db_session.execute(
+            select(IdentityLink.group_id).where(IdentityLink.user_id.in_(members)).distinct()
+        )
+        assert len(groups.scalars().all()) == 1
