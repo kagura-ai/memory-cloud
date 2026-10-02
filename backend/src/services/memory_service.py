@@ -2052,11 +2052,23 @@ class MemoryService:
 
     async def _is_private_context(self, context_id: UUID | str | None) -> bool:
         """Whether ``context_id`` is a private context, the one kind the caller
-        reads as a linked owner (#1784). False without a context."""
+        reads as a linked owner (#1784).
+
+        Asks for ``is_private`` being true rather than "not shared": a missing,
+        deleted or NULL context is treated as private for access, but here a
+        True widens the match to the link set, so anything unclear stays on
+        the caller's own rows. False without a context.
+        """
         if context_id is None:
             return False
         uuid = context_id if isinstance(context_id, UUID) else UUID(str(context_id))
-        return not await self.context_service.is_context_shared(uuid)
+        result = await self.db.execute(
+            select(Context.is_private).where(
+                Context.id == uuid,
+                Context.deleted_at.is_(None),
+            )
+        )
+        return result.scalar_one_or_none() is True
 
     async def _create_declared_links(
         self,

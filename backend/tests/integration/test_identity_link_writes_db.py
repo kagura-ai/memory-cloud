@@ -96,6 +96,28 @@ class TestResourceLookup:
         )
 
 
+class TestPrivateContextProbe:
+    """Only a context known to be private widens a match to the link set:
+    access treats a missing context as private, but here that would widen."""
+
+    @pytest.mark.asyncio
+    async def test_private_shared_deleted_and_missing(self, db_session):
+        from utils.datetime import utcnow
+
+        admin, _, workspace, private, _ = await _seed(db_session)
+        shared = await _shared_context(db_session, workspace, admin)
+        service = MemoryService(db_session)
+
+        assert await service._is_private_context(private.id) is True
+        assert await service._is_private_context(str(private.id)) is True
+        assert await service._is_private_context(shared.id) is False
+        assert await service._is_private_context(uuid4()) is False
+        assert await service._is_private_context(None) is False
+        private.deleted_at = utcnow()
+        await db_session.flush()
+        assert await service._is_private_context(private.id) is False
+
+
 async def _upsert(db: AsyncSession, caller: User, context: Context):
     """Run the upsert with remember()/forget() stubbed: what is under test is
     which row the external_id resolves to and what is handed to forget()."""
