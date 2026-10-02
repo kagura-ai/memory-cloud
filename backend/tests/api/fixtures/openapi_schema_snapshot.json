@@ -20452,7 +20452,7 @@
         },
         "tags": [
           "account-erasure",
-          "account-linking"
+          "identity-links"
         ]
       },
       "post": {
@@ -20506,7 +20506,53 @@
         },
         "tags": [
           "account-erasure",
-          "account-linking"
+          "identity-links"
+        ]
+      }
+    },
+    "/api/v1/me/account/identity-links/leave": {
+      "post": {
+        "operationId": "leave_identity_links_api_v1_me_account_identity_links_leave_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityLinkStatusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "account-erasure",
+          "identity-links"
         ]
       }
     },
@@ -20562,7 +20608,7 @@
         },
         "tags": [
           "account-erasure",
-          "account-linking"
+          "identity-links"
         ]
       }
     },
@@ -27633,6 +27679,9 @@
     },
     {
       "name": "graph"
+    },
+    {
+      "name": "identity-links"
     },
     {
       "name": "internal-billing"

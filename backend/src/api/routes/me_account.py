@@ -5,16 +5,17 @@ Routes that let an authenticated user request, confirm, cancel, and
 inspect their own GDPR-Art.17 / APPI account-deletion flow. Admin force-
 erase lives in `admin.py` and goes through the same service.
 
-The module also hosts the account-linking sub-API introduced in #517:
-``link-provider`` initiates an OAuth round-trip to bind a new IdP identity,
-``unlink-provider`` removes an existing linked provider, and ``providers``
-lists all providers currently linked to the session user.
+Two different kinds of "linking" live here, under two OpenAPI tags (#1807):
 
-Identity links (#1784) live here too: ``identity-links`` lists the accounts
-counted as the same owner as the session user and the ones that can be
-linked, and links or unlinks one. A link is proved by the browser session
-holding both accounts, each signed in within ``IDENTITY_LINK_SIGN_IN_WINDOW``
-(#1803), never by an email match.
+* **Sign-in providers** (``account-linking``, #517) — more ways to sign in to
+  ONE account: ``link-provider`` initiates an OAuth round-trip to bind a new
+  IdP identity, ``unlink-provider`` removes one, and ``providers`` lists them.
+* **Identity links** (``identity-links``, #1784) — separate ACCOUNTS, each
+  with its own sign-in, counted as one owner of their private contexts:
+  ``identity-links`` lists the linked and the linkable accounts, links one,
+  unlinks one, or leaves the set. A link is proved by the browser session
+  holding both accounts, each signed in within
+  ``IDENTITY_LINK_SIGN_IN_WINDOW`` (#1803), never by an email match.
 
 Auth model: every endpoint uses `SessionUser` (browser session only, no
 API keys) — a leaked API key must never be enough to trigger account
@@ -318,7 +319,9 @@ async def link_provider(
     body: LinkProviderRequest,
     user: SessionUser,
 ) -> LinkProviderResponse:
-    """Initiate a link-mode OAuth round-trip for the current user.
+    """Attach a sign-in provider to the current account: start a link-mode
+    OAuth round-trip. This adds a way to sign in to ONE account; counting two
+    accounts as one owner is an identity link (``/identity-links``).
 
     The OAuth round-trip *is* the fresh re-auth — there is no password
     prompt, which is the locked re-auth contract for OAuth-only users
@@ -368,7 +371,7 @@ async def unlink_provider(
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> UnlinkProviderResponse:
-    """Remove a linked OAuth provider from the current account.
+    """Detach a sign-in provider (a linked OAuth identity) from the current account.
 
     Returns ``{"status": "ok"}`` on success. The service guards the
     invariants and raises, which the global ``memory_cloud_exception_handler``
@@ -401,7 +404,7 @@ async def list_providers(
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> ProvidersListResponse:
-    """List the OAuth providers currently linked to the session user."""
+    """List the sign-in providers (OAuth identities) attached to the session user."""
     service = AccountLinkingService(db)
     rows = await service.list_providers(user["user_id"])
     return ProvidersListResponse(
@@ -487,15 +490,15 @@ def _session_id(request: Request) -> str:
     return session_id
 
 
-@router.get("/identity-links", response_model=IdentityLinksResponse, tags=["account-linking"])
+@router.get("/identity-links", response_model=IdentityLinksResponse, tags=["identity-links"])
 async def list_identity_links(
     request: Request,
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> IdentityLinksResponse:
-    """List the accounts linked to the session user, and the linkable ones.
+    """List the identity links of the session user, and the linkable accounts.
 
-    Linked accounts own the same private contexts and the memories in them
+    Identity-linked accounts (separate accounts, not sign-in providers) own the same private contexts and the memories in them
     (roles and workspace membership stay per account). Linkable accounts are
     the other accounts signed in on this browser session.
     """
@@ -535,7 +538,7 @@ async def list_identity_links(
     )
 
 
-@router.post("/identity-links", response_model=IdentityLinkStatusResponse, tags=["account-linking"])
+@router.post("/identity-links", response_model=IdentityLinkStatusResponse, tags=["identity-links"])
 async def link_identity(
     body: IdentityLinkTarget,
     request: Request,
@@ -543,7 +546,8 @@ async def link_identity(
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> IdentityLinkStatusResponse:
-    """Count another account as the same owner as the session user.
+    """Create an identity link: count another account as the same owner as
+    the session user. (A sign-in provider is attached with ``link-provider``.)
 
     The proof is this browser session: the target must be one of the accounts
     signed in on it, which each entered through its own sign-in, and both the
@@ -587,7 +591,7 @@ async def link_identity(
 
 
 @router.post(
-    "/identity-links/unlink", response_model=IdentityLinkStatusResponse, tags=["account-linking"]
+    "/identity-links/unlink", response_model=IdentityLinkStatusResponse, tags=["identity-links"]
 )
 async def unlink_identity(
     body: IdentityLinkTarget,
@@ -596,7 +600,8 @@ async def unlink_identity(
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> IdentityLinkStatusResponse:
-    """Stop counting an account as the same owner as the session user.
+    """Remove an identity link: stop counting another account as the same
+    owner as the session user.
 
     Either side can cut the link from its own session; the other account
     does not have to be signed in. 404 when the account is not linked.
@@ -618,7 +623,7 @@ async def unlink_identity(
 
 
 @router.post(
-    "/identity-links/leave", response_model=IdentityLinkStatusResponse, tags=["account-linking"]
+    "/identity-links/leave", response_model=IdentityLinkStatusResponse, tags=["identity-links"]
 )
 async def leave_identity_links(
     request: Request,
@@ -626,8 +631,8 @@ async def leave_identity_links(
     user: SessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> IdentityLinkStatusResponse:
-    """Take the session user out of its link set; the other accounts stay
-    linked to each other (#1807).
+    """Leave the identity-link set: take the session user out of it; the other
+    accounts stay linked to each other (#1807).
 
     ``unlink`` names one account to take out of the caller's set; ``leave``
     takes the caller out. Every account of the former set is notified.

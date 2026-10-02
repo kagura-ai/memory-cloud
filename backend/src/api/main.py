@@ -191,7 +191,19 @@ openapi_tags = [
     },
     {
         "name": "account-linking",
-        "description": "Link, unlink, and list external login providers for the current account",
+        "description": (
+            "Sign-in providers: attach, detach and list the external login providers "
+            "(Google, GitHub) of the current account — several ways to sign in to ONE "
+            "account. Not to be confused with identity-links."
+        ),
+    },
+    {
+        "name": "identity-links",
+        "description": (
+            "Identity links (Issue #1784): count several accounts of one person — each "
+            "with its own sign-in — as one owner of their private contexts. Roles and "
+            "workspace membership stay per account. Browser session only."
+        ),
     },
     {
         "name": "me-oauth",
