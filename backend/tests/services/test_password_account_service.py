@@ -656,13 +656,13 @@ def _fake_session_store(monkeypatch, uid: str) -> dict[str, dict]:
     """One live browser session for ``uid``; the simulated reset clears it."""
     from types import SimpleNamespace
 
-    from api.routes import auth as auth_routes
+    from auth import oauth2_server
 
     sessions: dict[str, dict] = {"sid-1": {"user_id": uid}}
     manager = SimpleNamespace(
         session_holds_user=lambda sid, uid: sessions.get(sid, {}).get("user_id") == uid
     )
-    monkeypatch.setattr(auth_routes, "get_session_manager", lambda: manager)
+    monkeypatch.setattr(oauth2_server, "get_session_manager", lambda: manager)
     return sessions
 
 

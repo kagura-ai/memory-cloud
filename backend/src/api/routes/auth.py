@@ -45,7 +45,12 @@ from auth.dependencies import SessionUser
 from auth.oauth2 import OAuth2Manager
 from auth.password import hash_password, verify_password
 from auth.roles import get_role_manager
-from auth.session import SessionManager, browser_cookie_attrs
+from auth.session import (
+    SESSION_COOKIE_NAME,
+    SessionManager,
+    browser_cookie_attrs,
+    set_session_manager,
+)
 from auth.totp import verify_totp
 from config.settings import TERMS_VERSION_RE
 from db.base import get_db
@@ -81,9 +86,6 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
-# The browser session cookie (Issue #115 renamed it from ``session_id``).
-SESSION_COOKIE_NAME = "kagura_session"
-
 # Google OAuth2 subrouter (provider-specific endpoints)
 google_router = APIRouter(prefix="/google", tags=["authentication", "google-oauth2"])
 
@@ -102,16 +104,8 @@ def initialize_auth_routes(oauth2_manager: OAuth2Manager, session_manager: Sessi
     global _oauth2_manager, _session_manager
     _oauth2_manager = oauth2_manager
     _session_manager = session_manager
-
-
-def get_session_manager() -> SessionManager | None:
-    """Return the active SessionManager instance (or None if not initialized).
-
-    Use this in code that lives outside ``api.routes.auth`` instead of
-    importing the private ``_session_manager`` module attribute directly.
-    Returns ``None`` if called before :func:`initialize_auth_routes`.
-    """
-    return _session_manager
+    # Code outside the routes reads it through auth.session (#1809).
+    set_session_manager(session_manager)
 
 
 # Models

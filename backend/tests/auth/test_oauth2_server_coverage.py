@@ -507,11 +507,11 @@ class TestBrowserSessionIsLive:
     """Fails closed: no cookie, no store, not a member → False; never refreshes a TTL."""
 
     def _manager(self, monkeypatch: pytest.MonkeyPatch, holds: bool) -> MagicMock:
-        from api.routes import auth as auth_routes
+        from auth import oauth2_server
 
         manager = MagicMock()
         manager.session_holds_user.return_value = holds
-        monkeypatch.setattr(auth_routes, "get_session_manager", lambda: manager)
+        monkeypatch.setattr(oauth2_server, "get_session_manager", lambda: manager)
         return manager
 
     def test_member_of_the_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -533,9 +533,9 @@ class TestBrowserSessionIsLive:
         assert browser_session_is_live("sid", "u-1") is False
 
     def test_no_session_store(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from api.routes import auth as auth_routes
+        from auth import oauth2_server
 
-        monkeypatch.setattr(auth_routes, "get_session_manager", lambda: None)
+        monkeypatch.setattr(oauth2_server, "get_session_manager", lambda: None)
         assert browser_session_is_live("sid", "u-1") is False
 
     def test_oauth_user_delegates_with_its_own_session(

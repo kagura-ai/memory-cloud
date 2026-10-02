@@ -933,16 +933,21 @@ def test_audit_salt_reads_from_settings(monkeypatch):
     assert pseudo_a != pseudo_b, "rotating the salt must change downstream pseudonyms"
 
 
-def test_get_session_manager_returns_module_state(monkeypatch):
-    """`get_session_manager()` must expose the live `_session_manager` module attribute."""
+def test_startup_registers_the_session_manager_beside_the_store(monkeypatch):
+    """The service reads the manager from ``auth.session``, not a route module (#1809)."""
     from api.routes import auth as auth_module
+    from auth import session as session_module
+    from services import account_erasure_service
+
+    # Snapshot the globals startup writes; monkeypatch restores them.
+    monkeypatch.setattr(session_module, "_active_session_manager", None)
+    monkeypatch.setattr(auth_module, "_session_manager", auth_module._session_manager)
+    monkeypatch.setattr(auth_module, "_oauth2_manager", auth_module._oauth2_manager)
 
     sentinel = object()
-    monkeypatch.setattr(auth_module, "_session_manager", sentinel)
-    assert auth_module.get_session_manager() is sentinel
-
-    monkeypatch.setattr(auth_module, "_session_manager", None)
-    assert auth_module.get_session_manager() is None
+    auth_module.initialize_auth_routes(None, sentinel)  # type: ignore[arg-type]
+    assert session_module.get_session_manager() is sentinel
+    assert account_erasure_service.get_session_manager() is sentinel
 
 
 class TestDeletePostgresSweep:

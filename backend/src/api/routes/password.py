@@ -41,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes import auth as auth_module
 from auth.dependencies import SessionUser
+from auth.session import SESSION_COOKIE_NAME
 from db.base import get_db
 from db.redis import increment_counter
 from services.email_service import redact_recipient
@@ -266,9 +267,7 @@ async def setup_password(
         new_password=body.new_password,
         ip_address=ip,
         user_agent=request.headers.get("user-agent"),
-        revoke_sessions=_session_revoker(
-            keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME)
-        ),
+        revoke_sessions=_session_revoker(keep_session_id=request.cookies.get(SESSION_COOKIE_NAME)),
     )
     schedule_security_notification(
         background_tasks, user_id=user_id, event=SecurityEvent.PASSWORD_SET, request=request
@@ -329,9 +328,7 @@ async def change_password(
         new_password=body.new_password,
         ip_address=auth_module._login_client_ip(request),
         user_agent=request.headers.get("user-agent"),
-        revoke_sessions=_session_revoker(
-            keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME)
-        ),
+        revoke_sessions=_session_revoker(keep_session_id=request.cookies.get(SESSION_COOKIE_NAME)),
     )
     schedule_security_notification(
         background_tasks, user_id=user_id, event=SecurityEvent.PASSWORD_CHANGED, request=request
@@ -360,9 +357,7 @@ async def remove_password(
         current_password=body.current_password,
         ip_address=auth_module._login_client_ip(request),
         user_agent=request.headers.get("user-agent"),
-        revoke_sessions=_session_revoker(
-            keep_session_id=request.cookies.get(auth_module.SESSION_COOKIE_NAME)
-        ),
+        revoke_sessions=_session_revoker(keep_session_id=request.cookies.get(SESSION_COOKIE_NAME)),
     )
     schedule_security_notification(
         background_tasks,

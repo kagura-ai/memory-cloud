@@ -150,13 +150,11 @@ def patched_external_stores():
         "services.account_erasure_service.get_redis_client",
         new=MagicMock(return_value=MagicMock(setex=AsyncMock(), delete=AsyncMock())),
     )
-    # SessionManager: patch the underlying module attribute the public
-    # get_session_manager() accessor reads, forcing the service to skip
-    # the session-cleanup branch.
+    # SessionManager: no store registered, so the service skips the
+    # session-cleanup branch.
     session_manager_patch = patch(
-        "api.routes.auth._session_manager",
-        new=None,
-        create=True,
+        "services.account_erasure_service.get_session_manager",
+        new=lambda: None,
     )
     with (
         qdrant_patch,

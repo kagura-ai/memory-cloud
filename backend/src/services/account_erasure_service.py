@@ -42,6 +42,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.session import get_session_manager
 from auth.workspace_roles import WorkspaceRole
 from config.settings import get_settings
 from db.qdrant import delete_user_points
@@ -1458,9 +1459,7 @@ class AccountErasureService:
     async def _clear_redis(self, user_id: str) -> dict[str, int]:
         """Best-effort Redis cleanup. Failures are logged inside helpers."""
         # SessionManager uses a sync Redis client — fetch the live instance
-        # via the auth module's public accessor so we go through the same setup.
-        from api.routes.auth import get_session_manager
-
+        # the app registered at startup (#1809).
         sessions_deleted = 0
         session_manager = get_session_manager()
         if session_manager is not None:
