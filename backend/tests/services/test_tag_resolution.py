@@ -581,6 +581,22 @@ class TestVocabularyCache:
         assert db.execute.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_the_aggregate_reads_the_same_link_set_as_the_key(self):
+        """The rows aggregated are the owners the key names, read once — not a
+        second lookup that a link committed in between could widen."""
+
+        async def linked(_db, _user_id):
+            return frozenset({"alice", "bob"})
+
+        db = _db_with_vocabulary({"python": 3})
+        with patch("services.tag_resolution.linked_user_ids", linked):
+            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
+
+        sql = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+        assert "'alice'" in sql and "'bob'" in sql
+        assert "identity_links" not in sql
+
+    @pytest.mark.asyncio
     async def test_linked_accounts_share_one_private_entry(self):
         both = frozenset({"alice", "bob"})
 

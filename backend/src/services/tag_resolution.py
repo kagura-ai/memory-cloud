@@ -34,7 +34,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
-from services.identity_link_service import linked_user_ids, owned_by
+from services.identity_link_service import linked_user_ids
 from utils.logger import get_logger
 from utils.tag_normalize import is_near_duplicate, normalize_tag
 
@@ -137,9 +137,9 @@ async def fetch_vocabulary(
     Returns:
         ``{tag: memory_count}``, capped at ``VOCABULARY_LIMIT`` by descending count.
     """
-    shared = await _is_context_shared(db, context_id)
+    owners = await _owners(db, context_id, user_id)
     return await _read_vocabulary(
-        db, workspace_id=workspace_id, context_id=context_id, user_id=user_id, shared=shared
+        db, workspace_id=workspace_id, context_id=context_id, owners=owners
     )
 
 
@@ -212,8 +212,11 @@ async def _cached_entry(
     user_id: str,
 ) -> tuple[dict[str, int], bool]:
     """``(entry, hit)`` for the caller's scope, loading it single-flight on a miss."""
-    shared = await _is_context_shared(db, context_id)
-    scope = _SHARED_SCOPE if shared else await _owner_scope(db, user_id)
+    owners = await _owners(db, context_id, user_id)
+    # The key and the aggregate both come from this one read of the link
+    # set, so an entry never holds another set's tags than its key names.
+    # A newline cannot occur in a user id, so the join is unambiguous.
+    scope = _SHARED_SCOPE if owners is None else "\n".join(sorted(owners))
     key: _CacheKey = (workspace_id, context_id, scope)
     cached = _vocabulary_cache.get(key)
     if cached is not None:
@@ -234,8 +237,7 @@ async def _cached_entry(
                 db,
                 workspace_id=workspace_id,
                 context_id=context_id,
-                user_id=user_id,
-                shared=shared,
+                owners=owners,
             )
         except Exception as e:  # noqa: BLE001 — negative-cache a failed aggregate
             logger.warning(
@@ -252,7 +254,7 @@ async def _cached_entry(
             cache="miss",
             duration_ms=round((perf_counter() - started) * 1000.0, 2),
             vocabulary_size=len(vocabulary),
-            scope="shared" if shared else "user",
+            scope="shared" if owners is None else "user",
         )
         future.set_result(vocabulary)
         return vocabulary, False
@@ -266,11 +268,12 @@ async def _cached_entry(
         _inflight.pop(key, None)
 
 
-async def _owner_scope(db: AsyncSession, user_id: str) -> str:
-    """Cache scope of a non-shared vocabulary: the caller's link set."""
-    owners = await linked_user_ids(db, user_id)
-    # A newline cannot occur in a user id, so the join is unambiguous.
-    return "\n".join(sorted(owners))
+async def _owners(db: AsyncSession, context_id: UUID, user_id: str) -> frozenset[str] | None:
+    """Whose rows the caller's vocabulary aggregates: None for a shared
+    context (every author), else the caller's link set (#1784)."""
+    if await _is_context_shared(db, context_id):
+        return None
+    return await linked_user_ids(db, user_id)
 
 
 async def _is_context_shared(db: AsyncSession, context_id: UUID) -> bool:
@@ -284,17 +287,16 @@ async def _read_vocabulary(
     *,
     workspace_id: UUID,
     context_id: UUID,
-    user_id: str,
-    shared: bool,
+    owners: frozenset[str] | None,
 ) -> dict[str, int]:
-    """The uncached aggregate; ``shared`` decides whether ``user_id`` scopes it."""
+    """The uncached aggregate over the rows of ``owners`` (every author when None)."""
     conditions = [
         Memory.workspace_id == workspace_id,
         Memory.context_id == context_id,
         Memory.deleted_at.is_(None),
     ]
-    if not shared:
-        conditions.append(owned_by(Memory.user_id, user_id))
+    if owners is not None:
+        conditions.append(Memory.user_id.in_(sorted(owners)))
 
     tag = func.unnest(Memory.tags).label("tag")
     inner = select(Memory.id.label("memory_id"), tag).where(*conditions).subquery()
