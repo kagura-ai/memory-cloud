@@ -319,7 +319,8 @@ class IdentityLink(Base):
             rows.
         user_id: The account (``ON DELETE CASCADE``). Unique: an account is
             in at most one set.
-        linked_by: The account whose session created this row.
+        linked_by: The account whose session created this row
+            (``ON DELETE SET NULL``, #1807): NULL once that account is gone.
         linked_at: Naive UTC time the account joined the set.
     """
 
@@ -336,7 +337,11 @@ class IdentityLink(Base):
         ForeignKey("users.user_id", ondelete="CASCADE"),
         nullable=False,
     )
-    linked_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    linked_by: Mapped[str | None] = mapped_column(
+        String(255),
+        ForeignKey("users.user_id", ondelete="SET NULL", name="identity_links_linked_by_fkey"),
+        nullable=True,
+    )
     linked_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
     __table_args__ = (
