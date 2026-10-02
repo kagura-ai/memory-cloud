@@ -209,7 +209,9 @@ export default function LinkedAccounts() {
     } catch (error) {
       const isNotLinked = error instanceof ApiError && error.status === 404;
       setDialogError(isNotLinked ? t("leaveNotLinkedError") : t("leaveError"));
-      if (isNotLinked) await loadLinks();
+      // Taken out elsewhere: re-read the list and the auth user's
+      // linked_user_ids, which owner attribution reads.
+      if (isNotLinked) await refreshAfterChange();
     } finally {
       setIsLeaving(false);
     }

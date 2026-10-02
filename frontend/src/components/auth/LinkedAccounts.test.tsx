@@ -486,6 +486,28 @@ describe("LinkedAccounts — leave", () => {
     expect(screen.getByRole("alertdialog")).toBeTruthy();
     expect(mockToast).not.toHaveBeenCalled();
   });
+
+  it("on 404 says so and re-reads the list and the auth user", async () => {
+    mockApiGet
+      .mockResolvedValueOnce({ linked: [ADMIN, GITHUB], linkable: [] })
+      .mockResolvedValueOnce({ linked: [], linkable: [] });
+    mockApiPost.mockRejectedValueOnce(new FakeApiError(404));
+
+    render(<LinkedAccounts />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^leaveButton$/ }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /^leaveButton$/ }),
+    );
+
+    expect(await screen.findByText("leaveNotLinkedError")).toBeTruthy();
+    await waitFor(() => {
+      expect(mockApiGet).toHaveBeenCalledTimes(2);
+    });
+    expect(mockRefetchUser).toHaveBeenCalledTimes(1);
+  });
 });
 
 // ---------- i18n: keys exist in both locales (no hardcoded strings) ----------
