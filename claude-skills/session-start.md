@@ -109,7 +109,7 @@ Display a concise summary:
 ### ⏰ Upcoming
 {ONLY if recall_upcoming returned ≥1 item — omit this whole section when empty.
  List forward-looking Time Memories soonest-first.
- End with: "Already done? Retire it with /kagura-memory:maintain".}
+ End with: "Finished one? Retire it with /kagura-memory:maintain".}
 
 ### Open Issues
 {open issues, prioritized by milestone}

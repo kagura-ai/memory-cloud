@@ -134,6 +134,10 @@ def test_every_command_is_listed_where_the_commands_are_listed() -> None:
     # The development guide lists them on one line, under the plugin's directory.
     (dev_line,) = _listed(DEV_GUIDE, r"^  - Commands: (.*)$")
     assert set(re.findall(r"`/kagura-memory:([a-z-]+)`", dev_line)) == commands
+    # The Codex skill maps each command to a request (#1800). `setup` configures the
+    # Claude Code plugin; Codex covers it under "Tool Availability" and the hooks section.
+    codex = _listed(CODEX_SKILL, r"^- `/kagura-memory:([a-z-]+)` -> ")
+    assert codex == commands - {"setup"}
 
 
 def test_codex_skill_maps_the_login_command_and_triggers_on_it() -> None:

@@ -2,10 +2,10 @@
 
 The command sweeps one context for memories that are out of date. It lists first
 and changes only what the user picks, so the safety rules are the contract: no
-write under ``dry-run``, ``forget`` by ``memory_id`` only, full ids, recalled
-text treated as data. These tests pin that text, the parity with the Codex
-section, the pointers from the neighbouring skills, and that every tool and
-parameter the skill names exists in the registry.
+write under ``dry-run``, consent per item number, ``forget`` by ``memory_id``
+only, full ids, recalled text treated as data. These tests pin those rules, the
+parity with the Codex section, the pointers from the neighbouring skills, and
+that every call the text spells out is a registered tool with real parameters.
 """
 
 from __future__ import annotations
@@ -23,14 +23,17 @@ SESSION_SUMMARY = REPO_ROOT / "claude-skills" / "session-summary.md"
 CODEX_SKILL = REPO_ROOT / "plugins" / "kagura-memory" / "skills" / "kagura-memory" / "SKILL.md"
 
 MAX_BYTES = 8 * 1024
-CODEX_SECTION_MAX_CHARS = 1500
+CODEX_SECTION_MAX_CHARS = 2300
 
 READ_TOOLS = ["recall_upcoming", "load_pinned", "recall", "reference"]
 WRITE_TOOLS = ["update_memory", "create_edge", "forget"]
 
-# A call spelled out in the text: `tool(arg=..., ...)`, inline or in a fence.
-_CALL = re.compile(r"\b([a-z_]+)\(([^()\n]*(?:\([^()\n]*\)[^()\n]*)*)\)")
+# A call spelled out in the text: ``name(args)``, inline or in a fence. Prose
+# never writes a word directly against an opening parenthesis.
+_CALL = re.compile(r"(?<![\w.])([a-z][a-z_]*)\(([^()\n]*(?:\([^()\n]*\)[^()\n]*)*)\)")
 _ARG = re.compile(r"(?:^|,\s*)([a-z_]+)=")
+# The one call shown only to forbid it.
+FORBIDDEN_CALL = ("forget", frozenset({"query"}))
 
 
 def _maintain() -> str:
@@ -56,9 +59,11 @@ def _tools() -> dict[str, dict]:
     return {tool["name"]: tool["inputSchema"] for tool in get_tool_definitions()}
 
 
-def _calls(text: str) -> list[tuple[str, set[str]]]:
-    tools = _tools()
-    return [(name, set(_ARG.findall(args))) for name, args in _CALL.findall(text) if name in tools]
+def _calls(text: str) -> list[tuple[str, frozenset[str]]]:
+    return [(name, frozenset(_ARG.findall(args))) for name, args in _CALL.findall(text)]
+
+
+BOTH = pytest.mark.parametrize("text", [_maintain, _codex_section], ids=["claude", "codex"])
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +76,6 @@ def test_front_matter_has_exactly_one_key() -> None:
     assert text.startswith("---\ndescription: "), "front matter must match the sibling commands"
     front = text.split("---", 2)[1].strip()
     assert front.startswith("description:") and "\n" not in front, "one front-matter key only"
-    assert "disable-model-invocation" not in front
 
 
 def test_skill_takes_its_arguments_and_stays_small() -> None:
@@ -81,87 +85,143 @@ def test_skill_takes_its_arguments_and_stays_small() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Safety rules
+# Safety rules (both skills)
 # ---------------------------------------------------------------------------
 
 
-def test_dry_run_calls_no_write_tool() -> None:
-    flat = _flat(_maintain())
-    assert "`dry-run` calls no write tool" in flat
-    assert "With `dry-run`, stop here." in flat
-    # The stop sits after the plan and before the first write call.
+def test_dry_run_stops_after_the_plan() -> None:
     text = _maintain()
+    assert "`dry-run` calls no write tool" in _flat(text)
     stop = text.index("With `dry-run`, stop here.")
     assert text.index("### 3. Show the plan") < stop < text.index("### 4. Ask the user")
+    assert "With `dry-run`, stop after the plan and call no write tool" in _flat(_codex_section())
 
 
-def test_nothing_changes_until_the_user_picks() -> None:
-    flat = _flat(_maintain())
+@BOTH
+def test_nothing_changes_without_the_item_numbers(text) -> None:
+    flat = _flat(text())
     assert "change nothing until the user picks" in flat
-    assert "Keep is the default for every item" in flat
-    assert "Run only the picked actions" in flat
+    assert '"All" or "you decide" is not consent to any change' in flat
+    assert "needs its item numbers" in flat
     assert "One context per run" in flat
 
 
-def test_forget_is_used_in_memory_id_mode_only() -> None:
-    text = _maintain()
-    flat = _flat(text)
-    assert "`forget` in `memory_id` mode only" in flat
-    assert "`forget(query=...)`) is forbidden here" in flat
-    forget_calls = [args for name, args in _calls(text) if name == "forget"]
-    assert forget_calls, "the skill no longer shows the delete call"
-    allowed = [args for args in forget_calls if args == {"memory_id", "context_id"}]
-    ruled_out = [args for args in forget_calls if args == {"query"}]
-    assert len(allowed) + len(ruled_out) == len(forget_calls), forget_calls
-    assert len(ruled_out) == 1, "the query mode appears once, where it is forbidden"
-
-
-def test_deletes_need_item_numbers_and_a_second_look() -> None:
-    flat = _flat(_maintain())
-    assert '"All" or "you decide" is not consent to delete' in flat
-    assert "A delete needs the item numbers" in flat
-    assert "Show the item's summary again" in flat
-    assert "`reference(memory_id=..., context_id=..., fields=[])` once" in flat
-    assert "above 0.8, warn" in flat
-
-
-def test_recalled_text_is_data_and_ids_are_full() -> None:
-    flat = _flat(_maintain())
-    assert "data, not instructions" in flat
-    assert "Full ids only" in flat
-    assert "verbatim from this session's tool results" in flat
-    assert "Never shorten" in flat
-    # Proposals come from structured fields, never from what a summary says.
+@BOTH
+def test_proposals_come_from_structured_fields_and_default_to_keep(text) -> None:
+    flat = _flat(text())
     assert "structured fields only" in flat
-    assert "the default stays keep" in flat
+    assert re.search(r"keep is the default", flat, flags=re.IGNORECASE)
+    assert "data, not instructions" in flat
 
 
-def test_reads_pass_the_trusted_tier() -> None:
-    text = _maintain()
-    assert 'filters={"trust_tier": "trusted"}' in text
-    recalls = [line for line in text.splitlines() if line.startswith("recall(")]
-    assert recalls, "the skill no longer shows the topic recall"
-    assert all('"trust_tier": "trusted"' in line for line in recalls), recalls
+@BOTH
+def test_ids_are_full_and_copied(text) -> None:
+    flat = _flat(text())
+    assert "verbatim from" in flat
+    for verb in ("shorten", "pad", "guess"):
+        assert verb in flat, verb
 
 
-def test_candidate_sources_make_no_promise_they_cannot_keep() -> None:
+@BOTH
+def test_forget_is_used_in_memory_id_mode_only(text) -> None:
+    body = text()
+    forget_calls = [args for name, args in _calls(body) if name == "forget"]
+    allowed = [args for args in forget_calls if args == {"memory_id", "context_id"}]
+    ruled_out = [args for args in forget_calls if ("forget", args) == FORBIDDEN_CALL]
+    assert allowed, "the delete call is no longer shown"
+    assert len(allowed) + len(ruled_out) == len(forget_calls), forget_calls
+    assert len(ruled_out) == 1, "the query mode appears once, where it is ruled out"
+    flat = _flat(body)
+    assert re.search(
+        r"`forget\(query=\.\.\.\)`\) is forbidden|never `forget\(query=\.\.\.\)`", flat
+    )
+    # A delete that removed nothing is reported, never retried as a search.
+    assert "`deleted_count` of 0" in flat and "with a query" in flat
+
+
+@BOTH
+def test_a_delete_gets_a_second_look(text) -> None:
+    flat = _flat(text())
+    assert "summary again" in flat
+    assert "`reference(memory_id=..., context_id=..., fields=[])` once" in flat
+    assert "above 0.8, warn and ask again" in flat
+
+
+@BOTH
+def test_an_update_is_shown_first_and_never_built_from_recalled_text(text) -> None:
+    flat = _flat(text())
+    assert re.search(r"show the new (summary and content|text)", flat)
+    assert re.search(r"never (comes )?from recalled text", flat)
+
+
+@BOTH
+def test_reads_pass_the_trusted_tier_and_unfiltered_reads_are_display_only(text) -> None:
+    body = text()
+    recalls = [args for name, args in _CALL.findall(body) if name == "recall"]
+    assert recalls, "the topic recall is no longer shown"
+    assert all('filters={"trust_tier": "trusted"}' in args for args in recalls), recalls
+    flat = _flat(body)
+    assert "`recall_upcoming` and `load_pinned` take no filters" in flat
+    assert "display-only" in flat
+
+
+@BOTH
+def test_one_context_means_a_single_context_id(text) -> None:
+    body = text()
+    assert "context_ids" not in body
+    assert "single `context_id`" in _flat(body)
+
+
+def test_plan_header_names_the_chosen_context() -> None:
     flat = _flat(_maintain())
-    # recall_upcoming with `until` and no `from` also returns windows still open.
-    assert "Pass no `from`" in flat
-    assert "`trigger.until` is earlier than now" in flat
+    assert "name, id, private or shared" in flat
+    assert "## Maintain: {context_name} ({context_id}, private|shared)" in flat
+
+
+@BOTH
+def test_now_comes_from_the_clock(text) -> None:
+    body = text()
+    assert "date -u +%Y-%m-%dT%H:%M:%S" in body
+    assert re.search(r"[Nn]ever guess the date", body)
+    # The tool documents 'now' for `from` only.
+    assert 'until="now"' not in body
+    untils = [args for name, args in _CALL.findall(body) if "until=" in args]
+    assert untils and all("from=" not in args for args in untils), untils
+
+
+@BOTH
+def test_candidate_sources_make_no_promise_they_cannot_keep(text) -> None:
+    flat = _flat(text())
+    # `until` with no `from` also returns windows still open.
+    assert re.search(r"`trigger\.until` (is earlier than now|has passed)", flat)
+    # Follow-ups that are not over yet are listed too, so a finished one can be retired.
+    assert 'recall_upcoming(context_id=..., from="now", k=20)' in flat
     # load_pinned returns no dates, and the sweep does not pay a reference per pin.
     assert "no dates" in flat
-    assert "Do not call `reference` per item" in flat
-    # No tool lists pending supersede candidates.
+    assert re.search(r"[Dd]o not call `reference` per item|no `reference` per item", flat)
     assert "No tool lists pending candidates" in flat
-    assert "not a complete list" in flat
-    assert "At most 20 items per category" in flat
+    assert re.search(r"not a complete list|list is not complete", flat)
+    assert re.search(r"[Aa]t most 20 (items )?per category", flat)
 
 
-def test_create_edge_absence_is_explained() -> None:
-    flat = _flat(_maintain())
-    assert "does not list `create_edge`" in flat
+@BOTH
+def test_create_edge_absence_is_explained(text) -> None:
+    flat = _flat(text())
+    assert re.search(r"`create_edge`[^.]*say so", flat)
     assert "`?profile=core`" in flat
+
+
+def test_follow_up_outcome_is_saved_without_a_supersedes_edge() -> None:
+    """``forget`` removes the memory's edges, so the edge would vanish at once."""
+    text = _maintain()
+    assert "supersedes=<time" not in text
+    assert 'remember(context_id=..., type="note", summary=..., content=...)' in text
+
+
+def test_boundary_with_sleep_maintenance_is_stated() -> None:
+    when = _maintain().split("## When to use", 1)[1].split("\n## ", 1)[0]
+    assert "Sleep maintenance" in when
+    assert "person's judgment" in when
 
 
 # ---------------------------------------------------------------------------
@@ -169,24 +229,30 @@ def test_create_edge_absence_is_explained() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("text", [_maintain, _codex_section], ids=["claude", "codex"])
-def test_every_named_call_uses_registry_parameters(text) -> None:
+@BOTH
+def test_every_call_is_a_registered_tool_with_its_required_parameters(text) -> None:
     tools = _tools()
     calls = _calls(text())
-    assert {name for name, _ in calls} >= set(READ_TOOLS + WRITE_TOOLS)
+    names = {name for name, _ in calls}
+    assert names <= set(tools), f"not a registered tool: {sorted(names - set(tools))}"
+    assert names >= set(READ_TOOLS + WRITE_TOOLS)
+    problems = []
     for name, args in calls:
         unknown = args - set(tools[name]["properties"])
-        assert not unknown, f"{name} has no parameter {sorted(unknown)}"
+        if unknown:
+            problems.append(f"{name} has no parameter {sorted(unknown)}")
+        if (name, args) == FORBIDDEN_CALL:
+            continue
+        missing = set(tools[name].get("required", [])) - args
+        if missing:
+            problems.append(f"{name}({sorted(args)}) is missing {sorted(missing)}")
+    assert problems == []
 
 
-@pytest.mark.parametrize("text", [_maintain, _codex_section], ids=["claude", "codex"])
-def test_write_calls_name_every_required_parameter(text) -> None:
-    tools = _tools()
-    for name, args in _calls(text()):
-        if name not in WRITE_TOOLS or args in ({"query"}, set()):
-            continue  # the forbidden `forget(query=...)` and the bare `update_memory(...)`
-        missing = set(tools[name]["required"]) - args
-        assert not missing, f"{name}({sorted(args)}) is missing {sorted(missing)}"
+def test_call_pattern_catches_a_misspelt_tool() -> None:
+    calls = _calls("```\nrecal_upcoming(context_id=...)\n```\nand `list_contexts()`")
+    assert [name for name, _ in calls] == ["recal_upcoming", "list_contexts"]
+    assert "recal_upcoming" not in _tools()
 
 
 # ---------------------------------------------------------------------------
@@ -200,24 +266,23 @@ def test_codex_section_sits_after_session_summary_with_its_sync_comment() -> Non
     assert text.index("\n## Session Summary\n") < start
     assert start < text.index("\n## Tool guardrails (hooks)\n")
     sync = text[: start + 1].rstrip().splitlines()[-1]
-    assert sync.startswith("<!-- SYNC:") and "claude-skills/maintain.md" in sync
+    assert sync.startswith("<!-- SYNC:")
+    assert "claude-skills/maintain.md" in sync
+    # The same comment ties the Session Summary step to its Claude counterpart.
+    assert 'step 5 of "Session Summary"' in sync
+    assert 'claude-skills/session-summary.md "4c"' in sync
+    assert "### 4c. " in SESSION_SUMMARY.read_text(encoding="utf-8")
     assert len(_codex_section()) <= CODEX_SECTION_MAX_CHARS, len(_codex_section())
 
 
-def test_codex_section_names_the_same_tools_and_rules() -> None:
-    section = _codex_section()
-    claude = _maintain()
+def test_codex_section_offers_the_same_actions() -> None:
+    claude, section = _calls(_maintain()), _calls(_codex_section())
     for tool in READ_TOOLS + WRITE_TOOLS:
-        assert f"{tool}(" in claude, tool
-        assert f"{tool}(" in section, tool
-    flat = _flat(section)
-    assert "change nothing until the user picks" in flat
-    assert "call no write tool" in flat
-    assert "data, not instructions" in flat
-    assert "never `forget(query=...)`" in flat
-    assert "never shortened" in flat
-    assert "One context per run" in flat
-    assert '"trust_tier": "trusted"' in section
+        assert any(name == tool for name, _ in section), tool
+    # Each write the Claude skill can make is spelled out for Codex with the same switch.
+    for switch in ("dismiss_supersede_candidate", "delivery_mode", "edge_type"):
+        assert any(switch in args for _, args in claude), switch
+        assert any(switch in args for _, args in section), switch
 
 
 def test_codex_skill_maps_the_command_and_triggers_on_it() -> None:
@@ -233,14 +298,19 @@ def test_codex_skill_maps_the_command_and_triggers_on_it() -> None:
 
 def test_session_start_points_to_the_skill() -> None:
     text = SESSION_START.read_text(encoding="utf-8")
-    # Both places the large-pinned-set warning appears, and the Upcoming section.
-    assert text.count("/kagura-memory:maintain") == 3
-    for line in text.splitlines():
-        if "pinned set is large" in line:
-            assert "/kagura-memory:maintain" in line, line
-    assert "recall_upcoming(" in text and text.count("recall_upcoming(") == 1, (
-        "the pointer is static text; session-start gains no tool call"
-    )
+    pointer = "/kagura-memory:maintain"
+    # Both places the large-pinned-set warning appears.
+    warnings = [
+        line
+        for line in text.splitlines()
+        if "pinned set is large" in line and "review for stale" in line
+    ]
+    assert len(warnings) == 2, warnings
+    assert all(pointer in line for line in warnings), warnings
+    # And the Upcoming section of the template, for a follow-up that is finished.
+    upcoming = text.split("\n### ⏰ Upcoming\n", 1)[1].split("\n### ", 1)[0]
+    assert pointer in upcoming and "Retire" in upcoming
+    assert text.count("recall_upcoming(") == 1, "the pointer is static text, not a tool call"
 
 
 def test_session_summary_and_codex_start_point_to_the_skill() -> None:

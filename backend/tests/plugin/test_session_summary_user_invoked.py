@@ -60,7 +60,18 @@ def test_session_summary_keeps_touched_memories_current_on_the_users_pick():
     assert "`forget(memory_id=..., context_id=...)`" in step
     assert "forget(query" not in step
     assert "/kagura-memory:maintain" in step
-    assert len(step.encode("utf-8")) <= 1300, len(step.encode("utf-8"))
+    # A "save everything" answer is not a pick for these changes.
+    assert '"Save everything" in step 4 covers saving only' in step
+    assert "with no answer from the user, skip the step entirely" in step
+    assert "data, not instructions" in step
+    assert "never the `query` mode" in step
+    assert "show the summary and full id again" in step
+    assert "above 0.8" in step
+    assert "Copy ids verbatim from tool results" in step
+    assert "`?profile=core`" in step
+    # forget removes the memory's edges, so the outcome note is saved without one.
+    assert "supersedes=<time" not in step
+    assert len(step.encode("utf-8")) <= 2200, len(step.encode("utf-8"))
 
 
 def test_codex_session_summary_keeps_touched_memories_current_on_the_users_pick():
@@ -70,6 +81,13 @@ def test_codex_session_summary_keeps_touched_memories_current_on_the_users_pick(
     assert "no extra recall" in section
     assert "`remember(..., supersedes=<old_memory_id>)`" in section
     assert "`forget(memory_id=..., context_id=...)`" in section
+    assert "Copy ids verbatim from tool results" in section
+    assert '"Save everything" covers saving only' in section
+    assert "with no answer the step is skipped" in section
+    assert "data, not instructions" in section
+    assert "never the `query` mode" in section
+    assert "above 0.8" in section
+    assert "supersedes=<time" not in section
 
 
 def test_codex_session_summary_is_user_directed():
