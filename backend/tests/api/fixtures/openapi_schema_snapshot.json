@@ -4465,6 +4465,14 @@
               "$ref": "#/components/schemas/LinkedIdentityItem"
             },
             "type": "array"
+          },
+          "sign_in_window_minutes": {
+            "default": 10,
+            "type": "integer"
+          },
+          "signed_in_recently": {
+            "default": false,
+            "type": "boolean"
           }
         },
         "required": [
@@ -4645,6 +4653,10 @@
                 "type": "null"
               }
             ]
+          },
+          "signed_in_recently": {
+            "default": false,
+            "type": "boolean"
           },
           "user_id": {
             "type": "string"

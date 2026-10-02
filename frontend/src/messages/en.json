@@ -100,6 +100,8 @@
     "unlinkSuccess": "{account} unlinked.",
     "linkError": "Couldn't link {account}. Please try again.",
     "linkNotSignedInError": "{account} is no longer signed in on this browser. Sign in to it again, then link it.",
+    "signInAgainHint": "To link, sign in again on this browser to this account and to the one you are using (\"Add another account\" in the account switcher), then link within {minutes} minutes.",
+    "linkSignInAgainError": "Both accounts must have signed in on this browser in the last {minutes} minutes. Sign in to {account} and to this account again, then link.",
     "linkLimitError": "No more accounts can be linked. Unlink one first.",
     "unlinkError": "Couldn't unlink {account}. Please try again.",
     "unlinkNotLinkedError": "{account} is not linked any more.",

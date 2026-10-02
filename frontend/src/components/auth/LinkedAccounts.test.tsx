@@ -9,6 +9,8 @@
  *     auth user refresh; cancel → no POST
  *   - Unlink → confirm dialog → POST identity-links/unlink, then both refresh
  *   - empty state when nothing is linked and nothing is linkable
+ *   - #1803: a linkable row asks to sign in again unless both accounts
+ *     signed in recently; 403 on link explains it inside the dialog
  *   - errors: 404 / 409 / other on link and 404 / other on unlink (in-dialog
  *     Alert, no toast), load failure (banner, no toast)
  *   - i18n: every key the component reads exists in BOTH en.json and ja.json
@@ -242,6 +244,24 @@ describe("LinkedAccounts — link", () => {
     expect(mockRefetchUser).not.toHaveBeenCalled();
   });
 
+  it("shows the sign-in-again error inside the open dialog on 403 and re-reads the list", async () => {
+    mockApiGet
+      .mockResolvedValueOnce({ linked: [], linkable: [GOOGLE] })
+      .mockResolvedValueOnce({ linked: [], linkable: [GOOGLE] });
+    mockApiPost.mockRejectedValueOnce(new FakeApiError(403));
+
+    render(<LinkedAccounts />);
+    await confirmLink();
+
+    expect(await screen.findByText("linkSignInAgainError|Me")).toBeTruthy();
+    expect(screen.getByRole("alertdialog")).toBeTruthy();
+    await waitFor(() => {
+      expect(mockApiGet).toHaveBeenCalledTimes(2);
+    });
+    expect(mockToast).not.toHaveBeenCalled();
+    expect(mockRefetchUser).not.toHaveBeenCalled();
+  });
+
   it("shows the limit error inside the open dialog on 409", async () => {
     mockApiGet.mockResolvedValueOnce({ linked: [], linkable: [GOOGLE] });
     mockApiPost.mockRejectedValueOnce(new FakeApiError(409));
@@ -266,6 +286,50 @@ describe("LinkedAccounts — link", () => {
     expect(await screen.findByText("linkError|Me")).toBeTruthy();
     expect(mockToast).not.toHaveBeenCalled();
     expect(mockRefetchUser).not.toHaveBeenCalled();
+  });
+});
+
+// ---------- #1803: a recent sign-in of both accounts -------------------------
+
+describe("LinkedAccounts — recent sign-in", () => {
+  it("asks to sign in again when the linkable account's sign-in is old", async () => {
+    mockApiGet.mockResolvedValueOnce({
+      linked: [],
+      linkable: [{ ...GOOGLE, signed_in_recently: false }],
+      signed_in_recently: true,
+      sign_in_window_minutes: 10,
+    });
+
+    render(<LinkedAccounts />);
+
+    expect(await screen.findByText("signInAgainHint")).toBeTruthy();
+  });
+
+  it("asks to sign in again when this account's own sign-in is old", async () => {
+    mockApiGet.mockResolvedValueOnce({
+      linked: [],
+      linkable: [{ ...GOOGLE, signed_in_recently: true }],
+      signed_in_recently: false,
+      sign_in_window_minutes: 10,
+    });
+
+    render(<LinkedAccounts />);
+
+    expect(await screen.findByText("signInAgainHint")).toBeTruthy();
+  });
+
+  it("says nothing when both signed in recently, and never on linked rows", async () => {
+    mockApiGet.mockResolvedValueOnce({
+      linked: [ADMIN],
+      linkable: [{ ...GOOGLE, signed_in_recently: true }],
+      signed_in_recently: true,
+      sign_in_window_minutes: 10,
+    });
+
+    render(<LinkedAccounts />);
+
+    expect(await screen.findByText("Me")).toBeTruthy();
+    expect(screen.queryByText("signInAgainHint")).toBeNull();
   });
 });
 
@@ -380,6 +444,8 @@ describe("LinkedAccounts — i18n key coverage", () => {
     "unlinkSuccess",
     "linkError",
     "linkNotSignedInError",
+    "linkSignInAgainError",
+    "signInAgainHint",
     "linkLimitError",
     "unlinkError",
     "unlinkNotLinkedError",

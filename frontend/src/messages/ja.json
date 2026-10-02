@@ -100,6 +100,8 @@
     "unlinkSuccess": "{account} のリンクを解除しました。",
     "linkError": "{account} をリンクできませんでした。もう一度お試しください。",
     "linkNotSignedInError": "{account} はこのブラウザでサインインしていません。サインインし直してからリンクしてください。",
+    "signInAgainHint": "リンクするには、このブラウザでこのアカウントと現在のアカウントの両方にサインインし直し（アカウント切り替えの「別のアカウントを追加」）、{minutes} 分以内にリンクしてください。",
+    "linkSignInAgainError": "両方のアカウントが、このブラウザで直近 {minutes} 分以内にサインインしている必要があります。{account} とこのアカウントにサインインし直してからリンクしてください。",
     "linkLimitError": "これ以上アカウントをリンクできません。先にいずれかのリンクを解除してください。",
     "unlinkError": "{account} のリンクを解除できませんでした。もう一度お試しください。",
     "unlinkNotLinkedError": "{account} はすでにリンクされていません。",

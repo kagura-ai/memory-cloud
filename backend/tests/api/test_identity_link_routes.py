@@ -22,7 +22,7 @@ from api.routes.me_account import (
 )
 from services.identity_link_service import LinkedIdentity
 from services.security_notification_service import SecurityEvent
-from utils.exceptions import NotFoundException
+from utils.exceptions import IdentityLinkSignInRequiredError, NotFoundException
 
 ME = "local:admin"
 OTHER = "google-oauth2|123"
@@ -136,6 +136,85 @@ class TestLinkIdentity:
         notices.assert_not_called()
 
 
+class TestFreshSignIn:
+    """#1803: holding both accounts is not enough — both must have signed in
+    on this session within ``IDENTITY_LINK_SIGN_IN_WINDOW``."""
+
+    @staticmethod
+    def _fresh(*accounts: str):
+        return lambda _session, account, _window: account in accounts
+
+    @pytest.mark.asyncio
+    async def test_both_accounts_are_checked_against_the_window(
+        self, session_manager, service, notices
+    ):
+        session_manager.session_holds_user.return_value = True
+        session_manager.signed_in_within.side_effect = self._fresh(ME, OTHER)
+
+        await link_identity(
+            IdentityLinkTarget(user_id=OTHER), _request(), MagicMock(), {"user_id": ME}, AsyncMock()
+        )
+
+        checked = {
+            (call.args[1], call.args[2]) for call in session_manager.signed_in_within.call_args_list
+        }
+        assert checked == {
+            (ME, me_account.IDENTITY_LINK_SIGN_IN_WINDOW),
+            (OTHER, me_account.IDENTITY_LINK_SIGN_IN_WINDOW),
+        }
+        service.link.assert_awaited_once()
+
+    def test_the_window_is_ten_minutes(self):
+        from datetime import timedelta
+
+        assert me_account.IDENTITY_LINK_SIGN_IN_WINDOW == timedelta(minutes=10)
+
+    @pytest.mark.parametrize("fresh", [(ME,), (OTHER,), ()])
+    @pytest.mark.asyncio
+    async def test_a_stale_sign_in_on_either_side_refuses_the_link(
+        self, session_manager, service, notices, fresh
+    ):
+        """A link is symmetric: a stale caller would let whoever holds an old
+        session hand its private contexts to an account they control, and a
+        stale target the other way round."""
+        session_manager.session_holds_user.return_value = True
+        session_manager.signed_in_within.side_effect = self._fresh(*fresh)
+
+        with pytest.raises(IdentityLinkSignInRequiredError) as exc:
+            await link_identity(
+                IdentityLinkTarget(user_id=OTHER),
+                _request(),
+                MagicMock(),
+                {"user_id": ME},
+                AsyncMock(),
+            )
+
+        assert exc.value.status_code == 403
+        assert exc.value.error_code == "AUTH-305"
+        service.link.assert_not_awaited()
+        notices.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_account_not_in_the_session_is_not_found_before_freshness(
+        self, session_manager, service, notices
+    ):
+        """404 first: a stale-sign-in answer for an id the session does not
+        hold would say that such an account exists."""
+        session_manager.session_holds_user.return_value = False
+        session_manager.signed_in_within.return_value = False
+
+        with pytest.raises(NotFoundException):
+            await link_identity(
+                IdentityLinkTarget(user_id=OTHER),
+                _request(),
+                MagicMock(),
+                {"user_id": ME},
+                AsyncMock(),
+            )
+
+        session_manager.signed_in_within.assert_not_called()
+
+
 class TestUnlinkIdentity:
     @pytest.mark.asyncio
     async def test_unlink_does_not_need_the_other_account_signed_in(
@@ -181,6 +260,27 @@ class TestListIdentityLinks:
         ]
         # Not the caller, not what is already linked.
         assert [(item.user_id, item.name) for item in result.linkable] == [("github|9", "GH")]
+
+    @pytest.mark.asyncio
+    async def test_reports_which_accounts_signed_in_recently(self, session_manager, service):
+        """#1803: the page can say which account to sign in to again."""
+        session_manager.list_accounts.return_value = [
+            {"user_id": ME, "is_active": True},
+            {"user_id": "github|9"},
+            {"user_id": "google|5"},
+        ]
+        session_manager.signed_in_within.side_effect = lambda _session, account, window: (
+            account == "github|9" and window == me_account.IDENTITY_LINK_SIGN_IN_WINDOW
+        )
+
+        result = await list_identity_links(_request(), {"user_id": ME}, AsyncMock())
+
+        assert result.signed_in_recently is False
+        assert [(item.user_id, item.signed_in_recently) for item in result.linkable] == [
+            ("github|9", True),
+            ("google|5", False),
+        ]
+        assert result.sign_in_window_minutes == 10
 
 
 class TestSessionOnly:

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import secrets
+from datetime import datetime, timedelta
 from typing import Any
 
 from utils.datetime import utcnow
@@ -60,7 +61,19 @@ def browser_cookie_attrs() -> dict[str, Any]:
 _SESSION_VERSION = 2
 
 # Envelope keys belong to the container, not to an account identity.
-_ENVELOPE_KEYS = frozenset({"v", "accounts", "active", "created_at", "last_accessed", "updated_at"})
+_ENVELOPE_KEYS = frozenset(
+    {"v", "accounts", "active", "created_at", "last_accessed", "updated_at", "signed_in_at"}
+)
+
+# When each account last went through a sign-in (#1803): ``{account_id: iso}``
+# on the container, never on an identity. An account stays in a container for
+# as long as the session lives, so membership alone says nothing about when it
+# proved itself; an identity link asks for a recent sign-in of both accounts.
+# Only ``create_session`` and ``add_account`` (a sign-in) write it — switching
+# accounts, refreshing the TTL and ``update_session`` never do. A record
+# written before this key existed has no time for any account, which readers
+# treat as "not recent" (fail closed).
+_SIGNED_IN_AT = "signed_in_at"
 
 
 def _account_id(identity: dict[str, Any]) -> str | None:
@@ -292,6 +305,7 @@ class SessionManager:
             "active": account_id,
             "created_at": now,
             "last_accessed": now,
+            _SIGNED_IN_AT: {account_id: now},
         }
 
         # Store in Redis with TTL
@@ -479,6 +493,45 @@ class SessionManager:
             logger.error(f"Failed to check session membership: {e}")
             return False
 
+    def signed_in_at(self, session_id: str, account_id: str) -> datetime | None:
+        """When ``account_id`` last signed in on this session (#1803).
+
+        Naive UTC, like ``utcnow()``. None when the session is missing or
+        unusable, the account is not in it, or no readable time was recorded
+        for it (a record from before the time was kept). Reads the record
+        without refreshing its TTL.
+        """
+        try:
+            raw = self._redis.get(f"session:{session_id}")
+            if not raw:
+                return None
+            stored = json.loads(raw)  # type: ignore[arg-type]
+            if not is_container(stored) or project_active(stored) is None:
+                return None
+            if account_id not in stored.get("accounts", {}):
+                return None
+            signed_in = stored.get(_SIGNED_IN_AT)
+            value = signed_in.get(account_id) if isinstance(signed_in, dict) else None
+            if not isinstance(value, str):
+                return None
+            when = datetime.fromisoformat(value)
+            return when if when.tzinfo is None else None
+        except Exception as e:
+            logger.error(f"Failed to read sign-in time: {e}")
+            return None
+
+    def signed_in_within(self, session_id: str, account_id: str, window: timedelta) -> bool:
+        """Whether ``account_id`` signed in on this session within ``window``.
+
+        A time in the future (clock skew, a tampered record) does not count,
+        and neither does a missing one.
+        """
+        when = self.signed_in_at(session_id, account_id)
+        if when is None:
+            return False
+        age = utcnow() - when
+        return timedelta(0) <= age <= window
+
     def list_accounts(self, session_id: str) -> list[dict[str, Any]]:
         """Identities signed in on this session, active one flagged.
 
@@ -518,6 +571,11 @@ class SessionManager:
         def _add(container: dict[str, Any]) -> None:
             container.setdefault("accounts", {})[account_id] = dict(user_info)
             container["active"] = account_id
+            # A sign-in: the one place besides create_session that sets it.
+            signed_in = container.get(_SIGNED_IN_AT)
+            if not isinstance(signed_in, dict):
+                signed_in = container[_SIGNED_IN_AT] = {}
+            signed_in[account_id] = utcnow().isoformat()
 
         return self._mutate_container(session_id, _add)
 
@@ -567,6 +625,9 @@ class SessionManager:
         def _remove(container: dict[str, Any]) -> None:
             accounts = container.get("accounts", {})
             accounts.pop(account_id, None)
+            signed_in = container.get(_SIGNED_IN_AT)
+            if isinstance(signed_in, dict):
+                signed_in.pop(account_id, None)
             if container.get("active") == account_id:
                 container["active"] = next(iter(accounts))
 
@@ -611,6 +672,9 @@ class SessionManager:
             active = container.get("active", "")
             identity = dict(container.get("accounts", {}).get(active, {}))
             for key, value in updates.items():
+                if key == _SIGNED_IN_AT:
+                    # Only a sign-in sets it (#1803); an update is not one.
+                    continue
                 if key in _ENVELOPE_KEYS:
                     container[key] = value
                 else:

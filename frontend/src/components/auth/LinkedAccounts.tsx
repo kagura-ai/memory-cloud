@@ -7,14 +7,18 @@
  * and an OAuth account) as one identity: linked accounts own the same private
  * contexts and the memories in them. Roles and workspace membership stay per
  * account. A link is proved by this browser session holding both accounts, so
- * only accounts signed in here (the sidebar account switcher) are linkable.
+ * only accounts signed in here (the sidebar account switcher) are linkable —
+ * and both accounts must have signed in here within the last few minutes
+ * (#1803), so a row that has not says to sign in again first.
  *
  * Backend contract:
  *   GET  /api/v1/me/account/identity-links
  *        → { linked: [{user_id, email, name, linked_at}],
- *            linkable: [{user_id, email, name}] }
+ *            linkable: [{user_id, email, name, signed_in_recently}],
+ *            signed_in_recently, sign_in_window_minutes }
  *   POST /api/v1/me/account/identity-links         {user_id}
- *        → { status: "ok" } | 404 (not signed in here) | 409 (link set full)
+ *        → { status: "ok" } | 404 (not signed in here)
+ *          | 403 (either account did not sign in recently) | 409 (set full)
  *   POST /api/v1/me/account/identity-links/unlink  {user_id}
  *        → { status: "ok" } | 404 (not linked)
  */
@@ -55,12 +59,20 @@ interface IdentityAccount {
   email?: string | null;
   name?: string | null;
   linked_at?: string | null;
+  // Linkable rows only: signed in on this browser within the link window.
+  signed_in_recently?: boolean;
 }
 
 interface IdentityLinksResponse {
   linked: IdentityAccount[];
   linkable: IdentityAccount[];
+  // Whether the session user itself signed in within the window (#1803).
+  signed_in_recently?: boolean;
+  sign_in_window_minutes?: number;
 }
+
+// The backend's window, should a response ever omit it.
+const DEFAULT_SIGN_IN_WINDOW_MINUTES = 10;
 
 /** What a row calls the account: its name, else its email, else its id. */
 function accountLabel(account: IdentityAccount): string {
@@ -75,6 +87,10 @@ export default function LinkedAccounts() {
 
   const [linked, setLinked] = useState<IdentityAccount[]>([]);
   const [linkable, setLinkable] = useState<IdentityAccount[]>([]);
+  const [selfSignedInRecently, setSelfSignedInRecently] = useState(false);
+  const [windowMinutes, setWindowMinutes] = useState(
+    DEFAULT_SIGN_IN_WINDOW_MINUTES,
+  );
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   // The account whose action (link or unlink) is in flight.
@@ -92,6 +108,10 @@ export default function LinkedAccounts() {
       const data = await apiClient.get<IdentityLinksResponse>(LINKS_PATH);
       setLinked(data.linked ?? []);
       setLinkable(data.linkable ?? []);
+      setSelfSignedInRecently(data.signed_in_recently ?? false);
+      setWindowMinutes(
+        data.sign_in_window_minutes ?? DEFAULT_SIGN_IN_WINDOW_MINUTES,
+      );
     } catch {
       setLoadError(t("loadError"));
     } finally {
@@ -127,12 +147,18 @@ export default function LinkedAccounts() {
       setDialogError(
         status === 404
           ? t("linkNotSignedInError", { account: label })
-          : status === 409
-            ? t("linkLimitError")
-            : t("linkError", { account: label }),
+          : status === 403
+            ? t("linkSignInAgainError", {
+                account: label,
+                minutes: windowMinutes,
+              })
+            : status === 409
+              ? t("linkLimitError")
+              : t("linkError", { account: label }),
       );
-      // The account left this session: drop the stale row behind the dialog.
-      if (status === 404) await loadLinks();
+      // The account left this session, or a sign-in went stale: re-read the
+      // rows behind the dialog.
+      if (status === 404 || status === 403) await loadLinks();
     } finally {
       setBusyUserId(null);
     }
@@ -168,6 +194,9 @@ export default function LinkedAccounts() {
     // Under a name, show the email; a row labelled by email or id has
     // nothing further to add.
     const secondary = account.name ? account.email : null;
+    // #1803: a link needs a recent sign-in of both accounts on this browser.
+    const needsSignIn =
+      !isLinked && !(selfSignedInRecently && account.signed_in_recently);
     return (
       <li
         key={account.user_id}
@@ -177,6 +206,11 @@ export default function LinkedAccounts() {
           <p className="text-sm font-medium leading-none truncate">{label}</p>
           {secondary && (
             <p className="text-xs text-slate-500 mt-1 truncate">{secondary}</p>
+          )}
+          {needsSignIn && (
+            <p className="text-xs text-amber-700 dark:text-amber-400 mt-1">
+              {t("signInAgainHint", { minutes: windowMinutes })}
+            </p>
           )}
         </div>
         {isLinked ? (

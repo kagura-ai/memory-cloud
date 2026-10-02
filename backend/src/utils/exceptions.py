@@ -1070,6 +1070,23 @@ class CurrentPasswordMismatchError(MemoryCloudException):
         super().__init__(message, status_code=403, error_code="AUTH-302")
 
 
+class IdentityLinkSignInRequiredError(MemoryCloudException):
+    """An identity link needs a recent sign-in of both accounts (403, #1803).
+
+    403 rather than 401: the session is valid, and web clients treat a 401 as
+    "signed out". Raised only for an account this session holds, so it says
+    nothing about accounts elsewhere.
+    """
+
+    def __init__(
+        self,
+        message: str = (
+            "Sign in to both accounts again on this browser, then link them within a few minutes"
+        ),
+    ) -> None:
+        super().__init__(message, status_code=403, error_code="AUTH-305")
+
+
 class PasswordSetupNotAllowedError(MemoryCloudException):
     """This account cannot receive a set-a-password link (400).
 

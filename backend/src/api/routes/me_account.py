@@ -13,7 +13,8 @@ lists all providers currently linked to the session user.
 Identity links (#1784) live here too: ``identity-links`` lists the accounts
 counted as the same owner as the session user and the ones that can be
 linked, and links or unlinks one. A link is proved by the browser session
-holding both accounts, never by an email match.
+holding both accounts, each signed in within ``IDENTITY_LINK_SIGN_IN_WINDOW``
+(#1803), never by an email match.
 
 Auth model: every endpoint uses `SessionUser` (browser session only, no
 API keys) — a leaked API key must never be enough to trigger account
@@ -24,7 +25,7 @@ and the billing checkout endpoints.
 from __future__ import annotations
 
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
@@ -52,7 +53,7 @@ from services.security_notification_service import (
     schedule_security_notification,
 )
 from utils.datetime import to_utc_iso
-from utils.exceptions import NotFoundException
+from utils.exceptions import IdentityLinkSignInRequiredError, NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -420,6 +421,15 @@ async def list_providers(
 # ---------------------------------------------------------------------------
 
 
+# How recently both accounts must have signed in on this browser session to be
+# linked (#1803). An account stays in a session for as long as the session
+# lives (7 rolling days), so holding it proves only that it signed in at some
+# point; the link asks for a sign-in now, as the provider link does with its
+# OAuth round trip (5 minutes there). Ten minutes leaves room for two sign-ins,
+# MFA included.
+IDENTITY_LINK_SIGN_IN_WINDOW = timedelta(minutes=10)
+
+
 class IdentityLinkTarget(BaseModel):
     """Body for linking or unlinking an account."""
 
@@ -439,11 +449,16 @@ class LinkedIdentityItem(BaseModel):
 
 
 class LinkableIdentityItem(BaseModel):
-    """An account signed in on this browser session that is not linked yet."""
+    """An account signed in on this browser session that is not linked yet.
+
+    ``signed_in_recently``: it signed in here within the link window, so it
+    can be linked now without signing in again.
+    """
 
     user_id: str
     email: str | None = None
     name: str | None = None
+    signed_in_recently: bool = False
 
 
 class IdentityLinksResponse(BaseModel):
@@ -451,6 +466,10 @@ class IdentityLinksResponse(BaseModel):
 
     linked: list[LinkedIdentityItem]
     linkable: list[LinkableIdentityItem]
+    # #1803: whether the session user itself signed in within the window, and
+    # the window, so the page can say what to do before a link.
+    signed_in_recently: bool = False
+    sign_in_window_minutes: int = int(IDENTITY_LINK_SIGN_IN_WINDOW.total_seconds() // 60)
 
 
 class IdentityLinkStatusResponse(BaseModel):
@@ -491,7 +510,12 @@ async def list_identity_links(
         if account_id and account_id != user_id and account_id not in linked_ids:
             linkable.append(
                 LinkableIdentityItem(
-                    user_id=account_id, email=account.get("email"), name=account.get("name")
+                    user_id=account_id,
+                    email=account.get("email"),
+                    name=account.get("name"),
+                    signed_in_recently=auth_module._session_manager.signed_in_within(
+                        session_id, account_id, IDENTITY_LINK_SIGN_IN_WINDOW
+                    ),
                 )
             )
     return IdentityLinksResponse(
@@ -505,6 +529,9 @@ async def list_identity_links(
             for item in linked
         ],
         linkable=linkable,
+        signed_in_recently=auth_module._session_manager.signed_in_within(
+            session_id, user_id, IDENTITY_LINK_SIGN_IN_WINDOW
+        ),
     )
 
 
@@ -519,19 +546,29 @@ async def link_identity(
     """Count another account as the same owner as the session user.
 
     The proof is this browser session: the target must be one of the accounts
-    signed in on it, which each entered through its own sign-in. Nothing is
-    ever linked by an email match (#481). An id that is not in the session
-    answers 404 whether or not such an account exists.
+    signed in on it, which each entered through its own sign-in, and both the
+    session user and the target must have signed in here within
+    ``IDENTITY_LINK_SIGN_IN_WINDOW`` (#1803) — a link is symmetric, so a stale
+    sign-in on either side would let whoever holds an old session hand that
+    account's private contexts to another. Nothing is ever linked by an email
+    match (#481). An id that is not in the session answers 404 whether or not
+    such an account exists; freshness is checked only after that.
 
     Raises (via the global handler): 400 for the caller's own id, 404 for an
-    account not signed in here, 409 when the set would exceed its size cap.
+    account not signed in here, 403 (``AUTH-305``) when either account has not
+    signed in within the window, 409 when the set would exceed its size cap.
     """
     user_id = user["user_id"]
     session_id = _session_id(request)
-    if body.user_id != user_id and not auth_module._session_manager.session_holds_user(
-        session_id, body.user_id
-    ):
-        raise NotFoundException("Account")
+    manager = auth_module._session_manager
+    if body.user_id != user_id:
+        if not manager.session_holds_user(session_id, body.user_id):
+            raise NotFoundException("Account")
+        if not all(
+            manager.signed_in_within(session_id, account, IDENTITY_LINK_SIGN_IN_WINDOW)
+            for account in (user_id, body.user_id)
+        ):
+            raise IdentityLinkSignInRequiredError()
     created = await IdentityLinkService(db).link(
         user_id,
         body.user_id,
