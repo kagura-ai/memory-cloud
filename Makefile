@@ -230,13 +230,34 @@ test-unit:
 	@echo "Running unit tests (no DB required)..."
 	cd $(BACKEND_DIR) && pytest tests/api/ tests/neural/ tests/utils/ tests/auth/ -v --ignore=tests/integration --ignore=tests/e2e
 
+# Coverage upload (release flow). Tools come from fixed places, never from
+# whatever `pytest` / `codecovcli` happens to be first on PATH (#1809):
+#   - pytest: the backend virtualenv (`uv sync --locked --extra dev`), which
+#     has the app's dependencies and pytest-cov;
+#   - codecovcli: an isolated, pinned `uvx` environment. codecov-cli pins
+#     click<8.3, so adding it to the backend lock would downgrade click and
+#     huggingface_hub for the app.
+BACKEND_PYTEST = $(BACKEND_DIR)/.venv/bin/pytest
+CODECOV_CLI_VERSION = 11.3.1
+CODECOV_CLI = uvx --from codecov-cli==$(CODECOV_CLI_VERSION) codecovcli
+
 .PHONY: coverage-upload
 coverage-upload:
-	@echo "Running unit tests with coverage and uploading to Codecov..."
-	cd $(BACKEND_DIR) && pytest tests/api/ tests/auth/ tests/smoke/ tests/neural/test_hebbian.py -v --cov=src --cov-report=xml --cov-report=term-missing || true
+	@test -x $(BACKEND_PYTEST) || { echo "Error: $(BACKEND_PYTEST) not found — run: cd $(BACKEND_DIR) && uv sync --locked --extra dev"; exit 1; }
+	@command -v uvx >/dev/null || { echo "Error: uvx not found (install uv)"; exit 1; }
+	@echo "pytest:     $(BACKEND_PYTEST)"
+	@v=$$($(CODECOV_CLI) --version) || { echo "Error: could not run codecov-cli $(CODECOV_CLI_VERSION) via uvx"; exit 1; }; \
+	echo "codecovcli: $$v"
 	@CODECOV_TOKEN=$${CODECOV_TOKEN:-$$(grep '^CODECOV_TOKEN=' .env.local 2>/dev/null | cut -d= -f2)}; \
-	if [ -z "$$CODECOV_TOKEN" ]; then echo "Error: CODECOV_TOKEN not set (add to .env.local)"; exit 1; fi; \
-	cd $(BACKEND_DIR) && codecovcli upload-process --token $$CODECOV_TOKEN -f coverage.xml \
+	if [ -z "$$CODECOV_TOKEN" ]; then echo "Error: CODECOV_TOKEN not set (add to .env.local)"; exit 1; fi
+	@echo "Running unit tests with coverage and uploading to Codecov..."
+	rm -f $(BACKEND_DIR)/coverage.xml
+	@# Failing tests (exit 1) still yield a coverage report worth uploading; an
+	@# interrupted run, collection/import errors or a usage error (exit >= 2) do not.
+	cd $(BACKEND_DIR) && { .venv/bin/pytest tests/api/ tests/auth/ tests/smoke/ tests/neural/test_hebbian.py -v --cov=src --cov-report=xml --cov-report=term-missing; rc=$$?; [ $$rc -le 1 ] || { echo "Error: pytest exited $$rc (interrupted, collection or usage error) — not uploading"; exit 1; }; }
+	@test -s $(BACKEND_DIR)/coverage.xml || { echo "Error: pytest wrote no coverage.xml"; exit 1; }
+	@CODECOV_TOKEN=$${CODECOV_TOKEN:-$$(grep '^CODECOV_TOKEN=' .env.local 2>/dev/null | cut -d= -f2)}; \
+	cd $(BACKEND_DIR) && $(CODECOV_CLI) upload-process --token $$CODECOV_TOKEN -f coverage.xml \
 		--sha $$(git rev-parse HEAD) \
 		--slug kagura-ai/memory-cloud \
 		--git-service github

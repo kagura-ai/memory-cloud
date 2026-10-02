@@ -151,14 +151,14 @@ class TestFreshSignIn:
         self, session_manager, service, notices
     ):
         session_manager.session_holds_user.return_value = True
-        session_manager.signed_in_within.side_effect = self._fresh(ME, OTHER)
+        session_manager.proven_within.side_effect = self._fresh(ME, OTHER)
 
         await link_identity(
             IdentityLinkTarget(user_id=OTHER), _request(), MagicMock(), {"user_id": ME}, AsyncMock()
         )
 
         checked = {
-            (call.args[1], call.args[2]) for call in session_manager.signed_in_within.call_args_list
+            (call.args[1], call.args[2]) for call in session_manager.proven_within.call_args_list
         }
         assert checked == {
             (ME, me_account.IDENTITY_LINK_SIGN_IN_WINDOW),
@@ -180,7 +180,7 @@ class TestFreshSignIn:
         session hand its private contexts to an account they control, and a
         stale target the other way round."""
         session_manager.session_holds_user.return_value = True
-        session_manager.signed_in_within.side_effect = self._fresh(*fresh)
+        session_manager.proven_within.side_effect = self._fresh(*fresh)
 
         with pytest.raises(IdentityLinkSignInRequiredError) as exc:
             await link_identity(
@@ -203,7 +203,7 @@ class TestFreshSignIn:
         """404 first: a stale-sign-in answer for an id the session does not
         hold would say that such an account exists."""
         session_manager.session_holds_user.return_value = False
-        session_manager.signed_in_within.return_value = False
+        session_manager.proven_within.return_value = False
 
         with pytest.raises(NotFoundException):
             await link_identity(
@@ -214,7 +214,7 @@ class TestFreshSignIn:
                 AsyncMock(),
             )
 
-        session_manager.signed_in_within.assert_not_called()
+        session_manager.proven_within.assert_not_called()
 
 
 class TestUnlinkIdentity:
@@ -271,7 +271,7 @@ class TestListIdentityLinks:
             {"user_id": "github|9"},
             {"user_id": "google|5"},
         ]
-        session_manager.signed_in_within.side_effect = lambda _session, account, window: (
+        session_manager.proven_within.side_effect = lambda _session, account, window: (
             account == "github|9" and window == me_account.IDENTITY_LINK_SIGN_IN_WINDOW
         )
 

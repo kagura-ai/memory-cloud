@@ -17,9 +17,10 @@ from fastapi.testclient import TestClient
 
 from api.routes import auth as auth_routes
 from auth.dependencies import require_session_auth
+from tests.redis_fake_ops import SessionFakeOps
 
 
-class FakeRedis:
+class FakeRedis(SessionFakeOps):
     def __init__(self) -> None:
         self.store: dict[str, str] = {}
 
@@ -37,20 +38,6 @@ class FakeRedis:
 
     def scan(self, cursor: int, match: str = "*", count: int = 100):
         return 0, [k for k in list(self.store) if k.startswith(match.rstrip("*"))]
-
-    def pipeline(self):
-        return _Pipe(self)
-
-
-class _Pipe:
-    def __init__(self, r: FakeRedis) -> None:
-        self.r, self.ops = r, []
-
-    def delete(self, key: str) -> None:
-        self.ops.append(key)
-
-    def execute(self):
-        return [self.r.delete(k) for k in self.ops]
 
 
 ALICE = {"sub": "alice", "user_id": "alice", "email": "alice@example.com", "name": "Alice"}

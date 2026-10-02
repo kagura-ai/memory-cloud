@@ -60,6 +60,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from auth.mcp_resource import is_same_mcp_resource, mcp_resource_identifier
 from auth.oauth_scope import client_registered_scope, granted_scope
+from auth.session import get_session_manager
 from config.settings import get_settings
 from models.auth import (
     OAuth2AuthorizationCode,
@@ -320,9 +321,6 @@ def browser_session_is_live(session_id: str | None, user_id: str) -> bool:
     """
     if not session_id:
         return False
-    # Lazy: the routes package imports this module's siblings at load time.
-    from api.routes.auth import get_session_manager
-
     manager = get_session_manager()
     if manager is None:
         logger.error("grant_session_check_unavailable", user_id=user_id)

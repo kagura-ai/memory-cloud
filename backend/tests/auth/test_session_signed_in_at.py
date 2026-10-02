@@ -30,12 +30,14 @@ def manager(monkeypatch) -> SessionManager:
     return SessionManager(redis_url="redis://fake:6379")
 
 
-def _set_signed_in_at(manager: SessionManager, sid: str, account: str, when: str | None) -> None:
+def _set_signed_in_at(
+    manager: SessionManager, sid: str, account: str, when: str | None, key: str = "signed_in_at"
+) -> None:
     stored = raw(manager, sid)
     if when is None:
-        stored.get("signed_in_at", {}).pop(account, None)
+        stored.get(key, {}).pop(account, None)
     else:
-        stored.setdefault("signed_in_at", {})[account] = when
+        stored.setdefault(key, {})[account] = when
     manager._redis.store[f"session:{sid}"] = json.dumps(stored)
 
 
@@ -195,8 +197,8 @@ class TestLinkRouteWithARealSession:
 
     @pytest.mark.asyncio
     async def test_two_fresh_sign_ins_link(self, manager):
-        sid = manager.create_session(USER)
-        manager.add_account(sid, OTHER)
+        sid = manager.create_session(USER, proven_at=utcnow())
+        manager.add_account(sid, OTHER, proven_at=utcnow())
 
         result, service = await self._link(manager, sid)
 
@@ -208,10 +210,26 @@ class TestLinkRouteWithARealSession:
     async def test_a_stale_sign_in_on_either_side_is_refused(self, manager, stale):
         from utils.exceptions import IdentityLinkSignInRequiredError
 
-        sid = manager.create_session(USER)
-        manager.add_account(sid, OTHER)
+        sid = manager.create_session(USER, proven_at=utcnow())
+        manager.add_account(sid, OTHER, proven_at=utcnow())
         old = (utcnow() - timedelta(minutes=11)).isoformat()
-        _set_signed_in_at(manager, sid, stale, old)
+        _set_signed_in_at(manager, sid, stale, old, key="proven_at")
+
+        with pytest.raises(IdentityLinkSignInRequiredError):
+            await self._link(manager, sid)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("unproven", ["google_1", "local:admin"])
+    async def test_a_fresh_sign_in_that_proved_nothing_is_refused(self, manager, unproven):
+        """#1818: a sign-in a minute ago is not enough when it proved nothing
+        (an OAuth round trip with no provider authentication time)."""
+        from utils.exceptions import IdentityLinkSignInRequiredError
+
+        proofs = {"google_1": utcnow(), "local:admin": utcnow()}
+        proofs[unproven] = None
+        sid = manager.create_session(USER, proven_at=proofs["google_1"])
+        manager.add_account(sid, OTHER, proven_at=proofs["local:admin"])
+        assert manager.signed_in_within(sid, unproven, timedelta(minutes=10))
 
         with pytest.raises(IdentityLinkSignInRequiredError):
             await self._link(manager, sid)

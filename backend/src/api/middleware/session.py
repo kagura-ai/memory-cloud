@@ -26,7 +26,7 @@ from collections.abc import Callable
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from auth.session import SessionManager
+from auth.session import SESSION_COOKIE_NAME, SessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Extract session_id from cookie (Issue #115: renamed from session_id to kagura_session)
-        session_id = request.cookies.get("kagura_session")
+        session_id = request.cookies.get(SESSION_COOKIE_NAME)
 
         if session_id:
             # Validate session

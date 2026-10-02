@@ -23,6 +23,7 @@ import functools
 import os
 import re
 import secrets
+from datetime import datetime
 from typing import Any, Literal
 
 import httpx
@@ -45,7 +46,12 @@ from auth.dependencies import SessionUser
 from auth.oauth2 import OAuth2Manager
 from auth.password import hash_password, verify_password
 from auth.roles import get_role_manager
-from auth.session import SessionManager, browser_cookie_attrs
+from auth.session import (
+    SESSION_COOKIE_NAME,
+    SessionManager,
+    browser_cookie_attrs,
+    set_session_manager,
+)
 from auth.totp import verify_totp
 from config.settings import TERMS_VERSION_RE
 from db.base import get_db
@@ -54,7 +60,11 @@ from services.account_linking_service import AccountLinkingService
 from services.beta_invite_service import BETA_INVITE_TOKEN_PATTERN
 from services.identity_link_service import linked_user_ids
 from services.known_device_service import note_browser_sign_in
-from services.password_account_service import find_password_user_by_email
+from services.password_account_service import (
+    credential_fingerprint,
+    find_password_user_by_email,
+    password_unchanged,
+)
 from services.security_notification_service import (
     PROVIDER_SIGN_IN_LABELS,
     SecurityEvent,
@@ -81,9 +91,6 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
-# The browser session cookie (Issue #115 renamed it from ``session_id``).
-SESSION_COOKIE_NAME = "kagura_session"
-
 # Google OAuth2 subrouter (provider-specific endpoints)
 google_router = APIRouter(prefix="/google", tags=["authentication", "google-oauth2"])
 
@@ -102,16 +109,8 @@ def initialize_auth_routes(oauth2_manager: OAuth2Manager, session_manager: Sessi
     global _oauth2_manager, _session_manager
     _oauth2_manager = oauth2_manager
     _session_manager = session_manager
-
-
-def get_session_manager() -> SessionManager | None:
-    """Return the active SessionManager instance (or None if not initialized).
-
-    Use this in code that lives outside ``api.routes.auth`` instead of
-    importing the private ``_session_manager`` module attribute directly.
-    Returns ``None`` if called before :func:`initialize_auth_routes`.
-    """
-    return _session_manager
+    # Code outside the routes reads it through auth.session (#1809).
+    set_session_manager(session_manager)
 
 
 # Models
@@ -538,6 +537,7 @@ async def google_login(
     add_account: bool = False,
     invite: str | None = None,
     accepted_terms: str | None = None,
+    link_proof: bool = False,
 ):
     """Initiate Google OAuth2 login flow.
 
@@ -551,6 +551,10 @@ async def google_login(
         accepted_terms: The terms version the person agreed to on the sign-in
             page (#1665). Bound to this flow's state; ignored while
             ``TERMS_VERSION`` is empty.
+        link_proof: This sign-in proves the account for an identity link
+            (#1818): Google is asked for ``auth_time``, and the callback
+            records it from the verified ID token. Ordinary sign-ins send the
+            same request as before.
 
     Returns:
         If return_to: RedirectResponse to Google OAuth (browser user)
@@ -603,6 +607,10 @@ async def google_login(
         # #1665: the terms version the person agreed to, bound to this state.
         _remember_accepted_terms(state, accepted_terms)
 
+        # #1818: a sign-in that proves this account for an identity link.
+        if link_proof:
+            _remember_link_proof_intent(state)
+
     # Get authorization URL
     redirect = redirect_uri or os.getenv("GOOGLE_REDIRECT_URI")
     if not redirect:
@@ -612,7 +620,7 @@ async def google_login(
     # it, a user with one Google session is returned the identity they already
     # have and the switcher never gains a second account.
     auth_url = _oauth2_manager.get_authorization_url_web(
-        redirect, state, select_account=add_account
+        redirect, state, select_account=add_account, request_auth_time=link_proof
     )
 
     # Issue #102: Auto-redirect for browser/iOS users
@@ -787,6 +795,8 @@ async def google_callback(
     beta_invite_token_hash = _take_beta_invite_hash(state)
     # #1665: likewise single-use and taken only after the CSRF check.
     accepted_terms = _take_accepted_terms(state)
+    # #1818: likewise.
+    link_proof = _take_link_proof_intent(state)
 
     try:
         # 2. Exchange code for token
@@ -955,8 +965,20 @@ async def google_callback(
             "role": role.value,
         }
 
+        # #1818: what this sign-in proves for an identity link. Only a
+        # link-proof flow asked Google for auth_time; a missing or unverifiable
+        # one proves nothing (fail closed).
+        auth_time = None
+        if link_proof:
+            auth_time = await asyncio.to_thread(
+                _oauth2_manager.verified_auth_time, credentials, user_info["sub"]
+            )
+            if auth_time is None:
+                logger.warning("link_proof_auth_time_missing", provider="google")
+        proven_at = _oauth_proven_at(auth_time)
+
         if intent == "add" and add_to_session:
-            if not _session_manager.add_account(add_to_session, session_data):
+            if not _session_manager.add_account(add_to_session, session_data, proven_at=proven_at):
                 # The session died between the check and the write. Refuse for
                 # the same reason — better a retryable error than a silent loss.
                 logger.warning("add_account_write_failed")
@@ -964,7 +986,7 @@ async def google_callback(
             session_id = add_to_session
             logger.info(f"Added account to existing session: {owner_email}")
         else:
-            session_id = _session_manager.create_session(session_data)
+            session_id = _session_manager.create_session(session_data, proven_at=proven_at)
 
         # Issue #212: Auto-create personal workspace on first login
         # Skip if user has pending invitations (they'll get workspace via invitation)
@@ -1232,6 +1254,54 @@ def _take_add_account_intent(state: str, request: Request) -> tuple[str, str | N
     return ("add", cookie_session)
 
 
+# --- Identity-link proof (#1818) -------------------------------------------
+#
+# An identity link asks both accounts to have proved their credential within a
+# few minutes (#1803). An OAuth round trip is not such a proof on its own: a
+# browser that still holds a provider session completes it without a password.
+# A sign-in started with ``link_proof=1`` asks Google for ``auth_time`` (the
+# last time the person actually authenticated there) and the callback records
+# that time, read from the verified ID token, as the account's proof. Google
+# cannot be made to re-authenticate (no ``prompt=login``, no ``max_age``), so a
+# stale ``auth_time`` is recorded as it is and the link refuses it. GitHub
+# reports no authentication time at all, so a GitHub sign-in proves nothing —
+# unless the operator turns ``IDENTITY_LINK_ALLOW_OAUTH_SIGNIN_PROOF`` on,
+# which brings back the #1803 rule (the sign-in itself counts).
+_LINK_PROOF_KEY = "oauth2_link_proof:{state}"
+_LINK_PROOF_TTL = 300  # same lifetime as oauth2_state:{state}
+
+
+def _remember_link_proof_intent(state: str) -> None:
+    """Mark this OAuth flow as a sign-in meant to prove an account."""
+    if _session_manager:
+        _session_manager._redis.setex(_LINK_PROOF_KEY.format(state=state), _LINK_PROOF_TTL, "1")
+
+
+def _take_link_proof_intent(state: str) -> bool:
+    """Whether this flow asked for a proof. Single-use, like the state."""
+    if not _session_manager:
+        return False
+    key = _LINK_PROOF_KEY.format(state=state)
+    value = _session_manager._redis.get(key)
+    _session_manager._redis.delete(key)
+    return value == "1"
+
+
+def _oauth_proven_at(auth_time: datetime | None) -> datetime | None:
+    """The proof an OAuth sign-in leaves on the session (#1818).
+
+    The provider's authentication time when it gave one, nothing otherwise —
+    unless the operator counts the sign-in itself, which then always wins.
+    """
+    from config.settings import get_settings
+
+    if get_settings().identity_link_allow_oauth_signin_proof:
+        # The operator counts the sign-in itself; a provider time can only
+        # be older, so it never makes the proof weaker than that.
+        return utcnow()
+    return auth_time
+
+
 # --- carrying a closed-beta invite across the OAuth round trip (#1581) -------
 #
 # ``GET /auth/{provider}/login?invite=<token>`` travels the same way `return_to`
@@ -1467,6 +1537,7 @@ async def _terms_refusal(
         redis.delete(
             f"oauth2_return_to:{state}",
             _ADD_ACCOUNT_KEY.format(state=state),
+            _LINK_PROOF_KEY.format(state=state),
             f"oauth2_state_intent:{state}",
             f"oauth2_state_user:{state}",
         )
@@ -2101,14 +2172,17 @@ async def github_callback(
             "picture": user_info.get("picture"),
             "role": role.value,
         }
+        # #1818: GitHub reports no authentication time, so its sign-in proves
+        # nothing for an identity link unless the operator allows it.
+        proven_at = _oauth_proven_at(None)
         if intent == "add" and add_to_session:
-            if not _session_manager.add_account(add_to_session, session_data):
+            if not _session_manager.add_account(add_to_session, session_data, proven_at=proven_at):
                 logger.warning("add_account_write_failed")
                 return _oauth_error_redirect("github", "add_account_failed")
             session_id = add_to_session
             logger.info(f"Added account to existing session: {db_email}")
         else:
-            session_id = _session_manager.create_session(session_data)
+            session_id = _session_manager.create_session(session_data, proven_at=proven_at)
 
         # 6. Auto-create personal workspace
         try:
@@ -2216,7 +2290,7 @@ async def _create_session_and_workspace(
 ) -> str:
     """Create session and ensure personal workspace exists.
 
-    Shared by OAuth callbacks and password login.
+    Used by the password and MFA sign-ins; the OAuth callbacks build their own.
     """
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Session manager not initialized")
@@ -2233,7 +2307,8 @@ async def _create_session_and_workspace(
         "picture": picture,
         "role": role,
     }
-    session_id = _session_manager.create_session(session_data)
+    # #1818: a password (and MFA) sign-in proves the account here and now.
+    session_id = _session_manager.create_session(session_data, proven_at=utcnow())
 
     try:
         async for db in get_db():
@@ -2475,6 +2550,62 @@ def _take_mfa_accepted_terms(mfa_token: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+# The fingerprint of the password hash a pending MFA step verified (#1809),
+# beside ``mfa_pending:{token}`` and with the same lifetime.
+_MFA_PENDING_CRED_KEY = "mfa_pending_cred:{token}"
+
+
+async def _password_still_current(user_id: str, fingerprint: str | None) -> bool:
+    """Is the password a sign-in verified still the committed one? (#1809)
+
+    Run AFTER the sign-in has written its session: the read waits for a
+    password write in progress (see ``password_unchanged``). Ends its
+    transaction at once so the share lock does not outlive the answer. A
+    database error propagates: the caller fails closed, but as an outage,
+    not as a wrong password.
+    """
+    async for db in get_db():
+        try:
+            return await password_unchanged(db, user_id, fingerprint)
+        finally:
+            await db.rollback()
+    return False
+
+
+async def _open_password_session(user: User, fingerprint: str | None) -> str:
+    """Write the session for a verified password sign-in, then re-check the password.
+
+    A password reset, set-up, change or removal signs the account out BEFORE
+    it commits. A sign-in that verified the old hash and writes its session
+    after that sweep would keep a session the new password never authorized,
+    so the session is written first and the password re-read second: if it
+    changed in between, the session is deleted and the sign-in fails like a
+    wrong password (#1809).
+    """
+    session_id = await _create_session_and_workspace(
+        user_id=user.user_id, email=user.email, name=user.name, role=user.role
+    )
+    try:
+        still_current = await _password_still_current(user.user_id, fingerprint)
+    except Exception as exc:
+        # Fail closed: without the answer the session cannot be trusted. A
+        # correct password is not a credential failure, so say "try again".
+        if _session_manager:
+            _session_manager.delete_session(session_id)
+        logger.error(
+            "password_login_recheck_failed", user_id=user.user_id, error_type=type(exc).__name__
+        )
+        raise HTTPException(
+            status_code=503, detail="Sign-in is temporarily unavailable. Please try again."
+        ) from exc
+    if not still_current:
+        if _session_manager:
+            _session_manager.delete_session(session_id)
+        logger.warning("password_login_superseded", user_id=user.user_id)
+        raise InvalidCredentialsError()
+    return session_id
+
+
 @router.get("/config")
 async def get_auth_config():
     """Get authentication configuration (public)."""
@@ -2530,11 +2661,14 @@ async def password_login(
         raise InvalidCredentialsError()
 
     _clear_login_failures(rate_key)
+    verified = credential_fingerprint(user.password_hash)
 
     # MFA check
     if user.totp_enabled and user.totp_secret:
         mfa_token = secrets.token_urlsafe(32)
         _session_manager._redis.setex(f"mfa_pending:{mfa_token}", 300, user.user_id)
+        # #1809: the second step re-checks the password this step verified.
+        _session_manager._redis.setex(_MFA_PENDING_CRED_KEY.format(token=mfa_token), 300, verified)
         # #1665: the acceptance waits beside the pending MFA step and is
         # recorded only once the second factor succeeds.
         _remember_mfa_accepted_terms(mfa_token, body.accepted_terms)
@@ -2542,9 +2676,7 @@ async def password_login(
         return PasswordLoginResponse(success=True, mfa_required=True, mfa_session_token=mfa_token)
 
     # No MFA — create session
-    session_id = await _create_session_and_workspace(
-        user_id=user.user_id, email=user.email, name=user.name, role=user.role
-    )
+    session_id = await _open_password_session(user, verified)
     await _record_terms_acceptance(
         user_id=user.user_id,
         email=user.email,
@@ -2600,20 +2732,33 @@ async def mfa_verify(
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to decrypt MFA secret") from e
 
+    # #1809: the password the first step verified. A pending step written
+    # without one (before this shipped) is refused: sign in again. The key is
+    # also the step's single-use guard: of two requests racing on one token,
+    # only the one whose DELETE removed it goes on. Taken FIRST, before the
+    # TOTP check and the terms key, so the loser consumes nothing.
+    cred_key = _MFA_PENDING_CRED_KEY.format(token=body.mfa_session_token)
+    verified = _session_manager._redis.get(cred_key)
+    taken = _session_manager._redis.delete(cred_key)
+    if not isinstance(verified, str) or not verified or not taken:
+        _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
+        raise AuthenticationError("Invalid or expired MFA session")
+
     # #1665: single-use like the pending token itself — taken (and deleted) on
     # the success and the failure path alike.
     accepted_terms = _take_mfa_accepted_terms(body.mfa_session_token)
 
     if not verify_totp(totp_secret, body.totp_code):
         # Delete MFA token on failed attempt (prevent brute-force replay)
-        _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
+        _session_manager._redis.delete(
+            f"mfa_pending:{body.mfa_session_token}",
+            _MFA_PENDING_CRED_KEY.format(token=body.mfa_session_token),
+        )
         raise AuthenticationError("Invalid TOTP code. Please login again.")
 
     _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
 
-    session_id = await _create_session_and_workspace(
-        user_id=user.user_id, email=user.email, name=user.name, role=user.role
-    )
+    session_id = await _open_password_session(user, verified)
     await _record_terms_acceptance(
         user_id=user.user_id,
         email=user.email,

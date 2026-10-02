@@ -366,3 +366,9 @@ async def test_error_is_generic(redis, resolver) -> None:
     with pytest.raises(InvalidCredentialsError) as exc_info:
         await auth_routes.password_login(body, _request(), return_to=None)
     assert "ghost" not in str(exc_info.value)
+
+
+@pytest.fixture(autouse=True)
+def _password_unchanged(monkeypatch):
+    """The #1809 re-check reads Postgres; these tests stub the database."""
+    monkeypatch.setattr(auth_routes, "_password_still_current", AsyncMock(return_value=True))

@@ -34,9 +34,10 @@ from auth.session import (
     project_active,
     to_container,
 )
+from tests.redis_fake_ops import SessionFakeOps
 
 
-class FakeRedis:
+class FakeRedis(SessionFakeOps):
     """Minimal Redis stand-in: the calls SessionManager actually makes."""
 
     def __init__(self) -> None:
@@ -77,27 +78,12 @@ class FakeRedis:
         prefix = match.rstrip("*")
         return 0, [k for k in list(self.store) if k.startswith(prefix)]
 
-    def pipeline(self):
-        return _FakePipeline(self)
-
     def keys(self, pattern: str):
         prefix = pattern.rstrip("*")
         return [k for k in self.store if k.startswith(prefix)]
 
     def ttl(self, _key: str) -> int:
         return 100
-
-
-class _FakePipeline:
-    def __init__(self, redis: FakeRedis) -> None:
-        self._redis = redis
-        self._ops: list[str] = []
-
-    def delete(self, key: str) -> None:
-        self._ops.append(key)
-
-    def execute(self) -> list[int]:
-        return [self._redis.delete(k) for k in self._ops]
 
 
 @pytest.fixture

@@ -1388,7 +1388,7 @@ class TestPurgeUserState:
         await _notify(email, key_name="second")
         assert await redis.zcard(sns._DUE_KEY) == 1
 
-        monkeypatch.setattr("api.routes.auth.get_session_manager", lambda: None)
+        monkeypatch.setattr(erasure_module, "get_session_manager", lambda: None)
         monkeypatch.setattr(erasure_module, "clear_co_activations", AsyncMock(return_value=0))
         monkeypatch.setattr(erasure_module, "clear_user_rate_limits", AsyncMock(return_value=0))
         service = erasure_module.AccountErasureService.__new__(erasure_module.AccountErasureService)

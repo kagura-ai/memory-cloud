@@ -3,7 +3,7 @@
 import json
 import logging
 import os
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import quote
 
@@ -19,8 +19,28 @@ from auth.exceptions import (
     NotAuthenticatedError,
     TokenRefreshError,
 )
+from utils.datetime import utcnow
 
 logger = logging.getLogger(__name__)
+
+
+# The claims request for ``auth_time`` (#1818). ``essential`` per OIDC Core 5.5.
+_AUTH_TIME_CLAIMS = json.dumps(
+    {"id_token": {"auth_time": {"essential": True}}}, separators=(",", ":")
+)
+
+
+_CERT_FETCH_TIMEOUT_SECONDS = 10
+
+
+def _cert_request(*args: Any, **kwargs: Any) -> Any:
+    """Fetch Google's ID-token certificates with a short timeout (#1818).
+
+    The library default is 120 s; a link-proof callback should fail fast (and
+    prove nothing) rather than hold a worker that long when Google is slow.
+    """
+    kwargs.setdefault("timeout", _CERT_FETCH_TIMEOUT_SECONDS)
+    return Request()(*args, **kwargs)
 
 
 class OAuth2Manager:
@@ -293,7 +313,11 @@ class OAuth2Manager:
     # ========================================================================
 
     def get_authorization_url_web(
-        self, redirect_uri: str, state: str, select_account: bool = False
+        self,
+        redirect_uri: str,
+        state: str,
+        select_account: bool = False,
+        request_auth_time: bool = False,
     ) -> str:
         """Get OAuth2 authorization URL for Web flow.
 
@@ -301,6 +325,11 @@ class OAuth2Manager:
             redirect_uri: Callback URL (e.g., https://your-domain.com/auth/callback)
             state: CSRF state token
             select_account: Ask Google to show the account chooser (#1488).
+            request_auth_time: Ask for the ``auth_time`` claim in the ID token
+                (#1818), for a sign-in that proves an account for an identity
+                link. Google returns it only to a verified app with Session age
+                claims enabled. It does not change the prompt: Google has no
+                ``prompt=login`` and does not honour ``max_age``.
 
         Returns:
             Authorization URL to redirect user to
@@ -344,6 +373,8 @@ class OAuth2Manager:
             f"access_type=offline&"
             f"prompt={prompt}"
         )
+        if request_auth_time:
+            auth_url += f"&claims={quote(_AUTH_TIME_CLAIMS, safe='')}"
 
         return auth_url
 
@@ -398,6 +429,44 @@ class OAuth2Manager:
         except Exception as e:
             logger.error(f"Code exchange failed: {e}")
             raise InvalidCredentialsError(f"Code exchange failed: {e}") from e
+
+    def verified_auth_time(self, credentials: Credentials, sub: str) -> datetime | None:
+        """When the user last authenticated with Google, from the ID token (#1818).
+
+        The ID token is verified (Google's signature, ``aud`` = our client id,
+        ``iss``, ``exp``) and must name ``sub``, the identity userinfo returned.
+        Naive UTC like ``utcnow()``. A time up to the verifier's 10-second skew
+        ahead of ours reads as now; one further ahead is refused, as the
+        session's own check refuses a future time. None when there is no ID
+        token, it does not verify, it names another identity, or it carries no
+        usable ``auth_time`` — the caller treats all of those as "not proved".
+        Blocking (fetches Google's certificates): call it off the event loop.
+        """
+        from google.oauth2 import id_token as google_id_token
+
+        token = getattr(credentials, "id_token", None)
+        client_id = os.getenv("GOOGLE_CLIENT_ID")
+        if not token or not client_id:
+            return None
+        try:
+            claims = google_id_token.verify_oauth2_token(
+                token, _cert_request, audience=client_id, clock_skew_in_seconds=10
+            )
+        except Exception as e:
+            logger.warning(f"ID token verification failed: {e}")
+            return None
+        if claims.get("sub") != sub:
+            logger.warning("ID token names another identity than userinfo")
+            return None
+        auth_time = claims.get("auth_time")
+        if isinstance(auth_time, bool) or not isinstance(auth_time, int | float):
+            return None
+        when = datetime.fromtimestamp(auth_time, UTC).replace(tzinfo=None)
+        now = utcnow()
+        if when > now + timedelta(seconds=10):
+            logger.warning("ID token auth_time is ahead of the server clock")
+            return None
+        return min(when, now)
 
     def get_user_info_web(self, credentials: Credentials) -> dict[str, Any]:
         """Get user info from Google.

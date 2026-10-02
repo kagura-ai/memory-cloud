@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import secrets
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -18,6 +19,59 @@ logger = logging.getLogger(__name__)
 
 # Singleton Redis client cache (shared across all instances)
 _redis_client_cache: dict[str, Any] = {}
+
+# The browser session cookie (Issue #115 renamed it from ``session_id``).
+SESSION_COOKIE_NAME = "kagura_session"
+
+# The SessionManager the app started with (#1809). It lives here, beside the
+# store, so code outside the routes (the OAuth2 server, account erasure, the
+# middleware) does not import a route module to reach it.
+_active_session_manager: "SessionManager | None" = None
+
+
+def set_session_manager(manager: "SessionManager | None") -> None:
+    """Register the app's SessionManager (called once at startup)."""
+    global _active_session_manager
+    _active_session_manager = manager
+
+
+def get_session_manager() -> "SessionManager | None":
+    """Return the app's SessionManager, or None before startup registered one."""
+    return _active_session_manager
+
+
+# ---------------------------------------------------------------------------
+# Per-user session index (#1809)
+# ---------------------------------------------------------------------------
+# ``user_sessions:<id>`` is a set of the session ids that hold account ``<id>``,
+# so signing a user out reads that user's sessions instead of walking every
+# ``session:*`` key. The prefix must not start with ``session:``, or a SCAN for
+# sessions would pick the sets up.
+#
+# Every write that keeps a session alive (create, a read that renews the TTL,
+# an account change, an update) also adds the session to the sets of every id
+# it answers to, and renews their TTL to the session's. A set therefore lives
+# at least as long as its newest member. Ids whose session expired or was
+# deleted stay in the set until the next sweep of that user prunes them.
+#
+# Sessions written before the index existed have no entry. Two things keep
+# them reachable:
+#   1. a read indexes the session, so any session that is used after the
+#      deploy is in the index from its next request on;
+#   2. for one session lifetime (+ a margin for a rolling deploy) after the
+#      first sweep that ran this code, the sweep still SCANs ``session:*`` as
+#      well. A session not used in that time has expired by the end of it.
+# The window start is a marker key written once (SET NX) and never expired.
+# Rolling back to a release without the index and then forward again leaves
+# the sessions written meanwhile unindexed: delete the marker on the redeploy
+# so the window starts over.
+_USER_INDEX_PREFIX = "user_sessions:"
+_LEGACY_SCAN_MARKER = "session_index:since"
+_LEGACY_SCAN_MARGIN_SECONDS = 24 * 3600
+
+
+def _user_index_key(user_id: str) -> str:
+    return f"{_USER_INDEX_PREFIX}{user_id}"
 
 
 def browser_cookie_attrs() -> dict[str, Any]:
@@ -62,7 +116,16 @@ _SESSION_VERSION = 2
 
 # Envelope keys belong to the container, not to an account identity.
 _ENVELOPE_KEYS = frozenset(
-    {"v", "accounts", "active", "created_at", "last_accessed", "updated_at", "signed_in_at"}
+    {
+        "v",
+        "accounts",
+        "active",
+        "created_at",
+        "last_accessed",
+        "updated_at",
+        "signed_in_at",
+        "proven_at",
+    }
 )
 
 # When each account last went through a sign-in (#1803): ``{account_id: iso}``
@@ -74,6 +137,23 @@ _ENVELOPE_KEYS = frozenset(
 # written before this key existed has no time for any account, which readers
 # treat as "not recent" (fail closed).
 _SIGNED_IN_AT = "signed_in_at"
+
+# When each account last PROVED its credential (#1818): ``{account_id: iso}``
+# on the container. A sign-in is not always a proof: an OAuth round trip goes
+# through without a password while the browser still has a session with the
+# provider. The caller of ``create_session`` / ``add_account`` says what was
+# proved and when (a password sign-in now, Google its ``auth_time``). An
+# account keeps its newest proof: a later sign-in that proves nothing, or
+# proves an older time, leaves it as it is. An identity link reads only this
+# key. Missing means "not proved" (fail closed).
+_PROVEN_AT = "proven_at"
+
+
+def _within(when: datetime | None, window: timedelta) -> bool:
+    """A recorded time no older than ``window``; never a missing or future one."""
+    if when is None:
+        return False
+    return timedelta(0) <= utcnow() - when <= window
 
 
 def _account_id(identity: dict[str, Any]) -> str | None:
@@ -118,6 +198,42 @@ def session_owns_user(container: dict[str, Any], user_id: str) -> bool:
         and (identity.get("user_id") == user_id or identity.get("sub") == user_id)
         for identity in accounts.values()
     )
+
+
+def _index_ids(container: dict[str, Any]) -> set[str]:
+    """Every id a sweep may ask for this container by.
+
+    The account keys, plus each identity's ``user_id`` and ``sub`` — the same
+    ids ``session_owns_user`` matches on, so the index can answer every
+    question the scan could.
+    """
+    ids: set[str] = set()
+    for key, identity in container.get("accounts", {}).items():
+        if isinstance(key, str) and key:
+            ids.add(key)
+        if isinstance(identity, dict):
+            for field in ("user_id", "sub"):
+                value = identity.get(field)
+                if isinstance(value, str) and value:
+                    ids.add(value)
+    return ids
+
+
+def _record_belongs(record: Any, user_id: str) -> bool:
+    """Does a stored session record (either shape) hold ``user_id``? (#114)
+
+    #1488: a container nests identities under ``accounts``, so reading
+    ``user_id``/``sub`` off the top level would match NOTHING and silently
+    retire #114's one-session-per-user guarantee. Match on account MEMBERSHIP,
+    which is also the right question once a container can hold several.
+    Legacy flat records are still matched the old way.
+    """
+    if not isinstance(record, dict):
+        return False
+    if is_container(record):
+        return session_owns_user(record, user_id)
+    # Support both "sub" (OAuth2) and "user_id" (internal)
+    return (record.get("user_id") or record.get("sub")) == user_id
 
 
 def to_container(flat: dict[str, Any]) -> dict[str, Any]:
@@ -216,6 +332,8 @@ class SessionManager:
         """
         self.redis_url = redis_url
         self.session_ttl = session_ttl
+        # Set once a sweep has seen the legacy-scan window close (#1809).
+        self._legacy_scan_over = False
 
         # Get or create shared Redis client (singleton pattern)
         self._redis = self._get_or_create_redis_client(redis_url)
@@ -272,13 +390,17 @@ class SessionManager:
 
         return _redis_client_cache[redis_url]
 
-    def create_session(self, user_info: dict[str, Any]) -> str:
+    def create_session(
+        self, user_info: dict[str, Any], *, proven_at: datetime | None = None
+    ) -> str:
         """Create new session for authenticated user.
 
         Args:
             user_info: User information from OAuth2 provider
                 Required keys: "sub" (user ID)
                 Optional keys: "email", "name", "picture", etc.
+            proven_at: When this sign-in last proved the account's credential
+                (naive UTC, #1818), or None when it proved nothing.
 
         Returns:
             Session ID (secure random token)
@@ -306,15 +428,20 @@ class SessionManager:
             "created_at": now,
             "last_accessed": now,
             _SIGNED_IN_AT: {account_id: now},
+            _PROVEN_AT: {account_id: proven_at.isoformat()} if proven_at else {},
         }
 
-        # Store in Redis with TTL
+        # Store in Redis with TTL, and index it in the same transaction: a
+        # session that cannot be found by its user cannot be signed out.
         try:
-            self._redis.setex(
+            pipe = self._redis.pipeline()
+            pipe.setex(
                 f"session:{session_id}",
                 self.session_ttl,
                 json.dumps(session_data),
             )
+            self._queue_index(pipe, session_id, session_data)
+            pipe.execute()
             logger.info(f"Created session for user: {user_info.get('sub', 'unknown')}")
         except Exception as e:
             logger.error(f"Failed to create session: {e}")
@@ -383,17 +510,34 @@ class SessionManager:
             # deliberately with an atomic mechanism, not by restoring the
             # whole-record rewrite.
             if update_access:
+                # One round trip, NOT a transaction (#1809): the renewal and
+                # the index writes run together, so the index set's TTL moves
+                # with the session's, but an index command Redis refuses (a
+                # SADD at maxmemory, say) does not undo the renewal or turn a
+                # valid session into a signed-out one.
+                pipe = self._redis.pipeline(transaction=False)
                 if was_legacy:
                     # One-time: a flat record must be written once to become a
                     # container. The only write left on the read path, and it
-                    # happens at most once per record.
-                    self._redis.setex(
+                    # happens at most once per record. XX: a sweep that deleted
+                    # the record since the read above must not be undone (#1809).
+                    pipe.set(
                         f"session:{session_id}",
-                        self.session_ttl,
                         json.dumps(container),
+                        ex=self.session_ttl,
+                        xx=True,
                     )
                 else:
-                    self._redis.expire(f"session:{session_id}", self.session_ttl)
+                    pipe.expire(f"session:{session_id}", self.session_ttl)
+                # Renewing the session renews its index entries, and indexes a
+                # session written before the index existed (#1809).
+                self._queue_index(pipe, session_id, container)
+                results = pipe.execute(raise_on_error=False)
+                if results and isinstance(results[0], Exception):
+                    raise results[0]
+                index_errors = [r for r in results[1:] if isinstance(r, Exception)]
+                if index_errors:
+                    logger.warning(f"Failed to refresh session index: {index_errors[0]}")
                 projected["last_accessed"] = utcnow().isoformat()
 
             # Callers see the flat shape they always have.
@@ -417,9 +561,12 @@ class SessionManager:
             >>> assert manager.get_session(session_id) is None
         """
         try:
+            raw = self._redis.get(f"session:{session_id}")
             deleted = self._redis.delete(f"session:{session_id}")
             if deleted:
                 logger.info(f"Deleted session: {session_id[:10]}...")
+            if raw:
+                self._drop_from_index(session_id, raw)
             return deleted > 0
         except Exception as e:
             logger.error(f"Failed to delete session: {e}")
@@ -456,19 +603,79 @@ class SessionManager:
                 logger.warning(f"Refusing to mutate unusable session: {session_id[:10]}...")
                 return False
 
+            before = _index_ids(container)
             if mutate(container) is False:
                 return False
 
             container["last_accessed"] = utcnow().isoformat()
-            self._redis.setex(
-                f"session:{session_id}",
-                self.session_ttl,
-                json.dumps(container),
+            return self._write_existing(
+                session_id, container, dropped=before - _index_ids(container)
             )
-            return True
         except Exception as e:
             logger.error(f"Failed to mutate session: {e}")
             return False
+
+    def _drop_from_index(self, session_id: str, raw: Any) -> None:
+        """Remove a deleted session from its index sets, best effort (#1809)."""
+        try:
+            stored = json.loads(raw)
+            container = stored if is_container(stored) else to_container(stored)
+        except Exception as e:
+            logger.warning(f"Failed to drop session from index: {e}")
+            return
+        self._drop_ids_from_index(session_id, _index_ids(container))
+
+    def _drop_ids_from_index(self, session_id: str, index_ids: set[str]) -> None:
+        """SREM ``session_id`` from each listed index set, best effort (#1809)."""
+        if not index_ids:
+            return
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            for index_id in index_ids:
+                pipe.srem(_user_index_key(index_id), session_id)
+            pipe.execute()
+        except Exception as e:
+            logger.warning(f"Failed to drop session from index: {e}")
+
+    def _queue_index(self, pipe: Any, session_id: str, record: dict[str, Any]) -> None:
+        """Queue the index writes for a session on ``pipe`` (#1809)."""
+        container = record if is_container(record) else to_container(record)
+        for index_id in _index_ids(container):
+            key = _user_index_key(index_id)
+            pipe.sadd(key, session_id)
+            pipe.expire(key, self.session_ttl)
+
+    def _write_existing(
+        self,
+        session_id: str,
+        container: dict[str, Any],
+        *,
+        dropped: set[str] | frozenset[str] = frozenset(),
+    ) -> bool:
+        """Write a read-modify-write result back, unless the record is gone.
+
+        ``SET XX``: a sweep (#114, a password reset) that deleted the record
+        between our read and this write must win — a plain SETEX here would
+        bring a signed-out session back to life (#1809). ``dropped`` names ids
+        the container no longer answers to; they leave the index.
+        """
+        pipe = self._redis.pipeline()
+        pipe.set(
+            f"session:{session_id}",
+            json.dumps(container),
+            ex=self.session_ttl,
+            xx=True,
+        )
+        self._queue_index(pipe, session_id, container)
+        for index_id in dropped:
+            pipe.srem(_user_index_key(index_id), session_id)
+        results = pipe.execute()
+        if not results or not results[0]:
+            logger.warning(f"Session vanished before the write: {session_id[:10]}...")
+            # The SADDs above ran anyway (one MULTI); take the dead id back out.
+            self._drop_ids_from_index(session_id, _index_ids(container) | set(dropped))
+            return False
+        return True
 
     def session_holds_user(self, session_id: str, user_id: str) -> bool:
         """Is ``user_id`` one of the accounts signed in on this session? (#1770)
@@ -496,11 +703,25 @@ class SessionManager:
     def signed_in_at(self, session_id: str, account_id: str) -> datetime | None:
         """When ``account_id`` last signed in on this session (#1803).
 
+        Diagnostic only since #1818: a sign-in is not a proof of the
+        credential. An identity link reads ``proven_within``, never this.
+
         Naive UTC, like ``utcnow()``. None when the session is missing or
         unusable, the account is not in it, or no readable time was recorded
         for it (a record from before the time was kept). Reads the record
         without refreshing its TTL.
         """
+        return self._account_time(session_id, account_id, _SIGNED_IN_AT)
+
+    def proven_at(self, session_id: str, account_id: str) -> datetime | None:
+        """When ``account_id`` last proved its credential here (#1818).
+
+        Same contract as ``signed_in_at``; None also when the latest sign-in
+        proved nothing (an OAuth sign-in with no provider authentication time).
+        """
+        return self._account_time(session_id, account_id, _PROVEN_AT)
+
+    def _account_time(self, session_id: str, account_id: str, key: str) -> datetime | None:
         try:
             raw = self._redis.get(f"session:{session_id}")
             if not raw:
@@ -510,8 +731,8 @@ class SessionManager:
                 return None
             if account_id not in stored.get("accounts", {}):
                 return None
-            signed_in = stored.get(_SIGNED_IN_AT)
-            value = signed_in.get(account_id) if isinstance(signed_in, dict) else None
+            times = stored.get(key)
+            value = times.get(account_id) if isinstance(times, dict) else None
             if not isinstance(value, str):
                 return None
             when = datetime.fromisoformat(value)
@@ -523,14 +744,19 @@ class SessionManager:
     def signed_in_within(self, session_id: str, account_id: str, window: timedelta) -> bool:
         """Whether ``account_id`` signed in on this session within ``window``.
 
+        Not a proof for an identity link (#1818) — use ``proven_within``.
+
         A time in the future (clock skew, a tampered record) does not count,
         and neither does a missing one.
         """
-        when = self.signed_in_at(session_id, account_id)
-        if when is None:
-            return False
-        age = utcnow() - when
-        return timedelta(0) <= age <= window
+        return _within(self.signed_in_at(session_id, account_id), window)
+
+    def proven_within(self, session_id: str, account_id: str, window: timedelta) -> bool:
+        """Whether ``account_id`` proved its credential within ``window`` (#1818).
+
+        What an identity link asks for. Same rules as ``signed_in_within``.
+        """
+        return _within(self.proven_at(session_id, account_id), window)
 
     def list_accounts(self, session_id: str) -> list[dict[str, Any]]:
         """Identities signed in on this session, active one flagged.
@@ -555,13 +781,19 @@ class SessionManager:
             logger.error(f"Failed to list accounts: {e}")
             return []
 
-    def add_account(self, session_id: str, user_info: dict[str, Any]) -> bool:
+    def add_account(
+        self, session_id: str, user_info: dict[str, Any], *, proven_at: datetime | None = None
+    ) -> bool:
         """Add an identity to an existing session and make it active.
 
         This is what a login performs INSTEAD of minting a fresh session when
         the browser already has one. Re-adding an account that is already
         present refreshes its identity and activates it, so "sign in again" is
         idempotent rather than creating a duplicate entry.
+
+        ``proven_at`` is as for ``create_session``. The later of it and an
+        earlier proof of this account is kept: a proof is a past event, so a
+        sign-in that proves nothing (or proves less) does not undo it.
         """
         account_id = _account_id(user_info)
         if not account_id:
@@ -576,6 +808,19 @@ class SessionManager:
             if not isinstance(signed_in, dict):
                 signed_in = container[_SIGNED_IN_AT] = {}
             signed_in[account_id] = utcnow().isoformat()
+            proven = container.get(_PROVEN_AT)
+            if not isinstance(proven, dict):
+                proven = container[_PROVEN_AT] = {}
+            if proven_at is not None:
+                earlier = proven.get(account_id)
+                try:
+                    keep = isinstance(earlier, str) and datetime.fromisoformat(earlier) > proven_at
+                except (ValueError, TypeError):
+                    # Unreadable or offset-aware (the reader ignores those
+                    # too): replace it rather than abort the whole sign-in.
+                    keep = False
+                if not keep:
+                    proven[account_id] = proven_at.isoformat()
 
         return self._mutate_container(session_id, _add)
 
@@ -625,9 +870,10 @@ class SessionManager:
         def _remove(container: dict[str, Any]) -> None:
             accounts = container.get("accounts", {})
             accounts.pop(account_id, None)
-            signed_in = container.get(_SIGNED_IN_AT)
-            if isinstance(signed_in, dict):
-                signed_in.pop(account_id, None)
+            for key in (_SIGNED_IN_AT, _PROVEN_AT):
+                times = container.get(key)
+                if isinstance(times, dict):
+                    times.pop(account_id, None)
             if container.get("active") == account_id:
                 container["active"] = next(iter(accounts))
 
@@ -669,11 +915,12 @@ class SessionManager:
             # the container's, so they are set on the container instead — a
             # caller passing `created_at` must not end up with it nested inside
             # an identity where nothing reads it.
+            before = _index_ids(container)
             active = container.get("active", "")
             identity = dict(container.get("accounts", {}).get(active, {}))
             for key, value in updates.items():
-                if key == _SIGNED_IN_AT:
-                    # Only a sign-in sets it (#1803); an update is not one.
+                if key in (_SIGNED_IN_AT, _PROVEN_AT):
+                    # Only a sign-in sets them (#1803, #1818); an update is not one.
                     continue
                 if key in _ENVELOPE_KEYS:
                     container[key] = value
@@ -682,12 +929,11 @@ class SessionManager:
             container.setdefault("accounts", {})[active] = identity
             container["updated_at"] = utcnow().isoformat()
 
-            # Save back to Redis
-            self._redis.setex(
-                f"session:{session_id}",
-                self.session_ttl,
-                json.dumps(container),
-            )
+            # Save back to Redis — only if it is still there (#1809).
+            if not self._write_existing(
+                session_id, container, dropped=before - _index_ids(container)
+            ):
+                return False
 
             logger.debug(f"Updated session: {session_id[:10]}...")
             return True
@@ -707,8 +953,15 @@ class SessionManager:
             >>> print(f"Active users: {count}")
         """
         try:
-            keys = self._redis.keys("session:*")
-            return len(keys)
+            # SCAN, not KEYS: KEYS walks the whole keyspace in one blocking
+            # call (#1809).
+            count = 0
+            cursor = 0
+            while True:
+                cursor, keys = self._redis.scan(cursor, match="session:*", count=500)
+                count += len(keys)
+                if cursor == 0:
+                    return count
         except Exception as e:
             logger.error(f"Failed to count sessions: {e}")
             return -1
@@ -731,6 +984,30 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to cleanup sessions: {e}")
             return -1
+
+    def _legacy_scan_needed(self) -> bool:
+        """Must a sweep still SCAN for sessions written before the index? (#1809)
+
+        True for ``session_ttl`` + a margin after the first sweep that ran
+        this code (it writes the start marker). Anything unexpected — the
+        marker unreadable, Redis refusing the write — answers True: a slower
+        sweep is better than a session that cannot be signed out.
+        """
+        if self._legacy_scan_over:
+            return False
+        try:
+            now = time.time()
+            self._redis.set(_LEGACY_SCAN_MARKER, str(now), nx=True)
+            raw = self._redis.get(_LEGACY_SCAN_MARKER)
+            if not isinstance(raw, str | bytes):
+                return True
+            since = float(raw)
+        except Exception:
+            return True
+        if now < since + self.session_ttl + _LEGACY_SCAN_MARGIN_SECONDS:
+            return True
+        self._legacy_scan_over = True
+        return False
 
     def delete_user_sessions(
         self,
@@ -770,61 +1047,67 @@ class SessionManager:
             >>> new_session_id = manager.create_session(user_info)
 
         Note:
-            Uses SCAN instead of KEYS for non-blocking iteration (O(1) per call).
-            Uses pipeline for atomic batch deletion.
+            Candidates come from the user's index set (#1809). For one
+            session lifetime after the index first appeared, a SCAN of
+            ``session:*`` adds sessions written before it (see
+            ``_legacy_scan_needed``). Every candidate is re-read and kept
+            only if its record still holds the user; ids whose session is
+            gone are pruned from the index.
         """
         excluded_key = f"session:{exclude_session_id}" if exclude_session_id else None
+        index_key = _user_index_key(user_id)
         try:
+            candidates: set[str] = {
+                f"session:{sid}" for sid in (self._redis.smembers(index_key) or ())
+            }
+            if self._legacy_scan_needed():
+                cursor = 0
+                while True:
+                    cursor, keys = self._redis.scan(cursor, match="session:*", count=100)
+                    candidates.update(keys)
+                    if cursor == 0:
+                        break
+
             keys_to_delete: list[str] = []
-
-            # Use SCAN for non-blocking iteration (PR review feedback)
-            # SCAN is O(1) per call vs KEYS which is O(N) and blocks Redis
-            cursor = 0
-            while True:
-                cursor, keys = self._redis.scan(cursor, match="session:*", count=100)
-                for key in keys:
-                    if excluded_key is not None and key == excluded_key:
-                        continue
+            # Every index set a deleted container sits in, not only this user's:
+            # its other accounts' sets must not keep a dead id (#1809).
+            other_sets: dict[str, set[str]] = {}
+            stale_ids: list[str] = []
+            for key in candidates:
+                if excluded_key is not None and key == excluded_key:
+                    continue
+                data = self._redis.get(key)
+                if not data:
+                    stale_ids.append(key.removeprefix("session:"))
+                    continue
+                try:
+                    record = json.loads(data)
+                except (json.JSONDecodeError, TypeError):
+                    # Skip invalid session data
+                    continue
+                if _record_belongs(record, user_id):
+                    keys_to_delete.append(key)
                     try:
-                        data = self._redis.get(key)
-                        if data:
-                            session_data = json.loads(data)
-                            # Check if session belongs to this user.
-                            #
-                            # #1488: a container nests identities under
-                            # `accounts`, so reading `user_id`/`sub` off the top
-                            # level would match NOTHING and silently retire
-                            # #114's one-session-per-user guarantee. Match on
-                            # account MEMBERSHIP, which is also the right
-                            # question once a container can hold several.
-                            #
-                            # Legacy flat records are still matched the old way
-                            # — they are what is in Redis at deploy time.
-                            if is_container(session_data):
-                                belongs = session_owns_user(session_data, user_id)
-                            else:
-                                # Support both "sub" (OAuth2) and "user_id" (internal)
-                                belongs = (
-                                    session_data.get("user_id") or session_data.get("sub")
-                                ) == user_id
-                            if belongs:
-                                keys_to_delete.append(key)
-                    except (json.JSONDecodeError, TypeError):
-                        # Skip invalid session data
-                        continue
+                        container = record if is_container(record) else to_container(record)
+                        other_sets[key] = _index_ids(container) - {user_id}
+                    except Exception:
+                        other_sets[key] = set()
 
-                if cursor == 0:
-                    break
-
-            # Use pipeline for atomic batch deletion (PR review feedback)
+            # One transaction: the sessions and their index entries go together.
             deleted_count = 0
-            if keys_to_delete:
+            if keys_to_delete or stale_ids:
                 pipe = self._redis.pipeline()
                 for key in keys_to_delete:
                     pipe.delete(key)
+                for sid in stale_ids + [k.removeprefix("session:") for k in keys_to_delete]:
+                    pipe.srem(index_key, sid)
+                for key, index_ids in other_sets.items():
+                    for index_id in index_ids:
+                        pipe.srem(_user_index_key(index_id), key.removeprefix("session:"))
                 results = pipe.execute()
-                deleted_count = sum(1 for r in results if r)
+                deleted_count = sum(1 for r in results[: len(keys_to_delete)] if r)
 
+            if deleted_count:
                 logger.info(f"Invalidated {deleted_count} old session(s) for user: {user_id}")
 
             return deleted_count

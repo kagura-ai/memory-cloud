@@ -209,10 +209,12 @@ jobs:
       - name: Install dependencies
         # From the lock, never a fresh resolution: --locked fails when uv.lock
         # is out of date with pyproject.toml (#1706). The venv goes on PATH so
-        # the pytest / alembic / python steps below run unchanged.
+        # the pytest / alembic / python steps below run unchanged. `lite`
+        # (lancedb, pyarrow) lets the real-table LanceDB tests run instead of
+        # skipping (#1808).
         run: |
           cd backend
-          uv sync --locked --extra dev
+          uv sync --locked --extra dev --extra lite
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Run unit tests

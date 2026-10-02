@@ -190,7 +190,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `AUTH-302` | `CurrentPasswordMismatchError` — exceptions.py | 403 | Current password re-entered to change / remove it is wrong (403, not 401: the session is valid, #1678). |
 | `AUTH-303` | `PasswordSetupNotAllowedError` — exceptions.py | 400 | No set-a-password link for a local CLI (`@local`) account (#1678). |
 | `AUTH-304` | `MemoryCloudException` — api/routes/password.py | 503 | The account's browser sessions could not be revoked (Redis); the password reset / set-up / change / removal was rolled back — retry (#1678). |
-| `AUTH-305` | `IdentityLinkSignInRequiredError` — exceptions.py | 403 | An identity link needs both accounts signed in on this browser within the last 10 minutes; sign in again and retry (#1803). |
+| `AUTH-305` | `IdentityLinkSignInRequiredError` — exceptions.py | 403 | An identity link needs both accounts proved on this browser within the last 10 minutes — a password sign-in, or a Google sign-in with a recent `auth_time` (GitHub only with `IDENTITY_LINK_ALLOW_OAUTH_SIGNIN_PROOF`); prove them again and retry (#1803, #1818). |
 | `AUTH-201` | `APIKeyError` — exceptions.py:129 | 401 | Invalid or missing API key. |
 | `AUTH-202` | `APIKeyRevokedError` — exceptions.py:139 | 401 | API key revoked. |
 | `AUTH-203` | `APIKeyExpiredError` — exceptions.py:146 | 401 | API key expired. |

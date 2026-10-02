@@ -42,7 +42,7 @@ from collections import defaultdict
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal_column, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import Context, ContextReadAttribution, UsageStats
@@ -73,6 +73,11 @@ _BACKLOG_WARN_DAYS = 90
 _COLD_GRAPH_MIN_MEMORIES = 25
 # Retrieval activity window.
 _USAGE_WINDOW_DAYS = 7
+# #1822: only successful calls count when telling a write-only store (WARN)
+# from an idle one (OK + note) — a failed read read nothing, a failed write
+# wrote nothing.
+_READ_TOOLS = frozenset({"recall", "recall_upcoming", "recall_nearby"})
+_WRITE_TOOLS = frozenset({"remember", "update_memory"})
 
 _EDGE_WEIGHT_MIN = 0.0
 _EDGE_WEIGHT_MAX = 3.0
@@ -487,6 +492,7 @@ class MemoryHealthService:
             "mcp:recall_upcoming",
             "mcp:recall_nearby",  # #1331: the WHERE-axis lane is a real read
             "mcp:remember",
+            "mcp:update_memory",
             "mcp:explore",
         ]
         conditions = [
@@ -496,18 +502,31 @@ class MemoryHealthService:
         ]
         if scope is not _ALL:
             conditions.append(UsageStats.context_id == scope)
+        # #1822: split each endpoint's count by success so a failed write
+        # (quota 429, permission 403, validation 422, crash 500) is not
+        # mistaken for one. Per-endpoint totals still include failures.
+        # A literal, not a bind parameter: the same expression must appear in
+        # SELECT and GROUP BY, and two binds would be two distinct expressions.
+        succeeded = UsageStats.status_code < literal_column("400")
         rows = await self.db.execute(
             select(
                 UsageStats.context_id,
                 UsageStats.endpoint,
+                succeeded,
                 func.count(UsageStats.id),
             )
             .where(*conditions)
-            .group_by(UsageStats.context_id, UsageStats.endpoint)
+            .group_by(UsageStats.context_id, UsageStats.endpoint, succeeded)
         )
         usage: dict[uuid.UUID | None, dict[str, int]] = defaultdict(dict)
-        for context_id, endpoint, count in rows.all():
-            usage[context_id][endpoint.removeprefix("mcp:")] = int(count)
+        for context_id, endpoint, ok, count in rows.all():
+            key = endpoint.removeprefix("mcp:")
+            counts = usage[context_id]
+            counts[key] = counts.get(key, 0) + int(count)
+            if ok and key in _READ_TOOLS:
+                counts["successful_reads"] = counts.get("successful_reads", 0) + int(count)
+            elif ok and key in _WRITE_TOOLS:
+                counts["successful_writes"] = counts.get("successful_writes", 0) + int(count)
 
         attr_conditions = [
             ContextReadAttribution.user_id == user_id,
@@ -527,7 +546,11 @@ class MemoryHealthService:
         )
         for context_id, endpoint, count in attr_rows.all():
             key = endpoint.removeprefix("mcp:")
-            usage[context_id][key] = usage[context_id].get(key, 0) + int(count)
+            counts = usage[context_id]
+            counts[key] = counts.get(key, 0) + int(count)
+            # Attribution rows are only written for a successful recall.
+            if key in _READ_TOOLS:
+                counts["successful_reads"] = counts.get("successful_reads", 0) + int(count)
         return dict(usage)
 
     async def _fetch_config_postures(
@@ -677,10 +700,12 @@ class MemoryHealthService:
         active_memories: int,
         heuristics: bool = True,
     ) -> dict[str, Any]:
-        """Informational; WARN only when memory exists but nothing reads it.
+        """Informational; WARN only when memory is written but nothing reads it.
 
-        ``heuristics=False`` (the unattributed bucket) skips the write-only
-        check — the bucket mixes scopes, so read/write ratios are noise.
+        A context with neither reads nor writes in the window is idle, not
+        write-only (#1822): it stays OK with an informational ``idle_store``
+        note. ``heuristics=False`` (the unattributed bucket) skips both
+        checks — the bucket mixes scopes, so read/write ratios are noise.
         """
         notes: list[dict[str, Any]] = []
         status = STATUS_OK
@@ -689,12 +714,20 @@ class MemoryHealthService:
         # #1331: a context read exclusively via the spatial lane (field/mobile
         # agents) must not false-WARN write_only_store.
         recall_nearby = usage.get("recall_nearby", 0)
+        # #1822: successful calls only — a failed read read nothing, a failed
+        # write wrote nothing. The per-endpoint metrics keep every call.
+        reads = usage.get("successful_reads", 0)
+        writes = usage.get("successful_writes", 0)
 
-        if heuristics and recalls + recall_upcoming + recall_nearby == 0 and active_memories > 0:
-            status = STATUS_WARN
+        if heuristics and reads == 0 and active_memories > 0:
+            if writes > 0:
+                status = STATUS_WARN
+                code = "write_only_store"
+            else:
+                code = "idle_store"
             notes.append(
                 _note(
-                    "write_only_store",
+                    code,
                     window_days=_USAGE_WINDOW_DAYS,
                     active_memories=active_memories,
                 )
@@ -708,6 +741,8 @@ class MemoryHealthService:
                 "recall_upcoming_calls": recall_upcoming,
                 "recall_nearby_calls": recall_nearby,
                 "remember_calls": usage.get("remember", 0),
+                "successful_read_calls": reads,
+                "successful_write_calls": writes,
                 "explore_calls": usage.get("explore", 0),
                 **posture,
             },

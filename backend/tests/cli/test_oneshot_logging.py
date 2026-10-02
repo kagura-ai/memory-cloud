@@ -80,9 +80,9 @@ def test_http_client_per_request_lines_are_held_back_below_debug(name):
     # httpx logs "HTTP Request: PUT .../points/payload" at INFO for every
     # request — one per memory on a payload sweep, the very noise #1788 is
     # about, through stdlib logging instead of structlog.
-    # Asserted on the effective level, not isEnabledFor(): alembic's
-    # fileConfig (run by the migration tests earlier in the integration job)
-    # leaves existing loggers ``disabled``, which isEnabledFor() also reports.
+    # Asserted on the effective level, not isEnabledFor(): a logger left
+    # ``disabled`` by some earlier logging config (alembic's fileConfig did
+    # this before #1808) would make isEnabledFor() report it too.
     http_logger = logging.getLogger(name)
     configure_logging("INFO")
     assert http_logger.getEffectiveLevel() == logging.WARNING

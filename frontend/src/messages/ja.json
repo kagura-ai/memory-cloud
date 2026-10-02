@@ -100,8 +100,10 @@
     "unlinkSuccess": "{account} のリンクを解除しました。",
     "linkError": "{account} をリンクできませんでした。もう一度お試しください。",
     "linkNotSignedInError": "{account} はこのブラウザでサインインしていません。サインインし直してからリンクしてください。",
-    "signInAgainHint": "リンクするには、このブラウザでこのアカウントと現在のアカウントの両方にサインインし直し（アカウント切り替えの「別のアカウントを追加」）、{minutes} 分以内にリンクしてください。",
-    "linkSignInAgainError": "両方のアカウントが、このブラウザで直近 {minutes} 分以内にサインインしている必要があります。{account} とこのアカウントにサインインし直してからリンクしてください。",
+    "signInAgainHint": "リンクするには、このアカウントと現在のアカウントの両方が、このブラウザで {minutes} 分以内にサインインを確認している必要があります。まずパスワードでサインインし（ブラウザのセッションが新しく始まります）、そのあと下の「Google で確認」で Google アカウントを確認してください。アカウント切り替えからの追加や GitHub のサインインは、運用者が許可している場合のみ有効です。",
+    "linkSignInAgainError": "両方のアカウントが、このブラウザで直近 {minutes} 分以内にサインインを確認している必要があります。{account} とこのアカウントをもう一度確認してから（パスワードでのサインインを先に、または「Google で確認」）リンクしてください。",
+    "confirmWithGoogle": "Google で確認",
+    "confirmWithGoogleHint": "「Google で確認」で確認できるのは、そこで選んだ Google アカウントだけです。直近数分以内に Google 自体にサインインしていて、かつ運用者が設定している場合にのみ有効です。確認済みにならない場合は、Google からサインアウトしてサインインし直し、もう一度お試しください。",
     "linkLimitError": "これ以上アカウントをリンクできません。先にいずれかのリンクを解除してください。",
     "unlinkError": "{account} のリンクを解除できませんでした。もう一度お試しください。",
     "unlinkNotLinkedError": "{account} はすでにリンクされていません。",
@@ -2871,6 +2873,7 @@
         "edge_weight_violations": "{count} 本のエッジが重み範囲 [{min}, {max}] を外れています — 未クランプ累積系のバグです。",
         "cold_graph": "アクティブメモリが {active_memories} 件あるのにエッジが 0 本 — グラフが一度も温まっていません。エッジ形成ゲートと sleep モードを確認してください。",
         "write_only_store": "アクティブメモリが {active_memories} 件あるのに直近 {window_days} 日間 recall 呼び出しがありません — ストアが書き込み専用になっています。",
+        "idle_store": "直近 {window_days} 日間、成功した MCP の recall も書き込みもありません（アクティブメモリ {active_memories} 件） — 書き込み専用ではなく、使われていない状態に見えます。Web UI・REST API・コネクタ経由の書き込みはここでは数えていません。",
         "unknown": "未知のヘルス注記です（コード: {code}）。"
       }
     },
