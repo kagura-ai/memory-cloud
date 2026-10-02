@@ -1,7 +1,8 @@
 """Shared scaffold for one-shot, plan-then-apply operator commands.
 
-``apply_rerank_defaults`` (#1572), ``transfer_context_creator`` (#1783) and
-``sweep_orphan_vectors`` (#1798) share the same shape: plan (read-only, printed), confirm, apply, report.
+``apply_rerank_defaults`` (#1572), ``transfer_context_creator`` (#1783),
+``sweep_orphan_vectors`` (#1798) and ``restore_context`` (#1804) share the same
+shape: plan (read-only, printed), confirm, apply, report.
 Keeping the driver here means a fix to the confirmation or the session
 handling lands in every command at once.
 """

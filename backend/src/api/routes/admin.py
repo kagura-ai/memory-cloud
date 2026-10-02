@@ -1553,6 +1553,81 @@ async def retry_failed_embeddings(
 
 
 # ============================================================================
+# Context Restore from soft-deleted rows (Issue #1804)
+# ============================================================================
+
+
+class ContextRestoreRequest(BaseModel):
+    """Restore a soft-deleted context from its rows."""
+
+    dry_run: bool = Field(True, description="Count only (default); false restores.")
+    new_name: str | None = Field(
+        None,
+        description="Restore under this name when a live context has taken the old one.",
+    )
+
+
+class ContextRestoreResponse(BaseModel):
+    """What a context restore did, or would do on a dry run."""
+
+    context_id: str
+    workspace_id: str
+    name: str
+    renamed_from: str | None
+    deleted_at: str
+    deleted_by: str | None
+    memories_restored: int
+    memories_left_deleted: int
+    warnings: list[str]
+    dry_run: bool
+
+
+@router.post("/contexts/{context_id}/restore", response_model=ContextRestoreResponse)
+async def restore_context(
+    context_id: UUID,
+    request_body: ContextRestoreRequest,
+    user: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> ContextRestoreResponse:
+    """Restore a soft-deleted context and the memories its deletion tombstoned.
+
+    #1804: clears ``deleted_at`` on the context and on the memories deleted
+    with it, and marks those memories ``pending`` so the embedding sweep
+    rebuilds their vectors (about 2,400 an hour; until then recall does not
+    find them). Memories forgotten before the deletion,
+    Sleep tombstones and rows the tombstone purge already removed stay gone,
+    as do the context's neural edges, members' ``allowed_context_ids``
+    entries and revoked resource tokens.
+
+    Default is dry_run=True. 404 for a context with no row (see
+    ``/contexts/recover``), 409 for one that is not deleted or whose name or
+    resource a live context now uses.
+    """
+    from services.context_restore import restore_deleted_context
+
+    result = await restore_deleted_context(
+        db,
+        context_id,
+        dry_run=request_body.dry_run,
+        new_name=request_body.new_name,
+        actor_id=get_user_id(user),
+        actor_email=user.get("email"),
+    )
+    return ContextRestoreResponse(
+        context_id=result.context_id,
+        workspace_id=result.workspace_id,
+        name=result.name,
+        renamed_from=result.renamed_from,
+        deleted_at=to_utc_iso(result.deleted_at) or "",
+        deleted_by=result.deleted_by,
+        memories_restored=result.memories_restored,
+        memories_left_deleted=result.memories_left_deleted,
+        warnings=result.warnings,
+        dry_run=result.dry_run,
+    )
+
+
+# ============================================================================
 # Context Recovery from Qdrant (Issue #86)
 # ============================================================================
 
@@ -1594,7 +1669,8 @@ async def recover_context(
     #1798: deleting a context now removes its points, and the orphan sweep
     removes points left by earlier deletions, so this finds nothing for a
     context deleted on v0.88.0 or later. Its soft-deleted rows stay in
-    Postgres until the tombstone purge.
+    Postgres until the tombstone purge; ``POST /contexts/{context_id}/restore``
+    (#1804) brings it back from them.
 
     Default is dry_run=True — shows what would be recovered without making changes.
     """
@@ -1644,6 +1720,19 @@ async def recover_context(
         offset = next_offset
 
     if not all_points:
+        no_points = "No Qdrant points found for this context_id"
+        # #1804: a context deleted on v0.88.0 or later has no points left, but
+        # its rows do; say where to go instead of leaving the admin at a dead end.
+        deleted_row = await db.execute(
+            select(Context.id).where(
+                Context.id == PyUUID(context_id), Context.deleted_at.is_not(None)
+            )
+        )
+        if deleted_row.first() is not None:
+            no_points += (
+                f". The context's soft-deleted rows are still in Postgres: restore it "
+                f"with POST /api/v1/admin/contexts/{context_id}/restore"
+            )
         return ContextRecoveryResponse(
             context_id=context_id,
             workspace_id=request_body.workspace_id or "",
@@ -1653,7 +1742,7 @@ async def recover_context(
             context_record_created=False,
             search_config_restored=False,
             dry_run=request_body.dry_run,
-            errors=["No Qdrant points found for this context_id"],
+            errors=[no_points],
         )
 
     # Step 2: Determine workspace_id from first point if not provided

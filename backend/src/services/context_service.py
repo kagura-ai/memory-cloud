@@ -1208,7 +1208,8 @@ class ContextService:
         #1798: the context's points are removed from the vector store once the
         soft-delete is committed. They used to be kept, and nothing ever
         removed them — not even the tombstone purge. The rows stay until that
-        purge; the vectors can be rebuilt from them.
+        purge; ``services/context_restore.py`` (#1804) brings the context back
+        from them and the embedding sweep rebuilds the vectors.
 
         Args:
             user_id: User ID (for access verification and audit trail)
@@ -1246,8 +1247,12 @@ class ContextService:
             )
         )
         memories_to_delete = list(memories_result.scalars().all())
+        # #1804: the context and its memories share one timestamp, which is
+        # how a restore (services/context_restore.py) tells the memories this
+        # deletion tombstoned from ones forgotten before it.
+        deleted_at = utcnow()
         for memory in memories_to_delete:
-            memory.deleted_at = utcnow()
+            memory.deleted_at = deleted_at
             memory.deleted_by = user_id
 
         # Hard-delete neural edges (no soft-delete needed, reconstructable)
@@ -1343,7 +1348,7 @@ class ContextService:
             )
 
         # Issue #84: Soft-delete context record (previously hard-deleted)
-        context.deleted_at = utcnow()
+        context.deleted_at = deleted_at
         context.deleted_by = user_id
         if _commit:
             await self.db.commit()
