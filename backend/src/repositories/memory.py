@@ -326,7 +326,12 @@ class MemoryRepository(BaseRepository[Memory]):
         logger.info("memory_promoted_to_persistent", memory_id=str(memory_id))
 
     async def get_by_resource_id(
-        self, resource_id: str, context_id: UUID, user_id: str
+        self,
+        resource_id: str,
+        context_id: UUID,
+        user_id: str,
+        *,
+        include_linked: bool = False,
     ) -> Memory | None:
         """Find active memory by external resource_id within a context.
 
@@ -336,16 +341,22 @@ class MemoryRepository(BaseRepository[Memory]):
             resource_id: External resource identifier
             context_id: Context UUID
             user_id: User ID (ownership check)
+            include_linked: Also match a memory written by an account linked
+                to ``user_id`` (#1803). Only for a context the caller reads as
+                a linked owner — a private one; the caller decides.
 
         Returns:
-            Memory or None
+            The newest matching memory, or None
         """
+        from services.identity_link_service import owned_by
+
+        author = owned_by(Memory.user_id, user_id) if include_linked else Memory.user_id == user_id
         result = await self.db.execute(
             select(Memory)
             .where(
                 Memory.resource_id == resource_id,
                 Memory.context_id == context_id,
-                Memory.user_id == user_id,
+                author,
                 Memory.deleted_at.is_(None),
             )
             .order_by(desc(Memory.created_at))

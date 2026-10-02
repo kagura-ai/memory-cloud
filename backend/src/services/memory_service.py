@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import ColumnElement, and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.retention import should_promote_to_persistent
@@ -1698,11 +1698,18 @@ class MemoryService:
         current_context_id: UUID | None = None,
         current_workspace_id: UUID | None = None,
     ) -> UpdateMemoryResponse:
-        """Upsert by external_id: remember new, then forget old if exists."""
+        """Upsert by external_id: remember new, then forget old if exists.
+
+        #1803: in a private context the external_id names a row of the owner,
+        and the owner is the link set (#1784) — so either linked account's
+        upsert replaces the same row instead of each keeping its own. A shared
+        context keeps matching the caller's own rows only.
+        """
         existing = await self.memory_repo.get_by_resource_id(
             resource_id=request.external_id,
             context_id=current_context_id,
             user_id=user_id,
+            include_linked=await self._is_private_context(current_context_id),
         )
 
         # Build details with resource_id preserved (copy to avoid mutating request)
@@ -1762,6 +1769,12 @@ class MemoryService:
         # caller addressed by external_id), not an agent read — the #1299
         # per-memory read filter must not silently no-op it, or a denied-type
         # existing row survives as a live duplicate alongside the new row.
+        #
+        # #1803: ``existing`` may be a linked account's row in a private
+        # context. forget() still authorizes it through can_access_memory
+        # (same owner + context EDITOR), but the skipped row filter means an
+        # agent binding's type filter does not stop the replacement — as it
+        # never did for the caller's own row: the link makes it the same owner.
         operation = "created"
         if existing:
             await self.forget(
@@ -2037,6 +2050,14 @@ class MemoryService:
 
         return outgoing_links, out_has_more, incoming_links, in_has_more
 
+    async def _is_private_context(self, context_id: UUID | str | None) -> bool:
+        """Whether ``context_id`` is a private context, the one kind the caller
+        reads as a linked owner (#1784). False without a context."""
+        if context_id is None:
+            return False
+        uuid = context_id if isinstance(context_id, UUID) else UUID(str(context_id))
+        return not await self.context_service.is_context_shared(uuid)
+
     async def _create_declared_links(
         self,
         memory_id: UUID,
@@ -2068,13 +2089,29 @@ class MemoryService:
         created = 0
 
         try:
+            # #1803: a target must be the caller's own memory — and in a
+            # private context the owner is the link set (#1784), so a memory
+            # an account linked to the caller wrote there counts too. A shared
+            # context keeps the caller's own memories only. Probed once, and
+            # only when a lookup actually runs.
+            own_target_cache: list[ColumnElement[bool]] = []
+
+            async def own_target() -> ColumnElement[bool]:
+                if not own_target_cache:
+                    own_target_cache.append(
+                        owned_by(Memory.user_id, user_id)
+                        if await self._is_private_context(context_id)
+                        else Memory.user_id == user_id
+                    )
+                return own_target_cache[0]
+
             # Direct links by memory ID (batch-validate targets exist in same scope)
             requested_ids = [t for t in (request.linked_memory_ids or []) if t != memory_id]
             if requested_ids:
                 result = await self.db.execute(
                     select(Memory.id).where(
                         Memory.id.in_(requested_ids),
-                        Memory.user_id == user_id,
+                        await own_target(),
                         Memory.workspace_id == UUID(workspace_id),
                         Memory.context_id == UUID(context_id),
                         Memory.deleted_at.is_(None),
@@ -2105,7 +2142,7 @@ class MemoryService:
             if uris:
                 result = await self.db.execute(
                     select(Memory.source_uri, Memory.id).where(
-                        Memory.user_id == user_id,
+                        await own_target(),
                         Memory.workspace_id == UUID(workspace_id),
                         Memory.context_id == UUID(context_id),
                         Memory.source_uri.in_(uris),
@@ -2146,7 +2183,7 @@ class MemoryService:
                 result = await self.db.execute(
                     select(Memory.id).where(
                         Memory.id == supersedes_target,
-                        Memory.user_id == user_id,
+                        await own_target(),
                         Memory.workspace_id == UUID(workspace_id),
                         Memory.context_id == UUID(context_id),
                         Memory.deleted_at.is_(None),

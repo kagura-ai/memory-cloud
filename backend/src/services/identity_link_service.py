@@ -18,7 +18,12 @@ workspace it is not a member of.
 Linking needs proof of both accounts and never an email match: the target
 must be signed in on the same browser session as the caller (the multi-account
 session container, #1488), which each account entered through its own
-sign-in.
+sign-in, and both must have signed in there recently (#1803 — checked by the
+route, ``IDENTITY_LINK_SIGN_IN_WINDOW``).
+
+Inside a private context the link set is also the owner for writes that name
+another memory (#1803): an ``external_id`` upsert and a remember's declared
+links match a memory any linked account wrote there.
 
 The lookups here are the single place the rule is spelled:
 
@@ -163,7 +168,8 @@ class IdentityLinkService:
     ) -> bool:
         """Put ``user_id`` and ``other_user_id`` in one link set.
 
-        The caller has already proved both accounts (same browser session).
+        The caller has already proved both accounts (same browser session,
+        both signed in recently).
         Idempotent for a pair that is already linked.
 
         Returns:
