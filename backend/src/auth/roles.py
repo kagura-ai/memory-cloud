@@ -311,9 +311,10 @@ class RoleManager:
             # (``users.auth_provider`` is retained as the denormalized "primary"
             # pointer that account-linking writes. It no longer resolves the
             # owner, but #1811 reads it again to decide whether this sign-in
-            # may sync email/name — see ``_sync_existing_user``.) A known provider that somehow still lacks a row falls
-            # through to the new-user path below, whose IntegrityError(user_id)
-            # retry re-resolves the existing user without creating a duplicate.
+            # may sync email/name — see ``_sync_existing_user``.) A known
+            # provider that somehow still lacks a row falls through to the
+            # new-user path below, whose IntegrityError(user_id) retry
+            # re-resolves the existing user without creating a duplicate.
             if known_provider:
                 link = (
                     await db.execute(
