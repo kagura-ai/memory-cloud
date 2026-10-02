@@ -353,6 +353,9 @@ by `backend/tests/auth/test_programmatic_workspace_auth.py`):
    Pivot on `user_metadata->>'key_prefix'` (the acting key) to find every mutation performed
    with the stolen key, and on `minted_key_prefix` to enumerate attacker-minted keys. Also
    review member additions/invitations in the same window (same audit lane, #1164).
+   `resource` is `api_key:<public id>` (`akey_…`) on rows written since #1008 and
+   `api_key:<integer id>` on older rows; map an older one with
+   `SELECT public_id FROM api_keys WHERE id = <integer id>`.
 5. **Revoke attacker-minted keys.** Preferred: after step 3, re-enable the switch and use the
    *new* owner key for per-id **soft** revokes (procedure 4) — this retains forensic rows and
    writes audit rows. Alternative while the switch stays off: owner-session hard delete
