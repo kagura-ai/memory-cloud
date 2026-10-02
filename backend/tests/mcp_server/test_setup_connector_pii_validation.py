@@ -99,7 +99,7 @@ async def test_setup_connector_passes_normalized_runtime_to_service():
     }
     provisioned = SimpleNamespace(
         connector=SimpleNamespace(id=connector_id, connector_type="slack"),
-        token=SimpleNamespace(id=7, quota_events_per_hour=1000),
+        token=SimpleNamespace(id=7, public_id="rtok_" + "7" * 22, quota_events_per_hour=1000),
         resource_id="slack_general",
         resource_pk=uuid4(),
         context_id=None,
@@ -169,7 +169,7 @@ async def test_setup_connector_notifies_when_a_kmc_key_was_minted(key_name):
     value never reaches the notice."""
     provisioned = SimpleNamespace(
         connector=SimpleNamespace(id=uuid4(), connector_type="slack"),
-        token=SimpleNamespace(id=7, quota_events_per_hour=1000),
+        token=SimpleNamespace(id=7, public_id="rtok_" + "7" * 22, quota_events_per_hour=1000),
         resource_id="slack_general",
         resource_pk=uuid4(),
         context_id=uuid4() if key_name else None,

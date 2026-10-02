@@ -92,7 +92,7 @@ afterEach(() => {
 });
 
 const VISIBLE_KEY: MemberAPIKey = {
-  id: 1,
+  id: "akey_0000000000000000000001",
   name: "test-key",
   key_prefix: "kag_",
   plaintext_key: "kag_real_secret_xyz",

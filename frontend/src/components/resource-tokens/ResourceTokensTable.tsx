@@ -39,7 +39,7 @@ export function ResourceTokensTable({
   onEdit,
 }: ResourceTokensTableProps) {
   const t = useTranslations('resourceTokens');
-  const [copiedTokenId, setCopiedTokenId] = useState<number | null>(null);  // Use token.id, not resource_id
+  const [copiedTokenId, setCopiedTokenId] = useState<string | null>(null);  // Use token.id, not resource_id
 
   const formatTime = (isoString: string | null): string => {
     if (!isoString) return t('timeAgo.never');
@@ -62,7 +62,7 @@ export function ResourceTokensTable({
     }
   };
 
-  const handleCopyResourceId = async (tokenId: number, resourceId: string) => {
+  const handleCopyResourceId = async (tokenId: string, resourceId: string) => {
     try {
       // copyText degrades to an execCommand fallback before throwing (#987).
       // The resource ID is visible in the table, so a hard failure is benign.

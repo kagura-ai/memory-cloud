@@ -134,6 +134,7 @@ class TestSerializeApiKeyLastUsed:
         # hidden_at set → is_visible False → plaintext path skipped (no encryptor).
         return SimpleNamespace(
             id=1,
+            public_id="akey_" + "1" * 22,
             name="prod-api",
             key_prefix="kagura_abc123",
             plaintext_encrypted=None,

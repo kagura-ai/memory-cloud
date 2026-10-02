@@ -2,16 +2,18 @@
 
 > Issue: #622 — pre-1.0 public API surface enumeration and freeze
 > Enumerated at commit 20ae959a2c79cacd2cf7922512ad780f540e9c60 (main HEAD, 2026-06-12)
-> Scope: all BaseModel / TZAwareBaseModel subclasses defined in backend/src/api/routes/ (46 route files, 208 model classes — 208 of 208 enumerated)
+> Scope: all BaseModel / TZAwareBaseModel subclasses defined in backend/src/api/routes/ (46 route files, 208 model classes at the enumeration commit; #1008 adds the 4 direct model classes of the later `share_keys.py` — 212 of 212 enumerated)
 > Re-frozen after #991 (Phase 1): 3 duplicate class names renamed; dead `APIKey*` schemas removed from `models/schemas.py`; redundant `WorkspaceConnectorCreateResponse.resource_pk` dropped.
 > Re-frozen after #991 (Phase 2): `WorkspaceConnectorSummary.resource_pk` → public `resource_id` slug (via Resource JOIN); `TelemetryResponse.embedding_config.ollama_base_url` dropped (internal URL, no consumer); sequential int PKs (`APIKeyResponse.id`, `ExternalKeyResponse.id`, `ResourceTokenResponse.id`, `WorkspaceConnectorCreateResponse.token_id`) **consciously frozen** into the 1.0 contract — opaque-ID replacement deferred to #1008 (post-1.0, breaking/major). #991 is now fully resolved.
 > Changed by #1733: `price_monthly` dropped from `PlanTierInfo`, `WorkspacePlanInfo` and `AvailablePlanInfo` — the value was stale, and the external billing service is the source of truth for prices.
+> Re-frozen after #1008: the sequential integer PKs that #991 froze are replaced by prefixed opaque public ids (`<prefix>_` + 22 base62 characters): `APIKeyResponse.id` → `akey_…`, `ShareKeyResponse.id` → `skey_…` (the `share_keys.py` models were missing from this enumeration and are added below), `ResourceTokenResponse.id` and `WorkspaceConnectorCreateResponse.token_id` → `rtok_…`; `ExternalKeyResponse.id` is dropped (external keys are addressed by `key_name`). The routes that address these resources take the public id as the path id; an integer path id is a 422 (hard cut, no dual-accept period). Outside this enumeration's scope (`models/schemas.py`): `WorkspaceInvitationResponse.id` / `PendingInvitationItem.id` → `winv_…`, `MemberAPIKeyResponse.id` and `RegenerateAPIKeyResponse.key_id` → `akey_…`.
+> Re-frozen after #1813: the remaining integer user / OAuth-client PKs are dropped outright, since each resource already carries the string id clients address it by: `OAuth2ClientResponse.id` (and `OAuth2ClientWithSecretResponse`, which inherits it — including the DCR `/register` response) → use `client_id`. Outside this enumeration's scope (`models/schemas.py`): `UserProfileResponse.id` (`/users/profile`, which gains the string `user_id` it lacked) and `UserWithAdminFlag.id` (`/admin/system-admins`) → use `user_id`; `SystemAdminListResponse.initial_admin_id` is dropped (each entry's `is_initial_admin` marks the protected initial admin).
 > Changed by #1678: new `password.py` models (email + password recovery and settings); `PasswordLoginRequest.login_id` now also accepts a verified email address (field name unchanged); `/auth/me` gains `has_password` (defined in `models/schemas.py`, outside this enumeration's scope).
 
 Notes:
 
 - 36 of the 46 route files define models; the following 10 define none locally (they reuse models from other modules or return plain dicts): `__init__.py`, `attachments.py`, `connectors_slack.py`, `context_search_config.py`, `invitations.py`, `member_credentials.py`, `resource_ingest.py`, `system_admins.py`, `users.py`, `well_known.py`.
-- Two route-file classes subclass an in-scope model rather than `BaseModel` directly and are therefore outside the 208-class grep, but are part of the response surface and noted inline for completeness: `Bm25DriftDetail(Bm25DriftSummary)` (bm25_drift.py L64, adds `context_deleted`, `top_divergent_terms`) and `SleepReportDetail(SleepReportSummary)` (sleep_reports.py L66, adds `context_deleted`, `embedding_calls_made`, `error_message`, and five `*_result: dict` fields).
+- Three route-file classes subclass an in-scope model rather than `BaseModel` directly and are therefore outside the 212-class grep, but are part of the response surface and noted inline for completeness: `Bm25DriftDetail(Bm25DriftSummary)` (bm25_drift.py L64, adds `context_deleted`, `top_divergent_terms`) and `SleepReportDetail(SleepReportSummary)` (sleep_reports.py L66, adds `context_deleted`, `embedding_calls_made`, `error_message`, and five `*_result: dict` fields), and `ShareKeyCreateResponse(ShareKeyResponse)` (share_keys.py L119, adds the one-time plaintext `share_key`).
 - Field convention: `field_name: type — required|optional (default ...)`. Required = no default in the model definition (Pydantic v2 semantics: `X | None` without a default is still required).
 - Request models are included for completeness and marked `(request model)`; the freeze priority per #622 is the response surface.
 - **⚠ Known gap (to close at rc1 — see `dx-lead-review.md` finding #5):** this enumeration covers only models *defined in* `backend/src/api/routes/`. Response models *defined in* `models/schemas.py` but *returned by* routes via `response_model=` are part of the frozen surface yet **not enumerated here** — notably the core memory API: `RememberResponse`, `RecallResponse`, `RecallConfidence` (incl. the `prominence` field added in #1052), and `ReferenceResponse`. The rc1 re-enumeration must include `models/schemas.py` response models (ideally via the snapshot guard in `dx-lead-review.md` finding #6).
@@ -382,7 +384,7 @@ Notes:
 
 ### APIKeyResponse (TZAwareBaseModel, L84)
 > Response model for API key metadata.
-- `id: int` — required ⚠ sequential integer DB PK used as the public identifier. **DECIDED (#991): frozen into the 1.0 contract** — replacement is a breaking migration (URL paths + params + DB lookups + responses); the enumeration existence-oracle is already closed (owner-scope + uniform not-found), residual exposure is row-count *magnitude* only. Opaque-ID migration tracked in #1008 (post-1.0, breaking/major).
+- `id: str` — required ✅ **DONE (#1008):** public id `akey_` + 22 base62 characters (was the sequential integer DB PK, frozen by #991). The `/config/api-keys/{key_id}` routes take it as `key_id`; an integer is a 422.
 - `key_prefix: str` — required
 - `name: str` — required
 - `user_id: str` — required
@@ -711,9 +713,9 @@ Notes:
 > Toggle enabled/disabled state (Issue #105).
 - `enabled: bool` — required
 
-### ExternalKeyResponse (BaseModel, L67)
+### ExternalKeyResponse (BaseModel, L92)
 > External API key response (masked).
-- `id: int` — required ⚠ sequential integer DB PK used as the public identifier. **DECIDED (#991): frozen into the 1.0 contract** — replacement is a breaking migration (URL paths + params + DB lookups + responses); the enumeration existence-oracle is already closed (owner-scope + uniform not-found), residual exposure is row-count *magnitude* only. Opaque-ID migration tracked in #1008 (post-1.0, breaking/major).
+- ~~`id: int`~~ — ✅ **removed in #1008** (was the sequential integer DB PK; external keys are addressed by `key_name`).
 - `key_name: str` — required
 - `provider: str` — required
 - `masked_value: str` — required
@@ -962,7 +964,7 @@ Notes:
 
 ### OAuth2ClientResponse (BaseModel, L107)
 > OAuth2 Client response (without secret).
-- `id: int` — required
+- ~~`id: int`~~ — ✅ **removed in #1813** (was the sequential integer DB PK; clients are addressed by `client_id`).
 - `client_id: str` — required
 - `client_name: str` — required
 - `redirect_uris: list[str]` — required
@@ -1192,7 +1194,7 @@ Notes:
 
 ### ResourceTokenResponse (TZAwareBaseModel, L75)
 > Response model for resource token metadata (no plaintext).
-- `id: int` — required ⚠ sequential integer DB PK used as the public identifier. **DECIDED (#991): frozen into the 1.0 contract** — replacement is a breaking migration (URL paths + params + DB lookups + responses); the enumeration existence-oracle is already closed (owner-scope + uniform not-found), residual exposure is row-count *magnitude* only. Opaque-ID migration tracked in #1008 (post-1.0, breaking/major).
+- `id: str` — required ✅ **DONE (#1008):** public id `rtok_` + 22 base62 characters (was the sequential integer DB PK, frozen by #991). `PATCH`/`DELETE /resource-tokens/{token_id}` take it; an integer is a 422.
 - `resource_id: str` — required
 - `description: str | None` — optional
 - `quota_events_per_hour: int` — required
@@ -1246,6 +1248,46 @@ Notes:
 > Cursor-paginated resource events response.
 - `events: list[ResourceEventRecord]` — required
 - `next_cursor: str | None` — optional
+
+## share_keys.py
+
+### ShareKeyCreate (BaseModel, L82) (request model)
+> Request to mint a share key bound to one owned context.
+- `name: str` — required
+- `context_id: UUID` — required
+- `ttl_days: int | None` — optional
+
+### ShareKeyResponse (TZAwareBaseModel, L97)
+> Share-key metadata (never includes the secret).
+- `id: str` — required ✅ **DONE (#1008):** public id `skey_` + 22 base62 characters (was the sequential integer DB PK, which this enumeration had missed). `POST /config/share-keys/{key_id}/revoke` takes it; an integer is a 422.
+- `key_prefix: str` — required
+- `name: str` — required
+- `user_id: str` — required
+- `context_id: UUID` — required
+- `scope: str` — required
+- `created_at: datetime` — required
+- `last_used_at: datetime | None` — optional
+- `revoked_at: datetime | None` — optional
+- `expires_at: datetime` — required
+- `status: Literal['active', 'revoked', 'expired']` — required
+
+### ShareKeyCreateResponse (ShareKeyResponse, L119)
+> Mint response — includes the plaintext key ONCE.
+- `share_key: str` — required ⚠ plaintext share key (shown-once by design)
+
+### SharedSessionState (TZAwareBaseModel, L285)
+> One agent session-state entry, projected for read-only observation (#1064).
+- `key: str` — required
+- `status: str | None` — optional
+- `awaiting_approval: bool` — required
+- `updated_at: datetime` — required
+- `value: Any` — required
+
+### SharedSessionsResponse (TZAwareBaseModel, L306)
+> The bound context's live agent session-state, for a status board (#1064).
+- `sessions: list[SharedSessionState]` — required
+- `count: int` — required
+- `as_of: datetime` — required
 
 ## sleep_reports.py
 
@@ -1505,7 +1547,7 @@ Notes:
 - `resource_id: str` — required
 - ~~`resource_pk: UUID`~~ — ✅ **removed in #991** (was the internal `resources.id` DB PK, redundant with the public `resource_id` slug above).
 - `context_id: UUID | None` — optional
-- `token_id: int` — required ⚠ sequential integer DB PK (ResourceToken.id) used as a public identifier. **DECIDED (#991): frozen into the 1.0 contract**; opaque-ID migration tracked in #1008 (post-1.0, breaking/major). See the `id: int` markers above for the rationale.
+- `token_id: str` — required ✅ **DONE (#1008):** the token's public id `rtok_…` (was `ResourceToken.id`, the integer DB PK frozen by #991).
 - `token: str` — required ⚠ plaintext connector token (shown-once by design — verify never logged/cached downstream)
 - `kmc_api_key: str | None` — optional ⚠ plaintext KMC write key (shown-once by design)
 - `quota_events_per_hour: int` — required
@@ -1732,6 +1774,7 @@ Issue #622 allows at most 2 follow-up sub-issues; candidates below are grouped i
 
 | Candidate | Priority | Action |
 |---|---|---|
-| `APIKeyResponse.id`, `ExternalKeyResponse.id`, `ResourceTokenResponse.id`, `WorkspaceConnectorCreateResponse.token_id` (all `int`) | ✅ DECIDED (#991) → tracked #1008 | **Frozen into the 1.0 contract** rather than replaced. Replacement is a breaking migration spanning URL paths (`/{token_id}`), request params, DB lookups, and response shapes across 4 models / 3+ route files — out of scope for a pre-1.0 cleanup. The enumeration existence-oracle is already closed (owner-scope + uniform not-found); residual exposure is row-count *magnitude* only. Opaque-ID replacement deferred to #1008 (post-1.0, breaking/major). |
+| `APIKeyResponse.id`, `ShareKeyResponse.id`, `ExternalKeyResponse.id`, `ResourceTokenResponse.id`, `WorkspaceConnectorCreateResponse.token_id` (all `int`) | ✅ DONE (#1008) | #991 first froze them into the 1.0 contract; #1008 replaced them before the freeze with prefixed opaque public ids (`akey_`, `skey_`, `rtok_`; 22 base62 characters) stored in a unique `public_id` column (migration `e91_1008_public_ids`, backfilled). `ExternalKeyResponse.id` was dropped (addressed by `key_name`). Path ids on `/config/api-keys/{key_id}`, `/config/share-keys/{key_id}/revoke`, `/resource-tokens/{token_id}`, `/workspaces/{workspace_id}/invitations/{invitation_id}` and `/workspaces/{workspace_id}/members/{user_id}/credentials/api-keys/{key_id}` are the public ids; an integer is a 422 (hard cut). The integer PK stays internal for joins. |
+| `OAuth2ClientResponse.id` (oauth.py), `UserProfileResponse.id`, `UserWithAdminFlag.id`, `SystemAdminListResponse.initial_admin_id` (models/schemas.py) (all `int`) | ✅ DONE (#1813) | Dropped: OAuth clients are addressed by `client_id`, users by `user_id` (added to `UserProfileResponse`, which had no string id), and the initial admin is the entry with `is_initial_admin`. No route takes these integer ids. |
 | Untyped `dict` fields on freezable responses: `PublicSearchResult.metadata`, `GraphStats.top_connections`/`recent_edges`, `GraphDataResponse.stats`, `UserStats.*`, `WorkspacePlanInfo.usage`/`quotas` (workspace_plan.py), `AvailablePlanInfo.quotas`, `TelemetryResponse.memory_stats`/`neural_memory`, `SleepReportDetail.*_result` | P2 | Type them with explicit models, or mark them explicitly non-frozen in the 1.0 contract |
 | Duplicate class names across route files | ✅ DONE (#991) | Renamed the `admin_plans.py` / `workspaces.py` copies → `AdminWorkspacePlanInfo`, `AdminUpdatePlanRequest`, `WorkspaceContextStatsResponse`; `workspace_plan.py` / `contexts.py` keep the canonical names. Also removed the dead `APIKeyCreate`/`APIKeyResponse`/`APIKeyCreateResponse` duplicates from `models/schemas.py` (zero callers; live versions are in `api_keys.py`). OpenAPI now emits distinct component names per endpoint; field JSON unchanged. |

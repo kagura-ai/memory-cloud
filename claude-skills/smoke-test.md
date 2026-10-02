@@ -347,16 +347,17 @@ Owner-scoped API-key binding introspection. No resource setup required — these
 ```
 list_my_bindings()
 -> Verify: status=success; returns a bindings array (may be empty; count >= 0)
--> Save the first binding's key_id (integer) as key_id, if any
+-> Save the first binding's key_id (a string: akey_ + 22 letters/digits) as key_id, if any
 
 describe_binding(key_id=<key_id from list_my_bindings>)
 -> Verify: if list_my_bindings returned >= 1 binding, describing it succeeds with
    binding {key_id, name, context_id, context_name, created_at, key_prefix} (no secret material)
 -> Verify: if no bindings exist, call describe_binding(context_id="00000000-0000-0000-0000-000000000000")
    instead and expect the uniform `binding_not_found` error (no side effects either way)
--> Note: the selectors are key_id (integer) OR context_id (UUID), exactly one of them — there is no
+-> Note: the selectors are key_id (akey_...) OR context_id (UUID), exactly one of them — there is no
    binding_id parameter. An unknown or not-yours selector always returns binding_not_found, never
-   a permission_denied that would leak whether the key exists
+   a permission_denied that would leak whether the key exists. An integer key_id (the format before
+   #1008) returns invalid_arguments
 ```
 
 ### 7. Merge & usage tools
@@ -437,7 +438,7 @@ rollback_sleep_run(report_id="this-is-not-a-uuid")
 
 ```
 setup_resource(name="smoke-test-resource-{unix_timestamp}", resource_id="smoke_test_{unix_timestamp}")
--> Verify: returns context_id (UUID), resource_id, token (plaintext), token_id
+-> Verify: returns context_id (UUID), resource_id, token (plaintext), token_id (rtok_ + 22 letters/digits)
 -> Save context_id as resource_context_id, resource_id, and token
 
 ingest_events(resource_id=<resource_id>, events=[

@@ -171,7 +171,7 @@ async def test_revoke_nonexistent_token(
     - Return 404 status
     """
     # Act
-    response = await async_client.delete("/api/v1/resource-tokens/99999")
+    response = await async_client.delete("/api/v1/resource-tokens/rtok_" + "0" * 22)
 
     # Assert
     assert response.status_code == 404

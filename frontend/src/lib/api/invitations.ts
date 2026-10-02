@@ -8,7 +8,7 @@ import { apiClient } from './base';
 import type { Workspace, WorkspaceMember } from './workspaces';
 
 export interface WorkspaceInvitation {
-  id: number;
+  id: string; // Public id: "winv_" + 22 base62 chars (#1008)
   workspace_id: string;
   token: string;
   email: string | null;
@@ -85,7 +85,7 @@ export async function listInvitations(
  */
 export async function deleteInvitation(
   workspaceId: string,
-  invitationId: number
+  invitationId: string
 ): Promise<void> {
   return apiClient.delete<void>(
     `/api/v1/workspaces/${workspaceId}/invitations/${invitationId}`
@@ -118,7 +118,7 @@ export async function getInvitationInfo(
  * Issue #179: In-app invitation notifications
  */
 export interface PendingInvitation {
-  id: number;
+  id: string; // Public id: "winv_..." (#1008)
   workspace_id: string;
   workspace_name: string;
   role: 'owner' | 'admin' | 'member' | 'viewer';

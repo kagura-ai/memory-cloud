@@ -248,7 +248,7 @@ class TestRevokeKey:
         db = _make_db_mock(execute_results=[rec])
         manager = ShareKeyManager(db)
         with patch("auth.share_keys.utcnow", return_value=NOW):
-            ok = await manager.revoke_key(key_id=5, user_id="user-1")
+            ok = await manager.revoke_key(public_id="skey_" + "a" * 22, user_id="user-1")
         assert ok is True
         assert rec.revoked_at == NOW
 
@@ -256,7 +256,7 @@ class TestRevokeKey:
     async def test_missing_or_unowned_returns_false(self) -> None:
         db = _make_db_mock(execute_results=[None])
         manager = ShareKeyManager(db)
-        assert await manager.revoke_key(key_id=999, user_id="user-1") is False
+        assert await manager.revoke_key(public_id="skey_" + "b" * 22, user_id="user-1") is False
 
 
 # ---------------------------------------------------------------------------

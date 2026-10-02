@@ -21,6 +21,8 @@ from api.main import app
 from auth.dependencies import get_user_from_api_key_or_session
 from db.base import get_db
 
+PID42 = "akey_" + "4" * 22
+PID7 = "akey_" + "7" * 22
 _WS = uuid.uuid4()
 
 
@@ -89,6 +91,7 @@ def _mock_manager(monkeypatch):
 
     new_key = MagicMock()
     new_key.id = 42
+    new_key.public_id = PID42
     new_key.name = "ci-key"
     new_key.key_prefix = "kagura_abc"
     new_key.created_at = __import__("datetime").datetime(2026, 1, 1)
@@ -152,7 +155,7 @@ class TestOwnerProvisionedMint:
         ]
         assert len(audit_rows) == 1
         assert audit_rows[0].action == "member_api_key_provisioned"
-        assert audit_rows[0].resource == "api_key:42"
+        assert audit_rows[0].resource == f"api_key:{PID42}"
         meta = audit_rows[0].user_metadata
         assert meta["target"] == "target-user"
         assert meta["via"] == "api_key"
@@ -212,12 +215,12 @@ class TestOwnerProvisionedMint:
 
 
 LIST_URL = f"/api/v1/workspaces/{_WS}/members/target-user/credentials"
-REVOKE_URL = f"/api/v1/workspaces/{_WS}/members/target-user/credentials/api-keys/42"
+REVOKE_URL = f"/api/v1/workspaces/{_WS}/members/target-user/credentials/api-keys/{PID42}"
 
 
 def _member_api_key_dict(plaintext="secret-plain"):
     return {
-        "id": 42,
+        "id": PID42,
         "name": "k",
         "key_prefix": "kagura_abc",
         "plaintext_key": plaintext,
@@ -300,7 +303,7 @@ class TestOwnerProvisionedRevoke:
         ]
         assert len(audit_rows) == 1
         assert audit_rows[0].action == "member_api_key_revoked"
-        assert audit_rows[0].resource == "api_key:42"
+        assert audit_rows[0].resource == f"api_key:{PID42}"
         meta = audit_rows[0].user_metadata
         assert meta["target"] == "target-user"
         assert meta["via"] == "api_key"
@@ -360,7 +363,7 @@ class TestOwnerProvisionedRevoke:
 
         app.dependency_overrides[get_db] = _get_db
 
-        r = client.delete(f"/api/v1/workspaces/{_WS}/members/owner-key/credentials/api-keys/7")
+        r = client.delete(f"/api/v1/workspaces/{_WS}/members/owner-key/credentials/api-keys/{PID7}")
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "revoked"
         assert api_key.revoked_at is not None

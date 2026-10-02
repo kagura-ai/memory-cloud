@@ -206,7 +206,6 @@ class TestReferenceResponseSerialization:
 class TestUserWithAdminFlagSerialization:
     def test_naive_created_at_gets_z_and_nullable_last_login_handled(self):
         u = UserWithAdminFlag(
-            id=1,
             email="a@b.c",
             user_id="u1",
             name="Foo",
@@ -224,7 +223,6 @@ class TestUserWithAdminFlagSerialization:
 
     def test_naive_last_login_at_also_gets_z(self):
         u = UserWithAdminFlag(
-            id=1,
             email="a@b.c",
             user_id="u1",
             name="Foo",
@@ -355,7 +353,7 @@ class TestContextResponseSerialization:
 class TestAPIKeyResponseSerialization:
     def test_all_four_datetime_fields_handle_naive_and_none(self):
         k = APIKeyResponse(
-            id=1,
+            id="akey_" + "a" * 22,
             key_prefix="prefix0123456789",
             name="test",
             user_id="u",
@@ -373,7 +371,7 @@ class TestAPIKeyResponseSerialization:
 
     def test_aware_utc_no_double_z(self):
         k = APIKeyResponse(
-            id=1,
+            id="akey_" + "a" * 22,
             key_prefix="prefix0123456789",
             name="test",
             user_id="u",
@@ -391,7 +389,7 @@ class TestAPIKeyResponseSerialization:
 class TestUserProfileResponseSerialization:
     def test_naive_created_and_nullable_last_login(self):
         u = UserProfileResponse(
-            id=1,
+            user_id="u1",
             email="a@b.c",
             name=None,
             picture=None,
@@ -407,6 +405,9 @@ class TestUserProfileResponseSerialization:
         body = json.loads(u.model_dump_json())
         assert body["created_at"] == "2026-04-28T17:50:22Z"
         assert body["last_login_at"] is None
+        # Issue #1813: identified by the string user_id, no integer id
+        assert body["user_id"] == "u1"
+        assert "id" not in body
 
 
 class TestContextStatsItemSerialization:

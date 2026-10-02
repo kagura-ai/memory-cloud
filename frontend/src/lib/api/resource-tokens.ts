@@ -11,7 +11,7 @@ import { apiClient } from './base';
  * Resource Token interface (metadata only, no plaintext)
  */
 export interface ResourceToken {
-  id: number;
+  id: string; // Public id: "rtok_" + 22 base62 chars (#1008)
   resource_id: string;
   description: string | null;
   quota_events_per_hour: number;
@@ -99,16 +99,16 @@ export async function createResourceToken(
  *
  * Soft delete - token remains in database for audit trail but cannot be used.
  *
- * @param tokenId - Database ID of the token
+ * @param tokenId - Public id of the token ("rtok_...", #1008)
  */
 export async function updateResourceToken(
-  tokenId: number,
+  tokenId: string,
   data: ResourceTokenUpdateRequest
 ): Promise<ResourceToken> {
   return apiClient.patch<ResourceToken>(`/api/v1/resource-tokens/${tokenId}`, data);
 }
 
-export async function revokeResourceToken(tokenId: number): Promise<void> {
+export async function revokeResourceToken(tokenId: string): Promise<void> {
   return apiClient.delete<void>(`/api/v1/resource-tokens/${tokenId}`);
 }
 

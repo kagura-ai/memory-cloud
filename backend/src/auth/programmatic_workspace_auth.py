@@ -202,8 +202,8 @@ async def audit_programmatic_workspace_action(
 
     ``resource`` defaults to ``workspace:{workspace_id}`` (the member/invitation
     surface, whose resource IS the workspace). The member-credential surface
-    (#1165) passes ``resource=f"api_key:{id}"`` so the row points at the specific
-    minted/revoked key. When the acting API key prefix is present, it is recorded
+    (#1165) passes ``resource=f"api_key:{public_id}"`` so the row points at the
+    specific minted/revoked key (rows written before #1008 hold the integer id). When the acting API key prefix is present, it is recorded
     under ``metadata["key_prefix"]``; callers that also want to record the
     minted/revoked key prefix must pass it via ``metadata`` under a DISTINCT key
     (e.g. ``minted_key_prefix`` / ``revoked_key_prefix``) so it is not clobbered.

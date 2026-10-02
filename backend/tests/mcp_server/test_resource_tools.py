@@ -623,6 +623,7 @@ class TestListResourceTokensHappyPath:
         # 3) paginated tokens query
         token1 = MagicMock()
         token1.id = 1
+        token1.public_id = "rtok_" + "1" * 22
         token1.resource_id = "res1"
         token1.description = "t1"
         token1.quota_events_per_hour = 1000
@@ -632,6 +633,7 @@ class TestListResourceTokensHappyPath:
 
         token2 = MagicMock()
         token2.id = 2
+        token2.public_id = "rtok_" + "2" * 22
         token2.resource_id = "res2"
         token2.description = None
         token2.quota_events_per_hour = 500
@@ -658,7 +660,7 @@ class TestListResourceTokensHappyPath:
         assert data["limit"] == 2
         assert data["offset"] == 0
         assert len(data["tokens"]) == 2
-        assert data["tokens"][0]["id"] == 1
+        assert data["tokens"][0]["id"] == "rtok_" + "1" * 22
         assert data["tokens"][0]["is_active"] is True
         assert data["tokens"][1]["is_active"] is False
 
@@ -831,6 +833,7 @@ class TestSetupResourceHappyPath:
         # Mock services/managers
         mock_token_record = MagicMock()
         mock_token_record.id = 42
+        mock_token_record.public_id = "rtok_" + "4" * 22
 
         async def mock_create_token(self, **kwargs):
             return ("plaintext-token-xyz", mock_token_record)
@@ -880,7 +883,7 @@ class TestSetupResourceHappyPath:
         assert data["status"] == "success"
         assert data["resource_id"] == "res1"
         assert data["token"] == "plaintext-token-xyz"
-        assert data["token_id"] == 42
+        assert data["token_id"] == "rtok_" + "4" * 22
         assert data["context_id"] == str(context_uuid)
         # Verify Context + ContextSearchConfig were added
         type_names = [type(o).__name__ for o in added]

@@ -32,11 +32,14 @@ REQUEST = SimpleNamespace(client=SimpleNamespace(host="192.0.2.1"), headers={})
 AGENT_ID = uuid.uuid4()
 CONTEXT_ID = uuid.uuid4()
 WORKSPACE_ID = uuid.uuid4()
+OLD_PID = "akey_" + "o" * 22
+NEW_PID = "akey_" + "n" * 22
 
 
 def _old_key(**over) -> SimpleNamespace:
     base = {
         "id": 7,
+        "public_id": OLD_PID,
         "name": "ci",
         "user_id": "user-1",
         "workspace_id": WORKSPACE_ID,
@@ -52,6 +55,7 @@ def _old_key(**over) -> SimpleNamespace:
 def _new_key() -> SimpleNamespace:
     return SimpleNamespace(
         id=8,
+        public_id=NEW_PID,
         key_prefix="kmc_live_abcdefgh",
         name="ci",
         user_id="user-1",
@@ -86,7 +90,7 @@ async def test_regenerate_carries_agent_binding_forward():
     manager = _manager()
 
     await regenerate_api_key(
-        key_id=7,
+        key_id=OLD_PID,
         request=REQUEST,
         background_tasks=BackgroundTasks(),
         user=USER,
@@ -110,7 +114,7 @@ async def test_regenerate_carries_public_context_binding_forward():
     manager = _manager()
 
     await regenerate_api_key(
-        key_id=7,
+        key_id=OLD_PID,
         request=REQUEST,
         background_tasks=BackgroundTasks(),
         user=USER,
@@ -133,7 +137,7 @@ async def test_regenerate_surfaces_binding_revalidation_as_400():
 
     with pytest.raises(HTTPException) as exc_info:
         await regenerate_api_key(
-            key_id=7,
+            key_id=OLD_PID,
             request=REQUEST,
             background_tasks=BackgroundTasks(),
             user=USER,
@@ -169,7 +173,7 @@ async def test_pro_workspace_can_still_rotate_an_existing_bound_key() -> None:
         ),
     ):
         response = await regenerate_api_key(
-            key_id=7,
+            key_id=OLD_PID,
             request=REQUEST,
             background_tasks=BackgroundTasks(),
             user=USER,
@@ -209,7 +213,7 @@ async def test_regenerate_keeps_an_unbound_key_unbound() -> None:
     manager = _manager()
 
     await regenerate_api_key(
-        key_id=7,
+        key_id=OLD_PID,
         request=REQUEST,
         background_tasks=BackgroundTasks(),
         user=USER,

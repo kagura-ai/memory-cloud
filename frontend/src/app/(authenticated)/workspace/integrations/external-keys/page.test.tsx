@@ -103,7 +103,6 @@ describe("ExternalKeysPage BYOK gate (#1167)", () => {
 
 describe("ExternalKeysPage protection (#1613)", () => {
   const storedKey = (overrides: Record<string, unknown> = {}) => ({
-    id: 1,
     key_name: "OPENAI_API_KEY",
     provider: "openai",
     masked_value: "sk-...abcd",
@@ -138,7 +137,6 @@ describe("ExternalKeysPage protection (#1613)", () => {
   it("does not decide from the provider: a protected flag on any key is honoured", async () => {
     mockListKeys.mockResolvedValue([
       storedKey({
-        id: 2,
         key_name: "COHERE_API_KEY",
         provider: "cohere",
         is_protected: true,

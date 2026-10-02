@@ -512,7 +512,7 @@ class APIKeyManager:
         apply_zero_knowledge_hide(key)
         await self.db.flush()
 
-        logger.info("api_key_hidden", key_id=key_id, user_id=user_id)
+        logger.info("api_key_hidden", key_id=key_id, public_id=key.public_id, user_id=user_id)
 
     @staticmethod
     def should_auto_hide(key: APIKey) -> bool:

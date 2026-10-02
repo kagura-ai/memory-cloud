@@ -57,6 +57,7 @@ async def auto_hide_expired_credentials():
             logger.info(
                 "api_key_auto_hidden",
                 key_id=key.id,
+                public_id=key.public_id,
                 user_id=key.user_id,
                 key_prefix=key.key_prefix,
             )

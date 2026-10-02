@@ -32,7 +32,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 
 interface RegenerateAPIKeyDialogProps {
   isOpen: boolean;
-  keyId: number;
+  keyId: string;
   keyName: string;
   onClose: () => void;
   onSuccess: () => void;

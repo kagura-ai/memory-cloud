@@ -20,7 +20,7 @@ import { deleteSystemAPIKey } from "@/lib/api/api-keys";
 
 interface DeleteAPIKeyDialogProps {
   isOpen: boolean;
-  keyId: number;
+  keyId: string;
   keyName: string;
   onClose: () => void;
   onSuccess: () => void;

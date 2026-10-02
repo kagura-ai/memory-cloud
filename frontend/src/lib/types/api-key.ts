@@ -6,7 +6,7 @@
 export type APIKeyStatus = "active" | "revoked" | "expired";
 
 export interface APIKey {
-  id: number;
+  id: string; // Public id: "akey_" + 22 base62 chars (#1008)
   key_prefix: string; // First 16 characters (e.g., "kagura_abc123...")
   name: string; // Friendly name
   user_id: string; // Owner OAuth2 sub
@@ -48,18 +48,18 @@ export interface CreateDialogState {
 
 export interface StatsDialogState {
   isOpen: boolean;
-  keyId: number | null;
+  keyId: string | null;
   keyName: string | null;
 }
 
 export interface RevokeDialogState {
   isOpen: boolean;
-  keyId: number | null;
+  keyId: string | null;
   keyName: string | null;
 }
 
 export interface DeleteDialogState {
   isOpen: boolean;
-  keyId: number | null;
+  keyId: string | null;
   keyName: string | null;
 }

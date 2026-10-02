@@ -554,7 +554,7 @@ async def handle_list_resource_tokens(
 
             token_list = [
                 {
-                    "id": t.id,
+                    "id": t.public_id,
                     "resource_id": t.resource_id,
                     "description": t.description,
                     "quota_events_per_hour": t.quota_events_per_hour,
@@ -1093,7 +1093,7 @@ async def handle_setup_resource(
                 context_name=context.name,
                 resource_id=resource_id,
                 token=plaintext_token,
-                token_id=token_record.id,
+                token_id=token_record.public_id,
                 warning="Save this token — it will not be shown again.",
             )
 
@@ -1290,7 +1290,7 @@ async def handle_setup_connector(
                 "connector_type": result.connector.connector_type,
                 "resource_id": result.resource_id,
                 "resource_pk": str(result.resource_pk),
-                "token_id": result.token.id,
+                "token_id": result.token.public_id,
                 "token": result.plaintext_token,
                 "quota_events_per_hour": result.token.quota_events_per_hour,
                 "idempotency_key_prefix": f"{result.connector.id}:",

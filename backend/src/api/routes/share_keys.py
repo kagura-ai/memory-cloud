@@ -44,6 +44,7 @@ from utils.exceptions import (
     ValidationError,
 )
 from utils.logger import get_logger
+from utils.public_id import PublicIdPrefix, ShareKeyPublicId, public_id_pattern
 
 logger = get_logger(__name__)
 
@@ -96,7 +97,11 @@ class ShareKeyCreate(BaseModel):
 class ShareKeyResponse(TZAwareBaseModel):
     """Share-key metadata (never includes the secret)."""
 
-    id: int = Field(..., description="Database ID")
+    id: str = Field(
+        ...,
+        description="Public id of the share key (`skey_` + 22 base62 characters)",
+        pattern=public_id_pattern(PublicIdPrefix.SHARE_KEY),
+    )
     key_prefix: str = Field(..., description="First 16 characters of the key (display only)")
     name: str = Field(..., description="Friendly name")
     user_id: str = Field(..., description="Minting owner")
@@ -138,7 +143,7 @@ def _determine_status(
 def _format_key_response(key: ShareKey) -> ShareKeyResponse:
     """Format a ShareKey row into a ShareKeyResponse."""
     return ShareKeyResponse(
-        id=key.id,
+        id=key.public_id,
         key_prefix=key.key_prefix,
         name=key.name,
         user_id=key.user_id,
@@ -207,14 +212,14 @@ async def list_share_keys(
 
 @router.post("/{key_id}/revoke", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 async def revoke_share_key(
-    key_id: int,
+    key_id: ShareKeyPublicId,
     user: SessionUser,
     manager: ShareKeyManager = Depends(get_share_key_manager),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     """Revoke a share key (soft delete; uniform 404 if not the user's active key)."""
     user_id = get_user_id(user)
-    revoked = await manager.revoke_key(key_id=key_id, user_id=user_id)
+    revoked = await manager.revoke_key(public_id=key_id, user_id=user_id)
     if not revoked:
         raise NotFoundException("Share key")
     await db.commit()

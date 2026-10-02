@@ -158,7 +158,7 @@ class MemberCredentialsService:
             {
                 "api_keys": [
                     {
-                        "id": int,
+                        "id": str,  # public id, akey_... (#1008)
                         "name": str,
                         "key_prefix": str,
                         "plaintext_key": str | None,  # Only if visible + owner
@@ -705,10 +705,15 @@ class MemberCredentialsService:
 
                 plaintext_key = get_encryptor().decrypt(api_key.plaintext_encrypted)
             except Exception as e:
-                logger.error("api_key_decryption_failed", key_id=api_key.id, error=str(e))
+                logger.error(
+                    "api_key_decryption_failed",
+                    key_id=api_key.id,
+                    public_id=api_key.public_id,
+                    error=str(e),
+                )
 
         return {
-            "id": api_key.id,
+            "id": api_key.public_id,
             "name": api_key.name,
             "key_prefix": api_key.key_prefix,
             "plaintext_key": plaintext_key,

@@ -27,6 +27,7 @@ from services.security_notification_service import (
 from utils import db_transaction, get_user_id
 from utils.datetime import utcnow
 from utils.logger import get_logger
+from utils.public_id import APIKeyPublicId, PublicIdPrefix, public_id_pattern
 
 logger = get_logger(__name__)
 
@@ -93,7 +94,11 @@ class APIKeyStats(BaseModel):
 class APIKeyResponse(TZAwareBaseModel):
     """Response model for API key metadata."""
 
-    id: int = Field(..., description="Database ID")
+    id: str = Field(
+        ...,
+        description="Public id of the key (`akey_` + 22 base62 characters)",
+        pattern=public_id_pattern(PublicIdPrefix.API_KEY),
+    )
     key_prefix: str = Field(..., description="First 16 characters of key (for display)")
     name: str = Field(..., description="Friendly name")
     user_id: str = Field(..., description="Owner user ID")
@@ -154,7 +159,7 @@ def _format_key_response(key: APIKey) -> APIKeyResponse:
     status = _determine_status(key.revoked_at, key.expires_at)
 
     return APIKeyResponse(
-        id=key.id,
+        id=key.public_id,
         key_prefix=key.key_prefix,
         name=key.name,
         user_id=key.user_id,
@@ -249,7 +254,7 @@ async def create_api_key(
 
 @router.delete("/{key_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 async def delete_api_key(
-    key_id: int,
+    key_id: APIKeyPublicId,
     user: SessionUser,
     manager: APIKeyManager = Depends(get_api_key_manager),
     db: AsyncSession = Depends(get_db),
@@ -267,7 +272,7 @@ async def delete_api_key(
         result = await db.execute(
             select(APIKey).where(
                 and_(
-                    APIKey.id == key_id,
+                    APIKey.public_id == key_id,
                     APIKey.user_id == user_id,  # Security: verify ownership
                 )
             )
@@ -295,7 +300,7 @@ async def delete_api_key(
 
 @router.post("/{key_id}/revoke", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 async def revoke_api_key(
-    key_id: int,
+    key_id: APIKeyPublicId,
     user: SessionUser,
     manager: APIKeyManager = Depends(get_api_key_manager),
     db: AsyncSession = Depends(get_db),
@@ -311,7 +316,7 @@ async def revoke_api_key(
         result = await db.execute(
             select(APIKey).where(
                 and_(
-                    APIKey.id == key_id,
+                    APIKey.public_id == key_id,
                     APIKey.user_id == user_id,  # Security: verify ownership
                 )
             )
@@ -340,7 +345,7 @@ async def revoke_api_key(
 
 @router.post("/{key_id}/regenerate", response_model=APIKeyCreateResponse)
 async def regenerate_api_key(
-    key_id: int,
+    key_id: APIKeyPublicId,
     request: Request,
     background_tasks: BackgroundTasks,
     user: SessionUser,
@@ -361,7 +366,7 @@ async def regenerate_api_key(
         result = await db.execute(
             select(APIKey).where(
                 and_(
-                    APIKey.id == key_id,
+                    APIKey.public_id == key_id,
                     APIKey.user_id == user_id,
                 )
             )
@@ -432,7 +437,14 @@ async def regenerate_api_key(
             key_name=key_name,
         )
 
-        logger.info(f"api_key_regenerated: old_id={key_id}, new_id={new_key.id}, user={user_id}")
+        logger.info(
+            "api_key_regenerated",
+            old_key_id=old_key.id,
+            old_public_id=key_id,
+            new_key_id=new_key.id,
+            new_public_id=new_key.public_id,
+            user_id=user_id,
+        )
 
         response_data = _format_key_response(new_key)
         return APIKeyCreateResponse(**response_data.model_dump(), api_key=new_api_key)
@@ -454,7 +466,7 @@ async def regenerate_api_key(
 
 @router.get("/{key_id}/stats", response_model=APIKeyStats)
 async def get_api_key_stats(
-    key_id: int,
+    key_id: APIKeyPublicId,
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     days: int = Query(30, ge=1, le=365),
@@ -464,7 +476,7 @@ async def get_api_key_stats(
 
     async with db_transaction(db, "get_api_key_stats", "Failed to retrieve API key statistics"):
         result = await db.execute(
-            select(APIKey).where(APIKey.id == key_id, APIKey.user_id == user_id)
+            select(APIKey).where(APIKey.public_id == key_id, APIKey.user_id == user_id)
         )
         api_key = result.scalar_one_or_none()
 
@@ -487,7 +499,7 @@ async def get_api_key_stats(
             daily_stats.append({"date": current_date.isoformat(), "count": 0})
             current_date += timedelta(days=1)
 
-        logger.info(f"api_key_stats_retrieved: key_id={key_id}, days={days}")
+        logger.info("api_key_stats_retrieved", key_id=api_key.id, public_id=key_id, days=days)
 
         return APIKeyStats(
             total_requests=0,

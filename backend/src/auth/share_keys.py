@@ -217,16 +217,16 @@ class ShareKeyManager:
         )
         return list(result.scalars().all())
 
-    async def revoke_key(self, key_id: int, user_id: str) -> bool:
-        """Revoke a share key by id (soft delete, preserves audit trail).
+    async def revoke_key(self, public_id: str, user_id: str) -> bool:
+        """Revoke a share key by its public id (soft delete, preserves audit trail).
 
-        Ownership is enforced in the query — a key id that is not the user's
+        Ownership is enforced in the query — an id that is not the user's
         active key returns ``False`` (the route maps that to a uniform 404).
         """
         result = await self.db.execute(
             select(ShareKey).where(
                 and_(
-                    ShareKey.id == key_id,
+                    ShareKey.public_id == public_id,
                     ShareKey.user_id == user_id,
                     ShareKey.revoked_at.is_(None),
                 )
@@ -238,5 +238,5 @@ class ShareKeyManager:
 
         record.revoked_at = utcnow()
         await self.db.flush()
-        logger.info("share_key_revoked", key_id=key_id, user_id=user_id)
+        logger.info("share_key_revoked", key_id=record.id, public_id=public_id, user_id=user_id)
         return True

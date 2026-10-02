@@ -122,6 +122,7 @@ class TestProgrammaticInvitationList:
 
         inv = MagicMock()
         inv.id = 1
+        inv.public_id = "winv_" + "1" * 22
         inv.workspace_id = _WS
         inv.token = "secret-token"
         inv.email = "x@example.com"

@@ -49,11 +49,13 @@ PARAM_DEFAULTS = {
     "workspace_id": "00000000-0000-0000-0000-000000000001",
     "context_id": "00000000-0000-0000-0000-000000000002",
     "user_id": "test_user_dummy",
-    "key_id": "1",
+    # #1008: public ids, so the request reaches the handler instead of the
+    # path pattern's 422. Share-key routes swap the prefix (_resolve_path).
+    "key_id": "akey_" + "0" * 22,
     "key_name": "OPENAI_API_KEY",
     "client_id": "1",
-    "invitation_id": "1",
-    "token_id": "1",
+    "invitation_id": "winv_" + "0" * 22,
+    "token_id": "rtok_" + "0" * 22,
     "grant_id": "00000000-0000-0000-0000-000000000003",  # Issue #1470: referral ledger row
     "invite_id": "00000000-0000-0000-0000-000000000004",  # Issue #1581: beta invite link
     "resource_id": "test-resource",
@@ -64,6 +66,8 @@ PARAM_DEFAULTS = {
 
 def _resolve_path(path: str) -> str:
     """Replace path parameters with dummy values."""
+    if "/share-keys/" in path:
+        path = path.replace("{key_id}", "skey_" + "0" * 22)
     for param, value in PARAM_DEFAULTS.items():
         path = path.replace(f"{{{param}}}", value)
     return path

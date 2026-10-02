@@ -34,8 +34,8 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
 }));
 
-const activeToken = (id: number, quota: number) => ({
-  id,
+const activeToken = (n: number, quota: number) => ({
+  id: `rtok_${String(n).padStart(22, "0")}`,
   resource_id: "products",
   description: null,
   quota_events_per_hour: quota,

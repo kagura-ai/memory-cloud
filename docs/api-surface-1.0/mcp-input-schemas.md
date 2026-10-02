@@ -23,7 +23,7 @@ Describe one of your public-bound API keys by exactly one selector (read-only).
 
 - **Required**: none ⚠ schema requires nothing, but the contract is "EXACTLY ONE of key_id / context_id" — not expressible as written; a `oneOf` (or at least one required selector) would harden the 1.0 surface
 - **Optional**:
-  - `key_id` — integer (from list_my_bindings; mutually exclusive with context_id)
+  - `key_id` — string, pattern `^akey_[0-9A-Za-z]{22}$` (the key's public id from list_my_bindings; mutually exclusive with context_id) ✅ **#1008**: was the integer DB PK; an integer is now `invalid_arguments`
   - `context_id` — string, format `uuid` (bound public context; mutually exclusive with key_id) ⚠ here `context_id` means "selector for a binding lookup", whereas in nearly every other tool it means "the context to operate in" — same name, different role
 
 ### remember
