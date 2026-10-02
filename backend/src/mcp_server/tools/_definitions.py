@@ -42,8 +42,9 @@ Returns: {status, binding: {key_id, name, context_id, context_name, created_at, 
                 "type": "object",
                 "properties": {
                     "key_id": {
-                        "type": "integer",
-                        "description": "API key ID from list_my_bindings(). Mutually exclusive with context_id.",
+                        "type": "string",
+                        "pattern": "^akey_[0-9A-Za-z]{22}$",
+                        "description": "key_id (akey_...) from list_my_bindings(). Mutually exclusive with context_id.",
                     },
                     "context_id": {
                         "type": "string",

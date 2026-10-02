@@ -15,7 +15,8 @@
       "type": "object",
       "properties": {
         "key_id": {
-          "type": "integer"
+          "type": "string",
+          "pattern": "^akey_[0-9A-Za-z]{22}$"
         },
         "context_id": {
           "type": "string",

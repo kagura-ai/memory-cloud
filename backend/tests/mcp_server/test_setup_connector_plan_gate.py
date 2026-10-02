@@ -84,7 +84,7 @@ async def test_non_xl_plan_denied_with_plan_required_envelope(plan_name: str) ->
 @pytest.mark.asyncio
 async def test_promax_passes_the_gate_and_provisions() -> None:
     resource_pk = uuid4()
-    token = SimpleNamespace(id=123, quota_events_per_hour=1000)
+    token = SimpleNamespace(id=123, public_id="rtok_" + "3" * 22, quota_events_per_hour=1000)
     # Same execute sequence as the service-level happy path
     # (tests/services/test_connector_provisioning.py): workspace, the three
     # advisory-lock statements, seat count, existing-connector probe, canonical
@@ -122,5 +122,7 @@ async def test_promax_passes_the_gate_and_provisions() -> None:
     payload = json.loads(result[0].text)
     assert payload["status"] == "success", payload
     assert payload["token"] == "kagura_resource_plain"
+    # #1008: the public id, never the integer PK.
+    assert payload["token_id"] == "rtok_" + "3" * 22
     assert payload["resource_pk"] == str(resource_pk)
     db.commit.assert_awaited_once()
