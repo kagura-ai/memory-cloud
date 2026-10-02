@@ -534,11 +534,12 @@ counts as a proof at the moment it completed. That proves only that the
 browser could complete a sign-in, not that a password was typed — on a
 shared or unattended computer someone could add both accounts and link them
 that way. Turn it on only where that is acceptable, and sign out of the
-provider as well as of Kagura on shared computers. A Google `auth_time` that
-is present still counts as it is.
+provider as well as of Kagura on shared computers. With it on, every OAuth
+sign-in counts at the moment it completed, "Confirm with Google" included.
 
-Sessions started before these checks existed carry no proof and need a
-fresh one.
+An account keeps its newest proof: a later sign-in that proves nothing, or an
+older Google `auth_time`, does not undo it. Sessions started before these
+checks existed carry no proof and need a fresh one.
 
 What a link does:
 

@@ -972,7 +972,9 @@ async def google_callback(
         # one proves nothing (fail closed).
         auth_time = None
         if link_proof:
-            auth_time = _oauth2_manager.verified_auth_time(credentials, user_info["sub"])
+            auth_time = await asyncio.to_thread(
+                _oauth2_manager.verified_auth_time, credentials, user_info["sub"]
+            )
             if auth_time is None:
                 logger.warning("link_proof_auth_time_missing", provider="google")
         proven_at = _oauth_proven_at(auth_time)
@@ -1254,14 +1256,6 @@ def _take_add_account_intent(state: str, request: Request) -> tuple[str, str | N
     return ("add", cookie_session)
 
 
-# --- carrying a closed-beta invite across the OAuth round trip (#1581) -------
-#
-# ``GET /auth/{provider}/login?invite=<token>`` travels the same way `return_to`
-# does — a short-lived Redis key beside the CSRF state — so no new cookie is
-# needed and multi-origin deployments (API and frontend on different hosts) work
-# unchanged. Only ``sha256_hex(token)`` is stored: the plaintext never rests in
-# Redis, and the callback (and everything downstream of it) only ever sees the
-# hash. Both providers go through these two helpers so they cannot diverge.
 # --- Identity-link proof (#1818) -------------------------------------------
 #
 # An identity link asks both accounts to have proved their credential within a
@@ -1298,18 +1292,26 @@ def _take_link_proof_intent(state: str) -> bool:
 def _oauth_proven_at(auth_time: datetime | None) -> datetime | None:
     """The proof an OAuth sign-in leaves on the session (#1818).
 
-    The provider's authentication time when it gave one; otherwise the sign-in
-    itself only when the operator allows it, and nothing by default.
+    The provider's authentication time when it gave one, nothing otherwise —
+    unless the operator counts the sign-in itself, which then always wins.
     """
     from config.settings import get_settings
 
-    if auth_time is not None:
-        return auth_time
     if get_settings().identity_link_allow_oauth_signin_proof:
+        # The operator counts the sign-in itself; a provider time can only
+        # be older, so it never makes the proof weaker than that.
         return utcnow()
-    return None
+    return auth_time
 
 
+# --- carrying a closed-beta invite across the OAuth round trip (#1581) -------
+#
+# ``GET /auth/{provider}/login?invite=<token>`` travels the same way `return_to`
+# does — a short-lived Redis key beside the CSRF state — so no new cookie is
+# needed and multi-origin deployments (API and frontend on different hosts) work
+# unchanged. Only ``sha256_hex(token)`` is stored: the plaintext never rests in
+# Redis, and the callback (and everything downstream of it) only ever sees the
+# hash. Both providers go through these two helpers so they cannot diverge.
 _BETA_INVITE_KEY = "oauth2_beta_invite:{state}"
 _BETA_INVITE_TTL = 300  # same lifetime as oauth2_state:{state}
 _BETA_INVITE_TOKEN_RE = re.compile(BETA_INVITE_TOKEN_PATTERN)

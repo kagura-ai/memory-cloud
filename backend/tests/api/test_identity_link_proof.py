@@ -171,13 +171,20 @@ class TestVerifiedAuthTime:
             assert oauth.verified_auth_time(SimpleNamespace(id_token=None), "108") is None
         verify.assert_not_called()
 
-    def test_a_time_ahead_of_ours_reads_as_now(self, oauth) -> None:
-        ahead = int((utcnow() + timedelta(minutes=1)).replace(tzinfo=UTC).timestamp())
+    def test_a_time_slightly_ahead_of_ours_reads_as_now(self, oauth) -> None:
+        ahead = int((utcnow() + timedelta(seconds=5)).replace(tzinfo=UTC).timestamp())
         p, _ = self._verify({"sub": "108", "auth_time": ahead})
         with p:
             got = oauth.verified_auth_time(SimpleNamespace(id_token="jwt"), "108")
 
         assert got is not None and got <= utcnow()
+
+    def test_a_time_well_ahead_of_ours_proves_nothing(self, oauth) -> None:
+        """Clock skew must not stretch into a fresh proof (fail closed)."""
+        ahead = int((utcnow() + timedelta(minutes=20)).replace(tzinfo=UTC).timestamp())
+        p, _ = self._verify({"sub": "108", "auth_time": ahead})
+        with p:
+            assert oauth.verified_auth_time(SimpleNamespace(id_token="jwt"), "108") is None
 
 
 # --- What the callbacks record --------------------------------------------------
@@ -236,6 +243,19 @@ class TestGoogleCallback:
         self, manager, signed_in_path, google_idp, opted_out
     ) -> None:
         before = utcnow()
+        await _callback("google")
+
+        assert before <= _proof(manager) <= utcnow()
+
+    @pytest.mark.asyncio
+    async def test_the_opt_out_does_not_let_an_old_auth_time_weaken_a_proof(
+        self, manager, signed_in_path, google_idp, opted_out
+    ) -> None:
+        """With the opt-out, "Confirm with Google" is never worse than a sign-in."""
+        auth_routes._oauth2_manager.verified_auth_time.return_value = utcnow() - timedelta(hours=3)
+        manager._redis.store[PROOF_KEY.format(state="st1")] = "1"
+        before = utcnow()
+
         await _callback("google")
 
         assert before <= _proof(manager) <= utcnow()

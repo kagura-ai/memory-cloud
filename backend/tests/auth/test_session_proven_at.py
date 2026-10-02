@@ -62,14 +62,35 @@ class TestProvenAt:
         assert manager.proven_within(sid, "local:admin", WINDOW)
         assert manager.proven_at(sid, "google_1") is None
 
-    def test_a_sign_in_that_proves_nothing_drops_an_earlier_proof(self, manager):
-        """The newest sign-in is the one that counts."""
+    def test_a_sign_in_that_proves_nothing_keeps_an_earlier_proof(self, manager):
+        """A proof is a past event; a later sign-in does not undo it."""
         sid = manager.create_session(USER)
-        manager.add_account(sid, OTHER, proven_at=utcnow())
+        proved = utcnow()
+        manager.add_account(sid, OTHER, proven_at=proved)
 
         assert manager.add_account(sid, OTHER)
 
-        assert manager.proven_at(sid, "local:admin") is None
+        assert manager.proven_at(sid, "local:admin") == proved
+
+    def test_an_older_proof_does_not_replace_a_newer_one(self, manager):
+        """A stale Google auth_time must not undo a fresh password proof."""
+        sid = manager.create_session(USER)
+        fresh = utcnow()
+        manager.add_account(sid, OTHER, proven_at=fresh)
+
+        assert manager.add_account(sid, OTHER, proven_at=fresh - timedelta(hours=3))
+
+        assert manager.proven_at(sid, "local:admin") == fresh
+
+    def test_a_newer_proof_replaces_an_older_one(self, manager):
+        sid = manager.create_session(USER)
+        old = utcnow() - timedelta(hours=3)
+        manager.add_account(sid, OTHER, proven_at=old)
+        fresh = utcnow()
+
+        assert manager.add_account(sid, OTHER, proven_at=fresh)
+
+        assert manager.proven_at(sid, "local:admin") == fresh
 
     def test_a_future_time_does_not_count(self, manager):
         sid = manager.create_session(USER, proven_at=utcnow() + timedelta(minutes=5))

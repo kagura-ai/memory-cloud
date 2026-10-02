@@ -54,8 +54,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiClient, ApiError } from "@/lib/api/base";
 import { getAuthConfig } from "@/lib/auth/auth";
-import { buildOAuthRedirect } from "@/lib/auth/buildOAuthRedirect";
-import { clearIdentityScopedClientState } from "@/lib/auth/clearClientState";
+import { startAddAccount } from "@/hooks/useAccountSwitcher";
 import { Loader2, Users } from "lucide-react";
 
 const LINKS_PATH = "/api/v1/me/account/identity-links";
@@ -111,19 +110,26 @@ export default function LinkedAccounts() {
   const [googleEnabled, setGoogleEnabled] = useState(false);
 
   useEffect(() => {
+    let alive = true;
     getAuthConfig()
-      .then((config) => setGoogleEnabled(config?.google_oauth_enabled === true))
-      .catch(() => setGoogleEnabled(false));
+      .then((config) => {
+        if (alive) setGoogleEnabled(config?.google_oauth_enabled === true);
+      })
+      .catch(() => {
+        if (alive) setGoogleEnabled(false);
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   // A Google sign-in that proves the account for a link (#1818). It adds the
   // account to this session (or refreshes it) and comes back to this page.
   const confirmWithGoogle = () => {
-    clearIdentityScopedClientState();
-    const url = new URL(buildOAuthRedirect("google", window.location.pathname));
-    url.searchParams.set("add_account", "1");
-    url.searchParams.set("link_proof", "1");
-    window.location.assign(url.toString());
+    startAddAccount("google", {
+      returnTo: window.location.pathname,
+      linkProof: true,
+    });
   };
 
   const loadLinks = useCallback(async () => {

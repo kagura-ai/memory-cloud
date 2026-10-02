@@ -526,6 +526,9 @@ class SessionManager:
     def signed_in_at(self, session_id: str, account_id: str) -> datetime | None:
         """When ``account_id`` last signed in on this session (#1803).
 
+        Diagnostic only since #1818: a sign-in is not a proof of the
+        credential. An identity link reads ``proven_within``, never this.
+
         Naive UTC, like ``utcnow()``. None when the session is missing or
         unusable, the account is not in it, or no readable time was recorded
         for it (a record from before the time was kept). Reads the record
@@ -563,6 +566,8 @@ class SessionManager:
 
     def signed_in_within(self, session_id: str, account_id: str, window: timedelta) -> bool:
         """Whether ``account_id`` signed in on this session within ``window``.
+
+        Not a proof for an identity link (#1818) — use ``proven_within``.
 
         A time in the future (clock skew, a tampered record) does not count,
         and neither does a missing one.
@@ -609,8 +614,9 @@ class SessionManager:
         present refreshes its identity and activates it, so "sign in again" is
         idempotent rather than creating a duplicate entry.
 
-        ``proven_at`` is as for ``create_session``. None removes an earlier
-        proof of this account: the newest sign-in is the one that counts.
+        ``proven_at`` is as for ``create_session``. The later of it and an
+        earlier proof of this account is kept: a proof is a past event, so a
+        sign-in that proves nothing (or proves less) does not undo it.
         """
         account_id = _account_id(user_info)
         if not account_id:
@@ -628,10 +634,14 @@ class SessionManager:
             proven = container.get(_PROVEN_AT)
             if not isinstance(proven, dict):
                 proven = container[_PROVEN_AT] = {}
-            if proven_at is None:
-                proven.pop(account_id, None)
-            else:
-                proven[account_id] = proven_at.isoformat()
+            if proven_at is not None:
+                earlier = proven.get(account_id)
+                try:
+                    keep = isinstance(earlier, str) and datetime.fromisoformat(earlier) > proven_at
+                except ValueError:
+                    keep = False
+                if not keep:
+                    proven[account_id] = proven_at.isoformat()
 
         return self._mutate_container(session_id, _add)
 

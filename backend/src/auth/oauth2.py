@@ -3,7 +3,7 @@
 import json
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import quote
 
@@ -422,10 +422,12 @@ class OAuth2Manager:
 
         The ID token is verified (Google's signature, ``aud`` = our client id,
         ``iss``, ``exp``) and must name ``sub``, the identity userinfo returned.
-        Naive UTC like ``utcnow()``; a time ahead of ours (clock skew) reads as
-        now. None when there is no ID token, it does not verify, it names
-        another identity, or it carries no usable ``auth_time`` — the caller
-        treats all of those as "not proved".
+        Naive UTC like ``utcnow()``. A time up to the verifier's 10-second skew
+        ahead of ours reads as now; one further ahead is refused, as the
+        session's own check refuses a future time. None when there is no ID
+        token, it does not verify, it names another identity, or it carries no
+        usable ``auth_time`` — the caller treats all of those as "not proved".
+        Blocking (fetches Google's certificates): call it off the event loop.
         """
         from google.oauth2 import id_token as google_id_token
 
@@ -447,7 +449,11 @@ class OAuth2Manager:
         if isinstance(auth_time, bool) or not isinstance(auth_time, int | float):
             return None
         when = datetime.fromtimestamp(auth_time, UTC).replace(tzinfo=None)
-        return min(when, utcnow())
+        now = utcnow()
+        if when > now + timedelta(seconds=10):
+            logger.warning("ID token auth_time is ahead of the server clock")
+            return None
+        return min(when, now)
 
     def get_user_info_web(self, credentials: Credentials) -> dict[str, Any]:
         """Get user info from Google.

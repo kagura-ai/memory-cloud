@@ -42,6 +42,42 @@ export interface UseAccountSwitcher {
   addAccount: (provider: AddableProvider) => void;
 }
 
+export interface AddAccountOptions {
+  /** Same-origin path to come back to. Default "/". */
+  returnTo?: string;
+  /** #1818: ask the provider for proof of a recent sign-in (Google only). */
+  linkProof?: boolean;
+}
+
+/**
+ * Leave for an OAuth sign-in that adds an account to this browser session.
+ * Shared by the account switcher and the Linked accounts card (#1818) so the
+ * navigation cannot drift between them.
+ */
+export function startAddAccount(
+  provider: AddableProvider,
+  options: AddAccountOptions = {},
+): void {
+  // The identity is about to change, so the same client state a switch or a
+  // sign-out drops has to go here too — otherwise the workspace preselect and
+  // onboarding progress of the account we are leaving greet a brand-new one.
+  clearIdentityScopedClientState();
+
+  // Build through the shared helper, not by concatenation. It guards three
+  // traps this flow has no reason to re-learn: NEXT_PUBLIC_API_URL may
+  // already carry an `/api/v1` suffix (yielding `/api/v1/api/v1/...`), the
+  // backend redirects to `return_to` verbatim so it must be absolute and
+  // same-origin (CWE-601), and the env var may end in trailing slashes.
+  //
+  // `add_account=1` is appended after: it makes the OAuth callback APPEND to
+  // this session instead of replacing it. Without it there is never a second
+  // account to switch to.
+  const url = new URL(buildOAuthRedirect(provider, options.returnTo ?? "/"));
+  url.searchParams.set("add_account", "1");
+  if (options.linkProof) url.searchParams.set("link_proof", "1");
+  window.location.assign(url.toString());
+}
+
 export function useAccountSwitcher(): UseAccountSwitcher {
   const [accounts, setAccounts] = useState<SignedInAccount[]>([]);
   const [addableProviders, setAddableProviders] = useState<AddableProvider[]>(
@@ -100,23 +136,7 @@ export function useAccountSwitcher(): UseAccountSwitcher {
   );
 
   const addAccount = useCallback((provider: AddableProvider) => {
-    // The identity is about to change, so the same client state a switch or a
-    // sign-out drops has to go here too — otherwise the workspace preselect and
-    // onboarding progress of the account we are leaving greet a brand-new one.
-    clearIdentityScopedClientState();
-
-    // Build through the shared helper, not by concatenation. It guards three
-    // traps this flow has no reason to re-learn: NEXT_PUBLIC_API_URL may
-    // already carry an `/api/v1` suffix (yielding `/api/v1/api/v1/...`), the
-    // backend redirects to `return_to` verbatim so it must be absolute and
-    // same-origin (CWE-601), and the env var may end in trailing slashes.
-    //
-    // `add_account=1` is appended after: it makes the OAuth callback APPEND to
-    // this session instead of replacing it. Without it there is never a second
-    // account to switch to.
-    const url = new URL(buildOAuthRedirect(provider, "/"));
-    url.searchParams.set("add_account", "1");
-    window.location.assign(url.toString());
+    startAddAccount(provider);
   }, []);
 
   return {
