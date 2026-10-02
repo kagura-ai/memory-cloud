@@ -1166,6 +1166,21 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Identity-link proof (Issue #1818)
+    identity_link_allow_oauth_signin_proof: bool = Field(
+        default=False,
+        description=(
+            "Whether an OAuth sign-in with no provider authentication time counts "
+            "as proof for an identity link (#1818). FALSE (the default) is strict: "
+            "only a password sign-in or a Google sign-in whose verified ID token "
+            "carries an auth_time inside the link window proves an account, so a "
+            "GitHub account, or a Google app without Session age claims, cannot be "
+            "linked. TRUE restores the #1803 behaviour, where any sign-in in the "
+            "window counts even when a live provider session completed it without "
+            "asking for a password."
+        ),
+    )
+
     # Terms-of-service acceptance (Issue #1665)
     terms_version: str = Field(
         default="",

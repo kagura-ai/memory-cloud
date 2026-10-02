@@ -23,6 +23,7 @@ import functools
 import os
 import re
 import secrets
+from datetime import datetime
 from typing import Any, Literal
 
 import httpx
@@ -538,6 +539,7 @@ async def google_login(
     add_account: bool = False,
     invite: str | None = None,
     accepted_terms: str | None = None,
+    link_proof: bool = False,
 ):
     """Initiate Google OAuth2 login flow.
 
@@ -551,6 +553,10 @@ async def google_login(
         accepted_terms: The terms version the person agreed to on the sign-in
             page (#1665). Bound to this flow's state; ignored while
             ``TERMS_VERSION`` is empty.
+        link_proof: This sign-in proves the account for an identity link
+            (#1818): Google is asked for ``auth_time``, and the callback
+            records it from the verified ID token. Ordinary sign-ins send the
+            same request as before.
 
     Returns:
         If return_to: RedirectResponse to Google OAuth (browser user)
@@ -603,6 +609,10 @@ async def google_login(
         # #1665: the terms version the person agreed to, bound to this state.
         _remember_accepted_terms(state, accepted_terms)
 
+        # #1818: a sign-in that proves this account for an identity link.
+        if link_proof:
+            _remember_link_proof_intent(state)
+
     # Get authorization URL
     redirect = redirect_uri or os.getenv("GOOGLE_REDIRECT_URI")
     if not redirect:
@@ -612,7 +622,7 @@ async def google_login(
     # it, a user with one Google session is returned the identity they already
     # have and the switcher never gains a second account.
     auth_url = _oauth2_manager.get_authorization_url_web(
-        redirect, state, select_account=add_account
+        redirect, state, select_account=add_account, request_auth_time=link_proof
     )
 
     # Issue #102: Auto-redirect for browser/iOS users
@@ -787,6 +797,8 @@ async def google_callback(
     beta_invite_token_hash = _take_beta_invite_hash(state)
     # #1665: likewise single-use and taken only after the CSRF check.
     accepted_terms = _take_accepted_terms(state)
+    # #1818: likewise.
+    link_proof = _take_link_proof_intent(state)
 
     try:
         # 2. Exchange code for token
@@ -955,8 +967,18 @@ async def google_callback(
             "role": role.value,
         }
 
+        # #1818: what this sign-in proves for an identity link. Only a
+        # link-proof flow asked Google for auth_time; a missing or unverifiable
+        # one proves nothing (fail closed).
+        auth_time = None
+        if link_proof:
+            auth_time = _oauth2_manager.verified_auth_time(credentials, user_info["sub"])
+            if auth_time is None:
+                logger.warning("link_proof_auth_time_missing", provider="google")
+        proven_at = _oauth_proven_at(auth_time)
+
         if intent == "add" and add_to_session:
-            if not _session_manager.add_account(add_to_session, session_data):
+            if not _session_manager.add_account(add_to_session, session_data, proven_at=proven_at):
                 # The session died between the check and the write. Refuse for
                 # the same reason — better a retryable error than a silent loss.
                 logger.warning("add_account_write_failed")
@@ -964,7 +986,7 @@ async def google_callback(
             session_id = add_to_session
             logger.info(f"Added account to existing session: {owner_email}")
         else:
-            session_id = _session_manager.create_session(session_data)
+            session_id = _session_manager.create_session(session_data, proven_at=proven_at)
 
         # Issue #212: Auto-create personal workspace on first login
         # Skip if user has pending invitations (they'll get workspace via invitation)
@@ -1240,6 +1262,54 @@ def _take_add_account_intent(state: str, request: Request) -> tuple[str, str | N
 # unchanged. Only ``sha256_hex(token)`` is stored: the plaintext never rests in
 # Redis, and the callback (and everything downstream of it) only ever sees the
 # hash. Both providers go through these two helpers so they cannot diverge.
+# --- Identity-link proof (#1818) -------------------------------------------
+#
+# An identity link asks both accounts to have proved their credential within a
+# few minutes (#1803). An OAuth round trip is not such a proof on its own: a
+# browser that still holds a provider session completes it without a password.
+# A sign-in started with ``link_proof=1`` asks Google for ``auth_time`` (the
+# last time the person actually authenticated there) and the callback records
+# that time, read from the verified ID token, as the account's proof. Google
+# cannot be made to re-authenticate (no ``prompt=login``, no ``max_age``), so a
+# stale ``auth_time`` is recorded as it is and the link refuses it. GitHub
+# reports no authentication time at all, so a GitHub sign-in proves nothing —
+# unless the operator turns ``IDENTITY_LINK_ALLOW_OAUTH_SIGNIN_PROOF`` on,
+# which brings back the #1803 rule (the sign-in itself counts).
+_LINK_PROOF_KEY = "oauth2_link_proof:{state}"
+_LINK_PROOF_TTL = 300  # same lifetime as oauth2_state:{state}
+
+
+def _remember_link_proof_intent(state: str) -> None:
+    """Mark this OAuth flow as a sign-in meant to prove an account."""
+    if _session_manager:
+        _session_manager._redis.setex(_LINK_PROOF_KEY.format(state=state), _LINK_PROOF_TTL, "1")
+
+
+def _take_link_proof_intent(state: str) -> bool:
+    """Whether this flow asked for a proof. Single-use, like the state."""
+    if not _session_manager:
+        return False
+    key = _LINK_PROOF_KEY.format(state=state)
+    value = _session_manager._redis.get(key)
+    _session_manager._redis.delete(key)
+    return value == "1"
+
+
+def _oauth_proven_at(auth_time: datetime | None) -> datetime | None:
+    """The proof an OAuth sign-in leaves on the session (#1818).
+
+    The provider's authentication time when it gave one; otherwise the sign-in
+    itself only when the operator allows it, and nothing by default.
+    """
+    from config.settings import get_settings
+
+    if auth_time is not None:
+        return auth_time
+    if get_settings().identity_link_allow_oauth_signin_proof:
+        return utcnow()
+    return None
+
+
 _BETA_INVITE_KEY = "oauth2_beta_invite:{state}"
 _BETA_INVITE_TTL = 300  # same lifetime as oauth2_state:{state}
 _BETA_INVITE_TOKEN_RE = re.compile(BETA_INVITE_TOKEN_PATTERN)
@@ -1467,6 +1537,7 @@ async def _terms_refusal(
         redis.delete(
             f"oauth2_return_to:{state}",
             _ADD_ACCOUNT_KEY.format(state=state),
+            _LINK_PROOF_KEY.format(state=state),
             f"oauth2_state_intent:{state}",
             f"oauth2_state_user:{state}",
         )
@@ -2101,14 +2172,17 @@ async def github_callback(
             "picture": user_info.get("picture"),
             "role": role.value,
         }
+        # #1818: GitHub reports no authentication time, so its sign-in proves
+        # nothing for an identity link unless the operator allows it.
+        proven_at = _oauth_proven_at(None)
         if intent == "add" and add_to_session:
-            if not _session_manager.add_account(add_to_session, session_data):
+            if not _session_manager.add_account(add_to_session, session_data, proven_at=proven_at):
                 logger.warning("add_account_write_failed")
                 return _oauth_error_redirect("github", "add_account_failed")
             session_id = add_to_session
             logger.info(f"Added account to existing session: {db_email}")
         else:
-            session_id = _session_manager.create_session(session_data)
+            session_id = _session_manager.create_session(session_data, proven_at=proven_at)
 
         # 6. Auto-create personal workspace
         try:
@@ -2216,7 +2290,7 @@ async def _create_session_and_workspace(
 ) -> str:
     """Create session and ensure personal workspace exists.
 
-    Shared by OAuth callbacks and password login.
+    Used by the password and MFA sign-ins; the OAuth callbacks build their own.
     """
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Session manager not initialized")
@@ -2233,7 +2307,8 @@ async def _create_session_and_workspace(
         "picture": picture,
         "role": role,
     }
-    session_id = _session_manager.create_session(session_data)
+    # #1818: a password (and MFA) sign-in proves the account here and now.
+    session_id = _session_manager.create_session(session_data, proven_at=utcnow())
 
     try:
         async for db in get_db():
