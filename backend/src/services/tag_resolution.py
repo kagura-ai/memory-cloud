@@ -34,7 +34,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
-from services.identity_link_service import owned_by
+from services.identity_link_service import linked_user_ids, owned_by
 from utils.logger import get_logger
 from utils.tag_normalize import is_near_duplicate, normalize_tag
 
@@ -76,6 +76,14 @@ MAX_SUGGESTIONS_PER_TAG = 5
 # user's tag names and counts would be served to another. Sharing is resolved
 # on EVERY call (one indexed SELECT) — it is the property that keeps a private
 # context from serving another user's tags, so it is never cached.
+#
+# A non-shared context aggregates the caller's link set (#1784), so the key is
+# that set, not the caller's id: linked accounts share one entry, and a link
+# or unlink handled by ANY API process changes the set every process reads,
+# so the entry that still holds a former link's tags is never read again
+# (#1807 — the per-process ``clear_vocabulary_cache`` on a link change only
+# reached the process that handled it). The set is read on every call, like
+# sharing — one indexed lookup, only for a non-shared context.
 #
 # A read that fails is cached as an empty vocabulary for the TTL (negative
 # caching): a context whose aggregate cannot complete must not re-run it on
@@ -205,7 +213,8 @@ async def _cached_entry(
 ) -> tuple[dict[str, int], bool]:
     """``(entry, hit)`` for the caller's scope, loading it single-flight on a miss."""
     shared = await _is_context_shared(db, context_id)
-    key: _CacheKey = (workspace_id, context_id, _SHARED_SCOPE if shared else user_id)
+    scope = _SHARED_SCOPE if shared else await _owner_scope(db, user_id)
+    key: _CacheKey = (workspace_id, context_id, scope)
     cached = _vocabulary_cache.get(key)
     if cached is not None:
         logger.debug("tag_vocabulary_read", context_id=str(context_id), cache="hit")
@@ -255,6 +264,13 @@ async def _cached_entry(
         raise
     finally:
         _inflight.pop(key, None)
+
+
+async def _owner_scope(db: AsyncSession, user_id: str) -> str:
+    """Cache scope of a non-shared vocabulary: the caller's link set."""
+    owners = await linked_user_ids(db, user_id)
+    # A newline cannot occur in a user id, so the join is unambiguous.
+    return "\n".join(sorted(owners))
 
 
 async def _is_context_shared(db: AsyncSession, context_id: UUID) -> bool:

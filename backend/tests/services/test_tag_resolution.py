@@ -32,6 +32,9 @@ CTX = uuid4()
 USER = "caller-1"
 
 
+pytestmark = pytest.mark.usefixtures("no_identity_links")
+
+
 @pytest.fixture(autouse=True)
 def _unshared_context():
     """Default every test to a NON-shared context (the user-scoped path).
@@ -555,6 +558,49 @@ class TestVocabularyCache:
         with _shared_context():
             await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id=USER)
         assert db.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_link_change_moves_a_private_entry_in_every_process(self):
+        """#1807: a private vocabulary covers the caller's link set, so the
+        set is part of the key. An unlink handled by another API process
+        changes the set read here, and the entry that still holds the former
+        link's tags is no longer the one read — no cross-process message
+        needed."""
+        links = {"alice": frozenset({"alice", "bob"})}
+
+        async def linked(_db, user_id):
+            return links.get(user_id, frozenset({user_id}))
+
+        db = _db_with_vocabulary({"python": 3})
+        with patch("services.tag_resolution.linked_user_ids", linked):
+            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
+            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
+            assert db.execute.await_count == 1
+            del links["alice"]  # unlinked elsewhere
+            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
+        assert db.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_linked_accounts_share_one_private_entry(self):
+        both = frozenset({"alice", "bob"})
+
+        async def linked(_db, _user_id):
+            return both
+
+        db = _db_with_vocabulary({"python": 3})
+        with patch("services.tag_resolution.linked_user_ids", linked):
+            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
+            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="bob")
+        assert db.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_shared_context_does_not_resolve_links(self):
+        async def linked(_db, _user_id):
+            raise AssertionError("a shared vocabulary is keyed once for everyone")
+
+        db = _db_with_vocabulary({"python": 3})
+        with _shared_context(), patch("services.tag_resolution.linked_user_ids", linked):
+            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
 
     @pytest.mark.asyncio
     async def test_failed_read_is_negative_cached_for_the_ttl(self):

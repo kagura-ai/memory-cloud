@@ -25,6 +25,9 @@ CTX = uuid4()
 USER = "caller-1"
 
 
+pytestmark = pytest.mark.usefixtures("no_identity_links")
+
+
 @pytest.fixture(autouse=True)
 def _unshared_context():
     """Vocabulary reads resolve context sharing; default to the scoped path."""
