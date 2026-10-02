@@ -1113,9 +1113,9 @@ class UserProfileResponse(TZAwareBaseModel):
     Issue #175: User timezone settings
     Issue #221: i18n support (locale)
     Issue #514: Expose auth_method + auth_provider for sign-in-method display
+    Issue #1813: no integer ``id`` — the user is identified by ``user_id``
     """
 
-    id: int
     email: str
     name: str | None
     picture: str | None
@@ -1302,9 +1302,9 @@ class UserWithAdminFlag(TZAwareBaseModel):
     """User model with system admin flags for admin management.
 
     Issue #166: System Admin vs Workspace Admin RBAC separation.
+    Issue #1813: no integer ``id`` — address users by ``user_id``.
     """
 
-    id: int
     email: str
     user_id: str
     name: str | None
@@ -1323,11 +1323,12 @@ class SystemAdminListResponse(BaseModel):
     """Response for listing system administrators.
 
     Issue #166: System Admin management API.
+    Issue #1813: ``initial_admin_id`` (integer PK) dropped — each entry's
+    ``is_initial_admin`` flag marks the protected initial admin.
     """
 
     admins: list[UserWithAdminFlag]
     total: int
-    initial_admin_id: int
 
 
 class PromoteToSystemAdminRequest(BaseModel):

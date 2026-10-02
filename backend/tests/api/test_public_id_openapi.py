@@ -1,9 +1,11 @@
-"""No integer PK leaks through the REST schema of keys, tokens, invitations (#1008).
+"""No integer PK leaks through the REST schema (#1008, #1813).
 
 Fails if a response model of API keys, share keys, resource tokens,
 workspace connectors' token, workspace invitations or member credential keys
 exposes an integer ``id`` / ``key_id`` / ``token_id`` again, or if one of the
-routes addressing them takes an integer path id.
+routes addressing them takes an integer path id; or if the user profile,
+OAuth client or system-admin responses regain their integer ``id`` /
+``initial_admin_id`` (#1813).
 """
 
 from __future__ import annotations
@@ -112,3 +114,24 @@ def test_no_integer_id_left_on_these_schemas(openapi: dict[str, Any]) -> None:
             prop = schemas[name]["properties"].get(field)
             if prop is not None:
                 assert prop.get("type") != "integer", (name, field)
+
+
+# Responses addressed by a string id the client already has (users by
+# ``user_id``, OAuth clients by ``client_id``): the integer PK was dropped
+# outright (#1813).
+NO_INTEGER_ID_SCHEMAS = [
+    ("UserProfileResponse", "id"),
+    ("OAuth2ClientResponse", "id"),
+    ("OAuth2ClientWithSecretResponse", "id"),
+    ("UserWithAdminFlag", "id"),
+    ("SystemAdminListResponse", "initial_admin_id"),
+]
+
+
+@pytest.mark.parametrize(("schema", "field"), NO_INTEGER_ID_SCHEMAS)
+def test_integer_pk_field_is_gone(openapi: dict[str, Any], schema: str, field: str) -> None:
+    props = openapi["components"]["schemas"][schema]["properties"]
+    assert field not in props, (schema, field)
+    for name, prop in props.items():
+        if name == "id" or name.endswith("_id"):
+            assert prop.get("type") != "integer", (schema, name, prop)

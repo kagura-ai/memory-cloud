@@ -65,7 +65,6 @@ async def list_system_admins(
         {
           "admins": [
             {
-              "id": 1,
               "email": "admin@example.com",
               "user_id": "google-oauth2|123456",
               "name": "Admin User",
@@ -77,12 +76,11 @@ async def list_system_admins(
               "is_active": true
             }
           ],
-          "total": 1,
-          "initial_admin_id": 1
+          "total": 1
         }
     """
     service = SystemAdminService(db)
-    admins, initial_admin_id = await service.list_system_admins()
+    admins = await service.list_system_admins()
 
     # Convert to response model with stats
     admin_list = []
@@ -99,7 +97,6 @@ async def list_system_admins(
 
         admin_list.append(
             UserWithAdminFlag(
-                id=admin.id,
                 email=admin.email,
                 user_id=admin.user_id,
                 name=admin.name or admin.email,
@@ -117,13 +114,11 @@ async def list_system_admins(
         "list_system_admins_success",
         requested_by=current_user["email"],
         admin_count=len(admin_list),
-        initial_admin_id=initial_admin_id,
     )
 
     return SystemAdminListResponse(
         admins=admin_list,
         total=len(admin_list),
-        initial_admin_id=initial_admin_id,
     )
 
 
@@ -181,7 +176,6 @@ async def promote_to_system_admin(
     return PromoteToSystemAdminResponse(
         success=True,
         user=UserWithAdminFlag(
-            id=user.id,
             email=user.email,
             user_id=user.user_id,
             name=user.name or user.email,
