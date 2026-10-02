@@ -75,6 +75,7 @@ vi.mock("@/lib/api/base", () => ({
 
 const LINKS = "/api/v1/me/account/identity-links";
 const UNLINK = "/api/v1/me/account/identity-links/unlink";
+const LEAVE = "/api/v1/me/account/identity-links/leave";
 
 const ADMIN = {
   user_id: "local:admin",
@@ -419,6 +420,74 @@ describe("LinkedAccounts — unlink", () => {
   });
 });
 
+// ---------- leave (#1807) -----------------------------------------------------
+
+describe("LinkedAccounts — leave", () => {
+  const GITHUB = {
+    user_id: "github:2",
+    email: "gh@example.com",
+    name: "Hub",
+    linked_at: "2026-01-02T00:00:00Z",
+  };
+
+  it("is offered only once two or more accounts are linked", async () => {
+    mockApiGet.mockResolvedValueOnce({ linked: [ADMIN], linkable: [] });
+
+    render(<LinkedAccounts />);
+    await screen.findByRole("button", { name: /^unlinkButtonLabel\|Admin$/ });
+
+    expect(screen.queryByRole("button", { name: /^leaveButton$/ })).toBeNull();
+  });
+
+  it("asks first, then POSTs leave and refreshes the list and the auth user", async () => {
+    mockApiGet
+      .mockResolvedValueOnce({ linked: [ADMIN, GITHUB], linkable: [] })
+      .mockResolvedValueOnce({ linked: [], linkable: [] });
+    mockApiPost.mockResolvedValueOnce({ status: "ok" });
+
+    render(<LinkedAccounts />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^leaveButton$/ }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText("leaveTitle")).toBeTruthy();
+    expect(mockApiPost).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /^leaveButton$/ }),
+    );
+
+    await waitFor(() => {
+      expect(mockApiPost).toHaveBeenCalledWith(LEAVE, {});
+    });
+    await waitFor(() => {
+      expect(mockToast).toHaveBeenCalledWith({ title: "leaveSuccess" });
+    });
+    await waitFor(() => {
+      expect(mockApiGet).toHaveBeenCalledTimes(2);
+    });
+    expect(mockRefetchUser).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the error inside the open dialog on failure", async () => {
+    mockApiGet.mockResolvedValueOnce({ linked: [ADMIN, GITHUB], linkable: [] });
+    mockApiPost.mockRejectedValueOnce(new FakeApiError(500));
+
+    render(<LinkedAccounts />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^leaveButton$/ }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /^leaveButton$/ }),
+    );
+
+    expect(await screen.findByText("leaveError")).toBeTruthy();
+    expect(screen.getByRole("alertdialog")).toBeTruthy();
+    expect(mockToast).not.toHaveBeenCalled();
+  });
+});
+
 // ---------- i18n: keys exist in both locales (no hardcoded strings) ----------
 
 describe("LinkedAccounts — i18n key coverage", () => {
@@ -450,6 +519,14 @@ describe("LinkedAccounts — i18n key coverage", () => {
     "unlinkError",
     "unlinkNotLinkedError",
     "loadError",
+    "leaveHint",
+    "leaveButton",
+    "leaving",
+    "leaveTitle",
+    "leaveDescription",
+    "leaveSuccess",
+    "leaveError",
+    "leaveNotLinkedError",
   ];
 
   it.each([

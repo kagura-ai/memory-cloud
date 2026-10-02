@@ -21,6 +21,12 @@
  *          | 403 (either account did not sign in recently) | 409 (set full)
  *   POST /api/v1/me/account/identity-links/unlink  {user_id}
  *        → { status: "ok" } | 404 (not linked)
+ *   POST /api/v1/me/account/identity-links/leave
+ *        → { status: "ok" } | 404 (not linked) — this account leaves the
+ *          set and the others stay linked to each other (#1807)
+ *
+ * Not to be confused with sign-in providers (`/link-provider`), which add
+ * ways to sign in to ONE account.
  */
 
 import { useState, useEffect, useCallback } from "react";
@@ -100,6 +106,9 @@ export default function LinkedAccounts() {
   const [unlinkTarget, setUnlinkTarget] = useState<IdentityAccount | null>(
     null,
   );
+  // #1807: leaving the whole set, offered once two or more are linked.
+  const [leaveOpen, setLeaveOpen] = useState(false);
+  const [isLeaving, setIsLeaving] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
 
   const loadLinks = useCallback(async () => {
@@ -189,6 +198,23 @@ export default function LinkedAccounts() {
     }
   };
 
+  const handleLeaveConfirm = async () => {
+    setIsLeaving(true);
+    setDialogError(null);
+    try {
+      await apiClient.post(`${LINKS_PATH}/leave`, {});
+      toast({ title: t("leaveSuccess") });
+      setLeaveOpen(false);
+      await refreshAfterChange();
+    } catch (error) {
+      const isNotLinked = error instanceof ApiError && error.status === 404;
+      setDialogError(isNotLinked ? t("leaveNotLinkedError") : t("leaveError"));
+      if (isNotLinked) await loadLinks();
+    } finally {
+      setIsLeaving(false);
+    }
+  };
+
   const renderRow = (account: IdentityAccount, isLinked: boolean) => {
     const label = accountLabel(account);
     // Under a name, show the email; a row labelled by email or id has
@@ -275,6 +301,22 @@ export default function LinkedAccounts() {
                   <ul className="space-y-2">
                     {linked.map((account) => renderRow(account, true))}
                   </ul>
+                  {linked.length >= 2 && (
+                    <div className="mt-3 flex items-center justify-between gap-3">
+                      <p className="text-xs text-slate-500">{t("leaveHint")}</p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          setDialogError(null);
+                          setLeaveOpen(true);
+                        }}
+                        disabled={busyUserId !== null || isLeaving}
+                      >
+                        {t("leaveButton")}
+                      </Button>
+                    </div>
+                  )}
                 </section>
               )}
               {linkable.length > 0 && (
@@ -388,6 +430,44 @@ export default function LinkedAccounts() {
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />
               )}
               {busyUserId !== null ? t("unlinking") : t("unlinkButton")}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Leave confirmation (#1807) */}
+      <AlertDialog
+        open={leaveOpen}
+        onOpenChange={(open) => {
+          if (!open && !isLeaving) {
+            setLeaveOpen(false);
+            setDialogError(null);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("leaveTitle")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("leaveDescription")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {dialogError && (
+            <Alert variant="destructive">
+              <AlertDescription>{dialogError}</AlertDescription>
+            </Alert>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isLeaving}>
+              {tCommon("cancel")}
+            </AlertDialogCancel>
+            <Button
+              variant="destructive"
+              onClick={handleLeaveConfirm}
+              disabled={isLeaving}
+            >
+              {isLeaving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              {isLeaving ? t("leaving") : t("leaveButton")}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>

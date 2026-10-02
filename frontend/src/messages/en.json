@@ -105,7 +105,15 @@
     "linkLimitError": "No more accounts can be linked. Unlink one first.",
     "unlinkError": "Couldn't unlink {account}. Please try again.",
     "unlinkNotLinkedError": "{account} is not linked any more.",
-    "loadError": "Couldn't load your linked accounts. Please refresh and try again."
+    "loadError": "Couldn't load your linked accounts. Please refresh and try again.",
+    "leaveHint": "Unlinking one account keeps the others linked to you. To take this account out and keep the others linked to each other, leave.",
+    "leaveButton": "Leave",
+    "leaving": "Leaving…",
+    "leaveTitle": "Leave the linked accounts?",
+    "leaveDescription": "This account will no longer own the private contexts of the accounts linked to it, nor they its. The other accounts stay linked to each other. Nothing is deleted.",
+    "leaveSuccess": "This account left its linked accounts.",
+    "leaveError": "Couldn't leave the linked accounts. Please try again.",
+    "leaveNotLinkedError": "This account is not linked any more."
   },
   "common": {
     "save": "Save",
