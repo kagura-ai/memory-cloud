@@ -88,7 +88,11 @@ vi.mock("next/navigation", async () => {
 // Stable translator: `key` or `key:{json}` so param interpolation is visible.
 // `.has` mirrors the real message catalog for the note codes under test —
 // the page treats the catalog as the single source of known codes.
-const CATALOG_NOTE_KEYS = new Set(["notes.judge_failures", "notes.unknown"]);
+const CATALOG_NOTE_KEYS = new Set([
+  "notes.judge_failures",
+  "notes.idle_store",
+  "notes.unknown",
+]);
 const stableTranslator = Object.assign(
   (key: string, values?: Record<string, unknown>) => {
     if (values && Object.keys(values).length > 0) {
@@ -215,6 +219,33 @@ describe("AdminMemoryHealthPage drill-down (#1225)", () => {
     ).toBeInTheDocument();
     // No GitHub issue reference anywhere in the rendered document.
     expect(document.body.textContent).not.toMatch(/#\d{3,}/);
+  });
+
+  it("renders informational notes on an OK section", async () => {
+    mockGet.mockResolvedValueOnce(BREAKDOWN).mockResolvedValueOnce({
+      ...DETAIL,
+      sections: {
+        ...DETAIL.sections,
+        retrieval: {
+          status: "ok",
+          metrics: { recall_calls: 0, remember_calls: 0 },
+          notes: [{ code: "idle_store", params: { window_days: 7, active_memories: 12 } }],
+        },
+      },
+    });
+
+    render(<AdminMemoryHealthPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId(`context-${CTX_ID}`)).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByTestId(`context-${CTX_ID}`));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('notes.idle_store:{"window_days":7,"active_memories":12}'),
+      ).toBeInTheDocument();
+    });
   });
 
   it("uses the unattributed sentinel for the context-less bucket", async () => {
