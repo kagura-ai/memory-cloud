@@ -276,6 +276,7 @@ MCP ツールに加えてフル REST API を提供:
 |--------|------|
 | `/kagura-memory:session-start` | 前回のセッションコンテキストを復元 |
 | `/kagura-memory:session-summary` | セッション終了前に知識を保存 |
+| `/kagura-memory:maintain` | 1 つのコンテキストを見直し、古くなった記憶を更新・置き換え・ピン解除・削除 (先に一覧を表示し、選んだものだけ変更。`dry-run` は一覧のみ) |
 | `/kagura-memory:recall` | 過去の知識を検索 |
 | `/kagura-memory:remember` | 新しい知識を保存 |
 | `/kagura-memory:guide` | 使い方ガイド・接続確認・セットアップ |

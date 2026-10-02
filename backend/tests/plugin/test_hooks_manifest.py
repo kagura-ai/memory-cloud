@@ -79,6 +79,7 @@ DOCS_TOUCHED = [
     "claude-skills/session-start.md",
     "claude-skills/remember.md",
     "claude-skills/session-summary.md",
+    "claude-skills/maintain.md",
     "claude-skills/setup.md",
     "claude-skills/login.md",
     "plugins/kagura-memory/skills/kagura-memory/SKILL.md",

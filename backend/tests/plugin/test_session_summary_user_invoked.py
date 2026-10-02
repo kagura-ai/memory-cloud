@@ -46,6 +46,32 @@ def test_session_summary_saves_what_the_user_keeps():
     assert "save only the ones the user chooses to keep" in text
 
 
+def test_session_summary_keeps_touched_memories_current_on_the_users_pick():
+    """#1800: a light step after the save, for memories this session touched."""
+    text = SESSION_SUMMARY.read_text(encoding="utf-8")
+    step = text.split("### 4c. Keep touched memories current", 1)[1].split("\n### ", 1)[0]
+    assert text.index("### 4. Save each item") < text.index("### 4c. Keep touched")
+    assert text.index("### 4c. Keep touched") < text.index("### 5. Guidelines")
+    assert "prints nothing when nothing applies" in step
+    assert "applied only after the user picks" in step
+    assert "No extra recall, no review of the whole context" in step
+    assert "`remember(..., supersedes=<old_memory_id>)`" in step
+    assert "`supersede_candidate`" in step
+    assert "`forget(memory_id=..., context_id=...)`" in step
+    assert "forget(query" not in step
+    assert "/kagura-memory:maintain" in step
+    assert len(step.encode("utf-8")) <= 1300, len(step.encode("utf-8"))
+
+
+def test_codex_session_summary_keeps_touched_memories_current_on_the_users_pick():
+    section = _section(CODEX_SKILL.read_text(encoding="utf-8"), "## Session Summary")
+    assert "print nothing when nothing applies" in section
+    assert "applied only after the user picks" in section
+    assert "no extra recall" in section
+    assert "`remember(..., supersedes=<old_memory_id>)`" in section
+    assert "`forget(memory_id=..., context_id=...)`" in section
+
+
 def test_codex_session_summary_is_user_directed():
     section = _section(CODEX_SKILL.read_text(encoding="utf-8"), "## Session Summary")
     assert "Only when the user asks for a session summary" in section

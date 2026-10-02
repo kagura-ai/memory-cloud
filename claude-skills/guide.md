@@ -76,6 +76,7 @@ Use `source_uri` and `source_type` with `remember` to track where knowledge orig
 1. Start session: `/kagura-memory:session-start` to restore context
 2. During work: `/kagura-memory:remember` and `/kagura-memory:recall` as needed
 3. End session: `/kagura-memory:session-summary` to save learnings
+4. Every few weeks: `/kagura-memory:maintain` to update, supersede, unpin or delete memories that are out of date
 
 ### 4. Using the memory tools well
 
@@ -143,6 +144,7 @@ With the hooks on, the hooks are the guardrail lane for this client: put `?guard
 |-------|-------------|
 | `session-start` | Restore previous session context |
 | `session-summary` | Save session knowledge before ending |
+| `maintain` | Review one context for memories to update, supersede, unpin or delete (`dry-run` lists only) |
 | `recall` | Search past knowledge |
 | `remember` | Save new knowledge |
 | `guide` | This guide |

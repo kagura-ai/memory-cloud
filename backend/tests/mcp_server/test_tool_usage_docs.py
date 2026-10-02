@@ -24,6 +24,8 @@ SUPERSEDE_WORKFLOW_DOCS = [
     "docs/mcp-tools.md",
     "claude-skills/guide.md",
     "claude-skills/recall.md",
+    "claude-skills/maintain.md",
+    "claude-skills/session-summary.md",
     "plugins/kagura-memory/skills/kagura-memory/SKILL.md",
 ]
 

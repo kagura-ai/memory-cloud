@@ -86,6 +86,16 @@ remember(..., type="troubleshooting",
 
 Full contract: `docs/mcp-tools.md#tool-guardrails`.
 
+### 4c. Keep touched memories current
+
+Only for memories this session saved or read. No extra recall, no review of the whole context. Show what applies as a numbered list; each change is applied only after the user picks it. The step prints nothing when nothing applies.
+
+- **A saved item replaces an earlier memory** whose full id is in this session's tool results: save it with `remember(..., supersedes=<old_memory_id>)`. The old one is shadowed out of default recall, not deleted.
+- **A `recall` / `reference` result carried `supersede_candidate`** for something being saved: show the pair. Accept with `create_edge(source_id=<new>, target_id=<old>, edge_type="supersedes", context_id=...)`; reject with `update_memory(memory_id=<this>, dismiss_supersede_candidate=true, context_id=...)`.
+- **A follow-up (`type="time"`) was completed in this session**: offer to retire it. Optionally record the outcome first with `remember(type="note", supersedes=<time memory id>, ...)`, then `forget(memory_id=..., context_id=...)`. There is no "mark done": a time memory leaves `recall_upcoming` only when forgotten.
+
+Copy ids verbatim from tool results. For a sweep of the whole context, use `/kagura-memory:maintain`.
+
 ### 5. Guidelines
 
 - **Write conclusions, not narratives** — "P2 failed because tags inflate BM25 scores" not "We tried P2 and it didn't work"
