@@ -146,7 +146,7 @@ The Resource Ingest API (`POST /api/v1/resources/{resource_id}/events`) authenti
 
 1. **Ingest-path workspace boundary**: `verify_resource_token` now enforces `WorkspaceMember.user_id == ResourceToken.created_by AND WorkspaceMember.workspace_id == Context.workspace_id`. Mismatches return 403 and emit a `cross_tenant_ingest_attempt` structured warning log.
 2. **Schema-level tenant isolation**: Alembic migration `a96` adds a global partial UNIQUE index `ux_contexts_resource_id_active ON contexts (resource_id) WHERE resource_id IS NOT NULL AND deleted_at IS NULL`. Cross-workspace `resource_id` collisions are now impossible at the database level.
-3. **Audit logging**: Structured warnings are emitted for unbound resources, missing token attribution, and membership violations. No raw token material is ever logged — only the integer `token_id` (DB PK), the workspace UUIDs, and the request's client IP.
+3. **Audit logging**: Structured warnings are emitted for unbound resources, missing token attribution, and membership violations. No raw token material is ever logged — only the integer `token_id` (DB PK), the token's public id (`rtok_…`, since #1008), the workspace UUIDs, and the request's client IP.
 
 #### Upgrade steps for self-hosted operators
 

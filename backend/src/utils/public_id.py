@@ -10,7 +10,10 @@ resource type, never ``kagura_`` (that is what secrets look like).
 Rows inserted without a ``public_id`` (an app instance from before the
 migration still running during a rolling deploy) get one from the column's
 ``server_default``: 22 lowercase hex characters from ``gen_random_uuid()``.
-Hex is a subset of base62, so those ids match the same pattern.
+Hex is a subset of base62, so those ids match the same pattern. They carry
+less randomness — about 82 bits, since the UUIDv4 version and variant
+nibbles fall inside the 22 characters — which is still far beyond guessing
+and only applies to rows written during that window.
 """
 
 from __future__ import annotations
