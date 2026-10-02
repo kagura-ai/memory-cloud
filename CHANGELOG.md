@@ -4,6 +4,28 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.88.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.88.0) — 2026-10-02
+
+One person's accounts can be linked so their private contexts have one owner, deleting a context now removes its vectors, and the plugin gains a skill that keeps memories current.
+
+### Added
+- **Linked accounts** ([#1784](https://github.com/kagura-ai/memory-cloud/issues/1784)): a CLI admin and an OAuth account of one person can be linked from Profile Settings. A private context is then open to every account linked to its creator, with the memories any of them wrote in it — in the context list, that context's memory list, recall, stats, tags and export. The link is proved by the browser session holding both accounts; nothing is linked by an email match. It widens ownership only: roles, workspace membership, `allowed_context_ids` and an API key's workspace scope stay the caller's own. Both accounts get an audit row and a security notice. `GET /api/v1/auth/me` returns `linked_user_ids`. See `docs/deployment.md`, *One person, two accounts*.
+- **Orphan vector sweep** ([#1798](https://github.com/kagura-ai/memory-cloud/issues/1798)): a daily job (04:30 UTC) and `python -m src.cli.sweep_orphan_vectors` delete vector-store points no reader can reach — a memory point whose row is gone or was soft-deleted more than an hour ago, and a resource point whose context is. A point whose memory row is live is never deleted. The command is read-only by default; the scheduled run refuses to delete more than half of what it scanned. `ORPHAN_VECTOR_SWEEP_ENABLED=false` turns the scheduled run off.
+- **`/kagura-memory:maintain`** ([#1800](https://github.com/kagura-ai/memory-cloud/issues/1800)): a plugin skill that reviews one context for memories to update, supersede, unpin or delete — ended and open follow-ups, pinned memories, and a topic the user names. It lists first and applies only the items the user picks by number; `dry-run` stops after the plan. `/kagura-memory:session-summary` gains a step that links or retires the memories a session replaced, and `/kagura-memory:session-start` points to the new command. The Codex skill carries both.
+
+### Fixed
+- **Deleting a context removes its vectors** ([#1798](https://github.com/kagura-ai/memory-cloud/issues/1798)): `delete_context` and `merge_contexts(delete_source=true)` remove the context's points from every `kagura_memories*` collection once the soft-delete is committed. Until now the points were kept and nothing removed them later, so the vector count drifted above the live memory count. Workspace deletion now covers the per-model collections too.
+
+### Changed
+- **CI** ([#1798](https://github.com/kagura-ai/memory-cloud/issues/1798)): the integration job starts Qdrant and fails if it does not come up, so the live vector-store tests no longer skip.
+
+### Notes
+- **Run the orphan sweep once after upgrading**, where the API runs (for example inside the API container): `python -m src.cli.sweep_orphan_vectors` shows the plan, `--apply --yes` deletes. A deployment that deleted large contexts before this release can have more orphans than the scheduled run will delete on its own.
+- **Do not run the sweep when another deployment writes to the same Qdrant** under the same collection names: its points have no row here and would be deleted. Set `ORPHAN_VECTOR_SWEEP_ENABLED=false` on both.
+- **`POST /api/v1/admin/contexts/recover` finds nothing for a context deleted on v0.88.0 or later.** It rebuilds a context from surviving points, and those are now removed. The soft-deleted rows stay in Postgres until the tombstone purge; restoring from them is tracked in [#1804](https://github.com/kagura-ai/memory-cloud/issues/1804).
+- **Linking accounts**: sign in with the password account, add the OAuth account from the account switcher, then link it under Profile Settings → Linked accounts. Sleep maintenance, the graph view, memory health, access patterns and the dashboard counts stay per account; `transfer_context_creator` remains for an account that is being retired.
+- Migration `e90_1784_identity_links` adds one table; an existing deployment starts with no links. New optional environment variable: `ORPHAN_VECTOR_SWEEP_ENABLED`.
+
 ## [v0.87.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.87.0) — 2026-10-01
 
 The data layer moves forward: Qdrant 1.19.1 with a 1.18 client, and a single-server Redis that can require a password.
