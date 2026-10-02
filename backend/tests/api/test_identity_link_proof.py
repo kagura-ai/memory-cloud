@@ -318,3 +318,15 @@ async def test_a_password_sign_in_proves_the_account_now(monkeypatch, strict) ->
     await auth_routes._create_session_and_workspace("local:admin", "a@local", None, "admin")
 
     assert before <= _proof(m) <= utcnow()
+
+
+def test_the_certificate_fetch_has_a_short_timeout() -> None:
+    """A slow Google must not hold a worker for the library's 120 s default."""
+    import auth.oauth2 as oauth2_module
+
+    with patch.object(oauth2_module, "Request") as request_cls:
+        oauth2_module._cert_request("https://certs", method="GET")
+
+    request_cls.return_value.assert_called_once_with(
+        "https://certs", method="GET", timeout=oauth2_module._CERT_FETCH_TIMEOUT_SECONDS
+    )
