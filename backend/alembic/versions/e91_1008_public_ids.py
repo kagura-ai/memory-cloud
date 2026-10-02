@@ -9,8 +9,9 @@ Steps per table:
 
 1. add ``public_id`` as a nullable ``varchar(32)``;
 2. backfill every existing row — revoked, expired and accepted rows
-   included — with a base62 id from ``secrets``, in batches of 1000 (the
-   generator is inlined: migrations do not import application code);
+   included — with a base62 id from ``secrets``, in keyset-paged batches of
+   1000 (the generator is inlined: migrations do not import application
+   code);
 3. set the DB-side default ``'<prefix>_' || 22 hex chars of
    gen_random_uuid()`` (hex is a subset of base62, so it matches the same
    pattern), so an app instance from before this release that inserts a row
@@ -20,7 +21,10 @@ Steps per table:
 The default is set after the backfill rather than with the column so that
 existing rows get base62 ids instead of the hex fallback; the whole upgrade
 runs in one transaction and ``ALTER TABLE`` holds the table lock until
-commit, so no concurrent insert can land between steps 1 and 3.
+commit, so no concurrent insert can land between steps 1 and 3. A
+``lock_timeout`` of 10s bounds the wait for each table lock, so the upgrade
+aborts (and can be re-run) rather than stalling API-key authentication
+behind a long-running transaction.
 
 Old audit rows keep the integer id they were written with
 (``api_key:<int>``). Map one to its public id with
@@ -59,6 +63,7 @@ _TABLES: dict[str, str] = {
 _BASE62 = string.digits + string.ascii_uppercase + string.ascii_lowercase
 _BODY_LENGTH = 22
 _BATCH = 1000
+_LOCK_TIMEOUT = "10s"
 
 
 def _new_public_id(prefix: str) -> str:
@@ -73,18 +78,26 @@ def _server_default(prefix: str) -> str:
 
 def _backfill(table: str, prefix: str) -> None:
     bind = op.get_bind()
+    # Keyset paging on the primary key: each row is read once, so the
+    # backfill stays linear while the table lock is held.
     select_batch = sa.text(
-        f"SELECT id FROM {table} WHERE public_id IS NULL ORDER BY id LIMIT :n"  # noqa: S608
+        f"SELECT id FROM {table} WHERE id > :last ORDER BY id LIMIT :n"  # noqa: S608
     )
     update_row = sa.text(f"UPDATE {table} SET public_id = :pid WHERE id = :id")  # noqa: S608
+    last = -1
     while True:
-        ids = bind.execute(select_batch, {"n": _BATCH}).scalars().all()
+        ids = bind.execute(select_batch, {"last": last, "n": _BATCH}).scalars().all()
         if not ids:
             return
         bind.execute(update_row, [{"id": i, "pid": _new_public_id(prefix)} for i in ids])
+        last = ids[-1]
 
 
 def upgrade() -> None:
+    # Fail fast instead of queueing behind a long transaction: a pending
+    # ACCESS EXCLUSIVE request blocks every later reader of api_keys (API-key
+    # auth). On timeout the migration aborts and rolls back; re-run it.
+    op.execute(sa.text(f"SET LOCAL lock_timeout = '{_LOCK_TIMEOUT}'"))
     for table, prefix in _TABLES.items():
         op.add_column(table, sa.Column("public_id", sa.String(32), nullable=True))
         _backfill(table, prefix)
