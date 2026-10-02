@@ -10,9 +10,10 @@ gone".
 Steps:
 
 1. drop NOT NULL;
-2. set ``linked_by`` to NULL on every row whose value names no ``users``
-   row — the dangling ids the old shape allowed, which would otherwise make
-   step 3 fail;
+2. set ``linked_by`` to NULL on every row whose value does not name an
+   account of the row's own set: the dangling ids of deleted accounts, which
+   would otherwise make step 3 fail, and the ids of accounts that were
+   unlinked from the set (before #1807 an unlink never rewrote them);
 3. add the foreign key.
 
 Downgrade drops the key, fills NULLs with the row's own ``user_id`` (what the
@@ -42,9 +43,10 @@ def upgrade() -> None:
     op.alter_column("identity_links", "linked_by", existing_type=sa.String(255), nullable=True)
     op.execute(
         sa.text(
-            "UPDATE identity_links SET linked_by = NULL "
-            "WHERE linked_by IS NOT NULL "
-            "AND NOT EXISTS (SELECT 1 FROM users WHERE users.user_id = identity_links.linked_by)"
+            "UPDATE identity_links AS row SET linked_by = NULL "
+            "WHERE row.linked_by IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM identity_links AS member "
+            "WHERE member.user_id = row.linked_by AND member.group_id = row.group_id)"
         )
     )
     op.create_foreign_key(

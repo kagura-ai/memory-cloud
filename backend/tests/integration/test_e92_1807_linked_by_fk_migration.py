@@ -51,12 +51,18 @@ class TestE92LinkedByForeignKey:
             engine = _sync_engine()
             group = str(uuid.uuid4())
             with engine.begin() as conn:
-                a, b, c = _user(conn), _user(conn), _user(conn)
+                a, b, c, d = _user(conn), _user(conn), _user(conn), _user(conn)
                 _link(conn, group, a, a)
                 _link(conn, group, b, a)
                 # What the delete_admin CLI left behind before #1807: an id
                 # that names no account.
                 _link(conn, group, c, "local:deleted-admin")
+                # An account unlinked from the set before #1807: alive, in a
+                # set of its own now, still named here.
+                gone = _user(conn)
+                _link(conn, group, d, gone)
+                other_group = str(uuid.uuid4())
+                _link(conn, other_group, gone, gone)
 
             with _alembic_at_test_db():
                 command.upgrade(_get_alembic_config(), E92_REV)
@@ -65,6 +71,8 @@ class TestE92LinkedByForeignKey:
                 assert _linked_by(conn, a) == a
                 assert _linked_by(conn, b) == a
                 assert _linked_by(conn, c) is None
+                assert _linked_by(conn, d) is None
+                assert _linked_by(conn, gone) == gone
                 fk = conn.execute(
                     text(
                         "SELECT confdeltype FROM pg_constraint "
