@@ -18,6 +18,7 @@ seeds uuid-suffixed identifiers to avoid colliding on the unique columns.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -38,9 +39,11 @@ from api.routes.me_account import (
     list_providers,
     unlink_provider,
 )
+from auth.roles import Role, RoleManager
 from models.auth import AuditLog, User, UserOAuthProvider
 from services.account_linking_service import AccountLinkingService
 from services.security_notification_service import notify_security_event
+from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException
 
 
@@ -620,3 +623,140 @@ async def test_sign_in_owner_is_the_linked_account_not_a_stale_same_sub_row(
         unlinked.user_id,
         unlinked.email,
     )
+
+
+# --- #1811: a linked provider's sign-in never rewrites the owner's profile ---
+
+
+@contextmanager
+def _sign_in_session(db: AsyncSession):
+    """Route ``RoleManager.ensure_user`` onto the test session; capture notices."""
+
+    async def _fake_get_db():
+        yield db
+
+    with (
+        patch("db.base.get_db", new=_fake_get_db),
+        patch("services.security_notification_service.spawn_email_change_notification") as notify,
+    ):
+        yield notify
+
+
+async def _owner_with_github_link(db: AsyncSession, suffix: str) -> tuple[User, str]:
+    """A google-primary account (link row sub == user_id) with github linked."""
+    owner = await _make_user(db, suffix=suffix)
+    owner.email_verified_at = utcnow()
+    db.add(UserOAuthProvider(user_id=owner.user_id, provider="google", oauth_sub=owner.user_id))
+    await db.commit()
+    gh_sub = f"gh-{suffix}"
+    await AccountLinkingService(db).link(
+        user_id=owner.user_id, provider="github", oauth_sub=gh_sub, email=owner.email
+    )
+    return owner, gh_sub
+
+
+async def _reload(db: AsyncSession, user_id: str) -> User:
+    return (
+        await db.execute(
+            select(User).filter_by(user_id=user_id).execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_linked_provider_sign_in_keeps_owner_email_and_name(db_session: AsyncSession):
+    suffix = uuid4().hex[:8]
+    owner, gh_sub = await _owner_with_github_link(db_session, suffix)
+    old_email, old_name = owner.email, owner.name
+    link = (
+        await db_session.execute(
+            select(UserOAuthProvider).filter_by(provider="github", oauth_sub=gh_sub)
+        )
+    ).scalar_one()
+    link.last_used_at = datetime(2020, 1, 1)
+    await db_session.commit()
+
+    with _sign_in_session(db_session) as notify:
+        role = await RoleManager(use_postgres=True).ensure_user(
+            email=f"other-{suffix}@github.example",
+            user_id=gh_sub,
+            name="gh-handle",
+            auth_provider="github",
+            email_verified=True,
+        )
+
+    assert role == Role.USER
+    user = await _reload(db_session, owner.user_id)
+    assert user.email == old_email
+    assert user.name == old_name
+    notify.assert_not_called()
+    assert await _audit_rows(db_session, owner.user_id, "oauth_user_email_synced") == []
+    link = (
+        await db_session.execute(
+            select(UserOAuthProvider)
+            .filter_by(provider="github", oauth_sub=gh_sub)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert link.last_used_at is not None and link.last_used_at > datetime(2020, 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_primary_provider_sign_in_still_syncs_verified_email(db_session: AsyncSession):
+    suffix = uuid4().hex[:8]
+    owner, _ = await _owner_with_github_link(db_session, suffix)
+    new_email = f"moved-{suffix}@example.com"
+
+    with _sign_in_session(db_session) as notify:
+        await RoleManager(use_postgres=True).ensure_user(
+            email=new_email,
+            user_id=owner.user_id,
+            name="Renamed",
+            auth_provider="google",
+            email_verified=True,
+        )
+
+    user = await _reload(db_session, owner.user_id)
+    assert user.email == new_email
+    assert user.name == "Renamed"
+    notify.assert_called_once()
+    assert len(await _audit_rows(db_session, owner.user_id, "oauth_user_email_synced")) == 1
+
+
+@pytest.mark.asyncio
+async def test_repointed_primary_syncs_after_original_is_unlinked(db_session: AsyncSession):
+    suffix = uuid4().hex[:8]
+    owner, gh_sub = await _owner_with_github_link(db_session, suffix)
+    await AccountLinkingService(db_session).unlink(user_id=owner.user_id, provider="google")
+    assert (await _reload(db_session, owner.user_id)).auth_provider == "github"
+    new_email = f"gh-primary-{suffix}@example.com"
+
+    with _sign_in_session(db_session):
+        await RoleManager(use_postgres=True).ensure_user(
+            email=new_email,
+            user_id=gh_sub,
+            auth_provider="github",
+            email_verified=True,
+        )
+
+    assert (await _reload(db_session, owner.user_id)).email == new_email
+
+
+@pytest.mark.asyncio
+async def test_linked_provider_with_another_accounts_email_signs_in(db_session: AsyncSession):
+    """#1811: the secondary's address is never written, so no 409 on sign-in."""
+    suffix = uuid4().hex[:8]
+    owner, gh_sub = await _owner_with_github_link(db_session, suffix)
+    other = await _make_user(db_session, suffix=f"other-{suffix}")
+
+    with _sign_in_session(db_session) as notify:
+        role = await RoleManager(use_postgres=True).ensure_user(
+            email=other.email,
+            user_id=gh_sub,
+            auth_provider="github",
+            email_verified=True,
+        )
+
+    assert role == Role.USER
+    assert (await _reload(db_session, owner.user_id)).email == owner.email
+    notify.assert_not_called()

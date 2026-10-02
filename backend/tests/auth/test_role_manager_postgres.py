@@ -117,13 +117,25 @@ def _patch_get_db(db_mock):
     return patch("db.base.get_db", new=_fake_get_db)
 
 
-def _user_row(*, user_id="u1", email="alice@example.com", name="Alice", role="user"):
-    """Build a minimal mock that mimics models.auth.User attribute access."""
+def _user_row(
+    *,
+    user_id="u1",
+    email="alice@example.com",
+    name="Alice",
+    role="user",
+    auth_provider="google",
+):
+    """Build a minimal mock that mimics models.auth.User attribute access.
+
+    ``auth_provider`` is the account's primary provider (#1811): only a
+    sign-in through it syncs email/name.
+    """
     user = MagicMock()
     user.user_id = user_id
     user.email = email
     user.name = name
     user.role = role
+    user.auth_provider = auth_provider
     return user
 
 
@@ -232,6 +244,55 @@ class TestSyncEmail:
 
         db.add.assert_not_called()
         db.commit.assert_awaited_once()
+
+
+class TestLinkedProviderSkipsSync:
+    """#1811: a provider linked to the account is not its primary identity."""
+
+    @pytest.mark.asyncio
+    async def test_linked_provider_leaves_email_and_name(self, role_manager):
+        existing = _user_row(email="alice@old.com", name="Alice", auth_provider="google")
+        link = _oauth_link_row()
+        db = _make_db_mock(_execute_returns(link, existing))
+
+        with (
+            _patch_get_db(db),
+            patch(
+                "services.security_notification_service.spawn_email_change_notification"
+            ) as notify,
+        ):
+            role = await role_manager.ensure_user(
+                email="alice@github.example",
+                user_id="gh-1",
+                name="alice-gh",
+                auth_provider="github",
+                email_verified=True,
+            )
+
+        assert role == Role.USER
+        assert existing.email == "alice@old.com"
+        assert existing.name == "Alice"
+        db.add.assert_not_called()
+        notify.assert_not_called()
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_race_retry_through_non_primary_provider_skips_sync(self, role_manager):
+        race_existing = _user_row(email="alice@old.com", name="Alice", auth_provider=None)
+        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing))
+        db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
+
+        with _patch_get_db(db):
+            await role_manager.ensure_user(
+                email="alice@new.com",
+                user_id="u1",
+                name="Alice New",
+                auth_provider="google",
+                email_verified=True,
+            )
+
+        assert race_existing.email == "alice@old.com"
+        assert race_existing.name == "Alice"
 
 
 class TestSyncName:
