@@ -53,7 +53,7 @@ def notices():
 @pytest.fixture
 def service():
     instance = MagicMock()
-    instance.link = AsyncMock()
+    instance.link = AsyncMock(return_value=True)
     instance.unlink = AsyncMock()
     instance.list_linked = AsyncMock(return_value=[])
     with patch.object(me_account, "IdentityLinkService", return_value=instance):
@@ -116,6 +116,24 @@ class TestLinkIdentity:
 
         assert exc.value.status_code == 401
         service.link.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_repeating_an_existing_link_sends_no_second_notice(
+        self, session_manager, service, notices
+    ):
+        session_manager.session_holds_user.return_value = True
+        service.link.return_value = False
+
+        result = await link_identity(
+            IdentityLinkTarget(user_id=OTHER),
+            _request(),
+            MagicMock(),
+            {"user_id": ME},
+            AsyncMock(),
+        )
+
+        assert result.status == "ok"
+        notices.assert_not_called()
 
 
 class TestUnlinkIdentity:

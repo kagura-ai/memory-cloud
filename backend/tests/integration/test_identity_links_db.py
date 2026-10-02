@@ -96,8 +96,9 @@ class TestLinkSets:
         admin, oauth = await _user(db_session, "local"), await _user(db_session, "google")
         service = IdentityLinkService(db_session)
 
-        await service.link(admin.user_id, oauth.user_id)
-        await service.link(oauth.user_id, admin.user_id)
+        assert await service.link(admin.user_id, oauth.user_id) is True
+        # A repeat changes nothing and says so.
+        assert await service.link(oauth.user_id, admin.user_id) is False
 
         both = {admin.user_id, oauth.user_id}
         assert await linked_user_ids(db_session, admin.user_id) == both
@@ -527,6 +528,8 @@ class TestALinkDoesNotLiftTheCallersOwnLimits:
             await permissions.check_context_access(oauth.user_id, context.id)
         with pytest.raises(NotFoundException):
             await permissions.resolve_context_for_workspace_read(oauth.user_id, context.id)
+        with pytest.raises(NotFoundException):
+            await ContextService(db_session).get_context(oauth.user_id, context.id)
 
 
 class TestALinkNeverCrossesWorkspaces:
@@ -814,18 +817,6 @@ class TestTheReadSurfacesInsideALinkedPrivateContext:
         )
 
         assert stats.total_count == 2
-
-    @pytest.mark.asyncio
-    async def test_the_dashboard_counts_both_authors_for_a_member(self, db_session):
-        from services.workspace_service import WorkspaceService
-
-        _, oauth, workspace, context, _, _ = await self._seed(db_session)
-
-        stats = await WorkspaceService(db_session).get_collection_memory_stats(
-            oauth.user_id, [context], is_workspace_owner=False
-        )
-
-        assert stats[str(context.id)][0] == 2
 
 
 class TestErasingThroughTheService:

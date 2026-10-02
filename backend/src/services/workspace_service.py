@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.workspace_roles import WorkspaceRole
 from models.auth import Context, ExternalAPIKey, UsageStats, Workspace, WorkspaceMember
 from models.memory import Memory
-from services.identity_link_service import linked_user_ids, owned_by
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import utcnow
 from utils.exceptions import NotFoundException, ValidationError
@@ -1737,11 +1736,9 @@ class WorkspaceService:
             # Owner: All private contexts (count all members' memories)
             private_context_ids = [c.id for c in contexts if c.is_private]
         else:
-            # Member: Only own private contexts (#1784: an account linked to
-            # the caller counts as the caller).
-            owner_ids = await linked_user_ids(self.db, user_id)
+            # Member: Only own private contexts
             private_context_ids = [
-                c.id for c in contexts if c.is_private and c.created_by in owner_ids
+                c.id for c in contexts if c.is_private and c.created_by == user_id
             ]
 
         shared_context_ids = [
@@ -1766,7 +1763,7 @@ class WorkspaceService:
                         Memory.context_id.in_(shared_context_ids),
                         and_(
                             Memory.context_id.in_(private_context_ids),
-                            owned_by(Memory.user_id, user_id),
+                            Memory.user_id == user_id,
                         ),
                     )
                 )
@@ -1831,7 +1828,7 @@ class WorkspaceService:
         """
         from config.constants import MAX_EMBEDDING_RETRIES
 
-        conditions = await self._visibility_conditions(user_id, contexts, is_workspace_owner)
+        conditions = self._visibility_conditions(user_id, contexts, is_workspace_owner)
         if conditions is None:
             return {}
 
@@ -1848,7 +1845,7 @@ class WorkspaceService:
         )
         return {str(row.context_id): (row.unsearchable, row.stalled) for row in result.all()}
 
-    async def _visibility_conditions(
+    def _visibility_conditions(
         self,
         user_id: str,
         contexts: list[Context],
@@ -1862,9 +1859,8 @@ class WorkspaceService:
         if is_workspace_owner:
             private_context_ids = [c.id for c in contexts if c.is_private]
         else:
-            owner_ids = await linked_user_ids(self.db, user_id)
             private_context_ids = [
-                c.id for c in contexts if c.is_private and c.created_by in owner_ids
+                c.id for c in contexts if c.is_private and c.created_by == user_id
             ]
         shared_context_ids = [c.id for c in contexts if not c.is_private]
 
@@ -1882,7 +1878,7 @@ class WorkspaceService:
                     Memory.context_id.in_(shared_context_ids),
                     and_(
                         Memory.context_id.in_(private_context_ids),
-                        owned_by(Memory.user_id, user_id),
+                        Memory.user_id == user_id,
                     ),
                 )
             )

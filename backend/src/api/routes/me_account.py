@@ -532,13 +532,14 @@ async def link_identity(
         session_id, body.user_id
     ):
         raise NotFoundException("Account")
-    await IdentityLinkService(db).link(
+    created = await IdentityLinkService(db).link(
         user_id,
         body.user_id,
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    for account in (user_id, body.user_id):
+    # A repeat of an existing link changed nothing: no second notice.
+    for account in (user_id, body.user_id) if created else ():
         schedule_security_notification(
             background_tasks,
             user_id=account,

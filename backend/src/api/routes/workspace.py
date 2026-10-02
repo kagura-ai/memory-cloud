@@ -35,7 +35,6 @@ from db.base import get_db
 from models.auth import Context, User, Workspace, WorkspaceMember
 from models.auth import UsageStats as UsageStatsModel
 from models.memory import Memory
-from services.identity_link_service import linked_user_ids, owned_by
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import AuthenticationError
 
@@ -207,8 +206,6 @@ async def get_workspace_stats(
         else:
             creators_by_id = {}
 
-        # #1784: the caller's own includes those of an account linked to it.
-        owner_ids = await linked_user_ids(db, user_id)
         for context in contexts_list:
             # Single Collection Migration: Use context.id, memory count only
             memory_count, _ = stats_by_collection.get(str(context.id), (0, 0))
@@ -218,7 +215,7 @@ async def get_workspace_stats(
             is_accessible = (
                 is_workspace_owner  # Owner sees everything
                 or not context.is_private  # Shared contexts visible to all
-                or context.created_by in owner_ids  # Creator sees own private contexts
+                or context.created_by == user_id  # Creator sees own private contexts
             )
 
             if is_accessible:
@@ -791,7 +788,7 @@ async def get_embedding_status(
     if owner_result.scalar_one_or_none() != user_id:
         accessible = select(Context.id).where(
             Context.workspace_id == workspace_id,
-            or_(Context.is_private.is_(False), owned_by(Context.created_by, user_id)),
+            or_(Context.is_private.is_(False), Context.created_by == user_id),
         )
         conditions.append(Memory.context_id.in_(accessible))
 

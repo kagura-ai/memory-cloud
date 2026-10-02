@@ -1047,6 +1047,9 @@ async def delete_user(
         # the user still owns are deleted below; the user leaves its link set.
         from services.identity_link_service import hand_over_private_contexts
 
+        # The user row first, then the link lock inside the hand-over: the
+        # order link() and account erasure use, so the three never deadlock.
+        await db.execute(select(User.user_id).where(User.user_id == user_id).with_for_update())
         await hand_over_private_contexts(db, user_id)
 
         # Delete memories and API keys

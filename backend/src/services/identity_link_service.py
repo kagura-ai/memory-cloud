@@ -160,11 +160,15 @@ class IdentityLinkService:
         *,
         ip_address: str | None = None,
         user_agent: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Put ``user_id`` and ``other_user_id`` in one link set.
 
         The caller has already proved both accounts (same browser session).
         Idempotent for a pair that is already linked.
+
+        Returns:
+            True when the link was created, False when the pair was already
+            linked (nothing written, nothing to audit or notify).
 
         Raises:
             ValidationError: An account cannot be linked to itself.
@@ -204,7 +208,7 @@ class IdentityLinkService:
         }
         mine, theirs = groups.get(user_id), groups.get(other_user_id)
         if mine is not None and mine == theirs:
-            return
+            return False
 
         async def size(group_id: uuid.UUID | None) -> int:
             if group_id is None:
@@ -236,6 +240,7 @@ class IdentityLinkService:
         await self.db.commit()
         _forget_cached_tags()
         logger.info("identity_linked", user_id=user_id, linked_user_id=other_user_id)
+        return True
 
     async def unlink(
         self,

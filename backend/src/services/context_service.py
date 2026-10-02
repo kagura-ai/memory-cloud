@@ -393,8 +393,17 @@ class ContextService:
             raise NotFoundException("Context", str(context_id))
 
         # Issue #165: Privacy check - private contexts are creator-only
-        if context.is_private and not await is_same_owner(self.db, user_id, context.created_by):
-            raise NotFoundException("Context", str(context_id))
+        if context.is_private and context.created_by != user_id:
+            if not await is_same_owner(self.db, user_id, context.created_by):
+                raise NotFoundException("Context", str(context_id))
+            # #1784: an account linked to the creator is checked as itself. A
+            # member with no whitelist is suspended (Migration 042), and the
+            # link does not lift that — same rule as check_context_access.
+            if (
+                workspace_member.role == WorkspaceRole.MEMBER
+                and workspace_member.allowed_context_ids is None
+            ):
+                raise NotFoundException("Context", str(context_id))
 
         # Issue #234: Check allowed_context_ids whitelist for member/viewer
         if workspace_member.role in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER):

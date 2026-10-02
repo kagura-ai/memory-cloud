@@ -513,7 +513,7 @@ What it does not do:
   private context is hidden from the context's creator again.
 - **Per-account history stays separate**: the graph view and its edges, Sleep
   maintenance (each account's memories are maintained on their own, with no
-  de-duplication across the two), memory health, access patterns and
+  de-duplication across the two), memory health, access patterns, the workspace dashboard's counts and
   retrieval feedback.
 - **Writes that name another memory stay per account**: an `external_id`
   upsert replaces only the caller's own earlier memory, and `supersedes` /
