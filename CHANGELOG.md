@@ -4,6 +4,34 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.91.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.91.0) — 2026-10-02
+
+Identity links and sessions get stricter and easier to manage: a link needs a proved credential rather than any recent sign-in, an account can leave a link set, a password reset can no longer race a sign-in, and the memory-health report stops flagging contexts that are simply unused.
+
+### Added
+- **Leave an identity-link set** ([#1807](https://github.com/kagura-ai/memory-cloud/issues/1807)): `POST /api/v1/me/account/identity-links/leave` and a *Leave* button on the profile page remove only the caller's account from a set of three or more; the other accounts stay linked. Unlink and leave audit and notify every account the removal separates.
+- **Confirm with Google before a link** ([#1818](https://github.com/kagura-ai/memory-cloud/issues/1818)): the *Linked accounts* card can start a Google sign-in with `link_proof=1`, which asks Google for `auth_time` and records it from the verified ID token as that account's proof.
+
+### Changed
+- **An identity link needs a proved credential** ([#1818](https://github.com/kagura-ai/memory-cloud/issues/1818)): both accounts must have proved their credential within the 10-minute window — a password or MFA sign-in, or a Google `link_proof` sign-in whose ID token carries a recent `auth_time`. A plain OAuth sign-in, a GitHub sign-in, or a Google token without `auth_time` no longer counts. `IDENTITY_LINK_ALLOW_OAUTH_SIGNIN_PROOF=true` restores the v0.90.0 behaviour. Ordinary sign-ins send the same request as before.
+- **Private surfaces follow the link set** ([#1807](https://github.com/kagura-ai/memory-cloud/issues/1807)): access patterns in a private context include the linked accounts' activity, and the private tag vocabulary is cached per link set, so a link change takes effect in every API process at once.
+- **Sign-in providers and identity links are named apart** ([#1807](https://github.com/kagura-ai/memory-cloud/issues/1807)): identity-link endpoints move to the new `identity-links` OpenAPI tag; `account-linking` now describes only sign-in providers attached to one account.
+- **Unused contexts are no longer flagged write-only** ([#1822](https://github.com/kagura-ai/memory-cloud/issues/1822)): the memory-health retrieval signal grades a context with no successful MCP reads or writes in the window OK with an `idle_store` note. `write_only_store` (WARN) now needs successful writes and no successful reads; failed calls are not counted and `update_memory` counts as a write. New metrics `successful_read_calls` and `successful_write_calls`.
+- **Browser sessions are indexed per user** ([#1809](https://github.com/kagura-ai/memory-cloud/issues/1809)): password change, password reset and account erasure invalidate a user's sessions through a per-user Redis set instead of scanning every session key, and the active-session count no longer uses `KEYS`. Sessions created before the upgrade are still found by a catch-up scan during their remaining lifetime.
+
+### Fixed
+- **A password sign-in during a reset's session sweep no longer survives the reset** ([#1809](https://github.com/kagura-ai/memory-cloud/issues/1809)): the sign-in re-checks the password hash after writing its session and drops the session (401) if the hash changed; the MFA step does the same. A database error during the re-check returns 503.
+- **Deleting an account keeps identity-link rows consistent** ([#1807](https://github.com/kagura-ai/memory-cloud/issues/1807)): `identity_links.linked_by` is a foreign key with `ON DELETE SET NULL`, so deleting the account that made a link no longer leaves a dangling id.
+- **Alembic no longer disables the application's loggers** ([#1808](https://github.com/kagura-ai/memory-cloud/issues/1808)): `alembic/env.py` keeps existing loggers when it configures logging, which also fixes logging tests failing when migration tests share a pytest process.
+- **`make coverage-upload` uses the backend virtual environment** ([#1809](https://github.com/kagura-ai/memory-cloud/issues/1809)) and checks its tools and token before running tests.
+- **Flaky no-leak assertions** ([#1810](https://github.com/kagura-ai/memory-cloud/issues/1810)): transport-failure tests no longer fail when the random `correlation_id` happens to contain a port number.
+
+### Notes
+- **Migration** `e92_1807_linked_by_fk`: makes `identity_links.linked_by` nullable, sets values that name an account outside the row's own set to NULL, then adds the `ON DELETE SET NULL` foreign key.
+- **New environment variable** `IDENTITY_LINK_ALLOW_OAUTH_SIGNIN_PROOF` (default `false`). Under the default, a Google account can be linked only when the OAuth app is published, Verified and has *Session age claims* turned on; GitHub accounts need the variable set to `true`. See `docs/deployment.md`, identity links.
+- **Operator action**: run the session Redis with `maxmemory-policy noeviction` — an evicted per-user index would let a password reset miss live sessions. After a rollback and redeploy of this version, delete the `session_index:since` key so the catch-up scan runs again.
+- The orphan vector sweep still keeps resource points in live contexts; the payload `memory_id` is not reliable for them ([#1808](https://github.com/kagura-ai/memory-cloud/issues/1808), follow-up [#1829](https://github.com/kagura-ai/memory-cloud/issues/1829)). Kagura Lite's LanceDB sweep paths are now tested against a real table.
+
 ## [v0.90.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.90.0) — 2026-10-02
 
 Linked accounts and context deletion keep your data: a deleted context can be restored from its rows, linking two accounts needs a fresh sign-in of both, linked owners write to the same memories, and a linked provider no longer rewrites the account's email.
