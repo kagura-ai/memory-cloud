@@ -34,6 +34,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
+from services.identity_link_service import owned_by
 from utils.logger import get_logger
 from utils.tag_normalize import is_near_duplicate, normalize_tag
 
@@ -277,7 +278,7 @@ async def _read_vocabulary(
         Memory.deleted_at.is_(None),
     ]
     if not shared:
-        conditions.append(Memory.user_id == user_id)
+        conditions.append(owned_by(Memory.user_id, user_id))
 
     tag = func.unnest(Memory.tags).label("tag")
     inner = select(Memory.id.label("memory_id"), tag).where(*conditions).subquery()

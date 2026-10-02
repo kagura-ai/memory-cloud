@@ -1138,6 +1138,13 @@ class AccountErasureService:
             SecretVersion,
         )
 
+        # #1784: a private context the subject created may hold memories a
+        # linked account wrote. Pass it to that account before created_by is
+        # pseudonymized below, or those memories go out of anyone's reach.
+        from services.identity_link_service import hand_over_private_contexts
+
+        counts.update(await hand_over_private_contexts(self.db, user_id))
+
         authorship_sweeps: tuple[tuple[Any, Any], ...] = (
             (WorkspaceConnector, WorkspaceConnector.created_by),
             (Resource, Resource.created_by),

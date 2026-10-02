@@ -203,6 +203,8 @@ class SecurityEvent(StrEnum):
     OAUTH_CLIENT_CREATED = "oauth_client_created"
     EMAIL_CHANGED = "email_changed"
     NEW_DEVICE_SIGN_IN = "new_device_sign_in"
+    ACCOUNT_LINKED = "account_linked"
+    ACCOUNT_UNLINKED = "account_unlinked"
 
 
 # The label of the sign-in method line, per event.
@@ -268,6 +270,16 @@ _EVENT_TEXT: dict[SecurityEvent, tuple[str, str]] = {
         "The email address of your Kagura account was changed",
         "The account's email address was changed to the one a sign-in provider "
         "reported. Security notices now go to the new address, not to this one.",
+    ),
+    # #1784: both accounts of the pair are told.
+    SecurityEvent.ACCOUNT_LINKED: (
+        "Another account was linked to your Kagura account",
+        "Another account was linked to this one. The two now own the same private "
+        "contexts and the memories in them.",
+    ),
+    SecurityEvent.ACCOUNT_UNLINKED: (
+        "An account was unlinked from your Kagura account",
+        "An account was unlinked from this one. They no longer share private contexts.",
     ),
     # #1769: a browser sign-in from a device the account had not used before.
     SecurityEvent.NEW_DEVICE_SIGN_IN: (

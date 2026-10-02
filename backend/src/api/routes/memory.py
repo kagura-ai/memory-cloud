@@ -36,6 +36,7 @@ from models.schemas import (
     RememberResponse,
 )
 from services.agent_binding_service import binding_memory_sql_predicate
+from services.identity_link_service import owned_by
 from services.memory_service import MemoryService
 from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso, utcnow
@@ -1064,7 +1065,15 @@ async def list_memories(
         if binding_predicate is not None:
             filters.append(binding_predicate)
         if owner_filter is not None:
-            filters.append(Memory.user_id == owner_filter)
+            if context_id is not None:
+                # #1784: inside a private context the caller may read, the
+                # caller's own includes what a linked account wrote there.
+                filters.append(owned_by(Memory.user_id, owner_filter))
+            else:
+                # No context: the caller's own id only. A link never reaches
+                # into a workspace the caller is not a member of, and nothing
+                # scopes this view to one.
+                filters.append(Memory.user_id == owner_filter)
         if scope:
             filters.append(Memory.scope == scope)
         if type:

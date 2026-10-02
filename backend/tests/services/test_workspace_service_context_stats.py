@@ -3,12 +3,24 @@
 Verifies single-query optimization for private/shared context stats.
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 
 from services.workspace_service import WorkspaceService
+
+
+@pytest.fixture(autouse=True)
+def _no_identity_links():
+    """#1784: the member view resolves the caller's link set — one more
+    ``db.execute`` than the mocked sessions in this module script. No links."""
+
+    async def only_self(_db, user_id):
+        return frozenset({user_id})
+
+    with patch("services.workspace_service.linked_user_ids", only_self):
+        yield
 
 
 class TestGetCollectionMemoryStats:

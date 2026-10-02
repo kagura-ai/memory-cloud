@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from collections.abc import Sequence
 from datetime import UTC
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -212,6 +213,7 @@ def build_lance_filter(
     user_id: str,
     is_shared_context: bool = False,
     filters: dict[str, Any] | None = None,
+    owner_ids: Sequence[str] | None = None,
 ) -> str:
     """Build the LanceDB pre-filter SQL ``WHERE`` body (no ``WHERE`` keyword).
 
@@ -252,7 +254,12 @@ def build_lance_filter(
         parts.append(f"context_id = {_sql_str(context_id)}")
 
     if not is_shared_context:
-        parts.append(f"user_id = {_sql_str(user_id)}")
+        if owner_ids and set(owner_ids) != {user_id}:
+            # #1784: the caller's own includes those of an account linked to it.
+            joined = ", ".join(_sql_str(u) for u in sorted({user_id, *owner_ids}))
+            parts.append(f"user_id IN ({joined})")
+        else:
+            parts.append(f"user_id = {_sql_str(user_id)}")
 
     if filters:
         if "scope" in filters:
@@ -505,13 +512,16 @@ class LanceVectorStore:
         is_shared_context: bool = False,
         collection_name: str = DEFAULT_COLLECTION,
         include_vectors: bool = False,
+        owner_ids: Sequence[str] | None = None,
     ) -> list[dict]:
         if not workspace_id or not context_id or not user_id:
             raise ValueError(
                 "Isolation requires workspace_id, context_id, and user_id. "
                 f"Got workspace_id={workspace_id}, context_id={context_id}, user_id={user_id}"
             )
-        where = build_lance_filter(workspace_id, context_id, user_id, is_shared_context, filters)
+        where = build_lance_filter(
+            workspace_id, context_id, user_id, is_shared_context, filters, owner_ids
+        )
         # #1229: validated here (outside the QdrantError-wrapping try) so junk
         # user input maps to 4xx, not a bare TypeError at the comparison below.
         score_threshold = extract_score_threshold(filters)
@@ -581,13 +591,16 @@ class LanceVectorStore:
         filters: dict[str, Any] | None = None,
         is_shared_context: bool = False,
         collection_name: str = DEFAULT_COLLECTION,
+        owner_ids: Sequence[str] | None = None,
     ) -> list[dict]:
         if not workspace_id or not context_id or not user_id:
             raise ValueError(
                 "Isolation requires workspace_id, context_id, and user_id. "
                 f"Got workspace_id={workspace_id}, context_id={context_id}, user_id={user_id}"
             )
-        where = build_lance_filter(workspace_id, context_id, user_id, is_shared_context, filters)
+        where = build_lance_filter(
+            workspace_id, context_id, user_id, is_shared_context, filters, owner_ids
+        )
         near = extract_near_filter(filters)
         within = extract_within_filter(filters)
 

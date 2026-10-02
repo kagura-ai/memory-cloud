@@ -70,6 +70,7 @@ from repositories.memory import MemoryRepository
 from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
+from services.identity_link_service import owned_by
 from services.persistence import persistence_info
 from services.query_router import classify_query
 from services.recall_selection import (
@@ -5354,7 +5355,15 @@ class MemoryService:
         # - Shared contexts: No user_id filter (all members' memories)
         base_conditions = [Memory.deleted_at.is_(None)]
         if not is_shared_context:
-            base_conditions.append(Memory.user_id == user_id)  # Private: creator only
+            if context_id:
+                # Private context: the creator's, an account linked to it
+                # included (#1784). The caller's access to the context was
+                # checked by the route.
+                base_conditions.append(owned_by(Memory.user_id, user_id))
+            else:
+                # No context: the caller's own id only — a link never reaches
+                # into a workspace the caller is not a member of.
+                base_conditions.append(Memory.user_id == user_id)
 
         # Single Collection Migration: Filter by workspace_id and context_id
         if workspace_id:

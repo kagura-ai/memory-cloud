@@ -24,6 +24,7 @@ The Protocol method signatures intentionally mirror the corresponding
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
@@ -75,6 +76,7 @@ class VectorStore(Protocol):
         is_shared_context: bool = False,
         collection_name: str = DEFAULT_COLLECTION,
         include_vectors: bool = False,
+        owner_ids: Sequence[str] | None = None,
     ) -> list[dict]: ...
 
     async def search_fulltext(
@@ -87,6 +89,7 @@ class VectorStore(Protocol):
         filters: dict[str, Any] | None = None,
         is_shared_context: bool = False,
         collection_name: str = DEFAULT_COLLECTION,
+        owner_ids: Sequence[str] | None = None,
     ) -> list[dict]: ...
 
     async def update_payload(

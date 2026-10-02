@@ -31,6 +31,7 @@ from models.api_base import TZAwareBaseModel
 from models.schemas import ContextExportResponse, RelatedTagItem
 from models.sleep import SleepMode
 from services.context_service import ContextService, TagSortMode
+from services.identity_link_service import linked_user_ids
 from utils.datetime import to_utc_iso
 from utils.exceptions import FeatureNotAvailableError, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -415,12 +416,18 @@ async def list_contexts(
         }
 
     context_responses = []
+    linked_ids: frozenset[str] | None = None
     for context in contexts_list:
         # Issue #165: Privacy filtering
         # - Private contexts: Only show to creator
         # - Shared contexts: Show to all workspace members
         if context.is_private and context.created_by != user_id:
-            continue  # Skip private contexts from other users
+            # #1784: a private context of an account linked to the caller is
+            # the caller's own. Resolved once, and only when one shows up.
+            if linked_ids is None:
+                linked_ids = await linked_user_ids(db, user_id)
+            if context.created_by not in linked_ids:
+                continue  # Skip private contexts from other users
 
         # Shared contexts (is_private=False) are visible to all workspace members
         # Private contexts by current user are visible

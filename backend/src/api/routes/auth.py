@@ -52,6 +52,7 @@ from db.base import get_db
 from models.auth import User
 from services.account_linking_service import AccountLinkingService
 from services.beta_invite_service import BETA_INVITE_TOKEN_PATTERN
+from services.identity_link_service import linked_user_ids
 from services.known_device_service import note_browser_sign_in
 from services.password_account_service import find_password_user_by_email
 from services.security_notification_service import (
@@ -1691,6 +1692,11 @@ async def get_current_user_info(
             # Issue #1678: ``auth_method`` is the ORIGINAL sign-in method; this
             # says whether the account can sign in with a password now.
             "has_password": bool(db_user and db_user.password_hash is not None),
+            # Issue #1784: the other accounts counted as this owner, so the
+            # web UI attributes their private contexts to the viewer.
+            "linked_user_ids": (
+                sorted((await linked_user_ids(db, user_id)) - {user_id}) if user_id else []
+            ),
             # Issue #953: surface the protected-initial-admin flag so the frontend
             # can hide the self-serve account-deletion control. The backend hard-
             # blocks erasure of this account (InitialAdminCannotBeErasedError —

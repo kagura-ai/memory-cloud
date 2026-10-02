@@ -1,6 +1,6 @@
 """Tests for PermissionService RBAC."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -14,6 +14,18 @@ from services.permission_service import (
     PermissionService,
 )
 from utils.exceptions import AuthorizationError, NotFoundException
+
+
+@pytest.fixture(autouse=True)
+def _no_identity_links():
+    """#1784: a private-context mismatch asks whether the two ids are linked —
+    a query the mocked sessions in this module do not script. No links."""
+
+    async def not_linked(_db, user_id, other_user_id):
+        return other_user_id is not None and user_id == other_user_id
+
+    with patch("services.permission_service.is_same_owner", not_linked):
+        yield
 
 
 class TestRoleWeights:

@@ -27,6 +27,7 @@ from config.plan_tiers import (
 from config.settings import get_settings
 from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
 from models.sleep import SleepMode
+from services.identity_link_service import is_same_owner, owned_by
 from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,
@@ -392,7 +393,7 @@ class ContextService:
             raise NotFoundException("Context", str(context_id))
 
         # Issue #165: Privacy check - private contexts are creator-only
-        if context.is_private and context.created_by != user_id:
+        if context.is_private and not await is_same_owner(self.db, user_id, context.created_by):
             raise NotFoundException("Context", str(context_id))
 
         # Issue #234: Check allowed_context_ids whitelist for member/viewer
@@ -448,7 +449,7 @@ class ContextService:
             Memory.deleted_at.is_(None),
         )
         if owner_filter is not None:
-            mq = mq.where(Memory.user_id == owner_filter)
+            mq = mq.where(owned_by(Memory.user_id, owner_filter))
         # Fetch cap+1 so an oversized context is detected in a single query,
         # avoiding a separate COUNT round-trip on the common (small) path.
         mq = mq.order_by(Memory.created_at).limit(EXPORT_MAX_MEMORIES + 1)

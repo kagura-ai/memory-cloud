@@ -20,6 +20,7 @@ from auth.workspace_roles import (
     WORKSPACE_ROLE_WEIGHTS as ORG_ROLE_WEIGHTS,
 )
 from models.auth import Context, ContextMember, WorkspaceMember
+from services.identity_link_service import is_same_owner, owned_by
 from services.workspace_service import WorkspaceService
 from utils.exceptions import AuthorizationError, NotFoundException
 from utils.logger import get_logger
@@ -338,7 +339,7 @@ class PermissionService:
         # (private → only the creator sees anything) instead of returning an
         # empty 200 that leaks "a private context with this ID exists in
         # this workspace, and you're not its owner".
-        if context.is_private and context.created_by != user_id:
+        if context.is_private and not await is_same_owner(self.db, user_id, context.created_by):
             logger.warning(
                 "context_read_denied",
                 reason="private_non_creator",
@@ -616,15 +617,20 @@ class PermissionService:
             required_role if isinstance(required_role, ContextRole) else ContextRole(required_role)
         )
 
+        linked_owner = False
         if context.is_private:
             if context.created_by == user_id:
                 # Creator has full access to their private context
                 return context, ContextRole.OWNER
-            else:
+            # #1784: an account linked to the creator is the same person. The
+            # link widens ownership only: the caller still passes the
+            # membership, whitelist and role rules below as itself.
+            if not await is_same_owner(self.db, user_id, context.created_by):
                 # Others cannot access private contexts
                 raise AuthorizationError("Insufficient permissions")
+            linked_owner = True
 
-        # Shared context: Check workspace membership
+        # Shared context, or a linked account's private one: workspace membership
         workspace_member = await self.workspace_service.get_member(
             context.workspace_id,
             user_id,
@@ -651,6 +657,14 @@ class PermissionService:
             if required != ContextRole.VIEWER:
                 raise AuthorizationError("Insufficient permissions")
             return context, ContextRole.VIEWER
+
+        if linked_owner:
+            # A member with no whitelist is suspended (Migration 042): the
+            # link does not lift that. One whose whitelist names this context
+            # passed the check above and owns it like the linked creator.
+            if workspace_member.allowed_context_ids is None:
+                raise AuthorizationError("Insufficient permissions")
+            return context, ContextRole.OWNER
 
         # Workspace member → requires explicit context membership
         stmt = select(ContextMember).where(
@@ -819,7 +833,8 @@ class PermissionService:
         # so the list shape matches the per-context access check; otherwise
         # the listing leaks the existence of private contexts that 403 on
         # click-through.
-        privacy_filter = (Context.is_private.is_(False)) | (Context.created_by == user_id)
+        # #1784: the caller's own includes those of an account linked to it.
+        privacy_filter = (Context.is_private.is_(False)) | owned_by(Context.created_by, user_id)
 
         # Workspace owner/admin → all accessible contexts (ignore
         # allowed_context_ids; privacy still applies).
@@ -1056,7 +1071,18 @@ class PermissionService:
         is_shared = await context_service.is_context_shared(context_id)
 
         if not is_shared:
-            # Private context: only creator can access
+            # Private context: only its creator, and — #1784 — a memory written
+            # there by an account linked to the caller is the caller's own.
+            # Both must hold: the context is the caller's (directly or by a
+            # link, with the caller's own workspace membership) and so is the
+            # memory's author.
+            if await is_same_owner(self.db, user_id, memory_user_id):
+                try:
+                    await self._check_context_access_rbac(user_id, context_id)
+                except (AuthorizationError, NotFoundException):
+                    await _emit_rbac_denied()
+                    return False
+                return await _binding_ok()
             await _emit_rbac_denied()
             return False
 

@@ -470,7 +470,7 @@ CLI actions (`reset_password`, `create_admin`) send no notice. A send failure is
 change. Under `EMAIL_PROVIDER=logging` each notice is one
 `security_notification_email` log line (event and a keyed recipient hash only).
 
-## One person, two accounts — moving context ownership (Issue #1783)
+## One person, two accounts — linking them (Issue #1784)
 
 Identities are keyed by `user_id` and are never linked by email: a CLI admin
 (`local:<login>`, created by `create_admin`) and an OAuth sign-in (the IdP
@@ -479,8 +479,64 @@ through the CLI admin's API key (MCP clients) then read as another creator in
 the browser — the **Created by me** filter is empty and the private ones are
 hidden — because `created_by` is compared with the session's `user_id`.
 
-To hand those contexts to the identity that should own them, run the one-shot
-command where the API runs (same env: `DATABASE_URL` and the vector store):
+When the person keeps using both accounts, link them:
+
+1. Sign in to the web UI with one account.
+2. From the account switcher, choose **Add another account** and sign in with
+   the other one. The browser session now holds both.
+3. Open **Profile Settings**, find **Linked accounts**, and link the other account.
+
+That browser session is the proof: each account entered it through its own
+sign-in. An account that is not signed in on the session cannot be linked,
+and nothing is ever linked by an email match.
+
+What a link does:
+
+- A private context is open to every account linked to its creator, and the
+  memories any of them wrote in it are visible to all of them — in the
+  context list, that context's memory list, recall, stats, tags and export.
+- The web UI shows those contexts as the viewer's own (`GET /api/v1/auth/me`
+  returns `linked_user_ids`).
+
+What it does not do:
+
+- **Roles and membership stay per account.** A link never makes an account a
+  system admin, and never lets it reach a workspace it is not a member of.
+  The caller is checked as itself: a workspace viewer reads the linked
+  account's private context but does not own it, a member needs the context
+  in its `allowed_context_ids`, and an API key keeps its workspace scope.
+  The memory list and stats with no context stay the caller's own.
+- **Rows keep their author.** `created_by` and `memories.user_id` are not
+  rewritten. After an unlink, a memory one account wrote in the other's
+  private context is hidden from the context's creator again.
+- **Per-account history stays separate**: the graph view and its edges, Sleep
+  maintenance (each account's memories are maintained on their own), and
+  retrieval feedback.
+
+Either account can unlink from **Profile Settings**; the other one does not
+have to be signed in. At most 4 accounts can be linked together. Every link
+and unlink writes an `audit_logs` row (`identity_linked`,
+`identity_unlinked`) on both accounts and emails both a security notice.
+
+Erasing an account takes it out of its link set. Its private contexts pass to
+a linked account that is a member of the same workspace, so what that account
+wrote there stays readable; the erased account's own memories are handled as
+for any erased account. `delete_admin` only removes the user row and its link.
+
+The endpoints, for a deployment that scripts it: `GET`/`POST
+/api/v1/me/account/identity-links` and `POST
+/api/v1/me/account/identity-links/unlink`, browser session only.
+
+### Moving ownership instead (Issue #1783)
+
+When one of the two accounts is being retired, move its contexts to the other
+with the one-shot command below rather than linking. Do not use it for a
+person who keeps both accounts: the account that gave its contexts away loses
+them, along with every client that signs in as it.
+
+
+Run the one-shot command where the API runs (same env: `DATABASE_URL` and the
+vector store):
 
 ```bash
 # inside the API container / venv, from backend/
@@ -523,7 +579,7 @@ The command does not move API keys: mint a new key for `--to` if MCP clients
 should keep seeing the private contexts afterwards. It also leaves other
 `created_by` columns (resources, agents, files, secrets), per-user retrieval
 history (neural edges, feedback, sleep reports — boosting starts over) and the
-two user rows untouched — linking the accounts is a separate feature (#1784).
+two user rows untouched.
 
 ## Hosted-mode UI gates (Issue #1571)
 

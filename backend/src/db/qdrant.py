@@ -9,7 +9,7 @@ Collection design (post Single Collection Migration, Issue #334):
 - Full-text index on summary + context_summary; keyword index on scope, type, context_id
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -202,12 +202,22 @@ def extract_score_threshold(filters: dict[str, Any] | None) -> float | None:
     return value
 
 
+def _owner_ids_kwarg(owner_ids: Sequence[str] | None) -> dict[str, Any]:
+    """``owner_ids`` as a keyword for the alternative store, or nothing.
+
+    Passed only when there is a link set (#1784), so a caller with no links
+    reaches the store exactly as before.
+    """
+    return {"owner_ids": owner_ids} if owner_ids else {}
+
+
 def _build_search_filter(
     workspace_id: str,
     context_id: str | list[str],
     user_id: str,
     is_shared_context: bool = False,
     filters: dict[str, Any] | None = None,
+    owner_ids: Sequence[str] | None = None,
 ) -> Filter | None:
     """Build combined isolation + metadata filter for search queries.
 
@@ -219,6 +229,9 @@ def _build_search_filter(
         user_id: User ID (isolation, skipped for shared contexts)
         is_shared_context: If True, skip user_id filter
         filters: Optional metadata filters (scope, type, importance, tags, date ranges)
+        owner_ids: ``user_id`` plus the accounts linked to it (#1784). When
+            given, the private filter matches any of them instead of
+            ``user_id`` alone.
 
     Returns:
         Qdrant Filter or None
@@ -234,7 +247,12 @@ def _build_search_filter(
         conditions.append(FieldCondition(key="context_id", match=MatchValue(value=context_id)))
 
     if not is_shared_context:
-        conditions.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
+        if owner_ids and set(owner_ids) != {user_id}:
+            conditions.append(
+                FieldCondition(key="user_id", match=MatchAny(any=sorted({user_id, *owner_ids})))
+            )
+        else:
+            conditions.append(FieldCondition(key="user_id", match=MatchValue(value=user_id)))
 
     if filters:
         if "scope" in filters:
@@ -500,6 +518,7 @@ async def search_memories_qdrant(
     is_shared_context: bool = False,
     collection_name: str = KAGURA_MEMORIES_COLLECTION,
     include_vectors: bool = False,
+    owner_ids: Sequence[str] | None = None,
 ) -> list[dict]:
     """Semantic search in Qdrant with workspace-aware isolation.
 
@@ -534,6 +553,7 @@ async def search_memories_qdrant(
             is_shared_context,
             collection_name,
             include_vectors,
+            **_owner_ids_kwarg(owner_ids),
         )
 
     client = get_qdrant_client()
@@ -555,7 +575,7 @@ async def search_memories_qdrant(
 
     # Build filter outside try/except so ValueError propagates as 4xx, not QdrantError
     qdrant_filter = _build_search_filter(
-        workspace_id, context_id, user_id, is_shared_context, filters
+        workspace_id, context_id, user_id, is_shared_context, filters, owner_ids
     )
 
     # #1229: score_threshold is a query_points kwarg, not a payload condition —
@@ -703,6 +723,7 @@ async def search_memories_fulltext(
     filters: dict[str, Any] | None = None,
     is_shared_context: bool = False,
     collection_name: str = KAGURA_MEMORIES_COLLECTION,
+    owner_ids: Sequence[str] | None = None,
 ) -> list[dict]:
     """BM25 keyword search using Qdrant native sparse vectors.
 
@@ -736,6 +757,7 @@ async def search_memories_fulltext(
             filters,
             is_shared_context,
             collection_name,
+            **_owner_ids_kwarg(owner_ids),
         )
 
     client = get_qdrant_client()
@@ -756,7 +778,7 @@ async def search_memories_fulltext(
 
     # Build filter outside try/except so ValueError propagates as 4xx, not QdrantError
     qdrant_filter = _build_search_filter(
-        workspace_id, context_id, user_id, is_shared_context, filters
+        workspace_id, context_id, user_id, is_shared_context, filters, owner_ids
     )
 
     try:

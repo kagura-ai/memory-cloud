@@ -304,6 +304,49 @@ class EmailActionToken(Base):
         return f"<EmailActionToken(user_id='{self.user_id}', purpose='{self.purpose}')>"
 
 
+class IdentityLink(Base):
+    """One account's membership in a link set (Issue #1784).
+
+    Accounts that share a ``group_id`` belong to one person. Ownership checks
+    on private contexts and the memories in them match any member of the
+    caller's set; roles and workspace membership stay per account. See
+    ``services/identity_link_service.py``.
+
+    Attributes:
+        id: Primary key (UUID).
+        group_id: The link set. Not a foreign key — a set is nothing but its
+            rows.
+        user_id: The account (``ON DELETE CASCADE``). Unique: an account is
+            in at most one set.
+        linked_by: The account whose session created this row.
+        linked_at: Naive UTC time the account joined the set.
+    """
+
+    __tablename__ = "identity_links"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=func.gen_random_uuid(),
+    )
+    group_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    user_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    linked_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    linked_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("user_id", name="identity_links_user_id_key"),
+        Index("ix_identity_links_group_id", "group_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<IdentityLink(user_id='{self.user_id}', group_id='{self.group_id}')>"
+
+
 class UserKnownDevice(Base):
     """A browser that has signed in to an account before (Issue #1769).
 

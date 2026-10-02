@@ -1,0 +1,665 @@
+"""#1784: identity links — one person's accounts counted as one owner.
+
+Real-DB tests: the rule is a set of SQL predicates plus the access checks
+built on them. They need a live Postgres (``db_session`` skips otherwise)
+and run in CI's integration job.
+"""
+
+from __future__ import annotations
+
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from models.auth import (
+    AuditLog,
+    Context,
+    IdentityLink,
+    User,
+    Workspace,
+    WorkspaceMember,
+    WorkspaceRole,
+)
+from models.memory import Memory
+from services.context_service import ContextService
+from services.identity_link_service import (
+    MAX_LINKED_IDENTITIES,
+    IdentityLinkService,
+    is_same_owner,
+    linked_user_ids,
+    owned_by,
+)
+from services.permission_service import PermissionService
+from utils.exceptions import AuthorizationError, ConflictError, NotFoundException, ValidationError
+
+
+async def _user(db: AsyncSession, prefix: str = "u") -> User:
+    uid = f"{prefix}_{uuid4().hex[:10]}"
+    user = User(
+        user_id=uid,
+        email=f"{uid}@link.example",
+        name=uid,
+        role="user",
+        is_initial_admin=False,
+        auth_method="oauth",
+    )
+    db.add(user)
+    await db.flush()
+    return user
+
+
+async def _workspace(db: AsyncSession, owner: User, *members: User) -> Workspace:
+    workspace = Workspace(id=uuid4(), name="Link Test", owner_user_id=owner.user_id)
+    db.add(workspace)
+    await db.flush()
+    db.add(
+        WorkspaceMember(workspace_id=workspace.id, user_id=owner.user_id, role=WorkspaceRole.OWNER)
+    )
+    for member in members:
+        db.add(
+            WorkspaceMember(
+                workspace_id=workspace.id, user_id=member.user_id, role=WorkspaceRole.ADMIN
+            )
+        )
+    await db.flush()
+    return workspace
+
+
+async def _private_context(db: AsyncSession, workspace: Workspace, creator: User) -> Context:
+    context = Context(
+        id=uuid4(),
+        workspace_id=workspace.id,
+        name=f"priv_{uuid4().hex[:8]}",
+        display_name="Private",
+        created_by=creator.user_id,
+        is_private=True,
+    )
+    db.add(context)
+    await db.flush()
+    return context
+
+
+class TestLinkSets:
+    @pytest.mark.asyncio
+    async def test_an_unlinked_account_is_only_itself(self, db_session):
+        user = await _user(db_session)
+
+        assert await linked_user_ids(db_session, user.user_id) == {user.user_id}
+        assert await is_same_owner(db_session, user.user_id, user.user_id)
+        assert not await is_same_owner(db_session, user.user_id, "someone-else")
+        assert not await is_same_owner(db_session, user.user_id, None)
+
+    @pytest.mark.asyncio
+    async def test_link_is_symmetric_and_idempotent(self, db_session):
+        admin, oauth = await _user(db_session, "local"), await _user(db_session, "google")
+        service = IdentityLinkService(db_session)
+
+        await service.link(admin.user_id, oauth.user_id)
+        await service.link(oauth.user_id, admin.user_id)
+
+        both = {admin.user_id, oauth.user_id}
+        assert await linked_user_ids(db_session, admin.user_id) == both
+        assert await linked_user_ids(db_session, oauth.user_id) == both
+        assert await is_same_owner(db_session, admin.user_id, oauth.user_id)
+        assert await is_same_owner(db_session, oauth.user_id, admin.user_id)
+        rows = await db_session.execute(select(IdentityLink).where(IdentityLink.user_id.in_(both)))
+        assert len(rows.scalars().all()) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_third_account_joins_the_existing_set(self, db_session):
+        a, b, c = [await _user(db_session) for _ in range(3)]
+        service = IdentityLinkService(db_session)
+
+        await service.link(a.user_id, b.user_id)
+        await service.link(c.user_id, a.user_id)
+
+        assert await linked_user_ids(db_session, b.user_id) == {a.user_id, b.user_id, c.user_id}
+
+    @pytest.mark.asyncio
+    async def test_two_sets_become_one(self, db_session):
+        a, b, c, d = [await _user(db_session) for _ in range(4)]
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, b.user_id)
+        await service.link(c.user_id, d.user_id)
+
+        await service.link(b.user_id, c.user_id)
+
+        everyone = {a.user_id, b.user_id, c.user_id, d.user_id}
+        assert await linked_user_ids(db_session, d.user_id) == everyone
+
+    @pytest.mark.asyncio
+    async def test_a_set_cannot_grow_past_the_cap(self, db_session):
+        users = [await _user(db_session) for _ in range(MAX_LINKED_IDENTITIES + 1)]
+        service = IdentityLinkService(db_session)
+        for other in users[1:MAX_LINKED_IDENTITIES]:
+            await service.link(users[0].user_id, other.user_id)
+
+        with pytest.raises(ConflictError):
+            await service.link(users[0].user_id, users[-1].user_id)
+
+        assert users[-1].user_id not in await linked_user_ids(db_session, users[0].user_id)
+
+    @pytest.mark.asyncio
+    async def test_self_link_and_unknown_account_are_refused(self, db_session):
+        user = await _user(db_session)
+        service = IdentityLinkService(db_session)
+
+        with pytest.raises(ValidationError):
+            await service.link(user.user_id, user.user_id)
+        with pytest.raises(NotFoundException):
+            await service.link(user.user_id, "no-such-account")
+
+    @pytest.mark.asyncio
+    async def test_unlink_dissolves_a_pair(self, db_session):
+        a, b = await _user(db_session), await _user(db_session)
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, b.user_id)
+
+        await service.unlink(b.user_id, a.user_id)
+
+        assert await linked_user_ids(db_session, a.user_id) == {a.user_id}
+        rows = await db_session.execute(
+            select(IdentityLink).where(IdentityLink.user_id.in_([a.user_id, b.user_id]))
+        )
+        assert rows.scalars().all() == []
+
+    @pytest.mark.asyncio
+    async def test_unlink_leaves_the_rest_of_a_larger_set(self, db_session):
+        a, b, c = [await _user(db_session) for _ in range(3)]
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, b.user_id)
+        await service.link(a.user_id, c.user_id)
+
+        await service.unlink(a.user_id, c.user_id)
+
+        assert await linked_user_ids(db_session, a.user_id) == {a.user_id, b.user_id}
+        assert await linked_user_ids(db_session, c.user_id) == {c.user_id}
+
+    @pytest.mark.asyncio
+    async def test_unlinking_a_stranger_is_not_found(self, db_session):
+        a, b, stranger = [await _user(db_session) for _ in range(3)]
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, b.user_id)
+
+        with pytest.raises(NotFoundException):
+            await service.unlink(a.user_id, stranger.user_id)
+        with pytest.raises(NotFoundException):
+            await service.unlink(stranger.user_id, a.user_id)
+
+        assert await is_same_owner(db_session, a.user_id, b.user_id)
+
+    @pytest.mark.asyncio
+    async def test_list_linked_names_the_others_only(self, db_session):
+        a, b = await _user(db_session), await _user(db_session)
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, b.user_id)
+
+        listed = await service.list_linked(a.user_id)
+
+        assert [(item.user_id, item.email) for item in listed] == [(b.user_id, b.email)]
+
+    @pytest.mark.asyncio
+    async def test_link_and_unlink_are_audited_on_both_accounts(self, db_session):
+        a, b = await _user(db_session), await _user(db_session)
+        service = IdentityLinkService(db_session)
+
+        await service.link(a.user_id, b.user_id, ip_address="203.0.113.7")
+        await service.unlink(a.user_id, b.user_id)
+
+        rows = await db_session.execute(
+            select(AuditLog.user_id, AuditLog.action, AuditLog.new_value_hash).where(
+                AuditLog.user_id.in_([a.user_id, b.user_id])
+            )
+        )
+        seen = {(r.user_id, r.action) for r in rows}
+        assert seen == {
+            (a.user_id, "identity_linked"),
+            (b.user_id, "identity_linked"),
+            (a.user_id, "identity_unlinked"),
+            (b.user_id, "identity_unlinked"),
+        }
+
+    @pytest.mark.asyncio
+    async def test_deleting_an_account_removes_it_from_its_set(self, db_session):
+        a, b = await _user(db_session), await _user(db_session)
+        await IdentityLinkService(db_session).link(a.user_id, b.user_id)
+
+        await db_session.delete(b)
+        await db_session.commit()
+
+        assert await linked_user_ids(db_session, a.user_id) == {a.user_id}
+
+
+class TestPrivateContextAcrossLinkedAccounts:
+    @pytest.mark.asyncio
+    async def test_owned_by_matches_the_linked_creator(self, db_session):
+        admin, oauth, stranger = [await _user(db_session) for _ in range(3)]
+        workspace = await _workspace(db_session, admin, oauth, stranger)
+        context = await _private_context(db_session, workspace, admin)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        async def sees(user: User) -> bool:
+            row = await db_session.execute(
+                select(Context.id).where(
+                    Context.id == context.id, owned_by(Context.created_by, user.user_id)
+                )
+            )
+            return row.scalar_one_or_none() is not None
+
+        assert await sees(admin)
+        assert await sees(oauth)
+        assert not await sees(stranger)
+
+    @pytest.mark.asyncio
+    async def test_linked_account_opens_and_lists_the_private_context(self, db_session):
+        admin, oauth = await _user(db_session, "local"), await _user(db_session, "google")
+        workspace = await _workspace(db_session, admin, oauth)
+        context = await _private_context(db_session, workspace, admin)
+        permissions = PermissionService(db_session)
+
+        with pytest.raises(AuthorizationError):
+            await permissions.check_context_access(oauth.user_id, context.id)
+        with pytest.raises(NotFoundException):
+            await ContextService(db_session).get_context(oauth.user_id, context.id)
+
+        await IdentityLinkService(db_session).link(oauth.user_id, admin.user_id)
+
+        _, role = await permissions.check_context_access(oauth.user_id, context.id)
+        assert role.value == "owner"
+        opened = await ContextService(db_session).get_context(oauth.user_id, context.id)
+        assert opened.id == context.id
+        resolved = await permissions.resolve_context_for_workspace_read(oauth.user_id, context.id)
+        assert resolved.id == context.id
+        listed = await permissions.get_accessible_contexts(oauth.user_id, workspace.id)
+        assert context.id in {c.id for c in listed}
+
+    @pytest.mark.asyncio
+    async def test_unlink_closes_it_again_at_once(self, db_session):
+        admin, oauth = await _user(db_session), await _user(db_session)
+        workspace = await _workspace(db_session, admin, oauth)
+        context = await _private_context(db_session, workspace, admin)
+        service = IdentityLinkService(db_session)
+        await service.link(admin.user_id, oauth.user_id)
+
+        await service.unlink(admin.user_id, oauth.user_id)
+
+        with pytest.raises(AuthorizationError):
+            await PermissionService(db_session).check_context_access(oauth.user_id, context.id)
+        listed = await PermissionService(db_session).get_accessible_contexts(
+            oauth.user_id, workspace.id
+        )
+        assert context.id not in {c.id for c in listed}
+
+    @pytest.mark.asyncio
+    async def test_a_link_does_not_carry_workspace_membership(self, db_session):
+        """The linked account is not a member of the creator's workspace: the
+        link widens ownership, never membership."""
+        admin, outsider = await _user(db_session), await _user(db_session)
+        workspace = await _workspace(db_session, admin)
+        context = await _private_context(db_session, workspace, admin)
+        await IdentityLinkService(db_session).link(admin.user_id, outsider.user_id)
+        permissions = PermissionService(db_session)
+
+        with pytest.raises(AuthorizationError):
+            await permissions.check_context_access(outsider.user_id, context.id)
+        with pytest.raises(NotFoundException):
+            await permissions.resolve_context_for_workspace_read(outsider.user_id, context.id)
+        with pytest.raises(NotFoundException):
+            await ContextService(db_session).get_context(outsider.user_id, context.id)
+
+    @pytest.mark.asyncio
+    async def test_a_third_party_still_sees_nothing(self, db_session):
+        admin, oauth, stranger = [await _user(db_session) for _ in range(3)]
+        workspace = await _workspace(db_session, admin, oauth, stranger)
+        context = await _private_context(db_session, workspace, admin)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+        permissions = PermissionService(db_session)
+
+        with pytest.raises(AuthorizationError):
+            await permissions.check_context_access(stranger.user_id, context.id)
+        listed = await permissions.get_accessible_contexts(stranger.user_id, workspace.id)
+        assert context.id not in {c.id for c in listed}
+
+
+async def _memory(db: AsyncSession, context: Context, author: User) -> Memory:
+    memory = Memory(
+        id=uuid4(),
+        user_id=author.user_id,
+        workspace_id=context.workspace_id,
+        context_id=context.id,
+        summary="a summary long enough",
+        content="content",
+        type="note",
+        client="pytest",
+        embedding_status="success",
+    )
+    db.add(memory)
+    await db.flush()
+    return memory
+
+
+class TestMemoriesInAPrivateContextAcrossLinkedAccounts:
+    """The admin's private context, written to by both of the person's
+    accounts. After a link each account reads all of it; before, and for
+    anyone else, the single-author rule holds."""
+
+    @staticmethod
+    async def _seed(db):
+        admin, oauth, stranger = [await _user(db) for _ in range(3)]
+        workspace = await _workspace(db, admin, oauth, stranger)
+        context = await _private_context(db, workspace, admin)
+        by_admin = await _memory(db, context, admin)
+        by_oauth = await _memory(db, context, oauth)
+        return admin, oauth, stranger, workspace, context, by_admin, by_oauth
+
+    @staticmethod
+    async def _visible(db, context: Context, viewer: User) -> set:
+        rows = await db.execute(
+            select(Memory.id).where(
+                Memory.context_id == context.id, owned_by(Memory.user_id, viewer.user_id)
+            )
+        )
+        return set(rows.scalars().all())
+
+    @pytest.mark.asyncio
+    async def test_owner_filter_covers_both_authors_once_linked(self, db_session):
+        admin, oauth, stranger, _, context, by_admin, by_oauth = await self._seed(db_session)
+
+        assert await self._visible(db_session, context, admin) == {by_admin.id}
+
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        both = {by_admin.id, by_oauth.id}
+        assert await self._visible(db_session, context, admin) == both
+        assert await self._visible(db_session, context, oauth) == both
+        assert await self._visible(db_session, context, stranger) == set()
+
+    @pytest.mark.asyncio
+    async def test_can_access_memory_follows_the_link(self, db_session):
+        admin, oauth, stranger, workspace, context, by_admin, by_oauth = await self._seed(
+            db_session
+        )
+        permissions = PermissionService(db_session)
+
+        async def can(viewer: User, memory: Memory) -> bool:
+            return await permissions.can_access_memory(
+                user_id=viewer.user_id,
+                memory_user_id=memory.user_id,
+                workspace_id=workspace.id,
+                context_id=context.id,
+            )
+
+        assert not await can(admin, by_oauth)
+        assert not await can(oauth, by_admin)
+
+        await IdentityLinkService(db_session).link(oauth.user_id, admin.user_id)
+
+        assert await can(admin, by_oauth)
+        assert await can(oauth, by_admin)
+        assert not await can(stranger, by_admin)
+        assert not await can(stranger, by_oauth)
+
+    @pytest.mark.asyncio
+    async def test_a_linked_author_does_not_open_someone_elses_private_context(self, db_session):
+        """Both conditions must hold: the memory's author is the caller's, and
+        so is the context. A link to the author alone is not enough."""
+        admin, oauth, stranger, workspace, _, _, _ = await self._seed(db_session)
+        strangers_context = await _private_context(db_session, workspace, stranger)
+        written_by_oauth = await _memory(db_session, strangers_context, oauth)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        allowed = await PermissionService(db_session).can_access_memory(
+            user_id=admin.user_id,
+            memory_user_id=written_by_oauth.user_id,
+            workspace_id=workspace.id,
+            context_id=strangers_context.id,
+        )
+
+        assert not allowed
+
+    @pytest.mark.asyncio
+    async def test_export_includes_the_linked_accounts_memories(self, db_session):
+        admin, oauth, _, _, context, by_admin, by_oauth = await self._seed(db_session)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        exported = await ContextService(db_session).export_context(oauth.user_id, context.id)
+
+        assert {str(m.id) for m in exported.memories} == {str(by_admin.id), str(by_oauth.id)}
+
+    @pytest.mark.asyncio
+    async def test_unlink_hides_the_other_accounts_memories_again(self, db_session):
+        admin, oauth, _, _, context, by_admin, _ = await self._seed(db_session)
+        service = IdentityLinkService(db_session)
+        await service.link(admin.user_id, oauth.user_id)
+
+        await service.unlink(admin.user_id, oauth.user_id)
+
+        assert await self._visible(db_session, context, admin) == {by_admin.id}
+
+
+class TestAuthMeCarriesTheLinkedIds:
+    """The web UI attributes a linked account's private contexts to the viewer."""
+
+    @pytest.mark.asyncio
+    async def test_me_lists_the_other_accounts_only(self, db_session):
+        from api.routes.auth import get_current_user_info
+
+        admin, oauth = await _user(db_session), await _user(db_session)
+
+        before = await get_current_user_info(user={"user_id": admin.user_id}, db=db_session)
+        assert before["user"]["linked_user_ids"] == []
+
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        as_admin = await get_current_user_info(user={"user_id": admin.user_id}, db=db_session)
+        as_oauth = await get_current_user_info(user={"user_id": oauth.user_id}, db=db_session)
+        assert as_admin["user"]["linked_user_ids"] == [oauth.user_id]
+        assert as_oauth["user"]["linked_user_ids"] == [admin.user_id]
+
+
+async def _member(
+    db: AsyncSession, workspace: Workspace, user: User, role: WorkspaceRole, allowed=None
+) -> None:
+    db.add(
+        WorkspaceMember(
+            workspace_id=workspace.id,
+            user_id=user.user_id,
+            role=role,
+            allowed_context_ids=allowed,
+        )
+    )
+    await db.flush()
+
+
+class TestALinkDoesNotLiftTheCallersOwnLimits:
+    """The linked account is checked as itself: its role, its whitelist."""
+
+    @staticmethod
+    async def _seed(db, role: WorkspaceRole, *, allowed_self: bool | None):
+        admin, oauth = await _user(db), await _user(db)
+        workspace = await _workspace(db, admin)
+        context = await _private_context(db, workspace, admin)
+        allowed = None if allowed_self is None else ([context.id] if allowed_self else [])
+        await _member(db, workspace, oauth, role, allowed)
+        await IdentityLinkService(db).link(admin.user_id, oauth.user_id)
+        return oauth, context
+
+    @pytest.mark.asyncio
+    async def test_a_viewer_reads_but_does_not_own(self, db_session):
+        oauth, context = await self._seed(db_session, WorkspaceRole.VIEWER, allowed_self=None)
+        permissions = PermissionService(db_session)
+
+        _, role = await permissions.check_context_access(
+            oauth.user_id, context.id, required_role="viewer"
+        )
+        assert role.value == "viewer"
+        with pytest.raises(AuthorizationError):
+            await permissions.check_context_write(oauth.user_id, context.id)
+        with pytest.raises(AuthorizationError):
+            await permissions.check_context_owner(oauth.user_id, context.id)
+
+    @pytest.mark.asyncio
+    async def test_a_member_whose_whitelist_names_the_context_owns_it(self, db_session):
+        oauth, context = await self._seed(db_session, WorkspaceRole.MEMBER, allowed_self=True)
+
+        _, role = await PermissionService(db_session).check_context_access(
+            oauth.user_id, context.id
+        )
+
+        assert role.value == "owner"
+
+    @pytest.mark.asyncio
+    async def test_a_member_whose_whitelist_omits_the_context_is_refused(self, db_session):
+        oauth, context = await self._seed(db_session, WorkspaceRole.MEMBER, allowed_self=False)
+
+        with pytest.raises(AuthorizationError):
+            await PermissionService(db_session).check_context_access(oauth.user_id, context.id)
+
+    @pytest.mark.asyncio
+    async def test_a_suspended_member_is_refused(self, db_session):
+        """MEMBER with no whitelist at all (Migration 042)."""
+        oauth, context = await self._seed(db_session, WorkspaceRole.MEMBER, allowed_self=None)
+        permissions = PermissionService(db_session)
+
+        with pytest.raises(AuthorizationError):
+            await permissions.check_context_access(oauth.user_id, context.id)
+        with pytest.raises(NotFoundException):
+            await permissions.resolve_context_for_workspace_read(oauth.user_id, context.id)
+
+
+class TestALinkNeverCrossesWorkspaces:
+    @pytest.mark.asyncio
+    async def test_the_unscoped_memory_list_stays_the_callers_own(self, db_session):
+        """``GET /memory/list`` with no context has no workspace predicate:
+        widening it would hand over the linked account's memories from
+        workspaces the caller is not a member of."""
+        from api.routes.memory import list_memories
+
+        admin, oauth = await _user(db_session), await _user(db_session)
+        elsewhere = await _workspace(db_session, admin)
+        context = await _private_context(db_session, elsewhere, admin)
+        theirs = await _memory(db_session, context, admin)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        listed = await list_memories(
+            user={"user_id": oauth.user_id},
+            db=db_session,
+            scope=None,
+            type=None,
+            context_id=None,
+            q=None,
+            tags=None,
+            tags_match="any",
+            trigger_from=None,
+            trigger_until=None,
+            lat_min=None,
+            lat_max=None,
+            lon_min=None,
+            lon_max=None,
+            order_by="created_at",
+            limit=50,
+            offset=0,
+        )
+
+        ids = {str(m.id) for m in listed.memories}
+        assert str(theirs.id) not in ids
+
+    @pytest.mark.asyncio
+    async def test_unscoped_stats_stay_the_callers_own(self, db_session):
+        from services.memory_service import MemoryService
+
+        admin, oauth = await _user(db_session), await _user(db_session)
+        elsewhere = await _workspace(db_session, admin)
+        context = await _private_context(db_session, elsewhere, admin)
+        await _memory(db_session, context, admin)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        stats = await MemoryService(db_session).get_stats(
+            user_id=oauth.user_id, include_details=False
+        )
+
+        assert stats.total_count == 0
+
+
+class TestErasingOneLinkedAccount:
+    """The survivor keeps what it wrote in the other account's private context."""
+
+    @pytest.mark.asyncio
+    async def test_private_contexts_pass_to_the_linked_member(self, db_session):
+        from services.identity_link_service import hand_over_private_contexts
+
+        admin, oauth = await _user(db_session), await _user(db_session)
+        workspace = await _workspace(db_session, admin, oauth)
+        context = await _private_context(db_session, workspace, admin)
+        mine = await _memory(db_session, context, oauth)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        counts = await hand_over_private_contexts(db_session, admin.user_id)
+        await db_session.flush()
+
+        assert counts == {"contexts_handed_over": 1, "identity_links_removed": 2}
+        assert context.created_by == oauth.user_id
+        assert await linked_user_ids(db_session, oauth.user_id) == {oauth.user_id}
+        # The survivor reads its own memory through its own id from here on.
+        _, role = await PermissionService(db_session).check_context_access(
+            oauth.user_id, context.id
+        )
+        assert role.value == "owner"
+        assert await PermissionService(db_session).can_access_memory(
+            user_id=oauth.user_id,
+            memory_user_id=mine.user_id,
+            workspace_id=workspace.id,
+            context_id=context.id,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_context_with_no_linked_member_in_its_workspace_is_left_alone(self, db_session):
+        from services.identity_link_service import hand_over_private_contexts
+
+        admin, oauth = await _user(db_session), await _user(db_session)
+        workspace = await _workspace(db_session, admin)  # oauth is not a member
+        context = await _private_context(db_session, workspace, admin)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        counts = await hand_over_private_contexts(db_session, admin.user_id)
+
+        assert counts["contexts_handed_over"] == 0
+        assert context.created_by == admin.user_id
+
+    @pytest.mark.asyncio
+    async def test_an_unlinked_account_is_a_no_op(self, db_session):
+        from services.identity_link_service import hand_over_private_contexts
+
+        user = await _user(db_session)
+
+        assert await hand_over_private_contexts(db_session, user.user_id) == {
+            "contexts_handed_over": 0,
+            "identity_links_removed": 0,
+        }
+
+    @pytest.mark.asyncio
+    async def test_linked_by_does_not_keep_the_erased_id_in_a_larger_set(self, db_session):
+        from services.identity_link_service import hand_over_private_contexts
+
+        a, b, c = [await _user(db_session) for _ in range(3)]
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, b.user_id)
+        await service.link(a.user_id, c.user_id)
+
+        await hand_over_private_contexts(db_session, a.user_id)
+        await db_session.flush()
+
+        rows = (
+            (
+                await db_session.execute(
+                    select(IdentityLink).where(IdentityLink.user_id.in_([b.user_id, c.user_id]))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 2
+        assert all(row.linked_by != a.user_id for row in rows)
+        assert await linked_user_ids(db_session, b.user_id) == {b.user_id, c.user_id}

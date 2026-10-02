@@ -10,6 +10,11 @@ The module also hosts the account-linking sub-API introduced in #517:
 ``unlink-provider`` removes an existing linked provider, and ``providers``
 lists all providers currently linked to the session user.
 
+Identity links (#1784) live here too: ``identity-links`` lists the accounts
+counted as the same owner as the session user and the ones that can be
+linked, and links or unlinks one. A link is proved by the browser session
+holding both accounts, never by an email match.
+
 Auth model: every endpoint uses `SessionUser` (browser session only, no
 API keys) — a leaked API key must never be enough to trigger account
 self-deletion. This mirrors the discipline already used by `/users/me`
@@ -40,12 +45,14 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from services.account_erasure_service import AccountErasureService
 from services.account_linking_service import AccountLinkingService
+from services.identity_link_service import IdentityLinkService
 from services.security_notification_service import (
     PROVIDER_SIGN_IN_LABELS,
     SecurityEvent,
     schedule_security_notification,
 )
 from utils.datetime import to_utc_iso
+from utils.exceptions import NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -406,3 +413,167 @@ async def list_providers(
             for row in rows
         ]
     )
+
+
+# ---------------------------------------------------------------------------
+# Identity links (Issue #1784)
+# ---------------------------------------------------------------------------
+
+
+class IdentityLinkTarget(BaseModel):
+    """Body for linking or unlinking an account."""
+
+    user_id: str = Field(min_length=1, max_length=255)
+
+
+class LinkedIdentityItem(BaseModel):
+    """An account counted as the same owner as the session user.
+
+    ``linked_at`` is an ISO 8601 string with an explicit ``Z`` (``to_utc_iso``).
+    """
+
+    user_id: str
+    email: str | None = None
+    name: str | None = None
+    linked_at: str | None = None
+
+
+class LinkableIdentityItem(BaseModel):
+    """An account signed in on this browser session that is not linked yet."""
+
+    user_id: str
+    email: str | None = None
+    name: str | None = None
+
+
+class IdentityLinksResponse(BaseModel):
+    """The session user's link set, and what this session could add to it."""
+
+    linked: list[LinkedIdentityItem]
+    linkable: list[LinkableIdentityItem]
+
+
+class IdentityLinkStatusResponse(BaseModel):
+    """Returned by the link and unlink endpoints on success."""
+
+    status: str
+
+
+def _session_id(request: Request) -> str:
+    """The caller's session id, or 401 — ``SessionUser`` has already
+    established a session, so a missing cookie is a contradiction."""
+    session_id = request.cookies.get(auth_module.SESSION_COOKIE_NAME)
+    if not auth_module._session_manager or not session_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return session_id
+
+
+@router.get("/identity-links", response_model=IdentityLinksResponse, tags=["account-linking"])
+async def list_identity_links(
+    request: Request,
+    user: SessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> IdentityLinksResponse:
+    """List the accounts linked to the session user, and the linkable ones.
+
+    Linked accounts own the same private contexts and the memories in them
+    (roles and workspace membership stay per account). Linkable accounts are
+    the other accounts signed in on this browser session.
+    """
+    user_id = user["user_id"]
+    linked = await IdentityLinkService(db).list_linked(user_id)
+    linked_ids = {item.user_id for item in linked}
+    session_id = _session_id(request)
+    accounts = auth_module._session_manager.list_accounts(session_id)
+    linkable = []
+    for account in accounts:
+        account_id = account.get("user_id") or account.get("sub")
+        if account_id and account_id != user_id and account_id not in linked_ids:
+            linkable.append(
+                LinkableIdentityItem(
+                    user_id=account_id, email=account.get("email"), name=account.get("name")
+                )
+            )
+    return IdentityLinksResponse(
+        linked=[
+            LinkedIdentityItem(
+                user_id=item.user_id,
+                email=item.email,
+                name=item.name,
+                linked_at=to_utc_iso(item.linked_at),
+            )
+            for item in linked
+        ],
+        linkable=linkable,
+    )
+
+
+@router.post("/identity-links", response_model=IdentityLinkStatusResponse, tags=["account-linking"])
+async def link_identity(
+    body: IdentityLinkTarget,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user: SessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> IdentityLinkStatusResponse:
+    """Count another account as the same owner as the session user.
+
+    The proof is this browser session: the target must be one of the accounts
+    signed in on it, which each entered through its own sign-in. Nothing is
+    ever linked by an email match (#481). An id that is not in the session
+    answers 404 whether or not such an account exists.
+
+    Raises (via the global handler): 400 for the caller's own id, 404 for an
+    account not signed in here, 409 when the set would exceed its size cap.
+    """
+    user_id = user["user_id"]
+    session_id = _session_id(request)
+    if body.user_id != user_id and not auth_module._session_manager.session_holds_user(
+        session_id, body.user_id
+    ):
+        raise NotFoundException("Account")
+    await IdentityLinkService(db).link(
+        user_id,
+        body.user_id,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    for account in (user_id, body.user_id):
+        schedule_security_notification(
+            background_tasks,
+            user_id=account,
+            event=SecurityEvent.ACCOUNT_LINKED,
+            request=request,
+        )
+    return IdentityLinkStatusResponse(status="ok")
+
+
+@router.post(
+    "/identity-links/unlink", response_model=IdentityLinkStatusResponse, tags=["account-linking"]
+)
+async def unlink_identity(
+    body: IdentityLinkTarget,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user: SessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> IdentityLinkStatusResponse:
+    """Stop counting an account as the same owner as the session user.
+
+    Either side can cut the link from its own session; the other account
+    does not have to be signed in. 404 when the account is not linked.
+    """
+    await IdentityLinkService(db).unlink(
+        user["user_id"],
+        body.user_id,
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    for account in (user["user_id"], body.user_id):
+        schedule_security_notification(
+            background_tasks,
+            user_id=account,
+            event=SecurityEvent.ACCOUNT_UNLINKED,
+            request=request,
+        )
+    return IdentityLinkStatusResponse(status="ok")

@@ -47,6 +47,19 @@ from utils.exceptions import (
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def hand_over():
+    """#1784: the Postgres sweep first passes the subject's private contexts
+    to a linked account — queries the mocked sessions in this module do not
+    script. The real step is covered in
+    ``tests/integration/test_identity_links_db.py``."""
+    with patch(
+        "services.identity_link_service.hand_over_private_contexts",
+        new=AsyncMock(return_value={"contexts_handed_over": 0, "identity_links_removed": 0}),
+    ) as mock:
+        yield mock
+
+
 def _user(
     *,
     user_id: str = "u-1",

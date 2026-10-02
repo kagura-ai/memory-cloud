@@ -24,6 +24,18 @@ import pytest
 from utils.exceptions import OpenAIError, QdrantError
 
 
+@pytest.fixture(autouse=True)
+def _no_identity_links():
+    """#1784: a private recall resolves the caller's link set — one more
+    ``db.execute`` than the mocked sessions in this module script. No links."""
+
+    async def only_self(_db, user_id):
+        return frozenset({user_id})
+
+    with patch("services.search_service.linked_user_ids", only_self):
+        yield
+
+
 def _fake_config() -> SimpleNamespace:
     return SimpleNamespace(
         context_id=uuid4(),
