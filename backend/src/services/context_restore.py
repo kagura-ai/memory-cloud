@@ -11,11 +11,12 @@ default 30 days), so a deleted context can be brought back from them:
   (``tasks/embedding_tasks.py``) builds their points again.
 
 "The memories the deletion tombstoned" are the context's rows with the same
-``deleted_by`` as the context, soft-deleted at the context's ``deleted_at`` or
-up to ``DELETION_WINDOW`` before it. ``delete_context`` stamps both with one
-timestamp from v0.90.0 on; before that each memory got its own, a little
-earlier than the context's, which the window covers. A memory forgotten
-earlier, or tombstoned by Sleep, stays deleted.
+``deleted_by`` as the context, soft-deleted at the context's ``deleted_at``.
+``delete_context`` stamps both with one timestamp from v0.90.0 on; before that
+each memory got its own, a little earlier than the context's, so when no
+memory carries the context's timestamp the restore takes those up to
+``DELETION_WINDOW`` before it. A memory forgotten earlier, or tombstoned by
+Sleep, stays deleted.
 
 Not restored: what the deletion hard-deleted or rewrote — the context's
 neural edges, its entries in members' ``allowed_context_ids``, revoked
@@ -75,15 +76,26 @@ class ContextRestoreResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def _deleted_by_the_deletion(context: Context) -> Any:
-    """The predicate for the memories ``context``'s deletion tombstoned."""
+def _deleted_by_the_deletion(context: Context, *, shared_timestamp: bool) -> Any:
+    """The predicate for the memories ``context``'s deletion tombstoned.
+
+    With ``shared_timestamp`` (a deletion from v0.90.0 on) only the memories
+    stamped with the context's own ``deleted_at``; otherwise those up to
+    ``DELETION_WINDOW`` before it.
+    """
     assert context.deleted_at is not None
+    if shared_timestamp:
+        when = Memory.deleted_at == context.deleted_at
+    else:
+        when = and_(
+            Memory.deleted_at <= context.deleted_at,
+            Memory.deleted_at >= context.deleted_at - DELETION_WINDOW,
+        )
     return and_(
         Memory.workspace_id == context.workspace_id,
         Memory.context_id == context.id,
         Memory.deleted_at.is_not(None),
-        Memory.deleted_at <= context.deleted_at,
-        Memory.deleted_at >= context.deleted_at - DELETION_WINDOW,
+        when,
         Memory.deleted_by.is_not_distinct_from(context.deleted_by),
     )
 
@@ -183,7 +195,22 @@ async def restore_deleted_context(
                 "delete or unpublish it before restoring this one"
             )
 
-    by_the_deletion = _deleted_by_the_deletion(context)
+    # A deletion from v0.90.0 on stamped its memories with the context's own
+    # timestamp; when any memory carries it, the window (for older deletions)
+    # is not used, so a memory forgotten just before the deletion stays deleted.
+    shared_timestamp = (
+        await db.execute(
+            select(Memory.id)
+            .where(
+                Memory.workspace_id == context.workspace_id,
+                Memory.context_id == context.id,
+                Memory.deleted_at == context.deleted_at,
+                Memory.deleted_by.is_not_distinct_from(context.deleted_by),
+            )
+            .limit(1)
+        )
+    ).first() is not None
+    by_the_deletion = _deleted_by_the_deletion(context, shared_timestamp=shared_timestamp)
     counts = (
         await db.execute(
             select(

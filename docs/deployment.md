@@ -991,10 +991,12 @@ not refuse it (the dry run warns when the workspace goes over). Restoring the
 source of a merge (`merge_contexts` with `delete_source`) brings back memories
 the target context already holds a copy of.
 
-Memories deleted with a context before v0.90.0 carry their own deletion time,
-a little earlier than the context's; the restore takes those up to 10 minutes
-before the context's deletion time, deleted by the same user. A memory that
-user forgot in those 10 minutes comes back too.
+From v0.90.0 a context and the memories deleted with it share one deletion
+time, and the restore takes exactly those. Memories deleted with a context
+before v0.90.0 carry their own deletion time, a little earlier than the
+context's; for such a context the restore takes those up to 10 minutes before
+the context's deletion time, deleted by the same user, so a memory that user
+forgot in those 10 minutes comes back too.
 
 The older endpoint `POST /api/v1/admin/contexts/recover` rebuilds a context
 from surviving vector-store points, for a context whose rows are gone. It finds

@@ -179,6 +179,29 @@ async def test_deletion_from_before_the_shared_timestamp_is_restored(db_session,
 
 
 @pytest.mark.asyncio
+async def test_memory_forgotten_just_before_a_shared_timestamp_deletion_stays_deleted(
+    db_session, seed
+):
+    """From v0.90.0 the window is not used: only the context's own timestamp counts."""
+    context = seed.context()
+    db_session.add(context)
+    await db_session.flush()
+    kept = seed.memory(context)
+    forgotten = seed.memory(context, deleted_at=utcnow() - timedelta(minutes=3), deleted_by=_USER)
+    db_session.add_all([kept, forgotten])
+    await db_session.commit()
+    context_id, kept_id, forgotten_id = context.id, kept.id, forgotten.id
+
+    await _delete(db_session, context_id)
+    result = await restore_deleted_context(db_session, context_id, dry_run=False)
+
+    assert (result.memories_restored, result.memories_left_deleted) == (1, 1)
+    rows = await _memories(db_session, context_id)
+    assert rows[kept_id].deleted_at is None
+    assert rows[forgotten_id].deleted_at is not None
+
+
+@pytest.mark.asyncio
 async def test_dry_run_counts_and_changes_nothing(db_session, seed):
     context = seed.context()
     db_session.add(context)
