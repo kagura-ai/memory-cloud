@@ -1321,7 +1321,9 @@ async def list_memory_collections() -> list[str]:
     )
 
 
-async def delete_context_points_everywhere(workspace_id: str, context_id: str) -> dict[str, int]:
+async def delete_context_points_everywhere(
+    workspace_id: str, context_id: str, *, collections: list[str] | None = None
+) -> dict[str, int]:
     """Delete a context's points from every ``kagura_memories*`` collection (#1798).
 
     A context routes to one collection, but an embedding migration leaves its
@@ -1329,17 +1331,34 @@ async def delete_context_points_everywhere(workspace_id: str, context_id: str) -
     has no use for either. Asking every collection also means the caller does
     not have to resolve the routing of a context it is removing.
 
+    Args:
+        collections: The collections to ask, for a caller that deletes many
+            contexts and has listed them once (default: list them now).
+
     Returns:
         Collection name -> points deleted, for the collections that held any.
 
     Raises:
-        QdrantError: If listing or any single deletion fails.
+        QdrantError: If listing fails, or — after every collection has been
+            tried — if any single deletion failed.
     """
+    names = collections if collections is not None else await list_memory_collections()
     deleted: dict[str, int] = {}
-    for collection_name in await list_memory_collections():
-        count = await delete_context_points(workspace_id, context_id, collection_name)
+    failed: list[str] = []
+    for collection_name in names:
+        try:
+            count = await delete_context_points(workspace_id, context_id, collection_name)
+        except QdrantError as e:
+            # The collection that actually holds the points may come later.
+            failed.append(f"{collection_name}: {e}")
+            continue
         if count:
             deleted[collection_name] = count
+    if failed:
+        raise QdrantError(
+            f"Failed to delete context points from {len(failed)} collection(s) "
+            f"(deleted {sum(deleted.values())} elsewhere): {'; '.join(failed)}"
+        )
     return deleted
 
 

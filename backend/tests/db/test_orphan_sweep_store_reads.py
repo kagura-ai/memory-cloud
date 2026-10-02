@@ -220,3 +220,27 @@ class TestBatchedDelete:
         await qmod.delete_points_from_qdrant(["a", "b"], KAGURA_MEMORIES_COLLECTION)
 
         store.delete_points.assert_awaited_once_with(["a", "b"], KAGURA_MEMORIES_COLLECTION)
+
+
+class TestDeleteEverywhereKeepsGoing:
+    async def test_a_failing_collection_does_not_hide_the_one_that_holds_the_points(
+        self, mock_client
+    ):
+        mock_client.get_collections.return_value = _collections(KAGURA_MEMORIES_COLLECTION, VARIANT)
+        mock_client.count.side_effect = [RuntimeError("timeout"), SimpleNamespace(count=5)]
+
+        with pytest.raises(QdrantError, match="1 collection"):
+            await delete_context_points_everywhere(WS, CTX)
+
+        swept = [call.kwargs["collection_name"] for call in mock_client.delete.await_args_list]
+        assert swept == [VARIANT]
+
+    async def test_a_caller_that_listed_the_collections_is_not_made_to_list_again(
+        self, mock_client
+    ):
+        mock_client.count.return_value = SimpleNamespace(count=2)
+
+        deleted = await delete_context_points_everywhere(WS, CTX, collections=[VARIANT])
+
+        assert deleted == {VARIANT: 2}
+        mock_client.get_collections.assert_not_awaited()

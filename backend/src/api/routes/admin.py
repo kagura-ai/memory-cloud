@@ -1697,6 +1697,12 @@ async def recover_context(
             errors=errors,
         )
 
+    # #1798: the rows created below belong to points that already exist. Until
+    # this transaction commits they look row-less to the orphan sweep.
+    from db.point_writer_lock import hold_point_writer_lock
+
+    await hold_point_writer_lock(db)
+
     # Step 3: Create Context record if missing
     context_record_created = False
     existing_context = await db.execute(select(Context).where(Context.id == PyUUID(context_id)))

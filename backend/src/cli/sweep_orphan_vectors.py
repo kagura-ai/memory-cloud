@@ -28,6 +28,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
+
 from cli._oneshot import add_log_level_argument, configure_logging, run_plan_apply  # noqa: E402
 from services.orphan_vector_sweep import (  # noqa: E402
     DEFAULT_GRACE,
@@ -56,6 +58,9 @@ def _print_plan(result: SweepResult) -> None:
 
 def _print_applied(result: SweepResult) -> None:
     """What is left, next to the number it should match."""
+    for stats in result.collections:
+        if stats.error:
+            print(f"{stats.collection}: skipped: {stats.error}")
     print(
         f"{result.remaining} point(s) left; {result.live_embedded_memories} live embedded memories"
     )
@@ -64,8 +69,17 @@ def _print_applied(result: SweepResult) -> None:
 async def _main(args: argparse.Namespace) -> int:
     configure_logging(args.log_level)
     grace = timedelta(hours=args.grace_hours)
+
+    async def run(db: AsyncSession, dry_run: bool) -> SweepResult:
+        result = await sweep_orphan_points(db, dry_run=dry_run, grace=grace)
+        if result.refused:
+            # Not a result to report as "deleted 0": the operator has to run
+            # it again.
+            raise RuntimeError(result.refused)
+        return result
+
     return await run_plan_apply(
-        run=lambda db, dry_run: sweep_orphan_points(db, dry_run=dry_run, grace=grace),
+        run=run,
         print_plan=_print_plan,
         changes=lambda result: result.orphans if result.dry_run else result.deleted,
         noun="orphaned point",

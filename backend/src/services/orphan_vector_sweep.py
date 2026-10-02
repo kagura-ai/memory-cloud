@@ -190,7 +190,7 @@ async def sweep_orphan_points(
 
     Args:
         db: Async session. Nothing is written to Postgres. A pass that
-            deletes rolls the session back when it is done, to release the
+            deletes rolls the session back after each batch, to release the
             point-writer lock.
         dry_run: Count only.
         grace: How long a soft-delete must have stood before its point counts
@@ -205,8 +205,8 @@ async def sweep_orphan_points(
         SweepResult with per-collection counts.
 
     Raises:
-        QdrantError: If the collections cannot be listed or a delete fails.
-            A single collection that cannot be read is skipped and reported.
+        QdrantError: If the collections cannot be listed. A single collection
+            that cannot be read or written is skipped and reported.
     """
     cutoff = utcnow() - grace
     names = collections if collections is not None else await list_memory_collections()
@@ -237,6 +237,9 @@ async def sweep_orphan_points(
             # must not cost the others their sweep.
             stats.error = str(e)
             found = []
+            # A partial count would be asked about, weighed against the ratio
+            # guard and never deleted.
+            stats.no_row = stats.tombstoned = stats.context_deleted = 0
             logger.warning("orphan_vector_sweep_collection_skipped", collection=name, error=str(e))
         candidates[name] = found
 
@@ -250,42 +253,60 @@ async def sweep_orphan_points(
     if dry_run or not result.orphans:
         return result
 
-    if max_orphan_ratio is not None and result.orphans > result.scanned * max_orphan_ratio:
+    # Weighed over the collections that were read in full: a skipped one
+    # contributes no orphans, and its partial point count must not dilute
+    # the share either.
+    readable = sum(c.scanned for c in result.collections if c.error is None)
+    if max_orphan_ratio is not None and result.orphans > readable * max_orphan_ratio:
         result.refused = (
-            f"{result.orphans} of {result.scanned} points look orphaned, more than "
+            f"{result.orphans} of {readable} points look orphaned, more than "
             f"{max_orphan_ratio:.0%}; nothing deleted"
         )
         logger.error(
             "orphan_vector_sweep_refused",
             orphans=result.orphans,
-            scanned=result.scanned,
+            scanned=readable,
             max_orphan_ratio=max_orphan_ratio,
         )
         return result
 
-    # Second look, with every point writer out of the way: what was row-less
-    # only because its transaction was still open has its row by now.
-    if not await wait_for_point_writers(db, timeout_seconds=POINT_WRITER_WAIT_SECONDS):
-        result.refused = (
-            f"a merge or a Sleep rollback was still writing points after "
-            f"{POINT_WRITER_WAIT_SECONDS:.0f}s; nothing deleted"
-        )
-        logger.warning("orphan_vector_sweep_point_writers_busy", orphans=result.orphans)
-        return result
-
-    try:
-        for stats in result.collections:
-            refs = candidates[stats.collection]
-            for start in range(0, len(refs), _DELETE_BATCH):
-                batch = refs[start : start + _DELETE_BATCH]
+    # Second look, a batch at a time, with every point writer out of the way:
+    # what was row-less only because its transaction was still open has its
+    # row by now. The lock is released after each batch, so a merge or a Sleep
+    # rollback never waits for more than one of them.
+    for stats in result.collections:
+        refs = candidates[stats.collection]
+        for start in range(0, len(refs), _DELETE_BATCH):
+            batch = refs[start : start + _DELETE_BATCH]
+            if not await wait_for_point_writers(db, timeout_seconds=POINT_WRITER_WAIT_SECONDS):
+                result.refused = (
+                    f"a merge or a Sleep rollback was still writing points after "
+                    f"{POINT_WRITER_WAIT_SECONDS:.0f}s; stopped after deleting {result.deleted}"
+                )
+                logger.warning(
+                    "orphan_vector_sweep_point_writers_busy",
+                    orphans=result.orphans,
+                    deleted=result.deleted,
+                )
+                return result
+            try:
                 still_orphaned = await _classify(db, batch, cutoff)
                 point_ids = [ref.point_id for ref in batch if ref.point_id in still_orphaned]
                 await delete_points_from_qdrant(point_ids, stats.collection)
                 stats.deleted += len(point_ids)
-    finally:
-        # Ends the transaction, which is what releases the lock: writers must
-        # not wait on a caller that keeps its session open.
-        await db.rollback()
+            except QdrantError as e:
+                # Same rule as the scan: one collection that cannot be
+                # written must not cost the others their sweep.
+                stats.error = str(e)
+                logger.warning(
+                    "orphan_vector_sweep_collection_skipped",
+                    collection=stats.collection,
+                    error=str(e),
+                )
+                break
+            finally:
+                # Ends the transaction, which is what releases the lock.
+                await db.rollback()
 
     logger.info(
         "orphan_vector_sweep_completed",

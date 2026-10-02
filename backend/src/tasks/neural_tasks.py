@@ -344,8 +344,13 @@ async def cleanup_deleted_memories_task():
 
 
 def _orphan_sweep_enabled() -> bool:
-    """Whether the daily orphan vector sweep runs (#1798). Read at call time."""
-    return os.getenv("ORPHAN_VECTOR_SWEEP_ENABLED", "true").lower() != "false"
+    """Whether the daily orphan vector sweep runs (#1798). Read at call time.
+
+    The switch guards a job that deletes, so every common way of writing
+    "off" turns it off.
+    """
+    value = os.getenv("ORPHAN_VECTOR_SWEEP_ENABLED", "true").strip().lower()
+    return value not in ("false", "0", "no", "off")
 
 
 async def sweep_orphan_vectors_task() -> None:

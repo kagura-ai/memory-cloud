@@ -91,3 +91,26 @@ class TestSweepOrphanVectorsTask:
         assert jobs["sweep_orphan_vectors"].args[0] is sweep_orphan_vectors_task
         fields = {f.name: str(f) for f in jobs["sweep_orphan_vectors"].kwargs["trigger"].fields}
         assert (fields["hour"], fields["minute"]) == ("4", "30")
+
+
+class TestKillSwitchSpellings:
+    """The switch guards a job that deletes: every way of writing "off" is off."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", ["false", "FALSE", " false ", "0", "no", "off", "Off"])
+    async def test_off(self, sweep, monkeypatch, value):
+        monkeypatch.setenv(_ENV, value)
+
+        await sweep_orphan_vectors_task()
+
+        sweep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", ["true", "1", "yes", ""])
+    async def test_on(self, sweep, monkeypatch, value):
+        monkeypatch.setenv(_ENV, value)
+
+        with patch("tasks.neural_tasks.get_db", mock_get_db_factory(MagicMock())):
+            await sweep_orphan_vectors_task()
+
+        sweep.assert_awaited_once()

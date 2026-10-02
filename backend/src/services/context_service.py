@@ -1463,6 +1463,7 @@ class ContextService:
         workspace_id: str,
         context_name: str,
         context_id: str | None = None,
+        collections: list[str] | None = None,
     ) -> None:
         """Delete a context's points from every kagura_memories* collection.
 
@@ -1474,6 +1475,8 @@ class ContextService:
             workspace_id: Workspace ID (as string)
             context_name: Context name (for logging only)
             context_id: Context ID (required for point deletion)
+            collections: The collections to ask, when the caller has listed
+                them once for many contexts
         """
         from db.qdrant import delete_context_points_everywhere
 
@@ -1487,7 +1490,9 @@ class ContextService:
                 return
 
             # Single collection migration: Delete points for this context
-            await delete_context_points_everywhere(workspace_id, context_id)
+            await delete_context_points_everywhere(
+                workspace_id, context_id, collections=collections
+            )
 
             logger.info(
                 "context_points_deleted",

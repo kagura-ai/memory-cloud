@@ -270,3 +270,122 @@ class TestSafetyRails:
         after = (await _sweep(db_session, _FakeStore([]))).live_embedded_memories
 
         assert after == before + 1
+
+
+class TestPartialFailures:
+    @pytest.mark.asyncio
+    async def test_a_scan_that_fails_part_way_reports_no_orphans_for_that_collection(
+        self, db_session
+    ):
+        """Its candidates are dropped, so its counts must not be asked about
+        or weighed against the ratio guard."""
+
+        async def scroll(collection_name, *, page_size=1000):
+            yield [_ref(uuid4()), _ref(uuid4())]
+            raise QdrantError("scroll failed on page 2")
+
+        with (
+            patch.object(sweep_module, "scroll_point_refs", scroll),
+            patch.object(sweep_module, "delete_points_from_qdrant", AsyncMock()) as delete,
+        ):
+            result = await sweep_orphan_points(
+                db_session, dry_run=False, collections=[COLLECTION], max_orphan_ratio=0.5
+            )
+
+        assert result.collections[0].error is not None
+        assert result.orphans == 0
+        assert result.refused is None
+        delete.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_delete_that_fails_does_not_stop_the_other_collections(self, db_session):
+        first, second = uuid4(), uuid4()
+        refs = {"kagura_memories_a": [_ref(first)], "kagura_memories_b": [_ref(second)]}
+        deleted: list[str] = []
+
+        async def scroll(collection_name, *, page_size=1000):
+            yield refs[collection_name]
+
+        async def delete(point_ids, collection_name):
+            if collection_name == "kagura_memories_a":
+                raise QdrantError("collection dropped")
+            deleted.extend(point_ids)
+
+        with (
+            patch.object(sweep_module, "scroll_point_refs", scroll),
+            patch.object(sweep_module, "delete_points_from_qdrant", delete),
+        ):
+            result = await sweep_orphan_points(db_session, dry_run=False, collections=list(refs))
+
+        failed, swept = result.collections
+        assert failed.error is not None
+        assert failed.deleted == 0
+        assert swept.deleted == 1
+        assert deleted == [str(second)]
+
+
+class TestLockIsHeldOneBatchAtATime:
+    @pytest.mark.asyncio
+    async def test_the_lock_is_retaken_for_every_batch(self, db_session):
+        """Writers wait for one batch, never for the whole backlog."""
+        store = _FakeStore([_ref(uuid4()), _ref(uuid4()), _ref(uuid4())])
+
+        with (
+            patch.object(sweep_module, "_DELETE_BATCH", 1),
+            patch.object(
+                sweep_module, "wait_for_point_writers", AsyncMock(return_value=True)
+            ) as wait,
+        ):
+            result = await _sweep(db_session, store, dry_run=False)
+
+        assert wait.await_count == 3
+        assert result.deleted == 3
+
+    @pytest.mark.asyncio
+    async def test_a_writer_that_turns_up_mid_run_stops_it_and_says_how_far_it_got(
+        self, db_session
+    ):
+        store = _FakeStore([_ref(uuid4()), _ref(uuid4())])
+
+        with (
+            patch.object(sweep_module, "_DELETE_BATCH", 1),
+            patch.object(
+                sweep_module, "wait_for_point_writers", AsyncMock(side_effect=[True, False])
+            ),
+        ):
+            result = await _sweep(db_session, store, dry_run=False)
+
+        assert result.deleted == 1
+        assert result.refused is not None
+        assert "deleting 1" in result.refused
+
+    @pytest.mark.asyncio
+    async def test_the_ratio_guard_weighs_only_the_collections_it_could_read(self, db_session):
+        """A half-read collection adds neither orphans nor points to the share."""
+        live = _memory()
+        db_session.add(live)
+        await db_session.flush()
+        gone = [uuid4(), uuid4()]
+        healthy = [_ref(live.id), *(_ref(g) for g in gone)]
+
+        async def scroll(collection_name, *, page_size=1000):
+            if collection_name == "kagura_memories_broken":
+                yield [_ref(uuid4()) for _ in range(50)]
+                raise QdrantError("scroll failed on page 2")
+            yield healthy
+
+        with (
+            patch.object(sweep_module, "scroll_point_refs", scroll),
+            patch.object(sweep_module, "delete_points_from_qdrant", AsyncMock()) as delete,
+        ):
+            result = await sweep_orphan_points(
+                db_session,
+                dry_run=False,
+                collections=["kagura_memories_broken", COLLECTION],
+                max_orphan_ratio=0.5,
+            )
+
+        # 2 of the 3 readable points are orphans; the 50 half-read ones do not
+        # make that look like 2 of 53.
+        assert result.refused is not None
+        delete.assert_not_awaited()

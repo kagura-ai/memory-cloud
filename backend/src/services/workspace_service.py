@@ -531,10 +531,27 @@ class WorkspaceService:
         contexts = contexts_result.scalars().all()
 
         context_service = ContextService(self.db)
+        # Listed once for the whole workspace, not once per context (#1798).
+        # None (listing failed) lets each context try again on its own.
+        collections: list[str] | None = None
+        if contexts:
+            from db.qdrant import list_memory_collections
+
+            try:
+                collections = await list_memory_collections()
+            except Exception as e:
+                logger.warning(
+                    "org_delete_qdrant_list_collections_failed",
+                    workspace_id=str(workspace_id),
+                    error=str(e),
+                )
         for context in contexts:
             try:
                 await context_service._delete_context_collection(
-                    str(workspace_id), context.name, context_id=str(context.id)
+                    str(workspace_id),
+                    context.name,
+                    context_id=str(context.id),
+                    collections=collections,
                 )
                 logger.info(
                     "org_delete_qdrant_collection",

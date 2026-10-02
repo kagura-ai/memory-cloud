@@ -101,3 +101,25 @@ class TestSweepOrphanVectorsCommand:
 
         assert _run([], sweep) == 1
         assert "error: qdrant down" in capsys.readouterr().err
+
+
+class TestApplyThatDeletedLessThanAsked:
+    def test_a_refused_apply_exits_non_zero_and_says_why(self, capsys):
+        refused = _result(dry_run=False)
+        refused.refused = "a merge or a Sleep rollback was still writing points"
+        sweep = AsyncMock(side_effect=[_result(dry_run=True), refused])
+
+        assert _run(["--apply", "--yes"], sweep) == 1
+
+        captured = capsys.readouterr()
+        assert "still writing points" in captured.err
+        assert "deleted 0" not in captured.out
+
+    def test_a_collection_skipped_during_apply_is_named(self, capsys):
+        applied = _result(dry_run=False, deleted=3)
+        applied.collections[0].error = "collection dropped"
+        sweep = AsyncMock(side_effect=[_result(dry_run=True), applied])
+
+        assert _run(["--apply", "--yes"], sweep) == 0
+
+        assert "kagura_memories: skipped: collection dropped" in capsys.readouterr().out
