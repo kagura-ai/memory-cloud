@@ -944,11 +944,61 @@ A merge or a Sleep rollback that is still writing points makes the delete pass
 wait, up to 30 seconds; past that the pass deletes nothing and the next run
 tries again. Only one API process per deployment runs the scheduled sweep.
 
-The admin endpoint `POST /api/v1/admin/contexts/recover` rebuilds a context
-from its surviving points, so it finds nothing for a context deleted on
-v0.88.0 or later. The soft-deleted rows remain in Postgres until the tombstone
-purge (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days); there is no
-command yet that restores a context from them.
+The sweep reads Postgres one page of points at a time and ends its
+transaction after each page, so a long scan is not cut short by
+`idle_in_transaction_session_timeout`.
+
+### Restoring a deleted context — Issue #1804
+
+Deleting a context soft-deletes it and its memories, and removes their points.
+The rows stay in Postgres until the tombstone purge
+(`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days, counted from the
+deletion), and a context can be restored from them within that window:
+
+```bash
+python -m src.cli.restore_context <context-id>                 # plan: what would come back, changes nothing
+python -m src.cli.restore_context <context-id> --apply --yes   # restore
+python -m src.cli.restore_context <context-id> --name notes-2 --apply   # under another name
+```
+
+or, as a system admin, `POST /api/v1/admin/contexts/{context_id}/restore` with
+`{"dry_run": false}` (`dry_run` defaults to `true`; `new_name` restores under
+another name). The restore is recorded in the audit log.
+
+**What comes back.** The context row, and the memories its deletion
+soft-deleted: they are live again and marked `pending`, and the embedding sweep
+rebuilds their vectors — about 2,400 memories an hour. Until a memory is
+re-embedded, recall does not find it. The context's search settings were never
+deleted and still apply.
+
+**What does not come back.**
+
+- Memories the purge already removed. After the retention window the context
+  comes back empty — the plan shows the count before you apply.
+- Memories forgotten before the deletion, and memories Sleep merged or archived.
+  They were already deleted when the context was; the plan lists them as
+  "stay deleted".
+- The context's neural edges (deleted outright; Sleep rebuilds them where it runs),
+  its entries in members' context restrictions (`allowed_context_ids` — grant
+  them again), and the resource tokens revoked with it.
+
+**Refusals.** A context that is not deleted; a workspace where a live context
+now has the same name (restore with `--name` / `new_name`); a published context
+whose `resource_id` a live context now serves. The restore is an admin action:
+it does not count against memory quotas, and it is not refused by the plan's
+context cap (the plan warns when the workspace goes over it). Restoring the
+source of a merge (`merge_contexts` with `delete_source`) brings back memories
+the target context already holds a copy of.
+
+Memories deleted with a context before v0.90.0 carry their own deletion time,
+a little earlier than the context's; the restore takes those up to 10 minutes
+before the context's deletion time, deleted by the same user. A memory that
+user forgot in those 10 minutes comes back too.
+
+The older endpoint `POST /api/v1/admin/contexts/recover` rebuilds a context
+from surviving vector-store points, for a context whose rows are gone. It finds
+no points for a context deleted on v0.88.0 or later, and says to use the
+restore above when the context's row is still there.
 
 ## Reranking — Issue #1572
 
