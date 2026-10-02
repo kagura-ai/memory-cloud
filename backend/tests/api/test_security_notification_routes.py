@@ -762,6 +762,7 @@ class TestConnectorKeys:
         result.plaintext_kmc_api_key = PLAINTEXT_KEY if key_name else None
         result.kmc_api_key_name = key_name
         result.token.id = 1
+        result.token.public_id = "rtok_" + "1" * 22
         result.plaintext_token = "kagura_resource_x"
         result.token.quota_events_per_hour = 1000
         return result
