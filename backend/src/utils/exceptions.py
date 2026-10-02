@@ -1071,7 +1071,10 @@ class CurrentPasswordMismatchError(MemoryCloudException):
 
 
 class IdentityLinkSignInRequiredError(MemoryCloudException):
-    """An identity link needs a recent sign-in of both accounts (403, #1803).
+    """An identity link needs a recent proof of both accounts (403, #1803, #1818).
+
+    A proof is a password sign-in or a Google sign-in with a recent
+    ``auth_time``; see ``SessionManager.proven_at``.
 
     403 rather than 401: the session is valid, and web clients treat a 401 as
     "signed out". Raised only for an account this session holds, so it says
@@ -1081,7 +1084,8 @@ class IdentityLinkSignInRequiredError(MemoryCloudException):
     def __init__(
         self,
         message: str = (
-            "Sign in to both accounts again on this browser, then link them within a few minutes"
+            "Prove both accounts again on this browser (a password sign-in, or a "
+            "Google confirmation), then link them within a few minutes"
         ),
     ) -> None:
         super().__init__(message, status_code=403, error_code="AUTH-305")

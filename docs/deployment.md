@@ -486,26 +486,59 @@ When the person keeps using both accounts, link them:
 2. From the account switcher, choose **Add another account** and sign in with
    the OAuth account. The browser session now holds both.
 3. Open **Profile Settings**, find **Linked accounts**, and link the other
-   account — within 10 minutes of the two sign-ins.
+   account — within 10 minutes of the two proofs (see below; for a Google
+   account, use **Confirm with Google** there).
 
 That browser session is the proof: each account entered it through its own
 sign-in. An account that is not signed in on the session cannot be linked,
 and nothing is ever linked by an email match. An account stays in a browser
 session for as long as the session lives, so the link also asks for a recent
-sign-in (#1803): **both** accounts must have signed in on this browser within
-the last 10 minutes. A link is symmetric — a stale sign-in on either side
-would let whoever holds an old session give that account's private contexts
-to another. When one of them signed in earlier, the page says so; sign in to
-it again from the account switcher (**Add another account** refreshes an
-account that is already there) and link. The request answers `403`
-(`AUTH-305`) otherwise. Sessions started before this check existed carry no
-sign-in time and need a fresh sign-in too.
+proof of each account (#1803, #1818): **both** accounts must have proved
+their credential on this browser within the last 10 minutes. A link is
+symmetric — a stale proof on either side would let whoever holds an old
+session give that account's private contexts to another. When one of them
+has no recent proof, the page says so. The request answers `403`
+(`AUTH-305`) otherwise.
 
-The window proves a sign-in to this service, not that a password was typed.
-An OAuth sign-in goes through when the browser still has a session with the
-provider (Google, GitHub), often with a click and no password. On a shared or
-unattended computer someone could add both accounts and link them that way,
-so sign out of the provider there as well as of Kagura.
+What counts as a proof (#1818):
+
+- **A password sign-in** (with MFA when the account has it). It always
+  starts a new browser session, so sign in with the password first, then
+  add the other account.
+- **A Google sign-in started from "Confirm with Google"** on the Linked
+  accounts card (`GET /api/v1/auth/google/login?add_account=1&link_proof=1`).
+  It asks Google for the `auth_time` claim — when the person last actually
+  signed in to Google — and records that time, read from the ID token after
+  verifying it (Google's signature, `aud` = this deployment's client id,
+  `iss`, `exp`, and the same `sub` as userinfo). An `auth_time` older than
+  10 minutes does not count, even though the round trip itself just
+  happened: a browser with a live Google session goes through without a
+  password. Google cannot be asked to re-authenticate (it has no
+  `prompt=login` and does not honour `max_age`), so the person signs out of
+  Google and in again when their Google sign-in is too old. A missing
+  `auth_time` does not count either (fail closed).
+- **Not** an ordinary OAuth sign-in or **Add another account**, and **never
+  a GitHub sign-in**: GitHub reports no authentication time.
+
+Google returns `auth_time` only to an OAuth app that is **published (In
+production) and Verified**, with **Session age claims** turned on (Google
+Auth Platform → Settings → Advanced settings). Without it, a Google account
+cannot be linked on this deployment, and the backend logs
+`link_proof_auth_time_missing` for each attempt. Ordinary sign-ins send
+Google exactly the request they always did.
+
+`IDENTITY_LINK_ALLOW_OAUTH_SIGNIN_PROOF=true` (default `false`) brings back
+the #1803 rule for any OAuth sign-in with no provider time: a GitHub sign-in,
+an ordinary Google sign-in, or a Google app without Session age claims
+counts as a proof at the moment it completed. That proves only that the
+browser could complete a sign-in, not that a password was typed — on a
+shared or unattended computer someone could add both accounts and link them
+that way. Turn it on only where that is acceptable, and sign out of the
+provider as well as of Kagura on shared computers. A Google `auth_time` that
+is present still counts as it is.
+
+Sessions started before these checks existed carry no proof and need a
+fresh one.
 
 What a link does:
 
