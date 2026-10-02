@@ -34,6 +34,14 @@ def _report() -> MagicMock:
     return report
 
 
+@pytest.fixture(autouse=True)
+def point_writer_lock():
+    """#1798: the restore takes the point-writer lock — one ``db.execute`` more
+    than the mocked sessions below script."""
+    with patch("services.sleep.undo.hold_point_writer_lock", new=AsyncMock()) as lock:
+        yield lock
+
+
 def _db(first_row, memory=None) -> AsyncMock:
     """AsyncMock db: 1st execute -> (action, report) join, 2nd -> memory,
     3rd -> the restore UPDATE."""
@@ -96,6 +104,33 @@ async def test_refuses_non_sleep_deletion() -> None:
     with pytest.raises(UndoMergeError) as exc:
         await undo_merge_action(db, 42, acting_user_id="admin-user")
     assert exc.value.code == "not_merge_deleted"
+
+
+@pytest.mark.asyncio
+async def test_restore_holds_the_point_writer_lock_before_the_vector_is_rebuilt(
+    point_writer_lock,
+) -> None:
+    """#1798: until the restore commits, the row still reads as a tombstone to
+    the orphan sweep, which would delete the rebuilt vector."""
+    action = _action()
+    loser = MagicMock()
+    loser.id = action.target_id
+    loser.deleted_at = MagicMock()
+    loser.deleted_by = "sleep_maintenance"
+    db = _db((action, _report()), memory=loser)
+    order: list[str] = []
+    point_writer_lock.side_effect = lambda _db: order.append("lock")
+
+    async def re_embed(*_args, **_kwargs):
+        order.append("re_embed")
+
+    with (
+        patch("services.sleep.undo.re_embed_memory_to_qdrant", new=re_embed),
+        patch("services.embedding_service.EmbeddingService"),
+    ):
+        await undo_merge_action(db, 42, acting_user_id="admin-user")
+
+    assert order == ["lock", "re_embed"]
 
 
 @pytest.mark.asyncio

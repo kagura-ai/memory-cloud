@@ -39,7 +39,7 @@ dependencies = [
 
     # Vector Database (Qdrant)
     # Both bounds track the pinned server image (qdrant/qdrant:v1.19.1 in
-    # docker-compose.yml, .github/workflows/eval-nightly.yml and
+    # docker-compose.yml, .github/workflows/ci.yml and eval-nightly.yml, and
     # terraform/single-server/docker-compose.*.yml): the client warns unless
     # major matches and minor differs by <= 1. A 1.18 client is inside the
     # window for servers 1.17, 1.18 and 1.19, so the same release runs before,

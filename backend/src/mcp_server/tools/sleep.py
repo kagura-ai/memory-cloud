@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import CursorResult
 
 from config.constants import TOMBSTONE_PURGER_CLAUSE
+from db.point_writer_lock import hold_point_writer_lock
 from mcp_server.tools._errors import classify_cause, new_correlation_id
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
@@ -453,6 +454,9 @@ async def _restore_sleep_tombstone(
     ``errors`` and never counted. Result[Any] at type level, CursorResult at
     runtime — .rowcount lives on the latter (#1442).
     """
+    # #1798: the vector is rebuilt before this UPDATE commits; until then the
+    # row still reads as a tombstone to the orphan sweep.
+    await hold_point_writer_lock(db)
     restore_result = await db.execute(
         restore_sleep_tombstone_stmt(memory_id, ctx.user_id, deleted_by=deleted_by)
     )

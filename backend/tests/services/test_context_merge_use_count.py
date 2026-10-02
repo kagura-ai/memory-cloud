@@ -64,6 +64,22 @@ def _source_memory(
     )
 
 
+@pytest.fixture(autouse=True)
+def vector_store_calls():
+    """#1798: merge takes the point-writer advisory lock (one more
+    ``db.execute`` than these mocked sessions script) and removes the source's
+    points after the commit. Yields ``(lock, remove_points)``."""
+    with (
+        patch("db.point_writer_lock.hold_point_writer_lock", new_callable=AsyncMock) as lock,
+        patch(
+            "db.qdrant.delete_context_points_everywhere",
+            new_callable=AsyncMock,
+            return_value={},
+        ) as remove_points,
+    ):
+        yield lock, remove_points
+
+
 async def _upsert_all(**kwargs) -> set[str]:
     """Stand-in for Qdrant: every requested point lands."""
     return set(kwargs["memory_id_mapping"].values())
@@ -386,3 +402,46 @@ async def test_an_unembedded_row_counts_as_transferred():
         live_count=1,
     )
     delete_called.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# #1798: the vector-store side of a merge
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_merge_holds_the_point_writer_lock_while_copies_have_no_committed_row(
+    vector_store_calls,
+):
+    lock, _ = vector_store_calls
+
+    await _run_merge([_source_memory])
+
+    lock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_merge_with_nothing_to_copy_takes_no_lock(vector_store_calls):
+    lock, _ = vector_store_calls
+
+    await _run_merge([lambda u, c: _source_memory(u, c, embedding_status="pending")])
+
+    lock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_delete_source_removes_the_source_points(vector_store_calls):
+    _, remove_points = vector_store_calls
+
+    await _run_merge([_source_memory], delete_source=True, live_count=1)
+
+    remove_points.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_keeping_the_source_keeps_its_points(vector_store_calls):
+    _, remove_points = vector_store_calls
+
+    await _run_merge([_source_memory])
+
+    remove_points.assert_not_awaited()

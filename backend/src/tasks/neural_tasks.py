@@ -287,7 +287,9 @@ async def cleanup_deleted_memories_task():
     """Permanently delete every soft-deleted memory older than the sweep window.
 
     Runs daily at 4 AM UTC. Qdrant points are already removed at soft-delete
-    time (forget, merge, archive), so the PostgreSQL row is the only residue.
+    time (forget, context deletion, merge, archive), best-effort; the row is
+    what this task removes, and ``sweep_orphan_vectors_task`` removes a point
+    that outlived its row (#1798).
 
     #1521: the window is ``CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`` (default
     30; 0 disables the sweep). It applies to every tombstone regardless of
@@ -341,6 +343,64 @@ async def cleanup_deleted_memories_task():
         logger.error("cleanup_deleted_memories_task_failed", error=str(e), exc_info=True)
 
 
+def _orphan_sweep_enabled() -> bool:
+    """Whether the daily orphan vector sweep runs (#1798). Read at call time.
+
+    The switch guards a job that deletes, so every common way of writing
+    "off" turns it off.
+    """
+    value = os.getenv("ORPHAN_VECTOR_SWEEP_ENABLED", "true").strip().lower()
+    return value not in ("false", "0", "no", "off")
+
+
+async def sweep_orphan_vectors_task() -> None:
+    """Delete vector-store points that no live row points at (#1798).
+
+    Runs daily at 4:30 AM UTC, after the tombstone purge. Postgres commits
+    first and the vector store follows best-effort, so a failed vector delete
+    leaves a point nothing else removes. See services/orphan_vector_sweep.py
+    for what counts as an orphan; a point whose memory is live never does.
+
+    The scheduled run refuses to delete more than half of what it scanned —
+    that is a sweep pointed at the wrong database, or a backlog an operator
+    should look at first with ``python -m src.cli.sweep_orphan_vectors``.
+    ``ORPHAN_VECTOR_SWEEP_ENABLED=false`` turns the scheduled run off.
+    """
+    if not _orphan_sweep_enabled():
+        logger.info("orphan_vector_sweep_disabled")
+        return
+
+    logger.info("orphan_vector_sweep_task_started")
+    try:
+        from services.orphan_vector_sweep import (
+            SCHEDULED_MAX_ORPHAN_RATIO,
+            sweep_orphan_points,
+        )
+        from tasks.single_flight import single_flight
+
+        # One API process per deployment sweeps; the others would only repeat
+        # the full scan and report the same deletes again.
+        async with single_flight("orphan_vector_sweep") as acquired:
+            if not acquired:
+                logger.info("orphan_vector_sweep_task_skipped", reason="another_process_running")
+                return
+            async for db in get_db():
+                result = await sweep_orphan_points(
+                    db, dry_run=False, max_orphan_ratio=SCHEDULED_MAX_ORPHAN_RATIO
+                )
+                logger.info(
+                    "orphan_vector_sweep_task_completed",
+                    scanned=result.scanned,
+                    orphans=result.orphans,
+                    deleted=result.deleted,
+                    refused=result.refused,
+                    live_embedded_memories=result.live_embedded_memories,
+                )
+                break
+    except Exception as e:
+        logger.error("orphan_vector_sweep_task_failed", error=str(e), exc_info=True)
+
+
 def schedule_neural_tasks(scheduler: AsyncIOScheduler) -> None:
     """Schedule Neural Memory background tasks.
 
@@ -382,3 +442,13 @@ def schedule_neural_tasks(scheduler: AsyncIOScheduler) -> None:
         replace_existing=True,
     )
     logger.info("scheduled_cleanup_deleted_task")
+
+    # Orphan vector sweep (#1798): daily at 4:30 AM UTC, after the purge above.
+    scheduler.add_job(
+        sweep_orphan_vectors_task,
+        trigger=CronTrigger(hour=4, minute=30),
+        id="sweep_orphan_vectors",
+        name="Sweep Orphan Vectors",
+        replace_existing=True,
+    )
+    logger.info("scheduled_orphan_vector_sweep_task")
