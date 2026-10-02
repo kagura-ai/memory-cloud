@@ -125,3 +125,9 @@ async def test_bcrypt4_era_hash_of_a_long_password_still_signs_in(redis, monkeyp
 
     assert response.status_code == 200
     assert KEY not in redis.store  # failures cleared on success
+
+
+@pytest.fixture(autouse=True)
+def _password_unchanged(monkeypatch):
+    """The #1809 re-check reads Postgres; these tests stub the database."""
+    monkeypatch.setattr(auth_routes, "_password_still_current", AsyncMock(return_value=True))

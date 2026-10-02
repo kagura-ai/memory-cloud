@@ -17,7 +17,11 @@ This sweep removes those points. A point is an orphan when:
 
 A point whose memory row is live is never an orphan, whatever else is true.
 A resource point in a live context is always kept, even when its document's
-memory was forgotten: the point id cannot be matched to a row.
+memory was forgotten: the point id cannot be matched to a row. Its payload's
+``memory_id`` is no way around that (#1808): ``ResourceIndexer._apply_upsert``
+writes a fresh ``uuid4()`` there before it looks the row up, so a re-index of
+a document that already has a row stores an id no row carries, and judging by
+it would delete live points.
 
 It runs daily from ``tasks/neural_tasks.py`` and on demand from
 ``cli/sweep_orphan_vectors.py``.

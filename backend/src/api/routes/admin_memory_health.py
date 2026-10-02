@@ -62,7 +62,8 @@ class MemoryHealthSection(BaseModel):
     Attributes:
         status: ok | warn | fail (fail only on deterministic facts).
         metrics: Label-free numeric signals backing the grade.
-        notes: Structured explanations for every non-ok contribution.
+        notes: Structured explanations for every non-ok contribution, plus
+            informational notes on ok sections (e.g. an idle store).
     """
 
     status: HealthStatus

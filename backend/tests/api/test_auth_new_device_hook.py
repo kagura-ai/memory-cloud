@@ -172,3 +172,9 @@ async def test_provider_sign_in_falls_back_to_the_sub_when_lookup_fails(
     )
 
     assert note.await_args.kwargs == {"user_id": "gh-7", "sign_in_method": "GitHub"}
+
+
+@pytest.fixture(autouse=True)
+def _password_unchanged(monkeypatch):
+    """The #1809 re-check reads Postgres; these tests stub the database."""
+    monkeypatch.setattr(auth_routes, "_password_still_current", AsyncMock(return_value=True))

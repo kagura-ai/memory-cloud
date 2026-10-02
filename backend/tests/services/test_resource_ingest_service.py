@@ -424,10 +424,15 @@ class TestAdapterErrorFormatting:
             assert out["error"] == expected, kind
             assert ("doc_id" in out) is has_doc_id, kind
 
-    def test_server_failure_items_say_how_to_resend(self):
+    def test_server_failure_items_say_how_to_resend(self, monkeypatch):
         """#1742: an event the server failed to store names its cause, a
         correlation_id and what to resend; never the exception text."""
+        import mcp_server.tools.resource as resource_tool
         from mcp_server.tools.resource import _format_batch_item_error as fmt
+
+        # A random hex correlation id can contain "5432" (#1810): pin one that
+        # does, so the no-leak check below must use needles hex cannot hold.
+        monkeypatch.setattr(resource_tool, "new_correlation_id", lambda: "0005432000000000")
 
         boom = ConnectionRefusedError("[Errno 111] Connect call failed ('10.0.0.5', 5432)")
         out = fmt(
@@ -442,7 +447,8 @@ class TestAdapterErrorFormatting:
         assert out["cause"] == "service_unavailable"
         assert out["correlation_id"]
         assert "Send only this event again" in out["help"]
-        assert "5432" not in json.dumps(out) and "Errno" not in json.dumps(out)
+        leaked = json.dumps(out)
+        assert "10.0.0.5" not in leaked and "Errno" not in leaked
 
         out = fmt(
             IngestItemError(index=3, kind=svc.KIND_UNEXPECTED, doc_id="d3", detail={"message": "x"})

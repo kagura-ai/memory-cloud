@@ -84,14 +84,17 @@ Metrics: `edges_by_origin` (hebbian / semantic / declared), `total_edges`,
 
 ### retrieval
 
-Window: 7 days of `mcp:recall` / `mcp:remember` / `mcp:explore` usage,
+Window: 7 days of `mcp:recall` / `mcp:recall_upcoming` / `mcp:recall_nearby` /
+`mcp:remember` / `mcp:update_memory` / `mcp:explore` usage,
 attributed per context.
 
 | Condition | Grade | Note code | Rationale |
 |---|---|---|---|
-| Zero `recall()` calls with > 0 active memories | warn | `write_only_store` | The store is write-only — memory exists but nothing reads it. Skipped for the unattributed entry. |
+| Zero successful read calls (`recall` / `recall_upcoming` / `recall_nearby`), > 0 successful write calls (`remember` / `update_memory`), > 0 active memories | warn | `write_only_store` | The store is write-only — agents write but nothing reads it back. Skipped for the unattributed entry. |
+| Zero successful read calls and zero successful write calls with > 0 active memories | ok | `idle_store` | No MCP read or write activity in the window — the context is idle, not write-only, so it stays OK with an informational note. A failed call (quota, permission, validation, crash) read or wrote nothing and does not count. Writes via the web UI, REST API or connectors are not MCP calls and are not counted. Skipped for the unattributed entry. |
 
-Metrics: `recall_calls`, `recall_upcoming_calls`, `remember_calls`,
+Metrics: `recall_calls`, `recall_upcoming_calls`, `recall_nearby_calls`,
+`remember_calls` (per-endpoint counts include failed calls), `successful_read_calls`, `successful_write_calls`,
 `explore_calls`, `window_days`, plus config posture (`has_config`,
 `reinforce_enabled`, `use_rerank` — booleans per context).
 
@@ -124,6 +127,7 @@ above is the deep link for operators.
 | `edge_weight_violations` | `count`, `min`, `max` |
 | `cold_graph` | `active_memories` |
 | `write_only_store` | `window_days`, `active_memories` |
+| `idle_store` | `window_days`, `active_memories` |
 
 Adding a note code is a three-place change: the service emits it, both
 message catalogs localize it, and the table above documents it.

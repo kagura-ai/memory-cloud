@@ -656,13 +656,13 @@ def _fake_session_store(monkeypatch, uid: str) -> dict[str, dict]:
     """One live browser session for ``uid``; the simulated reset clears it."""
     from types import SimpleNamespace
 
-    from api.routes import auth as auth_routes
+    from auth import oauth2_server
 
     sessions: dict[str, dict] = {"sid-1": {"user_id": uid}}
     manager = SimpleNamespace(
         session_holds_user=lambda sid, uid: sessions.get(sid, {}).get("user_id") == uid
     )
-    monkeypatch.setattr(auth_routes, "get_session_manager", lambda: manager)
+    monkeypatch.setattr(oauth2_server, "get_session_manager", lambda: manager)
     return sessions
 
 
@@ -1535,3 +1535,137 @@ class TestNoSecretsInLogs:
         assert setup_user.email not in dump
         # The logging backend still flags the emails for manual dispatch.
         assert any(e.get("email_dispatch_required") for e in logs)
+
+
+# ---------------------------------------------------------------------------
+# Password sign-in racing a reset's session sweep (#1809)
+# ---------------------------------------------------------------------------
+
+
+class TestPasswordLoginRacingTheSweep:
+    """A password sign-in that completes during a reset leaves no live session (#1809).
+
+    ``password_login`` checks the committed (old) hash, then writes a session.
+    The reset deletes the account's sessions BEFORE it commits the new hash,
+    holding the ``users`` row ``FOR UPDATE`` throughout. A sign-in whose
+    session lands after the sweep would survive it — unless the sign-in
+    re-reads the hash ``FOR SHARE`` after writing its session
+    (``password_unchanged``): that read waits for the reset to commit, sees
+    the new hash, and the route deletes the session it just wrote.
+
+    The other order needs nothing new: a session written before the sweep
+    is deleted by it.
+    """
+
+    @staticmethod
+    def _store():
+        import fakeredis
+
+        from auth.session import SessionManager
+
+        fake = fakeredis.FakeRedis(decode_responses=True)
+        manager = SessionManager.__new__(SessionManager)
+        manager.redis_url = "redis://fake"
+        manager.session_ttl = 3600
+        manager._legacy_scan_over = False
+        manager._redis = fake
+        return manager
+
+    async def test_a_session_written_after_the_sweep_does_not_survive(
+        self, db_session: AsyncSession, made: _Made, async_engine
+    ) -> None:
+        import threading
+
+        user = await _user(db_session, made)
+        uid = user.user_id
+        verified = password_service_module.credential_fingerprint(user.password_hash)
+        store = self._store()
+        service = PasswordAccountService(db_session, email_service=_email())
+        pending = await service.request_reset(email=user.email)
+        assert pending is not None
+
+        swept = threading.Event()
+        release = threading.Event()
+
+        def revoke(user_id: str) -> None:
+            store.delete_user_sessions(user_id, strict=True)
+            swept.set()
+            # Hold the reset between its sweep and its commit.
+            release.wait(10)
+
+        factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+        reset_pid: dict[str, int] = {}
+
+        async def reset() -> None:
+            async with factory() as db:
+                reset_pid["pid"] = await db.scalar(text("SELECT pg_backend_pid()"))
+                await PasswordAccountService(db, email_service=_email()).complete_reset(
+                    raw_token=_token_from(pending.reset_url),
+                    new_password=NEW,
+                    revoke_sessions=revoke,
+                )
+
+        async def recheck() -> bool:
+            async with factory() as db:
+                try:
+                    return await password_service_module.password_unchanged(db, uid, verified)
+                finally:
+                    await db.rollback()
+
+        reset_task = asyncio.create_task(reset())
+        check_task: asyncio.Task | None = None
+        try:
+            assert await asyncio.to_thread(swept.wait, 10), "the reset never swept"
+            # The sign-in checked the old hash before the reset; its session
+            # lands after the sweep has passed.
+            session_id = store.create_session({"sub": uid, "user_id": uid, "role": "user"})
+            check_task = asyncio.create_task(recheck())
+            await _wait_until_blocked(async_engine, blocked_by=reset_pid["pid"])
+            assert not check_task.done(), "the re-check must wait for the reset"
+        finally:
+            release.set()
+            await asyncio.wait_for(reset_task, timeout=10)
+
+        assert check_task is not None
+        still_current = await asyncio.wait_for(check_task, timeout=10)
+        assert still_current is False
+        # What the route does with that answer.
+        store.delete_session(session_id)
+        assert store.get_session(session_id) is None
+        assert store.delete_user_sessions(uid) == 0
+
+    async def test_an_unchanged_password_keeps_the_session(
+        self, db_session: AsyncSession, made: _Made
+    ) -> None:
+        user = await _user(db_session, made)
+        verified = password_service_module.credential_fingerprint(user.password_hash)
+        try:
+            assert await password_service_module.password_unchanged(
+                db_session, user.user_id, verified
+            )
+        finally:
+            await db_session.rollback()
+
+    async def test_a_removed_password_or_user_is_not_current(
+        self, db_session: AsyncSession, made: _Made
+    ) -> None:
+        user = await _user(db_session, made)
+        verified = password_service_module.credential_fingerprint(user.password_hash)
+        await db_session.execute(
+            update(User).where(User.user_id == user.user_id).values(password_hash=None)
+        )
+        await db_session.commit()
+        assert not await password_service_module.password_unchanged(
+            db_session, user.user_id, verified
+        )
+        assert not await password_service_module.password_unchanged(
+            db_session, "u_missing", verified
+        )
+        await db_session.rollback()
+
+    def test_the_fingerprint_does_not_carry_the_hash(self) -> None:
+        stored = hash_password(OLD)
+        fingerprint = password_service_module.credential_fingerprint(stored)
+        assert fingerprint and stored not in fingerprint
+        assert fingerprint == password_service_module.credential_fingerprint(stored)
+        assert fingerprint != password_service_module.credential_fingerprint(hash_password(OLD))

@@ -42,6 +42,7 @@ from api.routes.me_oauth import (
     _build_authorization_url,
 )
 from auth.dependencies import SessionUser
+from auth.session import SESSION_COOKIE_NAME
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from services.account_erasure_service import AccountErasureService
@@ -489,7 +490,7 @@ class IdentityLinkStatusResponse(BaseModel):
 def _session_id(request: Request) -> str:
     """The caller's session id, or 401 — ``SessionUser`` has already
     established a session, so a missing cookie is a contradiction."""
-    session_id = request.cookies.get(auth_module.SESSION_COOKIE_NAME)
+    session_id = request.cookies.get(SESSION_COOKIE_NAME)
     if not auth_module._session_manager or not session_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
     return session_id

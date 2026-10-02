@@ -27,9 +27,10 @@ from fastapi.testclient import TestClient
 
 from api.routes import auth as auth_routes
 from auth.dependencies import require_session_auth
+from tests.redis_fake_ops import SessionFakeOps
 
 
-class FakeRedis:
+class FakeRedis(SessionFakeOps):
     def __init__(self) -> None:
         self.store: dict[str, str] = {}
 

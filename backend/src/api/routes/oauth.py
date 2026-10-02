@@ -50,7 +50,6 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.orm import Session
 from starlette.requests import ClientDisconnect
 
-from api.routes import auth as auth_module
 from auth.dependencies import SessionUser, require_admin
 from auth.mcp_scopes import DCR_DEFAULT_SCOPE
 from auth.oauth2_server import (
@@ -64,6 +63,7 @@ from auth.oauth2_server import (
     validate_authorization_parameters,
 )
 from auth.oauth_scope import client_registered_scope, granted_scope, registration_scope
+from auth.session import SESSION_COOKIE_NAME
 from auth.starlette_oauth2_request import StarletteOAuth2Payload
 from config.settings import get_settings
 from db.base import get_sync_session
@@ -1464,7 +1464,7 @@ def get_current_user_from_session(request: Request) -> _OAuthUser | None:
         return None
 
     user_data = request.state.user
-    session_id = request.cookies.get(auth_module.SESSION_COOKIE_NAME)
+    session_id = request.cookies.get(SESSION_COOKIE_NAME)
 
     if isinstance(user_data, dict):
         return _OAuthUser(

@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from auth.mcp_resource import is_same_mcp_resource
+from auth.session import SESSION_COOKIE_NAME
 from utils.exceptions import AuthenticationError, InvalidTokenError
 
 if TYPE_CHECKING:
@@ -379,7 +380,7 @@ async def _verify_session_cookie(cookie_header: bytes) -> str | None:
         cookies.load(cookie_str)
 
         # Extract kagura_session cookie
-        session_cookie = cookies.get("kagura_session")
+        session_cookie = cookies.get(SESSION_COOKIE_NAME)
         if not session_cookie:
             logger.debug("No kagura_session cookie found")
             return None
