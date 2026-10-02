@@ -39,9 +39,12 @@ config = context.config
 db_url = to_async_database_url(get_database_url())
 config.set_main_option("sqlalchemy.url", db_url)
 
-# Setup Python logging from ini file
+# Setup Python logging from ini file. Keep the loggers that already exist:
+# the default disables every one of them, and the migration tests run alembic
+# inside the pytest process, where that silenced the application's loggers
+# for every test that came after (#1808).
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # MetaData for autogenerate support
 target_metadata = Base.metadata
