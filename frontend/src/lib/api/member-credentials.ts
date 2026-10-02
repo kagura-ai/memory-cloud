@@ -7,7 +7,7 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
 
 export interface MemberAPIKey {
-  id: number;
+  id: string; // Public id: "akey_" + 22 base62 chars (#1008)
   name: string;
   key_prefix: string;
   plaintext_key: string | null; // Only if visible + owner
@@ -86,7 +86,7 @@ export async function hideAPIKey(
 export async function regenerateAPIKey(
   workspaceId: string,
   userId: string,
-): Promise<{ key: string; key_prefix: string; key_id: number }> {
+): Promise<{ key: string; key_prefix: string; key_id: string }> {
   const response = await fetch(
     `${API_BASE}/api/v1/workspaces/${workspaceId}/members/${userId}/credentials/api-key/regenerate`,
     {
@@ -155,7 +155,7 @@ export async function createAPIKey(
 export async function deleteWorkspaceMemberAPIKeyById(
   workspaceId: string,
   userId: string,
-  keyId: number,
+  keyId: string,
 ): Promise<void> {
   const response = await fetch(
     `${API_BASE}/api/v1/workspaces/${workspaceId}/members/${userId}/credentials/api-keys/${keyId}`,
@@ -190,7 +190,7 @@ export async function deleteWorkspaceMemberAPIKeyById(
 export async function deleteWorkspaceMemberAPIKey(
   workspaceId: string,
   userId: string,
-  keyId: number,
+  keyId: string,
 ): Promise<void> {
   return deleteWorkspaceMemberAPIKeyById(workspaceId, userId, keyId);
 }

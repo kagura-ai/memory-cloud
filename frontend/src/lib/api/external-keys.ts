@@ -1,7 +1,6 @@
 import { apiClient } from "./base";
 
 export interface ExternalAPIKey {
-  id: number;
   key_name: string;
   provider: string;
   masked_value: string;

@@ -82,7 +82,7 @@ vi.mock("@/components/credentials/MCPConfigBlock", () => ({
 
 function makeKey(overrides: Partial<MemberAPIKey> = {}): MemberAPIKey {
   return {
-    id: 1,
+    id: "akey_0000000000000000000001",
     name: "prod-api",
     key_prefix: "kagura_abc123",
     plaintext_key: null,
@@ -121,7 +121,7 @@ describe("APIKeysTabPanel — table view (#943)", () => {
 
   it("shows '—' in Last used for a key that has never authenticated", async () => {
     mockGetMemberCredentials.mockResolvedValue({
-      api_keys: [makeKey({ id: 7, name: "never-used", last_used_at: null })],
+      api_keys: [makeKey({ id: "akey_0000000000000000000007", name: "never-used", last_used_at: null })],
       target_user_role: "owner",
     });
 
@@ -136,7 +136,7 @@ describe("APIKeysTabPanel — table view (#943)", () => {
     mockGetMemberCredentials.mockResolvedValue({
       api_keys: [
         makeKey({
-          id: 9,
+          id: "akey_0000000000000000000009",
           name: "used-key",
           last_used_at: "2026-06-01T00:00:00Z",
         }),

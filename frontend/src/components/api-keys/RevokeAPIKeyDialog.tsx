@@ -20,7 +20,7 @@ import { revokeAPIKey } from '@/lib/api/api-keys';
 
 interface RevokeAPIKeyDialogProps {
   isOpen: boolean;
-  keyId: number;
+  keyId: string;
   keyName: string;
   onClose: () => void;
   onSuccess: () => void;
