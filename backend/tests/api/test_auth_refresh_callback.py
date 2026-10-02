@@ -46,7 +46,7 @@ class TestMaybeRefreshRedirect:
         session creation as before."""
         sm, redis = _mock_session_manager_with_redis({})
         with patch.object(auth_module, "_session_manager", sm):
-            result = await _maybe_refresh_redirect(state="s1", idp_sub="u-1")
+            result = await _maybe_refresh_redirect(state="s1", user_id="u-1")
         assert result is None
         # Helper must NOT touch state/return_to keys when intent is absent —
         # those still belong to the login flow that called us.
@@ -59,7 +59,7 @@ class TestMaybeRefreshRedirect:
         None and leaves state alone."""
         sm, _redis = _mock_session_manager_with_redis({"oauth2_state_intent:s1": "login"})
         with patch.object(auth_module, "_session_manager", sm):
-            result = await _maybe_refresh_redirect(state="s1", idp_sub="u-1")
+            result = await _maybe_refresh_redirect(state="s1", user_id="u-1")
         assert result is None
 
     @pytest.mark.asyncio
@@ -75,7 +75,7 @@ class TestMaybeRefreshRedirect:
             }
         )
         with patch.object(auth_module, "_session_manager", sm):
-            result = await _maybe_refresh_redirect(state="s1", idp_sub="u-42")
+            result = await _maybe_refresh_redirect(state="s1", user_id="u-42")
 
         assert isinstance(result, RedirectResponse)
         assert result.status_code == 303
@@ -107,7 +107,7 @@ class TestMaybeRefreshRedirect:
             }
         )
         with patch.object(auth_module, "_session_manager", sm):
-            result = await _maybe_refresh_redirect(state="s1", idp_sub="u-42")
+            result = await _maybe_refresh_redirect(state="s1", user_id="u-42")
 
         assert isinstance(result, RedirectResponse)
         assert result.headers["location"] == "http://example.com/profile?refreshed=1"
@@ -126,7 +126,7 @@ class TestMaybeRefreshRedirect:
             }
         )
         with patch.object(auth_module, "_session_manager", sm):
-            result = await _maybe_refresh_redirect(state="s1", idp_sub="u-different")
+            result = await _maybe_refresh_redirect(state="s1", user_id="u-different")
 
         assert isinstance(result, RedirectResponse)
         assert (
@@ -148,7 +148,7 @@ class TestMaybeRefreshRedirect:
             }
         )
         with patch.object(auth_module, "_session_manager", sm):
-            result = await _maybe_refresh_redirect(state="s1", idp_sub="u-42")
+            result = await _maybe_refresh_redirect(state="s1", user_id="u-42")
 
         assert isinstance(result, RedirectResponse)
         assert (
@@ -162,7 +162,7 @@ class TestMaybeRefreshRedirect:
         boot or in degraded mode. Helper returns None safely; the caller
         will then 500 elsewhere on its own state validation."""
         with patch.object(auth_module, "_session_manager", None):
-            result = await _maybe_refresh_redirect(state="s1", idp_sub="u-1")
+            result = await _maybe_refresh_redirect(state="s1", user_id="u-1")
         assert result is None
 
     @pytest.mark.asyncio
@@ -179,7 +179,7 @@ class TestMaybeRefreshRedirect:
             }
         )
         with patch.object(auth_module, "_session_manager", sm):
-            await _maybe_refresh_redirect(state="s1", idp_sub="u-different")
+            await _maybe_refresh_redirect(state="s1", user_id="u-different")
         deleted = {call.args[0] for call in redis.delete.call_args_list}
         assert "oauth2_return_to:s1" in deleted, (
             "return_to key must be cleared even when the user-mismatch "
@@ -198,7 +198,7 @@ class TestMaybeRefreshRedirect:
             }
         )
         with patch.object(auth_module, "_session_manager", sm):
-            await _maybe_refresh_redirect(state="s1", idp_sub="u-1")
+            await _maybe_refresh_redirect(state="s1", user_id="u-1")
         deleted = {call.args[0] for call in redis.delete.call_args_list}
         assert "oauth2_return_to:s1" in deleted, (
             "return_to key must be cleared even when the state-expired branch fires"

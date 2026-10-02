@@ -252,7 +252,7 @@ def _email_in_use_redirect() -> RedirectResponse:
 async def _maybe_refresh_redirect(
     *,
     state: str,
-    idp_sub: str,
+    user_id: str,
 ) -> RedirectResponse | None:
     """Issue #515: handle the manual-refresh branch of a callback.
 
@@ -273,6 +273,11 @@ async def _maybe_refresh_redirect(
       account than the one that initiated the refresh (e.g. the user
       switched Google accounts mid-flow). Treat as suspicious — do not
       sync identity into the wrong session.
+
+    ``user_id`` is the account the returning identity signs in to — the owner
+    resolved by :func:`_session_owner`, not the raw IdP ``sub`` (#1805): the
+    pinned ``oauth2_state_user`` is the session's ``user_id``, which for a
+    provider linked to another account (#517) is that account's id.
     """
     if not _session_manager:
         return None
@@ -305,18 +310,18 @@ async def _maybe_refresh_redirect(
             status_code=303,
         )
 
-    if idp_sub != expected_user_id:
+    if user_id != expected_user_id:
         # The IdP returned a different account. ``ensure_user`` has
         # already been called by the caller for that other account —
         # which is fine, that account's row is now up to date — but we
         # must NOT redirect the originating session to a place that
         # implies the refresh succeeded for them. Surface the mismatch.
-        # The expected/returned ids are not PII (opaque OAuth ``sub``
-        # values), but stay terse for log volume.
+        # The expected/returned ids are not PII (opaque account ids), but
+        # stay terse for log volume.
         logger.warning(
             "refresh_user_mismatch",
             expected_user_id=expected_user_id,
-            idp_sub=idp_sub,
+            user_id=user_id,
         )
         return RedirectResponse(
             f"{frontend_url}/profile?error=refresh_user_mismatch",
@@ -334,7 +339,7 @@ async def _maybe_refresh_redirect(
     else:
         redirect_url = f"{frontend_url}/profile?refreshed=1"
 
-    logger.info("refresh_oauth_success", user_id=idp_sub)
+    logger.info("refresh_oauth_success", user_id=user_id)
     return RedirectResponse(url=redirect_url, status_code=303)
 
 
@@ -881,10 +886,10 @@ async def google_callback(
         # to the originating session's user_id. ensure_user above has already
         # synced email/name; we now skip session creation/workspace creation
         # so the user keeps their current session, then redirect to return_to.
-        refresh_redirect = await _maybe_refresh_redirect(
-            state=state,
-            idp_sub=user_info["sub"],
-        )
+        # #1805: a provider linked to another account signs in to that account.
+        owner_id, owner_email = await _session_owner("google", user_info["sub"], user_info["email"])
+
+        refresh_redirect = await _maybe_refresh_redirect(state=state, user_id=owner_id)
         if refresh_redirect is not None:
             return refresh_redirect
 
@@ -901,7 +906,9 @@ async def google_callback(
         # - OAuth2 standard compliance ("sub" for audit/debugging)
         # - Internal API compatibility ("user_id" for consistent access)
         #
-        # The value is the same: Google OAuth2 user identifier (sub claim)
+        # The value is the same: the id of the account that owns this Google
+        # identity — its sub, unless the identity is linked to another
+        # account (#517, #1805).
 
         # #1488: "add another account" keeps the CURRENT session and appends to
         # it; a normal login mints a fresh one.
@@ -929,15 +936,20 @@ async def google_callback(
         # #1488: every OTHER session for this identity still goes — #114 is
         # unchanged. Only the container being added to is spared.
         deleted_count = _session_manager.delete_user_sessions(
-            user_info["sub"], exclude_session_id=add_to_session
+            owner_id, exclude_session_id=add_to_session
         )
+        if user_info["sub"] != owner_id:
+            # #1805: sessions opened before the fix were keyed by the sub.
+            deleted_count += _session_manager.delete_user_sessions(
+                user_info["sub"], exclude_session_id=add_to_session
+            )
         if deleted_count > 0:
-            logger.info(f"Invalidated {deleted_count} old session(s) for {user_info['email']}")
+            logger.info(f"Invalidated {deleted_count} old session(s) for {owner_email}")
 
         session_data = {
-            "sub": user_info["sub"],  # OAuth2 standard: user identifier
-            "user_id": user_info["sub"],  # Internal API: same value for compatibility
-            "email": user_info["email"],
+            "sub": owner_id,  # OAuth2 standard: user identifier
+            "user_id": owner_id,  # Internal API: same value for compatibility
+            "email": owner_email,
             "name": user_info.get("name"),
             "picture": user_info.get("picture"),
             "role": role.value,
@@ -950,7 +962,7 @@ async def google_callback(
                 logger.warning("add_account_write_failed")
                 return _oauth_error_redirect("google", "add_account_failed")
             session_id = add_to_session
-            logger.info(f"Added account to existing session: {user_info['email']}")
+            logger.info(f"Added account to existing session: {owner_email}")
         else:
             session_id = _session_manager.create_session(session_data)
 
@@ -964,7 +976,7 @@ async def google_callback(
 
                 # Check for pending invitations
                 pending_invites = await invitation_service.get_pending_invitations_for_email(
-                    email=user_info["email"]
+                    email=owner_email
                 )
 
                 if pending_invites:
@@ -972,20 +984,20 @@ async def google_callback(
                     # Note: If user never accepts invitations, they'll have 0 workspaces.
                     # WorkspaceGuard will redirect to /workspace/dashboard where they can create one manually.
                     logger.info(
-                        f"User {user_info['email']} has {len(pending_invites)} pending invitation(s), "
+                        f"User {owner_email} has {len(pending_invites)} pending invitation(s), "
                         f"skipping personal workspace auto-creation"
                     )
                 else:
                     # No pending invitations - create personal workspace
                     workspace_service = WorkspaceService(db)
                     await workspace_service.ensure_personal_workspace(
-                        user_id=user_info["sub"],
-                        email=user_info["email"],
+                        user_id=owner_id,
+                        email=owner_email,
                     )
                 break  # Exit async for loop
         except Exception as e:
             logger.error(
-                f"Error ensuring personal workspace for user {user_info['sub']} ({user_info['email']}): {e}",
+                f"Error ensuring personal workspace for user {owner_id} ({owner_email}): {e}",
                 exc_info=True,
             )
             # Non-blocking: User can create workspace manually if auto-creation fails
@@ -1019,7 +1031,7 @@ async def google_callback(
             request, redirect, provider="google", idp_sub=user_info["sub"], method="Google"
         )
 
-        logger.info(f"OAuth2 login successful: {user_info['email']} (role={role})")
+        logger.info(f"OAuth2 login successful: {owner_email} (role={role})")
 
         return redirect
 
@@ -1486,6 +1498,31 @@ async def _owning_user(db: AsyncSession, provider: str, idp_sub: str) -> tuple[s
             )
         ).first()
     return (row[0], row[1]) if row is not None else None
+
+
+async def _session_owner(provider: str, idp_sub: str, idp_email: str) -> tuple[str, str]:
+    """``(user_id, email)`` an OAuth sign-in opens its session for (#1805).
+
+    A provider linked to another account (#517) signs in to that account, so
+    the session, the #114 invalidation, the personal-workspace step and the
+    refresh same-user check all use the owner :func:`_owning_user` resolves —
+    the way the known-device (#1769) and terms (#1665) steps already do. Call
+    it after ``ensure_user``, so a first sign-in finds the row that call
+    created.
+
+    Unlike those advisory steps this one fails closed: a database error
+    propagates, and the callback turns it into ``oauth_failed`` rather than
+    opening a session for an id that may own nothing. Only an identity with
+    no owning row at all (a role manager without Postgres) keeps the IdP
+    ``sub`` and email, which is what every sign-in used before.
+    """
+    async for db in get_db():
+        owner = await _owning_user(db, provider, idp_sub)
+        if owner is not None:
+            return owner
+        break
+    logger.warning("session_owner_not_found", provider=provider)
+    return idp_sub, idp_email
 
 
 async def _note_provider_sign_in(
@@ -2029,14 +2066,12 @@ async def github_callback(
         # Issue #515: refresh-mode short-circuit (see google_callback for the
         # full rationale). The branch must precede session swap so the user
         # keeps their current cookie when refresh ends.
-        refresh_redirect = await _maybe_refresh_redirect(
-            state=state,
-            idp_sub=user_info["sub"],
-        )
+        # #1805: a provider linked to another account signs in to that account.
+        db_user_id, db_email = await _session_owner("github", user_info["sub"], user_info["email"])
+
+        refresh_redirect = await _maybe_refresh_redirect(state=state, user_id=db_user_id)
         if refresh_redirect is not None:
             return refresh_redirect
-
-        db_user_id = user_info["sub"]
 
         # #1488: append when this flow was started as "add another account";
         # otherwise mint a fresh one. See the Google callback for why the intent
@@ -2046,17 +2081,22 @@ async def github_callback(
         if intent == "unusable":
             return _oauth_error_redirect("github", "add_account_failed")
 
-        # 5. Create session using GitHub sub as user_id
+        # 5. Create session for the account that owns the GitHub identity
         deleted_count = _session_manager.delete_user_sessions(
             db_user_id, exclude_session_id=add_to_session
         )
+        if user_info["sub"] != db_user_id:
+            # #1805: sessions opened before the fix were keyed by the sub.
+            deleted_count += _session_manager.delete_user_sessions(
+                user_info["sub"], exclude_session_id=add_to_session
+            )
         if deleted_count > 0:
-            logger.info(f"Invalidated {deleted_count} old session(s) for {user_info['email']}")
+            logger.info(f"Invalidated {deleted_count} old session(s) for {db_email}")
 
         session_data = {
             "sub": db_user_id,
             "user_id": db_user_id,
-            "email": user_info["email"],
+            "email": db_email,
             "name": user_info.get("name"),
             "picture": user_info.get("picture"),
             "role": role.value,
@@ -2066,7 +2106,7 @@ async def github_callback(
                 logger.warning("add_account_write_failed")
                 return _oauth_error_redirect("github", "add_account_failed")
             session_id = add_to_session
-            logger.info(f"Added account to existing session: {user_info['email']}")
+            logger.info(f"Added account to existing session: {db_email}")
         else:
             session_id = _session_manager.create_session(session_data)
 
@@ -2077,14 +2117,14 @@ async def github_callback(
 
                 invitation_service = InvitationService(db)
                 pending_invites = await invitation_service.get_pending_invitations_for_email(
-                    email=user_info["email"]
+                    email=db_email
                 )
 
                 if not pending_invites:
                     workspace_service = WorkspaceService(db)
                     await workspace_service.ensure_personal_workspace(
                         user_id=db_user_id,
-                        email=user_info["email"],
+                        email=db_email,
                     )
                 break
         except Exception as e:
@@ -2109,7 +2149,7 @@ async def github_callback(
             request, redirect, provider="github", idp_sub=user_info["sub"], method="GitHub"
         )
 
-        logger.info(f"GitHub OAuth2 login successful: {user_info['email']} (role={role})")
+        logger.info(f"GitHub OAuth2 login successful: {db_email} (role={role})")
         return redirect
 
     except ConflictError:

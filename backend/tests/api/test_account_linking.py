@@ -569,3 +569,54 @@ async def test_unlink_last_provider_refused_for_password_primary_without_hash(
 
     with pytest.raises(ConflictError):
         await svc.unlink(user_id=user.user_id, provider="github")
+
+
+@pytest.mark.asyncio
+async def test_sign_in_owner_is_the_linked_account_not_a_stale_same_sub_row(
+    db_session: AsyncSession,
+):
+    """#1805: a link row wins over a leftover ``users`` row keyed by the sub.
+
+    The OAuth callbacks open the session for this owner, so a stale row whose
+    ``user_id`` equals the provider sub must not capture the sign-in.
+    """
+    from api.routes.auth import _owning_user
+
+    suffix = uuid4().hex[:8]
+    owner = await _make_user(db_session, suffix=f"own-{suffix}")
+    sub = f"gh-{suffix}"
+    stale = User(
+        email=f"stale-{suffix}@example.com",
+        user_id=sub,
+        name="Stale",
+        role="user",
+        auth_method="oauth",
+        auth_provider="github",
+    )
+    db_session.add(stale)
+    await db_session.commit()
+    await AccountLinkingService(db_session).link(
+        user_id=owner.user_id,
+        provider="github",
+        oauth_sub=sub,
+        email=owner.email,
+        ip_address="1.2.3.4",
+        user_agent="pytest",
+    )
+
+    assert await _owning_user(db_session, "github", sub) == (owner.user_id, owner.email)
+    # An identity with no link row still resolves to the row keyed by its sub.
+    unlinked = User(
+        email=f"unlinked-{suffix}@example.com",
+        user_id=f"gh2-{suffix}",
+        name="Unlinked",
+        role="user",
+        auth_method="oauth",
+        auth_provider="github",
+    )
+    db_session.add(unlinked)
+    await db_session.commit()
+    assert await _owning_user(db_session, "github", unlinked.user_id) == (
+        unlinked.user_id,
+        unlinked.email,
+    )
