@@ -501,6 +501,12 @@ account that is already there) and link. The request answers `403`
 (`AUTH-305`) otherwise. Sessions started before this check existed carry no
 sign-in time and need a fresh sign-in too.
 
+The window proves a sign-in to this service, not that a password was typed.
+An OAuth sign-in goes through when the browser still has a session with the
+provider (Google, GitHub), often with a click and no password. On a shared or
+unattended computer someone could add both accounts and link them that way,
+so sign out of the provider there as well as of Kagura.
+
 What a link does:
 
 - A private context is open to every account linked to its creator, and the
