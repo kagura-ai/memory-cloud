@@ -485,11 +485,21 @@ When the person keeps using both accounts, link them:
    password sign-in always starts a new browser session, so it comes first.
 2. From the account switcher, choose **Add another account** and sign in with
    the OAuth account. The browser session now holds both.
-3. Open **Profile Settings**, find **Linked accounts**, and link the other account.
+3. Open **Profile Settings**, find **Linked accounts**, and link the other
+   account — within 10 minutes of the two sign-ins.
 
 That browser session is the proof: each account entered it through its own
 sign-in. An account that is not signed in on the session cannot be linked,
-and nothing is ever linked by an email match.
+and nothing is ever linked by an email match. An account stays in a browser
+session for as long as the session lives, so the link also asks for a recent
+sign-in (#1803): **both** accounts must have signed in on this browser within
+the last 10 minutes. A link is symmetric — a stale sign-in on either side
+would let whoever holds an old session give that account's private contexts
+to another. When one of them signed in earlier, the page says so; sign in to
+it again from the account switcher (**Add another account** refreshes an
+account that is already there) and link. The request answers `403`
+(`AUTH-305`) otherwise. Sessions started before this check existed carry no
+sign-in time and need a fresh sign-in too.
 
 What a link does:
 
@@ -515,10 +525,14 @@ What it does not do:
   maintenance (each account's memories are maintained on their own, with no
   de-duplication across the two), memory health, access patterns, the workspace dashboard's counts and
   retrieval feedback.
-- **Writes that name another memory stay per account**: an `external_id`
-  upsert replaces only the caller's own earlier memory, and `supersedes` /
-  linked memory ids must point at the caller's own memories. Two accounts
-  that upsert the same `external_id` into one private context keep two rows.
+- **Writes that name another memory follow the link only in a private
+  context** (#1803). There, an `external_id` upsert from either linked account
+  replaces the same row, and `supersedes`, `linked_memory_ids` and
+  `linked_source_uris` may point at a memory any of them wrote. The
+  replacement is checked as the caller (a workspace viewer cannot replace the
+  other account's memory), and an agent binding's memory-type filter does not
+  stop it, as it does not for the caller's own row. In a shared context these
+  still match the caller's own memories only.
 - A share key recalls as the account that issued it, so it also returns what
   a linked account wrote in that account's private context.
 
@@ -529,10 +543,11 @@ and unlink writes an `audit_logs` row (`identity_linked`,
 unlink takes effect at once; tag suggestions can keep the other account's tag
 names for up to two minutes.
 
-A link outlives the browser session it was made in. Anyone who can use a
-browser where both accounts are signed in can make one, so treat a shared
-browser as you would for any signed-in session, and unlink from **Profile
-Settings** if a notice arrives that you did not expect.
+A link outlives the browser session it was made in. Anyone who can sign in
+to both accounts on one browser can make one, so unlink from **Profile
+Settings** if a notice arrives that you did not expect. A password reset signs
+the account out everywhere but does not remove its links; the reset notice
+says how many accounts are linked to it, so the owner can review them.
 
 Erasing an account, or deleting a user from the admin API, takes it out of
 its link set. A private context it created passes to a linked account that
