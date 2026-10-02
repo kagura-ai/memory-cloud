@@ -453,8 +453,10 @@ class LinkedIdentityItem(BaseModel):
 class LinkableIdentityItem(BaseModel):
     """An account signed in on this browser session that is not linked yet.
 
-    ``signed_in_recently``: it signed in here within the link window, so it
-    can be linked now without signing in again.
+    ``signed_in_recently``: it proved its credential here within the link
+    window (#1818: a password sign-in, or a Google sign-in with a recent
+    ``auth_time``), so it can be linked now. An OAuth sign-in alone does not
+    count unless the operator allows it.
     """
 
     user_id: str
@@ -464,7 +466,11 @@ class LinkableIdentityItem(BaseModel):
 
 
 class IdentityLinksResponse(BaseModel):
-    """The session user's link set, and what this session could add to it."""
+    """The session user's link set, and what this session could add to it.
+
+    ``signed_in_recently``: the session user itself proved its credential here
+    within the link window (#1818), as for a linkable account.
+    """
 
     linked: list[LinkedIdentityItem]
     linkable: list[LinkableIdentityItem]

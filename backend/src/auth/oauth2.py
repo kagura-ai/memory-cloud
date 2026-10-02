@@ -30,6 +30,19 @@ _AUTH_TIME_CLAIMS = json.dumps(
 )
 
 
+_CERT_FETCH_TIMEOUT_SECONDS = 10
+
+
+def _cert_request(*args: Any, **kwargs: Any) -> Any:
+    """Fetch Google's ID-token certificates with a short timeout (#1818).
+
+    The library default is 120 s; a link-proof callback should fail fast (and
+    prove nothing) rather than hold a worker that long when Google is slow.
+    """
+    kwargs.setdefault("timeout", _CERT_FETCH_TIMEOUT_SECONDS)
+    return Request()(*args, **kwargs)
+
+
 class OAuth2Manager:
     """OAuth2 authentication manager for Google services
 
@@ -437,7 +450,7 @@ class OAuth2Manager:
             return None
         try:
             claims = google_id_token.verify_oauth2_token(
-                token, Request(), audience=client_id, clock_skew_in_seconds=10
+                token, _cert_request, audience=client_id, clock_skew_in_seconds=10
             )
         except Exception as e:
             logger.warning(f"ID token verification failed: {e}")

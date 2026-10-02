@@ -88,9 +88,10 @@ _SIGNED_IN_AT = "signed_in_at"
 # on the container. A sign-in is not always a proof: an OAuth round trip goes
 # through without a password while the browser still has a session with the
 # provider. The caller of ``create_session`` / ``add_account`` says what was
-# proved and when (a password sign-in now, Google its ``auth_time``); a sign-in
-# that proves nothing removes the account's entry. An identity link reads only
-# this key. Missing means "not proved" (fail closed).
+# proved and when (a password sign-in now, Google its ``auth_time``). An
+# account keeps its newest proof: a later sign-in that proves nothing, or
+# proves an older time, leaves it as it is. An identity link reads only this
+# key. Missing means "not proved" (fail closed).
 _PROVEN_AT = "proven_at"
 
 
@@ -638,7 +639,9 @@ class SessionManager:
                 earlier = proven.get(account_id)
                 try:
                     keep = isinstance(earlier, str) and datetime.fromisoformat(earlier) > proven_at
-                except ValueError:
+                except (ValueError, TypeError):
+                    # Unreadable or offset-aware (the reader ignores those
+                    # too): replace it rather than abort the whole sign-in.
                     keep = False
                 if not keep:
                     proven[account_id] = proven_at.isoformat()

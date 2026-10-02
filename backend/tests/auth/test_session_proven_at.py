@@ -82,6 +82,19 @@ class TestProvenAt:
 
         assert manager.proven_at(sid, "local:admin") == fresh
 
+    def test_an_unreadable_earlier_proof_does_not_abort_the_sign_in(self, manager):
+        """An offset-aware record (ignored by the reader) is replaced, not fatal."""
+        sid = manager.create_session(USER)
+        manager.add_account(sid, OTHER)
+        stored = raw(manager, sid)
+        stored["proven_at"] = {"local:admin": "2026-01-01T00:00:00+00:00"}
+        manager._redis.store[f"session:{sid}"] = json.dumps(stored)
+        fresh = utcnow()
+
+        assert manager.add_account(sid, OTHER, proven_at=fresh)
+
+        assert manager.proven_at(sid, "local:admin") == fresh
+
     def test_a_newer_proof_replaces_an_older_one(self, manager):
         sid = manager.create_session(USER)
         old = utcnow() - timedelta(hours=3)
