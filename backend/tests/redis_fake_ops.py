@@ -28,9 +28,17 @@ class DeferredPipeline:
 
         return queue
 
-    def execute(self) -> list[Any]:
+    def execute(self, raise_on_error: bool = True) -> list[Any]:
         ops, self._ops = self._ops, []
-        return [getattr(self._redis, name)(*args, **kwargs) for name, args, kwargs in ops]
+        results: list[Any] = []
+        for name, args, kwargs in ops:
+            try:
+                results.append(getattr(self._redis, name)(*args, **kwargs))
+            except Exception as exc:
+                if raise_on_error:
+                    raise
+                results.append(exc)
+        return results
 
 
 class SessionFakeOps:

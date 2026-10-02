@@ -2655,6 +2655,18 @@ async def mfa_verify(
     except Exception as e:
         raise HTTPException(status_code=500, detail="Failed to decrypt MFA secret") from e
 
+    # #1809: the password the first step verified. A pending step written
+    # without one (before this shipped) is refused: sign in again. The key is
+    # also the step's single-use guard: of two requests racing on one token,
+    # only the one whose DELETE removed it goes on. Taken FIRST, before the
+    # TOTP check and the terms key, so the loser consumes nothing.
+    cred_key = _MFA_PENDING_CRED_KEY.format(token=body.mfa_session_token)
+    verified = _session_manager._redis.get(cred_key)
+    taken = _session_manager._redis.delete(cred_key)
+    if not isinstance(verified, str) or not verified or not taken:
+        _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
+        raise AuthenticationError("Invalid or expired MFA session")
+
     # #1665: single-use like the pending token itself — taken (and deleted) on
     # the success and the failure path alike.
     accepted_terms = _take_mfa_accepted_terms(body.mfa_session_token)
@@ -2668,16 +2680,6 @@ async def mfa_verify(
         raise AuthenticationError("Invalid TOTP code. Please login again.")
 
     _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
-
-    # #1809: the password the first step verified. A pending step written
-    # without one (before this shipped) is refused: sign in again. The key is
-    # also the step's single-use guard: of two requests racing on one token,
-    # only the one whose DELETE removed it goes on.
-    cred_key = _MFA_PENDING_CRED_KEY.format(token=body.mfa_session_token)
-    verified = _session_manager._redis.get(cred_key)
-    taken = _session_manager._redis.delete(cred_key)
-    if not isinstance(verified, str) or not verified or not taken:
-        raise AuthenticationError("Invalid or expired MFA session")
 
     session_id = await _open_password_session(user, verified)
     await _record_terms_acceptance(

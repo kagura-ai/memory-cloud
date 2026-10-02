@@ -62,6 +62,9 @@ def get_session_manager() -> "SessionManager | None":
 #      first sweep that ran this code, the sweep still SCANs ``session:*`` as
 #      well. A session not used in that time has expired by the end of it.
 # The window start is a marker key written once (SET NX) and never expired.
+# Rolling back to a release without the index and then forward again leaves
+# the sessions written meanwhile unindexed: delete the marker on the redeploy
+# so the window starts over.
 _USER_INDEX_PREFIX = "user_sessions:"
 _LEGACY_SCAN_MARKER = "session_index:since"
 _LEGACY_SCAN_MARGIN_SECONDS = 24 * 3600
@@ -476,26 +479,34 @@ class SessionManager:
             # deliberately with an atomic mechanism, not by restoring the
             # whole-record rewrite.
             if update_access:
+                # One round trip, NOT a transaction (#1809): the renewal and
+                # the index writes run together, so the index set's TTL moves
+                # with the session's, but an index command Redis refuses (a
+                # SADD at maxmemory, say) does not undo the renewal or turn a
+                # valid session into a signed-out one.
+                pipe = self._redis.pipeline(transaction=False)
                 if was_legacy:
                     # One-time: a flat record must be written once to become a
                     # container. The only write left on the read path, and it
                     # happens at most once per record. XX: a sweep that deleted
                     # the record since the read above must not be undone (#1809).
-                    renewed = self._redis.set(
+                    pipe.set(
                         f"session:{session_id}",
                         json.dumps(container),
                         ex=self.session_ttl,
                         xx=True,
                     )
                 else:
-                    renewed = self._redis.expire(f"session:{session_id}", self.session_ttl)
+                    pipe.expire(f"session:{session_id}", self.session_ttl)
                 # Renewing the session renews its index entries, and indexes a
-                # session written before the index existed (#1809). Bookkeeping
-                # only: it runs apart from the renewal and its failure (Redis
-                # refusing writes at maxmemory, say) must not turn a valid
-                # session into a signed-out one.
-                if renewed:
-                    self._refresh_index(session_id, container)
+                # session written before the index existed (#1809).
+                self._queue_index(pipe, session_id, container)
+                results = pipe.execute(raise_on_error=False)
+                if results and isinstance(results[0], Exception):
+                    raise results[0]
+                index_errors = [r for r in results[1:] if isinstance(r, Exception)]
+                if index_errors:
+                    logger.warning(f"Failed to refresh session index: {index_errors[0]}")
                 projected["last_accessed"] = utcnow().isoformat()
 
             # Callers see the flat shape they always have.
@@ -573,27 +584,21 @@ class SessionManager:
             logger.error(f"Failed to mutate session: {e}")
             return False
 
-    def _refresh_index(self, session_id: str, container: dict[str, Any]) -> None:
-        """Add a session to its index sets, best effort (#1809).
-
-        A failure is logged and swallowed: the index only speeds sweeps up, and
-        a sweep prunes or re-finds what it misses.
-        """
-        try:
-            pipe = self._redis.pipeline(transaction=False)
-            self._queue_index(pipe, session_id, container)
-            pipe.execute()
-        except Exception as e:
-            logger.warning(f"Failed to refresh session index: {e}")
-
     def _drop_from_index(self, session_id: str, raw: Any) -> None:
         """Remove a deleted session from its index sets, best effort (#1809)."""
         try:
             stored = json.loads(raw)
             container = stored if is_container(stored) else to_container(stored)
-            index_ids = _index_ids(container)
-            if not index_ids:
-                return
+        except Exception as e:
+            logger.warning(f"Failed to drop session from index: {e}")
+            return
+        self._drop_ids_from_index(session_id, _index_ids(container))
+
+    def _drop_ids_from_index(self, session_id: str, index_ids: set[str]) -> None:
+        """SREM ``session_id`` from each listed index set, best effort (#1809)."""
+        if not index_ids:
+            return
+        try:
             pipe = self._redis.pipeline(transaction=False)
             for index_id in index_ids:
                 pipe.srem(_user_index_key(index_id), session_id)
@@ -636,6 +641,8 @@ class SessionManager:
         results = pipe.execute()
         if not results or not results[0]:
             logger.warning(f"Session vanished before the write: {session_id[:10]}...")
+            # The SADDs above ran anyway (one MULTI); take the dead id back out.
+            self._drop_ids_from_index(session_id, _index_ids(container) | set(dropped))
             return False
         return True
 
@@ -838,6 +845,7 @@ class SessionManager:
             # the container's, so they are set on the container instead — a
             # caller passing `created_at` must not end up with it nested inside
             # an identity where nothing reads it.
+            before = _index_ids(container)
             active = container.get("active", "")
             identity = dict(container.get("accounts", {}).get(active, {}))
             for key, value in updates.items():
@@ -852,7 +860,9 @@ class SessionManager:
             container["updated_at"] = utcnow().isoformat()
 
             # Save back to Redis — only if it is still there (#1809).
-            if not self._write_existing(session_id, container):
+            if not self._write_existing(
+                session_id, container, dropped=before - _index_ids(container)
+            ):
                 return False
 
             logger.debug(f"Updated session: {session_id[:10]}...")
@@ -989,6 +999,9 @@ class SessionManager:
                         break
 
             keys_to_delete: list[str] = []
+            # Every index set a deleted container sits in, not only this user's:
+            # its other accounts' sets must not keep a dead id (#1809).
+            other_sets: dict[str, set[str]] = {}
             stale_ids: list[str] = []
             for key in candidates:
                 if excluded_key is not None and key == excluded_key:
@@ -1004,6 +1017,11 @@ class SessionManager:
                     continue
                 if _record_belongs(record, user_id):
                     keys_to_delete.append(key)
+                    try:
+                        container = record if is_container(record) else to_container(record)
+                        other_sets[key] = _index_ids(container) - {user_id}
+                    except Exception:
+                        other_sets[key] = set()
 
             # One transaction: the sessions and their index entries go together.
             deleted_count = 0
@@ -1013,6 +1031,9 @@ class SessionManager:
                     pipe.delete(key)
                 for sid in stale_ids + [k.removeprefix("session:") for k in keys_to_delete]:
                     pipe.srem(index_key, sid)
+                for key, index_ids in other_sets.items():
+                    for index_id in index_ids:
+                        pipe.srem(_user_index_key(index_id), key.removeprefix("session:"))
                 results = pipe.execute()
                 deleted_count = sum(1 for r in results[: len(keys_to_delete)] if r)
 

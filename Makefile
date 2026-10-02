@@ -252,7 +252,9 @@ coverage-upload:
 	if [ -z "$$CODECOV_TOKEN" ]; then echo "Error: CODECOV_TOKEN not set (add to .env.local)"; exit 1; fi
 	@echo "Running unit tests with coverage and uploading to Codecov..."
 	rm -f $(BACKEND_DIR)/coverage.xml
-	cd $(BACKEND_DIR) && .venv/bin/pytest tests/api/ tests/auth/ tests/smoke/ tests/neural/test_hebbian.py -v --cov=src --cov-report=xml --cov-report=term-missing || true
+	@# Failing tests (exit 1) still yield a coverage report worth uploading; an
+	@# interrupted run, collection/import errors or a usage error (exit >= 2) do not.
+	cd $(BACKEND_DIR) && { .venv/bin/pytest tests/api/ tests/auth/ tests/smoke/ tests/neural/test_hebbian.py -v --cov=src --cov-report=xml --cov-report=term-missing; rc=$$?; [ $$rc -le 1 ] || { echo "Error: pytest exited $$rc (interrupted, collection or usage error) — not uploading"; exit 1; }; }
 	@test -s $(BACKEND_DIR)/coverage.xml || { echo "Error: pytest wrote no coverage.xml"; exit 1; }
 	@CODECOV_TOKEN=$${CODECOV_TOKEN:-$$(grep '^CODECOV_TOKEN=' .env.local 2>/dev/null | cut -d= -f2)}; \
 	cd $(BACKEND_DIR) && $(CODECOV_CLI) upload-process --token $$CODECOV_TOKEN -f coverage.xml \

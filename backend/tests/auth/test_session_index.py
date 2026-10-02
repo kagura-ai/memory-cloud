@@ -24,6 +24,7 @@ import pytest
 
 from auth import session as session_module
 from auth.session import SessionManager
+from tests.redis_fake_ops import DeferredPipeline
 
 TTL = 3600
 U1 = {"sub": "u1", "user_id": "u1", "email": "u1@example.com", "role": "user"}
@@ -127,15 +128,46 @@ class TestIndexIsMaintained:
 class TestIndexIsBookkeeping:
     def test_an_index_write_failure_does_not_sign_the_user_out(self, manager, redis, monkeypatch):
         session_id = manager.create_session(U1)
+        redis.expire(f"session:{session_id}", 10)
 
-        def _refused(*_a, **_kw):
-            raise RuntimeError("OOM command not allowed when used memory > 'maxmemory'")
+        class _RefusesSadd:
+            """Redis at maxmemory: SADD is refused, EXPIRE still runs."""
 
-        monkeypatch.setattr(redis, "pipeline", _refused)
+            def __getattr__(self, name):
+                if name == "sadd":
+
+                    def _refused(*_a, **_kw):
+                        raise RuntimeError("OOM command not allowed when used memory > 'maxmemory'")
+
+                    return _refused
+                return getattr(redis, name)
+
+        monkeypatch.setattr(
+            redis, "pipeline", lambda transaction=True: DeferredPipeline(_RefusesSadd())
+        )
 
         session = manager.get_session(session_id)
         assert session is not None and session["user_id"] == "u1"
-        assert 0 < redis.ttl(f"session:{session_id}") <= TTL
+        # The renewal still happened, and the set's TTL moved with it.
+        assert redis.ttl(f"session:{session_id}") > 10
+        assert redis.ttl("user_sessions:u1") > 10
+
+    def test_a_write_that_loses_to_a_sweep_leaves_no_index_entry(self, manager, redis):
+        session_id = manager.create_session(U1)
+        redis.delete(f"session:{session_id}")
+        redis.srem("user_sessions:u1", session_id)
+
+        assert manager.update_session(session_id, {"name": "x"}) is False
+        assert session_id not in _index(redis, "u1")
+
+    def test_a_sweep_unindexes_the_container_under_every_account(self, manager, redis):
+        session_id = manager.create_session(U1)
+        assert manager.add_account(session_id, U2)
+        assert session_id in _index(redis, "u2")
+
+        assert manager.delete_user_sessions("u1") == 1
+        assert session_id not in _index(redis, "u1")
+        assert session_id not in _index(redis, "u2")
 
     def test_logout_unindexes_the_session(self, manager, redis):
         session_id = manager.create_session(U1)

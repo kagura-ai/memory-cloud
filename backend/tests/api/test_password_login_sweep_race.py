@@ -233,3 +233,22 @@ class TestMfaVerify:
             await auth_routes.mfa_verify(self._verify_body(token), _request(), return_to=None)
 
         assert mfa.order == []
+
+    @pytest.mark.asyncio
+    async def test_the_losing_request_consumes_nothing(self, mfa, manager, monkeypatch) -> None:
+        # The fingerprint is taken before the TOTP check and the terms key, so
+        # a request that loses the race neither checks a code nor takes the
+        # winner's terms acceptance.
+        token = await self._password_step()
+        manager._redis.setex(f"mfa_pending_terms:{token}", 300, "2026-01-01")
+        manager._redis.delete(f"mfa_pending_cred:{token}")
+        checked: list[str] = []
+        monkeypatch.setattr(
+            auth_routes, "verify_totp", lambda _secret, code: checked.append(code) or True
+        )
+
+        with pytest.raises(AuthenticationError):
+            await auth_routes.mfa_verify(self._verify_body(token), _request(), return_to=None)
+
+        assert checked == []
+        assert f"mfa_pending_terms:{token}" in manager._redis.store
