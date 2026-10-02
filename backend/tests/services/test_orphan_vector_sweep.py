@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import delete
 
 from db.qdrant import PointRef
 from models.auth import Context, Workspace
@@ -257,19 +258,61 @@ class TestSafetyRails:
 
     @pytest.mark.asyncio
     async def test_reports_live_embedded_memories(self, db_session):
+        # Committed: the sweep ends its own read transactions (#1804), so rows
+        # that were only flushed would not be there when it counts.
         before = (await _sweep(db_session, _FakeStore([]))).live_embedded_memories
-        db_session.add_all(
-            [
-                _memory(),
-                _memory(embedding_status="pending"),
-                _memory(deleted_at=utcnow()),
-            ]
-        )
-        await db_session.flush()
-
-        after = (await _sweep(db_session, _FakeStore([]))).live_embedded_memories
+        rows = [
+            _memory(),
+            _memory(embedding_status="pending"),
+            _memory(deleted_at=utcnow()),
+        ]
+        ids = [m.id for m in rows]
+        db_session.add_all(rows)
+        await db_session.commit()
+        try:
+            after = (await _sweep(db_session, _FakeStore([]))).live_embedded_memories
+        finally:
+            await db_session.execute(delete(Memory).where(Memory.id.in_(ids)))
+            await db_session.commit()
 
         assert after == before + 1
+
+
+class TestReadTransactions:
+    """#1804: no read transaction stays open across the scan."""
+
+    @pytest.mark.asyncio
+    async def test_no_transaction_is_open_while_the_next_page_is_fetched(self, db_session):
+        seen: list[bool] = []
+
+        async def scroll(collection_name, *, page_size=1000):
+            for _ in range(3):
+                seen.append(db_session.in_transaction())
+                yield [_ref(uuid4())]
+            seen.append(db_session.in_transaction())
+
+        with patch.object(sweep_module, "scroll_point_refs", scroll):
+            result = await sweep_orphan_points(
+                db_session, dry_run=True, collections=["kagura_memories_a", "kagura_memories_b"]
+            )
+
+        assert result.scanned == 6
+        assert seen and not any(seen)
+        assert not db_session.in_transaction()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_lookup_still_ends_the_transaction(self, db_session):
+        async def scroll(collection_name, *, page_size=1000):
+            yield [_ref(uuid4())]
+
+        with (
+            patch.object(sweep_module, "scroll_point_refs", scroll),
+            patch.object(sweep_module, "_classify", AsyncMock(side_effect=RuntimeError("db"))),
+            pytest.raises(RuntimeError),
+        ):
+            await sweep_orphan_points(db_session, dry_run=True, collections=[COLLECTION])
+
+        assert not db_session.in_transaction()
 
 
 class TestPartialFailures:

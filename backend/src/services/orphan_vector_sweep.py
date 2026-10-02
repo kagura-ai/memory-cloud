@@ -189,9 +189,11 @@ async def sweep_orphan_points(
     """Find the vector store's orphaned points and, unless ``dry_run``, delete them.
 
     Args:
-        db: Async session. Nothing is written to Postgres. A pass that
-            deletes rolls the session back after each batch, to release the
-            point-writer lock.
+        db: Async session. Nothing is written to Postgres. The session is
+            rolled back after every page of the scan (#1804) and, on a pass
+            that deletes, after each batch, which releases the point-writer
+            lock: no transaction stays open while the vector store is read
+            or written. Give it a session of its own.
         dry_run: Count only.
         grace: How long a soft-delete must have stood before its point counts
             as an orphan.
@@ -220,7 +222,14 @@ async def sweep_orphan_points(
         try:
             async for page in scroll_point_refs(name):
                 stats.scanned += len(page)
-                reasons = await _classify(db, page, cutoff)
+                try:
+                    reasons = await _classify(db, page, cutoff)
+                finally:
+                    # #1804: end the read transaction before the next page is
+                    # fetched. Scrolling every collection can take longer than
+                    # a deployment's idle_in_transaction_session_timeout, and
+                    # a transaction left open across it would be cut off.
+                    await db.rollback()
                 for ref in page:
                     reason = reasons.get(ref.point_id)
                     if reason is None:
@@ -249,6 +258,7 @@ async def sweep_orphan_points(
         .where(Memory.deleted_at.is_(None), Memory.embedding_status == "success")
     )
     result.live_embedded_memories = int(live.scalar_one())
+    await db.rollback()
 
     if dry_run or not result.orphans:
         return result
