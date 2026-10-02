@@ -355,7 +355,7 @@ class TestContextResponseSerialization:
 class TestAPIKeyResponseSerialization:
     def test_all_four_datetime_fields_handle_naive_and_none(self):
         k = APIKeyResponse(
-            id=1,
+            id="akey_" + "a" * 22,
             key_prefix="prefix0123456789",
             name="test",
             user_id="u",
@@ -373,7 +373,7 @@ class TestAPIKeyResponseSerialization:
 
     def test_aware_utc_no_double_z(self):
         k = APIKeyResponse(
-            id=1,
+            id="akey_" + "a" * 22,
             key_prefix="prefix0123456789",
             name="test",
             user_id="u",

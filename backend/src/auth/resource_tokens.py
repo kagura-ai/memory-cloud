@@ -119,6 +119,8 @@ class ResourceTokenManager:
 
         logger.info(
             "resource_token_created",
+            token_id=new_token.id,
+            public_id=new_token.public_id,
             resource_id=resource_id,
             resource_pk=str(resource_pk),
             workspace_id=str(workspace_id),
@@ -184,6 +186,7 @@ class ResourceTokenManager:
             "resource_token_verified",
             resource_id=resource_id,
             token_id=token_record.id,
+            public_id=token_record.public_id,
         )
 
         return token_record
@@ -205,7 +208,12 @@ class ResourceTokenManager:
         token.is_active = False
         await self.db.flush()
 
-        logger.info("resource_token_revoked", token_id=token_id, resource_id=token.resource_id)
+        logger.info(
+            "resource_token_revoked",
+            token_id=token_id,
+            public_id=token.public_id,
+            resource_id=token.resource_id,
+        )
 
     async def list_tokens(
         self,

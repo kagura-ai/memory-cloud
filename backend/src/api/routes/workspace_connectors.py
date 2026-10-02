@@ -52,6 +52,7 @@ from utils.exceptions import (
     ValidationError,
 )
 from utils.logger import get_logger
+from utils.public_id import PublicIdPrefix, public_id_pattern
 
 logger = get_logger(__name__)
 
@@ -140,7 +141,11 @@ class WorkspaceConnectorCreateResponse(BaseModel):
     # the public `resource_id` slug above is the stable identifier; the internal
     # PK was redundant on this response and is dropped before the 1.0 freeze.
     context_id: UUID | None = None
-    token_id: int
+    token_id: str = Field(
+        ...,
+        description="Public id of the connector's resource token (`rtok_` + 22 base62 characters)",
+        pattern=public_id_pattern(PublicIdPrefix.RESOURCE_TOKEN),
+    )
     token: str = Field(..., description="Plaintext resource token; save immediately")
     kmc_api_key: str | None = Field(
         None, description="Plaintext KMC write key; shown once (registration flow only)"
@@ -482,7 +487,7 @@ async def create_workspace_connector(
         app_key=result.connector.app_key,
         resource_id=result.resource_id,
         context_id=result.context_id,
-        token_id=result.token.id,
+        token_id=result.token.public_id,
         token=result.plaintext_token,
         kmc_api_key=result.plaintext_kmc_api_key,
         quota_events_per_hour=result.token.quota_events_per_hour,

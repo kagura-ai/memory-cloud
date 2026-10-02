@@ -103,6 +103,7 @@ class TestInvitationContextIds:
 
         invitation = MagicMock()
         invitation.id = 7
+        invitation.public_id = "winv_" + "7" * 22
         invitation.workspace_id = _WS
         invitation.token = "t" * 32
         invitation.email = "x@example.com"

@@ -36,6 +36,7 @@ from services.invitation_service import InvitationService, build_invitation_url
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import FeatureNotAvailableError, NotFoundException, ValidationError
 from utils.logger import get_logger
+from utils.public_id import InvitationPublicId
 
 logger = get_logger(__name__)
 
@@ -150,7 +151,7 @@ async def create_invitation(
 
         # Build response
         response = WorkspaceInvitationResponse(
-            id=invitation.id,
+            id=invitation.public_id,
             workspace_id=invitation.workspace_id,
             token=invitation.token,
             email=invitation.email,
@@ -220,7 +221,7 @@ async def list_invitations(
 
     return [
         WorkspaceInvitationResponse(
-            id=inv.id,
+            id=inv.public_id,
             workspace_id=inv.workspace_id,
             token=inv.token if expose_token else None,
             email=inv.email,
@@ -250,7 +251,7 @@ async def list_invitations(
 )
 async def delete_invitation(
     workspace_id: UUID,
-    invitation_id: int,
+    invitation_id: InvitationPublicId,
     current_user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -285,7 +286,7 @@ async def delete_invitation(
         await db.commit()
 
         logger.info(
-            f"User {user_id} deleted invitation id={invitation_id} workspace={workspace_id}"
+            f"User {user_id} deleted invitation public_id={invitation_id} workspace={workspace_id}"
         )
 
         return {"success": True}
@@ -421,7 +422,7 @@ async def get_pending_invitations(
 
         results.append(
             PendingInvitationItem(
-                id=inv.id,
+                id=inv.public_id,
                 workspace_id=str(inv.workspace_id),
                 workspace_name=workspace.name,
                 role=inv.role,

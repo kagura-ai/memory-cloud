@@ -490,20 +490,20 @@ class InvitationService:
 
     async def delete_invitation(
         self,
-        invitation_id: int,
+        public_id: str,
         workspace_id: UUID,
     ) -> None:
         """Delete (revoke) invitation.
 
         Args:
-            invitation_id: Invitation ID
+            public_id: Public id of the invitation (``winv_...``, #1008)
             workspace_id: Workspace ID (for validation)
 
         Raises:
             NotFoundException: If invitation not found
         """
         stmt = select(WorkspaceInvitation).where(
-            WorkspaceInvitation.id == invitation_id,
+            WorkspaceInvitation.public_id == public_id,
             WorkspaceInvitation.workspace_id == workspace_id,
         )
         result = await self.db.execute(stmt)
@@ -516,8 +516,8 @@ class InvitationService:
         await self.db.flush()
 
         logger.info(
-            f"Deleted invitation id={invitation_id} workspace={workspace_id} "
-            f"token={invitation.token[:8]}..."
+            f"Deleted invitation id={invitation.id} public_id={public_id} "
+            f"workspace={workspace_id} token={invitation.token[:8]}..."
         )
 
     async def cleanup_expired_invitations(

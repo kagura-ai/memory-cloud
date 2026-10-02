@@ -73,6 +73,7 @@ def _notices(tasks: BackgroundTasks) -> list[tuple[tuple, dict]]:
 def _new_key(name: str = "deploy") -> SimpleNamespace:
     return SimpleNamespace(
         id=8,
+        public_id="akey_" + "8" * 22,
         name=name,
         key_prefix=KEY_PREFIX,
         user_id="owner-1",
@@ -142,6 +143,7 @@ class TestApiKeyRoutes:
     async def test_regenerate_schedules(self) -> None:
         old = SimpleNamespace(
             id=7,
+            public_id="akey_" + "7" * 22,
             name="ci",
             user_id="owner-1",
             workspace_id=WS,
@@ -161,7 +163,12 @@ class TestApiKeyRoutes:
         tasks = BackgroundTasks()
 
         await api_keys_routes.regenerate_api_key(
-            7, _request(), tasks, {"user_id": "owner-1"}, manager=manager, db=db
+            "akey_" + "7" * 22,
+            _request(),
+            tasks,
+            {"user_id": "owner-1"},
+            manager=manager,
+            db=db,
         )
 
         ((args, kwargs),) = _notices(tasks)
@@ -209,7 +216,7 @@ class TestMemberCredentialRoutes:
     async def test_admin_regenerate_names_the_admin(self, monkeypatch) -> None:
         monkeypatch.setattr(mc, "check_permission", AsyncMock())
         monkeypatch.setattr(mc, "MemberCredentialsService", MagicMock())
-        old = SimpleNamespace(id=7, name="ws-key", revoked_at=None)
+        old = SimpleNamespace(id=7, public_id="akey_" + "7" * 22, name="ws-key", revoked_at=None)
         db = MagicMock()
         db.execute = AsyncMock(
             return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=old))
@@ -231,7 +238,7 @@ class TestMemberCredentialRoutes:
     async def test_self_regenerate_has_no_actor(self, monkeypatch) -> None:
         monkeypatch.setattr(mc, "check_permission", AsyncMock())
         monkeypatch.setattr(mc, "MemberCredentialsService", MagicMock())
-        old = SimpleNamespace(id=7, name="mine", revoked_at=None)
+        old = SimpleNamespace(id=7, public_id="akey_" + "7" * 22, name="mine", revoked_at=None)
         db = MagicMock()
         db.execute = AsyncMock(
             return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=old))
