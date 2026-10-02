@@ -22,7 +22,7 @@ export interface OAuth2Provider {
 }
 
 export interface OAuth2Client {
-  id: number;
+  // #1813: no integer id — clients are addressed by client_id
   client_id: string;
   client_name: string;
   redirect_uris: string[];

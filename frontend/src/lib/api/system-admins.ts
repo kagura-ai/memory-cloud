@@ -15,7 +15,7 @@ import { apiClient } from './index';
  * System Administrator with flags and statistics
  */
 export interface SystemAdmin {
-  id: number;
+  // #1813: no integer id — admins are addressed by user_id
   email: string;
   user_id: string;
   name: string;
@@ -34,7 +34,6 @@ export interface SystemAdmin {
 export interface SystemAdminListResponse {
   admins: SystemAdmin[];
   total: number;
-  initial_admin_id: number;
 }
 
 /**
@@ -71,9 +70,9 @@ export interface DemoteSystemAdminResponse {
  *
  * @example
  * ```typescript
- * const { admins, total, initial_admin_id } = await listSystemAdmins();
+ * const { admins, total } = await listSystemAdmins();
  * console.log(`Found ${total} system admins`);
- * console.log(`Initial admin ID: ${initial_admin_id}`);
+ * const initial = admins.find((a) => a.is_initial_admin);
  * ```
  */
 export async function listSystemAdmins(): Promise<SystemAdminListResponse> {
