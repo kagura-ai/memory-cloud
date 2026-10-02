@@ -224,6 +224,18 @@ async def restore_deleted_context(
     ).one()
     result.memories_restored = int(counts[0])
     result.memories_left_deleted = int(counts[1]) - result.memories_restored
+    if not shared_timestamp and result.memories_restored:
+        # Either a deletion from before v0.90.0, or one of a context that had
+        # no live memories left (nothing carries its timestamp then). The
+        # rows cannot tell the two apart, so the admin is told what the
+        # window takes.
+        result.warnings.append(
+            "No memory carries the context's deletion time (a deletion from before "
+            f"v0.90.0, or of a context with no live memories): the "
+            f"{result.memories_restored} memories its deleter deleted up to "
+            f"{int(DELETION_WINDOW.total_seconds() // 60)} minutes before it are "
+            "restored, including any forgotten on purpose in that time."
+        )
 
     # The context cap is the plan's, for its users' own creates; an admin
     # restore is not refused by it (nor does it go through the quota gates,

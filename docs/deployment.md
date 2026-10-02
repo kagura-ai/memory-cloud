@@ -998,7 +998,10 @@ time, and the restore takes exactly those. Memories deleted with a context
 before v0.90.0 carry their own deletion time, a little earlier than the
 context's; for such a context the restore takes those up to 10 minutes before
 the context's deletion time, deleted by the same user, so a memory that user
-forgot in those 10 minutes comes back too.
+forgot in those 10 minutes comes back too. The rows cannot tell such a
+deletion from a v0.90.0 one of a context that had no live memories left, so
+the window applies there as well; the dry run warns whenever it does, with
+the number of memories it would bring back.
 
 The older endpoint `POST /api/v1/admin/contexts/recover` rebuilds a context
 from surviving vector-store points, for a context whose rows are gone. It finds

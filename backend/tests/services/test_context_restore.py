@@ -202,6 +202,41 @@ async def test_memory_forgotten_just_before_a_shared_timestamp_deletion_stays_de
 
 
 @pytest.mark.asyncio
+async def test_the_window_is_flagged_when_no_memory_shares_the_timestamp(db_session, seed):
+    """A context emptied by forget and then deleted looks like an old deletion."""
+    context = seed.context()
+    db_session.add(context)
+    await db_session.flush()
+    db_session.add(
+        seed.memory(context, deleted_at=utcnow() - timedelta(minutes=2), deleted_by=_USER)
+    )
+    await db_session.commit()
+    context_id = context.id
+    await _delete(db_session, context_id)
+
+    result = await restore_deleted_context(db_session, context_id)
+
+    assert result.memories_restored == 1
+    assert any("deletion time" in w for w in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_no_window_warning_for_a_shared_timestamp_deletion(db_session, seed):
+    context = seed.context()
+    db_session.add(context)
+    await db_session.flush()
+    db_session.add(seed.memory(context))
+    await db_session.commit()
+    context_id = context.id
+    await _delete(db_session, context_id)
+
+    result = await restore_deleted_context(db_session, context_id)
+
+    assert result.memories_restored == 1
+    assert result.warnings == []
+
+
+@pytest.mark.asyncio
 async def test_dry_run_counts_and_changes_nothing(db_session, seed):
     context = seed.context()
     db_session.add(context)
