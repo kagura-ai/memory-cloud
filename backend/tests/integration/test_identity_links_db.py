@@ -309,7 +309,7 @@ class TestLeavingASet:
             .scalars()
             .all()
         )
-        assert all(row.linked_by != a.user_id for row in rows)
+        assert all(row.linked_by is None for row in rows)
 
 
 class TestLinkedByFollowsTheAccount:
@@ -779,7 +779,7 @@ class TestErasingOneLinkedAccount:
             .all()
         )
         assert len(rows) == 2
-        assert all(row.linked_by != a.user_id for row in rows)
+        assert all(row.linked_by is None for row in rows)
         assert await linked_user_ids(db_session, b.user_id) == {b.user_id, c.user_id}
 
     @pytest.mark.asyncio

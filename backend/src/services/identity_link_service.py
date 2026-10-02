@@ -71,18 +71,6 @@ async def lock_identity_links(db: AsyncSession) -> None:
     await db.execute(_LINK_LOCK_SQL)
 
 
-def _forget_cached_tags() -> None:
-    """Drop this process's tag-vocabulary cache after a link change.
-
-    Not needed for correctness: a private vocabulary is keyed by the link set
-    itself (#1807), so after a change every API process reads a new key and
-    never serves the former set's tags. This only frees the entries no one
-    will read again in the process that handled the change."""
-    from services.tag_resolution import clear_vocabulary_cache
-
-    clear_vocabulary_cache()
-
-
 def linked_ids_subquery(user_id: str) -> Any:
     """``SELECT user_id`` of every account linked to ``user_id`` (itself included
     when it is linked at all). Empty for an account with no links."""
@@ -247,7 +235,6 @@ class IdentityLinkService:
         self._audit(users[user_id], "identity_linked", other_user_id, ip_address, user_agent)
         self._audit(users[other_user_id], "identity_linked", user_id, ip_address, user_agent)
         await self.db.commit()
-        _forget_cached_tags()
         logger.info("identity_linked", user_id=user_id, linked_user_id=other_user_id)
         return True
 
@@ -303,7 +290,6 @@ class IdentityLinkService:
             if actor in users:
                 self._audit(users[actor], "identity_unlinked", target, ip_address, user_agent)
         await self.db.commit()
-        _forget_cached_tags()
         logger.info("identity_unlinked", user_id=user_id, unlinked_user_id=other_user_id)
 
     async def leave(
@@ -358,7 +344,6 @@ class IdentityLinkService:
                 if actor in users:
                     self._audit(users[actor], "identity_unlinked", target, ip_address, user_agent)
         await self.db.commit()
-        _forget_cached_tags()
         logger.info("identity_link_left", user_id=user_id, former_links=len(others))
         return others
 
@@ -385,23 +370,30 @@ class IdentityLinkService:
         )
 
 
-async def _remove_from_set(db: AsyncSession, user_id: str, members: list[IdentityLink]) -> None:
+async def _remove_from_set(db: AsyncSession, user_id: str, members: list[IdentityLink]) -> int:
     """Delete ``user_id``'s row from the set ``members`` (every row of it).
 
     A set left with one account is removed. Rows of the remaining accounts
-    stop naming ``user_id`` in ``linked_by``: the account that made a link
-    and has left the set is recorded as the row's own account, the same as
-    the hand-over step writes. Runs under :func:`lock_identity_links`.
+    stop naming ``user_id`` in ``linked_by``: NULL, the value the foreign key
+    leaves when the account that made a link is deleted (#1807). Writing NULL
+    rather than another id also keeps this off the ``users`` rows — a
+    non-NULL value would make the foreign-key check lock one while the link
+    lock is held, the reverse of the order erasure and admin delete take.
+    Runs under :func:`lock_identity_links`.
+
+    Returns:
+        How many rows were deleted.
     """
     await db.execute(delete(IdentityLink).where(IdentityLink.user_id == user_id))
     remaining = [row for row in members if row.user_id != user_id]
     if len(remaining) <= 1:
         for row in remaining:
             await db.execute(delete(IdentityLink).where(IdentityLink.id == row.id))
-        return
+        return 1 + len(remaining)
     for row in remaining:
         if row.linked_by == user_id:
-            row.linked_by = row.user_id
+            row.linked_by = None
+    return 1
 
 
 async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str, int]:
@@ -424,7 +416,7 @@ async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str
     otherwise publish them by making the context shared.
 
     Then ``user_id`` leaves its set, a set left with one account is removed,
-    and ``linked_by`` no longer names ``user_id`` on any row.
+    and ``linked_by`` no longer names ``user_id`` on any row (NULL instead).
 
     Does not commit: it runs inside the caller's transaction, after the
     caller has locked the ``users`` row.
@@ -437,7 +429,16 @@ async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str
     from models.memory import Memory
 
     await lock_identity_links(db)
-    others = sorted((await linked_user_ids(db, user_id)) - {user_id})
+    link_rows = list(
+        (
+            await db.execute(
+                select(IdentityLink).where(IdentityLink.user_id.in_(linked_ids_subquery(user_id)))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    others = sorted(row.user_id for row in link_rows if row.user_id != user_id)
     handed_over = 0
     if others:
         contexts = (
@@ -508,19 +509,5 @@ async def hand_over_private_contexts(db: AsyncSession, user_id: str) -> dict[str
             context.created_by = eligible[0][1]
             handed_over += 1
 
-    members = list(
-        (
-            await db.execute(
-                select(IdentityLink).where(IdentityLink.user_id.in_(linked_ids_subquery(user_id)))
-            )
-        )
-        .scalars()
-        .all()
-    )
-    removed = 0
-    if members:
-        await _remove_from_set(db, user_id, members)
-        removed = 1 if len(members) > 2 else len(members)
-    if handed_over or removed:
-        _forget_cached_tags()
+    removed = await _remove_from_set(db, user_id, link_rows) if link_rows else 0
     return {"contexts_handed_over": handed_over, "identity_links_removed": removed}
