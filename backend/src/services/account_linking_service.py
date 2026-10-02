@@ -161,7 +161,9 @@ class AccountLinkingService:
         # is now represented by a ``user_oauth_providers`` row. Remaining methods
         # = the other linked providers + password; no separate legacy-provider
         # term is needed. (``users.auth_provider`` is still WRITTEN below as the
-        # denormalized "primary" pointer — only the read-dependence was removed.)
+        # denormalized "primary" pointer. Sign-in no longer resolves the owner
+        # through it, but ``RoleManager._sync_existing_user`` reads it to sync
+        # email/name only from the primary provider — #1811.)
         remaining_methods = (len(rows) - 1) + (1 if has_password else 0)
         if remaining_methods < 1:
             raise ConflictError("Cannot unlink the only remaining sign-in method")

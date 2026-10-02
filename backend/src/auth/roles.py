@@ -309,8 +309,9 @@ class RoleManager:
             # google/github users, so every such identity has a
             # ``user_oauth_providers`` row and this lookup is authoritative.
             # (``users.auth_provider`` is retained as the denormalized "primary"
-            # pointer that account-linking writes — only the READ-dependence is
-            # removed here.) A known provider that somehow still lacks a row falls
+            # pointer that account-linking writes. It no longer resolves the
+            # owner, but #1811 reads it again to decide whether this sign-in
+            # may sync email/name — see ``_sync_existing_user``.) A known provider that somehow still lacks a row falls
             # through to the new-user path below, whose IntegrityError(user_id)
             # retry re-resolves the existing user without creating a duplicate.
             if known_provider:
@@ -427,7 +428,7 @@ class RoleManager:
         email_verified: bool,
         ip_address: str | None,
         user_agent: str | None,
-        sync_profile: bool = True,
+        sync_profile: bool,
     ) -> Role:
         """Sync mutable attributes (email, name) on an existing user row.
 
