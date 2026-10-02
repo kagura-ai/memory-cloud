@@ -938,6 +938,11 @@ async def google_callback(
         deleted_count = _session_manager.delete_user_sessions(
             owner_id, exclude_session_id=add_to_session
         )
+        if user_info["sub"] != owner_id:
+            # #1805: sessions opened before the fix were keyed by the sub.
+            deleted_count += _session_manager.delete_user_sessions(
+                user_info["sub"], exclude_session_id=add_to_session
+            )
         if deleted_count > 0:
             logger.info(f"Invalidated {deleted_count} old session(s) for {owner_email}")
 
@@ -2080,6 +2085,11 @@ async def github_callback(
         deleted_count = _session_manager.delete_user_sessions(
             db_user_id, exclude_session_id=add_to_session
         )
+        if user_info["sub"] != db_user_id:
+            # #1805: sessions opened before the fix were keyed by the sub.
+            deleted_count += _session_manager.delete_user_sessions(
+                user_info["sub"], exclude_session_id=add_to_session
+            )
         if deleted_count > 0:
             logger.info(f"Invalidated {deleted_count} old session(s) for {db_email}")
 

@@ -606,4 +606,17 @@ async def test_sign_in_owner_is_the_linked_account_not_a_stale_same_sub_row(
 
     assert await _owning_user(db_session, "github", sub) == (owner.user_id, owner.email)
     # An identity with no link row still resolves to the row keyed by its sub.
-    assert await _owning_user(db_session, "google", sub) == (sub, stale.email)
+    unlinked = User(
+        email=f"unlinked-{suffix}@example.com",
+        user_id=f"gh2-{suffix}",
+        name="Unlinked",
+        role="user",
+        auth_method="oauth",
+        auth_provider="github",
+    )
+    db_session.add(unlinked)
+    await db_session.commit()
+    assert await _owning_user(db_session, "github", unlinked.user_id) == (
+        unlinked.user_id,
+        unlinked.email,
+    )

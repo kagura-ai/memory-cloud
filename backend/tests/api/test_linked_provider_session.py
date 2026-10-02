@@ -158,7 +158,7 @@ async def test_old_sessions_of_the_owning_account_are_invalidated(
 
     await _callback(provider)
 
-    assert manager.delete_user_sessions.call_args.args[0] == OWNER_ID
+    assert manager.delete_user_sessions.call_args_list[0].args[0] == OWNER_ID
 
 
 @pytest.mark.asyncio
@@ -257,8 +257,11 @@ async def test_add_account_through_a_linked_provider_adds_the_owner(
     response = await _callback(provider)
 
     assert "kagura_session=sess-A" in response.headers["set-cookie"]
-    assert manager.delete_user_sessions.call_args.args[0] == OWNER_ID
-    assert manager.delete_user_sessions.call_args.kwargs["exclude_session_id"] == "sess-A"
+    assert manager.delete_user_sessions.call_args_list[0].args[0] == OWNER_ID
+    assert all(
+        c.kwargs["exclude_session_id"] == "sess-A"
+        for c in manager.delete_user_sessions.call_args_list
+    )
     session_id, identity = manager.add_account.call_args.args
     assert session_id == "sess-A"
     assert identity["user_id"] == OWNER_ID
@@ -329,3 +332,27 @@ class TestSessionOwnerHelper:
             IDP_EMAIL,
         )
         owning.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider", "sub", "idp"), PROVIDERS)
+async def test_sessions_keyed_by_the_sub_before_the_fix_are_invalidated_too(
+    manager, signed_in_path, request, provider, sub, idp
+) -> None:
+    # A session opened before #1805 carries the sub as user_id; #114 must not
+    # leave it alive beside the owner's new one.
+    request.getfixturevalue(idp)
+
+    await _callback(provider)
+
+    invalidated = [c.args[0] for c in manager.delete_user_sessions.call_args_list]
+    assert invalidated == [OWNER_ID, sub]
+
+
+@pytest.mark.asyncio
+async def test_primary_provider_sign_in_invalidates_once(manager, signed_in_path, google_idp):
+    signed_in_path.owning.return_value = (GOOGLE_SUB, IDP_EMAIL)
+
+    await _callback("google")
+
+    assert [c.args[0] for c in manager.delete_user_sessions.call_args_list] == [GOOGLE_SUB]
