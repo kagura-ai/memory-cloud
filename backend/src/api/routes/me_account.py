@@ -13,8 +13,8 @@ lists all providers currently linked to the session user.
 Identity links (#1784) live here too: ``identity-links`` lists the accounts
 counted as the same owner as the session user and the ones that can be
 linked, and links or unlinks one. A link is proved by the browser session
-holding both accounts, each signed in within ``IDENTITY_LINK_SIGN_IN_WINDOW``
-(#1803), never by an email match.
+holding both accounts, each with a credential proved within
+``IDENTITY_LINK_SIGN_IN_WINDOW`` (#1803, #1818), never by an email match.
 
 Auth model: every endpoint uses `SessionUser` (browser session only, no
 API keys) — a leaked API key must never be enough to trigger account
@@ -426,7 +426,9 @@ async def list_providers(
 # lives (7 rolling days), so holding it proves only that it signed in at some
 # point; the link asks for a sign-in now, as the provider link does with its
 # OAuth round trip (5 minutes there). Ten minutes leaves room for two sign-ins,
-# MFA included.
+# MFA included. What counts is the time the credential was proved (#1818): a
+# password sign-in, or Google's ``auth_time`` — not an OAuth round trip that a
+# live provider session completes without asking (see ``SessionManager.proven_at``).
 IDENTITY_LINK_SIGN_IN_WINDOW = timedelta(minutes=10)
 
 
@@ -513,7 +515,7 @@ async def list_identity_links(
                     user_id=account_id,
                     email=account.get("email"),
                     name=account.get("name"),
-                    signed_in_recently=auth_module._session_manager.signed_in_within(
+                    signed_in_recently=auth_module._session_manager.proven_within(
                         session_id, account_id, IDENTITY_LINK_SIGN_IN_WINDOW
                     ),
                 )
@@ -529,7 +531,7 @@ async def list_identity_links(
             for item in linked
         ],
         linkable=linkable,
-        signed_in_recently=auth_module._session_manager.signed_in_within(
+        signed_in_recently=auth_module._session_manager.proven_within(
             session_id, user_id, IDENTITY_LINK_SIGN_IN_WINDOW
         ),
     )
@@ -547,8 +549,8 @@ async def link_identity(
 
     The proof is this browser session: the target must be one of the accounts
     signed in on it, which each entered through its own sign-in, and both the
-    session user and the target must have signed in here within
-    ``IDENTITY_LINK_SIGN_IN_WINDOW`` (#1803) — a link is symmetric, so a stale
+    session user and the target must have proved their credential here within
+    ``IDENTITY_LINK_SIGN_IN_WINDOW`` (#1803, #1818) — a link is symmetric, so a stale
     sign-in on either side would let whoever holds an old session hand that
     account's private contexts to another. Nothing is ever linked by an email
     match (#481). An id that is not in the session answers 404 whether or not
@@ -565,7 +567,7 @@ async def link_identity(
         if not manager.session_holds_user(session_id, body.user_id):
             raise NotFoundException("Account")
         if not all(
-            manager.signed_in_within(session_id, account, IDENTITY_LINK_SIGN_IN_WINDOW)
+            manager.proven_within(session_id, account, IDENTITY_LINK_SIGN_IN_WINDOW)
             for account in (user_id, body.user_id)
         ):
             raise IdentityLinkSignInRequiredError()

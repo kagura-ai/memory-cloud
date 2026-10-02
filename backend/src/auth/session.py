@@ -62,7 +62,16 @@ _SESSION_VERSION = 2
 
 # Envelope keys belong to the container, not to an account identity.
 _ENVELOPE_KEYS = frozenset(
-    {"v", "accounts", "active", "created_at", "last_accessed", "updated_at", "signed_in_at"}
+    {
+        "v",
+        "accounts",
+        "active",
+        "created_at",
+        "last_accessed",
+        "updated_at",
+        "signed_in_at",
+        "proven_at",
+    }
 )
 
 # When each account last went through a sign-in (#1803): ``{account_id: iso}``
@@ -74,6 +83,22 @@ _ENVELOPE_KEYS = frozenset(
 # written before this key existed has no time for any account, which readers
 # treat as "not recent" (fail closed).
 _SIGNED_IN_AT = "signed_in_at"
+
+# When each account last PROVED its credential (#1818): ``{account_id: iso}``
+# on the container. A sign-in is not always a proof: an OAuth round trip goes
+# through without a password while the browser still has a session with the
+# provider. The caller of ``create_session`` / ``add_account`` says what was
+# proved and when (a password sign-in now, Google its ``auth_time``); a sign-in
+# that proves nothing removes the account's entry. An identity link reads only
+# this key. Missing means "not proved" (fail closed).
+_PROVEN_AT = "proven_at"
+
+
+def _within(when: datetime | None, window: timedelta) -> bool:
+    """A recorded time no older than ``window``; never a missing or future one."""
+    if when is None:
+        return False
+    return timedelta(0) <= utcnow() - when <= window
 
 
 def _account_id(identity: dict[str, Any]) -> str | None:
@@ -272,13 +297,17 @@ class SessionManager:
 
         return _redis_client_cache[redis_url]
 
-    def create_session(self, user_info: dict[str, Any]) -> str:
+    def create_session(
+        self, user_info: dict[str, Any], *, proven_at: datetime | None = None
+    ) -> str:
         """Create new session for authenticated user.
 
         Args:
             user_info: User information from OAuth2 provider
                 Required keys: "sub" (user ID)
                 Optional keys: "email", "name", "picture", etc.
+            proven_at: When this sign-in last proved the account's credential
+                (naive UTC, #1818), or None when it proved nothing.
 
         Returns:
             Session ID (secure random token)
@@ -306,6 +335,7 @@ class SessionManager:
             "created_at": now,
             "last_accessed": now,
             _SIGNED_IN_AT: {account_id: now},
+            _PROVEN_AT: {account_id: proven_at.isoformat()} if proven_at else {},
         }
 
         # Store in Redis with TTL
@@ -501,6 +531,17 @@ class SessionManager:
         for it (a record from before the time was kept). Reads the record
         without refreshing its TTL.
         """
+        return self._account_time(session_id, account_id, _SIGNED_IN_AT)
+
+    def proven_at(self, session_id: str, account_id: str) -> datetime | None:
+        """When ``account_id`` last proved its credential here (#1818).
+
+        Same contract as ``signed_in_at``; None also when the latest sign-in
+        proved nothing (an OAuth sign-in with no provider authentication time).
+        """
+        return self._account_time(session_id, account_id, _PROVEN_AT)
+
+    def _account_time(self, session_id: str, account_id: str, key: str) -> datetime | None:
         try:
             raw = self._redis.get(f"session:{session_id}")
             if not raw:
@@ -510,8 +551,8 @@ class SessionManager:
                 return None
             if account_id not in stored.get("accounts", {}):
                 return None
-            signed_in = stored.get(_SIGNED_IN_AT)
-            value = signed_in.get(account_id) if isinstance(signed_in, dict) else None
+            times = stored.get(key)
+            value = times.get(account_id) if isinstance(times, dict) else None
             if not isinstance(value, str):
                 return None
             when = datetime.fromisoformat(value)
@@ -526,11 +567,14 @@ class SessionManager:
         A time in the future (clock skew, a tampered record) does not count,
         and neither does a missing one.
         """
-        when = self.signed_in_at(session_id, account_id)
-        if when is None:
-            return False
-        age = utcnow() - when
-        return timedelta(0) <= age <= window
+        return _within(self.signed_in_at(session_id, account_id), window)
+
+    def proven_within(self, session_id: str, account_id: str, window: timedelta) -> bool:
+        """Whether ``account_id`` proved its credential within ``window`` (#1818).
+
+        What an identity link asks for. Same rules as ``signed_in_within``.
+        """
+        return _within(self.proven_at(session_id, account_id), window)
 
     def list_accounts(self, session_id: str) -> list[dict[str, Any]]:
         """Identities signed in on this session, active one flagged.
@@ -555,13 +599,18 @@ class SessionManager:
             logger.error(f"Failed to list accounts: {e}")
             return []
 
-    def add_account(self, session_id: str, user_info: dict[str, Any]) -> bool:
+    def add_account(
+        self, session_id: str, user_info: dict[str, Any], *, proven_at: datetime | None = None
+    ) -> bool:
         """Add an identity to an existing session and make it active.
 
         This is what a login performs INSTEAD of minting a fresh session when
         the browser already has one. Re-adding an account that is already
         present refreshes its identity and activates it, so "sign in again" is
         idempotent rather than creating a duplicate entry.
+
+        ``proven_at`` is as for ``create_session``. None removes an earlier
+        proof of this account: the newest sign-in is the one that counts.
         """
         account_id = _account_id(user_info)
         if not account_id:
@@ -576,6 +625,13 @@ class SessionManager:
             if not isinstance(signed_in, dict):
                 signed_in = container[_SIGNED_IN_AT] = {}
             signed_in[account_id] = utcnow().isoformat()
+            proven = container.get(_PROVEN_AT)
+            if not isinstance(proven, dict):
+                proven = container[_PROVEN_AT] = {}
+            if proven_at is None:
+                proven.pop(account_id, None)
+            else:
+                proven[account_id] = proven_at.isoformat()
 
         return self._mutate_container(session_id, _add)
 
@@ -625,9 +681,10 @@ class SessionManager:
         def _remove(container: dict[str, Any]) -> None:
             accounts = container.get("accounts", {})
             accounts.pop(account_id, None)
-            signed_in = container.get(_SIGNED_IN_AT)
-            if isinstance(signed_in, dict):
-                signed_in.pop(account_id, None)
+            for key in (_SIGNED_IN_AT, _PROVEN_AT):
+                times = container.get(key)
+                if isinstance(times, dict):
+                    times.pop(account_id, None)
             if container.get("active") == account_id:
                 container["active"] = next(iter(accounts))
 
@@ -672,8 +729,8 @@ class SessionManager:
             active = container.get("active", "")
             identity = dict(container.get("accounts", {}).get(active, {}))
             for key, value in updates.items():
-                if key == _SIGNED_IN_AT:
-                    # Only a sign-in sets it (#1803); an update is not one.
+                if key in (_SIGNED_IN_AT, _PROVEN_AT):
+                    # Only a sign-in sets them (#1803, #1818); an update is not one.
                     continue
                 if key in _ENVELOPE_KEYS:
                     container[key] = value
