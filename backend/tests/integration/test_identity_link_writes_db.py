@@ -159,6 +159,23 @@ class TestExternalIdUpsert:
         assert forget.await_args.kwargs["_skip_binding_row_filter"] is True
 
     @pytest.mark.asyncio
+    async def test_rows_both_accounts_kept_before_the_link_are_all_replaced(self, db_session):
+        """Accounts linked before #1803 may each hold a row for the same
+        external_id; replacing only the newest would leave the other live,
+        and no later upsert would ever match it again."""
+        admin, oauth, _, context, by_admin = await _seed(db_session, link=False)
+        by_oauth = await _external(db_session, context, oauth)
+        await IdentityLinkService(db_session).link(admin.user_id, oauth.user_id)
+
+        response, forget = await _upsert(db_session, admin, context)
+
+        assert response.operation == "replaced"
+        assert {call.args[0].memory_id for call in forget.await_args_list} == {
+            by_admin.id,
+            by_oauth.id,
+        }
+
+    @pytest.mark.asyncio
     async def test_without_a_link_the_rows_stay_apart(self, db_session):
         _, oauth, _, context, _ = await _seed(db_session, link=False)
 

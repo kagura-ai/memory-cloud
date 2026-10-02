@@ -1703,14 +1703,17 @@ class MemoryService:
         #1803: in a private context the external_id names a row of the owner,
         and the owner is the link set (#1784) — so either linked account's
         upsert replaces the same row instead of each keeping its own. A shared
-        context keeps matching the caller's own rows only.
+        context keeps matching the caller's own rows only. Every matching row
+        is replaced, not only the newest: accounts linked before #1803 may
+        each hold one, and one left behind would never be matched again.
         """
-        existing = await self.memory_repo.get_by_resource_id(
+        matches = await self.memory_repo.list_by_resource_id(
             resource_id=request.external_id,
             context_id=current_context_id,
             user_id=user_id,
             include_linked=await self._is_private_context(current_context_id),
         )
+        existing = matches[0] if matches else None
 
         # Build details with resource_id preserved (copy to avoid mutating request)
         details = {**(request.details or {}), "resource_id": request.external_id}
@@ -1720,10 +1723,11 @@ class MemoryService:
         # than letting the inner forget() skip the old row silently and report
         # "replaced" with two live rows. The inner remember() gates a NEW
         # marking on its own.
-        if existing is not None and self._touches_tool_trigger(
-            existing.details, None, details_supplied=False
+        if any(
+            self._touches_tool_trigger(match.details, None, details_supplied=False)
+            for match in matches
         ):
-            await self._require_guardrail_author(user_id, existing.context_id)
+            await self._require_guardrail_author(user_id, matches[0].context_id)
 
         # #1519: forward the caller's pin — without it a pinned external_id row
         # was replaced by an unpinned one and left load_pinned() silently.
@@ -1776,9 +1780,9 @@ class MemoryService:
         # agent binding's type filter does not stop the replacement — as it
         # never did for the caller's own row: the link makes it the same owner.
         operation = "created"
-        if existing:
+        for match in matches:
             await self.forget(
-                ForgetRequest(memory_id=existing.id),
+                ForgetRequest(memory_id=match.id),
                 user_id=user_id,
                 current_context_id=current_context_id,
                 _skip_binding_row_filter=True,

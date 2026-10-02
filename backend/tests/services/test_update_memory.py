@@ -152,7 +152,7 @@ class TestUpsertByExternalId:
     @pytest.mark.asyncio
     async def test_upsert_creates_when_not_exists(self, service):
         """When external_id not found, should create new memory."""
-        service.memory_repo.get_by_resource_id = AsyncMock(return_value=None)
+        service.memory_repo.list_by_resource_id = AsyncMock(return_value=[])
 
         new_memory_id = uuid4()
         mock_remember_response = MagicMock()
@@ -191,7 +191,7 @@ class TestUpsertByExternalId:
         # #1519: a replacement inherits the existing row's delivery_mode when the
         # request omits it, so the stub must carry a real value.
         existing.delivery_mode = "on_recall"
-        service.memory_repo.get_by_resource_id = AsyncMock(return_value=existing)
+        service.memory_repo.list_by_resource_id = AsyncMock(return_value=[existing])
 
         new_memory_id = uuid4()
         mock_remember_response = MagicMock()

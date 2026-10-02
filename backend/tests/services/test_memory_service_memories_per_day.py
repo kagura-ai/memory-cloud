@@ -210,7 +210,7 @@ class TestUpsertByExternalId:
         )
 
     async def test_brand_new_external_id_is_charged(self, service):
-        service.memory_repo.get_by_resource_id = AsyncMock(return_value=None)
+        service.memory_repo.list_by_resource_id = AsyncMock(return_value=[])
         self._stub_remember(service)
 
         result = await service.update_memory(
@@ -224,7 +224,7 @@ class TestUpsertByExternalId:
         existing = MagicMock()
         existing.id = uuid4()
         existing.delivery_mode = "on_recall"
-        service.memory_repo.get_by_resource_id = AsyncMock(return_value=existing)
+        service.memory_repo.list_by_resource_id = AsyncMock(return_value=[existing])
         self._stub_remember(service)
         service.forget = AsyncMock()
 
