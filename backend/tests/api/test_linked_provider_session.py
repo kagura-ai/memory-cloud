@@ -281,3 +281,51 @@ async def test_invitations_are_looked_up_by_the_owning_account_email(
     await _callback(provider)
 
     assert lookup.await_args.kwargs["email"] == OWNER_EMAIL
+
+
+class TestSessionOwnerHelper:
+    """``_session_owner`` on its own: resolved owner, no owner row, no DB yielded."""
+
+    @pytest.mark.asyncio
+    async def test_returns_the_resolved_owner(self, monkeypatch) -> None:
+        async def _fake_db():
+            yield MagicMock()
+
+        monkeypatch.setattr(auth_routes, "get_db", _fake_db)
+        monkeypatch.setattr(
+            auth_routes, "_owning_user", AsyncMock(return_value=(OWNER_ID, OWNER_EMAIL))
+        )
+
+        assert await auth_routes._session_owner("google", GOOGLE_SUB, IDP_EMAIL) == (
+            OWNER_ID,
+            OWNER_EMAIL,
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_owner_row_keeps_the_sub(self, monkeypatch) -> None:
+        async def _fake_db():
+            yield MagicMock()
+
+        monkeypatch.setattr(auth_routes, "get_db", _fake_db)
+        monkeypatch.setattr(auth_routes, "_owning_user", AsyncMock(return_value=None))
+
+        assert await auth_routes._session_owner("github", GITHUB_SUB, IDP_EMAIL) == (
+            GITHUB_SUB,
+            IDP_EMAIL,
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_session_yielded_keeps_the_sub(self, monkeypatch) -> None:
+        async def _empty_db():
+            return
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(auth_routes, "get_db", _empty_db)
+        owning = AsyncMock()
+        monkeypatch.setattr(auth_routes, "_owning_user", owning)
+
+        assert await auth_routes._session_owner("google", GOOGLE_SUB, IDP_EMAIL) == (
+            GOOGLE_SUB,
+            IDP_EMAIL,
+        )
+        owning.assert_not_awaited()
