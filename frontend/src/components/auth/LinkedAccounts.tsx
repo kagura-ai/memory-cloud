@@ -193,6 +193,8 @@ export default function LinkedAccounts() {
           ? t("unlinkNotLinkedError", { account: label })
           : t("unlinkError", { account: label }),
       );
+      // Unlinked elsewhere: re-read the list and the auth user.
+      if (isNotLinked) await refreshAfterChange();
     } finally {
       setBusyUserId(null);
     }

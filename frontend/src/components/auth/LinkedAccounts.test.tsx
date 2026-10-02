@@ -402,7 +402,10 @@ describe("LinkedAccounts — unlink", () => {
     expect(await screen.findByText("unlinkNotLinkedError|Admin")).toBeTruthy();
     expect(screen.getByRole("alertdialog")).toBeTruthy();
     expect(mockToast).not.toHaveBeenCalled();
-    expect(mockRefetchUser).not.toHaveBeenCalled();
+    // Unlinked elsewhere: the list and the auth user are re-read.
+    await waitFor(() => {
+      expect(mockRefetchUser).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("shows the generic error inside the open dialog on any other failure", async () => {

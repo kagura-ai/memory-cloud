@@ -1166,7 +1166,8 @@ async def get_access_patterns(
         target_workspace_id = None
         # The caller's own memories; inside a private context that includes
         # what a linked account wrote there (#1784, #1807), as /memory/list and
-        # /memory/stats count it. A shared context stays the caller's own.
+        # /memory/stats do for a private context. In a shared context this view
+        # stays the caller's own (list and stats there count every author).
         owner_predicate: Any = Memory.user_id == user_id
         if target_context_id:
             # SECURITY (#1011 / #383 / #963): resolve via the shared
