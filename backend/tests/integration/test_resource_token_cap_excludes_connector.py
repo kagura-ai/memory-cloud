@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import User, Workspace
 from models.resource import Resource, ResourceToken, WorkspaceConnector
+from utils.public_id import PublicIdPrefix, new_public_id
 
 
 def _regular_count_query(user_id: str):
@@ -131,10 +132,16 @@ async def seeded_tokens(db_session: AsyncSession) -> AsyncIterator[str]:
     await db_session.execute(
         text(
             "INSERT INTO resource_tokens "
-            "(resource_pk, resource_id, workspace_id, token_hash, created_by, "
+            "(public_id, resource_pk, resource_id, workspace_id, token_hash, created_by, "
             " quota_events_per_hour, is_active) "
-            "VALUES (NULL, :rid, :wid, :hash, :uid, 1000, true)"
-        ).bindparams(rid="reg-null", wid=workspace_id, hash=f"hash_{uuid4().hex}", uid=user_id)
+            "VALUES (:pid, NULL, :rid, :wid, :hash, :uid, 1000, true)"
+        ).bindparams(
+            pid=new_public_id(PublicIdPrefix.RESOURCE_TOKEN),
+            rid="reg-null",
+            wid=workspace_id,
+            hash=f"hash_{uuid4().hex}",
+            uid=user_id,
+        )
     )
 
     # 1 connector resource + workspace_connector + active connector token

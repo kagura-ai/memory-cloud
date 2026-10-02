@@ -57,6 +57,7 @@ from auth.workspace_roles import (
 )
 from db.base import Base
 from utils.datetime import utcnow
+from utils.public_id import PublicIdPrefix, public_id_column
 from utils.redirect_uri import any_redirect_uri_matches
 
 
@@ -466,6 +467,8 @@ class APIKey(Base):
     __tablename__ = "api_keys"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # #1008: the id that leaves the server; ``id`` stays internal.
+    public_id: Mapped[str] = public_id_column(PublicIdPrefix.API_KEY)
 
     # API Key Data
     key_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
@@ -588,6 +591,8 @@ class ShareKey(Base):
     __tablename__ = "share_keys"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # #1008: the id that leaves the server; ``id`` stays internal.
+    public_id: Mapped[str] = public_id_column(PublicIdPrefix.SHARE_KEY)
 
     # Key material
     key_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
@@ -2201,6 +2206,8 @@ class WorkspaceInvitation(Base):
     __tablename__ = "workspace_invitations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # #1008: the id that leaves the server; ``id`` stays internal.
+    public_id: Mapped[str] = public_id_column(PublicIdPrefix.INVITATION)
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="CASCADE"),

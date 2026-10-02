@@ -38,7 +38,6 @@ vi.mock("next-intl", () => ({
 // ---------- Helpers ----------------------------------------------------------
 
 const MOCK_CLIENT: OAuth2Client = {
-  id: 1,
   client_id: "test-client-id",
   client_name: "Test Client",
   redirect_uris: ["https://example.com/callback"],

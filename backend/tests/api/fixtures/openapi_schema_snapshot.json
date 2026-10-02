@@ -3742,9 +3742,6 @@
           "enabled": {
             "type": "boolean"
           },
-          "id": {
-            "type": "integer"
-          },
           "is_protected": {
             "type": "boolean"
           },
@@ -3767,7 +3764,6 @@
         "required": [
           "created_at",
           "enabled",
-          "id",
           "is_protected",
           "key_name",
           "masked_value",
@@ -4995,7 +4991,8 @@
             ]
           },
           "id": {
-            "type": "integer"
+            "pattern": "^akey_[0-9A-Za-z]{22}$",
+            "type": "string"
           },
           "is_visible": {
             "type": "boolean"
@@ -5756,9 +5753,6 @@
             },
             "type": "array"
           },
-          "id": {
-            "type": "integer"
-          },
           "is_visible": {
             "type": "boolean"
           },
@@ -5819,7 +5813,6 @@
           "client_name",
           "created_at",
           "grant_types",
-          "id",
           "is_visible",
           "owner_id",
           "provider",
@@ -5908,9 +5901,6 @@
             },
             "type": "array"
           },
-          "id": {
-            "type": "integer"
-          },
           "is_visible": {
             "type": "boolean"
           },
@@ -5971,7 +5961,6 @@
           "client_name",
           "created_at",
           "grant_types",
-          "id",
           "is_visible",
           "owner_id",
           "provider",
@@ -7500,7 +7489,8 @@
             "type": "string"
           },
           "key_id": {
-            "type": "integer"
+            "pattern": "^akey_[0-9A-Za-z]{22}$",
+            "type": "string"
           },
           "key_prefix": {
             "type": "string"
@@ -9080,16 +9070,12 @@
             },
             "type": "array"
           },
-          "initial_admin_id": {
-            "type": "integer"
-          },
           "total": {
             "type": "integer"
           }
         },
         "required": [
           "admins",
-          "initial_admin_id",
           "total"
         ],
         "type": "object"
@@ -9893,26 +9879,26 @@
           "created_at": {},
           "current_workspace_id": {},
           "email": {},
-          "id": {},
           "last_login_at": {},
           "locale": {},
           "name": {},
           "picture": {},
           "role": {},
-          "timezone": {}
+          "timezone": {},
+          "user_id": {}
         },
         "required": [
           "auth_method",
           "created_at",
           "current_workspace_id",
           "email",
-          "id",
           "last_login_at",
           "locale",
           "name",
           "picture",
           "role",
-          "timezone"
+          "timezone",
+          "user_id"
         ],
         "type": "object"
       },
@@ -9987,7 +9973,6 @@
         "properties": {
           "created_at": {},
           "email": {},
-          "id": {},
           "is_active": {},
           "is_initial_admin": {},
           "last_login_at": {},
@@ -10000,7 +9985,6 @@
         "required": [
           "created_at",
           "email",
-          "id",
           "is_active",
           "is_initial_admin",
           "last_login_at",
@@ -10666,7 +10650,8 @@
             "type": "string"
           },
           "token_id": {
-            "type": "integer"
+            "pattern": "^rtok_[0-9A-Za-z]{22}$",
+            "type": "string"
           }
         },
         "required": [
@@ -15887,7 +15872,8 @@
             "name": "key_id",
             "required": true,
             "schema": {
-              "type": "integer"
+              "pattern": "^akey_[0-9A-Za-z]{22}$",
+              "type": "string"
             }
           },
           {
@@ -15932,7 +15918,8 @@
             "name": "key_id",
             "required": true,
             "schema": {
-              "type": "integer"
+              "pattern": "^akey_[0-9A-Za-z]{22}$",
+              "type": "string"
             }
           },
           {
@@ -15985,7 +15972,8 @@
             "name": "key_id",
             "required": true,
             "schema": {
-              "type": "integer"
+              "pattern": "^akey_[0-9A-Za-z]{22}$",
+              "type": "string"
             }
           },
           {
@@ -16030,7 +16018,8 @@
             "name": "key_id",
             "required": true,
             "schema": {
-              "type": "integer"
+              "pattern": "^akey_[0-9A-Za-z]{22}$",
+              "type": "string"
             }
           },
           {
@@ -16835,7 +16824,8 @@
             "name": "key_id",
             "required": true,
             "schema": {
-              "type": "integer"
+              "pattern": "^skey_[0-9A-Za-z]{22}$",
+              "type": "string"
             }
           },
           {
@@ -23033,7 +23023,8 @@
             "name": "token_id",
             "required": true,
             "schema": {
-              "type": "integer"
+              "pattern": "^rtok_[0-9A-Za-z]{22}$",
+              "type": "string"
             }
           },
           {
@@ -23076,7 +23067,8 @@
             "name": "token_id",
             "required": true,
             "schema": {
-              "type": "integer"
+              "pattern": "^rtok_[0-9A-Za-z]{22}$",
+              "type": "string"
             }
           },
           {
@@ -25779,7 +25771,8 @@
             "name": "invitation_id",
             "required": true,
             "schema": {
-              "type": "integer"
+              "pattern": "^winv_[0-9A-Za-z]{22}$",
+              "type": "string"
             }
           },
           {
@@ -26525,7 +26518,8 @@
             "name": "key_id",
             "required": true,
             "schema": {
-              "type": "integer"
+              "pattern": "^akey_[0-9A-Za-z]{22}$",
+              "type": "string"
             }
           },
           {

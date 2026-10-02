@@ -102,7 +102,9 @@ class TestFixedCallSites:
 
     async def test_delete_invitation(self) -> None:
         with pytest.raises(NotFoundException) as exc:
-            await InvitationService(_db_returning_none()).delete_invitation(1, uuid4())
+            await InvitationService(_db_returning_none()).delete_invitation(
+                "winv_" + "0" * 22, uuid4()
+            )
         assert exc.value.message == "Invitation not found"
 
     async def test_member(self) -> None:

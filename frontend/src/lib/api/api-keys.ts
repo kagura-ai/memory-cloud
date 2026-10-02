@@ -37,7 +37,7 @@ export async function createAPIKey(
  *
  * Soft delete - key remains in database for audit trail but cannot be used.
  */
-export async function revokeAPIKey(keyId: number): Promise<void> {
+export async function revokeAPIKey(keyId: string): Promise<void> {
   return apiClient.post<void>(`/api/v1/config/api-keys/${keyId}/revoke`, {});
 }
 
@@ -47,7 +47,7 @@ export async function revokeAPIKey(keyId: number): Promise<void> {
  * Hard delete - key and all associated data are permanently removed from database.
  * Use revokeAPIKey() if you want to preserve audit history.
  */
-export async function deleteSystemAPIKey(keyId: number): Promise<void> {
+export async function deleteSystemAPIKey(keyId: string): Promise<void> {
   return apiClient.delete<void>(`/api/v1/config/api-keys/${keyId}`);
 }
 
@@ -60,18 +60,18 @@ export async function deleteSystemAPIKey(keyId: number): Promise<void> {
  * IMPORTANT: The plaintext api_key is ONLY returned once.
  * The client MUST save it immediately - it cannot be retrieved again.
  */
-export async function regenerateAPIKey(keyId: number): Promise<APIKeyCreateResponse> {
+export async function regenerateAPIKey(keyId: string): Promise<APIKeyCreateResponse> {
   return apiClient.post<APIKeyCreateResponse>(`/api/v1/config/api-keys/${keyId}/regenerate`, {});
 }
 
 /**
  * Get usage statistics for an API key (Admin only)
  *
- * @param keyId - Database ID of the key
+ * @param keyId - Public id of the key ("akey_...", #1008)
  * @param days - Number of days to retrieve (1-90, default: 30)
  */
 export async function getAPIKeyStats(
-  keyId: number,
+  keyId: string,
   days: number = 30
 ): Promise<APIKeyStats> {
   const searchParams = new URLSearchParams({ days: days.toString() });

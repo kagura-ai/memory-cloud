@@ -131,6 +131,7 @@ async def verify_resource_token(
                 "resource_id_unbound_on_ingest",
                 resource_id=resource_id,
                 token_id=token_record.id,
+                public_id=token_record.public_id,
             )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -241,6 +242,7 @@ async def _enforce_workspace_membership(
             "resource_ingest_missing_token_creator",
             resource_id=context.resource_id,
             token_id=token_record.id,
+            public_id=token_record.public_id,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -259,6 +261,7 @@ async def _enforce_workspace_membership(
             "cross_tenant_ingest_attempt",
             resource_id=context.resource_id,
             token_id=token_record.id,
+            public_id=token_record.public_id,
             target_workspace_id=str(context.workspace_id),
             token_creator=token_record.created_by,
             client_ip=request.client.host if request.client else None,
@@ -308,6 +311,7 @@ async def _enforce_workspace_membership(
             "cross_tenant_ingest_token_workspace_mismatch",
             resource_id=context.resource_id,
             token_id=token_record.id,
+            public_id=token_record.public_id,
             token_workspace_id=str(resource_workspace_id),
             context_workspace_id=str(context.workspace_id),
             token_creator=token_record.created_by,

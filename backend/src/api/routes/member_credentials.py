@@ -48,6 +48,7 @@ from utils.exceptions import (
     NotFoundException,
 )
 from utils.logger import get_logger
+from utils.public_id import APIKeyPublicId
 
 logger = get_logger(__name__)
 
@@ -93,7 +94,7 @@ def _minted_key_response(
     in ``is_visible`` / ``visibility_expires_at`` / ``last_used_at``.
     """
     return {
-        "id": new_key.id,
+        "id": new_key.public_id,
         "name": new_key.name,
         "key_prefix": new_key.key_prefix,
         "plaintext_key": plaintext_key,  # shown once
@@ -260,7 +261,7 @@ async def _owner_provisioned_mint(
             workspace_id,
             action="member_api_key_provisioned",
             target=user_id,
-            resource=f"api_key:{new_key.id}",
+            resource=f"api_key:{new_key.public_id}",
             metadata={
                 "minted_key_prefix": new_key.key_prefix,  # the MINTED key
                 "expires_days": data.expires_days,
@@ -282,6 +283,7 @@ async def _owner_provisioned_mint(
         logger.info(
             "member_api_key_provisioned",
             key_id=new_key.id,
+            public_id=new_key.public_id,
             actor_id=caller_id,
             target=user_id,
             workspace_id=str(workspace_id),
@@ -438,7 +440,7 @@ async def hide_api_key(
     try:
         await manager.hide_key(api_key.id, user_id)
         await db.commit()
-        return {"status": "hidden", "key_id": api_key.id}
+        return {"status": "hidden", "key_id": api_key.public_id}
     except PermissionError as e:
         # CWE-639: keep the raw PermissionError text off the wire (log-only
         # ``reason``); the handler emits the uniform "Insufficient permissions".
@@ -539,14 +541,16 @@ async def regenerate_api_key(
     logger.info(
         "api_key_regenerated",
         old_key_id=old_key.id,
+        old_public_id=old_key.public_id,
         new_key_id=new_key.id,
+        new_public_id=new_key.public_id,
         user_id=user_id,
     )
 
     return RegenerateAPIKeyResponse(
         key=new_plaintext_key,
         key_prefix=new_key.key_prefix,
-        key_id=new_key.id,
+        key_id=new_key.public_id,
     )
 
 
@@ -762,7 +766,7 @@ async def create_api_key(
                     user_email=user.get("email") or f"{user_id}@api",
                     user_id=user_id,
                     action="public_bound_key_created",
-                    resource=f"api_key:{new_key.id}",
+                    resource=f"api_key:{new_key.public_id}",
                     user_metadata={
                         "bound_context_id": str(bound_context_uuid),
                         "workspace_id": str(workspace_id),
@@ -783,6 +787,7 @@ async def create_api_key(
         logger.info(
             "api_key_created",
             key_id=new_key.id,
+            public_id=new_key.public_id,
             user_id=user_id,
             name=data.name,
             bound_context_id=str(bound_context_uuid) if bound_context_uuid else None,
@@ -862,20 +867,20 @@ async def delete_api_key(
     await db.delete(api_key)
     await db.commit()
 
-    logger.info("api_key_deleted", key_id=api_key.id, user_id=user_id)
+    logger.info("api_key_deleted", key_id=api_key.id, public_id=api_key.public_id, user_id=user_id)
 
-    return {"status": "deleted", "key_id": api_key.id}
+    return {"status": "deleted", "key_id": api_key.public_id}
 
 
 @router.delete("/{user_id}/credentials/api-keys/{key_id}")
 async def delete_api_key_by_id(
     workspace_id: UUID,
     user_id: str,
-    key_id: int,
+    key_id: APIKeyPublicId,
     user: APIKeyOrSessionUser,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Delete/revoke a specific API key by ID.
+    """Delete/revoke a specific API key by its public id (``akey_...``, #1008).
 
     Issue #626: per-id endpoint (also revokes public-bound keys). The URL
     ``workspace_id`` is the permission scope, not a filter on the key's column.
@@ -928,7 +933,7 @@ async def delete_api_key_by_id(
     from models.auth import APIKey, Context
 
     result = await db.execute(
-        select(APIKey).where(and_(APIKey.id == key_id, APIKey.user_id == user_id))
+        select(APIKey).where(and_(APIKey.public_id == key_id, APIKey.user_id == user_id))
     )
     api_key = result.scalar_one_or_none()
     if api_key is None:
@@ -1020,7 +1025,8 @@ async def delete_api_key_by_id(
         await db.commit()
         logger.info(
             "member_api_key_revoked",
-            key_id=key_id,
+            key_id=api_key.id,
+            public_id=key_id,
             actor_id=caller_id,
             target=user_id,
             workspace_id=str(workspace_id),
@@ -1050,7 +1056,8 @@ async def delete_api_key_by_id(
 
     logger.info(
         "api_key_deleted",
-        key_id=key_id,
+        key_id=api_key.id,
+        public_id=key_id,
         user_id=user_id,
         bound_context_id=str(bound_ctx_id) if bound_ctx_id is not None else None,
     )

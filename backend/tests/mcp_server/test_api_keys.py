@@ -20,10 +20,16 @@ import pytest
 from mcp_server.tools.api_keys import handle_describe_binding, handle_list_my_bindings
 
 
+def _pid(n: int) -> str:
+    """The public id (#1008) the fake row with integer id ``n`` carries."""
+    return f"akey_{n:022d}"
+
+
 def _row(*, key_id, name, context_id, display_name, name_slug, prefix, created=None):
     """One (APIKey, Context.display_name, Context.name) result row."""
     api_key = SimpleNamespace(
         id=key_id,
+        public_id=_pid(key_id),
         name=name,
         bound_context_id=context_id,
         key_prefix=prefix,
@@ -75,7 +81,7 @@ class TestListMyBindings:
         assert data["count"] == 1
         b = data["bindings"][0]
         assert b == {
-            "key_id": 7,
+            "key_id": _pid(7),
             "name": "slack-bot",
             "context_id": str(ctx),
             "context_name": "Slack Bot",
@@ -129,10 +135,10 @@ class TestDescribeBinding:
         )
         get_db_patch, log_patch = _patches(db)
         with get_db_patch, log_patch:
-            result = await handle_describe_binding({"key_id": 42}, "user-1", None)
+            result = await handle_describe_binding({"key_id": _pid(42)}, "user-1", None)
         data = json.loads(result[0].text)
         assert data["status"] == "success"
-        assert data["binding"]["key_id"] == 42
+        assert data["binding"]["key_id"] == _pid(42)
         assert data["binding"]["key_prefix"] == "kagura_pub_xyz9"
         assert data["binding"]["context_id"] == str(ctx)
 
@@ -176,14 +182,14 @@ class TestDescribeBinding:
             result = await handle_describe_binding({"context_id": str(ctx)}, "user-1", None)
         data = json.loads(result[0].text)
         assert data["status"] == "success"
-        assert data["binding"]["key_id"] == 9  # most recent (first row)
+        assert data["binding"]["key_id"] == _pid(9)  # most recent (first row)
         assert "note" in data and "2 of your keys" in data["note"]
 
     async def test_not_found_is_uniform(self):
         db = _mock_db([])
         get_db_patch, log_patch = _patches(db)
         with get_db_patch, log_patch:
-            result = await handle_describe_binding({"key_id": 999999}, "user-1", None)
+            result = await handle_describe_binding({"key_id": _pid(999999)}, "user-1", None)
         data = json.loads(result[0].text)
         assert data["status"] == "error"
         assert data["error"] == "binding_not_found"
@@ -191,7 +197,7 @@ class TestDescribeBinding:
 
     async def test_both_selectors_rejected(self):
         result = await handle_describe_binding(
-            {"key_id": 1, "context_id": str(uuid4())}, "user-1", None
+            {"key_id": _pid(1), "context_id": str(uuid4())}, "user-1", None
         )
         data = json.loads(result[0].text)
         assert data["error"] == "invalid_arguments"
@@ -201,14 +207,21 @@ class TestDescribeBinding:
         data = json.loads(result[0].text)
         assert data["error"] == "invalid_arguments"
 
-    async def test_key_id_must_be_int(self):
-        result = await handle_describe_binding({"key_id": "42"}, "user-1", None)
+    @pytest.mark.parametrize("legacy", [42, "42"])
+    async def test_integer_key_id_is_rejected_with_a_pointer(self, legacy):
+        # #1008 hard cut: the integer id is gone; the error says where the
+        # public id comes from.
+        result = await handle_describe_binding({"key_id": legacy}, "user-1", None)
         data = json.loads(result[0].text)
         assert data["error"] == "invalid_arguments"
+        assert "list_my_bindings" in data["message"]
+        assert "akey_" in data["message"]
 
-    async def test_key_id_bool_rejected(self):
-        # bool is an int subclass — must be rejected explicitly.
-        result = await handle_describe_binding({"key_id": True}, "user-1", None)
+    @pytest.mark.parametrize(
+        "bad", [True, "akey_short", "skey_" + "a" * 22, "akey_" + "a" * 21 + "-", 42.0]
+    )
+    async def test_malformed_key_id_rejected(self, bad):
+        result = await handle_describe_binding({"key_id": bad}, "user-1", None)
         data = json.loads(result[0].text)
         assert data["error"] == "invalid_arguments"
 
@@ -275,7 +288,9 @@ class TestExecutorWiring:
         db = _mock_db([])
         get_db_patch, log_patch = _patches(db)
         with get_db_patch, log_patch:
-            result = await execute_tool_call("describe_binding", {"key_id": 1}, "user-1", None)
+            result = await execute_tool_call(
+                "describe_binding", {"key_id": _pid(1)}, "user-1", None
+            )
         data = json.loads(result[0].text)
         # Reaches the handler → uniform not-found, NOT context_id_required.
         assert data["error"] == "binding_not_found"

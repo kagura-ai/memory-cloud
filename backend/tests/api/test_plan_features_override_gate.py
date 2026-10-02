@@ -34,6 +34,7 @@ def _result(*, one=None, scalar=None) -> MagicMock:
 def _token() -> SimpleNamespace:
     return SimpleNamespace(
         id=7,
+        public_id="rtok_" + "7" * 22,
         resource_id="products",
         resource_pk=uuid.uuid4(),
         description=None,

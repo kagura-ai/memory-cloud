@@ -21,12 +21,16 @@ introspection to bound principals.
 
 Owner isolation: every query ANDs ``APIKey.user_id == user_id``. A caller can only
 ever see their own bindings. ``describe_binding`` returns a uniform
-``binding_not_found`` for both "does not exist" and "exists but not yours" so the
-sequential integer ``key_id`` cannot be used as an existence oracle.
+``binding_not_found`` for both "does not exist" and "exists but not yours", so
+``key_id`` cannot be used as an existence oracle.
+
+``key_id`` is the key's public id (``akey_`` + 22 base62 characters, #1008), the
+same id the REST API returns; the integer primary key never leaves the server.
 """
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 from uuid import UUID
@@ -36,12 +40,15 @@ from mcp.types import TextContent
 from mcp_server.tools._errors import _tool_exception_response
 from mcp_server.tools._helpers import _error_response, _log_tool_usage, _success_response
 from utils.datetime import to_utc_iso
+from utils.public_id import PublicIdPrefix, public_id_pattern
+
+_KEY_ID_RE = re.compile(public_id_pattern(PublicIdPrefix.API_KEY))
 
 
 def _binding_dict(api_key: Any, display_name: str | None, name: str | None) -> dict[str, Any]:
     """Shape one binding row for the response (never includes any secret)."""
     return {
-        "key_id": api_key.id,
+        "key_id": api_key.public_id,
         "name": api_key.name,
         "context_id": str(api_key.bound_context_id),
         "context_name": display_name or name,
@@ -106,7 +113,7 @@ async def handle_describe_binding(
 
     Exactly one selector must be supplied. The result is scoped to
     ``user_id == caller`` and to bound, non-revoked keys; a miss returns a uniform
-    ``binding_not_found`` (no existence oracle on the sequential ``key_id``).
+    ``binding_not_found`` (no existence oracle on ``key_id``).
     Adds ``key_prefix`` to the ``list_my_bindings`` shape.
     """
     from sqlalchemy import select
@@ -121,14 +128,21 @@ async def handle_describe_binding(
     if (raw_key_id is None) == (raw_context_id is None):
         return _error_response(
             "invalid_arguments",
-            "Provide exactly one of 'key_id' (integer) or 'context_id' (UUID).",
+            "Provide exactly one of 'key_id' (akey_... from list_my_bindings) "
+            "or 'context_id' (UUID).",
         )
 
-    key_id: int | None = None
+    key_id: str | None = None
     context_id: UUID | None = None
     if raw_key_id is not None:
-        if isinstance(raw_key_id, bool) or not isinstance(raw_key_id, int):
-            return _error_response("invalid_arguments", "'key_id' must be an integer.")
+        if not isinstance(raw_key_id, str) or not _KEY_ID_RE.fullmatch(raw_key_id):
+            # #1008 hard cut: an integer id (or its string form) is no longer
+            # accepted — point the caller at where the public id comes from.
+            return _error_response(
+                "invalid_arguments",
+                "'key_id' must be the key's public id (akey_ followed by 22 letters "
+                "and digits) — use key_id from list_my_bindings.",
+            )
         key_id = raw_key_id
     else:
         try:
@@ -145,7 +159,7 @@ async def handle_describe_binding(
                 APIKey.revoked_at.is_(None),
             ]
             if key_id is not None:
-                conditions.append(APIKey.id == key_id)
+                conditions.append(APIKey.public_id == key_id)
             else:
                 conditions.append(APIKey.bound_context_id == context_id)
 

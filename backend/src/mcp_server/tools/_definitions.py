@@ -9,6 +9,7 @@ from config.constants import (
     CONTEXT_USAGE_GUIDE_MAX_LENGTH,
 )
 from mcp_server.tools._annotations import annotate_tool_definitions
+from utils.public_id import PublicIdPrefix, public_id_pattern
 
 
 def get_tool_definitions() -> list[dict]:
@@ -42,8 +43,9 @@ Returns: {status, binding: {key_id, name, context_id, context_name, created_at, 
                 "type": "object",
                 "properties": {
                     "key_id": {
-                        "type": "integer",
-                        "description": "API key ID from list_my_bindings(). Mutually exclusive with context_id.",
+                        "type": "string",
+                        "pattern": public_id_pattern(PublicIdPrefix.API_KEY),
+                        "description": "key_id (akey_...) from list_my_bindings(). Mutually exclusive with context_id.",
                     },
                     "context_id": {
                         "type": "string",

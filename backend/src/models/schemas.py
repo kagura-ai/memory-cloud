@@ -19,6 +19,7 @@ from pydantic import (
 
 from auth.workspace_roles import ContextRole, WorkspaceRole
 from models.api_base import TZAwareBaseModel
+from utils.public_id import PublicIdPrefix, public_id_pattern
 
 logger = logging.getLogger(__name__)
 
@@ -1112,9 +1113,10 @@ class UserProfileResponse(TZAwareBaseModel):
     Issue #175: User timezone settings
     Issue #221: i18n support (locale)
     Issue #514: Expose auth_method + auth_provider for sign-in-method display
+    Issue #1813: no integer ``id`` — the user is identified by ``user_id``
     """
 
-    id: int
+    user_id: str
     email: str
     name: str | None
     picture: str | None
@@ -1301,9 +1303,9 @@ class UserWithAdminFlag(TZAwareBaseModel):
     """User model with system admin flags for admin management.
 
     Issue #166: System Admin vs Workspace Admin RBAC separation.
+    Issue #1813: no integer ``id`` — address users by ``user_id``.
     """
 
-    id: int
     email: str
     user_id: str
     name: str | None
@@ -1322,11 +1324,12 @@ class SystemAdminListResponse(BaseModel):
     """Response for listing system administrators.
 
     Issue #166: System Admin management API.
+    Issue #1813: ``initial_admin_id`` (integer PK) dropped — each entry's
+    ``is_initial_admin`` flag marks the protected initial admin.
     """
 
     admins: list[UserWithAdminFlag]
     total: int
-    initial_admin_id: int
 
 
 class PromoteToSystemAdminRequest(BaseModel):
@@ -1548,7 +1551,7 @@ class WorkspaceInvitationResponse(TZAwareBaseModel):
     Issue #165: Team Collaboration - Workspace Invitation System
     """
 
-    id: int
+    id: str = Field(..., pattern=public_id_pattern(PublicIdPrefix.INVITATION))  # #1008: winv_...
     workspace_id: UUID
     # Issue #1164: token / invitation_url are bearer join-credentials. They are
     # populated in the POST create response and in session-principal list
@@ -1638,7 +1641,7 @@ class PendingInvitationItem(TZAwareBaseModel):
     Issue #179: In-app invitation notifications.
     """
 
-    id: int
+    id: str = Field(..., pattern=public_id_pattern(PublicIdPrefix.INVITATION))  # #1008: winv_...
     workspace_id: str
     workspace_name: str
     role: str
@@ -1674,7 +1677,7 @@ class MemberAPIKeyResponse(BaseModel):
     Issue #626: Optional public-context binding.
     """
 
-    id: int
+    id: str = Field(..., pattern=public_id_pattern(PublicIdPrefix.API_KEY))  # #1008: akey_...
     name: str
     key_prefix: str
     plaintext_key: str | None  # Only if visible + owner
@@ -1750,7 +1753,7 @@ class RegenerateAPIKeyResponse(BaseModel):
 
     key: str
     key_prefix: str
-    key_id: int
+    key_id: str = Field(..., pattern=public_id_pattern(PublicIdPrefix.API_KEY))  # #1008: akey_...
 
 
 class RegenerateOAuthSecretResponse(BaseModel):

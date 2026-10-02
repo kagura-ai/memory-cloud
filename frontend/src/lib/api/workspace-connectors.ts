@@ -143,7 +143,7 @@ export interface CreateConnectorResponse {
   app_key: string;
   resource_id: string;
   context_id: string | null;
-  token_id: number;
+  token_id: string; // Public id: "rtok_..." (#1008)
   token: string;
   kmc_api_key: string | null;
   quota_events_per_hour: number;

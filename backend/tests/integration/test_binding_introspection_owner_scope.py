@@ -95,8 +95,8 @@ async def two_users_with_bindings(db_session: AsyncSession) -> AsyncIterator[Sim
     yield SimpleNamespace(
         user_a=user_a,
         user_b=user_b,
-        key_a_id=key_a.id,
-        key_b_id=key_b.id,
+        key_a_id=key_a.public_id,
+        key_b_id=key_b.public_id,
         ctx_a=ctx_a,
         ctx_b=ctx_b,
     )
@@ -128,7 +128,7 @@ class TestBindingOwnerScope:
     @pytest.mark.asyncio(loop_scope="session")
     async def test_describe_cross_user_key_id_is_not_found(self, two_users_with_bindings):
         s = two_users_with_bindings
-        # User B tries to describe User A's key by its (guessable, sequential) id.
+        # User B tries to describe User A's key by its public id (#1008).
         result = await handle_describe_binding({"key_id": s.key_a_id}, s.user_b, None)
         assert _data(result)["error"] == "binding_not_found"
 

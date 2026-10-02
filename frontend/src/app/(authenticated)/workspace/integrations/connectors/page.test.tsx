@@ -221,7 +221,7 @@ beforeEach(() => {
     app_key: "sales",
     resource_id: "slack-sales-t01",
     context_id: "context-1",
-    token_id: 1,
+    token_id: "rtok_0000000000000000000001",
     token: "resource-token",
     kmc_api_key: "kmc-key",
     quota_events_per_hour: 1000,
