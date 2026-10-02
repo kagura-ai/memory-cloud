@@ -124,6 +124,25 @@ class TestIndexIsMaintained:
         assert redis.ttl("user_sessions:u1") > 5
 
 
+class TestIndexIsBookkeeping:
+    def test_an_index_write_failure_does_not_sign_the_user_out(self, manager, redis, monkeypatch):
+        session_id = manager.create_session(U1)
+
+        def _refused(*_a, **_kw):
+            raise RuntimeError("OOM command not allowed when used memory > 'maxmemory'")
+
+        monkeypatch.setattr(redis, "pipeline", _refused)
+
+        session = manager.get_session(session_id)
+        assert session is not None and session["user_id"] == "u1"
+        assert 0 < redis.ttl(f"session:{session_id}") <= TTL
+
+    def test_logout_unindexes_the_session(self, manager, redis):
+        session_id = manager.create_session(U1)
+        assert manager.delete_session(session_id)
+        assert session_id not in _index(redis, "u1")
+
+
 class TestSweepUsesTheIndex:
     def test_deletes_the_users_sessions_and_only_those(self, manager, redis):
         _window_over(redis)

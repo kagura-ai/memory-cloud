@@ -246,7 +246,8 @@ coverage-upload:
 	@test -x $(BACKEND_PYTEST) || { echo "Error: $(BACKEND_PYTEST) not found — run: cd $(BACKEND_DIR) && uv sync --locked --extra dev"; exit 1; }
 	@command -v uvx >/dev/null || { echo "Error: uvx not found (install uv)"; exit 1; }
 	@echo "pytest:     $(BACKEND_PYTEST)"
-	@echo "codecovcli: $$($(CODECOV_CLI) --version)" || { echo "Error: could not run codecov-cli $(CODECOV_CLI_VERSION) via uvx"; exit 1; }
+	@v=$$($(CODECOV_CLI) --version) || { echo "Error: could not run codecov-cli $(CODECOV_CLI_VERSION) via uvx"; exit 1; }; \
+	echo "codecovcli: $$v"
 	@CODECOV_TOKEN=$${CODECOV_TOKEN:-$$(grep '^CODECOV_TOKEN=' .env.local 2>/dev/null | cut -d= -f2)}; \
 	if [ -z "$$CODECOV_TOKEN" ]; then echo "Error: CODECOV_TOKEN not set (add to .env.local)"; exit 1; fi
 	@echo "Running unit tests with coverage and uploading to Codecov..."

@@ -476,24 +476,26 @@ class SessionManager:
             # deliberately with an atomic mechanism, not by restoring the
             # whole-record rewrite.
             if update_access:
-                pipe = self._redis.pipeline()
                 if was_legacy:
                     # One-time: a flat record must be written once to become a
                     # container. The only write left on the read path, and it
                     # happens at most once per record. XX: a sweep that deleted
                     # the record since the read above must not be undone (#1809).
-                    pipe.set(
+                    renewed = self._redis.set(
                         f"session:{session_id}",
                         json.dumps(container),
                         ex=self.session_ttl,
                         xx=True,
                     )
                 else:
-                    pipe.expire(f"session:{session_id}", self.session_ttl)
+                    renewed = self._redis.expire(f"session:{session_id}", self.session_ttl)
                 # Renewing the session renews its index entries, and indexes a
-                # session written before the index existed (#1809).
-                self._queue_index(pipe, session_id, container)
-                pipe.execute()
+                # session written before the index existed (#1809). Bookkeeping
+                # only: it runs apart from the renewal and its failure (Redis
+                # refusing writes at maxmemory, say) must not turn a valid
+                # session into a signed-out one.
+                if renewed:
+                    self._refresh_index(session_id, container)
                 projected["last_accessed"] = utcnow().isoformat()
 
             # Callers see the flat shape they always have.
@@ -517,9 +519,12 @@ class SessionManager:
             >>> assert manager.get_session(session_id) is None
         """
         try:
+            raw = self._redis.get(f"session:{session_id}")
             deleted = self._redis.delete(f"session:{session_id}")
             if deleted:
                 logger.info(f"Deleted session: {session_id[:10]}...")
+            if raw:
+                self._drop_from_index(session_id, raw)
             return deleted > 0
         except Exception as e:
             logger.error(f"Failed to delete session: {e}")
@@ -567,6 +572,34 @@ class SessionManager:
         except Exception as e:
             logger.error(f"Failed to mutate session: {e}")
             return False
+
+    def _refresh_index(self, session_id: str, container: dict[str, Any]) -> None:
+        """Add a session to its index sets, best effort (#1809).
+
+        A failure is logged and swallowed: the index only speeds sweeps up, and
+        a sweep prunes or re-finds what it misses.
+        """
+        try:
+            pipe = self._redis.pipeline(transaction=False)
+            self._queue_index(pipe, session_id, container)
+            pipe.execute()
+        except Exception as e:
+            logger.warning(f"Failed to refresh session index: {e}")
+
+    def _drop_from_index(self, session_id: str, raw: Any) -> None:
+        """Remove a deleted session from its index sets, best effort (#1809)."""
+        try:
+            stored = json.loads(raw)
+            container = stored if is_container(stored) else to_container(stored)
+            index_ids = _index_ids(container)
+            if not index_ids:
+                return
+            pipe = self._redis.pipeline(transaction=False)
+            for index_id in index_ids:
+                pipe.srem(_user_index_key(index_id), session_id)
+            pipe.execute()
+        except Exception as e:
+            logger.warning(f"Failed to drop session from index: {e}")
 
     def _queue_index(self, pipe: Any, session_id: str, record: dict[str, Any]) -> None:
         """Queue the index writes for a session on ``pipe`` (#1809)."""

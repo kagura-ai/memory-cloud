@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from api.routes import auth as auth_routes
 from auth.password import hash_password
@@ -132,12 +133,15 @@ class TestPasswordLogin:
         manager.delete_session.assert_called_once_with("sess-1")
 
     @pytest.mark.asyncio
-    async def test_a_failed_recheck_fails_closed(self, wired, manager) -> None:
+    async def test_a_failed_recheck_fails_closed_as_an_outage(self, wired, manager) -> None:
+        # The session is not kept, but a correct password is not reported as
+        # a wrong one: the database failed, so the answer is "try again".
         wired.recheck.side_effect = RuntimeError("db down")
 
-        with pytest.raises(InvalidCredentialsError):
+        with pytest.raises(HTTPException) as exc_info:
             await auth_routes.password_login(_login_body(), _request(), return_to=None)
 
+        assert exc_info.value.status_code == 503
         manager.delete_session.assert_called_once_with("sess-1")
 
 
@@ -209,3 +213,23 @@ class TestMfaVerify:
 
         assert mfa.order == []
         assert "mfa_pending:old" not in manager._redis.store
+
+    @pytest.mark.asyncio
+    async def test_one_pending_step_signs_in_once(self, mfa, manager) -> None:
+        # Two requests that both read the step before either deleted it: only
+        # the one whose DELETE removed the fingerprint goes on.
+        token = await self._password_step()
+        real_delete = manager._redis.delete
+
+        def _lost_race(*keys: str) -> int:
+            if any(k.startswith("mfa_pending_cred:") for k in keys):
+                real_delete(*keys)
+                return 0
+            return real_delete(*keys)
+
+        manager._redis.delete = _lost_race
+
+        with pytest.raises(AuthenticationError):
+            await auth_routes.mfa_verify(self._verify_body(token), _request(), return_to=None)
+
+        assert mfa.order == []

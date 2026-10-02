@@ -2482,20 +2482,16 @@ async def _password_still_current(user_id: str, fingerprint: str | None) -> bool
     """Is the password a sign-in verified still the committed one? (#1809)
 
     Run AFTER the sign-in has written its session: the read waits for a
-    password write in progress (see ``password_unchanged``). Fails closed —
-    an error reads as "changed" — and ends its transaction at once so the
-    share lock does not outlive the answer.
+    password write in progress (see ``password_unchanged``). Ends its
+    transaction at once so the share lock does not outlive the answer. A
+    database error propagates: the caller fails closed, but as an outage,
+    not as a wrong password.
     """
-    try:
-        async for db in get_db():
-            try:
-                return await password_unchanged(db, user_id, fingerprint)
-            finally:
-                await db.rollback()
-    except Exception as exc:
-        logger.error(
-            "password_login_recheck_failed", user_id=user_id, error_type=type(exc).__name__
-        )
+    async for db in get_db():
+        try:
+            return await password_unchanged(db, user_id, fingerprint)
+        finally:
+            await db.rollback()
     return False
 
 
@@ -2512,7 +2508,20 @@ async def _open_password_session(user: User, fingerprint: str | None) -> str:
     session_id = await _create_session_and_workspace(
         user_id=user.user_id, email=user.email, name=user.name, role=user.role
     )
-    if not await _password_still_current(user.user_id, fingerprint):
+    try:
+        still_current = await _password_still_current(user.user_id, fingerprint)
+    except Exception as exc:
+        # Fail closed: without the answer the session cannot be trusted. A
+        # correct password is not a credential failure, so say "try again".
+        if _session_manager:
+            _session_manager.delete_session(session_id)
+        logger.error(
+            "password_login_recheck_failed", user_id=user.user_id, error_type=type(exc).__name__
+        )
+        raise HTTPException(
+            status_code=503, detail="Sign-in is temporarily unavailable. Please try again."
+        ) from exc
+    if not still_current:
         if _session_manager:
             _session_manager.delete_session(session_id)
         logger.warning("password_login_superseded", user_id=user.user_id)
@@ -2661,11 +2670,13 @@ async def mfa_verify(
     _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
 
     # #1809: the password the first step verified. A pending step written
-    # without one (before this shipped) is refused: sign in again.
+    # without one (before this shipped) is refused: sign in again. The key is
+    # also the step's single-use guard: of two requests racing on one token,
+    # only the one whose DELETE removed it goes on.
     cred_key = _MFA_PENDING_CRED_KEY.format(token=body.mfa_session_token)
     verified = _session_manager._redis.get(cred_key)
-    _session_manager._redis.delete(cred_key)
-    if not isinstance(verified, str) or not verified:
+    taken = _session_manager._redis.delete(cred_key)
+    if not isinstance(verified, str) or not verified or not taken:
         raise AuthenticationError("Invalid or expired MFA session")
 
     session_id = await _open_password_session(user, verified)
