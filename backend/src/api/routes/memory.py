@@ -1164,6 +1164,10 @@ async def get_access_patterns(
 
         # Single Collection Migration: Get workspace_id and context_id for filtering
         target_workspace_id = None
+        # The caller's own memories; inside a private context that includes
+        # what a linked account wrote there (#1784, #1807), as /memory/list and
+        # /memory/stats count it. A shared context stays the caller's own.
+        owner_predicate: Any = Memory.user_id == user_id
         if target_context_id:
             # SECURITY (#1011 / #383 / #963): resolve via the shared
             # workspace-read chokepoint for uniform-404 disclosure AND API-key
@@ -1174,12 +1178,14 @@ async def get_access_patterns(
                 key_workspace_id=user.get("api_key_workspace_id"),
             )
             target_workspace_id = context.workspace_id
+            if context.is_private:
+                owner_predicate = owned_by(Memory.user_id, user_id)
 
         cutoff = utcnow() - timedelta(days=days)
 
         # Build base filter
         base_filter = [
-            Memory.user_id == user_id,
+            owner_predicate,
             Memory.deleted_at.is_(None),
         ]
         if target_workspace_id:

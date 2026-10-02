@@ -16,6 +16,7 @@ import pytest
 from api.routes import me_account
 from api.routes.me_account import (
     IdentityLinkTarget,
+    leave_identity_links,
     link_identity,
     list_identity_links,
     unlink_identity,
@@ -55,6 +56,7 @@ def service():
     instance = MagicMock()
     instance.link = AsyncMock(return_value=True)
     instance.unlink = AsyncMock()
+    instance.leave = AsyncMock(return_value=frozenset())
     instance.list_linked = AsyncMock(return_value=[])
     with patch.object(me_account, "IdentityLinkService", return_value=instance):
         yield instance
@@ -296,3 +298,83 @@ class TestSessionOnly:
                 SessionUser,
                 "SessionUser",
             )
+
+
+class TestLeave:
+    """#1807: the session user leaves its set; the others stay linked."""
+
+    @pytest.mark.asyncio
+    async def test_leaving_notifies_every_account_of_the_former_set(self, service, notices):
+        service.leave = AsyncMock(return_value=frozenset({OTHER, "github|9"}))
+
+        result = await leave_identity_links(_request(), MagicMock(), {"user_id": ME}, AsyncMock())
+
+        assert result.status == "ok"
+        service.leave.assert_awaited_once_with(ME, ip_address="203.0.113.7", user_agent="pytest")
+        assert [
+            (call.kwargs["user_id"], call.kwargs["event"]) for call in notices.call_args_list
+        ] == [
+            (ME, SecurityEvent.ACCOUNT_UNLINKED),
+            ("github|9", SecurityEvent.ACCOUNT_UNLINKED),
+            (OTHER, SecurityEvent.ACCOUNT_UNLINKED),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_account_in_no_set_is_not_found(self, service, notices):
+        service.leave = AsyncMock(side_effect=NotFoundException("Identity link"))
+
+        with pytest.raises(NotFoundException):
+            await leave_identity_links(_request(), MagicMock(), {"user_id": ME}, AsyncMock())
+
+        notices.assert_not_called()
+
+
+class TestBrowserSessionOnlyOverHTTP:
+    """#1807: every identity-link endpoint refuses an API key and an OAuth
+    bearer token — through the real router and its ``SessionUser``
+    dependency, not by calling the handlers directly."""
+
+    ENDPOINTS = [
+        ("GET", "/api/v1/me/account/identity-links", None),
+        ("POST", "/api/v1/me/account/identity-links", {"user_id": OTHER}),
+        ("POST", "/api/v1/me/account/identity-links/unlink", {"user_id": OTHER}),
+        ("POST", "/api/v1/me/account/identity-links/leave", None),
+    ]
+
+    @pytest.fixture
+    def client(self, service):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from db.base import get_db
+
+        app = FastAPI()
+        app.include_router(me_account.router, prefix="/api/v1")
+
+        async def no_db():
+            yield AsyncMock()
+
+        app.dependency_overrides[get_db] = no_db
+        return TestClient(app)
+
+    @pytest.mark.parametrize("method,path,body", ENDPOINTS)
+    @pytest.mark.parametrize(
+        "token", ["kagura_" + "a" * 40, "oauth-access-token"], ids=["api_key", "bearer"]
+    )
+    def test_a_bearer_credential_is_refused(self, client, service, method, path, body, token):
+        response = client.request(
+            method, path, json=body, headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 403
+        service.list_linked.assert_not_awaited()
+        service.link.assert_not_awaited()
+        service.unlink.assert_not_awaited()
+        service.leave.assert_not_awaited()
+
+    @pytest.mark.parametrize("method,path,body", ENDPOINTS)
+    def test_no_credential_is_unauthenticated(self, client, service, method, path, body):
+        response = client.request(method, path, json=body)
+
+        assert response.status_code == 401
+        service.leave.assert_not_awaited()

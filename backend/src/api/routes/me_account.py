@@ -615,3 +615,34 @@ async def unlink_identity(
             request=request,
         )
     return IdentityLinkStatusResponse(status="ok")
+
+
+@router.post(
+    "/identity-links/leave", response_model=IdentityLinkStatusResponse, tags=["account-linking"]
+)
+async def leave_identity_links(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user: SessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> IdentityLinkStatusResponse:
+    """Take the session user out of its link set; the other accounts stay
+    linked to each other (#1807).
+
+    ``unlink`` names one account to take out of the caller's set; ``leave``
+    takes the caller out. Every account of the former set is notified.
+    404 when the session user is not linked to any account.
+    """
+    former = await IdentityLinkService(db).leave(
+        user["user_id"],
+        ip_address=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    for account in (user["user_id"], *sorted(former)):
+        schedule_security_notification(
+            background_tasks,
+            user_id=account,
+            event=SecurityEvent.ACCOUNT_UNLINKED,
+            request=request,
+        )
+    return IdentityLinkStatusResponse(status="ok")

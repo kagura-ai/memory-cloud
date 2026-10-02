@@ -32,6 +32,7 @@ from services.identity_link_service import (
     owned_by,
 )
 from services.permission_service import PermissionService
+from utils.datetime import utcnow
 from utils.exceptions import AuthorizationError, ConflictError, NotFoundException, ValidationError
 
 
@@ -231,6 +232,113 @@ class TestLinkSets:
         await db_session.commit()
 
         assert await linked_user_ids(db_session, a.user_id) == {a.user_id}
+
+
+class TestLeavingASet:
+    """#1807: an account leaves its set and the others stay linked."""
+
+    @pytest.mark.asyncio
+    async def test_leaving_a_set_of_three_keeps_the_other_two_linked(self, db_session):
+        a, b, c = [await _user(db_session) for _ in range(3)]
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, b.user_id)
+        await service.link(a.user_id, c.user_id)
+
+        left = await service.leave(a.user_id)
+
+        assert left == frozenset({b.user_id, c.user_id})
+        assert await linked_user_ids(db_session, a.user_id) == {a.user_id}
+        assert await linked_user_ids(db_session, b.user_id) == {b.user_id, c.user_id}
+        assert await is_same_owner(db_session, c.user_id, b.user_id)
+
+    @pytest.mark.asyncio
+    async def test_leaving_a_pair_dissolves_it(self, db_session):
+        a, b = await _user(db_session), await _user(db_session)
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, b.user_id)
+
+        assert await service.leave(b.user_id) == frozenset({a.user_id})
+
+        rows = await db_session.execute(
+            select(IdentityLink).where(IdentityLink.user_id.in_([a.user_id, b.user_id]))
+        )
+        assert rows.scalars().all() == []
+
+    @pytest.mark.asyncio
+    async def test_an_account_in_no_set_has_nothing_to_leave(self, db_session):
+        lone = await _user(db_session)
+
+        with pytest.raises(NotFoundException):
+            await IdentityLinkService(db_session).leave(lone.user_id)
+
+    @pytest.mark.asyncio
+    async def test_leaving_is_audited_on_every_account_of_the_set(self, db_session):
+        a, b, c = [await _user(db_session) for _ in range(3)]
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, b.user_id)
+        await service.link(a.user_id, c.user_id)
+
+        await service.leave(a.user_id)
+
+        rows = await db_session.execute(
+            select(AuditLog.user_id).where(
+                AuditLog.user_id.in_([a.user_id, b.user_id, c.user_id]),
+                AuditLog.action == "identity_unlinked",
+            )
+        )
+        # The leaver once per former partner; each partner once.
+        assert sorted(r.user_id for r in rows) == sorted(
+            [a.user_id, a.user_id, b.user_id, c.user_id]
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_leaver_no_longer_names_the_others_rows(self, db_session):
+        a, b, c = [await _user(db_session) for _ in range(3)]
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, b.user_id)
+        await service.link(a.user_id, c.user_id)
+
+        await service.leave(a.user_id)
+
+        rows = (
+            (
+                await db_session.execute(
+                    select(IdentityLink).where(IdentityLink.user_id.in_([b.user_id, c.user_id]))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert all(row.linked_by != a.user_id for row in rows)
+
+
+class TestLinkedByFollowsTheAccount:
+    """#1807: ``linked_by`` is a foreign key with ``ON DELETE SET NULL``."""
+
+    @pytest.mark.asyncio
+    async def test_deleting_the_linking_account_keeps_the_others_linked(self, db_session):
+        a, b, c = [await _user(db_session) for _ in range(3)]
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, b.user_id)
+        await service.link(a.user_id, c.user_id)
+
+        # A delete that skips the hand-over step (the delete_admin CLI).
+        await db_session.delete(a)
+        await db_session.commit()
+
+        rows = (
+            (
+                await db_session.execute(
+                    select(IdentityLink)
+                    .where(IdentityLink.user_id.in_([b.user_id, c.user_id]))
+                    .execution_options(populate_existing=True)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [row.linked_by for row in rows] == [None, None]
+        assert await linked_user_ids(db_session, b.user_id) == {b.user_id, c.user_id}
 
 
 class TestPrivateContextAcrossLinkedAccounts:
@@ -817,6 +925,45 @@ class TestTheReadSurfacesInsideALinkedPrivateContext:
         )
 
         assert stats.total_count == 2
+
+    @pytest.mark.asyncio
+    async def test_access_patterns_of_the_context_cover_both_authors(self, db_session):
+        """#1807: the access patterns of a private context follow the link set,
+        as its memory list and stats do."""
+        from api.routes.memory import get_access_patterns
+
+        _, oauth, _, context, by_admin, by_oauth = await self._seed(db_session)
+        for memory in (by_admin, by_oauth):
+            memory.access_count = 3
+            memory.last_used_at = utcnow()
+        await db_session.commit()
+
+        patterns = await get_access_patterns(
+            user={"user_id": oauth.user_id}, context_id=context.id, db=db_session, days=30
+        )
+
+        assert {m["memory_id"] for m in patterns["most_accessed"]} == {
+            str(by_admin.id),
+            str(by_oauth.id),
+        }
+        assert sum(patterns["type_distribution"].values()) == 2
+
+    @pytest.mark.asyncio
+    async def test_access_patterns_of_a_shared_context_stay_the_callers_own(self, db_session):
+        from api.routes.memory import get_access_patterns
+
+        _, oauth, _, context, by_admin, by_oauth = await self._seed(db_session)
+        context.is_private = False
+        for memory in (by_admin, by_oauth):
+            memory.access_count = 3
+            memory.last_used_at = utcnow()
+        await db_session.commit()
+
+        patterns = await get_access_patterns(
+            user={"user_id": oauth.user_id}, context_id=context.id, db=db_session, days=30
+        )
+
+        assert [m["memory_id"] for m in patterns["most_accessed"]] == [str(by_oauth.id)]
 
 
 class TestErasingThroughTheService:
