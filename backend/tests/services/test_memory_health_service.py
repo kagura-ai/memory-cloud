@@ -256,7 +256,7 @@ class TestRetrievalGrading:
 
     def test_write_only_store_warns(self) -> None:
         section = MemoryHealthService._grade_retrieval(
-            {"remember": 5}, _POSTURE_ON, active_memories=50
+            {"remember": 5, "successful_writes": 5}, _POSTURE_ON, active_memories=50
         )
         assert section["status"] == STATUS_WARN
         note = next(n for n in section["notes"] if n["code"] == "write_only_store")
@@ -268,7 +268,10 @@ class TestRetrievalGrading:
 
     def test_write_only_check_disabled_for_unattributed_scope(self) -> None:
         section = MemoryHealthService._grade_retrieval(
-            {"remember": 5}, _POSTURE_OFF, active_memories=50, heuristics=False
+            {"remember": 5, "successful_writes": 5},
+            _POSTURE_OFF,
+            active_memories=50,
+            heuristics=False,
         )
         assert section["status"] == STATUS_OK
 
@@ -292,10 +295,22 @@ class TestRetrievalGrading:
 
     def test_write_only_store_has_no_idle_note(self) -> None:
         section = MemoryHealthService._grade_retrieval(
-            {"remember": 1}, _POSTURE_ON, active_memories=50
+            {"remember": 1, "successful_writes": 1}, _POSTURE_ON, active_memories=50
         )
         assert section["status"] == STATUS_WARN
         assert _codes(section) == ["write_only_store"]
+        assert section["metrics"]["successful_write_calls"] == 1
+
+    def test_failed_writes_only_is_idle_not_write_only(self) -> None:
+        """remember calls that all failed (quota, permission, validation)
+        wrote nothing — the context is idle, not write-only."""
+        section = MemoryHealthService._grade_retrieval(
+            {"remember": 4}, _POSTURE_ON, active_memories=50
+        )
+        assert section["status"] == STATUS_OK
+        assert _codes(section) == ["idle_store"]
+        assert section["metrics"]["remember_calls"] == 4
+        assert section["metrics"]["successful_write_calls"] == 0
 
     def test_empty_store_has_no_idle_note(self) -> None:
         section = MemoryHealthService._grade_retrieval({}, _POSTURE_OFF, active_memories=0)
@@ -614,7 +629,7 @@ class TestFetchUsageCountsAttribution:
     @pytest.mark.asyncio
     async def test_attribution_rows_merge_into_usage_counts(self) -> None:
         db = self._db_with_result_sets(
-            usage_rows=[(_CTX_A, "mcp:recall", 4), (_CTX_B, "mcp:remember", 5)],
+            usage_rows=[(_CTX_A, "mcp:recall", True, 4), (_CTX_B, "mcp:remember", True, 5)],
             attribution_rows=[(_CTX_B, "mcp:recall", 3)],
         )
         svc = MemoryHealthService(db)
@@ -623,14 +638,41 @@ class TestFetchUsageCountsAttribution:
 
         assert usage[_CTX_A] == {"recall": 4}
         # B keeps its own writes AND gains the attributed reads.
-        assert usage[_CTX_B] == {"remember": 5, "recall": 3}
+        assert usage[_CTX_B] == {"remember": 5, "successful_writes": 5, "recall": 3}
+
+    @pytest.mark.asyncio
+    async def test_successful_writes_count_only_ok_write_rows(self) -> None:
+        """#1822: only successful remember / update_memory rows are writes —
+        a failed remember (quota 429, permission 403, ...) wrote nothing.
+        Raw per-endpoint counts still include failures."""
+        db = self._db_with_result_sets(
+            usage_rows=[
+                (_CTX_A, "mcp:remember", False, 3),
+                (_CTX_A, "mcp:remember", True, 2),
+                (_CTX_A, "mcp:update_memory", True, 1),
+                (_CTX_A, "mcp:recall", False, 1),
+                (_CTX_B, "mcp:remember", False, 6),
+            ],
+            attribution_rows=[],
+        )
+        svc = MemoryHealthService(db)
+
+        usage = await svc._fetch_usage_counts("user-1")
+
+        assert usage[_CTX_A] == {
+            "remember": 5,
+            "successful_writes": 3,
+            "update_memory": 1,
+            "recall": 1,
+        }
+        assert usage[_CTX_B] == {"remember": 6}
 
     @pytest.mark.asyncio
     async def test_same_context_and_endpoint_counts_sum(self) -> None:
         """A context that is BOTH the primary of some calls and attributed
         in others sums the two sources, never overwrites."""
         db = self._db_with_result_sets(
-            usage_rows=[(_CTX_A, "mcp:recall", 4)],
+            usage_rows=[(_CTX_A, "mcp:recall", True, 4)],
             attribution_rows=[(_CTX_A, "mcp:recall", 2)],
         )
         svc = MemoryHealthService(db)

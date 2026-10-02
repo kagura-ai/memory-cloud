@@ -2863,7 +2863,7 @@
         "edge_weight_violations": "{count} 本のエッジが重み範囲 [{min}, {max}] を外れています — 未クランプ累積系のバグです。",
         "cold_graph": "アクティブメモリが {active_memories} 件あるのにエッジが 0 本 — グラフが一度も温まっていません。エッジ形成ゲートと sleep モードを確認してください。",
         "write_only_store": "アクティブメモリが {active_memories} 件あるのに直近 {window_days} 日間 recall 呼び出しがありません — ストアが書き込み専用になっています。",
-        "idle_store": "直近 {window_days} 日間 MCP の利用がありません（recall も remember もなし、アクティブメモリ {active_memories} 件） — 書き込み専用ではなく、使われていない状態です。",
+        "idle_store": "直近 {window_days} 日間、MCP の recall も成功した書き込みもありません（アクティブメモリ {active_memories} 件） — 書き込み専用ではなく、使われていない状態に見えます。Web UI・REST API・コネクタ経由の書き込みはここでは数えていません。",
         "unknown": "未知のヘルス注記です（コード: {code}）。"
       }
     },
