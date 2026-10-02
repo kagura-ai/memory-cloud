@@ -606,13 +606,14 @@ async def unlink_identity(
     Either side can cut the link from its own session; the other account
     does not have to be signed in. 404 when the account is not linked.
     """
-    await IdentityLinkService(db).unlink(
+    former = await IdentityLinkService(db).unlink(
         user["user_id"],
         body.user_id,
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    for account in (user["user_id"], body.user_id):
+    # In a larger set every remaining account loses ``body.user_id`` too.
+    for account in (user["user_id"], body.user_id, *sorted(former - {user["user_id"]})):
         schedule_security_notification(
             background_tasks,
             user_id=account,

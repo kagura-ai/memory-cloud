@@ -245,11 +245,16 @@ class IdentityLinkService:
         *,
         ip_address: str | None = None,
         user_agent: str | None = None,
-    ) -> None:
+    ) -> frozenset[str]:
         """Take ``other_user_id`` out of ``user_id``'s link set.
 
         Either side can cut the link from its own session. A set left with one
-        account is removed.
+        account is removed. In a larger set the other remaining accounts lose
+        ``other_user_id`` too, so each of them is audited like the two named.
+
+        Returns:
+            The accounts ``other_user_id`` was linked to until now
+            (``user_id`` among them).
 
         Raises:
             NotFoundException: ``other_user_id`` is not linked to ``user_id``
@@ -261,36 +266,14 @@ class IdentityLinkService:
             # naming accounts it is not linked to never queues behind it.
             raise NotFoundException("Linked account")
         await lock_identity_links(self.db)
-        rows = (
-            (
-                await self.db.execute(
-                    select(IdentityLink)
-                    .where(IdentityLink.user_id.in_(linked_ids_subquery(user_id)))
-                    .with_for_update()
-                )
-            )
-            .scalars()
-            .all()
-        )
-        members = {row.user_id: row for row in rows}
+        rows = await self._locked_set_rows(user_id)
+        members = {row.user_id for row in rows}
         if other_user_id not in members or user_id not in members:
             raise NotFoundException("Linked account")
 
-        await _remove_from_set(self.db, other_user_id, list(members.values()))
-
-        users = {
-            u.user_id: u
-            for u in (
-                await self.db.execute(
-                    select(User).where(User.user_id.in_([user_id, other_user_id]))
-                )
-            ).scalars()
-        }
-        for actor, target in ((user_id, other_user_id), (other_user_id, user_id)):
-            if actor in users:
-                self._audit(users[actor], "identity_unlinked", target, ip_address, user_agent)
-        await self.db.commit()
+        former = await self._take_out(other_user_id, rows, ip_address, user_agent)
         logger.info("identity_unlinked", user_id=user_id, unlinked_user_id=other_user_id)
+        return former
 
     async def leave(
         self,
@@ -316,7 +299,17 @@ class IdentityLinkService:
             # Answered before the deployment-wide lock is taken, as in unlink.
             raise NotFoundException("Identity link")
         await lock_identity_links(self.db)
-        rows = (
+        rows = await self._locked_set_rows(user_id)
+        if user_id not in {row.user_id for row in rows}:
+            # Left (or was unlinked) between the check above and the lock.
+            raise NotFoundException("Identity link")
+        former = await self._take_out(user_id, rows, ip_address, user_agent)
+        logger.info("identity_link_left", user_id=user_id, former_links=len(former))
+        return former
+
+    async def _locked_set_rows(self, user_id: str) -> list[IdentityLink]:
+        """Every row of ``user_id``'s set, locked. Call under the link lock."""
+        return list(
             (
                 await self.db.execute(
                     select(IdentityLink)
@@ -327,25 +320,30 @@ class IdentityLinkService:
             .scalars()
             .all()
         )
-        others = frozenset(row.user_id for row in rows) - {user_id}
-        if len(rows) == len(others):
-            # Left (or was unlinked) between the check above and the lock.
-            raise NotFoundException("Identity link")
-        await _remove_from_set(self.db, user_id, list(rows))
 
+    async def _take_out(
+        self,
+        departing: str,
+        rows: list[IdentityLink],
+        ip_address: str | None,
+        user_agent: str | None,
+    ) -> frozenset[str]:
+        """Remove ``departing`` from the set ``rows``, audit it on both sides
+        with every account it leaves, commit. Returns those accounts."""
+        former = frozenset(row.user_id for row in rows) - {departing}
+        await _remove_from_set(self.db, departing, rows)
         users = {
             u.user_id: u
             for u in (
-                await self.db.execute(select(User).where(User.user_id.in_([user_id, *others])))
+                await self.db.execute(select(User).where(User.user_id.in_([departing, *former])))
             ).scalars()
         }
-        for other in sorted(others):
-            for actor, target in ((user_id, other), (other, user_id)):
+        for other in sorted(former):
+            for actor, target in ((departing, other), (other, departing)):
                 if actor in users:
                     self._audit(users[actor], "identity_unlinked", target, ip_address, user_agent)
         await self.db.commit()
-        logger.info("identity_link_left", user_id=user_id, former_links=len(others))
-        return others
+        return former
 
     def _audit(
         self,

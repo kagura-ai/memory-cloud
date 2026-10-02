@@ -55,7 +55,7 @@ def notices():
 def service():
     instance = MagicMock()
     instance.link = AsyncMock(return_value=True)
-    instance.unlink = AsyncMock()
+    instance.unlink = AsyncMock(return_value=frozenset({ME}))
     instance.leave = AsyncMock(return_value=frozenset())
     instance.list_linked = AsyncMock(return_value=[])
     with patch.object(me_account, "IdentityLinkService", return_value=instance):
@@ -298,6 +298,25 @@ class TestSessionOnly:
                 SessionUser,
                 "SessionUser",
             )
+
+
+class TestUnlinkInALargerSet:
+    """#1807: unlinking one account also separates it from the other
+    remaining accounts, so each of them is told."""
+
+    @pytest.mark.asyncio
+    async def test_every_account_the_unlinked_one_leaves_is_notified(self, service, notices):
+        service.unlink = AsyncMock(return_value=frozenset({ME, "github|9"}))
+
+        await unlink_identity(
+            IdentityLinkTarget(user_id=OTHER), _request(), MagicMock(), {"user_id": ME}, AsyncMock()
+        )
+
+        assert [call.kwargs["user_id"] for call in notices.call_args_list] == [
+            ME,
+            OTHER,
+            "github|9",
+        ]
 
 
 class TestLeave:

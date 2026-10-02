@@ -180,6 +180,28 @@ class TestLinkSets:
         assert await linked_user_ids(db_session, c.user_id) == {c.user_id}
 
     @pytest.mark.asyncio
+    async def test_unlink_in_a_larger_set_is_audited_on_every_account_it_separates(
+        self, db_session
+    ):
+        a, b, c = [await _user(db_session) for _ in range(3)]
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, b.user_id)
+        await service.link(a.user_id, c.user_id)
+
+        former = await service.unlink(a.user_id, c.user_id)
+
+        assert former == frozenset({a.user_id, b.user_id})
+        rows = await db_session.execute(
+            select(AuditLog.user_id).where(
+                AuditLog.user_id.in_([a.user_id, b.user_id, c.user_id]),
+                AuditLog.action == "identity_unlinked",
+            )
+        )
+        assert sorted(r.user_id for r in rows) == sorted(
+            [a.user_id, b.user_id, c.user_id, c.user_id]
+        )
+
+    @pytest.mark.asyncio
     async def test_unlinking_a_stranger_is_not_found(self, db_session):
         a, b, stranger = [await _user(db_session) for _ in range(3)]
         service = IdentityLinkService(db_session)

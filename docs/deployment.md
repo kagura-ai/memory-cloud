@@ -558,9 +558,10 @@ Either account can unlink from **Profile Settings**; the other one does not
 have to be signed in. At most 4 accounts can be linked together. In a set of
 three or more, unlinking takes one other account out and keeps the rest
 linked to you; **Leave** (#1807) takes this account out and keeps the others
-linked to each other. Every link, unlink and leave writes an `audit_logs` row
-(`identity_linked`, `identity_unlinked`) on each account involved and emails
-each a security notice. A change takes effect at once, in every API process —
+linked to each other. A link writes an `identity_linked` `audit_logs` row on both accounts and
+emails both a security notice; an unlink or a leave writes
+`identity_unlinked` and emails a notice on every account it separates —
+in a larger set, the other remaining accounts too. A change takes effect at once, in every API process —
 tag suggestions included.
 
 A link outlives the browser session it was made in. Anyone who can sign in
