@@ -122,6 +122,13 @@ class TestSignedInAt:
 
         assert manager.signed_in_at(sid, "google_1") is None
 
+    def test_a_time_with_a_zone_is_no_time(self, manager):
+        """Only naive UTC is ever written; anything else was not."""
+        sid = manager.create_session(USER)
+        _set_signed_in_at(manager, sid, "google_1", utcnow().isoformat() + "+00:00")
+
+        assert manager.signed_in_at(sid, "google_1") is None
+
     def test_an_account_not_in_the_session_or_a_missing_session_has_none(self, manager):
         sid = manager.create_session(USER)
 
@@ -154,3 +161,57 @@ class TestSignedInWithin:
         _set_signed_in_at(manager, sid, "google_1", None)
 
         assert not manager.signed_in_within(sid, "google_1", timedelta(minutes=10))
+
+
+class TestLinkRouteWithARealSession:
+    """The link route against a real SessionManager: the time ``add_account``
+    writes is the one the route reads, for the session the cookie names."""
+
+    @staticmethod
+    async def _link(manager: SessionManager, sid: str):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from api.routes import me_account
+
+        request = MagicMock()
+        request.cookies = {me_account.auth_module.SESSION_COOKIE_NAME: sid}
+        request.client = None
+        request.headers = {}
+        service = MagicMock()
+        service.link = AsyncMock(return_value=True)
+        with (
+            patch.object(me_account.auth_module, "_session_manager", manager),
+            patch.object(me_account, "IdentityLinkService", return_value=service),
+            patch.object(me_account, "schedule_security_notification"),
+        ):
+            result = await me_account.link_identity(
+                me_account.IdentityLinkTarget(user_id="local:admin"),
+                request,
+                MagicMock(),
+                {"user_id": "google_1"},
+                AsyncMock(),
+            )
+        return result, service
+
+    @pytest.mark.asyncio
+    async def test_two_fresh_sign_ins_link(self, manager):
+        sid = manager.create_session(USER)
+        manager.add_account(sid, OTHER)
+
+        result, service = await self._link(manager, sid)
+
+        assert result.status == "ok"
+        service.link.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stale", ["google_1", "local:admin"])
+    async def test_a_stale_sign_in_on_either_side_is_refused(self, manager, stale):
+        from utils.exceptions import IdentityLinkSignInRequiredError
+
+        sid = manager.create_session(USER)
+        manager.add_account(sid, OTHER)
+        old = (utcnow() - timedelta(minutes=11)).isoformat()
+        _set_signed_in_at(manager, sid, stale, old)
+
+        with pytest.raises(IdentityLinkSignInRequiredError):
+            await self._link(manager, sid)

@@ -2435,7 +2435,7 @@ class TestPasswordResetNamesLinks:
             SecurityOccurrence(occurred_at="2026-10-02T10:00:00 UTC", linked_accounts=3).to_json()
         )
         assert kept.linked_accounts == 3
-        for bad in ('"3"', "true", "-1", "999", "1.5"):
+        for bad in ('"3"', "true", "-1", "0", "4", "999", "1.5"):
             occurrence = SecurityOccurrence.from_json(
                 f'{{"occurred_at": "2026-10-02T10:00:00 UTC", "linked_accounts": {bad}}}'
             )
