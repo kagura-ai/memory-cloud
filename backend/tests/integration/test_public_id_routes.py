@@ -32,6 +32,7 @@ from auth.dependencies import (
     require_session_auth,
     require_workspace_owner,
 )
+from auth.resource_tokens import ResourceTokenManager
 from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
 from models.auth import (
@@ -395,3 +396,65 @@ async def test_member_credential_keys_use_public_ids(owners, client: TestClient)
     deleted = client.delete(f"{base}/api-keys/{mine}")
     assert deleted.status_code == 200, deleted.text
     assert deleted.json() == {"status": "deleted", "key_id": mine}
+
+
+# ---------------------------------------------------------------------------
+# Create responses carry the public id the database issued
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_responses_use_public_ids(owners, client: TestClient, db_session) -> None:
+    a = owners["a"]
+
+    share = client.post(
+        "/api/v1/config/share-keys",
+        json={"name": "pid-create", "context_id": str(a["context"].id)},
+    )
+    assert share.status_code == 201, share.text
+    share_id = share.json()["id"]
+    _assert_public(share_id, PublicIdPrefix.SHARE_KEY)
+    stored_share = await db_session.execute(
+        select(ShareKey.public_id).where(ShareKey.public_id == share_id)
+    )
+    assert stored_share.scalar_one() == share_id
+
+    # Resource tokens are an XL (promax) feature.
+    await db_session.execute(
+        Workspace.__table__.update()
+        .where(Workspace.id == a["workspace"].id)
+        .values(plan_name="promax")
+    )
+    await db_session.commit()
+    token = client.post(
+        "/api/v1/resource-tokens",
+        json={"resource_id": a["context"].resource_id, "description": "pid-create"},
+    )
+    assert token.status_code == 201, token.text
+    token_id = token.json()["id"]
+    _assert_public(token_id, PublicIdPrefix.RESOURCE_TOKEN)
+    stored_token = await db_session.execute(
+        select(ResourceToken.public_id).where(ResourceToken.public_id == token_id)
+    )
+    assert stored_token.scalar_one() == token_id
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_resource_token_revoke_race_hides_integer_id(
+    owners, client: TestClient, monkeypatch
+) -> None:
+    """A token that vanishes between lookup and revoke gets the uniform 404.
+
+    The manager's ``ValueError`` names the integer PK; the response must not.
+    """
+    a = owners["a"]
+    pk = a["token"].id
+
+    async def _vanished(self, token_id: int) -> None:
+        raise ValueError(f"Resource token {token_id} not found")
+
+    monkeypatch.setattr(ResourceTokenManager, "revoke_token", _vanished)
+    resp = client.delete(f"/api/v1/resource-tokens/{a['token'].public_id}")
+    assert resp.status_code == 404, resp.text
+    assert "Resource token not found" in resp.text, resp.text
+    assert f"Resource token {pk} not found" not in resp.text
