@@ -4,6 +4,28 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.90.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.90.0) — 2026-10-02
+
+Linked accounts and context deletion keep your data: a deleted context can be restored from its rows, linking two accounts needs a fresh sign-in of both, linked owners write to the same memories, and a linked provider no longer rewrites the account's email.
+
+### Added
+- **Restore a deleted context** ([#1804](https://github.com/kagura-ai/memory-cloud/issues/1804)): `POST /api/v1/admin/contexts/{context_id}/restore` (system admins; dry run by default, `new_name` to restore under another name) and `python -m src.cli.restore_context <id>` (plan by default, `--apply --yes`, `--name`, `--actor`) bring back a soft-deleted context and the memories its deletion removed, until the tombstone purge runs. Restored memories are re-embedded by the embedding sweep. Refused with 409 when the context is not deleted, its workspace is deleted, or a live context now uses its name or resource id. Each apply writes a `context_restore` audit row. Not restored: memories forgotten before the deletion, Sleep tombstones, purged rows, neural edges, members' `allowed_context_ids` entries and revoked resource tokens. See `docs/deployment.md`, *Restoring a deleted context*.
+- **Identity links name themselves in the password-reset notice** ([#1803](https://github.com/kagura-ai/memory-cloud/issues/1803)): when the account has linked accounts, the email says a reset does not remove them and to review *Linked accounts* on the profile page.
+
+### Changed
+- **Linking two accounts needs a fresh sign-in of both** ([#1803](https://github.com/kagura-ai/memory-cloud/issues/1803)): `POST /api/v1/me/account/identity-links` requires the session user and the target to have signed in on this session within the last 10 minutes, and answers 403 (`AUTH-305`) otherwise. `GET` reports `signed_in_recently` per account and `sign_in_window_minutes`; Profile Settings shows when to sign in again. Sessions created before this release have no sign-in time, so the first link after upgrading asks for a new sign-in.
+- **Linked owners write to the same memories in a private context** ([#1803](https://github.com/kagura-ai/memory-cloud/issues/1803)): an `external_id` upsert from either linked account replaces the same memory (every match, so duplicates left by earlier upserts are folded), and `linked_memory_ids`, `linked_source_uris` and `supersedes` may name the linked account's memories. Shared contexts are unchanged.
+- **`delete_context` stamps the context and its memories with one deletion time** ([#1804](https://github.com/kagura-ai/memory-cloud/issues/1804)), so a restore takes exactly the memories the deletion removed. For a context deleted before this release it falls back to memories the same user deleted in the 10 minutes before, and the dry run says so with the count.
+
+### Fixed
+- **A linked provider's sign-in no longer rewrites the account's email** ([#1811](https://github.com/kagura-ai/memory-cloud/issues/1811)): only the account's primary provider (`auth_provider`) syncs email and name; a linked secondary provider updates nothing but its last-used time, sends no email-change notice, and no longer fails with 409 when its address belongs to another account. A secondary provider marks the email verified only when it attests the address already stored.
+- **The orphan vector sweep no longer holds one long read transaction** ([#1804](https://github.com/kagura-ai/memory-cloud/issues/1804)): it ends the transaction after each page, so `idle_in_transaction_session_timeout` cannot cut a long scan short.
+
+### Notes
+- `POST /api/v1/admin/contexts/recover` still rebuilds a context from surviving vector points; for a context whose rows still exist its error now points to the restore endpoint.
+- An account whose `auth_provider` is empty (password-first accounts) no longer has its email or name synced from a linked OAuth provider.
+- No migration, no new environment variables, no operator action.
+
 ## [v0.89.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.89.0) — 2026-10-02
 
 Keys, tokens and invitations are addressed by opaque public ids instead of sequential row numbers, ahead of the 1.0 API freeze, and a sign-in through a linked provider opens the right account. This release also carries the v0.88.1 fix.
