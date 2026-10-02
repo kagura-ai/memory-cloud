@@ -46,11 +46,15 @@ class TestSessionManager:
         assert session_id is not None
         assert len(session_id) > 20  # URL-safe base64 of 32 bytes
 
-        # Redis setex should be called
-        mock_redis.setex.assert_called_once()
-        call_args = mock_redis.setex.call_args
+        # The record is written with its TTL, in the same transaction as the
+        # user's index entry (#1809).
+        pipe = mock_redis.pipeline.return_value
+        pipe.setex.assert_called_once()
+        call_args = pipe.setex.call_args
         assert call_args[0][0].startswith("session:")
         assert call_args[0][1] == 3600  # TTL
+        pipe.sadd.assert_called_once_with("user_sessions:user_123", session_id)
+        pipe.execute.assert_called_once()
 
     def test_get_session_exists(self, session_manager, mock_redis):
         """Test getting an existing session."""
@@ -223,7 +227,8 @@ class TestDeleteUserSessions:
         )
 
         mock_redis.scan.return_value = (0, ["session:s1", "session:s2", "session:s3"])
-        mock_redis.get.side_effect = [session1, session2, session3]
+        records = {"session:s1": session1, "session:s2": session2, "session:s3": session3}
+        mock_redis.get.side_effect = records.get
 
         # Mock pipeline with 2 successful deletions
         mock_pipe = MagicMock()
@@ -286,7 +291,8 @@ class TestDeleteUserSessions:
         valid_session = json.dumps({"sub": user_id, "email": "test@example.com"})
 
         mock_redis.scan.return_value = (0, ["session:valid", "session:invalid"])
-        mock_redis.get.side_effect = [valid_session, "not valid json"]
+        records = {"session:valid": valid_session, "session:invalid": "not valid json"}
+        mock_redis.get.side_effect = records.get
 
         mock_pipe = MagicMock()
         mock_pipe.execute.return_value = [1]
