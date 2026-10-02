@@ -309,6 +309,7 @@ export default function WorkspaceStatsPage() {
               contextStats={contextStats}
               workspaceName={currentWorkspace?.name}
               currentUserId={user?.id}
+              linkedUserIds={user?.linked_user_ids}
             />
           )}
 

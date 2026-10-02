@@ -37,6 +37,7 @@ import { COMMON_TIMEZONES } from "@/lib/utils/datetime";
 import { apiClient, ApiError } from "@/lib/api/base";
 import { PageContainer } from "@/components/common/PageContainer";
 import ConnectedAccounts from "@/components/auth/ConnectedAccounts";
+import LinkedAccounts from "@/components/auth/LinkedAccounts";
 import PasswordSettings from "@/components/auth/PasswordSettings";
 import { DeleteAccountSection } from "@/components/account/DeleteAccountSection";
 import {
@@ -478,6 +479,9 @@ export default function ProfilePage() {
           void refetchUser();
         }}
       />
+
+      {/* Linked accounts (Issue #1784): two accounts of one person. */}
+      <LinkedAccounts />
 
       {/* Password (Issue #1678): set up / change / remove. */}
       <PasswordSettings providersVersion={providersVersion} />

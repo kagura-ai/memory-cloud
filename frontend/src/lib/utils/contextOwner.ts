@@ -3,7 +3,8 @@
  *
  * The Contexts list and the dashboard breakdown both show this, so the rule
  * lives once:
- * - `mine`    — the viewer created it.
+ * - `mine`    — the viewer created it, or an account linked to the viewer
+ *   did (#1784: linked accounts own the same private contexts).
  * - `shared`  — someone else did.
  * - `unknown` — no recorded creator (legacy rows, system-created defaults),
  *   or the viewer is not known yet (auth still hydrating). Without an id to
@@ -16,9 +17,11 @@ export type ContextOwnerKind = "mine" | "shared" | "unknown";
 export function contextOwnerKind(
   createdBy: string | null | undefined,
   viewerId: string | null | undefined,
+  linkedUserIds?: readonly string[] | null,
 ): ContextOwnerKind {
   if (!createdBy || !viewerId) return "unknown";
-  return createdBy === viewerId ? "mine" : "shared";
+  if (createdBy === viewerId) return "mine";
+  return linkedUserIds?.includes(createdBy) ? "mine" : "shared";
 }
 
 /**

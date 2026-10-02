@@ -56,6 +56,10 @@ vi.mock("@/components/auth/PasswordSettings", () => ({
     <div data-testid="password-settings-stub">{String(providersVersion)}</div>
   ),
 }));
+// #1784: the Linked accounts section has its own suite and its own fetch.
+vi.mock("@/components/auth/LinkedAccounts", () => ({
+  default: () => null,
+}));
 vi.mock("@/components/auth/ConnectedAccounts", () => ({
   default: ({ onProvidersChanged }: { onProvidersChanged?: () => void }) => (
     <button type="button" onClick={() => onProvidersChanged?.()}>

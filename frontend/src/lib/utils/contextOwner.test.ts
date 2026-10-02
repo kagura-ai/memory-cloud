@@ -10,6 +10,18 @@ describe("contextOwnerKind", () => {
   it("is shared when someone else did", () => {
     expect(contextOwnerKind("u2", "u1")).toBe("shared");
   });
+  it("is mine when an account linked to the viewer created the context (#1784)", () => {
+    expect(contextOwnerKind("u2", "u1", ["u2", "u3"])).toBe("mine");
+  });
+  it("is shared when the creator is not among the linked accounts", () => {
+    expect(contextOwnerKind("u4", "u1", ["u2", "u3"])).toBe("shared");
+    expect(contextOwnerKind("u2", "u1", [])).toBe("shared");
+    expect(contextOwnerKind("u2", "u1", null)).toBe("shared");
+  });
+  it("stays unknown without a viewer even when linked ids are given", () => {
+    expect(contextOwnerKind("u2", undefined, ["u2"])).toBe("unknown");
+    expect(contextOwnerKind(null, "u1", ["u2"])).toBe("unknown");
+  });
   it("is unknown without a creator", () => {
     expect(contextOwnerKind(null, "u1")).toBe("unknown");
     expect(contextOwnerKind(undefined, "u1")).toBe("unknown");

@@ -308,6 +308,21 @@ describe("ContextBreakdownTable", () => {
     expect(screen.queryByText("ownerYou")).toBeNull();
   });
 
+  it("shows You for a context created by an account linked to the viewer (#1784)", () => {
+    render(
+      <ContextBreakdownTable
+        contexts={mockContexts}
+        totalMemories={300}
+        contextStats={mockContextStats}
+        currentUserId="viewer"
+        linkedUserIds={["user-2"]}
+      />,
+    );
+    fireEvent.click(screen.getByText("showDetails"));
+    const row = screen.getByText("prod").closest("tr") as HTMLTableRowElement;
+    expect(row).toHaveTextContent("ownerYou");
+  });
+
   it("shows You in the Owner column for the current user's contexts", () => {
     render(
       <ContextBreakdownTable

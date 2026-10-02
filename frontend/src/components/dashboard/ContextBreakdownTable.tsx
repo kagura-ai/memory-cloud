@@ -31,6 +31,8 @@ interface ContextBreakdownTableProps {
   workspaceName?: string;
   /** #1755: the viewer's user id, so their own contexts read "You". */
   currentUserId?: string | null;
+  /** #1784: accounts linked to the viewer; their contexts read "You" too. */
+  linkedUserIds?: readonly string[] | null;
 }
 
 type SortColumn = "name" | "memory" | "activity";
@@ -83,6 +85,7 @@ export function ContextBreakdownTable({
   contextStats,
   workspaceName,
   currentUserId,
+  linkedUserIds,
 }: ContextBreakdownTableProps) {
   const t = useTranslations("workspace");
   const tDashboard = useTranslations("dashboard");
@@ -93,7 +96,7 @@ export function ContextBreakdownTable({
   // nameless creator, or a dash when nothing is known.
   const ownerLabel = (context: DashboardContextStats) =>
     contextOwnerLabel(
-      contextOwnerKind(context.created_by, currentUserId),
+      contextOwnerKind(context.created_by, currentUserId, linkedUserIds),
       context.created_by_name,
       { you: t("ownerYou"), unnamed: t("ownerUnnamed") },
     );
@@ -103,7 +106,10 @@ export function ContextBreakdownTable({
   // not because anyone shared it — reads "Created by {creator}". The
   // viewer's own rows and rows with no known creator show nothing extra.
   const creatorMarker = (context: DashboardContextStats): string | null => {
-    if (contextOwnerKind(context.created_by, currentUserId) !== "shared") {
+    if (
+      contextOwnerKind(context.created_by, currentUserId, linkedUserIds) !==
+      "shared"
+    ) {
       return null;
     }
     const name = context.created_by_name || t("ownerUnnamed");

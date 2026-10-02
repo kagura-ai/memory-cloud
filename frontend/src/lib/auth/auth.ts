@@ -47,6 +47,9 @@ export interface User {
   // acceptance). Comes with the user so the re-acceptance step never depends
   // on a separate /system/info fetch.
   terms_version?: string | null;
+  // Issue #1784: the OTHER accounts linked to this one as the same person.
+  // Absent on an older backend — treat as none.
+  linked_user_ids?: string[];
 }
 
 /**

@@ -159,7 +159,7 @@ export default function ContextsPage() {
   // filter offers only the two states a row can be attributed to; a row
   // with an unknown creator matches neither.
   const ownerKindOf = (context: Context) =>
-    contextOwnerKind(context.created_by, user?.id);
+    contextOwnerKind(context.created_by, user?.id, user?.linked_user_ids);
   const OWNER_FILTERS = ["all", "mine", "shared"] as const;
   const [ownerFilter, setOwnerFilter] =
     useState<(typeof OWNER_FILTERS)[number]>("all");
