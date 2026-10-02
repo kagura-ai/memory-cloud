@@ -278,6 +278,11 @@ class TestLinkedProviderSkipsSync:
 
     @pytest.mark.asyncio
     async def test_race_retry_through_non_primary_provider_skips_sync(self, role_manager):
+        """The user_id-race retry path applies the same primary-provider guard.
+
+        The re-resolved row's ``auth_provider`` (None here) differs from the
+        provider signing in, so its email and name stay as they are.
+        """
         race_existing = _user_row(email="alice@old.com", name="Alice", auth_provider=None)
         db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing))
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])

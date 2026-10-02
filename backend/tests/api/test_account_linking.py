@@ -642,10 +642,13 @@ def _sign_in_session(db: AsyncSession):
         yield notify
 
 
-async def _owner_with_github_link(db: AsyncSession, suffix: str) -> tuple[User, str]:
+async def _owner_with_github_link(
+    db: AsyncSession, suffix: str, *, verified: bool = True
+) -> tuple[User, str]:
     """A google-primary account (link row sub == user_id) with github linked."""
     owner = await _make_user(db, suffix=suffix)
-    owner.email_verified_at = utcnow()
+    owner.email_verified_at = utcnow() if verified else None
+    owner.last_login_at = datetime(2020, 1, 1)
     db.add(UserOAuthProvider(user_id=owner.user_id, provider="google", oauth_sub=owner.user_id))
     await db.commit()
     gh_sub = f"gh-{suffix}"
@@ -689,6 +692,7 @@ async def test_linked_provider_sign_in_keeps_owner_email_and_name(db_session: As
     user = await _reload(db_session, owner.user_id)
     assert user.email == old_email
     assert user.name == old_name
+    assert user.last_login_at is not None and user.last_login_at > datetime(2020, 1, 1)
     notify.assert_not_called()
     assert await _audit_rows(db_session, owner.user_id, "oauth_user_email_synced") == []
     link = (
@@ -760,3 +764,37 @@ async def test_linked_provider_with_another_accounts_email_signs_in(db_session: 
     assert role == Role.USER
     assert (await _reload(db_session, owner.user_id)).email == owner.email
     notify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_linked_provider_other_address_leaves_owner_unverified(db_session: AsyncSession):
+    """#1811: a linked IdP attesting a different address verifies nothing."""
+    suffix = uuid4().hex[:8]
+    owner, gh_sub = await _owner_with_github_link(db_session, suffix, verified=False)
+
+    with _sign_in_session(db_session):
+        await RoleManager(use_postgres=True).ensure_user(
+            email=f"other-{suffix}@github.example",
+            user_id=gh_sub,
+            auth_provider="github",
+            email_verified=True,
+        )
+
+    assert (await _reload(db_session, owner.user_id)).email_verified_at is None
+
+
+@pytest.mark.asyncio
+async def test_linked_provider_same_address_verifies_owner(db_session: AsyncSession):
+    """#1811: a linked IdP attesting the owner's own address marks it verified."""
+    suffix = uuid4().hex[:8]
+    owner, gh_sub = await _owner_with_github_link(db_session, suffix, verified=False)
+
+    with _sign_in_session(db_session):
+        await RoleManager(use_postgres=True).ensure_user(
+            email=owner.email,
+            user_id=gh_sub,
+            auth_provider="github",
+            email_verified=True,
+        )
+
+    assert (await _reload(db_session, owner.user_id)).email_verified_at is not None
