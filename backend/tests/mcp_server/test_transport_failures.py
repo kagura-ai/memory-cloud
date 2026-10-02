@@ -28,6 +28,7 @@ from sqlalchemy.exc import OperationalError
 import auth.oauth2_bearer as bearer
 import mcp_server.auth as mcp_auth
 import mcp_server.tools as tools_mod
+import mcp_server.tools._errors as errors_mod
 import mcp_server.transport as transport
 from mcp_server.auth import OAuthGrant
 from mcp_server.transport import mcp_asgi_app
@@ -44,6 +45,17 @@ DB_DOWN = ConnectionRefusedError("[Errno 111] Connect call failed ('127.0.0.1', 
 def _origin(monkeypatch):
     monkeypatch.setenv("FRONTEND_URL", ORIGIN)
     monkeypatch.delenv("MCP_BASE_PATH", raising=False)
+
+
+# The correlation id is random hex, so a digits-only needle ("5432", "6379")
+# can occur in it by chance (#1810). Pin one that contains both ports: a no-leak
+# assertion that searches for a digit string now fails every run, not 1 in ~1000.
+COLLIDING_CORRELATION_ID = "0005432000637900"
+
+
+@pytest.fixture(autouse=True)
+def _colliding_correlation_id(monkeypatch):
+    monkeypatch.setattr(errors_mod, "new_correlation_id", lambda: COLLIDING_CORRELATION_ID)
 
 
 class _Recorder:
@@ -160,8 +172,11 @@ def _modern(method: str, request_id: int = 1, **params) -> tuple[dict, dict[byte
 
 
 def _assert_no_leak(send: _Recorder) -> None:
+    # Needles that cannot occur in a hex correlation id (#1810): the host and
+    # the asyncpg wording, not the bare port number.
     raw = b"".join(m.get("body", b"") for m in send.messages[1:]).decode()
-    assert "5432" not in raw
+    assert "127.0.0.1" not in raw
+    assert "Connect call failed" not in raw
     assert "Errno" not in raw
     assert "Traceback" not in raw
 
@@ -332,7 +347,9 @@ async def test_a_session_lookup_failure_is_a_jsonrpc_error(app):
     send = await app.call(_rpc("tools/list", request_id=4), headers={b"mcp-session-id": SESSION_ID})
 
     _assert_jsonrpc_failure(send, request_id=4, status=503, cause="service_unavailable")
-    assert "6379" not in json.dumps(send.body)
+    body = json.dumps(send.body)
+    assert "10.0.0.9" not in body
+    assert "refused" not in body
 
 
 @pytest.mark.asyncio
