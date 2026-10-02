@@ -55,7 +55,21 @@ def test_session_summary_keeps_touched_memories_current_on_the_users_pick():
     assert "prints nothing when nothing applies" in step
     assert "applied only after the user picks" in step
     assert "No extra recall, no review of the whole context" in step
-    assert "`remember(..., supersedes=<old_memory_id>)`" in step
+    # Save once: the replacement is declared on the step-4 save; 4c only links what
+    # was saved without it, and never saves the item again.
+    save = text.split("### 4. Save each item", 1)[1].split("\n### ", 1)[0]
+    assert "Pass `supersedes=<old_memory_id>` on this `remember` call only when" in save
+    assert "supersedes=<old_memory_id>" not in step
+    assert "remember(..., " not in step
+    assert "create_edge(source_id=<the memory just saved>, target_id=<the older memory>" in step
+    assert "Never save the item a second time" in step
+    assert "If step 4 did not already save the outcome" in step
+    # A candidate is accepted or dismissed on the memory that carries it.
+    assert "not the one just saved" in step
+    assert step.count("<memory_id of the result that carries the candidate>") == 2
+    assert "target_id=<supersede_candidate.memory_id>" in step
+    # recall_upcoming returns no importance.
+    assert "`reference(memory_id=..., context_id=..., fields=[])`" in step
     assert "`supersede_candidate`" in step
     assert "`forget(memory_id=..., context_id=...)`" in step
     assert "forget(query" not in step
@@ -79,7 +93,13 @@ def test_codex_session_summary_keeps_touched_memories_current_on_the_users_pick(
     assert "print nothing when nothing applies" in section
     assert "applied only after the user picks" in section
     assert "no extra recall" in section
-    assert "`remember(..., supersedes=<old_memory_id>)`" in section
+    step_3, step_5 = section.split("\n5. Keep touched memories current", 1)
+    assert "pass `supersedes=<old_memory_id>` on that `remember` call only when" in step_3
+    assert "supersedes=<old_memory_id>" not in step_5
+    assert "Never save the item a second time" in step_5
+    assert "not the one just saved" in step_5
+    assert step_5.count("<memory_id of the result that carries the candidate>") == 2
+    assert "`reference(memory_id=..., context_id=..., fields=[])`" in step_5
     assert "`forget(memory_id=..., context_id=...)`" in section
     assert "Copy ids verbatim from tool results" in section
     assert '"Save everything" covers saving only' in section

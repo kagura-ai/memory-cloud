@@ -23,9 +23,16 @@ SESSION_SUMMARY = REPO_ROOT / "claude-skills" / "session-summary.md"
 CODEX_SKILL = REPO_ROOT / "plugins" / "kagura-memory" / "skills" / "kagura-memory" / "SKILL.md"
 
 MAX_BYTES = 8 * 1024
-CODEX_SECTION_MAX_CHARS = 2300
+CODEX_SECTION_MAX_CHARS = 3500
 
-READ_TOOLS = ["recall_upcoming", "load_pinned", "recall", "reference"]
+READ_TOOLS = [
+    "list_contexts",
+    "recall_upcoming",
+    "load_pinned",
+    "recall",
+    "reference",
+    "list_edges",
+]
 WRITE_TOOLS = ["update_memory", "create_edge", "forget"]
 
 # A call spelled out in the text: ``name(args)``, inline or in a fence. Prose
@@ -63,6 +70,23 @@ def _calls(text: str) -> list[tuple[str, frozenset[str]]]:
     return [(name, frozenset(_ARG.findall(args))) for name, args in _CALL.findall(text)]
 
 
+def _step_4c() -> str:
+    """Step 4c of the session summary: the same calls, for one session's memories."""
+    text = SESSION_SUMMARY.read_text(encoding="utf-8")
+    return text.split("### 4c. Keep touched memories current", 1)[1].split("\n### ", 1)[0]
+
+
+def _codex_step_5() -> str:
+    section = _codex().split("\n## Session Summary\n", 1)[1].split("\n## ", 1)[0]
+    return section.split("\n5. Keep touched memories current", 1)[1].split("\n6. ", 1)[0]
+
+
+def tools_max_upcoming() -> int:
+    """The largest ``k`` the registry documents for ``recall_upcoming``."""
+    description = _tools()["recall_upcoming"]["properties"]["k"]["description"]
+    return int(re.search(r"max (\d+)", description).group(1))
+
+
 BOTH = pytest.mark.parametrize("text", [_maintain, _codex_section], ids=["claude", "codex"])
 
 
@@ -98,9 +122,33 @@ def test_dry_run_stops_after_the_plan() -> None:
 
 
 @BOTH
+def test_dry_run_does_not_claim_a_topic_recall_is_free(text) -> None:
+    """``recall`` may strengthen associations and promote what it returns."""
+    flat = _flat(text())
+    assert "a topic recall still counts as a search" in flat.lower()
+    assert "not free of side effects" in flat
+
+
+@BOTH
+def test_arguments_cannot_confuse_a_topic_with_a_context(text) -> None:
+    flat = _flat(text())
+    assert 'list_contexts(name_contains="<name>")' in flat
+    assert re.search(r"Exactly one match[^.]*ask", flat)
+    assert "name, id, private or shared" in flat
+
+
+def test_argument_grammar_is_spelled_out() -> None:
+    grammar = "`[context=<name or id>] [topic=<words>] [dry-run]`"
+    assert grammar in _maintain()
+    assert "asked about, not guessed" in _maintain()
+    assert grammar in (REPO_ROOT / "claude-skills" / "guide.md").read_text(encoding="utf-8")
+    assert "ask about a word that could be either" in _flat(_codex_section())
+
+
+@BOTH
 def test_nothing_changes_without_the_item_numbers(text) -> None:
     flat = _flat(text())
-    assert "change nothing until the user picks" in flat
+    assert "apply nothing until the user picks" in flat
     assert '"All" or "you decide" is not consent to any change' in flat
     assert "needs its item numbers" in flat
     assert "One context per run" in flat
@@ -148,9 +196,28 @@ def test_a_delete_gets_a_second_look(text) -> None:
 
 
 @BOTH
+def test_deleting_the_source_of_a_supersedes_edge_is_warned_about(text) -> None:
+    """``forget`` removes the edge, so the memory it shadowed returns to default recall."""
+    flat = _flat(text())
+    assert "list_edges(memory_id=..., context_id=...)" in flat
+    assert "`source_id`" in flat and "`target_id`" in flat
+    assert "comes back into default recall" in flat
+    assert re.search(r"[Aa]sk whether to delete (that one|it) too", flat)
+
+
+@BOTH
+def test_candidate_calls_name_the_memory_that_carries_it(text) -> None:
+    flat = _flat(text())
+    assert "memory_id=<memory_id of the result that carries the candidate>" in flat
+    assert "`supersede_candidate.memory_id`" in flat
+    for vague in ("<new>", "<old>", "<this>"):
+        assert vague not in flat, vague
+
+
+@BOTH
 def test_an_update_is_shown_first_and_never_built_from_recalled_text(text) -> None:
     flat = _flat(text())
-    assert re.search(r"show the new (summary and content|text)", flat)
+    assert re.search(r"show the new (summary and content|text) and wait for a yes", flat)
     assert re.search(r"never (comes )?from recalled text", flat)
 
 
@@ -163,6 +230,12 @@ def test_reads_pass_the_trusted_tier_and_unfiltered_reads_are_display_only(text)
     flat = _flat(body)
     assert "`recall_upcoming` and `load_pinned` take no filters" in flat
     assert "display-only" in flat
+    # The rerank setting is not left to the context's search config.
+    assert all("use_rerank=false" in args for args in recalls), recalls
+    # In a connector-fed context the filter alone can empty the result.
+    assert "excludes external and connector-ingested memories" in flat
+    assert "empty result may be the filter" in flat
+    assert re.search(r'never report "nothing needs attention"', flat)
 
 
 @BOTH
@@ -193,7 +266,14 @@ def test_now_comes_from_the_clock(text) -> None:
 def test_candidate_sources_make_no_promise_they_cannot_keep(text) -> None:
     flat = _flat(text())
     # `until` with no `from` also returns windows still open.
-    assert re.search(r"`trigger\.until` (is earlier than now|has passed)", flat)
+    # They fill the first slots, oldest first, so the read asks for the tool maximum.
+    assert tools_max_upcoming() == 100
+    assert re.search(r'recall_upcoming\(context_id=\.\.\., until="<cutoff[^"]*>", k=100\)', flat)
+    assert "`trigger.until` is earlier than the cutoff" in flat
+    assert "first 20" in flat
+    assert re.search(r"more may exist", flat)
+    # Trigger bounds are naive; a follow-up due today in the user's timezone is not "ended".
+    assert "minus 24 hours" in flat and "24-hour margin" in flat
     # Follow-ups that are not over yet are listed too, so a finished one can be retired.
     assert 'recall_upcoming(context_id=..., from="now", k=20)' in flat
     # load_pinned returns no dates, and the sweep does not pay a reference per pin.
@@ -201,7 +281,7 @@ def test_candidate_sources_make_no_promise_they_cannot_keep(text) -> None:
     assert re.search(r"[Dd]o not call `reference` per item|no `reference` per item", flat)
     assert "No tool lists pending candidates" in flat
     assert re.search(r"not a complete list|list is not complete", flat)
-    assert re.search(r"[Aa]t most 20 (items )?per category", flat)
+    assert "at most 20" in flat, "pins are capped too"
 
 
 @BOTH
@@ -230,12 +310,21 @@ def test_boundary_with_sleep_maintenance_is_stated() -> None:
 
 
 @BOTH
+def test_every_tool_of_the_sweep_is_spelled_out(text) -> None:
+    assert {name for name, _ in _calls(text())} >= set(READ_TOOLS + WRITE_TOOLS)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [_maintain, _codex_section, _step_4c, _codex_step_5],
+    ids=["claude", "codex", "claude-4c", "codex-step-5"],
+)
 def test_every_call_is_a_registered_tool_with_its_required_parameters(text) -> None:
     tools = _tools()
     calls = _calls(text())
+    assert calls
     names = {name for name, _ in calls}
     assert names <= set(tools), f"not a registered tool: {sorted(names - set(tools))}"
-    assert names >= set(READ_TOOLS + WRITE_TOOLS)
     problems = []
     for name, args in calls:
         unknown = args - set(tools[name]["properties"])
