@@ -166,7 +166,7 @@ Guardrails, all enforced **before any write**:
    `is_visible: false`, and the expected `expires_at`. (Programmatic responses are *always*
    metadata-only — plaintext never appears in a response that may be logged.)
 2. An `audit_logs` row exists (`AuditLog`, `backend/src/models/auth.py`) with
-   `action = 'member_api_key_provisioned'`, `resource = 'api_key:<id>'`, and
+   `action = 'member_api_key_provisioned'`, `resource = 'api_key:<public id>'` (`akey_…`), and
    `user_metadata` carrying the acting owner key's prefix (`key_prefix`), the minted key's
    prefix (`minted_key_prefix`), and `expires_days`.
 3. Smoke-test the new key with a low-privilege read as the workload would.
@@ -222,13 +222,15 @@ Semantics on the programmatic (owner-key) path:
 **Steps**
 
 1. Identify the `key_id` and `key_prefix` from `GET .../credentials` or the audit trail.
+   `key_id` is the key's public id, `akey_` followed by 22 letters and digits (#1008); the
+   integer database id is not accepted (an integer path id returns 422).
 2. Revoke:
 
    ```bash
    curl -sS -X DELETE \
      -H "Authorization: Bearer $OWNER_KEY" \
      "$API/api/v1/workspaces/$WORKSPACE_ID/members/$TARGET_USER_ID/credentials/api-keys/$KEY_ID"
-   # → {"status": "revoked", "key_id": ...}
+   # → {"status": "revoked", "key_id": "akey_..."}
    ```
 
 **Verification**
@@ -444,14 +446,27 @@ All rows/events below are shipped and verifiable in the tree:
 - **Audit rows** (`audit_logs`; `AuditLog` in `backend/src/models/auth.py`, written via
   `audit_programmatic_workspace_action` in `backend/src/auth/programmatic_workspace_auth.py`;
   session actions on this surface are intentionally not audited there):
-  - `member_api_key_provisioned` — resource `api_key:<id>`; metadata: `workspace_id`,
+  - `member_api_key_provisioned` — resource `api_key:<public id>`; metadata: `workspace_id`,
     `target`, `via: api_key`, `key_prefix` (acting key), `minted_key_prefix`, `expires_days`.
-  - `member_api_key_revoked` — resource `api_key:<id>`; metadata: `key_prefix` (acting key),
+  - `member_api_key_revoked` — resource `api_key:<public id>`; metadata: `key_prefix` (acting key),
     `revoked_key_prefix`, `self_revoke`.
+  - `public_bound_key_created` / `public_bound_key_revoked` — resource `api_key:<public id>`.
+  - **Rows written before #1008** record the integer database id instead
+    (`api_key:42`). Map one to the public id the API and newer rows use:
+
+    ```sql
+    SELECT public_id FROM api_keys WHERE id = 42;
+    ```
+
+    and the reverse with `SELECT id FROM api_keys WHERE public_id = 'akey_...'`. The same
+    `public_id` column exists on `share_keys`, `resource_tokens` and `workspace_invitations`
+    (an invitation-revocation row written before #1008 has the integer id as its `target`).
+    A hard-deleted key (session self-delete) has no row left to map.
 - **Structured log events**: `member_api_key_provisioned`, `member_api_key_revoked`,
   `api_key_created`, `api_key_deleted`, `workspace_mgmt_owner_key_disabled` (kill-switch),
   `workspace_mgmt_scoped_key_confined` (#963), `workspace_mgmt_oauth_denied`,
-  `workspace_mgmt_unrecognized_principal`.
+  `workspace_mgmt_unrecognized_principal`. The key events carry both the integer `key_id`
+  and the `public_id` (#1008), so a search on either side of the mapping above finds them.
 - **Auto-hide sweeper**: hourly job (`backend/src/tasks/credentials_tasks.py` →
   `backend/src/background/auto_hide_credentials.py`) clears plaintext visibility for
   session-minted keys after their window. Owner-provisioned keys are already force-hidden at

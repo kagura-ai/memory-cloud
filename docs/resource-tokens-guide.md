@@ -49,6 +49,21 @@ curl -X POST http://localhost:8080/api/v1/resource-tokens \
   }'
 ```
 
+The response carries the plaintext `token` (shown once) and the token's `id`, a public id of
+the form `rtok_` followed by 22 letters and digits. Use that id to edit or revoke the token:
+
+```bash
+curl -X PATCH http://localhost:8080/api/v1/resource-tokens/rtok_3fJ0kQ9pLm2ZtX7cVb1NaR \
+  -H "Authorization: Bearer kagura_{your_api_key}" \
+  -H "Content-Type: application/json" \
+  -d '{"description": "Product catalog sync (nightly)"}'
+
+curl -X DELETE http://localhost:8080/api/v1/resource-tokens/rtok_3fJ0kQ9pLm2ZtX7cVb1NaR \
+  -H "Authorization: Bearer kagura_{your_api_key}"
+```
+
+An integer id (the format before #1008) is rejected with `422`.
+
 ### 2. Send Data
 
 ```bash

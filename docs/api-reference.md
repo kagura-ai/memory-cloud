@@ -1203,7 +1203,7 @@ Create a new API key (Admin only).
 
 ```json
 {
-  "id": 1,
+  "id": "akey_3fJ0kQ9pLm2ZtX7cVb1NaR",
   "name": "Production API Key",
   "key": "kagura_abc123xyz789",
   "scopes": ["memory:read", "memory:write"],
@@ -1226,7 +1226,7 @@ List all API keys (Admin only).
 {
   "keys": [
     {
-      "id": 1,
+      "id": "akey_3fJ0kQ9pLm2ZtX7cVb1NaR",
       "name": "Production API Key",
       "scopes": ["memory:read", "memory:write"],
       "created_at": "2025-11-22T10:00:00Z",
@@ -1243,6 +1243,8 @@ List all API keys (Admin only).
 ### DELETE /api/v1/config/api-keys/{key_id}
 
 Permanently delete an API key (Admin only).
+
+`key_id` is the key's public id from the list or create response: `akey_` followed by 22 letters and digits. The integer database id is not accepted (an integer path id returns `422`), and a key that is not yours returns the same `404` as one that does not exist. The same applies to `/revoke`, `/regenerate` and `/stats`, to the share-key, resource-token and invitation routes (`skey_…`, `rtok_…`, `winv_…`), and to `DELETE /api/v1/workspaces/{workspace_id}/members/{user_id}/credentials/api-keys/{key_id}`.
 
 **Response:**
 
@@ -1286,7 +1288,6 @@ A key object:
 
 ```json
 {
-  "id": 12,
   "key_name": "OPENAI_API_KEY",
   "provider": "openai",
   "masked_value": "sk-p****9f2a",
@@ -1656,21 +1657,21 @@ List your public-bound API keys (read-only introspection, Issue #629). Returns t
   "arguments": {}
 }
 # → {"status": "success", "count": 1, "bindings": [
-#     {"key_id": 7, "name": "slack-bot", "context_id": "…",
+#     {"key_id": "akey_3fJ0kQ9pLm2ZtX7cVb1NaR", "name": "slack-bot", "context_id": "…",
 #      "context_name": "Slack Bot", "created_at": "2026-06-01T12:00:00Z"}]}
 ```
 
 ### 7. describe_binding
 
-Describe one of your bindings by **exactly one** of `key_id` (integer) or `context_id` (UUID). The result is scoped to keys you own; an unknown or not-yours selector returns a uniform `binding_not_found`. Adds `key_prefix` to the `list_my_bindings` shape. No secret is ever returned.
+Describe one of your bindings by **exactly one** of `key_id` (the key's public id, `akey_…`, from `list_my_bindings`) or `context_id` (UUID). An integer `key_id` returns `invalid_arguments`. The result is scoped to keys you own; an unknown or not-yours selector returns a uniform `binding_not_found`. Adds `key_prefix` to the `list_my_bindings` shape. No secret is ever returned.
 
 ```python
 {
   "name": "describe_binding",
-  "arguments": { "key_id": 7 }   # OR { "context_id": "<uuid>" } — not both
+  "arguments": { "key_id": "akey_3fJ0kQ9pLm2ZtX7cVb1NaR" }   # OR { "context_id": "<uuid>" } — not both
 }
 # → {"status": "success", "binding": {
-#     "key_id": 7, "name": "slack-bot", "context_id": "…",
+#     "key_id": "akey_3fJ0kQ9pLm2ZtX7cVb1NaR", "name": "slack-bot", "context_id": "…",
 #     "context_name": "Slack Bot", "created_at": "…", "key_prefix": "kagura_pub_…"}}
 ```
 
