@@ -89,7 +89,8 @@ attributed per context.
 
 | Condition | Grade | Note code | Rationale |
 |---|---|---|---|
-| Zero `recall()` calls with > 0 active memories | warn | `write_only_store` | The store is write-only — memory exists but nothing reads it. Skipped for the unattributed entry. |
+| Zero read calls (`recall` / `recall_upcoming` / `recall_nearby`), > 0 `remember()` calls, > 0 active memories | warn | `write_only_store` | The store is write-only — agents write but nothing reads it back. Skipped for the unattributed entry. |
+| Zero read calls and zero `remember()` calls with > 0 active memories | ok | `idle_store` | No MCP activity in the window — the context is idle, not write-only, so it stays OK with an informational note. Skipped for the unattributed entry. |
 
 Metrics: `recall_calls`, `recall_upcoming_calls`, `remember_calls`,
 `explore_calls`, `window_days`, plus config posture (`has_config`,
@@ -124,6 +125,7 @@ above is the deep link for operators.
 | `edge_weight_violations` | `count`, `min`, `max` |
 | `cold_graph` | `active_memories` |
 | `write_only_store` | `window_days`, `active_memories` |
+| `idle_store` | `window_days`, `active_memories` |
 
 Adding a note code is a three-place change: the service emits it, both
 message catalogs localize it, and the table above documents it.

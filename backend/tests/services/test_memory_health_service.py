@@ -272,6 +272,63 @@ class TestRetrievalGrading:
         )
         assert section["status"] == STATUS_OK
 
+    # #1822: a context with neither reads nor writes in the window is idle,
+    # not write-only — OK with an informational note instead of a WARN.
+
+    def test_idle_store_is_ok_with_note(self) -> None:
+        section = MemoryHealthService._grade_retrieval({}, _POSTURE_ON, active_memories=50)
+        assert section["status"] == STATUS_OK
+        assert _codes(section) == ["idle_store"]
+        note = section["notes"][0]
+        assert note["params"] == {"window_days": 7, "active_memories": 50}
+
+    def test_idle_store_ignores_non_read_non_write_calls(self) -> None:
+        """explore alone is neither a read nor a write for this check."""
+        section = MemoryHealthService._grade_retrieval(
+            {"explore": 3}, _POSTURE_ON, active_memories=50
+        )
+        assert section["status"] == STATUS_OK
+        assert _codes(section) == ["idle_store"]
+
+    def test_write_only_store_has_no_idle_note(self) -> None:
+        section = MemoryHealthService._grade_retrieval(
+            {"remember": 1}, _POSTURE_ON, active_memories=50
+        )
+        assert section["status"] == STATUS_WARN
+        assert _codes(section) == ["write_only_store"]
+
+    def test_empty_store_has_no_idle_note(self) -> None:
+        section = MemoryHealthService._grade_retrieval({}, _POSTURE_OFF, active_memories=0)
+        assert section["notes"] == []
+
+    def test_idle_note_disabled_for_unattributed_scope(self) -> None:
+        section = MemoryHealthService._grade_retrieval(
+            {}, _POSTURE_OFF, active_memories=50, heuristics=False
+        )
+        assert section["status"] == STATUS_OK
+        assert section["notes"] == []
+
+    @pytest.mark.parametrize("lane", ["recall_nearby", "recall_upcoming"])
+    def test_single_read_lane_is_ok_without_notes(self, lane: str) -> None:
+        section = MemoryHealthService._grade_retrieval({lane: 1}, _POSTURE_ON, active_memories=50)
+        assert section["status"] == STATUS_OK
+        assert section["notes"] == []
+
+    def test_idle_context_does_not_warn_the_scope(self) -> None:
+        """An idle but otherwise healthy context grades OK in every section,
+        so it no longer drags the page-level overall to WARN."""
+        svc = MemoryHealthService(AsyncMock())
+        signals = _signals(
+            graphs={_CTX_A: _healthy_graph()},
+            postures={_CTX_A: dict(_POSTURE_ON)},
+        )
+
+        sections = svc._grade_scope(signals, _CTX_A)
+
+        for section in sections.values():
+            assert section["status"] == STATUS_OK
+        assert "idle_store" in _codes(sections["retrieval"])
+
 
 class TestScopeIsolation:
     """The #1225 isolation contract: grading reads ONLY the scope's slice."""

@@ -677,10 +677,12 @@ class MemoryHealthService:
         active_memories: int,
         heuristics: bool = True,
     ) -> dict[str, Any]:
-        """Informational; WARN only when memory exists but nothing reads it.
+        """Informational; WARN only when memory is written but nothing reads it.
 
-        ``heuristics=False`` (the unattributed bucket) skips the write-only
-        check — the bucket mixes scopes, so read/write ratios are noise.
+        A context with neither reads nor writes in the window is idle, not
+        write-only (#1822): it stays OK with an informational ``idle_store``
+        note. ``heuristics=False`` (the unattributed bucket) skips both
+        checks — the bucket mixes scopes, so read/write ratios are noise.
         """
         notes: list[dict[str, Any]] = []
         status = STATUS_OK
@@ -689,12 +691,17 @@ class MemoryHealthService:
         # #1331: a context read exclusively via the spatial lane (field/mobile
         # agents) must not false-WARN write_only_store.
         recall_nearby = usage.get("recall_nearby", 0)
+        remembers = usage.get("remember", 0)
 
         if heuristics and recalls + recall_upcoming + recall_nearby == 0 and active_memories > 0:
-            status = STATUS_WARN
+            if remembers > 0:
+                status = STATUS_WARN
+                code = "write_only_store"
+            else:
+                code = "idle_store"
             notes.append(
                 _note(
-                    "write_only_store",
+                    code,
                     window_days=_USAGE_WINDOW_DAYS,
                     active_memories=active_memories,
                 )
@@ -707,7 +714,7 @@ class MemoryHealthService:
                 "recall_calls": recalls,
                 "recall_upcoming_calls": recall_upcoming,
                 "recall_nearby_calls": recall_nearby,
-                "remember_calls": usage.get("remember", 0),
+                "remember_calls": remembers,
                 "explore_calls": usage.get("explore", 0),
                 **posture,
             },
