@@ -37,6 +37,7 @@ def _result(*, one=None, scalar=None) -> MagicMock:
 def _token(**overrides) -> SimpleNamespace:
     base = {
         "id": 7,
+        "public_id": "rtok_" + "7" * 22,
         "resource_id": "products",
         "resource_pk": uuid.uuid4(),
         "description": None,
@@ -487,6 +488,7 @@ class TestBoundPublicKeyCreate:
 
         new_key = MagicMock()
         new_key.id = 42
+        new_key.public_id = "akey_" + "4" * 22
         new_key.name = "public-key"
         new_key.key_prefix = "kagura_pub"
         new_key.created_at = datetime(2026, 1, 1, tzinfo=UTC)
@@ -536,8 +538,10 @@ class TestBoundPublicKeyCreate:
 
         from api.routes import member_credentials as mc
 
-        old_key = SimpleNamespace(id=7, name="ws-key", revoked_at=None)
-        new_key = SimpleNamespace(id=8, key_prefix="kagura_new")
+        old_key = SimpleNamespace(
+            id=7, public_id="akey_" + "7" * 22, name="ws-key", revoked_at=None
+        )
+        new_key = SimpleNamespace(id=8, public_id="akey_" + "8" * 22, key_prefix="kagura_new")
         db = MagicMock()
         db.execute = AsyncMock(return_value=_result(one=old_key))
         db.commit = AsyncMock()
@@ -616,6 +620,7 @@ class TestInvitationGateIsRegistryDriven:
 
         inv = MagicMock()
         inv.id = 1
+        inv.public_id = "winv_" + "1" * 22
         inv.workspace_id = _WS
         inv.token = "tok"
         inv.email = "x@example.com"

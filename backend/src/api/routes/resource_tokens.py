@@ -28,6 +28,7 @@ from utils.exceptions import (
     QuotaExceededError,
 )
 from utils.logger import get_logger
+from utils.public_id import PublicIdPrefix, ResourceTokenPublicId, public_id_pattern
 
 logger = get_logger(__name__)
 
@@ -80,7 +81,11 @@ class ResourceTokenUpdate(BaseModel):
 class ResourceTokenResponse(TZAwareBaseModel):
     """Response model for resource token metadata (no plaintext)."""
 
-    id: int = Field(..., description="Database ID")
+    id: str = Field(
+        ...,
+        description="Public id of the token (`rtok_` + 22 base62 characters)",
+        pattern=public_id_pattern(PublicIdPrefix.RESOURCE_TOKEN),
+    )
     resource_id: str = Field(..., description="Resource identifier")
     description: str | None = Field(None, description="Human-readable description")
     quota_events_per_hour: int = Field(..., description="Event ingestion quota per hour")
@@ -146,7 +151,7 @@ def _format_token_response(token: ResourceToken) -> ResourceTokenResponse:
     status = _determine_status(token.is_active)
 
     return ResourceTokenResponse(
-        id=token.id,
+        id=token.public_id,
         resource_id=token.resource_id,
         description=token.description,
         quota_events_per_hour=token.quota_events_per_hour,
@@ -455,7 +460,7 @@ async def create_resource_token(
 
 @router.patch("/{token_id}", response_model=ResourceTokenResponse)
 async def update_resource_token(
-    token_id: int,
+    token_id: ResourceTokenPublicId,
     request: ResourceTokenUpdate,
     owner: WorkspaceOwner,
     db: AsyncSession = Depends(get_db),
@@ -466,7 +471,7 @@ async def update_resource_token(
     Issue #276: Uses WorkspaceOwner dependency for DRY principle.
 
     Args:
-        token_id: Token ID
+        token_id: Public id of the token (``rtok_...``)
         request: Update request
         owner: Workspace owner (user_id, workspace_id) from dependency
         db: Database session
@@ -488,7 +493,7 @@ async def update_resource_token(
         result = await db.execute(
             select(ResourceToken).where(
                 and_(
-                    ResourceToken.id == token_id,
+                    ResourceToken.public_id == token_id,
                     ResourceToken.created_by == user_id,
                 )
             )
@@ -545,7 +550,7 @@ async def update_resource_token(
                             and_(
                                 ResourceToken.created_by == user_id,
                                 ResourceToken.is_active == True,  # noqa: E712
-                                ResourceToken.id != token_id,
+                                ResourceToken.id != token.id,
                             )
                         )
                     )
@@ -570,7 +575,8 @@ async def update_resource_token(
 
         logger.info(
             "resource_token_updated",
-            token_id=token_id,
+            token_id=token.id,
+            public_id=token_id,
             user_id=user_id,
         )
 
@@ -579,7 +585,7 @@ async def update_resource_token(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("update_resource_token_failed", error=str(e), token_id=token_id)
+        logger.error("update_resource_token_failed", error=str(e), public_id=token_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update resource token",
@@ -588,7 +594,7 @@ async def update_resource_token(
 
 @router.delete("/{token_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 async def revoke_resource_token(
-    token_id: int,
+    token_id: ResourceTokenPublicId,
     owner: WorkspaceOwner,
     manager: ResourceTokenManager = Depends(get_resource_token_manager),
     db: AsyncSession = Depends(get_db),
@@ -599,7 +605,7 @@ async def revoke_resource_token(
     Issue #276: Uses WorkspaceOwner dependency for DRY principle.
 
     Args:
-        token_id: Token ID to revoke
+        token_id: Public id of the token to revoke (``rtok_...``)
         owner: Workspace owner (user_id, workspace_id) from dependency
         manager: ResourceTokenManager instance
         db: Database session
@@ -611,7 +617,7 @@ async def revoke_resource_token(
     """
     try:
         user_id, current_workspace_id = owner
-        logger.info("revoke_resource_token_request", user_id=user_id, token_id=token_id)
+        logger.info("revoke_resource_token_request", user_id=user_id, public_id=token_id)
 
         # SECURITY: Verify token exists and ownership
         from models.auth import Context
@@ -620,7 +626,7 @@ async def revoke_resource_token(
         result = await db.execute(
             select(ResourceToken).where(
                 and_(
-                    ResourceToken.id == token_id,
+                    ResourceToken.public_id == token_id,
                     ResourceToken.created_by == user_id,  # Security: verify ownership
                 )
             )
@@ -653,26 +659,29 @@ async def revoke_resource_token(
             )
 
         # Revoke token (soft delete)
-        await manager.revoke_token(token_id)
+        await manager.revoke_token(target_token.id)
         await db.commit()
 
         logger.info(
             "resource_token_revoked",
             user_id=user_id,
-            token_id=token_id,
+            token_id=target_token.id,
+            public_id=token_id,
             resource_id=target_token.resource_id,
         )
 
     except HTTPException:
         raise
     except ValueError as e:
-        logger.warning("revoke_resource_token_not_found", error=str(e), token_id=token_id)
+        # The manager's message names the integer PK — keep it in the log
+        # and send the same uniform detail as the lookup miss above (#1008).
+        logger.warning("revoke_resource_token_not_found", error=str(e), public_id=token_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e),
+            detail="Resource token not found",
         ) from e
     except Exception as e:
-        logger.error("revoke_resource_token_failed", error=str(e), token_id=token_id)
+        logger.error("revoke_resource_token_failed", error=str(e), public_id=token_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to revoke resource token",

@@ -358,6 +358,7 @@ class TestResourceIngestWorkspaceBoundary:
     def mock_token(self, workspace_id):
         token = MagicMock(spec=ResourceToken)
         token.id = 42
+        token.public_id = "rtok_" + "4" * 22
         token.resource_id = "acme"
         token.created_by = "user_owner"
         token.is_active = True
@@ -452,6 +453,7 @@ class TestResourceIngestWorkspaceBoundary:
                 "cross_tenant_ingest_attempt",
                 resource_id=mock_context.resource_id,
                 token_id=mock_token.id,
+                public_id=mock_token.public_id,
                 target_workspace_id=str(mock_context.workspace_id),
                 token_creator=mock_token.created_by,
                 client_ip="203.0.113.7",
@@ -508,6 +510,7 @@ class TestResourceIngestWorkspaceBoundary:
         """Legacy tokens without created_by cannot be authorized, without hitting the DB."""
         token = MagicMock(spec=ResourceToken)
         token.id = 99
+        token.public_id = "rtok_" + "9" * 22
         token.created_by = None
         db = MagicMock()
         db.execute = AsyncMock()
@@ -521,6 +524,7 @@ class TestResourceIngestWorkspaceBoundary:
                 "resource_ingest_missing_token_creator",
                 resource_id=mock_context.resource_id,
                 token_id=99,
+                public_id="rtok_" + "9" * 22,
             )
         # No permission check (and therefore no DB query) for unattributed tokens.
         db.execute.assert_not_awaited()

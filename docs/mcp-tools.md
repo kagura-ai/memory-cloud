@@ -455,7 +455,7 @@ Background consolidation of memories (decay, edge pruning, theme summarization).
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `list_my_bindings` | List your public-bound API keys (read-only; owner-scoped) | Viewer+ |
-| `describe_binding` | Describe one binding by `key_id` XOR `context_id` (read-only; owner-scoped) | Viewer+ |
+| `describe_binding` | Describe one binding by `key_id` (the `akey_…` public id from `list_my_bindings`) XOR `context_id` (read-only; owner-scoped) | Viewer+ |
 
 ## Errors
 
@@ -789,7 +789,7 @@ ingest_events(resource_id="ec_products", events=[
 
 get_resource_impact(resource_id="ec_products")   → {token_count: 2, memory_count: 500, current_schema_version: 3}
 get_resource_schema(resource_id="ec_products")   → {schema_version: 3, field_definitions: [{name: "product_name", ...}]}
-list_resource_tokens(resource_id="ec_products")  → {tokens: [{id: 1, resource_id: ..., is_active: true, ...}], total: 3}
+list_resource_tokens(resource_id="ec_products")  → {tokens: [{id: "rtok_…", resource_id: ..., is_active: true, ...}], total: 3}
 ```
 
 `setup_connector` creates a resource, a connector row and a connector-scoped resource token in one operation; its `runtime` object is validated server-side (the schema in `tools/list` is advisory).

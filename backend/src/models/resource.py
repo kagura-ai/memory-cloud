@@ -67,6 +67,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from db.base import Base
 from db.constraint_names import RESOURCE_EVENTS_UPSERT_UNIQUE
+from utils.public_id import PublicIdPrefix, public_id_column
 
 
 class Resource(Base):
@@ -341,6 +342,8 @@ class ResourceToken(Base):
     __tablename__ = "resource_tokens"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # #1008: the id that leaves the server; ``id`` stays internal.
+    public_id: Mapped[str] = public_id_column(PublicIdPrefix.RESOURCE_TOKEN)
     resource_pk: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("resources.id", ondelete="CASCADE"),

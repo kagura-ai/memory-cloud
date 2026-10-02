@@ -32,7 +32,7 @@ class SystemAdminService:
 
     Example:
         >>> service = SystemAdminService(db)
-        >>> admins, initial_id = await service.list_system_admins()
+        >>> admins = await service.list_system_admins()
         >>> await service.promote_to_system_admin("user123", "admin@example.com")
     """
 
@@ -44,14 +44,14 @@ class SystemAdminService:
         """
         self.db = db
 
-    async def list_system_admins(self) -> tuple[list[User], int]:
-        """List all system administrators.
+    async def list_system_admins(self) -> list[User]:
+        """List all system administrators, oldest first.
 
         Returns:
-            Tuple of (admins list, initial_admin_id)
+            Admin users; ``is_initial_admin`` marks the protected initial admin.
 
         Example:
-            >>> admins, initial_id = await service.list_system_admins()
+            >>> admins = await service.list_system_admins()
             >>> for admin in admins:
             ...     print(f"{admin.email} - initial: {admin.is_initial_admin}")
         """
@@ -60,15 +60,9 @@ class SystemAdminService:
         result = await self.db.execute(stmt)
         admins = list(result.scalars().all())
 
-        # Find initial admin ID
-        initial_admin = next((a for a in admins if a.is_initial_admin), None)
-        initial_admin_id = initial_admin.id if initial_admin else (admins[0].id if admins else 0)
+        logger.info("list_system_admins", admin_count=len(admins))
 
-        logger.info(
-            "list_system_admins", admin_count=len(admins), initial_admin_id=initial_admin_id
-        )
-
-        return admins, initial_admin_id
+        return admins
 
     async def promote_to_system_admin(self, user_id: str, promoted_by: str) -> User:
         """Promote user to system administrator.

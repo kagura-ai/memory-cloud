@@ -87,30 +87,29 @@ class TestListSystemAdmins:
     @pytest.mark.asyncio
     async def test_empty_list(self, db_session):
         service = SystemAdminService(db_session)
-        admins, initial_id = await service.list_system_admins()
+        admins = await service.list_system_admins()
         assert admins == []
-        assert initial_id == 0
 
     @pytest.mark.asyncio
     async def test_single_admin(self, db_session, fixture_admin):
         service = SystemAdminService(db_session)
-        admins, initial_id = await service.list_system_admins()
-        assert len(admins) == 1
-        assert admins[0].id == fixture_admin.id
-        assert initial_id == fixture_admin.id
+        admins = await service.list_system_admins()
+        assert [a.user_id for a in admins] == [fixture_admin.user_id]
+        assert admins[0].is_initial_admin is True
 
     @pytest.mark.asyncio
     async def test_multiple_admins_initial_preserved(
         self, db_session, fixture_admin, fixture_second_admin
     ):
         service = SystemAdminService(db_session)
-        admins, initial_id = await service.list_system_admins()
+        admins = await service.list_system_admins()
         assert len(admins) == 2
-        assert initial_id == fixture_admin.id
+        initial = [a.user_id for a in admins if a.is_initial_admin]
+        assert initial == [fixture_admin.user_id]
 
     @pytest.mark.asyncio
-    async def test_fallback_first_admin_when_no_initial_flag(self, db_session):
-        """If no admin has is_initial_admin=True, initial_id falls back to first admin."""
+    async def test_no_admin_flagged_initial_when_none_is(self, db_session):
+        """Without an is_initial_admin admin, none is reported as initial (#1813)."""
         suffix = uuid4().hex[:8]
         a1 = User(
             email=f"a1-{suffix}@example.com",
@@ -122,8 +121,9 @@ class TestListSystemAdmins:
         await db_session.flush()
 
         service = SystemAdminService(db_session)
-        admins, initial_id = await service.list_system_admins()
-        assert initial_id == a1.id
+        admins = await service.list_system_admins()
+        assert [a.user_id for a in admins] == [a1.user_id]
+        assert not any(a.is_initial_admin for a in admins)
 
 
 class TestPromoteToSystemAdmin:

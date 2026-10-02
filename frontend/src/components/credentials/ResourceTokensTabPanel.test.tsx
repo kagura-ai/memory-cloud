@@ -102,7 +102,7 @@ vi.mock("@/hooks/use-toast", () => ({
 // Child surfaces are not under test — render the token ids so "existing
 // tokens are still listed" is observable, and keep the dialog inert.
 vi.mock("@/components/resource-tokens/ResourceTokensTable", () => ({
-  ResourceTokensTable: ({ tokens }: { tokens: { id: number }[] }) => (
+  ResourceTokensTable: ({ tokens }: { tokens: { id: string }[] }) => (
     <ul>
       {tokens.map((tk) => (
         <li key={tk.id}>token#{tk.id}</li>
@@ -114,8 +114,11 @@ vi.mock("@/components/resource-tokens/CreateResourceTokenDialog", () => ({
   CreateResourceTokenDialog: () => null,
 }));
 
-const token = (id: number) => ({
-  id,
+// #1008: token ids are public ids (rtok_ + 22 base62 characters).
+const tid = (n: number) => `rtok_${String(n).padStart(22, "0")}`;
+
+const token = (n: number) => ({
+  id: tid(n),
   resource_id: "products",
   description: null,
   quota_events_per_hour: 1000,
@@ -162,8 +165,8 @@ describe("ResourceTokensTabPanel — XL-only create gate (#1551)", () => {
 
       render(<ResourceTokensTabPanel />);
 
-      expect(await screen.findByText("token#1")).toBeInTheDocument();
-      expect(screen.getByText("token#2")).toBeInTheDocument();
+      expect(await screen.findByText(`token#${tid(1)}`)).toBeInTheDocument();
+      expect(screen.getByText(`token#${tid(2)}`)).toBeInTheDocument();
       expect(createButton()).toBeDisabled();
       expect(screen.getByText("plan.newTitle")).toBeInTheDocument();
       // The resource-id hint is the OTHER prerequisite — not shown here.
@@ -177,7 +180,7 @@ describe("ResourceTokensTabPanel — XL-only create gate (#1551)", () => {
 
     render(<ResourceTokensTabPanel />);
 
-    expect(await screen.findByText("token#1")).toBeInTheDocument();
+    expect(await screen.findByText(`token#${tid(1)}`)).toBeInTheDocument();
     await waitFor(() => expect(createButton()).toBeEnabled());
     expect(screen.queryByText("plan.newTitle")).toBeNull();
     expect(screen.queryByText("noResourceIdWarning")).toBeNull();
@@ -205,7 +208,7 @@ describe("ResourceTokensTabPanel — XL-only create gate (#1551)", () => {
 
     render(<ResourceTokensTabPanel />);
 
-    expect(await screen.findByText("token#1")).toBeInTheDocument();
+    expect(await screen.findByText(`token#${tid(1)}`)).toBeInTheDocument();
     await waitFor(() => expect(createButton()).toBeEnabled());
     expect(screen.queryByText("plan.newTitle")).toBeNull();
   });
@@ -217,7 +220,7 @@ describe("ResourceTokensTabPanel — XL-only create gate (#1551)", () => {
 
     render(<ResourceTokensTabPanel />);
 
-    expect(await screen.findByText("token#1")).toBeInTheDocument();
+    expect(await screen.findByText(`token#${tid(1)}`)).toBeInTheDocument();
     expect(createButton()).toBeDisabled();
     expect(screen.queryByText("plan.newTitle")).toBeNull();
     expect(screen.queryByText("noResourceIdWarning")).toBeNull();
@@ -286,7 +289,7 @@ describe("ResourceTokensTabPanel — FeatureGateNotice (#1646 P5)", () => {
 
     render(<ResourceTokensTabPanel />);
 
-    expect(await screen.findByText("token#1")).toBeInTheDocument();
+    expect(await screen.findByText(`token#${tid(1)}`)).toBeInTheDocument();
     expect(screen.getByText("plan.titleNoTier")).toBeInTheDocument();
     expect(screen.getByText("plan.descriptionNoTier")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "plan.action" })).toBeNull();
@@ -304,7 +307,7 @@ describe("ResourceTokensTabPanel — serve caps from /workspaces/{id}/plan (#156
 
     render(<ResourceTokensTabPanel />);
 
-    expect(await screen.findByText("token#1")).toBeInTheDocument();
+    expect(await screen.findByText(`token#${tid(1)}`)).toBeInTheDocument();
     expect(mockGetWorkspacePlan).toHaveBeenCalledWith("ws-1");
     // "2 / 30" — the 30 is the API's max_resource_tokens, not a local table.
     expect(await screen.findByText(/\/ 30/)).toBeInTheDocument();
@@ -318,7 +321,7 @@ describe("ResourceTokensTabPanel — serve caps from /workspaces/{id}/plan (#156
 
     render(<ResourceTokensTabPanel />);
 
-    expect(await screen.findByText("token#1")).toBeInTheDocument();
+    expect(await screen.findByText(`token#${tid(1)}`)).toBeInTheDocument();
     await waitFor(() => expect(mockGetWorkspacePlan).toHaveBeenCalled());
     expect(screen.queryByText(/\/ \d+/)).toBeNull();
     expect(screen.queryByText("maxCapacity")).toBeNull();

@@ -133,6 +133,7 @@ async def test_create_passes_normalized_pii_guardrail_config_dict_to_service():
     result.context_id = None
     result.plaintext_kmc_api_key = None
     result.token.id = 1
+    result.token.public_id = "rtok_" + "1" * 22
     result.plaintext_token = "kagura_resource_x"
     result.token.quota_events_per_hour = 1000
 
@@ -170,6 +171,7 @@ async def test_create_passes_normalized_runtime_config_to_service():
     result.context_id = None
     result.plaintext_kmc_api_key = None
     result.token.id = 1
+    result.token.public_id = "rtok_" + "1" * 22
     result.plaintext_token = "kagura_resource_x"
     result.token.quota_events_per_hour = 1000
 

@@ -158,9 +158,11 @@ _DEVICE_AUTHORIZE_MAX_BODY_BYTES = 4096
 
 
 class OAuth2ClientResponse(BaseModel):
-    """OAuth2 Client response (without secret)."""
+    """OAuth2 Client response (without secret).
 
-    id: int
+    Issue #1813: no integer ``id`` — clients are addressed by ``client_id``.
+    """
+
     client_id: str
     client_name: str
     redirect_uris: list[str]
@@ -466,7 +468,6 @@ async def list_oauth2_clients(
 
             response_list.append(
                 OAuth2ClientResponse(
-                    id=client.id,
                     client_id=client.client_id,
                     client_name=client.client_name,
                     redirect_uris=client.redirect_uris,
@@ -583,7 +584,6 @@ async def create_oauth2_client(
 
         # Return response with client_secret (only shown once)
         return OAuth2ClientWithSecretResponse(
-            id=client.id,
             client_id=client.client_id,
             client_name=client.client_name,
             redirect_uris=client.redirect_uris,
@@ -925,7 +925,6 @@ async def dynamic_client_registration(
 
         # RFC 7591 §3.2.1: public client → omit client_secret / plaintext_secret
         return OAuth2ClientWithSecretResponse(
-            id=client.id,
             client_id=client.client_id,
             client_name=client.client_name,
             redirect_uris=client.redirect_uris,
@@ -1000,7 +999,6 @@ async def get_oauth2_client(
                 logger.error(f"Failed to decrypt secret for client {client.client_id}: {e}")
 
         return OAuth2ClientResponse(
-            id=client.id,
             client_id=client.client_id,
             client_name=client.client_name,
             redirect_uris=client.redirect_uris,
@@ -1089,7 +1087,6 @@ async def update_oauth2_client(
         logger.info("oauth2_client_updated", client_id=client_id)
 
         return OAuth2ClientResponse(
-            id=client.id,
             client_id=client.client_id,
             client_name=client.client_name,
             redirect_uris=client.redirect_uris,
@@ -1266,7 +1263,6 @@ async def regenerate_oauth2_client_secret(
 
         # Return response with new client_secret (only shown once)
         return OAuth2ClientWithSecretResponse(
-            id=client.id,
             client_id=client.client_id,
             client_name=client.client_name,
             redirect_uris=client.redirect_uris,

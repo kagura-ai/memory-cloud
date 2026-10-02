@@ -567,7 +567,7 @@ export default function ExternalKeysPage() {
               <TableBody>
                 {keys.map((key) => (
                   <TableRow
-                    key={key.id}
+                    key={key.key_name}
                     className={!key.enabled ? "opacity-50" : ""}
                   >
                     <TableCell className="font-medium">

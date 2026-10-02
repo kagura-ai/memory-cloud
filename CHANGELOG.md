@@ -4,6 +4,28 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.89.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.89.0) — 2026-10-02
+
+Keys, tokens and invitations are addressed by opaque public ids instead of sequential row numbers, ahead of the 1.0 API freeze, and a sign-in through a linked provider opens the right account. This release also carries the v0.88.1 fix.
+
+### Changed
+- **Opaque public ids for keys, tokens and invitations** ([#1008](https://github.com/kagura-ai/memory-cloud/issues/1008)) — **breaking**: API keys (including member credential keys), share keys, resource tokens (including the connector `token_id`) and workspace invitations are identified by `akey_…`, `skey_…`, `rtok_…` and `winv_…` (22 base62 characters) in REST responses, path parameters and MCP tools, instead of their integer row ids. An integer path id is refused with 422. `ExternalKeyResponse.id` is removed; external keys stay addressed by `key_name`. New audit rows record the public id, and log lines carry `public_id` beside the internal id.
+- **Integer row ids dropped from profile, OAuth client and admin responses** ([#1813](https://github.com/kagura-ai/memory-cloud/issues/1813)) — **breaking**: `GET /api/v1/users/profile` no longer returns `id` and now returns the string `user_id`; OAuth client responses (including the dynamic client registration response) no longer return `id` — use `client_id`; the system-admin list drops `id` and `initial_admin_id` — each entry's `is_initial_admin` marks the initial admin.
+
+### Fixed
+- **A sign-in through a linked provider opens the owning account** ([#1805](https://github.com/kagura-ai/memory-cloud/issues/1805)): both OAuth callbacks keyed the session by the provider's `sub`, so signing in with a provider linked to another account landed in a session that saw none of that account's workspaces and contexts. The session, the old-session invalidation, the personal-workspace and invitation steps and the profile-refresh check now use the account that owns the provider. Sessions opened through a linked provider before the fix are invalidated at the next sign-in. A database error while resolving the owner now fails the sign-in instead of opening a session for the `sub`.
+
+### Migration
+- **Database:** `alembic upgrade head` runs `e91_1008_public_ids`, which adds `public_id` to `api_keys`, `share_keys`, `resource_tokens` and `workspace_invitations` and backfills every row (revoked and expired ones included) under a 10-second lock timeout. The column has a database default, so an older instance still running during a rolling deploy can insert. Downgrading drops the ids for good; a later upgrade issues new ones.
+- **API clients:** read ids as strings and address keys, tokens and invitations by them — before `DELETE /api/v1/resource-tokens/42`, now `DELETE /api/v1/resource-tokens/rtok_3fJ9…`. Use the Python SDK `kagura-memory` 0.42.1 or later, or the TypeScript SDK `kagura-memory` 0.14.1 or later; both accept the new ids and still work against earlier servers.
+- **MCP:** `list_my_bindings`, `describe_binding`, `list_resource_tokens`, `setup_resource` and `setup_connector` return string ids; `describe_binding` takes the `key_id` string from `list_my_bindings`, and an integer gets `invalid_arguments`.
+- **Profile, OAuth clients, system admins:** use `user_id`, `client_id` and `is_initial_admin` in place of the removed integer fields.
+- **Audit trail:** rows written before this release name keys by their integer id; map them with `SELECT public_id FROM api_keys WHERE id = …` (see `docs/ops/agent-credential-runbook.md`).
+
+### Notes
+- Deploy the backend and the frontend together: a browser still running the previous bundle sends integer ids and gets 422 until it reloads.
+- No new environment variables.
+
 ## [v0.88.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.88.0) — 2026-10-02
 
 One person's accounts can be linked so their private contexts have one owner, deleting a context now removes its vectors, and the plugin gains a skill that keeps memories current.

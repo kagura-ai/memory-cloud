@@ -777,7 +777,7 @@ class TestDeleteInvitation:
         inv = await svc.create_invitation(
             workspace_id=ws.id, invited_by=owner.user_id, email="a@example.com", role="admin"
         )
-        await svc.delete_invitation(inv.id, ws.id)
+        await svc.delete_invitation(inv.public_id, ws.id)
         with pytest.raises(NotFoundException):
             await svc.get_invitation(inv.token)
 
@@ -787,7 +787,7 @@ class TestDeleteInvitation:
         ws = await _make_workspace(db_session, owner_user_id=owner.user_id)
         svc = _service(db_session)
         with pytest.raises(NotFoundException, match="Invitation not found"):
-            await svc.delete_invitation(999999999, ws.id)
+            await svc.delete_invitation("winv_" + "0" * 22, ws.id)
 
     async def test_delete_wrong_workspace_raises(self, db_session):
         """An invitation id under a different workspace is not deletable."""
@@ -799,7 +799,7 @@ class TestDeleteInvitation:
             workspace_id=ws.id, invited_by=owner.user_id, email="a@example.com", role="admin"
         )
         with pytest.raises(NotFoundException):
-            await svc.delete_invitation(inv.id, other_ws.id)
+            await svc.delete_invitation(inv.public_id, other_ws.id)
 
 
 # ---------------------------------------------------------------------------

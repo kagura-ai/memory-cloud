@@ -161,7 +161,7 @@ export function APIKeysTabPanel() {
   const [showRegenerateApiKeyDialog, setShowRegenerateApiKeyDialog] =
     useState(false);
   const [showDeleteApiKeyDialog, setShowDeleteApiKeyDialog] = useState(false);
-  const [selectedKeyId, setSelectedKeyId] = useState<number | null>(null);
+  const [selectedKeyId, setSelectedKeyId] = useState<string | null>(null);
   const [regenerating, setRegenerating] = useState(false);
   const [deleting, setDeleting] = useState(false);
   // Issue #626: dedicated confirmation flow for revoking a public-bound
@@ -169,7 +169,7 @@ export function APIKeysTabPanel() {
   // path stays clearly distinguished (different copy, calls the per-id
   // delete endpoint rather than the singleton).
   const [showBoundRevokeDialog, setShowBoundRevokeDialog] = useState(false);
-  const [boundRevokeKeyId, setBoundRevokeKeyId] = useState<number | null>(null);
+  const [boundRevokeKeyId, setBoundRevokeKeyId] = useState<string | null>(null);
 
   // Track if component is mounted to prevent state updates after unmount
   // (used by the load handlers; copy feedback owns its own mount tracking).
@@ -251,7 +251,7 @@ export function APIKeysTabPanel() {
     }
   };
 
-  const handleHideAPIKeyClick = (keyId: number) => {
+  const handleHideAPIKeyClick = (keyId: string) => {
     setSelectedKeyId(keyId);
     setShowHideApiKeyDialog(true);
   };
@@ -272,7 +272,7 @@ export function APIKeysTabPanel() {
     }
   };
 
-  const handleRegenerateAPIKeyClick = (keyId: number) => {
+  const handleRegenerateAPIKeyClick = (keyId: string) => {
     setSelectedKeyId(keyId);
     setShowRegenerateApiKeyDialog(true);
   };
@@ -300,7 +300,7 @@ export function APIKeysTabPanel() {
     }
   };
 
-  const handleDeleteAPIKeyClick = (keyId: number) => {
+  const handleDeleteAPIKeyClick = (keyId: string) => {
     setSelectedKeyId(keyId);
     setShowDeleteApiKeyDialog(true);
   };

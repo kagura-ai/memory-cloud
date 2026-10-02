@@ -90,9 +90,12 @@ class ExternalKeyToggle(BaseModel):
 
 
 class ExternalKeyResponse(BaseModel):
-    """External API key response (masked)."""
+    """External API key response (masked).
 
-    id: int
+    No ``id``: external keys are addressed by ``key_name`` (#1008 dropped the
+    integer primary key from the response).
+    """
+
     key_name: str
     provider: str
     masked_value: str
@@ -309,7 +312,6 @@ async def list_external_keys(
 
             key_responses.append(
                 ExternalKeyResponse(
-                    id=key.id,
                     key_name=key.key_name,
                     provider=key.provider,
                     masked_value=masked,
@@ -471,7 +473,6 @@ async def create_external_key(
         )
 
         return ExternalKeyResponse(
-            id=new_key.id,
             key_name=new_key.key_name,
             provider=new_key.provider,
             masked_value=mask_secret(request.value),
@@ -536,7 +537,6 @@ async def update_external_key(
         logger.info(f"external_key_updated: key_name={key_name}, user={user_id}")
 
         return ExternalKeyResponse(
-            id=key.id,
             key_name=key.key_name,
             provider=key.provider,
             masked_value=mask_secret(request.value),
@@ -674,7 +674,6 @@ async def toggle_external_key(
         )
 
         return ExternalKeyResponse(
-            id=key.id,
             key_name=key.key_name,
             provider=key.provider,
             masked_value=mask_secret(decrypt_value(key.encrypted_value)),
