@@ -1084,6 +1084,13 @@ class ContextService:
 
         await self.db.flush()
 
+        # #1798: the copies below exist before their rows are committed. Keep
+        # the orphan sweep's delete pass out until this transaction ends.
+        if memory_id_mapping:
+            from services.orphan_vector_sweep import hold_point_writer_lock
+
+            await hold_point_writer_lock(self.db)
+
         # Copy Qdrant points — rollback PG on failure for consistency.
         # Guarded: with no embedded source rows there is nothing to fetch, and
         # skipping the call also keeps this path working on backends that do not
@@ -1145,6 +1152,11 @@ class ContextService:
 
         await self.db.commit()
 
+        # #1798: the source's own points go once the merge is durable — the
+        # copies above carry the target's context_id and are not touched.
+        if delete_source:
+            await self._remove_context_points(str(source.workspace_id), str(source_context_id))
+
         # `merged` counts ROWS transferred, which is what the caller can see in
         # the context's memory count. It used to count Qdrant points, so a
         # source full of unembedded memories reported 0 while the UI had just
@@ -1182,11 +1194,17 @@ class ContextService:
 
         Issue #84: Changed from hard-delete to soft-delete. Sets deleted_at
         timestamp instead of removing records, preserving data for recovery.
-        Qdrant points are intentionally kept (filtered out by API access checks).
+
+        #1798: the context's points are removed from the vector store once the
+        soft-delete is committed. They used to be kept, and nothing ever
+        removed them — not even the tombstone purge. The rows stay until that
+        purge; the vectors can be rebuilt from them.
 
         Args:
             user_id: User ID (for access verification and audit trail)
             context_id: Context UUID
+            _commit: False when the caller owns the transaction; that caller
+                then removes the points itself after its own commit.
 
         Returns:
             The deleted Context object (with deleted_at set)
@@ -1328,7 +1346,39 @@ class ContextService:
             context_name=context.name,
         )
 
+        if _commit:
+            await self._remove_context_points(str(context.workspace_id), str(context_id))
+
         return context
+
+    async def _remove_context_points(self, workspace_id: str, context_id: str) -> None:
+        """Remove a deleted context's points from the vector store (#1798).
+
+        Runs after the Postgres commit and never raises: the delete has
+        already happened for every reader (hits are hydrated from live rows),
+        so a vector-store outage must not turn it into an error. What this
+        leaves behind, the orphan sweep (services/orphan_vector_sweep.py)
+        removes.
+        """
+        from db.qdrant import delete_context_points_everywhere
+
+        try:
+            deleted = await delete_context_points_everywhere(workspace_id, context_id)
+        except Exception as e:
+            logger.warning(
+                "context_points_delete_failed",
+                workspace_id=workspace_id,
+                context_id=context_id,
+                error=str(e),
+            )
+            return
+        logger.info(
+            "context_points_removed",
+            workspace_id=workspace_id,
+            context_id=context_id,
+            points=sum(deleted.values()),
+            collections=sorted(deleted),
+        )
 
     # ========================================================================
     # Current Context Management
@@ -1414,17 +1464,18 @@ class ContextService:
         context_name: str,
         context_id: str | None = None,
     ) -> None:
-        """Delete context's points from kagura_memories collection (single collection migration).
+        """Delete a context's points from every kagura_memories* collection.
 
         Single Collection Migration: Instead of deleting an entire collection,
-        this now deletes all points matching workspace_id + context_id from "kagura_memories".
+        this deletes all points matching workspace_id + context_id. #1798: it
+        covers the per-model collections too, not only the default one.
 
         Args:
             workspace_id: Workspace ID (as string)
             context_name: Context name (for logging only)
             context_id: Context ID (required for point deletion)
         """
-        from db.qdrant import delete_context_points
+        from db.qdrant import delete_context_points_everywhere
 
         try:
             if not context_id:
@@ -1436,7 +1487,7 @@ class ContextService:
                 return
 
             # Single collection migration: Delete points for this context
-            await delete_context_points(workspace_id, context_id)
+            await delete_context_points_everywhere(workspace_id, context_id)
 
             logger.info(
                 "context_points_deleted",

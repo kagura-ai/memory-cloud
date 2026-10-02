@@ -10,6 +10,7 @@ Collection design (post Single Collection Migration, Issue #334):
 """
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -1286,8 +1287,7 @@ async def delete_points_from_qdrant(point_ids: list[str], collection_name: str) 
         return
     _store = _active_store()
     if _store is not None:
-        for point_id in point_ids:
-            await _store.delete_memory("", UUID(point_id), collection_name)
+        await _store.delete_points(list(point_ids), collection_name)
         return
 
     client = get_qdrant_client()
@@ -1299,6 +1299,109 @@ async def delete_points_from_qdrant(point_ids: list[str], collection_name: str) 
         logger.info("points_deleted_from_qdrant", collection=collection_name, count=len(point_ids))
     except Exception as e:
         raise QdrantError(f"Failed to delete points: {e}") from e
+
+
+async def list_memory_collections() -> list[str]:
+    """Every ``kagura_memories*`` collection: the default and the per-model variants (#1798).
+
+    Raises:
+        QdrantError: If the collections cannot be listed.
+    """
+    _store = _active_store()
+    if _store is not None:
+        return await _store.list_collections()
+
+    client = get_qdrant_client()
+    try:
+        response = await client.get_collections()
+    except Exception as e:
+        raise QdrantError(f"Failed to list collections: {e}") from e
+    return sorted(
+        c.name for c in response.collections if c.name.startswith(KAGURA_MEMORIES_COLLECTION)
+    )
+
+
+async def delete_context_points_everywhere(workspace_id: str, context_id: str) -> dict[str, int]:
+    """Delete a context's points from every ``kagura_memories*`` collection (#1798).
+
+    A context routes to one collection, but an embedding migration leaves its
+    points in a second one until the source is purged, and a deleted context
+    has no use for either. Asking every collection also means the caller does
+    not have to resolve the routing of a context it is removing.
+
+    Returns:
+        Collection name -> points deleted, for the collections that held any.
+
+    Raises:
+        QdrantError: If listing or any single deletion fails.
+    """
+    deleted: dict[str, int] = {}
+    for collection_name in await list_memory_collections():
+        count = await delete_context_points(workspace_id, context_id, collection_name)
+        if count:
+            deleted[collection_name] = count
+    return deleted
+
+
+@dataclass(frozen=True)
+class PointRef:
+    """What the orphan sweep needs to know about one stored point (#1798)."""
+
+    point_id: str
+    context_id: str | None
+    # A resource-indexer point: its id is derived from the document, not from
+    # a memory row, so it cannot be matched to ``memories.id``.
+    is_resource: bool
+
+
+async def scroll_point_refs(
+    collection_name: str, *, page_size: int = 1000
+) -> AsyncIterator[list[PointRef]]:
+    """Yield every point of ``collection_name`` as :class:`PointRef` pages (#1798).
+
+    Crosses workspace and context boundaries on purpose — the orphan sweep is
+    a deployment-wide maintenance read, and it returns ids only (no content,
+    no vectors). Do not use it from a request path.
+
+    Raises:
+        QdrantError: If a page cannot be read.
+    """
+    _store = _active_store()
+    if _store is not None:
+        refs = [
+            PointRef(point_id=point_id, context_id=context_id, is_resource=False)
+            for point_id, context_id in await _store.list_point_refs(collection_name)
+        ]
+        for start in range(0, len(refs), page_size):
+            yield refs[start : start + page_size]
+        return
+
+    client = get_qdrant_client()
+    from qdrant_client.conversions.common_types import PointId
+
+    offset: PointId | None = None
+    while True:
+        try:
+            points, offset = await client.scroll(
+                collection_name=collection_name,
+                limit=page_size,
+                offset=offset,
+                with_payload=["context_id", "resource_id"],
+                with_vectors=False,
+            )
+        except Exception as e:
+            raise QdrantError(f"Failed to scroll {collection_name}: {e}") from e
+        if points:
+            yield [
+                PointRef(
+                    point_id=str(point.id),
+                    context_id=(point.payload or {}).get("context_id"),
+                    is_resource="resource_id" in (point.payload or {}),
+                )
+                for point in points
+            ]
+        if offset is None or not points:
+            return
 
 
 async def delete_user_points(user_id: str) -> dict[str, int]:

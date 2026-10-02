@@ -1581,6 +1581,11 @@ async def recover_context(
     Issue #86: Admin endpoint to reconstruct context and memory records
     from Qdrant point payloads when a context has been accidentally deleted.
 
+    #1798: deleting a context now removes its points, and the orphan sweep
+    removes points left by earlier deletions, so this finds nothing for a
+    context deleted on v0.88.0 or later. Its soft-deleted rows stay in
+    Postgres until the tombstone purge.
+
     Default is dry_run=True — shows what would be recovered without making changes.
     """
     import re

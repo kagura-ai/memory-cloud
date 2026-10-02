@@ -706,11 +706,61 @@ class LanceVectorStore:
         except Exception as e:
             raise QdrantError(f"Failed to delete memory from LanceDB: {e}") from e
 
+    async def delete_points(self, point_ids: list[str], collection_name: str) -> None:
+        """Delete many rows by id, a chunk per statement (#1798).
+
+        One ``tbl.delete`` per id writes one table version per id; the orphan
+        sweep can hand over thousands.
+        """
+
+        def _run() -> None:
+            with self._lock:
+                tbl = self._open(collection_name)
+                if tbl is None:
+                    return
+                for start in range(0, len(point_ids), 500):
+                    chunk = point_ids[start : start + 500]
+                    tbl.delete(f"id IN ({', '.join(_sql_str(pid) for pid in chunk)})")
+
+        try:
+            await asyncio.to_thread(_run)
+        except Exception as e:
+            raise QdrantError(f"Failed to delete points from LanceDB: {e}") from e
+
     def _collection_names(self) -> list[str]:
         """All kagura_memories* tables in the store (per-model variants included)."""
         with self._lock:
             db = self._connect()
             return [name for name in db.table_names() if name.startswith(DEFAULT_COLLECTION)]
+
+    async def list_collections(self) -> list[str]:
+        """Every kagura_memories* table (#1798)."""
+        try:
+            return sorted(await asyncio.to_thread(self._collection_names))
+        except Exception as e:
+            raise QdrantError(f"Failed to list LanceDB collections: {e}") from e
+
+    async def list_point_refs(self, collection_name: str) -> list[tuple[str, str | None]]:
+        """``(point id, context_id)`` for every row of a collection (#1798).
+
+        The orphan sweep's read: ids only, never the vector or the payload.
+        A Lite store is small enough to list in one read.
+        """
+
+        def _run() -> list[tuple[str, str | None]]:
+            tbl = self._open(collection_name)
+            if tbl is None:
+                return []
+            total = tbl.count_rows()
+            if not total:
+                return []
+            rows = tbl.search().select(["id", "context_id"]).limit(total).to_list()
+            return [(row["id"], row.get("context_id")) for row in rows]
+
+        try:
+            return await asyncio.to_thread(_run)
+        except Exception as e:
+            raise QdrantError(f"Failed to list LanceDB points: {e}") from e
 
     async def delete_user_points(self, user_id: str) -> dict[str, int]:
         """Hard-delete every point authored by ``user_id`` across collections.

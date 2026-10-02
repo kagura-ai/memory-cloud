@@ -64,6 +64,22 @@ def _source_memory(
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_vector_store_side_effects():
+    """#1798: merge takes the point-writer advisory lock (one more
+    ``db.execute`` than these mocked sessions script) and removes the source's
+    points after the commit. Neither is under test here."""
+    with (
+        patch("services.orphan_vector_sweep.hold_point_writer_lock", new_callable=AsyncMock),
+        patch(
+            "db.qdrant.delete_context_points_everywhere",
+            new_callable=AsyncMock,
+            return_value={},
+        ),
+    ):
+        yield
+
+
 async def _upsert_all(**kwargs) -> set[str]:
     """Stand-in for Qdrant: every requested point lands."""
     return set(kwargs["memory_id_mapping"].values())

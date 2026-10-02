@@ -1,7 +1,7 @@
 """Shared scaffold for one-shot, plan-then-apply operator commands.
 
-``apply_rerank_defaults`` (#1572) and ``transfer_context_creator`` (#1783)
-share the same shape: plan (read-only, printed), confirm, apply, report.
+``apply_rerank_defaults`` (#1572), ``transfer_context_creator`` (#1783) and
+``sweep_orphan_vectors`` (#1798) share the same shape: plan (read-only, printed), confirm, apply, report.
 Keeping the driver here means a fix to the confirmation or the session
 handling lands in every command at once.
 """
@@ -92,6 +92,8 @@ async def run_plan_apply(
     noun: str,
     apply: bool,
     assume_yes: bool,
+    verb: str = "change",
+    print_applied: Callable[[R], None] | None = None,
 ) -> int:
     """Plan, print, confirm, apply — the body of every one-shot command's main.
 
@@ -101,6 +103,10 @@ async def run_plan_apply(
         print_plan: Renders a result to stdout.
         changes: How many rows the result would change / changed.
         noun: What is being changed, for the prompt ("context").
+        verb: What happens to it, for the prompt and the report ("change",
+            "delete").
+        print_applied: Renders the applied result after the one-line report,
+            for a command whose outcome is more than a count.
         apply: ``--apply`` was given.
         assume_yes: ``--yes`` was given.
 
@@ -117,11 +123,13 @@ async def run_plan_apply(
                 return 0
             if not changes(plan):
                 return 0
-            if not confirm(f"Change {changes(plan)} {noun}(s)?", assume_yes):
+            if not confirm(f"{verb.capitalize()} {changes(plan)} {noun}(s)?", assume_yes):
                 print("  skipped")
                 return 0
             applied = await run(db, False)
-            print(f"changed {changes(applied)} {noun}(s)")
+            print(f"{verb}d {changes(applied)} {noun}(s)")
+            if print_applied is not None:
+                print_applied(applied)
     except Exception as exc:  # noqa: BLE001 - CLI boundary: report and exit non-zero
         print(f"error: {exc}", file=sys.stderr)
         return 1
