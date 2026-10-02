@@ -15219,6 +15219,15 @@
                 }
               ]
             }
+          },
+          {
+            "in": "query",
+            "name": "link_proof",
+            "required": false,
+            "schema": {
+              "default": false,
+              "type": "boolean"
+            }
           }
         ],
         "responses": {

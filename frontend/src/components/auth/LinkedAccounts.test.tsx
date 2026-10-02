@@ -13,6 +13,8 @@
  *     signed in recently; 403 on link explains it inside the dialog
  *   - errors: 404 / 409 / other on link and 404 / other on unlink (in-dialog
  *     Alert, no toast), load failure (banner, no toast)
+ *   - #1818: "Confirm with Google" starts a link-proof sign-in, offered only
+ *     when a row needs a sign-in and Google is configured
  *   - i18n: every key the component reads exists in BOTH en.json and ja.json
  */
 
@@ -73,6 +75,17 @@ vi.mock("@/lib/api/base", () => ({
   ApiError: FakeApiError,
 }));
 
+const { mockGetAuthConfig, mockClearState } = vi.hoisted(() => ({
+  mockGetAuthConfig: vi.fn(),
+  mockClearState: vi.fn(),
+}));
+vi.mock("@/lib/auth/auth", () => ({
+  getAuthConfig: () => mockGetAuthConfig(),
+}));
+vi.mock("@/lib/auth/clearClientState", () => ({
+  clearIdentityScopedClientState: () => mockClearState(),
+}));
+
 const LINKS = "/api/v1/me/account/identity-links";
 const UNLINK = "/api/v1/me/account/identity-links/unlink";
 
@@ -90,6 +103,13 @@ beforeEach(() => {
   mockRefetchUser.mockResolvedValue(undefined);
   mockApiGet.mockReset();
   mockApiPost.mockReset();
+  mockClearState.mockReset();
+  mockGetAuthConfig.mockReset();
+  mockGetAuthConfig.mockResolvedValue({
+    password_login_enabled: true,
+    google_oauth_enabled: true,
+    github_oauth_enabled: true,
+  });
 });
 
 // ---------- render ----------------------------------------------------------
@@ -330,6 +350,72 @@ describe("LinkedAccounts — recent sign-in", () => {
 
     expect(await screen.findByText("Me")).toBeTruthy();
     expect(screen.queryByText("signInAgainHint")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "confirmWithGoogle" }),
+    ).toBeNull();
+  });
+});
+
+// ---------- #1818: a proved sign-in ------------------------------------------
+
+describe("LinkedAccounts — confirm with Google", () => {
+  const stale = {
+    linked: [],
+    linkable: [{ ...GOOGLE, signed_in_recently: false }],
+    signed_in_recently: true,
+    sign_in_window_minutes: 10,
+  };
+
+  it("starts a link-proof Google sign-in that adds to this session", async () => {
+    mockApiGet.mockResolvedValueOnce(stale);
+    const assign = vi.fn();
+    const original = window.location;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: {
+        ...original,
+        assign,
+        pathname: "/profile",
+        origin: original.origin,
+      },
+    });
+    try {
+      render(<LinkedAccounts />);
+      fireEvent.click(
+        await screen.findByRole("button", { name: "confirmWithGoogle" }),
+      );
+
+      expect(mockClearState).toHaveBeenCalledTimes(1);
+      const url = new URL(assign.mock.calls[0][0]);
+      expect(url.pathname).toBe("/api/v1/auth/google/login");
+      expect(url.searchParams.get("add_account")).toBe("1");
+      expect(url.searchParams.get("link_proof")).toBe("1");
+      expect(new URL(url.searchParams.get("return_to")!).pathname).toBe(
+        "/profile",
+      );
+    } finally {
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: original,
+      });
+    }
+  });
+
+  it("is not offered when Google sign-in is not configured", async () => {
+    mockGetAuthConfig.mockResolvedValue({
+      password_login_enabled: true,
+      google_oauth_enabled: false,
+      github_oauth_enabled: true,
+    });
+    mockApiGet.mockResolvedValueOnce(stale);
+
+    render(<LinkedAccounts />);
+
+    expect(await screen.findByText("signInAgainHint")).toBeTruthy();
+    await waitFor(() => expect(mockGetAuthConfig).toHaveBeenCalled());
+    expect(
+      screen.queryByRole("button", { name: "confirmWithGoogle" }),
+    ).toBeNull();
   });
 });
 

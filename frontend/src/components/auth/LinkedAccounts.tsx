@@ -9,7 +9,10 @@
  * account. A link is proved by this browser session holding both accounts, so
  * only accounts signed in here (the sidebar account switcher) are linkable —
  * and both accounts must have signed in here within the last few minutes
- * (#1803), so a row that has not says to sign in again first.
+ * (#1803), so a row that has not says to sign in again first. Only a proved
+ * sign-in counts (#1818): a password sign-in, or a Google sign-in whose
+ * provider authentication is recent — the "Confirm with Google" button starts
+ * one (`link_proof=1`). GitHub reports no authentication time.
  *
  * Backend contract:
  *   GET  /api/v1/me/account/identity-links
@@ -50,6 +53,9 @@ import { LoadingState } from "@/components/common/LoadingState";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiClient, ApiError } from "@/lib/api/base";
+import { getAuthConfig } from "@/lib/auth/auth";
+import { buildOAuthRedirect } from "@/lib/auth/buildOAuthRedirect";
+import { clearIdentityScopedClientState } from "@/lib/auth/clearClientState";
 import { Loader2, Users } from "lucide-react";
 
 const LINKS_PATH = "/api/v1/me/account/identity-links";
@@ -101,6 +107,24 @@ export default function LinkedAccounts() {
     null,
   );
   const [dialogError, setDialogError] = useState<string | null>(null);
+  // #1818: whether a Google sign-in can prove an account here.
+  const [googleEnabled, setGoogleEnabled] = useState(false);
+
+  useEffect(() => {
+    getAuthConfig()
+      .then((config) => setGoogleEnabled(config?.google_oauth_enabled === true))
+      .catch(() => setGoogleEnabled(false));
+  }, []);
+
+  // A Google sign-in that proves the account for a link (#1818). It adds the
+  // account to this session (or refreshes it) and comes back to this page.
+  const confirmWithGoogle = () => {
+    clearIdentityScopedClientState();
+    const url = new URL(buildOAuthRedirect("google", window.location.pathname));
+    url.searchParams.set("add_account", "1");
+    url.searchParams.set("link_proof", "1");
+    window.location.assign(url.toString());
+  };
 
   const loadLinks = useCallback(async () => {
     setLoadError(null);
@@ -245,6 +269,9 @@ export default function LinkedAccounts() {
   };
 
   const isEmpty = linked.length === 0 && linkable.length === 0;
+  const anyNeedsSignIn =
+    linkable.length > 0 &&
+    !(selfSignedInRecently && linkable.every((a) => a.signed_in_recently));
   const linkLabel = linkTarget ? accountLabel(linkTarget) : "";
   const unlinkLabel = unlinkTarget ? accountLabel(unlinkTarget) : "";
 
@@ -288,6 +315,21 @@ export default function LinkedAccounts() {
                   <ul className="space-y-2">
                     {linkable.map((account) => renderRow(account, false))}
                   </ul>
+                  {anyNeedsSignIn && googleEnabled && (
+                    <div className="mt-3 space-y-2">
+                      <p className="text-xs text-slate-500">
+                        {t("confirmWithGoogleHint")}
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={confirmWithGoogle}
+                        disabled={busyUserId !== null}
+                      >
+                        {t("confirmWithGoogle")}
+                      </Button>
+                    </div>
+                  )}
                 </section>
               )}
               {isEmpty && !loadError && (
