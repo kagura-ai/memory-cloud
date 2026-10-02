@@ -35,6 +35,7 @@ Raw tokens, reset URLs and passwords are never logged or placed in exceptions.
 from __future__ import annotations
 
 import asyncio
+import hmac
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -74,6 +75,7 @@ from utils.exceptions import (
     PasswordSetupNotAllowedError,
     ValidationError,
 )
+from utils.hashing import sha256_hex
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -90,6 +92,46 @@ _AUDIT_ACTOR_LINK = "email-link"
 # Every password change kills the outstanding password links, so an older
 # email cannot undo (or redo) it.
 _PASSWORD_LINK_PURPOSES = PASSWORD_LINK_PURPOSES
+
+
+def credential_fingerprint(password_hash: str | None) -> str | None:
+    """A stand-in for a stored password hash that says only whether it changed.
+
+    A sign-in records the fingerprint of the hash it verified, and re-checks
+    it with :func:`password_unchanged` once its session exists (#1809). It is
+    kept beside a pending MFA step in Redis, so it is a digest — the bcrypt
+    hash itself never leaves the database. Every new password gets a new
+    bcrypt salt, so setting the same password again still changes it.
+    """
+    if password_hash is None:
+        return None
+    return sha256_hex(password_hash)
+
+
+async def password_unchanged(db: AsyncSession, user_id: str, fingerprint: str | None) -> bool:
+    """Is the account's committed password still the one a sign-in verified? (#1809)
+
+    The race this closes: a password write (reset, set-up, change, removal)
+    deletes the account's browser sessions BEFORE it commits, while holding
+    the ``users`` row ``FOR UPDATE``. A sign-in that verified the old hash and
+    writes its session after that sweep would otherwise keep a live session
+    the new password never authorized.
+
+    Call it AFTER the session is written. ``FOR SHARE`` conflicts with the
+    writer's row lock, so a write in progress makes this wait for its commit
+    and then read the new hash. Either the session was written before the
+    sweep (and the sweep deleted it), or this read sees the change. The
+    caller owns the transaction and must end it promptly to drop the lock.
+
+    False when the hash changed or is gone, or the user no longer exists.
+    """
+    if fingerprint is None:
+        return False
+    current = await db.scalar(
+        select(User.password_hash).where(User.user_id == user_id).with_for_update(read=True)
+    )
+    current_fingerprint = credential_fingerprint(current)
+    return current_fingerprint is not None and hmac.compare_digest(current_fingerprint, fingerprint)
 
 
 def normalize_email(email: str) -> str:

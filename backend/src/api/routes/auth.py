@@ -59,7 +59,11 @@ from services.account_linking_service import AccountLinkingService
 from services.beta_invite_service import BETA_INVITE_TOKEN_PATTERN
 from services.identity_link_service import linked_user_ids
 from services.known_device_service import note_browser_sign_in
-from services.password_account_service import find_password_user_by_email
+from services.password_account_service import (
+    credential_fingerprint,
+    find_password_user_by_email,
+    password_unchanged,
+)
 from services.security_notification_service import (
     PROVIDER_SIGN_IN_LABELS,
     SecurityEvent,
@@ -2469,6 +2473,53 @@ def _take_mfa_accepted_terms(mfa_token: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
+# The fingerprint of the password hash a pending MFA step verified (#1809),
+# beside ``mfa_pending:{token}`` and with the same lifetime.
+_MFA_PENDING_CRED_KEY = "mfa_pending_cred:{token}"
+
+
+async def _password_still_current(user_id: str, fingerprint: str | None) -> bool:
+    """Is the password a sign-in verified still the committed one? (#1809)
+
+    Run AFTER the sign-in has written its session: the read waits for a
+    password write in progress (see ``password_unchanged``). Fails closed —
+    an error reads as "changed" — and ends its transaction at once so the
+    share lock does not outlive the answer.
+    """
+    try:
+        async for db in get_db():
+            try:
+                return await password_unchanged(db, user_id, fingerprint)
+            finally:
+                await db.rollback()
+    except Exception as exc:
+        logger.error(
+            "password_login_recheck_failed", user_id=user_id, error_type=type(exc).__name__
+        )
+    return False
+
+
+async def _open_password_session(user: User, fingerprint: str | None) -> str:
+    """Write the session for a verified password sign-in, then re-check the password.
+
+    A password reset, set-up, change or removal signs the account out BEFORE
+    it commits. A sign-in that verified the old hash and writes its session
+    after that sweep would keep a session the new password never authorized,
+    so the session is written first and the password re-read second: if it
+    changed in between, the session is deleted and the sign-in fails like a
+    wrong password (#1809).
+    """
+    session_id = await _create_session_and_workspace(
+        user_id=user.user_id, email=user.email, name=user.name, role=user.role
+    )
+    if not await _password_still_current(user.user_id, fingerprint):
+        if _session_manager:
+            _session_manager.delete_session(session_id)
+        logger.warning("password_login_superseded", user_id=user.user_id)
+        raise InvalidCredentialsError()
+    return session_id
+
+
 @router.get("/config")
 async def get_auth_config():
     """Get authentication configuration (public)."""
@@ -2524,11 +2575,14 @@ async def password_login(
         raise InvalidCredentialsError()
 
     _clear_login_failures(rate_key)
+    verified = credential_fingerprint(user.password_hash)
 
     # MFA check
     if user.totp_enabled and user.totp_secret:
         mfa_token = secrets.token_urlsafe(32)
         _session_manager._redis.setex(f"mfa_pending:{mfa_token}", 300, user.user_id)
+        # #1809: the second step re-checks the password this step verified.
+        _session_manager._redis.setex(_MFA_PENDING_CRED_KEY.format(token=mfa_token), 300, verified)
         # #1665: the acceptance waits beside the pending MFA step and is
         # recorded only once the second factor succeeds.
         _remember_mfa_accepted_terms(mfa_token, body.accepted_terms)
@@ -2536,9 +2590,7 @@ async def password_login(
         return PasswordLoginResponse(success=True, mfa_required=True, mfa_session_token=mfa_token)
 
     # No MFA — create session
-    session_id = await _create_session_and_workspace(
-        user_id=user.user_id, email=user.email, name=user.name, role=user.role
-    )
+    session_id = await _open_password_session(user, verified)
     await _record_terms_acceptance(
         user_id=user.user_id,
         email=user.email,
@@ -2600,14 +2652,23 @@ async def mfa_verify(
 
     if not verify_totp(totp_secret, body.totp_code):
         # Delete MFA token on failed attempt (prevent brute-force replay)
-        _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
+        _session_manager._redis.delete(
+            f"mfa_pending:{body.mfa_session_token}",
+            _MFA_PENDING_CRED_KEY.format(token=body.mfa_session_token),
+        )
         raise AuthenticationError("Invalid TOTP code. Please login again.")
 
     _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
 
-    session_id = await _create_session_and_workspace(
-        user_id=user.user_id, email=user.email, name=user.name, role=user.role
-    )
+    # #1809: the password the first step verified. A pending step written
+    # without one (before this shipped) is refused: sign in again.
+    cred_key = _MFA_PENDING_CRED_KEY.format(token=body.mfa_session_token)
+    verified = _session_manager._redis.get(cred_key)
+    _session_manager._redis.delete(cred_key)
+    if not isinstance(verified, str) or not verified:
+        raise AuthenticationError("Invalid or expired MFA session")
+
+    session_id = await _open_password_session(user, verified)
     await _record_terms_acceptance(
         user_id=user.user_id,
         email=user.email,

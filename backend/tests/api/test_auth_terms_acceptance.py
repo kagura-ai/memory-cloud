@@ -846,3 +846,9 @@ class TestLinkedIdentityOwner:
         )
 
         record.assert_not_awaited()
+
+
+@pytest.fixture(autouse=True)
+def _password_unchanged(monkeypatch):
+    """The #1809 re-check reads Postgres; these tests stub the database."""
+    monkeypatch.setattr(auth_routes, "_password_still_current", AsyncMock(return_value=True))
