@@ -1116,6 +1116,7 @@ class UserProfileResponse(TZAwareBaseModel):
     Issue #1813: no integer ``id`` — the user is identified by ``user_id``
     """
 
+    user_id: str
     email: str
     name: str | None
     picture: str | None

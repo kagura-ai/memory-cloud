@@ -128,6 +128,13 @@ NO_INTEGER_ID_SCHEMAS = [
 ]
 
 
+def test_user_profile_carries_string_user_id(openapi: dict[str, Any]) -> None:
+    # The replacement identifier the #1813 migration note points clients at.
+    schema = openapi["components"]["schemas"]["UserProfileResponse"]
+    assert "user_id" in schema["properties"]
+    assert "user_id" in schema["required"]
+
+
 @pytest.mark.parametrize(("schema", "field"), NO_INTEGER_ID_SCHEMAS)
 def test_integer_pk_field_is_gone(openapi: dict[str, Any], schema: str, field: str) -> None:
     props = openapi["components"]["schemas"][schema]["properties"]

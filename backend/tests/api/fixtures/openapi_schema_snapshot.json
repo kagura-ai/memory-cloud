@@ -9884,7 +9884,8 @@
           "name": {},
           "picture": {},
           "role": {},
-          "timezone": {}
+          "timezone": {},
+          "user_id": {}
         },
         "required": [
           "auth_method",
@@ -9896,7 +9897,8 @@
           "name",
           "picture",
           "role",
-          "timezone"
+          "timezone",
+          "user_id"
         ],
         "type": "object"
       },

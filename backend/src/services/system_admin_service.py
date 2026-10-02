@@ -32,7 +32,7 @@ class SystemAdminService:
 
     Example:
         >>> service = SystemAdminService(db)
-        >>> admins, initial_id = await service.list_system_admins()
+        >>> admins = await service.list_system_admins()
         >>> await service.promote_to_system_admin("user123", "admin@example.com")
     """
 
