@@ -253,7 +253,8 @@ async def test_api_keys_use_public_ids(owners, client: TestClient, db_session) -
         ("POST", "/regenerate"),
         ("DELETE", ""),
     ):
-        assert client.request(method, f"{base}/{a['api_key'].id}{suffix}").status_code == 422
+        response = client.request(method, f"{base}/{a['api_key'].id}{suffix}")
+        assert response.status_code == 422
         _assert_uniform_404(
             client,
             method,
@@ -261,7 +262,8 @@ async def test_api_keys_use_public_ids(owners, client: TestClient, db_session) -
             f"{base}/{unknown}{suffix}",
         )
 
-    assert client.get(f"{base}/{mine}/stats").status_code == 200
+    response = client.get(f"{base}/{mine}/stats")
+    assert response.status_code == 200
 
     regen = client.post(f"{base}/{mine}/regenerate")
     assert regen.status_code == 200, regen.text
@@ -269,8 +271,11 @@ async def test_api_keys_use_public_ids(owners, client: TestClient, db_session) -
     _assert_public(new_id, PublicIdPrefix.API_KEY)
     assert new_id != mine
 
-    assert client.post(f"{base}/{new_id}/revoke").status_code == 204
-    assert client.delete(f"{base}/{new_id}").status_code == 204
+    response = client.post(f"{base}/{new_id}/revoke")
+
+    assert response.status_code == 204
+    response = client.delete(f"{base}/{new_id}")
+    assert response.status_code == 204
 
 
 # ---------------------------------------------------------------------------
@@ -290,14 +295,17 @@ async def test_share_keys_use_public_ids(owners, client: TestClient) -> None:
         _assert_public(pid, PublicIdPrefix.SHARE_KEY)
     assert ids == [a["share_key"].public_id]
 
-    assert client.post(f"{base}/{a['share_key'].id}/revoke").status_code == 422
+    response = client.post(f"{base}/{a['share_key'].id}/revoke")
+
+    assert response.status_code == 422
     _assert_uniform_404(
         client,
         "POST",
         f"{base}/{b['share_key'].public_id}/revoke",
         f"{base}/{new_public_id(PublicIdPrefix.SHARE_KEY)}/revoke",
     )
-    assert client.post(f"{base}/{a['share_key'].public_id}/revoke").status_code == 204
+    response = client.post(f"{base}/{a['share_key'].public_id}/revoke")
+    assert response.status_code == 204
 
 
 # ---------------------------------------------------------------------------
@@ -319,8 +327,10 @@ async def test_resource_tokens_use_public_ids(owners, client: TestClient) -> Non
     _assert_public(ids[0], PublicIdPrefix.RESOURCE_TOKEN)
 
     body = {"description": "renamed"}
-    assert client.patch(f"{base}/{a['token'].id}", json=body).status_code == 422
-    assert client.delete(f"{base}/{a['token'].id}").status_code == 422
+    response = client.patch(f"{base}/{a['token'].id}", json=body)
+    assert response.status_code == 422
+    response = client.delete(f"{base}/{a['token'].id}")
+    assert response.status_code == 422
 
     r_other = client.patch(f"{base}/{b['token'].public_id}", json=body)
     r_unknown = client.patch(f"{base}/{unknown}", json=body)
@@ -331,7 +341,8 @@ async def test_resource_tokens_use_public_ids(owners, client: TestClient) -> Non
     patched = client.patch(f"{base}/{mine}", json=body)
     assert patched.status_code == 200, patched.text
     assert patched.json()["id"] == mine
-    assert client.delete(f"{base}/{mine}").status_code == 204
+    response = client.delete(f"{base}/{mine}")
+    assert response.status_code == 204
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +363,9 @@ async def test_invitations_use_public_ids(owners, client: TestClient, db_session
     assert ids == [mine]
     _assert_public(ids[0], PublicIdPrefix.INVITATION)
 
-    assert client.delete(f"{base}/{a['invitation'].id}").status_code == 422
+    response = client.delete(f"{base}/{a['invitation'].id}")
+
+    assert response.status_code == 422
     # B's invitation addressed through A's workspace: same 404 as unknown.
     _assert_uniform_404(
         client,
@@ -360,7 +373,8 @@ async def test_invitations_use_public_ids(owners, client: TestClient, db_session
         f"{base}/{b['invitation'].public_id}",
         f"{base}/{new_public_id(PublicIdPrefix.INVITATION)}",
     )
-    assert client.delete(f"{base}/{mine}").status_code == 200
+    response = client.delete(f"{base}/{mine}")
+    assert response.status_code == 200
     gone = await db_session.execute(
         select(WorkspaceInvitation).where(WorkspaceInvitation.public_id == mine)
     )
@@ -385,7 +399,9 @@ async def test_member_credential_keys_use_public_ids(owners, client: TestClient)
     assert ids == [mine]
     _assert_public(ids[0], PublicIdPrefix.API_KEY)
 
-    assert client.delete(f"{base}/api-keys/{a['api_key'].id}").status_code == 422
+    response = client.delete(f"{base}/api-keys/{a['api_key'].id}")
+
+    assert response.status_code == 422
     _assert_uniform_404(
         client,
         "DELETE",
