@@ -470,7 +470,16 @@ CLI actions (`reset_password`, `create_admin`) send no notice. A send failure is
 change. Under `EMAIL_PROVIDER=logging` each notice is one
 `security_notification_email` log line (event and a keyed recipient hash only).
 
-## One person, two accounts — linking them (Issue #1784)
+## One person, two accounts — identity links (Issue #1784)
+
+Two different things are called "linking" in Kagura, and they do not overlap:
+
+- **Sign-in providers** (OpenAPI tag `account-linking`, Issue #517) attach
+  another way to sign in — Google, GitHub — to **one** account. It is still
+  one `user_id`.
+- **Identity links** (OpenAPI tag `identity-links`, this section) count
+  **separate accounts**, each with its own sign-in and its own `user_id`, as
+  one owner of their private contexts.
 
 Identities are keyed by `user_id` and are never linked by email: a CLI admin
 (`local:<login>`, created by `create_admin`) and an OAuth sign-in (the IdP
@@ -527,10 +536,13 @@ What it does not do:
 - **Rows keep their author.** `created_by` and `memories.user_id` are not
   rewritten. After an unlink, a memory one account wrote in the other's
   private context is hidden from the context's creator again.
-- **Per-account history stays separate**: the graph view and its edges, Sleep
-  maintenance (each account's memories are maintained on their own, with no
-  de-duplication across the two), memory health, access patterns, the workspace dashboard's counts and
-  retrieval feedback.
+- **Per-account history stays separate**: the graph view and its edges
+  (and `explore`), Sleep maintenance (each account's memories are maintained
+  on their own, with no de-duplication across the two — merging would delete
+  or rewrite one account's rows under the other's name, and an unlink could
+  not give them back), the admin memory-health report, the workspace
+  dashboard's counts and retrieval feedback. A private context's **access
+  patterns** do follow the link (#1807), as its memory list and stats do.
 - **Writes that name another memory follow the link only in a private
   context** (#1803). There, an `external_id` upsert from either linked account
   replaces the same row, and `supersedes`, `linked_memory_ids` and
@@ -543,11 +555,13 @@ What it does not do:
   a linked account wrote in that account's private context.
 
 Either account can unlink from **Profile Settings**; the other one does not
-have to be signed in. At most 4 accounts can be linked together. Every link
-and unlink writes an `audit_logs` row (`identity_linked`,
-`identity_unlinked`) on both accounts and emails both a security notice. An
-unlink takes effect at once; tag suggestions can keep the other account's tag
-names for up to two minutes.
+have to be signed in. At most 4 accounts can be linked together. In a set of
+three or more, unlinking takes one other account out and keeps the rest
+linked to you; **Leave** (#1807) takes this account out and keeps the others
+linked to each other. Every link, unlink and leave writes an `audit_logs` row
+(`identity_linked`, `identity_unlinked`) on each account involved and emails
+each a security notice. A change takes effect at once, in every API process —
+tag suggestions included.
 
 A link outlives the browser session it was made in. Anyone who can sign in
 to both accounts on one browser can make one, so unlink from **Profile
@@ -562,11 +576,14 @@ or admin, or a member whose `allowed_context_ids` names it), so what that
 account wrote stays readable. The leaving account's own memories in that
 context are deleted. A context no linked account wrote in is handled as for
 any erased or deleted account. The `delete_admin` command only removes the
-user row and its link.
+user row and its link; the other accounts' rows record who made the link
+(`linked_by`), and that becomes empty when the account is gone (#1807).
 
 The endpoints, for a deployment that scripts it: `GET`/`POST
-/api/v1/me/account/identity-links` and `POST
-/api/v1/me/account/identity-links/unlink`, browser session only.
+/api/v1/me/account/identity-links`, `POST
+/api/v1/me/account/identity-links/unlink` and `POST
+/api/v1/me/account/identity-links/leave`, browser session only (an API key
+or OAuth bearer token is refused with `403`).
 
 ### Moving ownership instead (Issue #1783)
 
