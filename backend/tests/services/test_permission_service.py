@@ -15,17 +15,7 @@ from services.permission_service import (
 )
 from utils.exceptions import AuthorizationError, NotFoundException
 
-
-@pytest.fixture(autouse=True)
-def _no_identity_links():
-    """#1784: a private-context mismatch asks whether the two ids are linked —
-    a query the mocked sessions in this module do not script. No links."""
-
-    async def not_linked(_db, user_id, other_user_id):
-        return other_user_id is not None and user_id == other_user_id
-
-    with patch("services.permission_service.is_same_owner", not_linked):
-        yield
+pytestmark = pytest.mark.usefixtures("no_identity_links")
 
 
 class TestRoleWeights:
@@ -240,7 +230,6 @@ class TestMemoryAccessControl:
     @pytest.mark.asyncio
     async def test_non_owner_private_context_denied(self, service):
         """Non-owner denied access to private context memory."""
-        from unittest.mock import patch
 
         mock_ctx_svc = MagicMock()
         mock_ctx_svc.is_context_shared = AsyncMock(return_value=False)
@@ -257,7 +246,6 @@ class TestMemoryAccessControl:
     @pytest.mark.asyncio
     async def test_workspace_member_shared_context_access(self, service):
         """Workspace member can access shared context memory."""
-        from unittest.mock import patch
 
         mock_ctx_svc = MagicMock()
         mock_ctx_svc.is_context_shared = AsyncMock(return_value=True)

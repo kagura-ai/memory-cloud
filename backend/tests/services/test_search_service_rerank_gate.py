@@ -28,17 +28,7 @@ from config.settings import Settings
 from services.reranker_service import RerankerService, VLLMReranker
 from services.search_service import SearchService
 
-
-@pytest.fixture(autouse=True)
-def _no_identity_links():
-    """#1784: a private recall resolves the caller's link set — one more
-    ``db.execute`` than the mocked sessions in this module script. No links."""
-
-    async def only_self(_db, user_id):
-        return frozenset({user_id})
-
-    with patch("services.search_service.linked_user_ids", only_self):
-        yield
+pytestmark = pytest.mark.usefixtures("no_identity_links")
 
 
 _WS = "00000000-0000-0000-0000-000000000001"

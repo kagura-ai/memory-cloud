@@ -70,6 +70,35 @@ def _clear_vocabulary_cache():
     clear_vocabulary_cache()
 
 
+@pytest.fixture
+def no_identity_links():
+    """No account is linked to another (#1784, #1807).
+
+    The link-set lookups run one more ``db.execute`` than the scripted mock
+    sessions of many unit modules expect: a private recall resolves the
+    caller's link set, a private-context mismatch asks whether two ids are
+    linked, a private tag vocabulary is keyed by the link set. Modules that
+    script their sessions opt in with
+    ``pytestmark = pytest.mark.usefixtures("no_identity_links")``.
+    Real link behaviour is covered against Postgres in
+    ``tests/integration/test_identity_links_db.py``.
+    """
+    from unittest.mock import patch
+
+    async def only_self(_db, user_id):
+        return frozenset({user_id})
+
+    async def not_linked(_db, user_id, other_user_id):
+        return other_user_id is not None and user_id == other_user_id
+
+    with (
+        patch("services.search_service.linked_user_ids", only_self),
+        patch("services.tag_resolution.linked_user_ids", only_self),
+        patch("services.permission_service.is_same_owner", not_linked),
+    ):
+        yield
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """Validate asyncio_default_test_loop_scope matches fixture loop scope.
 
