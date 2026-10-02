@@ -73,9 +73,10 @@ _BACKLOG_WARN_DAYS = 90
 _COLD_GRAPH_MIN_MEMORIES = 25
 # Retrieval activity window.
 _USAGE_WINDOW_DAYS = 7
-# #1822: MCP tools whose successful call changes a context's memories. Only
-# these (with a non-error status) count as writes when telling a write-only
-# store (WARN) apart from an idle one (OK + note).
+# #1822: only successful calls count when telling a write-only store (WARN)
+# from an idle one (OK + note) — a failed read read nothing, a failed write
+# wrote nothing.
+_READ_TOOLS = frozenset({"recall", "recall_upcoming", "recall_nearby"})
 _WRITE_TOOLS = frozenset({"remember", "update_memory"})
 
 _EDGE_WEIGHT_MIN = 0.0
@@ -522,7 +523,9 @@ class MemoryHealthService:
             key = endpoint.removeprefix("mcp:")
             counts = usage[context_id]
             counts[key] = counts.get(key, 0) + int(count)
-            if ok and key in _WRITE_TOOLS:
+            if ok and key in _READ_TOOLS:
+                counts["successful_reads"] = counts.get("successful_reads", 0) + int(count)
+            elif ok and key in _WRITE_TOOLS:
                 counts["successful_writes"] = counts.get("successful_writes", 0) + int(count)
 
         attr_conditions = [
@@ -543,7 +546,11 @@ class MemoryHealthService:
         )
         for context_id, endpoint, count in attr_rows.all():
             key = endpoint.removeprefix("mcp:")
-            usage[context_id][key] = usage[context_id].get(key, 0) + int(count)
+            counts = usage[context_id]
+            counts[key] = counts.get(key, 0) + int(count)
+            # Attribution rows are only written for a successful recall.
+            if key in _READ_TOOLS:
+                counts["successful_reads"] = counts.get("successful_reads", 0) + int(count)
         return dict(usage)
 
     async def _fetch_config_postures(
@@ -707,11 +714,12 @@ class MemoryHealthService:
         # #1331: a context read exclusively via the spatial lane (field/mobile
         # agents) must not false-WARN write_only_store.
         recall_nearby = usage.get("recall_nearby", 0)
-        # #1822: successful remember / update_memory calls only — a failed
-        # write wrote nothing.
+        # #1822: successful calls only — a failed read read nothing, a failed
+        # write wrote nothing. The per-endpoint metrics keep every call.
+        reads = usage.get("successful_reads", 0)
         writes = usage.get("successful_writes", 0)
 
-        if heuristics and recalls + recall_upcoming + recall_nearby == 0 and active_memories > 0:
+        if heuristics and reads == 0 and active_memories > 0:
             if writes > 0:
                 status = STATUS_WARN
                 code = "write_only_store"
@@ -733,6 +741,7 @@ class MemoryHealthService:
                 "recall_upcoming_calls": recall_upcoming,
                 "recall_nearby_calls": recall_nearby,
                 "remember_calls": usage.get("remember", 0),
+                "successful_read_calls": reads,
                 "successful_write_calls": writes,
                 "explore_calls": usage.get("explore", 0),
                 **posture,

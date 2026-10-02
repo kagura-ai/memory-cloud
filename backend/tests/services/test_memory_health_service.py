@@ -248,7 +248,9 @@ _POSTURE_OFF = {"has_config": False, "reinforce_enabled": False, "use_rerank": F
 class TestRetrievalGrading:
     def test_active_usage_is_ok(self) -> None:
         section = MemoryHealthService._grade_retrieval(
-            {"recall": 42, "remember": 10}, _POSTURE_ON, active_memories=100
+            {"recall": 42, "successful_reads": 42, "remember": 10, "successful_writes": 10},
+            _POSTURE_ON,
+            active_memories=100,
         )
         assert section["status"] == STATUS_OK
         assert section["metrics"]["recall_calls"] == 42
@@ -325,9 +327,24 @@ class TestRetrievalGrading:
 
     @pytest.mark.parametrize("lane", ["recall_nearby", "recall_upcoming"])
     def test_single_read_lane_is_ok_without_notes(self, lane: str) -> None:
-        section = MemoryHealthService._grade_retrieval({lane: 1}, _POSTURE_ON, active_memories=50)
+        section = MemoryHealthService._grade_retrieval(
+            {lane: 1, "successful_reads": 1}, _POSTURE_ON, active_memories=50
+        )
         assert section["status"] == STATUS_OK
         assert section["notes"] == []
+
+    def test_failed_reads_do_not_hide_a_write_only_store(self) -> None:
+        """Review on #1822: a recall that failed (quota, crash) read nothing,
+        so writes + only-failed reads is still write-only."""
+        section = MemoryHealthService._grade_retrieval(
+            {"recall": 3, "remember": 2, "successful_writes": 2},
+            _POSTURE_ON,
+            active_memories=50,
+        )
+        assert section["status"] == STATUS_WARN
+        assert _codes(section) == ["write_only_store"]
+        assert section["metrics"]["recall_calls"] == 3
+        assert section["metrics"]["successful_read_calls"] == 0
 
     def test_idle_context_does_not_warn_the_scope(self) -> None:
         """An idle but otherwise healthy context grades OK in every section,
@@ -636,9 +653,15 @@ class TestFetchUsageCountsAttribution:
 
         usage = await svc._fetch_usage_counts("user-1")
 
-        assert usage[_CTX_A] == {"recall": 4}
-        # B keeps its own writes AND gains the attributed reads.
-        assert usage[_CTX_B] == {"remember": 5, "successful_writes": 5, "recall": 3}
+        assert usage[_CTX_A] == {"recall": 4, "successful_reads": 4}
+        # B keeps its own writes AND gains the attributed reads (attribution
+        # rows are only written for a successful recall).
+        assert usage[_CTX_B] == {
+            "remember": 5,
+            "successful_writes": 5,
+            "recall": 3,
+            "successful_reads": 3,
+        }
 
     @pytest.mark.asyncio
     async def test_successful_writes_count_only_ok_write_rows(self) -> None:
@@ -659,6 +682,7 @@ class TestFetchUsageCountsAttribution:
 
         usage = await svc._fetch_usage_counts("user-1")
 
+        # The failed recall counts toward the raw total but not as a read.
         assert usage[_CTX_A] == {
             "remember": 5,
             "successful_writes": 3,
@@ -679,7 +703,7 @@ class TestFetchUsageCountsAttribution:
 
         usage = await svc._fetch_usage_counts("user-1")
 
-        assert usage[_CTX_A] == {"recall": 6}
+        assert usage[_CTX_A] == {"recall": 6, "successful_reads": 6}
 
     @pytest.mark.asyncio
     async def test_attributed_only_context_no_longer_warns_write_only(self) -> None:

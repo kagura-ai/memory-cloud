@@ -90,11 +90,11 @@ attributed per context.
 
 | Condition | Grade | Note code | Rationale |
 |---|---|---|---|
-| Zero read calls (`recall` / `recall_upcoming` / `recall_nearby`), > 0 successful write calls (`remember` / `update_memory`), > 0 active memories | warn | `write_only_store` | The store is write-only — agents write but nothing reads it back. Skipped for the unattributed entry. |
-| Zero read calls and zero successful write calls with > 0 active memories | ok | `idle_store` | No MCP read or write activity in the window — the context is idle, not write-only, so it stays OK with an informational note. A failed write (quota, permission, validation, crash) wrote nothing and does not count. Writes via the web UI, REST API or connectors are not MCP calls and are not counted. Skipped for the unattributed entry. |
+| Zero successful read calls (`recall` / `recall_upcoming` / `recall_nearby`), > 0 successful write calls (`remember` / `update_memory`), > 0 active memories | warn | `write_only_store` | The store is write-only — agents write but nothing reads it back. Skipped for the unattributed entry. |
+| Zero successful read calls and zero successful write calls with > 0 active memories | ok | `idle_store` | No MCP read or write activity in the window — the context is idle, not write-only, so it stays OK with an informational note. A failed call (quota, permission, validation, crash) read or wrote nothing and does not count. Writes via the web UI, REST API or connectors are not MCP calls and are not counted. Skipped for the unattributed entry. |
 
 Metrics: `recall_calls`, `recall_upcoming_calls`, `recall_nearby_calls`,
-`remember_calls` (all statuses), `successful_write_calls`,
+`remember_calls` (per-endpoint counts include failed calls), `successful_read_calls`, `successful_write_calls`,
 `explore_calls`, `window_days`, plus config posture (`has_config`,
 `reinforce_enabled`, `use_rerank` — booleans per context).
 
