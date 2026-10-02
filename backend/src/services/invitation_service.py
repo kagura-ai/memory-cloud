@@ -516,8 +516,7 @@ class InvitationService:
         await self.db.flush()
 
         logger.info(
-            f"Deleted invitation id={invitation.id} public_id={public_id} "
-            f"workspace={workspace_id} token={invitation.token[:8]}..."
+            f"Deleted invitation id={invitation.id} public_id={public_id} workspace={workspace_id}"
         )
 
     async def cleanup_expired_invitations(
