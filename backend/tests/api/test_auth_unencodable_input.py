@@ -132,6 +132,9 @@ class TestMfaVerify:
     def _pending(self, redis) -> str:
         token = "pending-token"
         redis.setex(f"mfa_pending:{token}", 300, "user-1")
+        # The fingerprint of the verified password, written beside the pending
+        # step since #1809; its value only matters to the later re-check.
+        redis.setex(f"mfa_pending_cred:{token}", 300, "fingerprint")
         return token
 
     def test_unencodable_code_is_a_wrong_code(self, client, redis, monkeypatch) -> None:
