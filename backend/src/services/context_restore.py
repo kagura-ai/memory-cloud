@@ -37,7 +37,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import AuditLog, Context
+from models.auth import AuditLog, Context, Workspace
 from models.memory import Memory
 from services.context_service import CONTEXT_NAME_PATTERN, DEFAULT_CONTEXT_NAME
 from utils.datetime import to_utc_iso
@@ -115,8 +115,8 @@ async def restore_deleted_context(
         NotFoundException: No context row with this id (a hard-deleted
             context; ``POST /admin/contexts/recover`` rebuilds one from
             surviving points, if any).
-        ConflictError: The context is not deleted, its name or its
-            ``resource_id`` is now used by a live context.
+        ConflictError: The context is not deleted, its workspace is, or its
+            name or ``resource_id`` is now used by a live context.
         ValidationError: ``new_name`` is not a valid context name.
     """
     if new_name is not None:
@@ -139,6 +139,13 @@ async def restore_deleted_context(
         raise NotFoundException("Context", str(context_id))
     if context.deleted_at is None:
         raise ConflictError(f"Context {context_id} is not deleted")
+    workspace = (
+        await db.execute(select(Workspace).where(Workspace.id == context.workspace_id))
+    ).scalar_one()
+    if workspace.deleted_at is not None:
+        # Deleting a workspace is final: its points are gone and its members
+        # were let go. A context cannot come back into it.
+        raise ConflictError(f"The workspace of context {context_id} is deleted")
 
     name = new_name or context.name
     result = ContextRestoreResult(
@@ -191,13 +198,22 @@ async def restore_deleted_context(
     result.memories_restored = int(counts[0])
     result.memories_left_deleted = int(counts[1]) - result.memories_restored
 
-    # The cap is the plan's, for its users' own creates; an admin restore is
-    # not refused by it, but says so.
-    from services.quota_service import QuotaService
-
-    allowed, error = await QuotaService(db).check_context_creation_allowed(context.workspace_id)
-    if not allowed and error:
-        result.warnings.append(f"{error} The restore puts the workspace over it.")
+    # The context cap is the plan's, for its users' own creates; an admin
+    # restore is not refused by it (nor does it go through the quota gates,
+    # which only create paths call — #1552), but says so.
+    live_contexts = (
+        await db.execute(
+            select(func.count())
+            .select_from(Context)
+            .where(Context.workspace_id == context.workspace_id, Context.deleted_at.is_(None))
+        )
+    ).scalar_one()
+    max_contexts = workspace.effective_max_contexts
+    if live_contexts >= max_contexts:
+        result.warnings.append(
+            f"The workspace has {live_contexts} live context(s) and its plan allows "
+            f"{max_contexts}; the restore puts it over the cap."
+        )
 
     if dry_run:
         # Ends the read transaction; the CLI holds the session open while the

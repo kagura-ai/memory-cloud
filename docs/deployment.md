@@ -974,19 +974,20 @@ deleted and still apply.
 **What does not come back.**
 
 - Memories the purge already removed. After the retention window the context
-  comes back empty — the plan shows the count before you apply.
+  comes back empty — the dry run shows the count before you apply.
 - Memories forgotten before the deletion, and memories Sleep merged or archived.
-  They were already deleted when the context was; the plan lists them as
+  They were already deleted when the context was; the dry run lists them as
   "stay deleted".
 - The context's neural edges (deleted outright; Sleep rebuilds them where it runs),
   its entries in members' context restrictions (`allowed_context_ids` — grant
   them again), and the resource tokens revoked with it.
 
-**Refusals.** A context that is not deleted; a workspace where a live context
-now has the same name (restore with `--name` / `new_name`); a published context
+**Refusals.** A context that is not deleted; a context of a deleted workspace
+(deleting a workspace is final); a context whose name a live context of the
+workspace now has (restore with `--name` / `new_name`); a published context
 whose `resource_id` a live context now serves. The restore is an admin action:
-it does not count against memory quotas, and it is not refused by the plan's
-context cap (the plan warns when the workspace goes over it). Restoring the
+it does not count against memory quotas, and the workspace's context cap does
+not refuse it (the dry run warns when the workspace goes over). Restoring the
 source of a merge (`merge_contexts` with `delete_source`) brings back memories
 the target context already holds a copy of.
 

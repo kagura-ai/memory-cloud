@@ -2315,6 +2315,89 @@
         ],
         "type": "object"
       },
+      "ContextRestoreRequest": {
+        "properties": {
+          "dry_run": {
+            "default": true,
+            "type": "boolean"
+          },
+          "new_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ContextRestoreResponse": {
+        "properties": {
+          "context_id": {
+            "type": "string"
+          },
+          "deleted_at": {
+            "type": "string"
+          },
+          "deleted_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "memories_left_deleted": {
+            "type": "integer"
+          },
+          "memories_restored": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "renamed_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "workspace_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "context_id",
+          "deleted_at",
+          "deleted_by",
+          "dry_run",
+          "memories_left_deleted",
+          "memories_restored",
+          "name",
+          "renamed_from",
+          "warnings",
+          "workspace_id"
+        ],
+        "type": "object"
+      },
       "ContextSearchConfigResponse": {
         "properties": {
           "bm25_weight": {},
@@ -11828,6 +11911,55 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ContextRecoveryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/api/v1/admin/contexts/{context_id}/restore": {
+      "post": {
+        "operationId": "restore_context_api_v1_admin_contexts__context_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "context_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContextRestoreRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContextRestoreResponse"
                 }
               }
             }

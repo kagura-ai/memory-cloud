@@ -1600,8 +1600,8 @@ async def restore_context(
     entries and revoked resource tokens.
 
     Default is dry_run=True. 404 for a context with no row (see
-    ``/contexts/recover``), 409 for one that is not deleted or whose name or
-    resource a live context now uses.
+    ``/contexts/recover``), 409 for one that is not deleted, is in a deleted
+    workspace, or whose name or resource a live context now uses.
     """
     from services.context_restore import restore_deleted_context
 

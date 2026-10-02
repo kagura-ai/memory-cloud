@@ -220,6 +220,21 @@ async def test_writes_an_audit_row(db_session, seed):
     assert audit.user_id == "admin-1"
 
 
+@pytest.mark.asyncio
+async def test_warns_when_the_workspace_is_at_its_context_cap(db_session, seed):
+    workspace = await db_session.get(Workspace, seed.workspace_id)
+    workspace.plan_name = "free"
+    context = seed.context(deleted_at=utcnow(), deleted_by=_USER)
+    db_session.add(context)
+    cap = workspace.effective_max_contexts
+    db_session.add_all([seed.context() for _ in range(cap)])
+    await db_session.commit()
+
+    result = await restore_deleted_context(db_session, context.id)
+
+    assert any("over the cap" in w for w in result.warnings)
+
+
 class TestRefusals:
     @pytest.mark.asyncio
     async def test_unknown_context(self, db_session, seed):
@@ -259,6 +274,18 @@ class TestRefusals:
             await db_session.execute(select(Context).where(Context.id == context_id))
         ).scalar_one()
         assert (restored.name, restored.deleted_at) == ("restore_taken-2", None)
+
+    @pytest.mark.asyncio
+    async def test_deleted_workspace(self, db_session, seed):
+        context = seed.context(deleted_at=utcnow(), deleted_by=_USER)
+        db_session.add(context)
+        await db_session.flush()
+        workspace = await db_session.get(Workspace, seed.workspace_id)
+        workspace.deleted_at = utcnow()
+        await db_session.commit()
+
+        with pytest.raises(ConflictError, match="workspace"):
+            await restore_deleted_context(db_session, context.id)
 
     @pytest.mark.asyncio
     async def test_resource_taken_by_a_live_context(self, db_session, seed):
