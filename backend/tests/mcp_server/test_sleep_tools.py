@@ -20,6 +20,14 @@ from services.sleep.prompts import EDGE_DISCOVERY_PROMPT_REVISION
 from services.sleep.undo import ShadowEdgeRevert
 
 
+@pytest.fixture(autouse=True)
+def _point_writer_lock():
+    """#1798: a restore takes the point-writer lock — one ``db.execute`` more
+    than the mocked sessions in this module script."""
+    with patch("mcp_server.tools.sleep.hold_point_writer_lock", new=AsyncMock()) as lock:
+        yield lock
+
+
 class TestGetSleepHistory:
     """Test get_sleep_history MCP tool handler."""
 

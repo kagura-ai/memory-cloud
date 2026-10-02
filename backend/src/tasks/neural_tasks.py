@@ -371,20 +371,27 @@ async def sweep_orphan_vectors_task() -> None:
             SCHEDULED_MAX_ORPHAN_RATIO,
             sweep_orphan_points,
         )
+        from tasks.single_flight import single_flight
 
-        async for db in get_db():
-            result = await sweep_orphan_points(
-                db, dry_run=False, max_orphan_ratio=SCHEDULED_MAX_ORPHAN_RATIO
-            )
-            logger.info(
-                "orphan_vector_sweep_task_completed",
-                scanned=result.scanned,
-                orphans=result.orphans,
-                deleted=result.deleted,
-                refused=result.refused,
-                live_embedded_memories=result.live_embedded_memories,
-            )
-            return
+        # One API process per deployment sweeps; the others would only repeat
+        # the full scan and report the same deletes again.
+        async with single_flight("orphan_vector_sweep") as acquired:
+            if not acquired:
+                logger.info("orphan_vector_sweep_task_skipped", reason="another_process_running")
+                return
+            async for db in get_db():
+                result = await sweep_orphan_points(
+                    db, dry_run=False, max_orphan_ratio=SCHEDULED_MAX_ORPHAN_RATIO
+                )
+                logger.info(
+                    "orphan_vector_sweep_task_completed",
+                    scanned=result.scanned,
+                    orphans=result.orphans,
+                    deleted=result.deleted,
+                    refused=result.refused,
+                    live_embedded_memories=result.live_embedded_memories,
+                )
+                break
     except Exception as e:
         logger.error("orphan_vector_sweep_task_failed", error=str(e), exc_info=True)
 

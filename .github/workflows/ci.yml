@@ -316,6 +316,8 @@ jobs:
               - 'backend/tests/cli/**'
               - 'backend/tests/smoke/test_all_routes.py'
               - 'backend/tests/services/test_password_account_service.py'
+              - 'backend/tests/services/test_orphan_vector_sweep.py'
+              - 'backend/tests/services/test_context_delete_removes_points.py'
               - 'backend/pyproject.toml'
               - 'backend/uv.lock'
               - '.github/workflows/ci.yml'
@@ -380,6 +382,14 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      qdrant:
+        # For the live vector-store tests (#1798). No --health-cmd: the image
+        # ships no shell utilities usable for a container-side probe; the
+        # "Wait for Qdrant" step below polls /readyz from the host. Same tag
+        # as the compose files (qdrant_pin_consistency.bats).
+        image: qdrant/qdrant:v1.19.1
+        ports:
+          - 6333:6333
     steps:
       - uses: actions/checkout@v4
 
@@ -435,15 +445,36 @@ jobs:
           docker logs minio 2>&1 | tail -30 || true
           exit 1
 
+      # Hard-fail rather than let the Qdrant tests silently skip: they are the
+      # only place the "never deletes a live memory's point" rule of the
+      # orphan sweep meets a real vector store (#1798).
+      - name: Wait for Qdrant
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fs http://localhost:6333/readyz >/dev/null; then
+              echo "qdrant up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Qdrant did not become ready within 60s" >&2
+          exit 1
+
       - name: Run integration tests
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test
           REDIS_URL: redis://localhost:6379
+          QDRANT_URL: http://localhost:6333
           MINIO_TEST_ENDPOINT: http://localhost:9000
           MINIO_TEST_ACCESS_KEY: minioadmin
           MINIO_TEST_SECRET_KEY: minioadmin
           MINIO_TEST_BUCKET: kagura-files-test
-        run: cd backend && pytest tests/integration/ tests/cli/ tests/smoke/test_all_routes.py tests/services/test_password_account_service.py -v --timeout=120 --maxfail=3
+        # The tests/services files need a live database and skip in the unit job.
+        run: >-
+          cd backend && pytest tests/integration/ tests/cli/ tests/smoke/test_all_routes.py
+          tests/services/test_password_account_service.py
+          tests/services/test_orphan_vector_sweep.py
+          tests/services/test_context_delete_removes_points.py
+          -v --timeout=120 --maxfail=3
 
   # Authenticated a11y (color-contrast) lane (#840). Unlike the hermetic
   # frontend-a11y job (next dev only), the e2e/authed-a11y/ specs need a LIVE

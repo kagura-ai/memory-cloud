@@ -166,12 +166,13 @@ class TestSafetyRails:
         gone = uuid4()
         store = _FakeStore([_ref(late.id), _ref(gone)])
 
-        async def merge_finishes(_db):
+        async def merge_finishes(_db, *, timeout_seconds):
             db_session.add(late)
             await db_session.flush()
+            return True
 
         with patch.object(
-            sweep_module, "_wait_for_point_writers", AsyncMock(side_effect=merge_finishes)
+            sweep_module, "wait_for_point_writers", AsyncMock(side_effect=merge_finishes)
         ):
             result = await _sweep(db_session, store, dry_run=False)
 
@@ -183,10 +184,21 @@ class TestSafetyRails:
     async def test_dry_run_does_not_wait_for_point_writers(self, db_session):
         store = _FakeStore([_ref(uuid4())])
 
-        with patch.object(sweep_module, "_wait_for_point_writers", AsyncMock()) as wait:
+        with patch.object(sweep_module, "wait_for_point_writers", AsyncMock()) as wait:
             await _sweep(db_session, store, dry_run=True)
 
         wait.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_writer_that_does_not_finish_in_time_stops_the_delete(self, db_session):
+        store = _FakeStore([_ref(uuid4())])
+
+        with patch.object(sweep_module, "wait_for_point_writers", AsyncMock(return_value=False)):
+            result = await _sweep(db_session, store, dry_run=False)
+
+        assert result.refused is not None
+        assert result.deleted == 0
+        assert store.deleted == []
 
     @pytest.mark.asyncio
     async def test_unreadable_collection_is_skipped_not_fatal(self, db_session):

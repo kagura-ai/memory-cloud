@@ -858,10 +858,21 @@ context's points in its source collection (`migrate_context_embedding
 --purge-source` removes those). A second
 run reports 0 orphans. `--grace-hours` changes the one-hour grace period.
 
+The sweep assumes this deployment's Postgres owns every point in the
+`kagura_memories*` collections. If a second deployment (staging, an evaluation
+stack) writes to the same Qdrant under the same collection names, its points
+have no row here and would be deleted: set `ORPHAN_VECTOR_SWEEP_ENABLED=false`
+on both and do not run the command.
+
+A merge or a Sleep rollback that is still writing points makes the delete pass
+wait, up to 30 seconds; past that the pass deletes nothing and the next run
+tries again. Only one API process per deployment runs the scheduled sweep.
+
 The admin endpoint `POST /api/v1/admin/contexts/recover` rebuilds a context
 from its surviving points, so it finds nothing for a context deleted on
 v0.88.0 or later. The soft-deleted rows remain in Postgres until the tombstone
-purge (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days).
+purge (`CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`, default 30 days); there is no
+command yet that restores a context from them.
 
 ## Reranking — Issue #1572
 

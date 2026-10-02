@@ -2,16 +2,32 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import structlog
 
 from services.orphan_vector_sweep import SCHEDULED_MAX_ORPHAN_RATIO, SweepResult
 from tasks.neural_tasks import schedule_neural_tasks, sweep_orphan_vectors_task
 from tests.tasks.conftest import mock_get_db_factory
 
 _ENV = "ORPHAN_VECTOR_SWEEP_ENABLED"
+
+
+def _single_flight(acquired: bool):
+    @asynccontextmanager
+    async def single_flight(_lock_key):
+        yield acquired
+
+    return single_flight
+
+
+@pytest.fixture(autouse=True)
+def this_process_sweeps():
+    with patch("tasks.single_flight.single_flight", _single_flight(True)):
+        yield
 
 
 @pytest.fixture
@@ -49,8 +65,22 @@ class TestSweepOrphanVectorsTask:
         monkeypatch.delenv(_ENV, raising=False)
         sweep.side_effect = RuntimeError("qdrant down")
 
-        with patch("tasks.neural_tasks.get_db", mock_get_db_factory(MagicMock())):
+        with (
+            patch("tasks.neural_tasks.get_db", mock_get_db_factory(MagicMock())),
+            structlog.testing.capture_logs() as logs,
+        ):
             await sweep_orphan_vectors_task()
+
+        assert any(entry["event"] == "orphan_vector_sweep_task_failed" for entry in logs)
+
+    @pytest.mark.asyncio
+    async def test_only_one_process_per_deployment_sweeps(self, sweep, monkeypatch):
+        monkeypatch.delenv(_ENV, raising=False)
+
+        with patch("tasks.single_flight.single_flight", _single_flight(False)):
+            await sweep_orphan_vectors_task()
+
+        sweep.assert_not_awaited()
 
     def test_scheduled_daily_after_the_tombstone_purge(self):
         scheduler = MagicMock()

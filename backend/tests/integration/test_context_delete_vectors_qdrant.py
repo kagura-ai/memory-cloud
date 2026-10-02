@@ -5,8 +5,11 @@ the vector store; after the tombstone purge those points had no row at all.
 These tests drive the real ``ContextService`` and the real sweep against a
 real Qdrant and a real Postgres.
 
-Local-only, like ``test_resource_indexer_qdrant.py``: skipped when
-``QDRANT_URL`` is unreachable (and by ``db_session`` when Postgres is). Run with::
+Skipped when ``QDRANT_URL`` is unreachable (and by ``db_session`` when Postgres
+is); CI's integration job starts a Qdrant and fails if it does not come up.
+The tests write to the Qdrant at ``QDRANT_URL`` — a throwaway
+``kagura_memories_it_*`` collection, plus random-id points in the default
+collection that are removed again. Run with::
 
     make test-integration
 """
@@ -189,21 +192,21 @@ class TestDeleteContextRemovesPoints:
             )
             for _ in range(2)
         ]
-        db_session.add_all(memories)
-        await db_session.flush()
-        for memory in memories:
-            await add_memory_to_qdrant(
-                user_id=_USER,
-                memory_id=memory.id,
-                vector=[0.1] * settings.embedding_dimensions,
-                payload={"summary": "a summary long enough"},
-                workspace_id=str(workspace.id),
-                context_id=str(source.id),
-                collection_name=merge_collection,
-            )
-        await db_session.commit()
-
         try:
+            db_session.add_all(memories)
+            await db_session.flush()
+            for memory in memories:
+                await add_memory_to_qdrant(
+                    user_id=_USER,
+                    memory_id=memory.id,
+                    vector=[0.1] * settings.embedding_dimensions,
+                    payload={"summary": "a summary long enough"},
+                    workspace_id=str(workspace.id),
+                    context_id=str(source.id),
+                    collection_name=merge_collection,
+                )
+            await db_session.commit()
+
             result = await ContextService(db_session).merge_contexts(
                 _USER, source.id, target.id, delete_source=True
             )

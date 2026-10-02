@@ -23,6 +23,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.constants import TOMBSTONE_PURGER_CLAUSE
+from db.point_writer_lock import hold_point_writer_lock
 from models.memory import DELETED_BY_SLEEP_MERGE, Memory
 from models.sleep import SleepAction, SleepReport
 from services.sleep.merge_retention import restore_sleep_tombstone_stmt
@@ -377,6 +378,9 @@ async def undo_merge_action(
     # live-context row still carrying the merge sentinel, so a forget() or a
     # context soft-delete that landed after the reads above is refused instead
     # of planting a live row + vector where no retention sweep can reach it.
+    # #1798: the vector is rebuilt before this UPDATE commits; until then the
+    # row still reads as a tombstone to the orphan sweep.
+    await hold_point_writer_lock(db)
     restored = await db.execute(
         restore_sleep_tombstone_stmt(loser_id, report.user_id, deleted_by=DELETED_BY_SLEEP_MERGE)
     )

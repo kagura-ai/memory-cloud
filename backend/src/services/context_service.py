@@ -1087,7 +1087,7 @@ class ContextService:
         # #1798: the copies below exist before their rows are committed. Keep
         # the orphan sweep's delete pass out until this transaction ends.
         if memory_id_mapping:
-            from services.orphan_vector_sweep import hold_point_writer_lock
+            from db.point_writer_lock import hold_point_writer_lock
 
             await hold_point_writer_lock(self.db)
 

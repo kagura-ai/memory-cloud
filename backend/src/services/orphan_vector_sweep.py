@@ -29,9 +29,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from db.point_writer_lock import wait_for_point_writers
 from db.qdrant import (
     PointRef,
     delete_points_from_qdrant,
@@ -49,11 +50,10 @@ logger = get_logger(__name__)
 # A soft-delete younger than this is left alone: its own vector delete may
 # still be in flight, and an embed task that raced the delete can still land.
 DEFAULT_GRACE = timedelta(hours=1)
-# merge_contexts upserts its copies before the rows that own them are
-# committed, so for as long as it runs those points look row-less. It holds
-# this advisory lock shared for that span; the sweep takes it exclusively
-# before its second look, which therefore never sees a merge half-way.
-_POINT_WRITER_LOCK_KEY = "orphan_vector_sweep:point_writers"
+# How long the delete pass waits for a writer that upserted points before
+# committing their rows (db/point_writer_lock.py). Past it the pass gives up
+# and the next run tries again.
+POINT_WRITER_WAIT_SECONDS = 30.0
 # The scheduled run refuses to delete more than this share of what it scanned:
 # that is what a sweep pointed at the wrong database looks like. The CLI shows
 # the plan to an operator instead.
@@ -95,7 +95,8 @@ class SweepResult:
     # Live memories that should each have exactly one point. Deployment-wide,
     # whatever ``collections`` the sweep was limited to.
     live_embedded_memories: int = 0
-    # Set when the sweep found orphans and refused to delete them.
+    # Set when the sweep found orphans and deleted none: too large a share of
+    # the store, or a point writer that did not finish in time.
     refused: str | None = None
 
     @property
@@ -114,28 +115,6 @@ class SweepResult:
     def remaining(self) -> int:
         """Points left in the swept collections after this pass."""
         return self.scanned - self.deleted
-
-
-async def hold_point_writer_lock(db: AsyncSession) -> None:
-    """Keep the sweep's delete pass out until this transaction ends.
-
-    For a writer that upserts points before committing the rows they belong
-    to. Shared: writers do not block each other.
-    """
-    await db.execute(
-        text("SELECT pg_advisory_xact_lock_shared(hashtextextended(:key, 0))").bindparams(
-            key=_POINT_WRITER_LOCK_KEY
-        )
-    )
-
-
-async def _wait_for_point_writers(db: AsyncSession) -> None:
-    """Block until no point writer is mid-transaction; held until this one ends."""
-    await db.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))").bindparams(
-            key=_POINT_WRITER_LOCK_KEY
-        )
-    )
 
 
 def _as_uuid(value: str | None) -> UUID | None:
@@ -210,9 +189,9 @@ async def sweep_orphan_points(
     """Find the vector store's orphaned points and, unless ``dry_run``, delete them.
 
     Args:
-        db: Async session. Nothing is written to Postgres, but a pass that
-            deletes holds an advisory lock until the session's transaction
-            ends, so end it promptly.
+        db: Async session. Nothing is written to Postgres. A pass that
+            deletes rolls the session back when it is done, to release the
+            point-writer lock.
         dry_run: Count only.
         grace: How long a soft-delete must have stood before its point counts
             as an orphan.
@@ -286,16 +265,27 @@ async def sweep_orphan_points(
 
     # Second look, with every point writer out of the way: what was row-less
     # only because its transaction was still open has its row by now.
-    await _wait_for_point_writers(db)
+    if not await wait_for_point_writers(db, timeout_seconds=POINT_WRITER_WAIT_SECONDS):
+        result.refused = (
+            f"a merge or a Sleep rollback was still writing points after "
+            f"{POINT_WRITER_WAIT_SECONDS:.0f}s; nothing deleted"
+        )
+        logger.warning("orphan_vector_sweep_point_writers_busy", orphans=result.orphans)
+        return result
 
-    for stats in result.collections:
-        refs = candidates[stats.collection]
-        for start in range(0, len(refs), _DELETE_BATCH):
-            batch = refs[start : start + _DELETE_BATCH]
-            still_orphaned = await _classify(db, batch, cutoff)
-            point_ids = [ref.point_id for ref in batch if ref.point_id in still_orphaned]
-            await delete_points_from_qdrant(point_ids, stats.collection)
-            stats.deleted += len(point_ids)
+    try:
+        for stats in result.collections:
+            refs = candidates[stats.collection]
+            for start in range(0, len(refs), _DELETE_BATCH):
+                batch = refs[start : start + _DELETE_BATCH]
+                still_orphaned = await _classify(db, batch, cutoff)
+                point_ids = [ref.point_id for ref in batch if ref.point_id in still_orphaned]
+                await delete_points_from_qdrant(point_ids, stats.collection)
+                stats.deleted += len(point_ids)
+    finally:
+        # Ends the transaction, which is what releases the lock: writers must
+        # not wait on a caller that keeps its session open.
+        await db.rollback()
 
     logger.info(
         "orphan_vector_sweep_completed",

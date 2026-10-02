@@ -19,6 +19,7 @@ REPO_ROOT="$BATS_TEST_DIRNAME/../../../.."
 IMAGE_FILES=(
     "docker-compose.yml"
     ".github/workflows/eval-nightly.yml"
+    ".github/workflows/ci.yml"
     "terraform/single-server/docker-compose.prod.yml"
     "terraform/single-server/docker-compose.data.yml"
 )

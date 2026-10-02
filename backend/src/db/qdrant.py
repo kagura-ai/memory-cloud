@@ -1368,6 +1368,10 @@ async def scroll_point_refs(
     """
     _store = _active_store()
     if _store is not None:
+        # Every row of an alternative store is a memory point: the resource
+        # indexer writes through the Qdrant client only. A store that gains
+        # resource points must report them here, or the sweep would judge
+        # them by a memory row they never had.
         refs = [
             PointRef(point_id=point_id, context_id=context_id, is_resource=False)
             for point_id, context_id in await _store.list_point_refs(collection_name)

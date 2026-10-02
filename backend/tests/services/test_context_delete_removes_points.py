@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from db.point_writer_lock import hold_point_writer_lock, wait_for_point_writers
 from models.auth import Context, Workspace, WorkspaceMember, WorkspaceRole
 from services.context_service import ContextService
 from utils.exceptions import QdrantError
@@ -83,22 +86,43 @@ async def test_caller_owned_transaction_leaves_points_to_the_caller(db_session):
 
 
 @pytest.mark.asyncio
-async def test_point_writer_lock_excludes_the_sweeps_delete_pass(db_session, async_engine):
-    """merge_contexts holds the lock shared while its copies have no committed
-    row; the sweep's exclusive request must wait for that transaction."""
-    import asyncio
-
-    from sqlalchemy.ext.asyncio import AsyncSession
-
-    from services.orphan_vector_sweep import _wait_for_point_writers, hold_point_writer_lock
-
+async def test_point_writer_lock_keeps_the_sweep_out_until_the_writer_ends(
+    db_session, async_engine
+):
+    """A writer holds the lock shared while its points have no committed row;
+    the sweep's exclusive request waits for that transaction."""
     await hold_point_writer_lock(db_session)
     async with AsyncSession(async_engine) as sweeper:
-        waiting = asyncio.ensure_future(_wait_for_point_writers(sweeper))
-        done, _ = await asyncio.wait({waiting}, timeout=0.5)
-        assert not done
+        waiting = asyncio.ensure_future(wait_for_point_writers(sweeper, timeout_seconds=30))
+        try:
+            done, _ = await asyncio.wait({waiting}, timeout=0.5)
+            assert not done, "the sweep took the lock while a writer was mid-transaction"
 
+            await db_session.rollback()
+
+            assert await asyncio.wait_for(waiting, timeout=5) is True
+        finally:
+            waiting.cancel()
+            await db_session.rollback()
+            await sweeper.rollback()
+
+
+@pytest.mark.asyncio
+async def test_sweep_gives_up_on_a_writer_that_outlasts_the_timeout(db_session, async_engine):
+    await hold_point_writer_lock(db_session)
+    try:
+        async with AsyncSession(async_engine) as sweeper:
+            assert await wait_for_point_writers(sweeper, timeout_seconds=0.2) is False
+    finally:
         await db_session.rollback()
 
-        await asyncio.wait_for(waiting, timeout=5)
-        await sweeper.rollback()
+
+@pytest.mark.asyncio
+async def test_writers_do_not_block_each_other(db_session, async_engine):
+    await hold_point_writer_lock(db_session)
+    try:
+        async with AsyncSession(async_engine) as other_writer:
+            await asyncio.wait_for(hold_point_writer_lock(other_writer), timeout=5)
+            await other_writer.rollback()
+    finally:
+        await db_session.rollback()

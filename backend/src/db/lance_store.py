@@ -748,13 +748,14 @@ class LanceVectorStore:
         """
 
         def _run() -> list[tuple[str, str | None]]:
-            tbl = self._open(collection_name)
-            if tbl is None:
-                return []
-            total = tbl.count_rows()
-            if not total:
-                return []
-            rows = tbl.search().select(["id", "context_id"]).limit(total).to_list()
+            with self._lock:
+                tbl = self._open(collection_name)
+                if tbl is None:
+                    return []
+                total = tbl.count_rows()
+                if not total:
+                    return []
+                rows = tbl.search().select(["id", "context_id"]).limit(total).to_list()
             return [(row["id"], row.get("context_id")) for row in rows]
 
         try:
