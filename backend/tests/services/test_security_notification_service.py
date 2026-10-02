@@ -2357,3 +2357,86 @@ class TestTransportTimeout:
             assert resend_module._may_have_been_delivered(RuntimeError("x")) is False
         finally:
             resend_module._uncertain_error_types.cache_clear()
+
+
+class TestPasswordResetNamesLinks:
+    """#1803: a reset signs the account out everywhere, but its identity links
+    stay — a linked account keeps owning its private contexts. The reset
+    notice says so when the account has links."""
+
+    @pytest.mark.asyncio
+    async def test_the_reset_notice_counts_the_linked_accounts(
+        self, redis, deliverable, email, monkeypatch
+    ) -> None:
+        count = AsyncMock(return_value=2)
+        monkeypatch.setattr(sns, "_linked_account_count", count)
+
+        await _notify(email, SecurityEvent.PASSWORD_RESET)
+
+        assert count.await_args.args[1] == OWNER
+        (occurrence,) = email.send_security_notification.await_args.kwargs["occurrences"]
+        assert occurrence.linked_accounts == 2
+
+    @pytest.mark.asyncio
+    async def test_no_links_leaves_it_out(self, redis, deliverable, email, monkeypatch) -> None:
+        monkeypatch.setattr(sns, "_linked_account_count", AsyncMock(return_value=0))
+
+        await _notify(email, SecurityEvent.PASSWORD_RESET)
+
+        (occurrence,) = email.send_security_notification.await_args.kwargs["occurrences"]
+        assert occurrence.linked_accounts is None
+
+    @pytest.mark.asyncio
+    async def test_other_notices_do_not_look_links_up(
+        self, redis, deliverable, email, monkeypatch
+    ) -> None:
+        count = AsyncMock(return_value=2)
+        monkeypatch.setattr(sns, "_linked_account_count", count)
+
+        await _notify(email, SecurityEvent.PASSWORD_CHANGED)
+
+        count.assert_not_awaited()
+        (occurrence,) = email.send_security_notification.await_args.kwargs["occurrences"]
+        assert occurrence.linked_accounts is None
+
+    def _render(self, *occurrences: SecurityOccurrence) -> str:
+        _, text = render_security_notification(
+            SecurityEvent.PASSWORD_RESET,
+            list(occurrences),
+            digest=False,
+            window_minutes=10,
+            profile_page_url="https://app.example/profile",
+        )
+        return text
+
+    def test_the_email_names_the_links_and_where_to_review_them(self) -> None:
+        text = self._render(
+            SecurityOccurrence(occurred_at="2026-10-02T10:00:00 UTC", linked_accounts=2)
+        )
+
+        assert "linked to 2 other accounts" in text
+        assert "does not remove" in text
+        assert "Linked accounts" in text
+
+    def test_one_link_reads_in_the_singular(self) -> None:
+        text = self._render(
+            SecurityOccurrence(occurred_at="2026-10-02T10:00:00 UTC", linked_accounts=1)
+        )
+
+        assert "linked to 1 other account." in text
+
+    def test_without_links_the_email_says_nothing_about_them(self) -> None:
+        text = self._render(SecurityOccurrence(occurred_at="2026-10-02T10:00:00 UTC"))
+
+        assert "linked to" not in text
+
+    def test_the_count_survives_the_buffer_and_nothing_else_does(self) -> None:
+        kept = SecurityOccurrence.from_json(
+            SecurityOccurrence(occurred_at="2026-10-02T10:00:00 UTC", linked_accounts=3).to_json()
+        )
+        assert kept.linked_accounts == 3
+        for bad in ('"3"', "true", "-1", "999", "1.5"):
+            occurrence = SecurityOccurrence.from_json(
+                f'{{"occurred_at": "2026-10-02T10:00:00 UTC", "linked_accounts": {bad}}}'
+            )
+            assert occurrence.linked_accounts is None

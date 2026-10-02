@@ -399,6 +399,9 @@ class SecurityOccurrence:
         sign_in_method: The removed sign-in method (``Password``, ``Google``...).
         actor: Who made the change when it was not the owner:
             ``"Display Name (email)"`` of the acting administrator.
+        linked_accounts: For a password reset, how many other accounts are
+            linked to this one (#1803); None when there are none. A number,
+            never an account name or address.
     """
 
     occurred_at: str
@@ -408,6 +411,7 @@ class SecurityOccurrence:
     key_name: str | None = None
     sign_in_method: str | None = None
     actor: str | None = None
+    linked_accounts: int | None = None
 
     def to_json(self) -> str:
         """Serialize for the Redis buffer."""
@@ -433,7 +437,17 @@ class SecurityOccurrence:
             key_name=sanitize_display_text(values.get("key_name"), _NAME_MAX_CHARS),
             sign_in_method=sanitize_display_text(values.get("sign_in_method"), _NAME_MAX_CHARS),
             actor=sanitize_display_text(values.get("actor"), 2 * _NAME_MAX_CHARS),
+            linked_accounts=_linked_accounts_value(values.get("linked_accounts")),
         )
+
+
+def _linked_accounts_value(value: object) -> int | None:
+    """A buffered link count, or None for anything that is not one."""
+    from services.identity_link_service import MAX_LINKED_IDENTITIES
+
+    if type(value) is not int or not 0 < value < MAX_LINKED_IDENTITIES:
+        return None
+    return value
 
 
 def format_occurred_at(when: datetime) -> str:
@@ -526,6 +540,21 @@ def render_security_notification(
     elif count > len(listed):
         lines += [f"  ... and {count - len(listed)} more.", ""]
 
+    # #1803: a reset signs the account out everywhere, but its identity links
+    # stay. Whoever linked an account of theirs keeps owning this account's
+    # private contexts, so the owner is told the links exist.
+    linked = max((o.linked_accounts or 0 for o in listed), default=0)
+    if linked:
+        accounts = "account" if linked == 1 else "accounts"
+        lines += [
+            f"This account is linked to {linked} other {accounts}. A password reset",
+            "does not remove links: a linked account still owns this account's",
+            "private contexts and the memories in them. Review them under",
+            '"Linked accounts" on your profile page and unlink any you do not',
+            "recognize.",
+            "",
+        ]
+
     lines.append("Wasn't you?")
     if event in _SIGN_IN_EVENTS:
         lines += [
@@ -601,6 +630,13 @@ async def _actor_label(db: AsyncSession, actor_user_id: str) -> str | None:
     if name and email:
         return f"{name} ({email})"
     return name or email or "another account"
+
+
+async def _linked_account_count(db: AsyncSession, user_id: str) -> int:
+    """How many other accounts are linked to ``user_id`` (#1784, #1803)."""
+    from services.identity_link_service import linked_user_ids
+
+    return len(await linked_user_ids(db, user_id)) - 1
 
 
 async def _client_name(db: AsyncSession, client_id: str) -> str | None:
@@ -1011,6 +1047,11 @@ async def notify_security_event(
             if client_id and not client_name:
                 client_name = await _client_name(db, client_id)
             actor = await _actor_label(db, actor_user_id) if actor_user_id else None
+            linked_accounts = (
+                await _linked_account_count(db, user_id)
+                if event == SecurityEvent.PASSWORD_RESET
+                else 0
+            )
         occurrence = SecurityOccurrence(
             occurred_at=format_occurred_at(occurred_at or utcnow()),
             ip=sanitize_ip(ip),
@@ -1019,6 +1060,7 @@ async def notify_security_event(
             key_name=sanitize_display_text(key_name, _NAME_MAX_CHARS),
             sign_in_method=sanitize_display_text(sign_in_method, _NAME_MAX_CHARS),
             actor=actor,
+            linked_accounts=linked_accounts or None,
         )
         outcome, window_id = await _buffer_if_window_open(user_id, event, occurrence)
         if outcome == _BUFFERED:
