@@ -963,7 +963,9 @@ python -m src.cli.restore_context <context-id> --name notes-2 --apply   # under 
 
 or, as a system admin, `POST /api/v1/admin/contexts/{context_id}/restore` with
 `{"dry_run": false}` (`dry_run` defaults to `true`; `new_name` restores under
-another name). The restore is recorded in the audit log.
+another name). The restore is recorded in the audit log (`context_restore`),
+under the admin for the endpoint and under `--actor` for the command (default
+`cli:<OS user>`).
 
 **What comes back.** The context row, and the memories its deletion
 soft-deleted: they are live again and marked `pending`, and the embedding sweep

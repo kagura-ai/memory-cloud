@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import sys
 from pathlib import Path
 from uuid import UUID
@@ -68,7 +69,7 @@ async def _main(args: argparse.Namespace) -> int:
 
     async def run(db: AsyncSession, dry_run: bool) -> ContextRestoreResult:
         return await restore_deleted_context(
-            db, args.context_id, dry_run=dry_run, new_name=args.name
+            db, args.context_id, dry_run=dry_run, new_name=args.name, actor_id=args.actor
         )
 
     return await run_plan_apply(
@@ -96,8 +97,23 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     mode.add_argument("--plan", action="store_true", help="show what would be restored (default)")
     mode.add_argument("--apply", action="store_true", help="restore the context")
     parser.add_argument("--yes", action="store_true", help="no confirmation prompt")
+    parser.add_argument(
+        "--actor",
+        default=None,
+        help="who restores, for the audit row (default: cli:<OS user>)",
+    )
     add_log_level_argument(parser)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not args.actor:
+        args.actor = f"cli:{_os_user()}"
+    return args
+
+
+def _os_user() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:  # no USER/LOGNAME and no passwd entry (some containers)
+        return "unknown"
 
 
 if __name__ == "__main__":

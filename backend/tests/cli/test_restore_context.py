@@ -101,3 +101,18 @@ class TestRestoreContextCommand:
         assert _run([str(CONTEXT_ID)], restore) == 1
 
         assert "not deleted" in capsys.readouterr().err
+
+    def test_actor_reaches_the_audit_row(self, capsys):
+        restore = AsyncMock(return_value=_result(dry_run=True))
+
+        assert _run([str(CONTEXT_ID), "--actor", "ops-alice"], restore) == 0
+
+        assert restore.await_args.kwargs["actor_id"] == "ops-alice"
+
+    def test_actor_defaults_to_the_os_user(self, capsys):
+        restore = AsyncMock(return_value=_result(dry_run=True))
+
+        with patch.object(cli.getpass, "getuser", return_value="deploy"):
+            assert _run([str(CONTEXT_ID)], restore) == 0
+
+        assert restore.await_args.kwargs["actor_id"] == "cli:deploy"
