@@ -42,15 +42,17 @@ const MCP_CLIENTS_DOCS_URL =
 
 /**
  * The MCP endpoints for an API base URL: the bare `…/mcp` every client can
- * use, and the workspace-pinned `…/mcp/w/<id>` (null without a workspace).
- * `apiUrl` may carry the `/api/v1` REST suffix; it is stripped.
+ * use, and the workspace-pinned `…/mcp/w/<id>` (null without a workspace),
+ * plus the server origin they share. `apiUrl` may carry the `/api/v1` REST
+ * suffix; it is stripped here, once, for every caller on the page.
  */
 export function mcpEndpoints(
   apiUrl: string,
   workspaceId: string | null,
-): { mcpUrl: string; pinnedUrl: string | null } {
+): { baseUrl: string; mcpUrl: string; pinnedUrl: string | null } {
   const baseUrl = apiUrl.replace(/\/api\/v1$/, "");
   return {
+    baseUrl,
     mcpUrl: `${baseUrl}/mcp`,
     pinnedUrl: workspaceId ? `${baseUrl}/mcp/w/${workspaceId}` : null,
   };
@@ -98,7 +100,7 @@ export function McpConnectionCard() {
   const { isCopied, copyToTarget } = useCopyFeedback();
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
-  const { mcpUrl, pinnedUrl } = useMemo(
+  const { baseUrl, mcpUrl, pinnedUrl } = useMemo(
     () => mcpEndpoints(apiUrl, currentWorkspaceId),
     [apiUrl, currentWorkspaceId],
   );
@@ -108,16 +110,19 @@ export function McpConnectionCard() {
   );
   // Pinning only means something when there is another workspace the OAuth
   // connector could otherwise drift to.
-  const canPin = pinnedUrl !== null && workspaces.length > 1;
+  const pinnedUrlToOffer = workspaces.length > 1 ? pinnedUrl : null;
 
   const handleCopy = async (text: string, key: string) => {
     try {
       await copyToTarget(text, key);
-    } catch (err: unknown) {
-      // Clipboard failure is a user-action failure → destructive toast.
+    } catch {
+      // Clipboard failure is a user-action failure → destructive toast with
+      // the i18n'd "select it and copy manually" hint (copyText has already
+      // tried the execCommand fallback, #987); the raw DOM exception text
+      // would be English in every locale.
       toast({
         title: tCommon("error"),
-        description: err instanceof Error ? err.message : String(err),
+        description: tCommon("copyFailedManualHint"),
         variant: "destructive",
       });
     }
@@ -174,7 +179,7 @@ export function McpConnectionCard() {
         </p>
 
         {/* Pin an OAuth connector to this workspace (multi-workspace users) */}
-        {canPin && pinnedUrl && (
+        {pinnedUrlToOffer && (
           <div className="space-y-2 border-t border-gray-200 dark:border-gray-700 pt-3">
             <p className="text-xs text-gray-600 dark:text-gray-400">
               {t("followsWorkspace")}
@@ -194,10 +199,10 @@ export function McpConnectionCard() {
               <CollapsibleContent className="mt-2 space-y-2">
                 <div className="flex items-center gap-2">
                   <code className="flex-1 bg-gray-50 dark:bg-gray-800 px-3 py-2 rounded border border-gray-200 dark:border-gray-700 text-xs font-mono break-all">
-                    {pinnedUrl}
+                    {pinnedUrlToOffer}
                   </code>
                   <CopyIconButton
-                    value={pinnedUrl}
+                    value={pinnedUrlToOffer}
                     copyKey="pinned-mcp-url"
                     label={t("copyPinnedUrl")}
                     isCopied={isCopied}
@@ -231,7 +236,7 @@ export function McpConnectionCard() {
             {t("links.pythonSdk")}
           </a>
           <a
-            href={`${apiUrl.replace(/\/api\/v1$/, "")}/redoc`}
+            href={`${baseUrl}/redoc`}
             target="_blank"
             rel="noopener noreferrer"
             className="text-primary underline hover:text-primary/80"

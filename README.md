@@ -226,8 +226,8 @@ Works with Claude Code, Claude Desktop, Claude Chat, ChatGPT, Gemini CLI, and an
 
 **Claude Code (3 steps):**
 
-1. Start services and open `http://localhost:3000/workspace/integrations/api-keys` to create an API key
-2. Copy `.mcp.json.example` to `.mcp.json` and fill in your API key (the key already carries its workspace):
+1. Start services and open `http://localhost:3000/workspace/integrations/credentials?tab=api-keys` to create an API key
+2. Copy `.mcp.json.example` to `.mcp.json` and fill in your API key (a key created there is scoped to its workspace):
 
 ```bash
 cp .mcp.json.example .mcp.json

@@ -42,6 +42,7 @@ import {
 import { EmptyState } from "@/components/ui/empty-state";
 import { MaskedSecretField } from "@/components/common/MaskedSecretField";
 import { MCPConfigBlock } from "@/components/credentials/MCPConfigBlock";
+import { mcpEndpoints } from "@/components/credentials/McpConnectionCard";
 import { useAutoOpenOnFreshWindow } from "@/hooks/useAutoOpenOnFreshWindow";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import { useToast } from "@/hooks/use-toast";
@@ -117,10 +118,13 @@ export function APIKeysTabPanel() {
 
   const userId = user?.id;
 
-  // The bare MCP endpoint for the key-bearing snippets. An API key carries
-  // its own workspace, so no `/w/<id>` segment is needed (#1836).
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
-  const mcpUrl = apiUrl.replace(/\/api\/v1$/, "") + "/mcp";
+  // The bare MCP endpoint for the key-bearing snippets. A workspace-scoped
+  // API key carries its own workspace, so no `/w/<id>` segment is needed
+  // (#1836); the derivation is shared with McpConnectionCard.
+  const { mcpUrl } = mcpEndpoints(
+    process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080",
+    null,
+  );
 
   const [credentials, setCredentials] = useState<MemberCredentials | null>(
     null,
@@ -659,7 +663,6 @@ export function APIKeysTabPanel() {
               <MCPConfigBlock
                 apiKey={apiKeys[0] ?? null}
                 mcpUrl={mcpUrl}
-                mcpBaseUrl={mcpUrl}
                 includeOAuthCommand={false}
               />
             </CollapsibleContent>

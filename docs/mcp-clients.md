@@ -13,9 +13,9 @@ Every client below takes one of two endpoint URLs — same server, same credenti
 | **Guardrail digest** (clients without tool hooks) | `…/mcp?guardrails=<context_id>` (off: `?guardrails=off`) |
 | **Pinned to one workspace** (OAuth client, several workspaces) | `…/mcp/w/{workspace_id}` — takes the same query parameters |
 
-An API key carries its workspace, so `/mcp` is all it needs. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) signs in on first connect and follows the workspace selected in the web UI; use the pinned form to keep one connector on one workspace.
+An API key created on the credentials page is scoped to its workspace, so `/mcp` is all it needs. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) signs in on first connect and follows the workspace selected in the web UI; use the pinned form to keep one connector on one workspace. The same applies to a key minted before workspace scoping existed (no workspace on the key): pin it, or create a new key.
 
-Pick core when your client loads every tool schema at session start (it is about 65% smaller). It lists the 12 memory and context tools and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. The exact tool set and sizes are in [Tool Profiles](mcp-tools.md#tool-profiles); a narrower allowlist (`?tools=…`) is under [List fewer tools](#list-fewer-tools). The Web UI's MCP Setup Guide has a **Core tools only** switch that writes the query into its snippets for you.
+Pick core when your client loads every tool schema at session start (it is about 65% smaller). It lists the 12 memory and context tools and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. The exact tool set and sizes are in [Tool Profiles](mcp-tools.md#tool-profiles); a narrower allowlist (`?tools=…`) is under [List fewer tools](#list-fewer-tools). In the Web UI, the API Keys tab's **Connect with this key** section has a **Core tools only** switch that writes the query into its snippets for you.
 
 ## Claude Code (Recommended)
 
@@ -33,12 +33,12 @@ Claude Code + Kagura Memory Cloud gives your AI assistant **persistent, searchab
 
 **Setup (3 steps):**
 
-1. Start services and open `http://localhost:3000/workspace/integrations/api-keys` to create an API key
+1. Start services and open `http://localhost:3000/workspace/integrations/credentials?tab=api-keys` to create an API key
 2. Copy `.mcp.json.example` to `.mcp.json` and fill in your workspace ID and API key:
 
 ```bash
 cp .mcp.json.example .mcp.json
-# Edit .mcp.json — set the API key (it already carries its workspace)
+# Edit .mcp.json — set the API key (a key created there is scoped to its workspace)
 ```
 
 `.mcp.json.example` ships with the all-tools URL (JSON has no comments, so the choice is spelled out here). Set `"url"` to one of — see [Which URL?](#which-url):

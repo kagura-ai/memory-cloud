@@ -1734,7 +1734,7 @@
     "featureGuide": {
       "title": "認証方法の選び方",
       "overview": "このページには、クライアントの接続に必要なものがすべてあります: MCP エンドポイント、API キー、カスタム OAuth アプリ。",
-      "choosingMethod": "Claude、ChatGPT、Cursor、Claude Code は上の MCP URL を貼るだけで、OAuth でログインして接続します（作成するものはありません）。Codex CLI、Python SDK、CI、.mcp.json には API キーを使います。カスタム OAuth アプリは、自作の OAuth2 クライアントを繋ぐ場合だけ作成してください。"
+      "choosingMethod": "Claude、ChatGPT、Cursor、Claude Code は下の MCP URL を貼るだけで、OAuth でログインして接続します（作成するものはありません）。Codex CLI、Python SDK、CI、.mcp.json には API キーを使います。カスタム OAuth アプリは、自作の OAuth2 クライアントを繋ぐ場合だけ作成してください。"
     },
     "tabs": {
       "apiKeys": "APIキー",
@@ -1869,8 +1869,8 @@
     "featureGuide": {
       "title": "OAuthアプリとは？",
       "overview": "OAuthアプリは、サードパーティアプリケーションにセキュアなトークンベース認証を提供します。スコープされた権限での委任アクセス、自動トークンリフレッシュ、ユーザー同意フローが必要な場合に使用します。",
-      "useCases": "ユースケース: ClaudeやChatGPTをOAuthクライアントとして接続、OAuth2認可コードフローによるカスタム統合の構築、チームメンバーが個別にアプリを認可。",
-      "howItWorks": "アプリを登録（またはClaude/ChatGPTのプリセットを使用） → ユーザーがOAuthフローで認可 → アプリがアクセストークンを受け取り → MCP/REST API呼び出しに使用。"
+      "useCases": "ユースケース: OAuth2認可コードフローによる自作統合の構築、チームメンバーが個別にアプリを認可。Claude、ChatGPT、Cursor、Claude Code は自動登録されるため、ここでのアプリは不要です。",
+      "howItWorks": "自作アプリを登録 → ユーザーがOAuthフローで認可 → アプリがアクセストークンを受け取り → MCP/REST API呼び出しに使用。"
     },
     "dcrNote": "Claude.ai、Claude Desktop、ChatGPT、Cursor、Claude Code は接続時に自動登録される（Dynamic Client Registration）ため、ここでアプリを作成する必要はありません。自作の OAuth2 クライアントを繋ぐ場合だけカスタムアプリを作成してください。",
     "legacyPresetsTitle": "以前のプリセットアプリ",

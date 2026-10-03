@@ -1734,7 +1734,7 @@
     "featureGuide": {
       "title": "Choosing an Authentication Method",
       "overview": "This page holds everything a client needs to connect: the MCP endpoint, your API keys and any custom OAuth app.",
-      "choosingMethod": "Claude, ChatGPT, Cursor and Claude Code connect with the MCP URL above and sign in with OAuth — nothing to create. Use an API key for Codex CLI, the Python SDK, CI pipelines or a .mcp.json file. Create a custom OAuth app only for an OAuth2 client you build yourself."
+      "choosingMethod": "Claude, ChatGPT, Cursor and Claude Code connect with the MCP URL below and sign in with OAuth — nothing to create. Use an API key for Codex CLI, the Python SDK, CI pipelines or a .mcp.json file. Create a custom OAuth app only for an OAuth2 client you build yourself."
     },
     "tabs": {
       "apiKeys": "API Keys",
@@ -1869,8 +1869,8 @@
     "featureGuide": {
       "title": "What are OAuth Apps?",
       "overview": "OAuth Apps provide secure, token-based authentication for third-party applications. Use them when you need delegated access with scoped permissions, automatic token refresh, and user consent flows.",
-      "useCases": "Use cases: connect Claude or ChatGPT as OAuth clients, build custom integrations with OAuth2 authorization code flow, enable team members to authorize apps individually.",
-      "howItWorks": "Register an app (or use pre-configured Claude/ChatGPT) → Users authorize via OAuth flow → App receives access tokens → Tokens are used for MCP or REST API calls."
+      "useCases": "Use cases: build your own integration with the OAuth2 authorization code flow, let team members authorize your app individually. Claude, ChatGPT, Cursor and Claude Code register themselves and need no app here.",
+      "howItWorks": "Register your app → Users authorize via the OAuth flow → The app receives access tokens → Tokens are used for MCP or REST API calls."
     },
     "dcrNote": "Claude.ai, Claude Desktop, ChatGPT, Cursor and Claude Code register themselves when they connect (Dynamic Client Registration) — there is nothing to create here for them. Create a custom app only for an OAuth2 client you build yourself.",
     "legacyPresetsTitle": "Earlier preset apps",

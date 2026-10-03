@@ -122,7 +122,7 @@ The emailed links need a real email provider (`EMAIL_PROVIDER=resend`): the defa
 
 ## MCP Integration
 
-The Web UI MCP Setup Guide at `/workspace/integrations/credentials?tab=api-keys` renders ready-to-paste snippets for each client below. The manual snippets in this section are the source of truth — keep them in sync if you change the supported transport shape.
+The Web UI credentials page (`/workspace/integrations/credentials`) shows the MCP endpoint and the Claude Code OAuth one-liner in its connection card; the API Keys tab's **Connect with this key** section renders ready-to-paste snippets for each client below. The manual snippets in this section are the source of truth — keep them in sync if you change the supported transport shape.
 
 ### Which URL?
 
@@ -131,7 +131,7 @@ Every snippet below takes one of two endpoint URLs — same server, same API key
 - **All tools (default):** `http://localhost:8080/mcp`
 - **Core tools only — smaller tool list:** `http://localhost:8080/mcp?profile=core`
 
-The API key carries its workspace, so the URL needs no workspace segment. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) also uses `/mcp` and connects to the workspace selected in the web UI; `http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID` pins such a connector to one workspace when you belong to several.
+An API key created on the credentials page is scoped to its workspace, so the URL needs no workspace segment. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) also uses `/mcp` and connects to the workspace selected in the web UI; `http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID` pins such a connector (or a key minted before workspace scoping existed) to one workspace.
 
 Pick core when your client loads every tool schema at session start (it is about 65% smaller). It lists the 12 memory and context tools and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. See [Tool Profiles](mcp-tools.md#tool-profiles) for the exact tool set. The snippets show the default URL; in the Web UI, the **Core tools only** switch above them writes `?profile=core` into every snippet.
 
