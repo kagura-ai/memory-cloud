@@ -2300,6 +2300,34 @@ class TestAccessEventEmission:
         assert perm_kw["memory_id"] == mid
 
     @pytest.mark.asyncio
+    async def test_forget_deletes_the_point_by_summary_embedding_id(self):
+        """#1829: a resource-ingested memory's point id is uuid5(resource:doc:v),
+        kept in summary_embedding_id — deleting by the row id missed it."""
+        service = MemoryService(MagicMock())
+        ws, ctx, mid, point_id = uuid4(), uuid4(), uuid4(), uuid4()
+        row = self._memory_row(ws, ctx, mid)
+        row.summary_embedding_id = point_id
+        service.memory_repo.get = AsyncMock(return_value=row)
+        service.memory_repo.update = AsyncMock()
+        service.db.commit = AsyncMock()
+
+        with (
+            patch(
+                "services.permission_service.PermissionService.can_access_memory",
+                AsyncMock(return_value=True),
+            ),
+            patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
+            patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()) as delete_point,
+            patch("repositories.neural_edge.NeuralEdgeRepository") as edge_cls,
+            patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()),
+        ):
+            edge_cls.return_value.delete_node_edges = AsyncMock(return_value=0)
+            res = await service.forget(ForgetRequest(memory_id=mid), "caller")
+
+        assert res.deleted_count == 1
+        delete_point.assert_awaited_once_with("caller", point_id, collection_name="c")
+
+    @pytest.mark.asyncio
     async def test_forget_with_declared_context_uses_helper_workspace(self):
         # When a context IS declared (MCP always), the isolation helper's
         # workspace wins over the row's.

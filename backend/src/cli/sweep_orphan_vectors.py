@@ -40,12 +40,14 @@ from services.orphan_vector_sweep import (  # noqa: E402
 
 def _print_plan(result: SweepResult) -> None:
     print(
-        f"{'collection':<44} {'points':>8} {'no row':>8} {'soft-deleted':>13} {'context gone':>13}"
+        f"{'collection':<44} {'points':>8} {'no row':>8} {'soft-deleted':>13} {'context gone':>13} "
+        f"{'doc gone':>9}"
     )
     for stats in result.collections:
         print(
             f"{stats.collection:<44} {stats.scanned:>8} {stats.no_row:>8} "
-            f"{stats.tombstoned:>13} {stats.context_deleted:>13}"
+            f"{stats.tombstoned:>13} {stats.context_deleted:>13} "
+            f"{stats.resource_tombstoned + stats.resource_no_row:>9}"
         )
         if stats.error:
             print(f"  not read, skipped: {stats.error}")

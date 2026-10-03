@@ -25,6 +25,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local application imports (PEP8)
+from db.point_writer_lock import hold_point_writer_lock
 from db.qdrant import (
     KAGURA_MEMORIES_BM25_VECTOR_NAME,
     KAGURA_MEMORIES_VECTOR_NAME,
@@ -674,8 +675,34 @@ class ResourceIndexer:
         point_id_str = f"{event.resource_id}:{event.doc_id}:v{event.version}"
         point_id_uuid = uuid5(NAMESPACE_DNS, point_id_str)
 
-        # Generate Memory ID for new memories (may be overwritten if memory exists)
-        memory_id = uuid4()
+        # Resolve the Memory row BEFORE the point is built, so the payload's
+        # ``memory_id`` is the row's id on a re-index too (#1829). It used to be
+        # a fresh uuid4() overwritten only after the upsert, so a re-indexed
+        # point named an id no row carried and nothing could judge the point
+        # by it (#1808).
+        #
+        # Idempotency lookup for re-indexing. Performance: generated columns
+        # (Migration 061) instead of a JSONB search. Context uses 'created_by',
+        # not 'owner_id'. Single Collection Migration: workspace_id/context_id
+        # instead of collection_name. #1549 review: tombstones are excluded so
+        # a doc the user forgot is RE-CREATED on re-sync (a fresh, visible row
+        # — charged once by the batch gate, which ignores tombstones the same
+        # way) instead of being patched in place under its deleted_at and
+        # staying invisible. Tombstones are terminal: the #1521 sweep
+        # hard-deletes them later.
+        existing_memory_query = await self.db.execute(
+            select(Memory).where(
+                Memory.user_id == str(context.created_by),
+                Memory.workspace_id == context.workspace_id,
+                Memory.context_id == context.id,
+                Memory.resource_id == event.resource_id,  # Generated column (fast!)
+                Memory.resource_doc_id == event.doc_id,  # Generated column (fast!)
+                Memory.resource_version == event.version,  # Generated column (fast!)
+                Memory.deleted_at.is_(None),
+            )
+        )
+        existing_memory = existing_memory_query.scalar_one_or_none()
+        memory_id = existing_memory.id if existing_memory else uuid4()
 
         # Issue #335: Build sparse BM25 vector from the same fulltext_content
         # used for the dense embedding, so resource points participate in
@@ -710,7 +737,12 @@ class ResourceIndexer:
             },
         )
 
-        # 4. Upsert to Qdrant (per-context collection, see #334)
+        # 4. Upsert to Qdrant (per-context collection, see #334). The point is
+        # written before the row that owns it commits, so hold the writers'
+        # shared lock until this transaction ends: the orphan sweep, which now
+        # judges resource points by their rows (#1829), waits for it before it
+        # deletes and never sees this write half-way (#1798).
+        await hold_point_writer_lock(self.db)
         try:
             await self.qdrant_client.upsert(
                 collection_name=collection_name,
@@ -743,35 +775,15 @@ class ResourceIndexer:
         # This is acceptable because:
         # 1. Qdrant upsert is idempotent (same point_id)
         # 2. Next indexer run will retry Memory creation
-        # 3. Orphaned Qdrant points are harmless (will be garbage collected later)
+        # 3. A point left without a row is swept: the orphan sweep judges
+        #    resource points by their row (#1829); the writer lock taken above
+        #    keeps the sweep from seeing this transaction half-way.
 
         try:
-            # Check if Memory already exists (idempotency for re-indexing)
-            # Performance: Use generated columns (Migration 061) instead of JSONB search
-            # Bugfix: Context uses 'created_by' not 'owner_id'
-            # Single Collection Migration: Use workspace_id/context_id instead of collection_name
-            # #1549 review: tombstones are excluded so a doc the user forgot is
-            # RE-CREATED on re-sync (a fresh, visible row — charged once by the
-            # batch gate, which ignores tombstones the same way) instead of
-            # being patched in place under its deleted_at and staying invisible.
-            # Tombstones are terminal: the #1521 sweep hard-deletes them later.
-            existing_memory_query = await self.db.execute(
-                select(Memory).where(
-                    Memory.user_id == str(context.created_by),
-                    Memory.workspace_id == context.workspace_id,
-                    Memory.context_id == context.id,
-                    Memory.resource_id == event.resource_id,  # Generated column (fast!)
-                    Memory.resource_doc_id == event.doc_id,  # Generated column (fast!)
-                    Memory.resource_version == event.version,  # Generated column (fast!)
-                    Memory.deleted_at.is_(None),
-                )
-            )
-            existing_memory = existing_memory_query.scalar_one_or_none()
-
+            # The row was resolved above, before the point was built; the point
+            # already carries its id.
             if existing_memory:
                 # Update existing memory (re-indexing case)
-                # P0-1: Use existing memory_id, update summary_embedding_id to point_id
-                memory_id = existing_memory.id
 
                 # P1-5: Truncate summary to 500 chars (database limit)
                 summary = f"[{event.resource_id}] {event.doc_id} v{event.version}"

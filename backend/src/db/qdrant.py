@@ -1382,8 +1382,30 @@ class PointRef:
     point_id: str
     context_id: str | None
     # A resource-indexer point: its id is derived from the document, not from
-    # a memory row, so it cannot be matched to ``memories.id``.
+    # a memory row, so it cannot be matched to ``memories.id`` — only to
+    # ``memories.summary_embedding_id`` (#1829).
     is_resource: bool
+    # Resource points only: the document the id was derived from
+    # (resource_id, doc_id, version), so a point whose row was purged can
+    # still be checked against the natural key before it is deleted (#1829).
+    resource_key: tuple[str, str, int] | None = None
+
+
+def _point_ref(point: Any) -> PointRef:
+    """A :class:`PointRef` for one scrolled point (#1798, #1829)."""
+    payload = point.payload or {}
+    is_resource = "resource_id" in payload
+    resource_key: tuple[str, str, int] | None = None
+    if is_resource:
+        doc_id, version = payload.get("doc_id"), payload.get("version")
+        if isinstance(doc_id, str) and isinstance(version, int) and not isinstance(version, bool):
+            resource_key = (str(payload["resource_id"]), doc_id, version)
+    return PointRef(
+        point_id=str(point.id),
+        context_id=payload.get("context_id"),
+        is_resource=is_resource,
+        resource_key=resource_key,
+    )
 
 
 async def scroll_point_refs(
@@ -1422,20 +1444,13 @@ async def scroll_point_refs(
                 collection_name=collection_name,
                 limit=page_size,
                 offset=offset,
-                with_payload=["context_id", "resource_id"],
+                with_payload=["context_id", "resource_id", "doc_id", "version"],
                 with_vectors=False,
             )
         except Exception as e:
             raise QdrantError(f"Failed to scroll {collection_name}: {e}") from e
         if points:
-            yield [
-                PointRef(
-                    point_id=str(point.id),
-                    context_id=(point.payload or {}).get("context_id"),
-                    is_resource="resource_id" in (point.payload or {}),
-                )
-                for point in points
-            ]
+            yield [_point_ref(point) for point in points]
         if offset is None or not points:
             return
 

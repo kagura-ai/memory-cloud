@@ -4857,10 +4857,16 @@ class MemoryService:
                 memory.deleted_by = user_id
                 await self.memory_repo.update(memory.id, memory)
 
-                # Hard delete from Qdrant (remove from search index)
+                # Hard delete from Qdrant (remove from search index). The point
+                # id is ``summary_embedding_id``: equal to the row id for a
+                # memory the API wrote, but ``uuid5(resource:doc:version)`` for
+                # a resource-ingested one, which a delete by row id misses and
+                # leaves the document text in the store (#1829).
                 del_collection = await resolve_collection_name(self.db, memory.context_id)
                 await delete_memory_from_qdrant(
-                    user_id, request.memory_id, collection_name=del_collection
+                    user_id,
+                    memory.summary_embedding_id or request.memory_id,
+                    collection_name=del_collection,
                 )
 
                 # Clean up neural memory edges with 3-level isolation

@@ -20,6 +20,14 @@ from services.resource_indexer import ResourceIndexer
 from utils.datetime import utcnow
 
 
+@pytest.fixture(autouse=True)
+def _no_point_writer_lock():
+    """#1829: the indexer holds the sweep's shared writer lock while it writes;
+    a unit test's mocked session has no transaction to hold it in."""
+    with patch("services.resource_indexer.hold_point_writer_lock", AsyncMock()):
+        yield
+
+
 def _make_event() -> MagicMock:
     event = MagicMock()
     event.id = 1
@@ -137,6 +145,32 @@ class TestResourceIndexerNamedVectorUpsert:
         lookup_sql = str(mock_db.execute.call_args_list[0].args[0])
         assert "resource_doc_id" in lookup_sql
         assert "deleted_at IS NULL" in lookup_sql
+
+    @pytest.mark.asyncio
+    async def test_apply_upsert_point_carries_the_existing_rows_memory_id(self, indexer, mock_db):
+        """#1829: on a re-index the payload memory_id is the row's id, not a
+        fresh uuid4() written before the row was looked up (#1808)."""
+        existing = MagicMock()
+        existing.id = uuid4()
+        existing.details = {}
+        lookup = MagicMock()
+        lookup.scalar_one_or_none.return_value = existing
+        old_versions = MagicMock()
+        old_versions.scalars.return_value.all.return_value = []
+        mock_db.execute.side_effect = [lookup, old_versions]
+
+        await indexer._apply_upsert(
+            _make_event(),
+            _make_schema(),
+            _make_context(),
+            "kagura_memories",
+            indexer.embedding_service,
+        )
+
+        point = indexer.qdrant_client.upsert.await_args.kwargs["points"][0]
+        assert point.payload["memory_id"] == str(existing.id)
+        # The row was resolved before the point was built: one lookup, no second.
+        assert mock_db.add.call_count == 0
 
     @pytest.mark.asyncio
     async def test_apply_upsert_attaches_bm25_sparse_vector(self, indexer):

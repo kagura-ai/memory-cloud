@@ -39,11 +39,40 @@ def _memory(**overrides) -> Memory:
     return Memory(**fields)
 
 
-def _ref(point_id, *, context_id=None, is_resource=False) -> PointRef:
+def _ref(point_id, *, context_id=None, is_resource=False, resource_key=None) -> PointRef:
     return PointRef(
         point_id=str(point_id),
         context_id=str(context_id) if context_id else None,
         is_resource=is_resource,
+        resource_key=resource_key,
+    )
+
+
+async def _live_context(db_session) -> Context:
+    workspace = Workspace(id=uuid4(), name="Sweep", owner_user_id="sweep_user")
+    db_session.add(workspace)
+    await db_session.flush()
+    context = Context(
+        id=uuid4(),
+        workspace_id=workspace.id,
+        name=f"sweep_{uuid4().hex[:8]}",
+        display_name="Sweep",
+        created_by="sweep_user",
+    )
+    db_session.add(context)
+    await db_session.flush()
+    return context
+
+
+def _resource_memory(context: Context, point_id, *, doc_id="doc_1", version=1, **overrides):
+    """A resource-ingested row: the point id lives in summary_embedding_id and
+    the document's natural key in details (the generated columns read it)."""
+    return _memory(
+        workspace_id=context.workspace_id,
+        context_id=context.id,
+        summary_embedding_id=point_id,
+        details={"resource_id": "res_1", "doc_id": doc_id, "version": str(version)},
+        **overrides,
     )
 
 
@@ -145,6 +174,127 @@ class TestWhatCountsAsAnOrphan:
 
         assert result.collections[0].context_deleted == 1
         assert len(store.deleted) == 1
+
+    # --- #1829: a resource point in a live context follows its own row -------
+
+    @pytest.mark.asyncio
+    async def test_resource_point_with_a_live_row_is_kept(self, db_session):
+        context = await _live_context(db_session)
+        point_id = uuid4()
+        db_session.add(_resource_memory(context, point_id))
+        await db_session.flush()
+        store = _FakeStore(
+            [
+                _ref(
+                    point_id,
+                    context_id=context.id,
+                    is_resource=True,
+                    resource_key=("res_1", "doc_1", 1),
+                )
+            ]
+        )
+
+        result = await _sweep(db_session, store, dry_run=False)
+
+        assert result.orphans == 0
+        assert store.deleted == []
+
+    @pytest.mark.asyncio
+    async def test_forgotten_resource_memory_loses_its_point_after_the_grace_period(
+        self, db_session
+    ):
+        """forget soft-deletes the row; the point it could not delete by row id
+        (#1829) goes with the next sweep — but not before the grace period."""
+        context = await _live_context(db_session)
+        fresh_id, old_id = uuid4(), uuid4()
+        db_session.add_all(
+            [
+                _resource_memory(
+                    context, fresh_id, doc_id="fresh", deleted_at=utcnow() - timedelta(minutes=5)
+                ),
+                _resource_memory(
+                    context, old_id, doc_id="old", deleted_at=utcnow() - timedelta(hours=2)
+                ),
+            ]
+        )
+        await db_session.flush()
+        store = _FakeStore(
+            [
+                _ref(fresh_id, context_id=context.id, is_resource=True),
+                _ref(old_id, context_id=context.id, is_resource=True),
+            ]
+        )
+
+        result = await _sweep(db_session, store, dry_run=False, grace=timedelta(hours=1))
+
+        assert store.deleted == [str(old_id)]
+        assert result.collections[0].resource_tombstoned == 1
+
+    @pytest.mark.asyncio
+    async def test_a_live_row_keeps_the_point_even_beside_an_old_tombstone(self, db_session):
+        """forget, then sync again: the new row gets the same uuid5 point id the
+        tombstone still names. The live row wins, whatever order the rows come in."""
+        context = await _live_context(db_session)
+        point_id = uuid4()
+        db_session.add_all(
+            [
+                _resource_memory(context, point_id, deleted_at=utcnow() - timedelta(days=2)),
+                _resource_memory(context, point_id),
+            ]
+        )
+        await db_session.flush()
+        store = _FakeStore([_ref(point_id, context_id=context.id, is_resource=True)])
+
+        result = await _sweep(db_session, store, dry_run=False)
+
+        assert result.orphans == 0
+        assert store.deleted == []
+
+    @pytest.mark.asyncio
+    async def test_resource_point_whose_row_was_purged_is_judged_by_the_natural_key(
+        self, db_session
+    ):
+        """No row by point id: a live row for the same document keeps the point
+        (a re-index moved it), no such row makes it an orphan."""
+        context = await _live_context(db_session)
+        kept_id, gone_id = uuid4(), uuid4()
+        # The document "doc_1" is live under some point id; the store still has
+        # another point for it (kept), and one for a document no row names.
+        db_session.add(_resource_memory(context, uuid4(), doc_id="doc_1"))
+        await db_session.flush()
+        store = _FakeStore(
+            [
+                _ref(
+                    kept_id,
+                    context_id=context.id,
+                    is_resource=True,
+                    resource_key=("res_1", "doc_1", 1),
+                ),
+                _ref(
+                    gone_id,
+                    context_id=context.id,
+                    is_resource=True,
+                    resource_key=("res_1", "doc_9", 1),
+                ),
+            ]
+        )
+
+        result = await _sweep(db_session, store, dry_run=False)
+
+        assert store.deleted == [str(gone_id)]
+        assert result.collections[0].resource_no_row == 1
+
+    @pytest.mark.asyncio
+    async def test_resource_point_without_a_natural_key_and_no_row_is_kept(self, db_session):
+        """Points written before the payload carried doc_id/version cannot be
+        judged when no row names them: keep them."""
+        context = await _live_context(db_session)
+        store = _FakeStore([_ref(uuid4(), context_id=context.id, is_resource=True)])
+
+        result = await _sweep(db_session, store, dry_run=False)
+
+        assert result.orphans == 0
+        assert store.deleted == []
 
 
 class TestSafetyRails:
