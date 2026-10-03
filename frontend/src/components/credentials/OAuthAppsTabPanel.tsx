@@ -1,9 +1,17 @@
 /**
  * OAuthAppsTabPanel
  *
- * Self-contained panel for the OAuth Apps tab on the consolidated credentials page.
- * Contains all state, handlers, dialogs, and rendering from the oauth-apps page,
- * excluding PageContainer, PageHeader, and FeatureGuide.
+ * Self-contained panel for the Custom OAuth Apps tab on the consolidated
+ * credentials page: state, handlers, dialogs and rendering, excluding
+ * PageContainer, PageHeader and FeatureGuide.
+ *
+ * Since #1836 the tab holds custom apps only. Claude.ai, Claude Desktop,
+ * ChatGPT, Cursor and Claude Code register themselves through Dynamic Client
+ * Registration (RFC 7591) and never use an app created here, so the former
+ * "Create Claude app" / "Create ChatGPT app" presets are gone. Apps created
+ * through those presets earlier are still listed — flagged as no longer
+ * needed — so their owners can delete them. The MCP endpoint moved to the
+ * connection card above the tabs (McpConnectionCard).
  */
 
 "use client";
@@ -18,7 +26,6 @@ import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   getOAuth2Clients,
-  createOAuth2Client,
   deleteOAuth2Client,
   regenerateOAuth2ClientSecret,
   OAuth2Client,
@@ -27,7 +34,7 @@ import { EditOAuthClientDialog } from "@/components/oauth/EditOAuthClientDialog"
 import { OAuthAppCard } from "@/components/oauth/OAuthAppCard";
 import { CreateCustomOAuthAppDialog } from "@/components/oauth/CreateCustomOAuthAppDialog";
 import { hideOAuthClientSecret } from "@/lib/api/member-credentials";
-import { Copy, Check, Plus, KeyRound } from "lucide-react";
+import { Plus, KeyRound } from "lucide-react";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useToast } from "@/hooks/use-toast";
@@ -41,7 +48,6 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Button } from "@/components/ui/button";
 
 // Auto-refresh interval: 5 minutes (refresh before 10-minute visibility expiry)
 const OAUTH_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
@@ -54,14 +60,6 @@ export function OAuthAppsTabPanel() {
   const { currentWorkspaceId } = useWorkspace();
   const { user } = useAuth();
   const { toast } = useToast();
-
-  // URLs
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
-  const baseUrl = apiUrl.replace(/\/api\/v1$/, "");
-  const mcpBaseUrl = baseUrl + "/mcp";
-  const workspaceScopedMcpUrl = currentWorkspaceId
-    ? `${baseUrl}/mcp/w/${currentWorkspaceId}`
-    : null;
 
   const [oauthClients, setOauthClients] = useState<OAuth2Client[]>([]);
   const [loading, setLoading] = useState(true);
@@ -159,40 +157,7 @@ export function OAuthAppsTabPanel() {
 
   // --- CRUD handlers ---
 
-  const handleCreateOAuthApp = async (
-    provider: "claude" | "chatgpt" | "custom",
-  ) => {
-    if (provider === "custom") {
-      setShowCustomDialog(true);
-      return;
-    }
-
-    try {
-      await createOAuth2Client({
-        provider,
-        client_name: provider === "claude" ? "Claude" : "ChatGPT",
-        redirect_uris:
-          provider === "claude"
-            ? ["https://claude.ai/api/mcp/auth_callback"]
-            : ["https://chatgpt.com/connector/oauth/*"],
-      });
-
-      await loadOAuthClients();
-
-      toast({
-        title: tCommon("success"),
-        description: t("createSuccess", {
-          provider: provider === "claude" ? "Claude" : "ChatGPT",
-        }),
-      });
-    } catch (err: unknown) {
-      toast({
-        title: tCommon("error"),
-        description: err instanceof Error ? err.message : String(err),
-        variant: "destructive",
-      });
-    }
-  };
+  const openCustomAppDialog = () => setShowCustomDialog(true);
 
   const handleHideOAuthAppClick = (clientId: string) => {
     setOauthToHide(clientId);
@@ -273,9 +238,11 @@ export function OAuthAppsTabPanel() {
     return <TableLoadingState rows={3} />;
   }
 
-  const claudeApp = oauthClients.find((c) => c.provider === "claude");
-  const chatgptApp = oauthClients.find((c) => c.provider === "chatgpt");
   const customApps = oauthClients.filter((c) => c.provider === "custom");
+  // Apps created through the former Claude / ChatGPT presets. Connectors
+  // never used them (they self-register), so they are listed only to be
+  // cleaned up.
+  const legacyPresetApps = oauthClients.filter((c) => c.provider !== "custom");
 
   const cardProps = {
     onCopy: handleCopy,
@@ -292,117 +259,13 @@ export function OAuthAppsTabPanel() {
     <>
       <ErrorBanner error={error} />
 
-      {/* MCP Connection URL */}
-      <Section
-        title={`🔗 ${t("mcpConnection", { default: "MCP Connection" })}`}
-        description={t("mcpConnectionDesc", {
-          default: "MCP endpoint URL for all clients",
-        })}
-      >
-        <div className="space-y-3">
-          {workspaceScopedMcpUrl ? (
-            <div className="flex items-center gap-2">
-              <code className="flex-1 bg-blue-50 dark:bg-blue-900/30 px-4 py-3 rounded border border-blue-200 dark:border-blue-800 text-sm font-mono text-blue-800 dark:text-blue-200">
-                {workspaceScopedMcpUrl}
-              </code>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() =>
-                  handleCopy(workspaceScopedMcpUrl, "workspace-mcp-url")
-                }
-                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800"
-                title={t("copyMcpUrl", { default: "Copy MCP URL" })}
-                aria-label={t("copyMcpUrl", { default: "Copy MCP URL" })}
-              >
-                {isCopied("workspace-mcp-url") ? (
-                  <Check className="w-4 h-4 text-green-600" />
-                ) : (
-                  <Copy className="w-4 h-4" />
-                )}
-              </Button>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2">
-              <code className="flex-1 bg-blue-50 dark:bg-blue-900/30 px-4 py-3 rounded border border-blue-200 dark:border-blue-800 text-sm font-mono text-blue-800 dark:text-blue-200">
-                {mcpBaseUrl}
-              </code>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => handleCopy(mcpBaseUrl, "mcp-url")}
-                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800"
-                title={t("copyMcpUrl", { default: "Copy MCP URL" })}
-                aria-label={t("copyMcpUrl", { default: "Copy MCP URL" })}
-              >
-                {isCopied("mcp-url") ? (
-                  <Check className="w-4 h-4 text-green-600" />
-                ) : (
-                  <Copy className="w-4 h-4" />
-                )}
-              </Button>
-            </div>
-          )}
-        </div>
-      </Section>
-
-      {/* OAuth Applications */}
       <Section>
         <div className="space-y-6">
-          {/* Claude & ChatGPT Apps */}
-          {(
-            [
-              {
-                provider: "claude" as const,
-                app: claudeApp,
-                icon: "🧠",
-                title: t("claude"),
-                subtitle: t("claudeSubtitle"),
-              },
-              {
-                provider: "chatgpt" as const,
-                app: chatgptApp,
-                icon: "🤖",
-                title: t("chatgpt"),
-                subtitle: t("chatgptSubtitle"),
-              },
-            ] as const
-          ).map(({ provider, app, icon, title, subtitle }) => (
-            <div
-              key={provider}
-              className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4"
-            >
-              <div className="flex items-center gap-2 mb-3">
-                <span className="text-2xl">{icon}</span>
-                <div>
-                  <h3 className="font-semibold text-gray-900 dark:text-gray-100">
-                    {title}
-                  </h3>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">
-                    {subtitle}
-                  </p>
-                </div>
-              </div>
-
-              {app ? (
-                <OAuthAppCard app={app} copyKey={provider} {...cardProps} />
-              ) : (
-                <div className="bg-gray-50 dark:bg-gray-800 p-3 rounded border border-gray-200 dark:border-gray-700">
-                  <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">
-                    {t("noOAuthApp", { provider: title })}
-                  </p>
-                  <ActionButton
-                    onClick={() => handleCreateOAuthApp(provider)}
-                    icon={<Plus className="w-4 h-4" />}
-                  >
-                    {t("createOAuthApp", { provider: title })}
-                  </ActionButton>
-                </div>
-              )}
-            </div>
-          ))}
+          {/* Claude / ChatGPT / Cursor / Claude Code register themselves (DCR):
+              no app to create here for them. */}
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            {t("dcrNote")}
+          </p>
 
           {/* Custom OAuth Apps */}
           <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
@@ -419,7 +282,7 @@ export function OAuthAppsTabPanel() {
                 </div>
               </div>
               <ActionButton
-                onClick={() => handleCreateOAuthApp("custom")}
+                onClick={openCustomAppDialog}
                 icon={<Plus className="w-4 h-4" />}
                 variant="primary"
               >
@@ -433,7 +296,7 @@ export function OAuthAppsTabPanel() {
                 title={t("noCustomOAuthAppsTitle")}
                 description={t("noCustomApps")}
                 actionLabel={t("createCustomApp")}
-                onAction={() => handleCreateOAuthApp("custom")}
+                onAction={openCustomAppDialog}
               />
             ) : (
               <div className="space-y-4">
@@ -457,6 +320,40 @@ export function OAuthAppsTabPanel() {
               </div>
             )}
           </div>
+
+          {/* Apps created through the former Claude / ChatGPT presets */}
+          {legacyPresetApps.length > 0 && (
+            <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+              <h3 className="font-semibold text-gray-900 dark:text-gray-100 mb-3">
+                {t("legacyPresetsTitle")}
+              </h3>
+              <div className="space-y-4">
+                {legacyPresetApps.map((app) => (
+                  <div
+                    key={app.client_id}
+                    className="border-t border-gray-200 dark:border-gray-700 pt-4 first:border-t-0 first:pt-0"
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <h4 className="font-semibold text-gray-900 dark:text-gray-100">
+                        {app.client_name}
+                      </h4>
+                      <span className="text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 font-mono">
+                        {app.provider}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+                      {t("legacyPresetNote")}
+                    </p>
+                    <OAuthAppCard
+                      app={app}
+                      copyKey={`legacy-${app.client_id}`}
+                      {...cardProps}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </Section>
 

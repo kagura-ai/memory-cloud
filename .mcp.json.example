@@ -2,7 +2,7 @@
   "mcpServers": {
     "kagura-memory": {
       "type": "http",
-      "url": "http://localhost:8080/mcp/w/{workspace-id}",
+      "url": "http://localhost:8080/mcp",
       "headers": {
         "Authorization": "Bearer kagura_{your-api-key}"
       },

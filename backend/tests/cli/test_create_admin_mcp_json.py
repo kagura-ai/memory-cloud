@@ -62,11 +62,13 @@ class TestResolveMcpJsonPath:
 class TestWriteMcpJson:
     def test_writes_file_when_path_resolvable(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MCP_JSON_DIR", str(tmp_path))
-        ok = create_admin._write_mcp_json("test-key", "ws-123")
+        ok = create_admin._write_mcp_json("test-key")
         assert ok is True
         content = (tmp_path / ".mcp.json").read_text()
         assert "test-key" in content
-        assert "ws-123" in content
+        # The key is workspace-scoped, so the bare endpoint is written (#1836).
+        assert '"url": "http://localhost:8080/mcp"' in content
+        assert "/mcp/w/" not in content
 
     def test_does_not_raise_on_permission_error(self, tmp_path, monkeypatch, capsys):
         """Regression for #194: PermissionError must not propagate.
@@ -80,7 +82,7 @@ class TestWriteMcpJson:
         readonly.chmod(0o500)  # r-x only, no write
         monkeypatch.setenv("MCP_JSON_DIR", str(readonly))
         try:
-            ok = create_admin._write_mcp_json("test-key", "ws-123")
+            ok = create_admin._write_mcp_json("test-key")
         finally:
             readonly.chmod(0o700)  # restore so pytest can clean up
 
@@ -89,11 +91,11 @@ class TestWriteMcpJson:
         assert "Permission denied" in out or "Could not write" in out
         # Config printed as fallback so operator can copy-paste
         assert "test-key" in out
-        assert "ws-123" in out
+        assert "http://localhost:8080/mcp" in out
 
     def test_does_not_raise_when_no_writable_dir(self, monkeypatch, capsys):
         monkeypatch.setattr(create_admin, "_resolve_mcp_json_path", lambda: None)
-        ok = create_admin._write_mcp_json("test-key", "ws-123")
+        ok = create_admin._write_mcp_json("test-key")
         assert ok is False
         out = capsys.readouterr().out
         assert "test-key" in out  # fallback printed

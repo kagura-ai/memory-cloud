@@ -10,9 +10,9 @@ See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concep
 
 | Endpoint URL | `tools/list` returns | Approx. size |
 |--------------|----------------------|--------------|
-| `/mcp/w/{workspace_id}` (or `?profile=full`) | All 64 tools — the default, unchanged | ≈ 95k chars |
-| `/mcp/w/{workspace_id}?profile=core` | The 12 core tools: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback` | ≈ 32k chars (about 65% smaller) |
-| `/mcp/w/{workspace_id}?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 15k chars for these three |
+| `/mcp` (or `?profile=full`) | All 64 tools — the default, unchanged | ≈ 95k chars |
+| `/mcp?profile=core` | The 12 core tools: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback` | ≈ 32k chars (about 65% smaller) |
+| `/mcp?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 15k chars for these three |
 
 Sizes are the compact JSON of the `tools` array, measured at v0.78.0, which added a `title` and [annotations](#tool-annotations) to every tool (≈ 84k / 28k / 14k at v0.73.0, when the descriptions were trimmed; ≈ 111k / 45k / 23k at v0.72.0). Per-client instructions: [MCP Client Setup › List fewer tools](mcp-clients.md#list-fewer-tools).
 

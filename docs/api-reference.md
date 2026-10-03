@@ -5,7 +5,7 @@ Kagura Memory Cloud provides both REST APIs and MCP (Model Context Protocol) too
 ## Overview
 
 - **REST API Base URL**: `http://localhost:8080/api/v1`
-- **MCP Server Endpoint**: `http://localhost:8080/mcp/w/{WORKSPACE_ID}` (Streamable HTTP transport)
+- **MCP Server Endpoint**: `http://localhost:8080/mcp` (Streamable HTTP transport)
 - **OpenAPI Specification**: `http://localhost:8080/openapi.json`
 
 ## Authentication

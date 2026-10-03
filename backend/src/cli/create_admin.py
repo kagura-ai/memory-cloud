@@ -158,25 +158,27 @@ def _create_api_key(db: Session, user_id: str, workspace_id) -> str:
     return raw_key
 
 
-def _build_mcp_config(api_key: str, workspace_id: str) -> dict:
+def _build_mcp_config(api_key: str) -> dict:
+    # The API key is workspace-scoped, so the bare /mcp endpoint is enough;
+    # /mcp/w/<id> only pins an OAuth connector to one workspace (#1836).
     return {
         "mcpServers": {
             "kagura-memory": {
                 "type": "http",
-                "url": f"http://localhost:8080/mcp/w/{workspace_id}",
+                "url": "http://localhost:8080/mcp",
                 "headers": {"Authorization": f"Bearer {api_key}"},
             }
         }
     }
 
 
-def _write_mcp_json(api_key: str, workspace_id: str) -> bool:
+def _write_mcp_json(api_key: str) -> bool:
     """Write .mcp.json. Best-effort: on failure prints config to stdout.
 
     Returns True if file was written, False if skipped/fell back to stdout.
     Never raises — admin creation has already been committed by the caller.
     """
-    mcp_config = _build_mcp_config(api_key, workspace_id)
+    mcp_config = _build_mcp_config(api_key)
     mcp_path = _resolve_mcp_json_path()
 
     if mcp_path is None:
@@ -388,10 +390,10 @@ def create_admin(skip_mcp_json: bool = False):
         mcp_written = False
         if skip_mcp_json:
             print("\n==> Skipping .mcp.json (--skip-mcp-json)")
-            _print_mcp_config_fallback(_build_mcp_config(api_key, str(workspace.id)))
+            _print_mcp_config_fallback(_build_mcp_config(api_key))
         else:
             print("\n==> Writing .mcp.json...")
-            mcp_written = _write_mcp_json(api_key, str(workspace.id))
+            mcp_written = _write_mcp_json(api_key)
 
         print("\n" + "=" * 50)
         print("✓ Admin setup complete!")
@@ -399,7 +401,7 @@ def create_admin(skip_mcp_json: bool = False):
         print(f"  MFA:          {'enabled' if totp_enabled else 'disabled'}")
         print(f"  Workspace ID: {workspace.id}")
         print(f"  API Key:      {api_key}")
-        print(f"  MCP URL:      http://localhost:8080/mcp/w/{workspace.id}")
+        print("  MCP URL:      http://localhost:8080/mcp")
         print(f"  MCP:          {'.mcp.json written' if mcp_written else 'config printed above'}")
         print("  Login:        http://localhost:3000/login")
         print("=" * 50)

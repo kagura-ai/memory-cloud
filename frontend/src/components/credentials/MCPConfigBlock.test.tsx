@@ -166,6 +166,24 @@ describe("MCPConfigBlock", () => {
       expect(screen.queryByText(/claude mcp add/)).not.toBeInTheDocument();
     });
 
+    it("omits the OAuth one-liner and its manual-config label when includeOAuthCommand is false (#1836)", () => {
+      // The credentials page shows the one-liner in its connection card; the
+      // API-key tab then renders only the key-bearing .mcp.json snippet.
+      render(
+        <MCPConfigBlock
+          apiKey={VISIBLE_KEY}
+          mcpUrl={MCP_URL}
+          includeOAuthCommand={false}
+        />,
+      );
+      expect(screen.queryByText(/claude mcp add/)).not.toBeInTheDocument();
+      expect(screen.queryByText("claudeOAuthHeading")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText("claudeManualConfigLabel"),
+      ).not.toBeInTheDocument();
+      expect(screen.getByText(/"mcpServers"/)).toBeInTheDocument();
+    });
+
     it("copies the OAuth command via its copy button", async () => {
       render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
       fireEvent.click(

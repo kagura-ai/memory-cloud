@@ -12,8 +12,11 @@ import {
 } from "@/components/ui/tabs";
 import { useTabParam } from "@/hooks/useTabParam";
 import { APIKeysTabPanel } from "@/components/credentials/APIKeysTabPanel";
+import { McpConnectionCard } from "@/components/credentials/McpConnectionCard";
 import { OAuthAppsTabPanel } from "@/components/credentials/OAuthAppsTabPanel";
 
+// "oauth-apps" is kept as the URL value for existing links even though the
+// tab now holds custom apps only (#1836).
 const CREDENTIAL_TABS = ["api-keys", "oauth-apps"] as const;
 
 export default function CredentialsPage() {
@@ -28,6 +31,8 @@ export default function CredentialsPage() {
         <p>{t("featureGuide.overview")}</p>
         <p>{t("featureGuide.choosingMethod")}</p>
       </FeatureGuide>
+
+      <McpConnectionCard />
 
       <CategoryTabs value={tab} onValueChange={setTab}>
         <CategoryTabsList>

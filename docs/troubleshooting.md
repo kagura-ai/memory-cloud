@@ -10,7 +10,7 @@ Look at the endpoint URL your client stores — `"url"` in `.mcp.json` / `.gemin
 
 | URL ends with | The client lists |
 |---|---|
-| `/mcp/w/{workspace_id}` | All tools (default) |
+| `/mcp` | All tools (default) |
 | `?profile=core` | Core tools only — the 12 memory and context tools. Sleep, analyses, files, edges, secrets, resources and the agent control plane are left out |
 | `?tools=…` | Exactly the names in the list |
 
@@ -41,7 +41,7 @@ Replace the entry with the two keys Codex reads, and put the key itself in the e
 
 ```toml
 [mcp_servers.kagura-memory]
-url = "http://localhost:8080/mcp/w/{workspace_id}"
+url = "http://localhost:8080/mcp"
 bearer_token_env_var = "KAGURA_API_KEY"
 ```
 
@@ -135,7 +135,7 @@ OAuth is optional. You can skip the callback entirely by configuring a Bearer AP
      "mcpServers": {
       "kagura-memory": {
         "type": "http",
-        "url": "https://your-domain.com/mcp/w/{workspace_id}",
+        "url": "https://your-domain.com/mcp",
         "headers": {
           "Authorization": "Bearer kagura_{your_api_key}"
         }

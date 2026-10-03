@@ -141,6 +141,17 @@ export function buildCodexAddCommand(mcpUrl: string): string {
   return `codex mcp add kagura-memory --url ${shellUrlArg(mcpUrl)} --bearer-token-env-var ${CODEX_BEARER_TOKEN_ENV_VAR}`;
 }
 
+/**
+ * Build the Claude Code OAuth one-liner (#988):
+ * `claude mcp add --transport http kagura-memory <url>`. It needs no API key
+ * (Claude Code runs the OAuth browser flow on first use) and is shared with
+ * the credentials page's connection card (#1836), so the command the card
+ * shows and the one this block shows cannot drift apart.
+ */
+export function buildClaudeOAuthCommand(mcpUrl: string): string {
+  return `claude mcp add --transport http kagura-memory ${shellUrlArg(mcpUrl)}`;
+}
+
 export interface MCPConfigBlockProps {
   /**
    * The user's API key. `null` when no key has been created yet OR the
@@ -157,6 +168,13 @@ export interface MCPConfigBlockProps {
    * the production path needs no regex.
    */
   mcpBaseUrl?: string;
+  /**
+   * Render the Claude Code OAuth one-liner (and the "or configure manually"
+   * label) on the Claude Code tab. Default true. The credentials page passes
+   * false because its connection card already shows that command (#1836);
+   * the block then holds only the key-bearing snippets.
+   */
+  includeOAuthCommand?: boolean;
 }
 
 function readStoredClient(): MCPClient {
@@ -177,8 +195,9 @@ function readStoredClient(): MCPClient {
  *
  * SECURITY CONTRACT: `mcpUrl` and `authValue` MUST be server-issued or
  * known constants. They are NEVER user-controlled. Specifically:
- * - `mcpUrl` is `${baseUrl}/mcp/w/${currentWorkspaceId}` where baseUrl is
- *   from NEXT_PUBLIC_API_URL (build-time env) and currentWorkspaceId is a
+ * - `mcpUrl` is `${baseUrl}/mcp` (or the workspace-pinned
+ *   `${baseUrl}/mcp/w/${currentWorkspaceId}`) where baseUrl is from
+ *   NEXT_PUBLIC_API_URL (build-time env) and currentWorkspaceId is a
  *   backend-issued UUID.
  * - `authValue` is either the live API key (backend-issued), the masked
  *   constant `MASKED_KEY`, or the placeholder constant `PLACEHOLDER_KEY`.
@@ -304,6 +323,7 @@ export function MCPConfigBlock({
   apiKey,
   mcpUrl,
   mcpBaseUrl,
+  includeOAuthCommand = true,
 }: MCPConfigBlockProps) {
   const t = useTranslations("apiKeys");
   const tCommon = useTranslations("common");
@@ -424,8 +444,9 @@ export function MCPConfigBlock({
   // quotes the URL so the `?` survives the shell.
   const claudeOAuthCommand = useMemo(() => {
     const bareUrl = mcpBaseUrl ?? toBareMcpUrl(mcpUrl);
-    const url = coreOnly ? withCoreProfile(bareUrl) : bareUrl;
-    return `claude mcp add --transport http kagura-memory ${shellUrlArg(url)}`;
+    return buildClaudeOAuthCommand(
+      coreOnly ? withCoreProfile(bareUrl) : bareUrl,
+    );
   }, [mcpBaseUrl, mcpUrl, coreOnly]);
 
   // Track which Copy button the user pressed last, so the Check icon only
@@ -512,7 +533,7 @@ export function MCPConfigBlock({
                 use. Only for the claude-code client; ChatGPT does not use the
                 `claude mcp add` CLI. The existing .mcp.json JSON stays below as
                 the manual / API-key alternative. */}
-            {c === "claude-code" && (
+            {c === "claude-code" && includeOAuthCommand && (
               <div>
                 <h4 className="text-sm font-medium mb-2">
                   {t("claudeOAuthHeading")}
@@ -544,7 +565,7 @@ export function MCPConfigBlock({
                 </p>
               </div>
             )}
-            {c === "claude-code" && (
+            {c === "claude-code" && includeOAuthCommand && (
               <p className="text-xs font-medium text-gray-600 dark:text-gray-400 pt-1">
                 {t("claudeManualConfigLabel")}
               </p>

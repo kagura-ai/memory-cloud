@@ -732,7 +732,7 @@ export function SettingsTabPanel({
                         </div>
                         <div className="flex gap-3 mt-2 text-xs">
                           <a
-                            href="/workspace/integrations/credentials?tab=resource-tokens"
+                            href={`/workspace/resources/${context.resource_id}?tab=tokens`}
                             className="text-primary underline hover:text-primary/80"
                           >
                             {t("manageResourceTokens")}

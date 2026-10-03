@@ -227,17 +227,19 @@ Works with Claude Code, Claude Desktop, Claude Chat, ChatGPT, Gemini CLI, and an
 **Claude Code (3 steps):**
 
 1. Start services and open `http://localhost:3000/workspace/integrations/api-keys` to create an API key
-2. Copy `.mcp.json.example` to `.mcp.json` and fill in your workspace ID and API key:
+2. Copy `.mcp.json.example` to `.mcp.json` and fill in your API key (the key already carries its workspace):
 
 ```bash
 cp .mcp.json.example .mcp.json
-# Edit .mcp.json — set workspace_id (from URL bar) and API key
+# Edit .mcp.json — set the API key
 ```
 
 `.mcp.json.example` ships with the all-tools URL. Set `"url"` to one of:
 
-- **All tools (default):** `http://localhost:8080/mcp/w/{workspace_id}`
-- **Core tools only — smaller tool list:** `http://localhost:8080/mcp/w/{workspace_id}?profile=core`
+- **All tools (default):** `http://localhost:8080/mcp`
+- **Core tools only — smaller tool list:** `http://localhost:8080/mcp?profile=core`
+
+An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) uses the same `/mcp` URL and connects to the workspace selected in the web UI; `/mcp/w/{workspace_id}` pins such a connector to one workspace when you belong to several.
 
 Pick core when your client loads every tool schema at session start (it is about 65% smaller). It lists the 12 memory and context tools and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. See [Tool Profiles](docs/mcp-tools.md#tool-profiles).
 

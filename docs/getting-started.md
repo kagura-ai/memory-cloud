@@ -128,8 +128,10 @@ The Web UI MCP Setup Guide at `/workspace/integrations/credentials?tab=api-keys`
 
 Every snippet below takes one of two endpoint URLs — same server, same API key:
 
-- **All tools (default):** `http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID`
-- **Core tools only — smaller tool list:** `http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID?profile=core`
+- **All tools (default):** `http://localhost:8080/mcp`
+- **Core tools only — smaller tool list:** `http://localhost:8080/mcp?profile=core`
+
+The API key carries its workspace, so the URL needs no workspace segment. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) also uses `/mcp` and connects to the workspace selected in the web UI; `http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID` pins such a connector to one workspace when you belong to several.
 
 Pick core when your client loads every tool schema at session start (it is about 65% smaller). It lists the 12 memory and context tools and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. See [Tool Profiles](mcp-tools.md#tool-profiles) for the exact tool set. The snippets show the default URL; in the Web UI, the **Core tools only** switch above them writes `?profile=core` into every snippet.
 
@@ -142,7 +144,7 @@ The `create_admin` CLI automatically generates `.mcp.json`. If you need to creat
   "mcpServers": {
     "kagura-memory": {
       "type": "http",
-      "url": "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID",
+      "url": "http://localhost:8080/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_API_KEY"
       }
@@ -151,7 +153,7 @@ The `create_admin` CLI automatically generates `.mcp.json`. If you need to creat
 }
 ```
 
-Core tools only: set `"url"` to `"http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID?profile=core"` instead ([which one?](#which-url)). The generated `.mcp.json` and `.mcp.json.example` both carry the default URL.
+Core tools only: set `"url"` to `"http://localhost:8080/mcp?profile=core"` instead ([which one?](#which-url)). The generated `.mcp.json` and `.mcp.json.example` both carry the default URL.
 
 Restart Claude Code to pick up the config, then test with `remember` and `recall` tools.
 
@@ -167,11 +169,11 @@ ChatGPT custom connectors take a flatter shape — paste the URL and header into
 
 ```
 ChatGPT → Settings → Custom Connectors → New connector
-  URL: http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID
+  URL: http://localhost:8080/mcp
   Authorization: Bearer YOUR_API_KEY
 ```
 
-Core tools only: use `http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID?profile=core` as the URL instead ([which one?](#which-url)).
+Core tools only: use `http://localhost:8080/mcp?profile=core` as the URL instead ([which one?](#which-url)).
 
 ChatGPT runs no client hooks, so tool guardrails travel through the server: add `?guardrails=YOUR_CONTEXT_ID` to the URL (or `&guardrails=…` after `?profile=core`) and the connector's server instructions carry a digest of that context's guardrails — see [MCP Client Setup › ChatGPT web (developer mode)](mcp-clients.md#chatgpt-web-developer-mode).
 
@@ -183,7 +185,7 @@ Checked against Codex `rust-v0.155.1`. Codex reads the API key from an environme
 
 ```bash
 export KAGURA_API_KEY="kagura_xxxxxxxxxxxx"
-codex mcp add kagura-memory --url "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID" --bearer-token-env-var KAGURA_API_KEY
+codex mcp add kagura-memory --url "http://localhost:8080/mcp" --bearer-token-env-var KAGURA_API_KEY
 ```
 
 `codex mcp list` now shows `kagura-memory` with `KAGURA_API_KEY` as its bearer token env var. Export `KAGURA_API_KEY` in every shell you start Codex from (or in your shell profile).
@@ -194,13 +196,13 @@ The command writes this entry; paste it yourself if you prefer editing the file:
 
 ```toml
 [mcp_servers.kagura-memory]
-url = "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID"
+url = "http://localhost:8080/mcp"
 bearer_token_env_var = "KAGURA_API_KEY"
 ```
 
 These two keys only. Codex rejects an inline `bearer_token` on an HTTP server, and the whole `config.toml` then fails to load ([Troubleshooting](troubleshooting.md#codex-cli--bearer_token-is-not-supported-for-streamable_http)); `type` is not a Codex key.
 
-Core tools only: set `url = "http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID?profile=core"` instead ([which one?](#which-url)).
+Core tools only: set `url = "http://localhost:8080/mcp?profile=core"` instead ([which one?](#which-url)).
 
 Restart Codex CLI to pick up the config.
 

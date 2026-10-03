@@ -31,8 +31,6 @@ import {
 import { getContexts } from "@/lib/api/contexts";
 import type { Context } from "@/lib/types/context";
 import {
-  Copy,
-  Check,
   EyeOff,
   RefreshCw,
   Trash2,
@@ -45,7 +43,6 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { MaskedSecretField } from "@/components/common/MaskedSecretField";
 import { MCPConfigBlock } from "@/components/credentials/MCPConfigBlock";
 import { useAutoOpenOnFreshWindow } from "@/hooks/useAutoOpenOnFreshWindow";
-import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -120,24 +117,16 @@ export function APIKeysTabPanel() {
 
   const userId = user?.id;
 
-  // URLs
+  // The bare MCP endpoint for the key-bearing snippets. An API key carries
+  // its own workspace, so no `/w/<id>` segment is needed (#1836).
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
-  const baseUrl = apiUrl.replace(/\/api\/v1$/, "");
-  const mcpBaseUrl = baseUrl + "/mcp";
-  const workspaceScopedMcpUrl = currentWorkspaceId
-    ? `${baseUrl}/mcp/w/${currentWorkspaceId}`
-    : null;
+  const mcpUrl = apiUrl.replace(/\/api\/v1$/, "") + "/mcp";
 
   const [credentials, setCredentials] = useState<MemberCredentials | null>(
     null,
   );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  // Per-key copy feedback (independent timers per copy target — extracted
-  // into useCopyFeedback to fix the multi-target stale-state bug from the
-  // pre-batch single-shared-ref pattern).
-  const { isCopied, copyToTarget } = useCopyFeedback();
 
   // Dialog states
   const [showCreateKeyDialog, setShowCreateKeyDialog] = useState(false);
@@ -232,24 +221,6 @@ export function APIKeysTabPanel() {
   const [setupGuideOpen, setSetupGuideOpen] = useAutoOpenOnFreshWindow(
     credentials?.api_keys?.[0]?.visibility_expires_at ?? null,
   );
-
-  const handleCopy = async (text: string, key: string) => {
-    try {
-      await copyToTarget(text, key);
-    } catch {
-      // Clipboard write failure is a user-action failure (the user clicked
-      // a Copy button) — surface via destructive toast per the 3-channel
-      // error rule, not via silent console.error. copyText already tried the
-      // execCommand fallback (issue #987), so show an actionable, i18n'd hint
-      // instead of leaking the raw DOM exception string. The MCP URL is always
-      // visible in its <code> block, so the user can select + copy manually.
-      toast({
-        title: tCommon("error"),
-        description: tCommon("copyFailedManualHint"),
-        variant: "destructive",
-      });
-    }
-  };
 
   const handleHideAPIKeyClick = (keyId: string) => {
     setSelectedKeyId(keyId);
@@ -665,9 +636,10 @@ export function APIKeysTabPanel() {
       {/* API Keys Section */}
       <Section title={t("apiKeysTitle")} description={t("apiKeysDesc")}>
         <div className="space-y-4">
-          {/* MCP Setup Guide (Collapsible) — controlled state so the
-              auto-open useEffect can react to fresh visibility windows
-              after credentials load asynchronously. */}
+          {/* Key-bearing client snippets (Collapsible) — controlled state so
+              the auto-open useEffect can react to fresh visibility windows
+              after credentials load asynchronously. The endpoint itself and
+              the OAuth paths live in McpConnectionCard above the tabs. */}
           <Collapsible
             className="border border-blue-200 dark:border-blue-800 rounded-lg"
             open={setupGuideOpen}
@@ -683,99 +655,15 @@ export function APIKeysTabPanel() {
                 aria-hidden="true"
               />
             </CollapsibleTrigger>
-            <CollapsibleContent className="p-4 bg-blue-50 dark:bg-blue-900/20 space-y-4">
-              {/* MCP URL */}
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                  MCP URL:
-                </span>
-                <code className="flex-1 bg-blue-100 dark:bg-blue-900/40 px-2 py-1 rounded border border-blue-200 dark:border-blue-800 text-xs font-mono text-blue-800 dark:text-blue-200">
-                  {workspaceScopedMcpUrl || mcpBaseUrl}
-                </code>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  onClick={() =>
-                    handleCopy(workspaceScopedMcpUrl || mcpBaseUrl, "mcp-url")
-                  }
-                  className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-800"
-                  title={t("copyMcpUrl")}
-                  aria-label={t("copyMcpUrl")}
-                >
-                  {isCopied("mcp-url") ? (
-                    <Check className="w-3.5 h-3.5 text-green-600" />
-                  ) : (
-                    <Copy className="w-3.5 h-3.5" />
-                  )}
-                </Button>
-              </div>
-
-              {/* Config Example */}
-              <div>
-                <p className="font-semibold text-gray-900 dark:text-gray-100 mb-2 text-sm">
-                  {t("mcpConfigTitle")}
-                </p>
-                <MCPConfigBlock
-                  apiKey={apiKeys[0] ?? null}
-                  mcpUrl={workspaceScopedMcpUrl || mcpBaseUrl}
-                  mcpBaseUrl={mcpBaseUrl}
-                />
-              </div>
+            <CollapsibleContent className="p-4 bg-blue-50 dark:bg-blue-900/20">
+              <MCPConfigBlock
+                apiKey={apiKeys[0] ?? null}
+                mcpUrl={mcpUrl}
+                mcpBaseUrl={mcpUrl}
+                includeOAuthCommand={false}
+              />
             </CollapsibleContent>
           </Collapsible>
-
-          {/* SDK & Integration Links */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <a
-              href="https://github.com/kagura-ai/kagura-memory-python-sdk"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-3 p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
-            >
-              <span className="text-lg">🐍</span>
-              <div>
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                  {t("sdkLinks.pythonSdk")}
-                </p>
-                <p className="text-xs text-gray-500 dark:text-gray-400">
-                  pip install kagura-memory
-                </p>
-              </div>
-            </a>
-            <a
-              href={`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080"}/redoc`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-3 p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
-            >
-              <span className="text-lg">📘</span>
-              <div>
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                  {t("sdkLinks.restApi")}
-                </p>
-                <p className="text-xs text-gray-500 dark:text-gray-400">
-                  ReDoc / OpenAPI
-                </p>
-              </div>
-            </a>
-            <a
-              href="https://github.com/kagura-ai/memory-cloud#claude-code-recommended"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-3 p-3 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
-            >
-              <span className="text-lg">🤖</span>
-              <div>
-                <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                  {t("sdkLinks.claudeCode")}
-                </p>
-                <p className="text-xs text-gray-500 dark:text-gray-400">
-                  .mcp.json
-                </p>
-              </div>
-            </a>
-          </div>
 
           {/* Create API Key Button */}
           <div>

@@ -4,13 +4,16 @@ How to connect MCP clients (Claude Code, Claude Desktop/Chat, ChatGPT, Gemini CL
 
 ## Which URL?
 
-Every client below takes one of two endpoint URLs — same server, same API key:
+Every client below takes one of two endpoint URLs — same server, same credentials:
 
 | | Endpoint URL |
 |---|---|
-| **All tools (default)** | `…/mcp/w/{workspace_id}` |
-| **Core tools only — smaller tool list** | `…/mcp/w/{workspace_id}?profile=core` |
-| **Guardrail digest** (clients without tool hooks) | `…/mcp/w/{workspace_id}?guardrails=<context_id>` (off: `?guardrails=off`) |
+| **All tools (default)** | `…/mcp` |
+| **Core tools only — smaller tool list** | `…/mcp?profile=core` |
+| **Guardrail digest** (clients without tool hooks) | `…/mcp?guardrails=<context_id>` (off: `?guardrails=off`) |
+| **Pinned to one workspace** (OAuth client, several workspaces) | `…/mcp/w/{workspace_id}` — takes the same query parameters |
+
+An API key carries its workspace, so `/mcp` is all it needs. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) signs in on first connect and follows the workspace selected in the web UI; use the pinned form to keep one connector on one workspace.
 
 Pick core when your client loads every tool schema at session start (it is about 65% smaller). It lists the 12 memory and context tools and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. The exact tool set and sizes are in [Tool Profiles](mcp-tools.md#tool-profiles); a narrower allowlist (`?tools=…`) is under [List fewer tools](#list-fewer-tools). The Web UI's MCP Setup Guide has a **Core tools only** switch that writes the query into its snippets for you.
 
@@ -35,13 +38,13 @@ Claude Code + Kagura Memory Cloud gives your AI assistant **persistent, searchab
 
 ```bash
 cp .mcp.json.example .mcp.json
-# Edit .mcp.json — set workspace_id (from URL bar) and API key
+# Edit .mcp.json — set the API key (it already carries its workspace)
 ```
 
 `.mcp.json.example` ships with the all-tools URL (JSON has no comments, so the choice is spelled out here). Set `"url"` to one of — see [Which URL?](#which-url):
 
-- **All tools (default):** `http://localhost:8080/mcp/w/{workspace_id}`
-- **Core tools only — smaller tool list:** `http://localhost:8080/mcp/w/{workspace_id}?profile=core`
+- **All tools (default):** `http://localhost:8080/mcp`
+- **Core tools only — smaller tool list:** `http://localhost:8080/mcp?profile=core`
 
 3. Restart Claude Code and verify:
 ```
@@ -66,7 +69,7 @@ Kagura Memory Cloud includes a hook that **automatically syncs** Claude Code's l
 Add these environment variables to `.env.local`:
 
 ```bash
-KAGURA_MCP_URL=http://localhost:8080/mcp/w/{workspace_id}
+KAGURA_MCP_URL=http://localhost:8080/mcp
 KAGURA_MCP_TOKEN=kagura_{your_api_key}
 KAGURA_CONTEXT_ID={context_id}  # optional — auto-detected from project name if omitted
 ```
@@ -204,9 +207,9 @@ An MCP entry that worked can lose its sign-in: the token expired or was revoked,
 **Claude Chat (claude.ai)**: Add as a remote MCP server in Settings > Integrations:
 1. Click "Add Integration" → "Custom MCP Server"
 2. Enter the MCP endpoint URL ([which one?](#which-url)):
-   - **All tools (default):** `https://your-domain.com/mcp/w/{workspace_id}`
-   - **Core tools only — smaller tool list:** `https://your-domain.com/mcp/w/{workspace_id}?profile=core`
-3. Add the `Authorization: Bearer kagura_{your_api_key}` header
+   - **All tools (default):** `https://your-domain.com/mcp`
+   - **Core tools only — smaller tool list:** `https://your-domain.com/mcp?profile=core`
+3. Connect — Claude registers itself (Dynamic Client Registration) and opens the Kagura sign-in; no OAuth app to create. To use an API key instead, add the `Authorization: Bearer kagura_{your_api_key}` header.
 
 > Claude Chat requires a publicly accessible URL (not `localhost`). Use a production deployment or tunnel (e.g., ngrok, Cloudflare Tunnel).
 
@@ -216,9 +219,9 @@ Neither client runs tool hooks, so the server sends its `instructions` on `initi
 
 ChatGPT desktop app supports MCP servers. Add via Settings > MCP Servers:
 1. Server URL ([which one?](#which-url)):
-   - **All tools (default):** `https://your-domain.com/mcp/w/{workspace_id}`
-   - **Core tools only — smaller tool list:** `https://your-domain.com/mcp/w/{workspace_id}?profile=core`
-2. Authentication: Bearer token `kagura_{your_api_key}`
+   - **All tools (default):** `https://your-domain.com/mcp`
+   - **Core tools only — smaller tool list:** `https://your-domain.com/mcp?profile=core`
+2. Authentication: OAuth — ChatGPT registers itself and opens the Kagura sign-in (no OAuth app to create). Alternatively a Bearer token `kagura_{your_api_key}`.
 
 > Like Claude Chat, ChatGPT requires a public URL. For local development, use a tunnel or the REST API directly.
 
@@ -226,7 +229,7 @@ ChatGPT desktop app supports MCP servers. Add via Settings > MCP Servers:
 
 ChatGPT web (and ChatGPT Work on the web) runs no client-side hooks, so [tool guardrails](mcp-tools.md#tool-guardrails) reach the model through the server instead:
 
-- **Server instructions** — add `?guardrails=<context_id>` to the connector's Server URL, in the same query as `?profile=` (`https://your-domain.com/mcp/w/{workspace_id}?profile=core&guardrails=<context_id>`). `server/discover` then returns the base instructions plus a digest of that context's tool guardrails: up to 5 entries, one line each, at most 1,200 characters in total. ChatGPT reads the instructions at connect time and on **Refresh** in developer mode — the digest is a snapshot until the next refresh. `?guardrails=off` switches both server lanes off.
+- **Server instructions** — add `?guardrails=<context_id>` to the connector's Server URL, in the same query as `?profile=` (`https://your-domain.com/mcp?profile=core&guardrails=<context_id>`). `server/discover` then returns the base instructions plus a digest of that context's tool guardrails: up to 5 entries, one line each, at most 1,200 characters in total. ChatGPT reads the instructions at connect time and on **Refresh** in developer mode — the digest is a snapshot until the next refresh. `?guardrails=off` switches both server lanes off.
 - **`get_context_info.guardrails`** — on by default for every URL: the session-start call returns the context's guardrails per call, nothing to configure.
 
 Who writes what you see: a context editor or above, with a user credential (an agent-bound key cannot author a guardrail). The digest reaches **every** conversation of the connector, and a connector configured with one shared API key serves that key's digest to every user of the connector. Use `?guardrails=<context_id>` only for a context whose editor list you control; for a shared workspace context prefer the per-session `get_context_info.guardrails` lane. Preview exactly what a credential receives with `GET /api/v1/memory/guardrails/digest?context_id=<uuid>&target=instructions` ([API Reference](api-reference.md#get-apiv1memoryguardrailsdigest)); the full rules are in [MCP Tools › Server instructions](mcp-tools.md#server-instructions).
@@ -239,7 +242,7 @@ Add to `.gemini/settings.json` (project root or `~/.gemini/settings.json`):
 {
   "mcpServers": {
     "kagura-memory": {
-      "url": "http://localhost:8080/mcp/w/{workspace_id}",
+      "url": "http://localhost:8080/mcp",
       "headers": {
         "Authorization": "Bearer kagura_{your_api_key}"
       }
@@ -248,7 +251,7 @@ Add to `.gemini/settings.json` (project root or `~/.gemini/settings.json`):
 }
 ```
 
-That `"url"` is the **all tools (default)** one. For **core tools only — smaller tool list**, use `"http://localhost:8080/mcp/w/{workspace_id}?profile=core"` ([which one?](#which-url)).
+That `"url"` is the **all tools (default)** one. For **core tools only — smaller tool list**, use `"http://localhost:8080/mcp?profile=core"` ([which one?](#which-url)).
 
 ## Codex cloud
 
@@ -337,7 +340,7 @@ Only the URL changes; the `Authorization` header stays as it is. The client sect
 | ChatGPT | Server URL |
 | Gemini CLI | `"url"` in `.gemini/settings.json` |
 | Cursor | `"url"` of the `mcpServers` entry (same shape as Claude Code) |
-| Codex CLI | `url = "http://localhost:8080/mcp/w/{workspace_id}?profile=core"` in `~/.codex/config.toml` |
+| Codex CLI | `url = "http://localhost:8080/mcp?profile=core"` in `~/.codex/config.toml` |
 
 Restart or reconnect the client afterwards so it lists tools again. A typo in `profile`, or a `tools` list that matches nothing, makes `tools/list` fail with an error naming the valid values rather than silently falling back to the full list.
 

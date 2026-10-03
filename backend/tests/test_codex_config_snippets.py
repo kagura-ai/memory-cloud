@@ -136,7 +136,11 @@ def test_codex_section_uses_one_auth_shape(relative_path, heading):
         assert server.get("bearer_token_env_var") == BEARER_TOKEN_ENV_VAR, (
             f"{relative_path}: the snippet must name {BEARER_TOKEN_ENV_VAR} in bearer_token_env_var"
         )
-        assert "/mcp/w/" in server["url"], f"{relative_path}: url is not a workspace endpoint"
+        # The bare /mcp endpoint is the documented default (the API key carries
+        # its workspace, #1836); /mcp/w/<id> pins an OAuth connector and stays valid.
+        assert re.search(r"/mcp(/w/[^/?]+)?(\?|$)", server["url"]), (
+            f"{relative_path}: url is not an MCP endpoint"
+        )
 
 
 def test_every_published_toml_snippet_uses_only_codex_streamable_http_keys():
