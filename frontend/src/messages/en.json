@@ -288,7 +288,7 @@
     "registrationDisabled": "Registration is disabled. Please ask an admin for an invitation.",
     "emailInUse": "This email is already linked to another sign-in method. Please use the provider you originally signed in with.",
     "signinCancelled": "Sign-in cancelled. You can try again or choose a different method.",
-    "linkHint": "An account with this email already exists. Sign in with your original provider, then link this one from your profile.",
+    "linkHint": "An account with this email already exists. Sign in with your original provider, then link this one from your settings.",
     "oauthFailed": "Sign-in failed. Please try again.",
     "oauthExpired": "The sign-in link has expired. Please try again.",
     "termsRequired": "No account was created: please agree to the Terms of Service and Privacy Policy below, then sign in again.",
@@ -4221,7 +4221,7 @@
     "emailSentBody": "We've sent a confirmation link to your account email address. Click it to start the 7-day cooling-off period.",
     "requestError": "Could not start account deletion. Please try again.",
     "confirmError": "Could not confirm deletion. Check your password and try again.",
-    "confirmTokenExpired": "This deletion request has expired or was already used. Please start again from your profile.",
+    "confirmTokenExpired": "This deletion request has expired or was already used. Please start again from your settings.",
     "workspaceTransferError": "You are the sole owner of a shared workspace. Transfer ownership (or remove the other members) before deleting your account.",
     "alreadyRequested": "You already have an account deletion request in progress.",
     "pendingTitle": "Deletion awaiting confirmation",
@@ -4235,10 +4235,10 @@
     "cancelError": "Could not cancel the deletion. Please try again.",
     "confirmPageLoading": "Confirming…",
     "confirmPageSuccessTitle": "Deletion confirmed",
-    "confirmPageSuccessBody": "Your account is scheduled for deletion on {date}. You can cancel from your profile until then.",
+    "confirmPageSuccessBody": "Your account is scheduled for deletion on {date}. You can cancel from your settings until then.",
     "confirmPageInvalidTitle": "Link expired or already used",
-    "confirmPageInvalidBody": "This confirmation link is no longer valid. If you still want to delete your account, start again from your profile.",
-    "goToProfile": "Go to profile",
+    "confirmPageInvalidBody": "This confirmation link is no longer valid. If you still want to delete your account, start again from your settings.",
+    "goToProfile": "Go to settings",
     "protectedAccount": "This is the protected initial administrator account and cannot be deleted."
   },
   "termsReaccept": {
@@ -4454,9 +4454,9 @@
       "submitting": "Saving…",
       "successTitle": "Password set",
       "successBody": "You can now sign in with your email address and this password.",
-      "continue": "Go to your profile",
+      "continue": "Go to your settings",
       "invalidTitle": "This link can't be used",
-      "invalidBody": "The link is invalid, was already used, or has expired. Request a new one from your profile."
+      "invalidBody": "The link is invalid, was already used, or has expired. Request a new one from your settings."
     }
   },
   "passwordSettings": {

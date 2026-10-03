@@ -494,7 +494,7 @@ When the person keeps using both accounts, link them:
    password sign-in always starts a new browser session, so it comes first.
 2. From the account switcher, choose **Add another account** and sign in with
    the OAuth account. The browser session now holds both.
-3. Open **Profile Settings**, find **Linked accounts**, and link the other
+3. Open **Settings** from the user menu, find **Linked accounts**, and link the other
    account — within 10 minutes of the two proofs (see below; for a Google
    account, use **Confirm with Google** there).
 
@@ -588,7 +588,7 @@ What it does not do:
 - A share key recalls as the account that issued it, so it also returns what
   a linked account wrote in that account's private context.
 
-Either account can unlink from **Profile Settings**; the other one does not
+Either account can unlink from **Settings**; the other one does not
 have to be signed in. At most 4 accounts can be linked together. In a set of
 three or more, unlinking takes one other account out and keeps the rest
 linked to you; **Leave** (#1807) takes this account out and keeps the others
