@@ -96,7 +96,7 @@ async def test_forget_by_query_log_has_no_raw_query():
 
     service = MemoryService(MagicMock())
     ws, ctx, mid = uuid4(), uuid4(), uuid4()
-    row = MagicMock(id=mid, workspace_id=ws, context_id=ctx, deleted_at=None)
+    row = MagicMock(id=mid, point_id=mid, workspace_id=ws, context_id=ctx, deleted_at=None)
     service.context_service.get_context = AsyncMock(return_value=MagicMock(id=ctx, workspace_id=ws))
     service.recall = AsyncMock(
         return_value=SimpleNamespace(

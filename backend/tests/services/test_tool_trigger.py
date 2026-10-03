@@ -231,6 +231,9 @@ async def test_remember_rejects_tool_trigger_from_an_agent_credential(service, p
 def _memory(details, **overrides):
     m = MagicMock()
     m.id = uuid4()
+    # #1829: a mock row needs the point id the real model derives from
+    # summary_embedding_id; an API-written memory's point id is its row id.
+    m.point_id = m.id
     m.user_id = "test_user"
     m.workspace_id = uuid4()
     m.context_id = uuid4()
