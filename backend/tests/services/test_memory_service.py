@@ -2074,6 +2074,9 @@ class TestExploreAccessStats:
     @pytest.mark.asyncio
     async def test_explore_bumps_seed_when_seed_not_in_graph(self, service):
         """Path A: has_node() returns False → only seed is bumped, then return."""
+        # #1834: the seed context's privacy is read with the real session; the
+        # mocked one cannot be awaited, so answer "shared" (per-account graph).
+        service._is_private_context = AsyncMock(return_value=False)
         from models.schemas import ExploreRequest
 
         seed_id = uuid4()

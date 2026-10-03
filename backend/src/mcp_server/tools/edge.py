@@ -31,7 +31,7 @@ from services.edge_service import (
 from services.edge_service import (
     edge_to_dict as _edge_to_dict,
 )
-from services.identity_link_service import linked_user_ids
+from services.identity_link_service import link_set_reads
 from utils.response_budget import BudgetArgumentError, parse_limit
 
 # #1743: list_edges pages each direction. A hub memory can hold thousands of
@@ -143,7 +143,7 @@ async def handle_list_edges(
             ws_id = str(context.workspace_id)
             ctx_id = str(context.id)
             # #1834: a private context's edges are read for its whole identity-link set.
-            owner_filter = await linked_user_ids(db, user_id) if context.is_private else None
+            owner_filter = await link_set_reads(db, user_id, context.is_private)
 
             repo = NeuralEdgeRepository(db)
 

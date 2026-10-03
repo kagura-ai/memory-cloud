@@ -196,20 +196,24 @@ class TestMemoryHealthCoversTheSet:
         assert other not in owned and shared not in owned
 
     @pytest.mark.asyncio
-    async def test_signals_in_a_covered_context_count_whoever_wrote_them(self, db_session):
+    async def test_signals_in_a_covered_context_count_the_link_sets_rows(self, db_session):
         """The same scoping for every signal: B's merge losers in B's private
-        context show up in A's report, B's rows elsewhere do not."""
-        a, b = f"a-{uuid4().hex[:6]}", f"b-{uuid4().hex[:6]}"
+        context show up in A's report; B's rows elsewhere, and an unlinked
+        member's rows inside A's own shared context, do not."""
+        a, b, m = f"a-{uuid4().hex[:6]}", f"b-{uuid4().hex[:6]}", f"m-{uuid4().hex[:6]}"
         await _link(db_session, a, b)
         ws, linked = await _private_scope(db_session, b)
         _, elsewhere = await _private_scope(db_session, b)
         (await db_session.get(Context, elsewhere)).is_private = False
+        ws_a, mine_shared = await _private_scope(db_session, a)
+        (await db_session.get(Context, mine_shared)).is_private = False
         await db_session.flush()
-        for ctx in (linked, elsewhere):
-            loser = Memory(
+
+        def loser(user_id: str, workspace_id, ctx) -> Memory:
+            return Memory(
                 id=uuid4(),
-                user_id=b,
-                workspace_id=ws,
+                user_id=user_id,
+                workspace_id=workspace_id,
                 context_id=ctx,
                 summary="merge loser",
                 content="c",
@@ -219,12 +223,18 @@ class TestMemoryHealthCoversTheSet:
                 deleted_by=DELETED_BY_SLEEP_MERGE,
                 deleted_at=utcnow(),
             )
-            db_session.add(loser)
+
+        db_session.add_all(
+            [loser(b, ws, linked), loser(b, ws, elsewhere), loser(m, ws_a, mine_shared)]
+        )
         await db_session.flush()
         svc = MemoryHealthService(db_session)
         owned_ids = frozenset(cid for cid, _ in await svc._fetch_owned_contexts(a))
+        assert {linked, mine_shared} <= owned_ids
 
-        backlogs = await svc._fetch_merge_backlogs(a, owned_ids=owned_ids)
+        signals = await svc._fetch_signals(a, owned_ids=owned_ids)
+        backlogs = signals["backlogs"]
 
         assert backlogs[linked]["count"] == 1
         assert elsewhere not in backlogs
+        assert mine_shared not in backlogs  # M is a member, not a linked owner

@@ -88,6 +88,17 @@ def owned_by(column: Any, user_id: str) -> ColumnElement[bool]:
     return or_(column == user_id, column.in_(linked_ids_subquery(user_id)))
 
 
+async def link_set_reads(
+    db: AsyncSession, user_id: str, context_is_private: bool
+) -> frozenset[str] | None:
+    """The owner filter a graph READ uses (#1834): inside a private context the
+    identity-link set (``user_id`` and every account linked to it), elsewhere
+    None — no creator filter, the shared-context rule. Writes never use it."""
+    if not context_is_private:
+        return None
+    return await linked_user_ids(db, user_id)
+
+
 async def linked_user_ids(db: AsyncSession, user_id: str) -> frozenset[str]:
     """``user_id`` plus every account linked to it."""
     rows = await db.execute(

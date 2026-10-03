@@ -462,7 +462,7 @@ class NeuralEdgeRepository:
 
     async def get_edge(
         self,
-        user_id: str,
+        user_id: str | frozenset[str],
         src_id: UUID,
         dst_id: UUID,
         workspace_id: str | None = None,
@@ -481,7 +481,7 @@ class NeuralEdgeRepository:
             Edge or None if not found
         """
         conditions = [
-            NeuralMemoryEdge.user_id == user_id,
+            owner_condition(user_id),
             NeuralMemoryEdge.src_id == src_id,
             NeuralMemoryEdge.dst_id == dst_id,
         ]

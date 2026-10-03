@@ -70,7 +70,7 @@ from repositories.memory import MemoryRepository
 from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
-from services.identity_link_service import linked_user_ids, owned_by
+from services.identity_link_service import link_set_reads, owned_by
 from services.persistence import persistence_info
 from services.query_router import classify_query
 from services.recall_selection import (
@@ -5180,18 +5180,9 @@ class MemoryService:
         # (the accounts that own it together), so a seed written by a linked
         # account is in the graph and the spread crosses its edges; shared
         # contexts and every write stay per account.
-        owner_ids: frozenset[str] | None = None
-        if current_context_id:
-            try:
-                is_private = await self.db.scalar(
-                    select(Context.is_private).where(Context.id == current_context_id)
-                )
-                if is_private:
-                    owner_ids = await linked_user_ids(self.db, user_id)
-            except Exception:
-                # Fail narrow: the caller's own graph, as before #1834.
-                logger.warning("explore_owner_set_unresolved", user_id=user_id)
-                owner_ids = None
+        owner_ids = await link_set_reads(
+            self.db, user_id, await self._is_private_context(current_context_id)
+        )
         graph_service = GraphService(
             user_id=user_id,
             db=self.db,
@@ -5597,16 +5588,10 @@ class MemoryService:
 
         # #1834: in a private context the results include a linked account's
         # memories, so their degrees count the link set's edges as well.
-        degree_owner: str | frozenset[str] = user_id
-        if context_id is not None:
-            try:
-                is_private = await self.db.scalar(
-                    select(Context.is_private).where(Context.id == context_id)
-                )
-                if is_private:
-                    degree_owner = await linked_user_ids(self.db, user_id)
-            except Exception:
-                degree_owner = user_id
+        degree_owner: str | frozenset[str] = (
+            await link_set_reads(self.db, user_id, await self._is_private_context(context_id))
+            or user_id
+        )
 
         degree_map: dict[UUID, int] = {}
         for resp in top_n:

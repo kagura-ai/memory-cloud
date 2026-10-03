@@ -17,7 +17,7 @@ from db.base import get_db
 from models.memory import Memory
 from services.edge_service import VALID_EDGE_TYPES, create_declared_edge
 from services.graph_service import GraphService
-from services.identity_link_service import linked_user_ids
+from services.identity_link_service import link_set_reads
 from services.permission_service import PermissionService
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
@@ -209,7 +209,7 @@ async def get_graph_stats(
         str_context_id = str(context.id)
         # #1834: inside a private context the edges of every account that owns it
         # (the identity-link set) are read together; shared contexts stay unfiltered.
-        owner_filter = await linked_user_ids(db, user_id) if context.is_private else None
+        owner_filter = await link_set_reads(db, user_id, context.is_private)
 
         graph_service = GraphService(
             user_id, db, workspace_id=workspace_id, context_id=str_context_id
@@ -310,7 +310,7 @@ async def get_graph_data(
         str_context_id = str(context.id)
         # #1834: inside a private context the edges of every account that owns it
         # (the identity-link set) are read together; shared contexts stay unfiltered.
-        owner_filter = await linked_user_ids(db, user_id) if context.is_private else None
+        owner_filter = await link_set_reads(db, user_id, context.is_private)
 
         graph_service = GraphService(
             user_id, db, workspace_id=workspace_id, context_id=str_context_id

@@ -223,16 +223,26 @@ class MemoryHealthService:
         )
 
     @staticmethod
-    def _rows_of(user_col: Any, context_col: Any, user_id: str, owned_ids: frozenset) -> Any:
+    def _rows_of(
+        user_col: Any,
+        context_col: Any,
+        user_id: str,
+        owners: frozenset[str] | None,
+        owned_ids: frozenset,
+    ) -> Any:
         """Rows the report counts: the caller's own anywhere (they may sit in
         a context the caller does not own, or in none — the unattributed
-        bucket), plus every row inside a context the report covers, whichever
-        account of the link set wrote it (#1834). The same predicate scopes
-        windows, backlogs, graphs and usage, so a covered context is graded
-        on signals that belong together."""
-        if not owned_ids:
+        bucket), plus the rows a LINKED account wrote inside a context the
+        report covers (#1834). Other members of the caller's shared contexts
+        stay out, as before. The same predicate scopes windows, backlogs,
+        graphs and usage, so a covered context is graded on signals that
+        belong together."""
+        if not owned_ids or not owners or owners <= {user_id}:
             return user_col == user_id
-        return or_(user_col == user_id, context_col.in_(owned_ids))
+        return or_(
+            user_col == user_id,
+            and_(context_col.in_(owned_ids), user_col.in_(owners)),
+        )
 
     async def _fetch_signals(
         self, user_id: str, scope: Any = _ALL, owned_ids: frozenset = frozenset()
@@ -240,11 +250,12 @@ class MemoryHealthService:
         """All grouped signal maps, one query per signal (no per-context
         fan-out — the gate1 N+1 concern). ``scope`` (a context UUID) narrows
         every query to one partition for the detail path."""
+        owners = await linked_user_ids(self.db, user_id) if owned_ids else None
         return {
-            "windows": await self._fetch_sleep_windows(user_id, scope, owned_ids),
-            "backlogs": await self._fetch_merge_backlogs(user_id, scope, owned_ids),
-            "graphs": await self._fetch_graph_stats(user_id, scope, owned_ids),
-            "usage": await self._fetch_usage_counts(user_id, scope, owned_ids),
+            "windows": await self._fetch_sleep_windows(user_id, scope, owned_ids, owners),
+            "backlogs": await self._fetch_merge_backlogs(user_id, scope, owned_ids, owners),
+            "graphs": await self._fetch_graph_stats(user_id, scope, owned_ids, owners),
+            "usage": await self._fetch_usage_counts(user_id, scope, owned_ids, owners),
             "postures": await self._fetch_config_postures(user_id, scope, owned_ids),
         }
 
@@ -366,7 +377,11 @@ class MemoryHealthService:
         return (row.display_name or row.name) if row else None
 
     async def _fetch_sleep_windows(
-        self, user_id: str, scope: Any = _ALL, owned_ids: frozenset = frozenset()
+        self,
+        user_id: str,
+        scope: Any = _ALL,
+        owned_ids: frozenset = frozenset(),
+        owners: frozenset[str] | None = None,
     ) -> dict[uuid.UUID | None, list[dict[str, Any]]]:
         """Most recent sleep reports per context (newest first), flattened.
 
@@ -383,7 +398,7 @@ class MemoryHealthService:
             .label("rn")
         )
         conditions = [
-            self._rows_of(SleepReport.user_id, SleepReport.context_id, user_id, owned_ids),
+            self._rows_of(SleepReport.user_id, SleepReport.context_id, user_id, owners, owned_ids),
             SleepReport.started_at >= utcnow() - timedelta(days=_WINDOW_LOOKBACK_DAYS),
         ]
         if scope is not _ALL:
@@ -424,11 +439,15 @@ class MemoryHealthService:
         return dict(windows)
 
     async def _fetch_merge_backlogs(
-        self, user_id: str, scope: Any = _ALL, owned_ids: frozenset = frozenset()
+        self,
+        user_id: str,
+        scope: Any = _ALL,
+        owned_ids: frozenset = frozenset(),
+        owners: frozenset[str] | None = None,
     ) -> dict[uuid.UUID | None, dict[str, Any]]:
         """Soft-deleted merge losers per context: count + oldest age (days)."""
         conditions = [
-            self._rows_of(Memory.user_id, Memory.context_id, user_id, owned_ids),
+            self._rows_of(Memory.user_id, Memory.context_id, user_id, owners, owned_ids),
             Memory.deleted_by == DELETED_BY_SLEEP_MERGE,
             Memory.deleted_at.is_not(None),
         ]
@@ -451,15 +470,21 @@ class MemoryHealthService:
         return backlogs
 
     async def _fetch_graph_stats(
-        self, user_id: str, scope: Any = _ALL, owned_ids: frozenset = frozenset()
+        self,
+        user_id: str,
+        scope: Any = _ALL,
+        owned_ids: frozenset = frozenset(),
+        owners: frozenset[str] | None = None,
     ) -> dict[uuid.UUID | None, dict[str, Any]]:
         """Edge composition, weight-invariant violations and density, per
         context. Edges always carry a context; active memories may not."""
         edge_conditions = [
-            self._rows_of(NeuralMemoryEdge.user_id, NeuralMemoryEdge.context_id, user_id, owned_ids)
+            self._rows_of(
+                NeuralMemoryEdge.user_id, NeuralMemoryEdge.context_id, user_id, owners, owned_ids
+            )
         ]
         memory_conditions = [
-            self._rows_of(Memory.user_id, Memory.context_id, user_id, owned_ids),
+            self._rows_of(Memory.user_id, Memory.context_id, user_id, owners, owned_ids),
             Memory.deleted_at.is_(None),
         ]
         if scope is not _ALL:
@@ -515,7 +540,11 @@ class MemoryHealthService:
         return stats
 
     async def _fetch_usage_counts(
-        self, user_id: str, scope: Any = _ALL, owned_ids: frozenset = frozenset()
+        self,
+        user_id: str,
+        scope: Any = _ALL,
+        owned_ids: frozenset = frozenset(),
+        owners: frozenset[str] | None = None,
     ) -> dict[uuid.UUID | None, dict[str, int]]:
         """MCP tool call counts per context over the usage window.
 
@@ -535,7 +564,7 @@ class MemoryHealthService:
             "mcp:explore",
         ]
         conditions = [
-            self._rows_of(UsageStats.user_id, UsageStats.context_id, user_id, owned_ids),
+            self._rows_of(UsageStats.user_id, UsageStats.context_id, user_id, owners, owned_ids),
             UsageStats.created_at >= since,
             UsageStats.endpoint.in_(watched_endpoints),
         ]
@@ -572,6 +601,7 @@ class MemoryHealthService:
                 ContextReadAttribution.user_id,
                 ContextReadAttribution.context_id,
                 user_id,
+                owners,
                 owned_ids,
             ),
             ContextReadAttribution.created_at >= since,
