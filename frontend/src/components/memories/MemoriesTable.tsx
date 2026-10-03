@@ -161,7 +161,7 @@ export function MemoriesTable({
       {/* Pagination */}
       {totalPages > 1 && (
         <div className="flex items-center justify-between">
-          <p className="text-sm text-slate-500">
+          <p className="text-sm text-slate-500 dark:text-slate-400">
             {t("paginationShowing", {
               start: (page - 1) * pageSize + 1,
               end: Math.min(page * pageSize, total),

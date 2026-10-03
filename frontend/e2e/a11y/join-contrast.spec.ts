@@ -1,4 +1,4 @@
-import { test } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import {
   assertNoColorContrastViolations,
   gotoAndWaitStable,
@@ -20,8 +20,14 @@ import {
  * belong to the authed / full-stack lane, not here (#786).
  *
  * Wait on the <h1>, NOT the default landmark set: the loading screen already
- * renders <main>, so the default would resolve while the spinner is still up
- * and axe would check the wrong screen.
+ * renders <main> (and the language-selector button inside it), so the default
+ * would resolve while the spinner is still up and axe would check the wrong
+ * screen. Only JoinCard — the settled screens — renders the <h1>.
+ *
+ * #1824: "Execution context was destroyed" came from `next dev` reloading the
+ * document under the scan (cold route compile), not from the loading screen.
+ * The scan helper re-waits for the <h1> and rescans on that error; the URL
+ * assertion guards against the other kind of navigation, a redirect.
  */
 test.describe("/join/[token] color-contrast (#1582)", () => {
   for (const colorScheme of ["light", "dark"] as const) {
@@ -30,7 +36,8 @@ test.describe("/join/[token] color-contrast (#1582)", () => {
     }) => {
       await page.emulateMedia({ colorScheme });
       await gotoAndWaitStable(page, "/join/e2e-a11y-nonexistent-token", "h1");
-      await assertNoColorContrastViolations(page);
+      await expect(page).toHaveURL(/\/join\/e2e-a11y-nonexistent-token/);
+      await assertNoColorContrastViolations(page, "h1");
     });
   }
 });

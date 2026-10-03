@@ -198,7 +198,7 @@ export function SessionDetailDialog({
           {/* File Changes Tab */}
           <TabsContent value="files" className="mt-4 space-y-3">
             {file_changes.length === 0 ? (
-              <div className="text-center py-8 text-slate-500">
+              <div className="text-center py-8 text-slate-500 dark:text-slate-400">
                 No file changes recorded
               </div>
             ) : (
@@ -211,7 +211,7 @@ export function SessionDetailDialog({
           {/* Decisions Tab */}
           <TabsContent value="decisions" className="mt-4 space-y-3">
             {decisions.length === 0 ? (
-              <div className="text-center py-8 text-slate-500">
+              <div className="text-center py-8 text-slate-500 dark:text-slate-400">
                 No decisions recorded
               </div>
             ) : (
@@ -224,7 +224,7 @@ export function SessionDetailDialog({
           {/* Errors Tab */}
           <TabsContent value="errors" className="mt-4 space-y-3">
             {errors.length === 0 ? (
-              <div className="text-center py-8 text-slate-500">
+              <div className="text-center py-8 text-slate-500 dark:text-slate-400">
                 No errors recorded
               </div>
             ) : (

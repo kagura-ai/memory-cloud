@@ -229,7 +229,7 @@ function UserActivitySection({
           ) : (
             <div className="flex items-center justify-center py-8">
               <InlineSpinner size="md" />
-              <span className="ml-3 text-slate-500">
+              <span className="ml-3 text-slate-500 dark:text-slate-400">
                 {t("loadingUserActivity")}
               </span>
             </div>

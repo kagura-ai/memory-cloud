@@ -29,7 +29,14 @@ test.describe("/workspace/dashboard color-contrast (#785)", () => {
       // workspace, so it is not redirected to /workspace/contexts (viewer-only).
       await expect(page).toHaveURL(/\/workspace\/dashboard(\?|$)/);
       await expect(page.locator("h1")).toBeVisible();
-      await assertNoColorContrastViolations(page);
+      // The <h1> is up while the stats still load, and the loading text was
+      // what axe kept catching in dark mode (#1824). Wait for the KPI cards:
+      // a positive signal that the stats rendered, not the absence of the
+      // spinner (which would also pass before it ever appeared).
+      await expect(page.getByTestId("kpi-cards")).toBeVisible({
+        timeout: 15_000,
+      });
+      await assertNoColorContrastViolations(page, '[data-testid="kpi-cards"]');
     });
   }
 });

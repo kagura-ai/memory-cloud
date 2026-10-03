@@ -152,7 +152,7 @@ export function SessionsTable({
       {/* Pagination */}
       {totalPages > 1 && (
         <div className="flex items-center justify-between">
-          <p className="text-sm text-slate-500">
+          <p className="text-sm text-slate-500 dark:text-slate-400">
             Showing {(page - 1) * pageSize + 1} to {Math.min(page * pageSize, total)} of {total} sessions
           </p>
           <div className="flex items-center gap-2">

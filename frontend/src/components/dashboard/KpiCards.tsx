@@ -43,7 +43,12 @@ export function KpiCards({
   }, [contextStats]);
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+    // data-testid: the authed a11y spec waits for the KPIs before it scans, so
+    // axe never sees the dashboard's loading state (#1824).
+    <div
+      className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6"
+      data-testid="kpi-cards"
+    >
       <KpiCard
         icon={Brain}
         label={t("totalMemories")}

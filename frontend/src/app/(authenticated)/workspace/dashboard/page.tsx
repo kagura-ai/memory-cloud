@@ -248,7 +248,9 @@ export default function WorkspaceStatsPage() {
       {loading && !stats ? (
         <div className="flex items-center justify-center py-12">
           <InlineSpinner size="lg" />
-          <span className="ml-3 text-slate-500">{t("loadingStats")}</span>
+          <span className="ml-3 text-slate-500 dark:text-slate-400">
+            {t("loadingStats")}
+          </span>
         </div>
       ) : stats ? (
         <>
