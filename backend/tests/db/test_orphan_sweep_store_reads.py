@@ -105,7 +105,15 @@ class TestScrollPointRefs:
         ]
         first, second = mock_client.scroll.await_args_list
         assert first.kwargs["with_vectors"] is False
-        assert first.kwargs["with_payload"] == ["context_id", "resource_id"]
+        # #1829: the sweep also reads the document key and the write time of
+        # resource points — never content.
+        assert first.kwargs["with_payload"] == [
+            "context_id",
+            "resource_id",
+            "doc_id",
+            "version",
+            "updated_at",
+        ]
         assert second.kwargs["offset"] == "next"
 
     async def test_empty_collection_yields_nothing(self, mock_client):
