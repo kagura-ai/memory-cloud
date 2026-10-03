@@ -1120,7 +1120,7 @@ export function Sidebar() {
                 </>
               )}
 
-              {/* Profile Settings */}
+              {/* Settings (/profile): profile, preferences, security, linked accounts */}
               <DropdownMenuItem
                 onClick={() => {
                   router.push("/profile");

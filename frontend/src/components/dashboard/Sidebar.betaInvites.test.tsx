@@ -1,6 +1,6 @@
 /**
  * Sidebar × beta invites (#1582): the "Invite a friend" card above the account
- * menu, and the permanent account-menu entry next to Profile Settings.
+ * menu, and the permanent account-menu entry next to Settings (/profile).
  *
  * A separate file from Sidebar.test.tsx because it swaps the Radix dropdown
  * for a pass-through: this repo has no working pattern for opening one under a
@@ -172,7 +172,7 @@ describe("Sidebar beta invites — feature on", () => {
     ).toBeTruthy();
   });
 
-  it("puts the entry right after Profile Settings", async () => {
+  it("puts the entry right after Settings", async () => {
     render(<Sidebar />);
     await waitFor(() => expect(menuEntry()).not.toBeNull());
     const items = screen.getAllByRole("menuitem");

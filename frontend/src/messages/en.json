@@ -195,7 +195,7 @@
     "workerApps": "Worker Apps",
     "systemAdmin": "System Admin",
     "ownerOnly": "Owner",
-    "profileSettings": "Profile Settings",
+    "profileSettings": "Settings",
     "logOut": "Log out",
     "signOutThisAccount": "Sign out of {name}",
     "signOutAllAccounts": "Sign out of all accounts",
@@ -909,7 +909,7 @@
         "dataOwnership": "**Data Ownership**: You own all data you store in the Service.",
         "dataProcessing": "**Data Processing**: We process your data only to provide the Service.",
         "gdprRights": "**GDPR Rights**: If you are an EU resident, you have rights under GDPR including access, rectification, erasure, and portability.",
-        "dataDeletion": "**Data Deletion**: You can delete your account and data at any time from your profile settings."
+        "dataDeletion": "**Data Deletion**: You can delete your account and data at any time from your settings."
       },
       "subscriptionBilling": {
         "title": "Subscription & Billing",
@@ -931,7 +931,7 @@
       "termination": {
         "title": "Termination",
         "intro": "Account termination:",
-        "byYou": "**By You**: You may delete your account at any time from your profile settings.",
+        "byYou": "**By You**: You may delete your account at any time from your settings.",
         "byUs": "**By Us**: We may suspend or terminate accounts that violate these Terms, with 30 days notice when possible.",
         "effectOfTermination": "**Effect of Termination**: Upon termination, your data will be deleted according to our Privacy Policy (30-day soft delete, then permanent deletion).",
         "survival": "**Survival**: Sections regarding liability, disclaimers, and dispute resolution survive termination."
@@ -984,7 +984,7 @@
     "unsearchableSubtext": "{count} not searchable"
   },
   "profile": {
-    "title": "Profile Settings",
+    "title": "Settings",
     "subtitle": "Manage your user profile, preferences, and security settings.",
     "profileInfo": "Profile Information",
     "profileInfoDesc": "Your basic profile information",

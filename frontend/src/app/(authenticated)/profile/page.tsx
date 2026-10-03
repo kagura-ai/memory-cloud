@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * User Profile Settings Page
+ * Settings page (/profile)
  *
  * User profile management, theme settings, and preferences
  * Issue #672: UI Polish & Design Enhancement - Phase 2
