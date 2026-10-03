@@ -1801,7 +1801,7 @@
     "createApiKey": "APIキーを作成",
     "noApiKeys": "APIキーが設定されていません。上の「APIキーを作成」ボタンをクリックして開始してください。",
     "noKeysTitle": "APIキーがまだありません",
-    "noKeysDesc": "Claude Code やその他の MCP クライアントをワークスペースに接続するため、最初の API キーを作成してください。",
+    "noKeysDesc": "Codex CLI、Python SDK、CI、.mcp.json 用に最初の API キーを作成してください。Claude Code やチャットクライアントは OAuth でログインするため、キーは不要です。",
     "showKey": "キーを表示",
     "hideKey": "キーを非表示",
     "keyCopied": "APIキーをコピーしました",

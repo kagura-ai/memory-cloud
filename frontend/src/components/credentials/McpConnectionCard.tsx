@@ -15,15 +15,20 @@
  * only when the user belongs to more than one, which is when the pinning
  * section is shown at all.
  *
+ * "Core tools only" (#1609) puts `?profile=core` on every URL and command the
+ * card renders and copies — the same switch the key-bearing snippets have —
+ * so the Claude Code OAuth one-liner keeps its core-profile form here.
+ *
  * Key-bearing snippets (.mcp.json, ChatGPT Bearer, Codex CLI) stay on the
  * API-key tab next to the key they embed (MCPConfigBlock).
  */
 
 "use client";
 
-import { useMemo } from "react";
+import { useId, useMemo, useState } from "react";
 import { useTranslations } from "next-intl";
-import { Check, ChevronDown, Copy } from "lucide-react";
+import { ChevronDown } from "lucide-react";
+import { CopyIconButton } from "@/components/common/CopyIconButton";
 import { Section } from "@/components/common/Section";
 import { Button } from "@/components/ui/button";
 import {
@@ -31,69 +36,24 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useToast } from "@/hooks/use-toast";
-import { buildClaudeOAuthCommand } from "@/components/credentials/MCPConfigBlock";
+import {
+  buildClaudeOAuthCommand,
+  mcpEndpoints,
+  withCoreProfile,
+} from "@/lib/mcp/url";
 
 const PYTHON_SDK_URL = "https://github.com/kagura-ai/kagura-memory-python-sdk";
 const MCP_CLIENTS_DOCS_URL =
   "https://github.com/kagura-ai/memory-cloud/blob/main/docs/mcp-clients.md";
 
-/**
- * The MCP endpoints for an API base URL: the bare `…/mcp` every client can
- * use, and the workspace-pinned `…/mcp/w/<id>` (null without a workspace),
- * plus the server origin they share. `apiUrl` may carry the `/api/v1` REST
- * suffix; it is stripped here, once, for every caller on the page.
- */
-export function mcpEndpoints(
-  apiUrl: string,
-  workspaceId: string | null,
-): { baseUrl: string; mcpUrl: string; pinnedUrl: string | null } {
-  const baseUrl = apiUrl.replace(/\/api\/v1$/, "");
-  return {
-    baseUrl,
-    mcpUrl: `${baseUrl}/mcp`,
-    pinnedUrl: workspaceId ? `${baseUrl}/mcp/w/${workspaceId}` : null,
-  };
-}
-
-function CopyIconButton({
-  value,
-  copyKey,
-  label,
-  isCopied,
-  onCopy,
-  className,
-}: {
-  value: string;
-  copyKey: string;
-  label: string;
-  isCopied: (key: string) => boolean;
-  onCopy: (text: string, key: string) => void;
-  className?: string;
-}) {
-  return (
-    <Button
-      type="button"
-      variant="ghost"
-      size="icon"
-      onClick={() => onCopy(value, copyKey)}
-      title={label}
-      aria-label={label}
-      className={className}
-    >
-      {isCopied(copyKey) ? (
-        <Check className="w-4 h-4 text-green-600" />
-      ) : (
-        <Copy className="w-4 h-4" />
-      )}
-    </Button>
-  );
-}
-
 export function McpConnectionCard() {
   const t = useTranslations("mcpConnection");
+  const tApiKeys = useTranslations("apiKeys");
   const tCommon = useTranslations("common");
   const { currentWorkspaceId, workspaces } = useWorkspace();
   const { toast } = useToast();
@@ -104,13 +64,22 @@ export function McpConnectionCard() {
     () => mcpEndpoints(apiUrl, currentWorkspaceId),
     [apiUrl, currentWorkspaceId],
   );
-  const claudeCodeCommand = useMemo(
-    () => buildClaudeOAuthCommand(mcpUrl),
-    [mcpUrl],
-  );
+
+  // Not persisted, like MCPConfigBlock's switch: the full list is the safe
+  // default. One derived URL feeds every display and copy below.
+  const [coreOnly, setCoreOnly] = useState(false);
+  const coreSwitchId = useId();
+  const coreHelpId = useId();
+  const shownUrl = coreOnly ? withCoreProfile(mcpUrl) : mcpUrl;
+  const claudeCodeCommand = buildClaudeOAuthCommand(shownUrl);
+
   // Pinning only means something when there is another workspace the OAuth
   // connector could otherwise drift to.
   const pinnedUrlToOffer = workspaces.length > 1 ? pinnedUrl : null;
+  const shownPinnedUrl =
+    pinnedUrlToOffer && coreOnly
+      ? withCoreProfile(pinnedUrlToOffer)
+      : pinnedUrlToOffer;
 
   const handleCopy = async (text: string, key: string) => {
     try {
@@ -134,10 +103,10 @@ export function McpConnectionCard() {
         {/* The endpoint every client uses */}
         <div className="flex items-center gap-2">
           <code className="flex-1 bg-blue-50 dark:bg-blue-900/30 px-4 py-3 rounded border border-blue-200 dark:border-blue-800 text-sm font-mono text-blue-800 dark:text-blue-200 break-all">
-            {mcpUrl}
+            {shownUrl}
           </code>
           <CopyIconButton
-            value={mcpUrl}
+            value={shownUrl}
             copyKey="mcp-url"
             label={t("copyUrl")}
             isCopied={isCopied}
@@ -148,6 +117,25 @@ export function McpConnectionCard() {
         <p className="text-sm text-gray-700 dark:text-gray-300">
           {t("oauthHint")}
         </p>
+
+        {/* Core tools only (#1609) — applies to every URL on the card */}
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <Switch
+              id={coreSwitchId}
+              checked={coreOnly}
+              onCheckedChange={setCoreOnly}
+              aria-describedby={coreHelpId}
+            />
+            <Label htmlFor={coreSwitchId}>{tApiKeys("coreProfileLabel")}</Label>
+          </div>
+          <p
+            id={coreHelpId}
+            className="text-xs text-gray-600 dark:text-gray-400"
+          >
+            {tApiKeys("coreProfileHelp")}
+          </p>
+        </div>
 
         {/* Claude Code: one command, no key */}
         <div>
@@ -179,7 +167,7 @@ export function McpConnectionCard() {
         </p>
 
         {/* Pin an OAuth connector to this workspace (multi-workspace users) */}
-        {pinnedUrlToOffer && (
+        {shownPinnedUrl && (
           <div className="space-y-2 border-t border-gray-200 dark:border-gray-700 pt-3">
             <p className="text-xs text-gray-600 dark:text-gray-400">
               {t("followsWorkspace")}
@@ -199,10 +187,10 @@ export function McpConnectionCard() {
               <CollapsibleContent className="mt-2 space-y-2">
                 <div className="flex items-center gap-2">
                   <code className="flex-1 bg-gray-50 dark:bg-gray-800 px-3 py-2 rounded border border-gray-200 dark:border-gray-700 text-xs font-mono break-all">
-                    {pinnedUrlToOffer}
+                    {shownPinnedUrl}
                   </code>
                   <CopyIconButton
-                    value={pinnedUrlToOffer}
+                    value={shownPinnedUrl}
                     copyKey="pinned-mcp-url"
                     label={t("copyPinnedUrl")}
                     isCopied={isCopied}

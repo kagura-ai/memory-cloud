@@ -36,7 +36,7 @@ Create or update `.mcp.json`:
   "mcpServers": {
     "kagura-memory": {
       "type": "http",
-      "url": "{server_url}/mcp/w/{workspace_id}",
+      "url": "{server_url}/mcp",
       "headers": {
         "Authorization": "Bearer {api_key}"
       }
@@ -45,7 +45,7 @@ Create or update `.mcp.json`:
 }
 ```
 
-That URL lists all tools (the default). For the core tools only — a smaller tool list; everything else stays callable, it is just not listed — use `{server_url}/mcp/w/{workspace_id}?profile=core` instead.
+That URL lists all tools (the default). For the core tools only — a smaller tool list; everything else stays callable, it is just not listed — use `{server_url}/mcp?profile=core` instead.
 
 If `.mcp.json` already exists with other servers, merge the kagura-memory entry.
 
@@ -123,7 +123,7 @@ The plugin ships Claude Code hooks that deliver **tool guardrails** — memories
 Scriptable form, with placeholders:
 
 ```
-claude plugin install kagura-memory@kagura-memory-cloud --config server_url=https://<your-domain>/mcp/w/<workspace-id> --config api_key=<your API key> --config context_id=<context uuid>
+claude plugin install kagura-memory@kagura-memory-cloud --config server_url=https://<your-domain>/mcp --config api_key=<your API key> --config context_id=<context uuid>
 ```
 
 With the hooks on, the hooks are the guardrail lane for this client: put `?guardrails=off` on the **`.mcp.json` URL** (`https://<your-domain>/mcp/w/<workspace-id>?guardrails=off`, or `&guardrails=off` when the URL already has a query, such as `?profile=core`) so the server does not also send a guardrail digest; the plugin's `server_url` stays the plain endpoint. A `kagura-mcp` entry (from `kagura setup claude --profile <name>`) has no URL there: its own flags set the query on the URL it forwards to. With `kagura-mcp` 0.39.0+ (`kagura --version`), add `--guardrails off` to its `args` (replace an existing `--guardrails <context-id>` value instead of adding a second flag) and keep any `--tool-profile <name>`, which sets `?profile=` the same way; each flag replaces that parameter in a `--server` query. Before 0.39.0 the only way is `--server https://<your-domain>/mcp?guardrails=off` (same host as the profile, keeping any `profile=` it already has), which a later `kagura setup claude` re-run drops. `/kagura-memory:setup` does all of this. The hook only sees `server_url`, so it warns once at session start if that URL carries a different `guardrails=` value.

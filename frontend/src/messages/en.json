@@ -1801,7 +1801,7 @@
     "createApiKey": "Create API Key",
     "noApiKeys": "No API keys configured. Click \"Create API Key\" button above to get started.",
     "noKeysTitle": "No API keys yet",
-    "noKeysDesc": "Create your first API key to authenticate Claude Code or any MCP client to your workspace.",
+    "noKeysDesc": "Create your first API key for Codex CLI, the Python SDK, CI or a .mcp.json file. Claude Code and the chat clients sign in with OAuth and need no key.",
     "showKey": "Show key",
     "hideKey": "Hide key",
     "keyCopied": "API key copied",

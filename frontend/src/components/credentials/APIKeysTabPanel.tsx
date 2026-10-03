@@ -42,7 +42,7 @@ import {
 import { EmptyState } from "@/components/ui/empty-state";
 import { MaskedSecretField } from "@/components/common/MaskedSecretField";
 import { MCPConfigBlock } from "@/components/credentials/MCPConfigBlock";
-import { mcpEndpoints } from "@/components/credentials/McpConnectionCard";
+import { mcpEndpoints } from "@/lib/mcp/url";
 import { useAutoOpenOnFreshWindow } from "@/hooks/useAutoOpenOnFreshWindow";
 import { formatDateTime, formatRelativeTime } from "@/lib/utils/datetime";
 import { useToast } from "@/hooks/use-toast";
@@ -120,7 +120,7 @@ export function APIKeysTabPanel() {
 
   // The bare MCP endpoint for the key-bearing snippets. A workspace-scoped
   // API key carries its own workspace, so no `/w/<id>` segment is needed
-  // (#1836); the derivation is shared with McpConnectionCard.
+  // (#1836); lib/mcp/url is the one place the URL is derived.
   const { mcpUrl } = mcpEndpoints(
     process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080",
     null,

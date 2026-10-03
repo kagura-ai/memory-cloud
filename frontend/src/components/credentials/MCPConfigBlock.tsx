@@ -69,88 +69,23 @@ const FALLBACK_KEY_PREFIX = "kag_";
 const MASK_BODY = "•••••••••••";
 const PLACEHOLDER_KEY = "YOUR_API_KEY";
 
-// The environment variable Codex reads the API key from (#1624). Codex takes
-// a bearer token for a streamable-HTTP server ONLY by env var name
-// (`bearer_token_env_var`); an inline `bearer_token` is rejected and stops the
-// whole config.toml from loading. Same name as docs/getting-started.md exports
-// in its Quick API Test, so one `export` serves both.
-export const CODEX_BEARER_TOKEN_ENV_VAR = "KAGURA_API_KEY";
+// URL and one-liner helpers live in lib/mcp/url (#1836); they are re-exported
+// here so existing imports and tests keep working.
+import {
+  CODEX_BEARER_TOKEN_ENV_VAR,
+  buildClaudeOAuthCommand,
+  buildCodexAddCommand,
+  toBareMcpUrl,
+  withCoreProfile,
+} from "@/lib/mcp/url";
 
-/**
- * Strip the workspace-scoped `/w/<workspaceId>` suffix from an MCP URL,
- * yielding the bare `…/mcp` endpoint the Claude Code OAuth one-liner targets
- * (OAuth resolves the workspace at login — issue #988). Idempotent: a URL that
- * is already bare passes through unchanged.
- *
- * This is the single source of the derivation. Prefer passing the bare URL
- * directly via the `mcpBaseUrl` prop (the caller in APIKeysTabPanel already
- * computes `baseUrl + "/mcp"`); this helper is the fallback when only the
- * workspace-scoped URL is available, and keeps the regex in one tested place
- * instead of inlined at each future call site.
- */
-export function toBareMcpUrl(mcpUrl: string): string {
-  return mcpUrl.replace(/\/w\/[^/]+$/, "");
-}
-
-// The query the server reads to list the 12 core tools only (#1601). Both
-// `/mcp` and `/mcp/w/<workspaceId>` honour it; `tools/call` never does.
-const CORE_PROFILE_QUERY = "profile=core";
-
-/**
- * Put `profile=core` on an MCP endpoint URL (#1609).
- *
- * Plain string handling rather than `new URL()`: the snippet must show the
- * URL exactly as issued (no normalization), and a placeholder URL must not
- * throw. An existing query is kept and joined with `&`; an existing `profile`
- * parameter is replaced rather than repeated, which also makes the helper
- * idempotent; a fragment stays last.
- */
-export function withCoreProfile(mcpUrl: string): string {
-  const hashAt = mcpUrl.indexOf("#");
-  const beforeHash = hashAt === -1 ? mcpUrl : mcpUrl.slice(0, hashAt);
-  const hash = hashAt === -1 ? "" : mcpUrl.slice(hashAt);
-  const queryAt = beforeHash.indexOf("?");
-  if (queryAt === -1) return `${beforeHash}?${CORE_PROFILE_QUERY}${hash}`;
-  const params = beforeHash
-    .slice(queryAt + 1)
-    .split("&")
-    .filter((p) => p !== "" && p !== "profile" && !p.startsWith("profile="));
-  const query = [...params, CORE_PROFILE_QUERY].join("&");
-  return `${beforeHash.slice(0, queryAt)}?${query}${hash}`;
-}
-
-/**
- * Render a URL as one shell argument. `?` is a glob character (zsh aborts the
- * command with "no matches found") and `&` ends the command, so a URL with a
- * query is wrapped in double quotes — understood by sh, zsh, PowerShell and
- * cmd alike. A URL without one is left bare, as the one-liner always was.
- */
-function shellUrlArg(url: string): string {
-  return /[?&]/.test(url) ? `"${url}"` : url;
-}
-
-/**
- * Build the Codex CLI one-liner that registers the server (#1624):
- * `codex mcp add kagura-memory --url <url> --bearer-token-env-var KAGURA_API_KEY`.
- * It writes exactly the entry {@link buildTomlConfig} renders. Like the
- * Claude Code OAuth one-liner it is env-aware via the URL, quotes the URL
- * when it carries a query, and needs no key — so it renders and copies in
- * every key-visibility state.
- */
-export function buildCodexAddCommand(mcpUrl: string): string {
-  return `codex mcp add kagura-memory --url ${shellUrlArg(mcpUrl)} --bearer-token-env-var ${CODEX_BEARER_TOKEN_ENV_VAR}`;
-}
-
-/**
- * Build the Claude Code OAuth one-liner (#988):
- * `claude mcp add --transport http kagura-memory <url>`. It needs no API key
- * (Claude Code runs the OAuth browser flow on first use) and is shared with
- * the credentials page's connection card (#1836), so the command the card
- * shows and the one this block shows cannot drift apart.
- */
-export function buildClaudeOAuthCommand(mcpUrl: string): string {
-  return `claude mcp add --transport http kagura-memory ${shellUrlArg(mcpUrl)}`;
-}
+export {
+  CODEX_BEARER_TOKEN_ENV_VAR,
+  buildClaudeOAuthCommand,
+  buildCodexAddCommand,
+  toBareMcpUrl,
+  withCoreProfile,
+};
 
 export interface MCPConfigBlockProps {
   /**
@@ -164,8 +99,8 @@ export interface MCPConfigBlockProps {
   /**
    * The bare `…/mcp` endpoint (no `/w/<workspaceId>` suffix) for the OAuth
    * one-liner. Optional: when omitted it is derived from `mcpUrl` via
-   * {@link toBareMcpUrl}. The caller passes its already-computed base URL so
-   * the production path needs no regex.
+   * {@link toBareMcpUrl}, which is the only production path since the
+   * credentials page passes the bare URL as `mcpUrl` (#1836).
    */
   mcpBaseUrl?: string;
   /**

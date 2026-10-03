@@ -34,7 +34,7 @@ Claude Code + Kagura Memory Cloud gives your AI assistant **persistent, searchab
 **Setup (3 steps):**
 
 1. Start services and open `http://localhost:3000/workspace/integrations/credentials?tab=api-keys` to create an API key
-2. Copy `.mcp.json.example` to `.mcp.json` and fill in your workspace ID and API key:
+2. Copy `.mcp.json.example` to `.mcp.json` and fill in your API key (a key created there is scoped to its workspace):
 
 ```bash
 cp .mcp.json.example .mcp.json

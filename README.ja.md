@@ -209,13 +209,15 @@ Claude Code / Claude Desktop / Claude Chat / ChatGPT / Gemini CLI ほか、Strea
 
 **Claude Code(3 ステップ):**
 
-1. サービスを起動し `http://localhost:3000/workspace/integrations/api-keys` で API キーを作成
-2. `.mcp.json.example` を `.mcp.json` にコピーし、workspace ID と API キーを設定:
+1. サービスを起動し `http://localhost:3000/workspace/integrations/credentials?tab=api-keys` で API キーを作成
+2. `.mcp.json.example` を `.mcp.json` にコピーし、API キーを設定 (そこで作ったキーはワークスペースに紐付いているので、URL は `http://localhost:8080/mcp` のままで動きます):
 
 ```bash
 cp .mcp.json.example .mcp.json
-# .mcp.json を編集 — URL の workspace_id と API キーを入れる
+# .mcp.json を編集 — API キーを入れる
 ```
+
+OAuth で繋ぐクライアント (Claude.ai / Claude Desktop / ChatGPT / Cursor / `claude mcp add`) も同じ `/mcp` を使い、Web UI で選択中のワークスペースに接続します。複数ワークスペースに属していて 1 つに固定したい場合だけ `/mcp/w/{workspace_id}` を使います。
 
 3. Claude Code を再起動して動作確認(`recall` / `remember` が呼べれば OK)
 

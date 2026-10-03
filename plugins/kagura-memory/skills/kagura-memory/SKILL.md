@@ -39,11 +39,11 @@ If the MCP tools are not available:
 
    ```toml
    [mcp_servers.kagura-memory]
-   url = "https://<your-domain>/mcp/w/<workspace-id>"
+   url = "https://<your-domain>/mcp"
    bearer_token_env_var = "KAGURA_API_KEY"
    ```
 
-3. Set `url` to your Memory Cloud endpoint: a self-hosted deployment uses `https://<your-domain>/mcp/w/<workspace-id>` (or `http://localhost:8080/mcp/w/<workspace-id>` for local development). That URL lists all tools (the default); end it with `?profile=core` to list the core tools only — a smaller tool list; everything else stays callable, it is just not listed.
+3. Set `url` to your Memory Cloud endpoint: a self-hosted deployment uses `https://<your-domain>/mcp` (or `http://localhost:8080/mcp` for local development). That URL lists all tools (the default); end it with `?profile=core` to list the core tools only — a smaller tool list; everything else stays callable, it is just not listed.
 4. Export the key in the shell that starts Codex without typing it on the command line: the user runs `read -rs KAGURA_API_KEY` (it takes the key at a hidden prompt, so it stays out of the shell history), then `export KAGURA_API_KEY`. To keep it across shells, the user stores it in a file only they can read (`chmod 600`) and sources that file from their shell profile, rather than writing the key into the profile. With the variable unset the server is registered but every call is unauthenticated. `bearer_token_env_var` names the variable holding the API key (`env_http_headers` is the equivalent for a custom header). Codex rejects an inline `bearer_token` on an HTTP server and the whole `config.toml` then fails to load; `type` is not a Codex key. Never put the key itself in the file.
 5. Restart Codex so the tools are loaded.
 

@@ -81,6 +81,37 @@ describe("McpConnectionCard — endpoint", () => {
       ),
     ).toBeInTheDocument();
   });
+
+  it("tolerates a trailing slash on NEXT_PUBLIC_API_URL", () => {
+    vi.stubEnv("NEXT_PUBLIC_API_URL", "https://memory.example.test/api/v1/");
+
+    render(<McpConnectionCard />);
+
+    expect(
+      screen.getByText("https://memory.example.test/mcp"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/\/\/mcp/)).not.toBeInTheDocument();
+  });
+
+  it("'Core tools only' puts ?profile=core on the URL, the command and the pinned URL (#1609)", () => {
+    render(<McpConnectionCard />);
+
+    fireEvent.click(screen.getByRole("switch"));
+
+    expect(
+      screen.getByText("https://memory.example.test/mcp?profile=core"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'claude mcp add --transport http kagura-memory "https://memory.example.test/mcp?profile=core"',
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("pinToggle"));
+    expect(
+      screen.getByText("https://memory.example.test/mcp/w/ws-1?profile=core"),
+    ).toBeInTheDocument();
+  });
 });
 
 describe("McpConnectionCard — workspace pinning", () => {
