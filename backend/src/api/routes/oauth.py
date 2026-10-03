@@ -22,6 +22,7 @@ Security:
 import asyncio
 import base64
 import binascii
+import contextvars
 import hashlib
 import ipaddress
 import json
@@ -29,8 +30,11 @@ import os
 import re
 import secrets
 import unicodedata
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
+from typing import TypeVar
 from urllib.parse import parse_qsl, unquote_plus, urlencode, urlparse, urlsplit, urlunsplit
 
 from authlib.oauth2.rfc6749.errors import OAuth2Error
@@ -429,8 +433,7 @@ async def list_oauth2_clients(
         GET /api/v1/oauth/clients
     """
 
-    # #1831: the sync session work runs in a worker thread — never on the
-    # event loop, where a wait on a row lock would stall every request.
+    # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
         db_session = get_sync_session()
 
@@ -494,7 +497,7 @@ async def list_oauth2_clients(
         finally:
             db_session.close()
 
-    return await asyncio.to_thread(_sync)
+    return await _run_sync(_sync)
 
 
 @router.post(
@@ -533,8 +536,7 @@ async def create_oauth2_client(
     user_id = get_current_user_id(request)
     current_workspace_id = user.get("current_workspace_id")  # Issue #169, Migration 034
 
-    # #1831: the sync session work runs in a worker thread — never on the
-    # event loop, where a wait on a row lock would stall every request.
+    # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
         db_session = get_sync_session()
 
@@ -622,7 +624,7 @@ async def create_oauth2_client(
         finally:
             db_session.close()
 
-    return await asyncio.to_thread(_sync)
+    return await _run_sync(_sync)
 
 
 # --- Dynamic Client Registration (DCR) provider detection ----------------
@@ -895,8 +897,7 @@ async def dynamic_client_registration(
             ),
         )
 
-    # #1831: the sync session work runs in a worker thread — never on the
-    # event loop, where a wait on a row lock would stall every request.
+    # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
         db_session = get_sync_session()
 
@@ -967,7 +968,7 @@ async def dynamic_client_registration(
         finally:
             db_session.close()
 
-    return await asyncio.to_thread(_sync)
+    return await _run_sync(_sync)
 
 
 @router.get("/clients/{client_id}", response_model=OAuth2ClientResponse)
@@ -988,8 +989,7 @@ async def get_oauth2_client(
         GET /api/v1/oauth/clients/oauth_abc123
     """
 
-    # #1831: the sync session work runs in a worker thread — never on the
-    # event loop, where a wait on a row lock would stall every request.
+    # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
         db_session = get_sync_session()
 
@@ -1011,7 +1011,11 @@ async def get_oauth2_client(
             from utils.encryption import get_encryptor
 
             plaintext_secret = None
-            is_visible = client.hidden_at is None
+            # Same rule as the list endpoint: not hidden AND the one-time
+            # visibility window (Migration 034) has not closed.
+            is_visible = client.hidden_at is None and (
+                client.visibility_expires_at is None or client.visibility_expires_at > utcnow()
+            )
 
             if (
                 current_user_id == client.owner_id
@@ -1043,7 +1047,7 @@ async def get_oauth2_client(
         finally:
             db_session.close()
 
-    return await asyncio.to_thread(_sync)
+    return await _run_sync(_sync)
 
 
 @router.put("/clients/{client_id}", response_model=OAuth2ClientResponse)
@@ -1074,8 +1078,7 @@ async def update_oauth2_client(
         - Can update: name, redirect_uris, scope, token_endpoint_auth_method
     """
 
-    # #1831: the sync session work runs in a worker thread — never on the
-    # event loop, where a wait on a row lock would stall every request.
+    # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
         db_session = get_sync_session()
 
@@ -1155,7 +1158,7 @@ async def update_oauth2_client(
         finally:
             db_session.close()
 
-    return await asyncio.to_thread(_sync)
+    return await _run_sync(_sync)
 
 
 @router.post("/clients/{client_id}/hide")
@@ -1175,8 +1178,7 @@ async def hide_oauth2_client_secret(
         Status message
     """
 
-    # #1831: the sync session work runs in a worker thread — never on the
-    # event loop, where a wait on a row lock would stall every request.
+    # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
         db_session = get_sync_session()
 
@@ -1212,6 +1214,11 @@ async def hide_oauth2_client_secret(
             db_session.rollback()
             raise
 
+        except AuthorizationError:
+            # Owner guard: the global handler answers 403 (#1021).
+            db_session.rollback()
+            raise
+
         except Exception as e:
             db_session.rollback()
             logger.error("oauth2_client_hide_failed", client_id=client_id, error=str(e))
@@ -1223,7 +1230,7 @@ async def hide_oauth2_client_secret(
         finally:
             db_session.close()
 
-    return await asyncio.to_thread(_sync)
+    return await _run_sync(_sync)
 
 
 @router.post(
@@ -1252,8 +1259,7 @@ async def regenerate_oauth2_client_secret(
         POST /api/v1/oauth/clients/oauth_abc123/regenerate-secret
     """
 
-    # #1831: the sync session work runs in a worker thread — never on the
-    # event loop, where a wait on a row lock would stall every request.
+    # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
         db_session = get_sync_session()
 
@@ -1329,6 +1335,11 @@ async def regenerate_oauth2_client_secret(
             db_session.rollback()
             raise
 
+        except AuthorizationError:
+            # Owner guard: the global handler answers 403 (#1021).
+            db_session.rollback()
+            raise
+
         except Exception as e:
             db_session.rollback()
             logger.error(
@@ -1342,7 +1353,7 @@ async def regenerate_oauth2_client_secret(
         finally:
             db_session.close()
 
-    return await asyncio.to_thread(_sync)
+    return await _run_sync(_sync)
 
 
 @router.delete("/clients/{client_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
@@ -1367,8 +1378,7 @@ async def delete_oauth2_client(
         - This action cannot be undone
     """
 
-    # #1831: the sync session work runs in a worker thread — never on the
-    # event loop, where a wait on a row lock would stall every request.
+    # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
         db_session = get_sync_session()
 
@@ -1416,7 +1426,7 @@ async def delete_oauth2_client(
         finally:
             db_session.close()
 
-    return await asyncio.to_thread(_sync)
+    return await _run_sync(_sync)
 
 
 # ============================================================================
@@ -1834,8 +1844,7 @@ async def oauth_authorize_get(
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
         return RedirectResponse(f"{frontend_url}/login?return_to={return_to}")
 
-    # #1831: the sync session work runs in a worker thread — never on the
-    # event loop, where a wait on a row lock would stall every request.
+    # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
         db_session = get_sync_session()
         try:
@@ -1923,7 +1932,25 @@ async def oauth_authorize_get(
         finally:
             db_session.close()
 
-    return await asyncio.to_thread(_sync)
+    return await _run_sync(_sync)
+
+
+# #1831: the sync bodies of the OAuth routes run here, not on asyncio's default
+# pool. That pool grows to min(32, cpus + 4) threads; the sync engine has 15
+# connections (db/base.py). A body that waits on a row lock pins a thread AND a
+# pooled connection, so an unbounded pool could park 15 requests on one lock and
+# starve every other OAuth route (QueuePool timeout → 500). Ten workers keep
+# head-room on the pool for the Authlib paths and the rest of the app.
+T = TypeVar("T")
+
+_OAUTH_SYNC_EXECUTOR = ThreadPoolExecutor(max_workers=10, thread_name_prefix="oauth-sync")
+
+
+async def _run_sync(fn: Callable[[], T]) -> T:
+    """Run ``fn`` (a sync DB body) in the OAuth worker pool, with the request's
+    contextvars (structlog correlation fields) copied like ``asyncio.to_thread``."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_OAUTH_SYNC_EXECUTOR, contextvars.copy_context().run, fn)
 
 
 def _run_oauth_sync(action: str, request, **kwargs):
@@ -2001,7 +2028,6 @@ async def oauth_authorize_post(
     user's last grant. An unchanged repeat consent adds little: the code can
     only reach the client's registered redirect URI.
     """
-    import asyncio
 
     # Preload form data manually
     await preload_form(request)
@@ -2042,7 +2068,7 @@ async def oauth_authorize_post(
         finally:
             pre_check_session.close()
 
-    rejected = await asyncio.to_thread(_pre_check)
+    rejected = await _run_sync(_pre_check)
     if rejected is not None:
         return rejected
 
@@ -2124,7 +2150,6 @@ async def oauth_token(request: Request):
     Issue #157: Support public clients (no client_secret) with PKCE.
     Returns Authlib response with proper status code and headers.
     """
-    import asyncio
 
     from fastapi.responses import JSONResponse, Response
 
@@ -2485,8 +2510,7 @@ async def device_authorize(request: Request) -> DeviceAuthorizationResponse | JS
             error="invalid_request", description=e.description, status_code=e.status_code
         )
 
-    # #1831: the sync session work runs in a worker thread — never on the
-    # event loop, where a wait on a row lock would stall every request.
+    # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
         db_session = get_sync_session()
 
@@ -2553,7 +2577,7 @@ async def device_authorize(request: Request) -> DeviceAuthorizationResponse | JS
         finally:
             db_session.close()
 
-    return await asyncio.to_thread(_sync)
+    return await _run_sync(_sync)
 
 
 @router.post(
@@ -2581,8 +2605,7 @@ async def device_verify(request: Request, body: DeviceVerifyRequest) -> DeviceVe
             headers={"Retry-After": str(_DEVICE_FLOW_RATE_WINDOW_SECONDS)},
         )
 
-    # #1831: the sync session work runs in a worker thread — never on the
-    # event loop, where a wait on a row lock would stall every request.
+    # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
         db_session = get_sync_session()
 
@@ -2616,12 +2639,10 @@ async def device_verify(request: Request, body: DeviceVerifyRequest) -> DeviceVe
                 is_expired=is_expired,
             )
 
-        except HTTPException:
-            raise
         finally:
             db_session.close()
 
-    return await asyncio.to_thread(_sync)
+    return await _run_sync(_sync)
 
 
 @router.post(
@@ -2817,7 +2838,6 @@ async def device_confirm(
     The database work runs in a worker thread (#1770): the approval
     share-locks the owner's ``users`` row and may wait on a reset holding it.
     """
-    import asyncio
 
     user = _get_user_from_session(request)
     if not user:
@@ -3006,8 +3026,7 @@ async def introspect_token(
     caller_ip = request.client.host if request.client else "unknown"
     token_prefix = token[:8] + "..." if token else "(empty)"
 
-    # #1831: the sync session work runs in a worker thread — never on the
-    # event loop, where a wait on a row lock would stall every request.
+    # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
         db_session = get_sync_session()
         try:
@@ -3063,7 +3082,7 @@ async def introspect_token(
         finally:
             db_session.close()
 
-    return await asyncio.to_thread(_sync)
+    return await _run_sync(_sync)
 
 
 @router.post(
@@ -3094,8 +3113,7 @@ async def oauth_revoke(
     revokes the access token issued with it.
     """
 
-    # #1831: the sync session work runs in a worker thread — never on the
-    # event loop, where a wait on a row lock would stall every request.
+    # #1831: sync session work runs off the event loop (see _run_sync).
     def _sync():
         db_session = get_sync_session()
         try:
@@ -3141,4 +3159,4 @@ async def oauth_revoke(
         finally:
             db_session.close()
 
-    return await asyncio.to_thread(_sync)
+    return await _run_sync(_sync)

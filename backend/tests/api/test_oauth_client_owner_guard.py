@@ -20,6 +20,7 @@ overrides), so the auth boundary is exercised without the full HTTP/DB stack.
 from __future__ import annotations
 
 import sys
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -35,6 +36,9 @@ from api.routes import oauth as oauth_routes  # noqa: E402
 from api.routes.oauth import (  # noqa: E402
     OAuth2ClientUpdateRequest,
     delete_oauth2_client,
+    get_oauth2_client,
+    hide_oauth2_client_secret,
+    regenerate_oauth2_client_secret,
     update_oauth2_client,
 )
 from utils.datetime import utcnow  # noqa: E402
@@ -204,3 +208,52 @@ async def test_delete_allows_owner() -> None:
         )
     assert session.deleted is client
     assert session.committed is True
+
+
+# --------------------------------------------------------------------------- #
+# #1831 review: hide / regenerate let the guard reach the 403 handler, and the
+# single-client GET honours the one-time visibility window like the list does.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_hide_rejects_non_owner_with_the_guard_error() -> None:
+    """The generic handler used to rewrite AuthorizationError as a 500."""
+    session = _FakeSession(_make_client(owner_id=_OWNER))
+    with patch.object(oauth_routes, "get_sync_session", return_value=session):
+        with pytest.raises(AuthorizationError):
+            await hide_oauth2_client_secret(
+                request=_request_as(_OTHER), client_id="oauth_abc123", user=None
+            )
+    assert session.committed is False
+    assert session.rolled_back is True
+
+
+@pytest.mark.asyncio
+async def test_regenerate_rejects_non_owner_with_the_guard_error() -> None:
+    session = _FakeSession(_make_client(owner_id=_OWNER))
+    with patch.object(oauth_routes, "get_sync_session", return_value=session):
+        with pytest.raises(AuthorizationError):
+            await regenerate_oauth2_client_secret(
+                request=_request_as(_OTHER),
+                background_tasks=SimpleNamespace(add_task=lambda *a, **k: None),
+                client_id="oauth_abc123",
+                user=None,
+            )
+    assert session.committed is False
+
+
+@pytest.mark.asyncio
+async def test_get_hides_the_secret_once_the_visibility_window_closed() -> None:
+    """Migration 034: the secret is shown once, for ten minutes. The list
+    endpoint honoured that; the single-client GET kept returning it."""
+    client = _make_client(owner_id=_OWNER)
+    client.visibility_expires_at = utcnow() - timedelta(minutes=1)
+    client.plaintext_secret_encrypted = "enc"
+    session = _FakeSession(client)
+    with patch.object(oauth_routes, "get_sync_session", return_value=session):
+        response = await get_oauth2_client(
+            request=_request_as(_OWNER), client_id="oauth_abc123", user=None
+        )
+    assert response.plaintext_secret is None
+    assert response.is_visible is False
