@@ -26,12 +26,13 @@ and the billing checkout endpoints.
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.routes import auth as auth_module
@@ -44,8 +45,10 @@ from api.routes.me_oauth import (
 )
 from auth.dependencies import SessionUser
 from auth.session import SESSION_COOKIE_NAME
+from config.constants import IDENTITY_LINK_SIGN_IN_WINDOW
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
+from models.auth import User, UserOAuthProvider
 from services.account_erasure_service import AccountErasureService
 from services.account_linking_service import AccountLinkingService
 from services.identity_link_service import IdentityLinkService
@@ -433,7 +436,6 @@ async def list_providers(
 # MFA included. What counts is the time the credential was proved (#1818): a
 # password sign-in, or Google's ``auth_time`` — not an OAuth round trip that a
 # live provider session completes without asking (see ``SessionManager.proven_at``).
-IDENTITY_LINK_SIGN_IN_WINDOW = timedelta(minutes=10)
 
 
 class IdentityLinkTarget(BaseModel):
@@ -467,6 +469,10 @@ class LinkableIdentityItem(BaseModel):
     email: str | None = None
     name: str | None = None
     signed_in_recently: bool = False
+    # #1833: how this account can sign in ("google", "github", "password"), so
+    # the page offers "Confirm with Google" only where a Google sign-in can
+    # prove something. Empty when nothing is known about the account.
+    providers: list[str] = []
 
 
 class IdentityLinksResponse(BaseModel):
@@ -482,6 +488,39 @@ class IdentityLinksResponse(BaseModel):
     # the window, so the page can say what to do before a link.
     signed_in_recently: bool = False
     sign_in_window_minutes: int = int(IDENTITY_LINK_SIGN_IN_WINDOW.total_seconds() // 60)
+    # #1833: the session user's own sign-in methods, as for a linkable row.
+    providers: list[str] = []
+
+
+async def _sign_in_providers(db: AsyncSession, user_ids: list[str]) -> dict[str, list[str]]:
+    """How each of ``user_ids`` can sign in (#1833).
+
+    The OAuth providers attached to the account (``user_oauth_providers``, plus
+    the legacy ``users.auth_provider`` of accounts that pre-date that table) and
+    ``"password"`` when a password is set. Accounts with nothing known get an
+    empty list, never a missing key.
+    """
+    found: dict[str, set[str]] = {user_id: set() for user_id in user_ids}
+    if not user_ids:
+        return {}
+    rows = await db.execute(
+        select(UserOAuthProvider.user_id, UserOAuthProvider.provider).where(
+            UserOAuthProvider.user_id.in_(user_ids)
+        )
+    )
+    for user_id, provider in rows:
+        found.setdefault(user_id, set()).add(provider)
+    rows = await db.execute(
+        select(User.user_id, User.auth_provider, User.password_hash).where(
+            User.user_id.in_(user_ids)
+        )
+    )
+    for user_id, auth_provider, password_hash in rows:
+        if auth_provider:
+            found.setdefault(user_id, set()).add(auth_provider)
+        if password_hash:
+            found.setdefault(user_id, set()).add("password")
+    return {user_id: sorted(providers) for user_id, providers in found.items()}
 
 
 class IdentityLinkStatusResponse(BaseModel):
@@ -516,20 +555,28 @@ async def list_identity_links(
     linked_ids = {item.user_id for item in linked}
     session_id = _session_id(request)
     accounts = auth_module._session_manager.list_accounts(session_id)
-    linkable = []
-    for account in accounts:
-        account_id = account.get("user_id") or account.get("sub")
-        if account_id and account_id != user_id and account_id not in linked_ids:
-            linkable.append(
-                LinkableIdentityItem(
-                    user_id=account_id,
-                    email=account.get("email"),
-                    name=account.get("name"),
-                    signed_in_recently=auth_module._session_manager.proven_within(
-                        session_id, account_id, IDENTITY_LINK_SIGN_IN_WINDOW
-                    ),
-                )
-            )
+    linkable_accounts = [
+        (account_id, account)
+        for account in accounts
+        if (account_id := account.get("user_id") or account.get("sub"))
+        and account_id != user_id
+        and account_id not in linked_ids
+    ]
+    providers = await _sign_in_providers(
+        db, [user_id, *(account_id for account_id, _ in linkable_accounts)]
+    )
+    linkable = [
+        LinkableIdentityItem(
+            user_id=account_id,
+            email=account.get("email"),
+            name=account.get("name"),
+            signed_in_recently=auth_module._session_manager.proven_within(
+                session_id, account_id, IDENTITY_LINK_SIGN_IN_WINDOW
+            ),
+            providers=providers.get(account_id, []),
+        )
+        for account_id, account in linkable_accounts
+    ]
     return IdentityLinksResponse(
         linked=[
             LinkedIdentityItem(
@@ -544,6 +591,7 @@ async def list_identity_links(
         signed_in_recently=auth_module._session_manager.proven_within(
             session_id, user_id, IDENTITY_LINK_SIGN_IN_WINDOW
         ),
+        providers=providers.get(user_id, []),
     )
 
 

@@ -28,6 +28,7 @@ import {
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import LinkedAccounts from "./LinkedAccounts";
+import { resetConsumedSearchParams } from "@/hooks/useConsumeSearchParams";
 import en from "@/messages/en.json";
 import ja from "@/messages/ja.json";
 
@@ -40,6 +41,16 @@ const stableTranslator = (key: string, values?: Record<string, unknown>) => {
 };
 vi.mock("next-intl", () => ({
   useTranslations: (_namespace: string) => stableTranslator,
+}));
+
+// #1833: the card reads `?link_proof=` from the URL and strips it.
+const { mockReplace, paramsHolder } = vi.hoisted(() => ({
+  mockReplace: vi.fn(),
+  paramsHolder: { current: new URLSearchParams() },
+}));
+vi.mock("next/navigation", () => ({
+  useSearchParams: () => paramsHolder.current,
+  useRouter: () => ({ replace: mockReplace }),
 }));
 
 const mockRefetchUser = vi.fn();
@@ -99,6 +110,9 @@ const ADMIN = {
 const GOOGLE = { user_id: "google:1", email: "me@example.com", name: "Me" };
 
 beforeEach(() => {
+  mockReplace.mockReset();
+  paramsHolder.current = new URLSearchParams();
+  resetConsumedSearchParams();
   mockToast.mockClear();
   mockRefetchUser.mockReset();
   mockRefetchUser.mockResolvedValue(undefined);
@@ -420,6 +434,108 @@ describe("LinkedAccounts — confirm with Google", () => {
   });
 });
 
+// ---------- link-proof result (#1833) ---------------------------------------
+
+describe("LinkedAccounts — link-proof result", () => {
+  const stale = {
+    linked: [],
+    linkable: [{ ...GOOGLE, signed_in_recently: false, providers: ["google"] }],
+    signed_in_recently: true,
+    sign_in_window_minutes: 10,
+    providers: ["password"],
+  };
+
+  it("says the deployment cannot confirm Google accounts, and strips the parameter", async () => {
+    paramsHolder.current = new URLSearchParams("link_proof=unproved");
+    mockApiGet.mockResolvedValueOnce(stale);
+
+    render(<LinkedAccounts />);
+
+    expect(await screen.findByText("linkProofUnproved")).toBeTruthy();
+    expect(mockReplace).toHaveBeenCalledWith("/profile");
+  });
+
+  it("says to sign in to Google again when the sign-in was too old", async () => {
+    paramsHolder.current = new URLSearchParams("link_proof=stale");
+    mockApiGet.mockResolvedValueOnce(stale);
+
+    render(<LinkedAccounts />);
+
+    expect(await screen.findByText("linkProofStale")).toBeTruthy();
+    expect(mockReplace).toHaveBeenCalledWith("/profile");
+  });
+
+  it("ignores any other value and leaves the URL alone", async () => {
+    paramsHolder.current = new URLSearchParams("link_proof=whatever");
+    mockApiGet.mockResolvedValueOnce(stale);
+
+    render(<LinkedAccounts />);
+
+    await screen.findByText("signInAgainHint");
+    expect(screen.queryByText("linkProofUnproved")).toBeNull();
+    expect(screen.queryByText("linkProofStale")).toBeNull();
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it("does not offer Confirm with Google when only a GitHub account needs proof", async () => {
+    mockApiGet.mockResolvedValueOnce({
+      ...stale,
+      linkable: [
+        {
+          user_id: "github:9",
+          name: "GH",
+          signed_in_recently: false,
+          providers: ["github"],
+        },
+      ],
+    });
+
+    render(<LinkedAccounts />);
+
+    expect(await screen.findByText("signInAgainHint")).toBeTruthy();
+    await waitFor(() => expect(mockGetAuthConfig).toHaveBeenCalled());
+    expect(
+      screen.queryByRole("button", { name: "confirmWithGoogle" }),
+    ).toBeNull();
+  });
+
+  it("offers it when the account that needs proof is the session user with Google", async () => {
+    mockApiGet.mockResolvedValueOnce({
+      ...stale,
+      linkable: [
+        {
+          user_id: "github:9",
+          name: "GH",
+          signed_in_recently: true,
+          providers: ["github"],
+        },
+      ],
+      signed_in_recently: false,
+      providers: ["google", "password"],
+    });
+
+    render(<LinkedAccounts />);
+
+    expect(
+      await screen.findByRole("button", { name: "confirmWithGoogle" }),
+    ).toBeTruthy();
+  });
+
+  it("keeps offering it when the backend says nothing about providers", async () => {
+    mockApiGet.mockResolvedValueOnce({
+      linked: [],
+      linkable: [{ ...GOOGLE, signed_in_recently: false }],
+      signed_in_recently: true,
+    });
+
+    render(<LinkedAccounts />);
+
+    expect(
+      await screen.findByRole("button", { name: "confirmWithGoogle" }),
+    ).toBeTruthy();
+  });
+});
+
 // ---------- unlink -----------------------------------------------------------
 
 describe("LinkedAccounts — unlink", () => {
@@ -626,6 +742,8 @@ describe("LinkedAccounts — i18n key coverage", () => {
     "linkNotSignedInError",
     "linkSignInAgainError",
     "signInAgainHint",
+    "linkProofUnproved",
+    "linkProofStale",
     "linkLimitError",
     "unlinkError",
     "unlinkNotLinkedError",

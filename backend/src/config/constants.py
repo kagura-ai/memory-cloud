@@ -4,6 +4,7 @@ Issue #273: Extract magic numbers to centralized configuration for maintainabili
 All constants are grouped by category with clear documentation.
 """
 
+from datetime import timedelta
 from typing import Literal, get_args
 
 # ============================================================================
@@ -266,3 +267,8 @@ QUOTA_TYPES: frozenset[str] = frozenset(
         "api_public_daily",
     }
 )
+
+# How recently each account of an identity link must have proved its credential
+# on this browser (#1803, #1818). Read by the identity-links routes and by the
+# OAuth callback that reports a stale Google ``auth_time`` (#1833).
+IDENTITY_LINK_SIGN_IN_WINDOW = timedelta(minutes=10)

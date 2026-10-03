@@ -103,6 +103,8 @@
     "signInAgainHint": "To link, both this account and the one you are using must prove their sign-in on this browser within {minutes} minutes. Sign in with the password first (it starts a new browser session), then confirm a Google account with \"Confirm with Google\" below. Adding an account through the switcher, or a GitHub sign-in, counts only where the operator allows it.",
     "linkSignInAgainError": "Both accounts must have proved their sign-in on this browser in the last {minutes} minutes. Confirm {account} and this account again (a password sign-in first, or \"Confirm with Google\"), then link.",
     "confirmWithGoogle": "Confirm with Google",
+    "linkProofUnproved": "This deployment can't confirm Google accounts: Google did not say when you last signed in there. Ask your operator to set this up (a verified OAuth app with Session age claims), or prove the account with a password sign-in.",
+    "linkProofStale": "Google confirmed a sign-in older than {minutes} minutes, which is too old for a link. Sign out of Google, sign in again, then retry \"Confirm with Google\".",
     "confirmWithGoogleHint": "\"Confirm with Google\" proves only the Google account you pick there. Google confirms it only if you signed in to Google itself within the last few minutes, and only where the operator has set this up. If the account still shows as not confirmed, sign out of Google, sign in again, then retry.",
     "linkLimitError": "No more accounts can be linked. Unlink one first.",
     "unlinkError": "Couldn't unlink {account}. Please try again.",

@@ -53,6 +53,7 @@ from auth.session import (
     set_session_manager,
 )
 from auth.totp import verify_totp
+from config.constants import IDENTITY_LINK_SIGN_IN_WINDOW
 from config.settings import TERMS_VERSION_RE
 from db.base import get_db
 from models.auth import User
@@ -976,6 +977,9 @@ async def google_callback(
             if auth_time is None:
                 logger.warning("link_proof_auth_time_missing", provider="google")
         proven_at = _oauth_proven_at(auth_time)
+        # #1833: what to tell the Linked accounts page when this sign-in proved
+        # nothing (None when it did, or when the operator counts sign-ins).
+        link_proof_result = _link_proof_result(auth_time) if link_proof else None
 
         if intent == "add" and add_to_session:
             if not _session_manager.add_account(add_to_session, session_data, proven_at=proven_at):
@@ -1036,6 +1040,11 @@ async def google_callback(
         # Issue #776: server-side validation of the Redis-sourced return_to
         # (CWE-601 defense-in-depth). See _safe_redirect_url docstring.
         redirect_url = _safe_redirect_url(return_to_url)
+        # #1833: only the page that asked for the proof reads the result, so
+        # it rides on a return_to that passed validation — never on the
+        # dashboard fallback.
+        if link_proof_result and return_to_url and redirect_url != _safe_redirect_url(None):
+            redirect_url = _with_link_proof_result(redirect_url, link_proof_result)
 
         redirect = RedirectResponse(url=redirect_url, status_code=303)
         # Issue #115: Cookie name changed from 'session_id' to 'kagura_session'.
@@ -1285,6 +1294,41 @@ def _take_link_proof_intent(state: str) -> bool:
     value = _session_manager._redis.get(key)
     _session_manager._redis.delete(key)
     return value == "1"
+
+
+def _link_proof_result(auth_time: datetime | None) -> str | None:
+    """Why a link-proof sign-in proved nothing, for the page that asked (#1833).
+
+    ``"unproved"``: Google sent no usable ``auth_time`` (the OAuth app is not
+    Verified, or Session age claims is off — the operator's side). ``"stale"``:
+    it did, but the person authenticated with Google longer ago than the link
+    window (sign out of Google and in again). None when the proof stands, or
+    when the operator counts the sign-in itself.
+    """
+    from config.settings import get_settings
+
+    if get_settings().identity_link_allow_oauth_signin_proof:
+        return None
+    if auth_time is None:
+        return "unproved"
+    if utcnow() - auth_time > IDENTITY_LINK_SIGN_IN_WINDOW:
+        logger.warning("link_proof_auth_time_stale", provider="google")
+        return "stale"
+    return None
+
+
+def _with_link_proof_result(url: str, result: str) -> str:
+    """``url`` with ``link_proof=<result>`` added to its query (#1833).
+
+    Merges with any query the page already carries (``?tab=…``) instead of
+    appending a second ``?`` (#218).
+    """
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    query.append(("link_proof", result))
+    return urlunsplit(parts._replace(query=urlencode(query)))
 
 
 def _oauth_proven_at(auth_time: datetime | None) -> datetime | None:

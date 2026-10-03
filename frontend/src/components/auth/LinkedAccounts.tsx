@@ -57,11 +57,12 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { LoadingState } from "@/components/common/LoadingState";
 import { useToast } from "@/hooks/use-toast";
+import { useConsumeSearchParams } from "@/hooks/useConsumeSearchParams";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiClient, ApiError } from "@/lib/api/base";
 import { getAuthConfig } from "@/lib/auth/auth";
 import { startAddAccount } from "@/hooks/useAccountSwitcher";
-import { Loader2, Users } from "lucide-react";
+import { AlertCircle, Loader2, Users } from "lucide-react";
 
 const LINKS_PATH = "/api/v1/me/account/identity-links";
 
@@ -72,6 +73,9 @@ interface IdentityAccount {
   linked_at?: string | null;
   // Linkable rows only: signed in on this browser within the link window.
   signed_in_recently?: boolean;
+  // #1833: how the account can sign in ("google", "github", "password").
+  // Absent on an older backend: then nothing is known and every option stays.
+  providers?: string[];
 }
 
 interface IdentityLinksResponse {
@@ -80,6 +84,18 @@ interface IdentityLinksResponse {
   // Whether the session user itself signed in within the window (#1803).
   signed_in_recently?: boolean;
   sign_in_window_minutes?: number;
+  // #1833: the session user's own sign-in methods.
+  providers?: string[];
+}
+
+// #1833: what the Google callback reports when a link-proof sign-in proved
+// nothing. "unproved": Google sent no authentication time (the operator's
+// OAuth app setup). "stale": it did, but older than the link window.
+type LinkProofResult = "unproved" | "stale";
+
+/** Whether a Google sign-in could prove this account (unknown counts as yes). */
+function googleCanProve(providers: string[] | undefined): boolean {
+  return providers === undefined || providers.includes("google");
 }
 
 // The backend's window, should a response ever omit it.
@@ -99,6 +115,7 @@ export default function LinkedAccounts() {
   const [linked, setLinked] = useState<IdentityAccount[]>([]);
   const [linkable, setLinkable] = useState<IdentityAccount[]>([]);
   const [selfSignedInRecently, setSelfSignedInRecently] = useState(false);
+  const [selfProviders, setSelfProviders] = useState<string[] | undefined>();
   const [windowMinutes, setWindowMinutes] = useState(
     DEFAULT_SIGN_IN_WINDOW_MINUTES,
   );
@@ -117,6 +134,21 @@ export default function LinkedAccounts() {
   const [dialogError, setDialogError] = useState<string | null>(null);
   // #1818: whether a Google sign-in can prove an account here.
   const [googleEnabled, setGoogleEnabled] = useState(false);
+  // #1833: why the last "Confirm with Google" proved nothing, if it did not.
+  const [proofResult, setProofResult] = useState<LinkProofResult | null>(null);
+
+  // The callback reports the result on the URL we asked it to come back to;
+  // read it once and strip it, so a reload or the back button does not
+  // repeat it (#1382 mechanics).
+  useConsumeSearchParams(
+    (params) => {
+      const result = params.get("link_proof");
+      if (result !== "unproved" && result !== "stale") return false;
+      setProofResult(result);
+      return true;
+    },
+    { cleanUrl: "/profile" },
+  );
 
   useEffect(() => {
     let alive = true;
@@ -148,6 +180,7 @@ export default function LinkedAccounts() {
       setLinked(data.linked ?? []);
       setLinkable(data.linkable ?? []);
       setSelfSignedInRecently(data.signed_in_recently ?? false);
+      setSelfProviders(data.providers);
       setWindowMinutes(
         data.sign_in_window_minutes ?? DEFAULT_SIGN_IN_WINDOW_MINUTES,
       );
@@ -308,6 +341,12 @@ export default function LinkedAccounts() {
   const anyNeedsSignIn =
     linkable.length > 0 &&
     !(selfSignedInRecently && linkable.every((a) => a.signed_in_recently));
+  // #1833: offer "Confirm with Google" only when one of the accounts that
+  // still needs a proof can sign in with Google. A GitHub-only or
+  // password-only account gains nothing from the Google round trip.
+  const googleCanHelp =
+    (!selfSignedInRecently && googleCanProve(selfProviders)) ||
+    linkable.some((a) => !a.signed_in_recently && googleCanProve(a.providers));
   const linkLabel = linkTarget ? accountLabel(linkTarget) : "";
   const unlinkLabel = unlinkTarget ? accountLabel(unlinkTarget) : "";
 
@@ -367,7 +406,17 @@ export default function LinkedAccounts() {
                   <ul className="space-y-2">
                     {linkable.map((account) => renderRow(account, false))}
                   </ul>
-                  {anyNeedsSignIn && googleEnabled && (
+                  {proofResult && (
+                    <Alert className="mt-3">
+                      <AlertCircle className="h-4 w-4" />
+                      <AlertDescription>
+                        {proofResult === "unproved"
+                          ? t("linkProofUnproved")
+                          : t("linkProofStale", { minutes: windowMinutes })}
+                      </AlertDescription>
+                    </Alert>
+                  )}
+                  {anyNeedsSignIn && googleEnabled && googleCanHelp && (
                     <div className="mt-3 space-y-2">
                       <p className="text-xs text-slate-500">
                         {t("confirmWithGoogleHint")}

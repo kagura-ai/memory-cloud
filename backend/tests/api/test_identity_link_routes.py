@@ -284,6 +284,48 @@ class TestListIdentityLinks:
         ]
         assert result.sign_in_window_minutes == 10
 
+    @pytest.mark.asyncio
+    async def test_reports_how_each_account_can_sign_in(self, session_manager, service):
+        """#1833: the page offers "Confirm with Google" only to Google accounts."""
+        session_manager.list_accounts.return_value = [
+            {"user_id": ME, "is_active": True},
+            {"user_id": "github|9"},
+            {"user_id": "google|5"},
+        ]
+        db = AsyncMock()
+        db.execute.side_effect = [
+            [("github|9", "github"), ("google|5", "google")],  # user_oauth_providers
+            [  # users: auth_provider, password_hash
+                (ME, None, "$argon2..."),
+                ("github|9", "github", None),
+                ("google|5", None, None),
+            ],
+        ]
+
+        result = await list_identity_links(_request(), {"user_id": ME}, db)
+
+        assert result.providers == ["password"]
+        assert [(item.user_id, item.providers) for item in result.linkable] == [
+            ("github|9", ["github"]),
+            ("google|5", ["google"]),
+        ]
+        # One query per table, whatever the number of accounts.
+        assert db.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_an_account_nothing_is_known_about_gets_no_providers(
+        self, session_manager, service
+    ):
+        session_manager.list_accounts.return_value = [
+            {"user_id": ME, "is_active": True},
+            {"user_id": "google|5"},
+        ]
+
+        result = await list_identity_links(_request(), {"user_id": ME}, AsyncMock())
+
+        assert result.providers == []
+        assert result.linkable[0].providers == []
+
 
 class TestSessionOnly:
     """A leaked API key or OAuth token must never be enough to link accounts."""

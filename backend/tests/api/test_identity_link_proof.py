@@ -260,6 +260,94 @@ class TestGoogleCallback:
 
         assert before <= _proof(manager) <= utcnow()
 
+    # --- #1833: telling the page when the proof did not stand ---------------
+
+    @staticmethod
+    def _result(response) -> list[str] | None:
+        return parse_qs(urlparse(response.headers["location"]).query).get("link_proof")
+
+    @pytest.mark.asyncio
+    async def test_a_missing_auth_time_tells_the_page_it_proved_nothing(
+        self, manager, signed_in_path, google_idp, strict
+    ) -> None:
+        auth_routes._oauth2_manager.verified_auth_time.return_value = None
+        manager._redis.store[PROOF_KEY.format(state="st1")] = "1"
+        manager._redis.store["oauth2_return_to:st1"] = "http://localhost:3000/profile"
+
+        response = await _callback("google")
+
+        location = urlparse(response.headers["location"])
+        assert location.path == "/profile"
+        assert self._result(response) == ["unproved"]
+
+    @pytest.mark.asyncio
+    async def test_a_stale_auth_time_tells_the_page_to_sign_in_to_google_again(
+        self, manager, signed_in_path, google_idp, strict
+    ) -> None:
+        auth_routes._oauth2_manager.verified_auth_time.return_value = utcnow() - timedelta(hours=3)
+        manager._redis.store[PROOF_KEY.format(state="st1")] = "1"
+        manager._redis.store["oauth2_return_to:st1"] = "http://localhost:3000/profile?tab=x"
+
+        response = await _callback("google")
+
+        query = parse_qs(urlparse(response.headers["location"]).query)
+        assert query["link_proof"] == ["stale"]
+        assert query["tab"] == ["x"]  # merged, not a second "?"
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_auth_time_reports_nothing(
+        self, manager, signed_in_path, google_idp, strict
+    ) -> None:
+        auth_routes._oauth2_manager.verified_auth_time.return_value = utcnow() - timedelta(
+            minutes=1
+        )
+        manager._redis.store[PROOF_KEY.format(state="st1")] = "1"
+        manager._redis.store["oauth2_return_to:st1"] = "http://localhost:3000/profile"
+
+        response = await _callback("google")
+
+        assert self._result(response) is None
+
+    @pytest.mark.asyncio
+    async def test_the_result_never_rides_on_the_dashboard_fallback(
+        self, manager, signed_in_path, google_idp, strict
+    ) -> None:
+        """No return_to, or one that fails validation: nobody reads the result."""
+        auth_routes._oauth2_manager.verified_auth_time.return_value = None
+        manager._redis.store[PROOF_KEY.format(state="st1")] = "1"
+
+        response = await _callback("google")
+        assert self._result(response) is None
+
+        manager._redis.store["oauth2_state:st1"] = "pending"
+        manager._redis.store[PROOF_KEY.format(state="st1")] = "1"
+        manager._redis.store["oauth2_return_to:st1"] = "https://evil.example/profile"
+        response = await _callback("google")
+        assert self._result(response) is None
+        assert "evil.example" not in response.headers["location"]
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_sign_in_reports_nothing(
+        self, manager, signed_in_path, google_idp, strict
+    ) -> None:
+        manager._redis.store["oauth2_return_to:st1"] = "http://localhost:3000/profile"
+
+        response = await _callback("google")
+
+        assert self._result(response) is None
+
+    @pytest.mark.asyncio
+    async def test_the_opt_out_reports_nothing(
+        self, manager, signed_in_path, google_idp, opted_out
+    ) -> None:
+        auth_routes._oauth2_manager.verified_auth_time.return_value = None
+        manager._redis.store[PROOF_KEY.format(state="st1")] = "1"
+        manager._redis.store["oauth2_return_to:st1"] = "http://localhost:3000/profile"
+
+        response = await _callback("google")
+
+        assert self._result(response) is None
+
     @pytest.mark.asyncio
     async def test_add_account_carries_the_proof(
         self, manager, signed_in_path, google_idp, strict, monkeypatch
