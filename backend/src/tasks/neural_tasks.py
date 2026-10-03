@@ -227,7 +227,7 @@ async def consolidation_task():
                         # Delete from Qdrant first
                         from db.qdrant import delete_memory_from_qdrant
 
-                        await delete_memory_from_qdrant(user_id, memory.id)
+                        await delete_memory_from_qdrant(user_id, memory.point_id)
 
                         # Then delete from PostgreSQL
                         await memory_repo.delete(memory.id)

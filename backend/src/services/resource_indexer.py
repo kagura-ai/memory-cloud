@@ -25,7 +25,6 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local application imports (PEP8)
-from db.point_writer_lock import hold_point_writer_lock
 from db.qdrant import (
     KAGURA_MEMORIES_BM25_VECTOR_NAME,
     KAGURA_MEMORIES_VECTOR_NAME,
@@ -690,17 +689,27 @@ class ResourceIndexer:
         # way) instead of being patched in place under its deleted_at and
         # staying invisible. Tombstones are terminal: the #1521 sweep
         # hard-deletes them later.
-        existing_memory_query = await self.db.execute(
-            select(Memory).where(
-                Memory.user_id == str(context.created_by),
-                Memory.workspace_id == context.workspace_id,
-                Memory.context_id == context.id,
-                Memory.resource_id == event.resource_id,  # Generated column (fast!)
-                Memory.resource_doc_id == event.doc_id,  # Generated column (fast!)
-                Memory.resource_version == event.version,  # Generated column (fast!)
-                Memory.deleted_at.is_(None),
+        try:
+            existing_memory_query = await self.db.execute(
+                select(Memory).where(
+                    Memory.user_id == str(context.created_by),
+                    Memory.workspace_id == context.workspace_id,
+                    Memory.context_id == context.id,
+                    Memory.resource_id == event.resource_id,  # Generated column (fast!)
+                    Memory.resource_doc_id == event.doc_id,  # Generated column (fast!)
+                    Memory.resource_version == event.version,  # Generated column (fast!)
+                    Memory.deleted_at.is_(None),
+                )
             )
-        )
+        except Exception as e:
+            logger.error(
+                "resource_memory_lookup_failed",
+                resource_id=event.resource_id,
+                doc_id=event.doc_id,
+                version=event.version,
+                error=str(e),
+            )
+            raise
         existing_memory = existing_memory_query.scalar_one_or_none()
         memory_id = existing_memory.id if existing_memory else uuid4()
 
@@ -738,11 +747,11 @@ class ResourceIndexer:
         )
 
         # 4. Upsert to Qdrant (per-context collection, see #334). The point is
-        # written before the row that owns it commits, so hold the writers'
-        # shared lock until this transaction ends: the orphan sweep, which now
-        # judges resource points by their rows (#1829), waits for it before it
-        # deletes and never sees this write half-way (#1798).
-        await hold_point_writer_lock(self.db)
+        # written before the row that owns it commits (once per batch); the
+        # orphan sweep, which judges resource points by their rows (#1829),
+        # never takes a point younger than its grace period for an orphan, so
+        # this window is safe without the #1798 writer lock — which would pin
+        # the sweep out for the whole batch.
         try:
             await self.qdrant_client.upsert(
                 collection_name=collection_name,
@@ -775,9 +784,9 @@ class ResourceIndexer:
         # This is acceptable because:
         # 1. Qdrant upsert is idempotent (same point_id)
         # 2. Next indexer run will retry Memory creation
-        # 3. A point left without a row is swept: the orphan sweep judges
-        #    resource points by their row (#1829); the writer lock taken above
-        #    keeps the sweep from seeing this transaction half-way.
+        # 3. A point left without a row is swept once it is older than the
+        #    sweep's grace period: the sweep judges resource points by their
+        #    row (#1829).
 
         try:
             # The row was resolved above, before the point was built; the point

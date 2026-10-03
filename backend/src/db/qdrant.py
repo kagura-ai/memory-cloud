@@ -11,6 +11,7 @@ Collection design (post Single Collection Migration, Issue #334):
 
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -1389,6 +1390,9 @@ class PointRef:
     # (resource_id, doc_id, version), so a point whose row was purged can
     # still be checked against the natural key before it is deleted (#1829).
     resource_key: tuple[str, str, int] | None = None
+    # Resource points only: when the point was written (payload ``updated_at``),
+    # so a point whose row has not committed yet is never taken for an orphan.
+    updated_at: datetime | None = None
 
 
 def _point_ref(point: Any) -> PointRef:
@@ -1396,15 +1400,27 @@ def _point_ref(point: Any) -> PointRef:
     payload = point.payload or {}
     is_resource = "resource_id" in payload
     resource_key: tuple[str, str, int] | None = None
+    updated_at: datetime | None = None
     if is_resource:
         doc_id, version = payload.get("doc_id"), payload.get("version")
         if isinstance(doc_id, str) and isinstance(version, int) and not isinstance(version, bool):
             resource_key = (str(payload["resource_id"]), doc_id, version)
+        raw = payload.get("updated_at")
+        if isinstance(raw, str):
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                parsed = None
+            if parsed is not None:
+                updated_at = (
+                    parsed.astimezone(UTC).replace(tzinfo=None) if parsed.tzinfo else parsed
+                )
     return PointRef(
         point_id=str(point.id),
         context_id=payload.get("context_id"),
         is_resource=is_resource,
         resource_key=resource_key,
+        updated_at=updated_at,
     )
 
 
@@ -1444,7 +1460,7 @@ async def scroll_point_refs(
                 collection_name=collection_name,
                 limit=page_size,
                 offset=offset,
-                with_payload=["context_id", "resource_id", "doc_id", "version"],
+                with_payload=["context_id", "resource_id", "doc_id", "version", "updated_at"],
                 with_vectors=False,
             )
         except Exception as e:

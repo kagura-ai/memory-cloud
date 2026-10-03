@@ -1445,7 +1445,7 @@ class DedupMergePhase:
         # Delete loser from Qdrant to prevent orphan vectors (cf. BUG FIX #83-10)
         try:
             await delete_memory_from_qdrant(
-                user_id, loser.id, self.collection_name or "kagura_memories"
+                user_id, loser.point_id, self.collection_name or "kagura_memories"
             )
         except Exception as e:
             logger.warning(

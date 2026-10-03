@@ -16,9 +16,11 @@ This sweep removes those points. A point is an orphan when:
   grace period; or
 * it is a resource point whose row — found by ``summary_embedding_id``, the
   column that holds the point id — was soft-deleted longer ago than the grace
-  period, or is gone and no live row carries the document's natural key
-  ``(context, resource_id, doc_id, version)`` either (#1829: ``forget`` on a
-  resource-ingested memory used to leave its point behind for good).
+  period, or is gone, was written longer ago than the grace period, and no live
+  row carries the document's natural key ``(context, resource_id, doc_id,
+  version)`` either (#1829: ``forget`` on a resource-ingested memory used to
+  leave its point behind for good). The age check covers the indexer, which
+  writes the point before the transaction that owns the row commits.
 
 A point whose memory row is live is never an orphan, whatever else is true.
 A resource point whose row cannot be decided (no natural key in the payload,
@@ -36,7 +38,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.point_writer_lock import wait_for_point_writers
@@ -213,10 +215,11 @@ async def _classify_resource_rows(
     """Judge resource points whose context is live by their memory rows (#1829).
 
     A row found by ``summary_embedding_id``: live → kept; soft-deleted before
-    ``cutoff`` → orphan. No row: a re-index may have moved the document to a
-    new version (a new point id) and purged this one, so a live row for the
-    document's natural key keeps the point; otherwise it is an orphan. Points
-    that cannot be decided (no natural key in the payload) are kept.
+    ``cutoff`` → orphan. No row: the point must be older than ``cutoff`` (the
+    indexer writes a point before its row commits), and a live row that names
+    the same document under another point id — an older row, or one whose
+    point was re-pointed — keeps it; otherwise it is an orphan. Points that
+    cannot be decided (no natural key or no timestamp in the payload) are kept.
     """
     point_ids: dict[UUID, PointRef] = {}
     for ref in refs:
@@ -226,9 +229,13 @@ async def _classify_resource_rows(
     if not point_ids:
         return {}
 
+    # Scoped by the (indexed) context ids as well: summary_embedding_id alone
+    # has no index.
+    context_ids = {c for c in (_as_uuid(ref.context_id) for ref in point_ids.values()) if c}
     rows = await db.execute(
         select(Memory.summary_embedding_id, Memory.deleted_at).where(
-            Memory.summary_embedding_id.in_(list(point_ids))
+            Memory.context_id.in_(list(context_ids)),
+            Memory.summary_embedding_id.in_(list(point_ids)),
         )
     )
     # Several rows can name one point: a forgotten document that was synced
@@ -253,19 +260,22 @@ async def _classify_resource_rows(
         if point_uuid in newest_tombstone:
             if newest_tombstone[point_uuid] < cutoff:
                 orphans[ref.point_id] = REASON_RESOURCE_TOMBSTONED
-        elif ref.resource_key is not None:
+        elif (
+            ref.resource_key is not None
+            and ref.updated_at is not None
+            and ref.updated_at < cutoff
+            and _as_uuid(ref.context_id) is not None
+        ):
             unmatched.append(ref)
 
     if unmatched:
-        # One query for every unmatched document: live rows for the natural key.
-        # Keys compare canonical UUID strings on both sides: the payload's
-        # context_id is whatever the writer stored, the row's is a UUID.
-        keyed = {
-            (str(_as_uuid(ref.context_id)), *ref.resource_key): ref  # type: ignore[misc]
-            for ref in unmatched
-            if ref.resource_key is not None and _as_uuid(ref.context_id) is not None
-        }
-        context_ids = {_as_uuid(ref.context_id) for ref in unmatched}
+        # One query for every unmatched document: live rows for exactly these
+        # natural keys (not every row of the resource).
+        keyed: dict[tuple[UUID, str, str, int], PointRef] = {}
+        for ref in unmatched:
+            context_uuid = _as_uuid(ref.context_id)
+            if context_uuid is not None and ref.resource_key is not None:
+                keyed[(context_uuid, *ref.resource_key)] = ref
         rows = await db.execute(
             select(
                 Memory.context_id,
@@ -273,13 +283,17 @@ async def _classify_resource_rows(
                 Memory.resource_doc_id,
                 Memory.resource_version,
             ).where(
-                Memory.context_id.in_([c for c in context_ids if c is not None]),
-                Memory.resource_id.in_({key[1] for key in keyed}),
+                tuple_(
+                    Memory.context_id,
+                    Memory.resource_id,
+                    Memory.resource_doc_id,
+                    Memory.resource_version,
+                ).in_(list(keyed)),
                 Memory.deleted_at.is_(None),
             )
         )
         live_keys = {
-            (str(row.context_id), row.resource_id, row.resource_doc_id, row.resource_version)
+            (row.context_id, row.resource_id, row.resource_doc_id, row.resource_version)
             for row in rows
         }
         for key, ref in keyed.items():

@@ -2168,6 +2168,9 @@ class TestAccessEventEmission:
 
         memory = MagicMock()
         memory.id = mid
+        # #1829: an API-written memory's point id is its row id (point_id property).
+        memory.summary_embedding_id = mid
+        memory.point_id = mid
         memory.user_id = "author"
         memory.workspace_id = ws
         memory.context_id = ctx
@@ -2307,9 +2310,12 @@ class TestAccessEventEmission:
         ws, ctx, mid, point_id = uuid4(), uuid4(), uuid4(), uuid4()
         row = self._memory_row(ws, ctx, mid)
         row.summary_embedding_id = point_id
+        row.point_id = point_id
         service.memory_repo.get = AsyncMock(return_value=row)
         service.memory_repo.update = AsyncMock()
         service.db.commit = AsyncMock()
+        # No other live row names the point.
+        service.db.execute = AsyncMock(return_value=MagicMock(scalar=MagicMock(return_value=0)))
 
         with (
             patch(
@@ -2326,6 +2332,36 @@ class TestAccessEventEmission:
 
         assert res.deleted_count == 1
         delete_point.assert_awaited_once_with("caller", point_id, collection_name="c")
+
+    @pytest.mark.asyncio
+    async def test_forget_keeps_a_point_another_live_row_still_owns(self):
+        """#1829: one document indexed into two contexts of one collection is ONE
+        point for TWO rows; forgetting one row must not blind the other."""
+        service = MemoryService(MagicMock())
+        ws, ctx, mid, point_id = uuid4(), uuid4(), uuid4(), uuid4()
+        row = self._memory_row(ws, ctx, mid)
+        row.summary_embedding_id = point_id
+        row.point_id = point_id
+        service.memory_repo.get = AsyncMock(return_value=row)
+        service.memory_repo.update = AsyncMock()
+        service.db.commit = AsyncMock()
+        service.db.execute = AsyncMock(return_value=MagicMock(scalar=MagicMock(return_value=1)))
+
+        with (
+            patch(
+                "services.permission_service.PermissionService.can_access_memory",
+                AsyncMock(return_value=True),
+            ),
+            patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
+            patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()) as delete_point,
+            patch("repositories.neural_edge.NeuralEdgeRepository") as edge_cls,
+            patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()),
+        ):
+            edge_cls.return_value.delete_node_edges = AsyncMock(return_value=0)
+            res = await service.forget(ForgetRequest(memory_id=mid), "caller")
+
+        assert res.deleted_count == 1  # the row is still tombstoned
+        delete_point.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_forget_with_declared_context_uses_helper_workspace(self):

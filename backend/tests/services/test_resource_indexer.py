@@ -20,14 +20,6 @@ from services.resource_indexer import ResourceIndexer
 from utils.datetime import utcnow
 
 
-@pytest.fixture(autouse=True)
-def _no_point_writer_lock():
-    """#1829: the indexer holds the sweep's shared writer lock while it writes;
-    a unit test's mocked session has no transaction to hold it in."""
-    with patch("services.resource_indexer.hold_point_writer_lock", AsyncMock()):
-        yield
-
-
 def _make_event() -> MagicMock:
     event = MagicMock()
     event.id = 1

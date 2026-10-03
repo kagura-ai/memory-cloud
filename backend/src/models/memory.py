@@ -530,6 +530,16 @@ class Memory(Base):
         return f"<Memory(id='{self.id}', type='{self.type}', scope='{self.scope}')>"
 
     @property
+    def point_id(self) -> uuid.UUID:
+        """The vector store point this row owns (#1829).
+
+        ``summary_embedding_id`` when set — equal to ``id`` for memories the API
+        wrote, ``uuid5(resource:doc:version)`` for resource-ingested ones — else
+        the row id. Every vector delete must use this, never ``id`` alone.
+        """
+        return self.summary_embedding_id or self.id
+
+    @property
     def is_pinned(self) -> bool:
         """#1519: the one Python-side definition of "pinned" — the row belongs to the
         deterministic ``load_pinned()`` lane (``delivery_mode='always'``). The SQL

@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import ColumnElement, and_, or_, select
+from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.retention import should_promote_to_persistent
@@ -4748,6 +4748,37 @@ class MemoryService:
             tool_triggered_truncated=tool_truncated,
         )
 
+    async def _delete_memory_point(self, user_id: str, memory: Memory) -> None:
+        """Remove ``memory``'s vector point, unless another live row still owns it.
+
+        A resource-ingested memory's point id is ``uuid5(resource:doc:version)``
+        (#1829): the same document indexed into two contexts that share one
+        collection yields ONE point for TWO rows. Deleting it under the other
+        row would leave that memory unsearchable, so the point goes only when
+        no other live row names it. Memories the API wrote have their own
+        point (``point_id == id``) and skip the check.
+        """
+        point_id = memory.point_id
+        if point_id != memory.id:
+            others = await self.db.execute(
+                select(func.count())
+                .select_from(Memory)
+                .where(
+                    Memory.summary_embedding_id == point_id,
+                    Memory.id != memory.id,
+                    Memory.deleted_at.is_(None),
+                )
+            )
+            if (others.scalar() or 0) > 0:
+                logger.info(
+                    "memory_point_shared_kept",
+                    memory_id=str(memory.id),
+                    point_id=str(point_id),
+                )
+                return
+        del_collection = await resolve_collection_name(self.db, memory.context_id)
+        await delete_memory_from_qdrant(user_id, point_id, collection_name=del_collection)
+
     async def forget(
         self,
         request: ForgetRequest,
@@ -4857,17 +4888,9 @@ class MemoryService:
                 memory.deleted_by = user_id
                 await self.memory_repo.update(memory.id, memory)
 
-                # Hard delete from Qdrant (remove from search index). The point
-                # id is ``summary_embedding_id``: equal to the row id for a
-                # memory the API wrote, but ``uuid5(resource:doc:version)`` for
-                # a resource-ingested one, which a delete by row id misses and
-                # leaves the document text in the store (#1829).
-                del_collection = await resolve_collection_name(self.db, memory.context_id)
-                await delete_memory_from_qdrant(
-                    user_id,
-                    memory.summary_embedding_id or request.memory_id,
-                    collection_name=del_collection,
-                )
+                # Hard delete from Qdrant (remove from search index) — by the
+                # row's point id, not its row id (#1829).
+                await self._delete_memory_point(user_id, memory)
 
                 # Clean up neural memory edges with 3-level isolation
                 from repositories.neural_edge import NeuralEdgeRepository
@@ -4944,11 +4967,8 @@ class MemoryService:
                     memory.deleted_by = user_id
                     await self.memory_repo.update(memory.id, memory)
 
-                    # Hard delete from Qdrant
-                    del_collection = await resolve_collection_name(self.db, memory.context_id)
-                    await delete_memory_from_qdrant(
-                        user_id, memory_response.memory_id, collection_name=del_collection
-                    )
+                    # Hard delete from Qdrant — by the row's point id (#1829)
+                    await self._delete_memory_point(user_id, memory)
 
                     # Clean up neural memory edges
                     from repositories.neural_edge import NeuralEdgeRepository
@@ -5070,9 +5090,8 @@ class MemoryService:
             # Delete from PostgreSQL
             await self.memory_repo.delete(memory.id)
 
-            # Delete from Qdrant
-            del_collection = await resolve_collection_name(self.db, memory.context_id)
-            await delete_memory_from_qdrant(user_id, memory.id, collection_name=del_collection)
+            # Delete from Qdrant — by the row's point id (#1829)
+            await self._delete_memory_point(user_id, memory)
 
             deleted_count += 1
 
