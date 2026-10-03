@@ -23,7 +23,7 @@ import functools
 import os
 import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 import httpx
@@ -1043,7 +1043,7 @@ async def google_callback(
         # #1833: only the page that asked for the proof reads the result, so
         # it rides on a return_to that passed validation — never on the
         # dashboard fallback.
-        if link_proof_result and return_to_url and redirect_url != _safe_redirect_url(None):
+        if link_proof_result and redirect_url != _safe_redirect_url(None):
             redirect_url = _with_link_proof_result(redirect_url, link_proof_result)
 
         redirect = RedirectResponse(url=redirect_url, status_code=303)
@@ -1296,14 +1296,25 @@ def _take_link_proof_intent(state: str) -> bool:
     return value == "1"
 
 
+# A proof that would expire before the page can use it is reported as stale:
+# the browser still has to follow the redirect and load the Linked accounts
+# card, and the link itself is a further click away.
+_LINK_PROOF_HEADROOM = timedelta(minutes=1)
+
+
 def _link_proof_result(auth_time: datetime | None) -> str | None:
     """Why a link-proof sign-in proved nothing, for the page that asked (#1833).
 
     ``"unproved"``: Google sent no usable ``auth_time`` (the OAuth app is not
     Verified, or Session age claims is off — the operator's side). ``"stale"``:
-    it did, but the person authenticated with Google longer ago than the link
-    window (sign out of Google and in again). None when the proof stands, or
-    when the operator counts the sign-in itself.
+    it did, but the person authenticated with Google too long ago for the link
+    window, counting the time the page needs to come back and act on it (sign
+    out of Google and in again). None when the proof stands, or when the
+    operator counts the sign-in itself (see ``_oauth_proven_at``).
+
+    A stale time is the ordinary case — Google's ``auth_time`` is usually hours
+    old — so it is logged at info; the missing claim, an operator-side setup
+    gap, keeps its warning in the caller.
     """
     from config.settings import get_settings
 
@@ -1311,8 +1322,8 @@ def _link_proof_result(auth_time: datetime | None) -> str | None:
         return None
     if auth_time is None:
         return "unproved"
-    if utcnow() - auth_time > IDENTITY_LINK_SIGN_IN_WINDOW:
-        logger.warning("link_proof_auth_time_stale", provider="google")
+    if utcnow() - auth_time > IDENTITY_LINK_SIGN_IN_WINDOW - _LINK_PROOF_HEADROOM:
+        logger.info("link_proof_auth_time_stale", provider="google")
         return "stale"
     return None
 
@@ -1326,7 +1337,13 @@ def _with_link_proof_result(url: str, result: str) -> str:
     from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
     parts = urlsplit(url)
-    query = parse_qsl(parts.query, keep_blank_values=True)
+    # Replace, never stack: a return_to that still carries last round's result
+    # (a retry started before the page stripped it) must not win the read.
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key != "link_proof"
+    ]
     query.append(("link_proof", result))
     return urlunsplit(parts._replace(query=urlencode(query)))
 

@@ -309,6 +309,35 @@ class TestGoogleCallback:
         assert self._result(response) is None
 
     @pytest.mark.asyncio
+    async def test_a_proof_about_to_expire_counts_as_stale(
+        self, manager, signed_in_path, google_idp, strict
+    ) -> None:
+        """Seconds of headroom are not enough to come back and link."""
+        auth_routes._oauth2_manager.verified_auth_time.return_value = utcnow() - timedelta(
+            minutes=9, seconds=30
+        )
+        manager._redis.store[PROOF_KEY.format(state="st1")] = "1"
+        manager._redis.store["oauth2_return_to:st1"] = "http://localhost:3000/profile"
+
+        response = await _callback("google")
+
+        assert self._result(response) == ["stale"]
+
+    @pytest.mark.asyncio
+    async def test_a_result_already_on_return_to_is_replaced_not_stacked(
+        self, manager, signed_in_path, google_idp, strict
+    ) -> None:
+        auth_routes._oauth2_manager.verified_auth_time.return_value = None
+        manager._redis.store[PROOF_KEY.format(state="st1")] = "1"
+        manager._redis.store["oauth2_return_to:st1"] = (
+            "http://localhost:3000/profile?link_proof=stale"
+        )
+
+        response = await _callback("google")
+
+        assert self._result(response) == ["unproved"]
+
+    @pytest.mark.asyncio
     async def test_the_result_never_rides_on_the_dashboard_fallback(
         self, manager, signed_in_path, google_idp, strict
     ) -> None:

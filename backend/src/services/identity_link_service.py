@@ -19,7 +19,8 @@ Linking needs proof of both accounts and never an email match: the target
 must be signed in on the same browser session as the caller (the multi-account
 session container, #1488), which each account entered through its own
 sign-in, and both must have signed in there recently (#1803 — checked by the
-route, ``IDENTITY_LINK_SIGN_IN_WINDOW``).
+route, ``config.constants.IDENTITY_LINK_SIGN_IN_WINDOW``, which the OAuth
+callback also reads to report a stale proof, #1833).
 
 Inside a private context the link set is also the owner for writes that name
 another memory (#1803): an ``external_id`` upsert and a remember's declared

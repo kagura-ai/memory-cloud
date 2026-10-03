@@ -12,6 +12,13 @@ export interface ConsumeSearchParamsOptions {
   enabled?: boolean;
   /** URL to `router.replace` to after a successful consume (strips the params). */
   cleanUrl: string;
+  /**
+   * Identity of this consumer in the remount memory (default: `cleanUrl`).
+   * Two consumers on one page that strip to the same URL must not share it,
+   * or the one that runs second sees the other's consume as its own and
+   * stays silent for the rest of the mount (#1833).
+   */
+  key?: string;
 }
 
 /**
@@ -60,7 +67,11 @@ export function resetConsumedSearchParams(): void {
 
 export function useConsumeSearchParams(
   consume: (params: ReadonlyURLSearchParams) => boolean,
-  { enabled = true, cleanUrl }: ConsumeSearchParamsOptions,
+  {
+    enabled = true,
+    cleanUrl,
+    key: memoryKey = cleanUrl,
+  }: ConsumeSearchParamsOptions,
 ): void {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -70,13 +81,15 @@ export function useConsumeSearchParams(
 
   useEffect(() => {
     const key = searchParams.toString();
-    const remembered = lastConsumed.get(cleanUrl);
+    const remembered = lastConsumed.get(memoryKey);
     const previous =
-      remembered && Date.now() - remembered.at < REMEMBER_MS ? remembered.key : undefined;
+      remembered && Date.now() - remembered.at < REMEMBER_MS
+        ? remembered.key
+        : undefined;
     if (remembered !== undefined && previous !== key) {
       // The URL moved on (the strip landed, or new params arrived) or the
       // memory expired: it no longer describes the current URL.
-      lastConsumed.delete(cleanUrl);
+      lastConsumed.delete(memoryKey);
     }
     if (handled.current) return;
     if (previous === key) {
@@ -87,7 +100,7 @@ export function useConsumeSearchParams(
     if (!enabled) return;
     if (!consumeRef.current(searchParams)) return;
     handled.current = true;
-    lastConsumed.set(cleanUrl, { key, at: Date.now() });
+    lastConsumed.set(memoryKey, { key, at: Date.now() });
     router.replace(cleanUrl);
-  }, [searchParams, enabled, cleanUrl, router]);
+  }, [searchParams, enabled, cleanUrl, memoryKey, router]);
 }

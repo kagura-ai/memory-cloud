@@ -144,9 +144,8 @@ export default function LinkedAccounts() {
   // The callback reports the result on the URL we asked it to come back to;
   // read it once and strip it, so a reload or the back button does not
   // repeat it (#1382 mechanics). The profile page consumes its own params
-  // (`linked`, `link_error`, `refreshed`) under the same cleanUrl; the two
-  // never share a URL, because each arrives through its own full-page OAuth
-  // redirect, and this consumer returns false for anything but `link_proof`.
+  // (`linked`, `link_error`, `refreshed`) under the same cleanUrl, so this
+  // consumer carries its own key in the hook's remount memory.
   useConsumeSearchParams(
     (params) => {
       const result = params.get("link_proof");
@@ -154,7 +153,7 @@ export default function LinkedAccounts() {
       setProofResult(result);
       return true;
     },
-    { cleanUrl: "/profile" },
+    { cleanUrl: "/profile", key: "/profile#link_proof" },
   );
 
   useEffect(() => {
@@ -373,6 +372,21 @@ export default function LinkedAccounts() {
           ) : (
             <>
               <ErrorBanner error={loadError} />
+              {/* #1833: the result of the last "Confirm with Google". Rendered
+                  here, not inside the linkable list, because the parameter was
+                  already stripped from the URL: if the list fails to load or
+                  the account turned out to be linked already, the message must
+                  still be shown. */}
+              {proofResult && (
+                <Alert>
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    {proofResult === "unproved"
+                      ? t("linkProofUnproved")
+                      : t("linkProofStale", { minutes: windowMinutes })}
+                  </AlertDescription>
+                </Alert>
+              )}
               {linked.length > 0 && (
                 <section aria-labelledby="linked-accounts-linked-heading">
                   <h3
@@ -413,16 +427,6 @@ export default function LinkedAccounts() {
                   <ul className="space-y-2">
                     {linkable.map((account) => renderRow(account, false))}
                   </ul>
-                  {proofResult && (
-                    <Alert className="mt-3">
-                      <AlertCircle className="h-4 w-4" />
-                      <AlertDescription>
-                        {proofResult === "unproved"
-                          ? t("linkProofUnproved")
-                          : t("linkProofStale", { minutes: windowMinutes })}
-                      </AlertDescription>
-                    </Alert>
-                  )}
                   {anyNeedsSignIn && googleEnabled && googleCanHelp && (
                     <div className="mt-3 space-y-2">
                       <p className="text-xs text-slate-500">

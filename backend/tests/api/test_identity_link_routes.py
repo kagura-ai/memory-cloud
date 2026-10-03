@@ -295,11 +295,7 @@ class TestListIdentityLinks:
         db = AsyncMock()
         db.execute.side_effect = [
             [("github|9", "github"), ("google|5", "google")],  # user_oauth_providers
-            [  # users: auth_provider, password_hash
-                (ME, None, "$argon2..."),
-                ("github|9", "github", None),
-                ("google|5", None, None),
-            ],
+            [(ME,)],  # users with a password_hash
         ]
 
         result = await list_identity_links(_request(), {"user_id": ME}, db)

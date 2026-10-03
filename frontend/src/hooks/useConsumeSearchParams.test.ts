@@ -33,6 +33,26 @@ beforeEach(() => {
 });
 
 describe("useConsumeSearchParams", () => {
+  it("keeps two consumers on one cleanUrl apart when they give their own key (#1833)", () => {
+    paramsHolder.current = new URLSearchParams("link_proof=stale");
+    const card = vi.fn().mockReturnValue(true);
+    const page = vi.fn().mockReturnValue(false);
+
+    renderHook(() =>
+      useConsumeSearchParams(card, {
+        cleanUrl: "/profile",
+        key: "/profile#card",
+      }),
+    );
+    renderHook(() => useConsumeSearchParams(page, { cleanUrl: "/profile" }));
+
+    // The page still gets to look at the params instead of inheriting the
+    // card's consume as its own.
+    expect(card).toHaveBeenCalledTimes(1);
+    expect(page).toHaveBeenCalledTimes(1);
+    expect(mockReplace).toHaveBeenCalledWith("/profile");
+  });
+
   it("calls consume with the params and strips via router.replace when consumed", () => {
     paramsHolder.current = new URLSearchParams("slack_error=failed");
     const consume = vi.fn().mockReturnValue(true);
@@ -178,7 +198,9 @@ describe("useConsumeSearchParams", () => {
 
       // Well past the remount race window, the same params arrive again.
       now.mockReturnValue(1_000_000 + 11_000);
-      renderHook(() => useConsumeSearchParams(consume, { cleanUrl: "/profile" }));
+      renderHook(() =>
+        useConsumeSearchParams(consume, { cleanUrl: "/profile" }),
+      );
 
       expect(consume).toHaveBeenCalledTimes(2);
       expect(mockReplace).toHaveBeenCalledTimes(2);

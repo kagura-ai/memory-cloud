@@ -495,31 +495,25 @@ class IdentityLinksResponse(BaseModel):
 async def _sign_in_providers(db: AsyncSession, user_ids: list[str]) -> dict[str, list[str]]:
     """How each of ``user_ids`` can sign in (#1833).
 
-    The OAuth providers attached to the account (``user_oauth_providers``, plus
-    the legacy ``users.auth_provider`` of accounts that pre-date that table) and
-    ``"password"`` when a password is set. Accounts with nothing known get an
-    empty list, never a missing key.
+    The OAuth providers attached to the account — every usable OAuth sign-in is
+    a ``user_oauth_providers`` row since #938; ``users.auth_provider`` is only a
+    denormalised pointer and is not consulted — and ``"password"`` when a
+    password is set. Accounts with nothing known get an empty list, never a
+    missing key.
     """
     found: dict[str, set[str]] = {user_id: set() for user_id in user_ids}
-    if not user_ids:
-        return {}
     rows = await db.execute(
         select(UserOAuthProvider.user_id, UserOAuthProvider.provider).where(
             UserOAuthProvider.user_id.in_(user_ids)
         )
     )
     for user_id, provider in rows:
-        found.setdefault(user_id, set()).add(provider)
+        found[user_id].add(provider)
     rows = await db.execute(
-        select(User.user_id, User.auth_provider, User.password_hash).where(
-            User.user_id.in_(user_ids)
-        )
+        select(User.user_id).where(User.user_id.in_(user_ids), User.password_hash.isnot(None))
     )
-    for user_id, auth_provider, password_hash in rows:
-        if auth_provider:
-            found.setdefault(user_id, set()).add(auth_provider)
-        if password_hash:
-            found.setdefault(user_id, set()).add("password")
+    for (user_id,) in rows:
+        found[user_id].add("password")
     return {user_id: sorted(providers) for user_id, providers in found.items()}
 
 
