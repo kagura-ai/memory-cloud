@@ -70,7 +70,7 @@ from repositories.memory import MemoryRepository
 from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
-from services.identity_link_service import owned_by
+from services.identity_link_service import linked_user_ids, owned_by
 from services.persistence import persistence_info
 from services.query_router import classify_query
 from services.recall_selection import (
@@ -5175,12 +5175,29 @@ class MemoryService:
         graph_repo = GraphRepository(self.db)
         await graph_repo.get_or_create(user_id)
 
-        # 3. Convert to GraphService with 3-level isolation
+        # 3. Convert to GraphService with 3-level isolation. #1834: inside a
+        # private context the graph is read for the whole identity-link set
+        # (the accounts that own it together), so a seed written by a linked
+        # account is in the graph and the spread crosses its edges; shared
+        # contexts and every write stay per account.
+        owner_ids: frozenset[str] | None = None
+        if current_context_id:
+            try:
+                is_private = await self.db.scalar(
+                    select(Context.is_private).where(Context.id == current_context_id)
+                )
+                if is_private:
+                    owner_ids = await linked_user_ids(self.db, user_id)
+            except Exception:
+                # Fail narrow: the caller's own graph, as before #1834.
+                logger.warning("explore_owner_set_unresolved", user_id=user_id)
+                owner_ids = None
         graph_service = GraphService(
             user_id=user_id,
             db=self.db,
             workspace_id=str(current_workspace_id) if current_workspace_id else None,
             context_id=str(current_context_id) if current_context_id else None,
+            owner_ids=owner_ids,
         )
 
         # 4. Check if seed node exists in graph
@@ -5221,7 +5238,7 @@ class MemoryService:
         activated = await spreader.spread(
             seed_activations=seed_activations,
             max_hops=request.depth,
-            user_id=user_id,
+            user_id=graph_service.read_owner,
         )
 
         # 6. Filter by weight and exclude seed
@@ -5578,10 +5595,23 @@ class MemoryService:
         top_n = responses[:3]
         edge_repo = NeuralEdgeRepository(self.db)
 
+        # #1834: in a private context the results include a linked account's
+        # memories, so their degrees count the link set's edges as well.
+        degree_owner: str | frozenset[str] = user_id
+        if context_id is not None:
+            try:
+                is_private = await self.db.scalar(
+                    select(Context.is_private).where(Context.id == context_id)
+                )
+                if is_private:
+                    degree_owner = await linked_user_ids(self.db, user_id)
+            except Exception:
+                degree_owner = user_id
+
         degree_map: dict[UUID, int] = {}
         for resp in top_n:
             try:
-                in_deg, out_deg = await edge_repo.get_node_degree(user_id, resp.memory_id)
+                in_deg, out_deg = await edge_repo.get_node_degree(degree_owner, resp.memory_id)
                 degree_map[resp.memory_id] = in_deg + out_deg
             except Exception:
                 degree_map[resp.memory_id] = 0

@@ -42,13 +42,14 @@ from collections import defaultdict
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import func, literal_column, select
+from sqlalchemy import and_, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import Context, ContextReadAttribution, UsageStats
 from models.config import ContextSearchConfig
 from models.memory import DELETED_BY_SLEEP_MERGE, Memory, NeuralMemoryEdge
 from models.sleep import SleepReport
+from services.identity_link_service import linked_user_ids
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
@@ -141,7 +142,9 @@ class MemoryHealthService:
         """
         contexts = await self._fetch_owned_contexts(user_id)
         owned_ids = {context_id for context_id, _ in contexts}
-        signals = self._fold_orphan_scopes(await self._fetch_signals(user_id), owned_ids)
+        signals = self._fold_orphan_scopes(
+            await self._fetch_signals(user_id, owned_ids=frozenset(owned_ids)), owned_ids
+        )
 
         scopes: list[tuple[uuid.UUID | None, str | None]] = list(contexts)
         if any(_UNATTRIBUTED in signals[key] for key in _SIGNAL_KEYS):
@@ -181,11 +184,15 @@ class MemoryHealthService:
                 return None
             # Scoped fetch: single-partition WHERE instead of grouping the
             # caller's entire partition to read one key.
-            signals = await self._fetch_signals(user_id, scope=context_scope)
+            signals = await self._fetch_signals(
+                user_id, scope=context_scope, owned_ids=frozenset({context_scope})
+            )
         else:
             context_name = None
             owned_ids = {cid for cid, _ in await self._fetch_owned_contexts(user_id)}
-            signals = self._fold_orphan_scopes(await self._fetch_signals(user_id), owned_ids)
+            signals = self._fold_orphan_scopes(
+                await self._fetch_signals(user_id, owned_ids=frozenset(owned_ids)), owned_ids
+            )
 
         sections = self._grade_scope(signals, context_scope)
         return {
@@ -199,21 +206,46 @@ class MemoryHealthService:
     # -------------------------------------------------------------- scoping
 
     @staticmethod
-    def _owned_context_filter(user_id: str) -> tuple[Any, ...]:
+    def _owned_context_filter(user_id: str, owners: frozenset[str]) -> tuple[Any, ...]:
         """The Phase-1 self-scope predicate, defined once. Phase 3 replaces
         this with workspace semantics — every consumer updates together."""
-        return (Context.created_by == user_id, Context.deleted_at.is_(None))
+        # #1834: the identity-link set owns PRIVATE contexts together, so the
+        # report also covers the private contexts a linked account created.
+        # Its shared contexts stay out: a link grants ownership, not
+        # membership. ``owners`` is the materialised set (linked_user_ids),
+        # so the predicate is indexable equalities, not a correlated subquery.
+        return (
+            or_(
+                Context.created_by == user_id,
+                and_(Context.created_by.in_(owners), Context.is_private.is_(True)),
+            ),
+            Context.deleted_at.is_(None),
+        )
 
-    async def _fetch_signals(self, user_id: str, scope: Any = _ALL) -> dict[str, Any]:
+    @staticmethod
+    def _rows_of(user_col: Any, context_col: Any, user_id: str, owned_ids: frozenset) -> Any:
+        """Rows the report counts: the caller's own anywhere (they may sit in
+        a context the caller does not own, or in none — the unattributed
+        bucket), plus every row inside a context the report covers, whichever
+        account of the link set wrote it (#1834). The same predicate scopes
+        windows, backlogs, graphs and usage, so a covered context is graded
+        on signals that belong together."""
+        if not owned_ids:
+            return user_col == user_id
+        return or_(user_col == user_id, context_col.in_(owned_ids))
+
+    async def _fetch_signals(
+        self, user_id: str, scope: Any = _ALL, owned_ids: frozenset = frozenset()
+    ) -> dict[str, Any]:
         """All grouped signal maps, one query per signal (no per-context
         fan-out — the gate1 N+1 concern). ``scope`` (a context UUID) narrows
         every query to one partition for the detail path."""
         return {
-            "windows": await self._fetch_sleep_windows(user_id, scope),
-            "backlogs": await self._fetch_merge_backlogs(user_id, scope),
-            "graphs": await self._fetch_graph_stats(user_id, scope),
-            "usage": await self._fetch_usage_counts(user_id, scope),
-            "postures": await self._fetch_config_postures(user_id, scope),
+            "windows": await self._fetch_sleep_windows(user_id, scope, owned_ids),
+            "backlogs": await self._fetch_merge_backlogs(user_id, scope, owned_ids),
+            "graphs": await self._fetch_graph_stats(user_id, scope, owned_ids),
+            "usage": await self._fetch_usage_counts(user_id, scope, owned_ids),
+            "postures": await self._fetch_config_postures(user_id, scope, owned_ids),
         }
 
     @staticmethod
@@ -314,25 +346,27 @@ class MemoryHealthService:
 
     async def _fetch_owned_contexts(self, user_id: str) -> list[tuple[uuid.UUID, str]]:
         """Owned, non-deleted contexts — the Phase-1 self-scope."""
+        owners = await linked_user_ids(self.db, user_id)
         rows = await self.db.execute(
             select(Context.id, Context.name, Context.display_name)
-            .where(*self._owned_context_filter(user_id))
+            .where(*self._owned_context_filter(user_id, owners))
             .order_by(Context.name)
         )
         return [(cid, display_name or name) for cid, name, display_name in rows.all()]
 
     async def _resolve_owned_context(self, user_id: str, context_id: uuid.UUID) -> str | None:
         """Display name of one owned context, or None (single indexed row)."""
+        owners = await linked_user_ids(self.db, user_id)
         rows = await self.db.execute(
             select(Context.name, Context.display_name).where(
-                Context.id == context_id, *self._owned_context_filter(user_id)
+                Context.id == context_id, *self._owned_context_filter(user_id, owners)
             )
         )
         row = rows.one_or_none()
         return (row.display_name or row.name) if row else None
 
     async def _fetch_sleep_windows(
-        self, user_id: str, scope: Any = _ALL
+        self, user_id: str, scope: Any = _ALL, owned_ids: frozenset = frozenset()
     ) -> dict[uuid.UUID | None, list[dict[str, Any]]]:
         """Most recent sleep reports per context (newest first), flattened.
 
@@ -349,7 +383,7 @@ class MemoryHealthService:
             .label("rn")
         )
         conditions = [
-            SleepReport.user_id == user_id,
+            self._rows_of(SleepReport.user_id, SleepReport.context_id, user_id, owned_ids),
             SleepReport.started_at >= utcnow() - timedelta(days=_WINDOW_LOOKBACK_DAYS),
         ]
         if scope is not _ALL:
@@ -390,11 +424,11 @@ class MemoryHealthService:
         return dict(windows)
 
     async def _fetch_merge_backlogs(
-        self, user_id: str, scope: Any = _ALL
+        self, user_id: str, scope: Any = _ALL, owned_ids: frozenset = frozenset()
     ) -> dict[uuid.UUID | None, dict[str, Any]]:
         """Soft-deleted merge losers per context: count + oldest age (days)."""
         conditions = [
-            Memory.user_id == user_id,
+            self._rows_of(Memory.user_id, Memory.context_id, user_id, owned_ids),
             Memory.deleted_by == DELETED_BY_SLEEP_MERGE,
             Memory.deleted_at.is_not(None),
         ]
@@ -417,12 +451,17 @@ class MemoryHealthService:
         return backlogs
 
     async def _fetch_graph_stats(
-        self, user_id: str, scope: Any = _ALL
+        self, user_id: str, scope: Any = _ALL, owned_ids: frozenset = frozenset()
     ) -> dict[uuid.UUID | None, dict[str, Any]]:
         """Edge composition, weight-invariant violations and density, per
         context. Edges always carry a context; active memories may not."""
-        edge_conditions = [NeuralMemoryEdge.user_id == user_id]
-        memory_conditions = [Memory.user_id == user_id, Memory.deleted_at.is_(None)]
+        edge_conditions = [
+            self._rows_of(NeuralMemoryEdge.user_id, NeuralMemoryEdge.context_id, user_id, owned_ids)
+        ]
+        memory_conditions = [
+            self._rows_of(Memory.user_id, Memory.context_id, user_id, owned_ids),
+            Memory.deleted_at.is_(None),
+        ]
         if scope is not _ALL:
             edge_conditions.append(NeuralMemoryEdge.context_id == scope)
             memory_conditions.append(Memory.context_id == scope)
@@ -476,7 +515,7 @@ class MemoryHealthService:
         return stats
 
     async def _fetch_usage_counts(
-        self, user_id: str, scope: Any = _ALL
+        self, user_id: str, scope: Any = _ALL, owned_ids: frozenset = frozenset()
     ) -> dict[uuid.UUID | None, dict[str, int]]:
         """MCP tool call counts per context over the usage window.
 
@@ -496,7 +535,7 @@ class MemoryHealthService:
             "mcp:explore",
         ]
         conditions = [
-            UsageStats.user_id == user_id,
+            self._rows_of(UsageStats.user_id, UsageStats.context_id, user_id, owned_ids),
             UsageStats.created_at >= since,
             UsageStats.endpoint.in_(watched_endpoints),
         ]
@@ -529,7 +568,12 @@ class MemoryHealthService:
                 counts["successful_writes"] = counts.get("successful_writes", 0) + int(count)
 
         attr_conditions = [
-            ContextReadAttribution.user_id == user_id,
+            self._rows_of(
+                ContextReadAttribution.user_id,
+                ContextReadAttribution.context_id,
+                user_id,
+                owned_ids,
+            ),
             ContextReadAttribution.created_at >= since,
             ContextReadAttribution.endpoint.in_(watched_endpoints),
         ]
@@ -554,10 +598,15 @@ class MemoryHealthService:
         return dict(usage)
 
     async def _fetch_config_postures(
-        self, user_id: str, scope: Any = _ALL
+        self, user_id: str, scope: Any = _ALL, owned_ids: frozenset = frozenset()
     ) -> dict[uuid.UUID | None, dict[str, bool]]:
-        """Search-config posture per owned context."""
-        conditions: list[Any] = list(self._owned_context_filter(user_id))
+        """Search-config posture per covered context."""
+        if not owned_ids:
+            return {}
+        conditions: list[Any] = [
+            ContextSearchConfig.context_id.in_(owned_ids),
+            Context.deleted_at.is_(None),
+        ]
         if scope is not _ALL:
             conditions.append(ContextSearchConfig.context_id == scope)
         rows = await self.db.execute(

@@ -61,7 +61,7 @@ class ActivationSpreader:
         self,
         seed_activations: dict[str, float],
         max_hops: int | None = None,
-        user_id: str | None = None,
+        user_id: str | frozenset[str] | None = None,
     ) -> list[ActivationState]:
         """Spread activation from seed nodes through the graph.
 
@@ -140,7 +140,7 @@ class ActivationSpreader:
         current_layer: dict[str, float],
         all_activations: dict[str, dict[str, Any]],
         hop: int,
-        user_id: str | None,
+        user_id: str | frozenset[str] | None,
     ) -> dict[str, float]:
         """Propagate activation from current layer to neighbors.
 
@@ -161,7 +161,7 @@ class ActivationSpreader:
                 from uuid import UUID
 
                 src_uuid = UUID(src_id) if isinstance(src_id, str) else src_id
-                edge_user_id = user_id or self.graph.user_id
+                edge_user_id = user_id or self.graph.read_owner
                 outgoing_edges = await self.graph.edge_repo.get_outgoing_edges(
                     edge_user_id,
                     src_uuid,
@@ -341,7 +341,7 @@ class ActivationSpreader:
 
                 node_uuid = UUID(node_id) if isinstance(node_id, str) else node_id
                 outgoing_edges = await self.graph.edge_repo.get_outgoing_edges(
-                    self.graph.user_id,
+                    self.graph.read_owner,
                     node_uuid,
                     workspace_id=self.graph.workspace_id,
                     context_id=self.graph.context_id,

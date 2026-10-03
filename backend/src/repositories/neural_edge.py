@@ -20,6 +20,7 @@ from sqlalchemy import cast as sa_cast
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from models.memory import (
     EDGE_ORIGIN_DECLARED,
@@ -32,6 +33,21 @@ from utils.datetime import utcnow
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# #1834: who an edge READ belongs to. A str is one account; a frozenset is an
+# identity-link set (the accounts that own a private context together, see
+# services.identity_link_service); None is no creator filter (shared contexts).
+# Writes and deletes stay keyed by one account — a linked account must not be
+# able to delete edges it did not write.
+OwnerFilter = str | frozenset[str] | None
+
+
+def owner_condition(user_id: str | frozenset[str]) -> ColumnElement[bool]:
+    """``user_id`` as an edge-creator predicate (#1834)."""
+    if isinstance(user_id, str):
+        return NeuralMemoryEdge.user_id == user_id
+    return NeuralMemoryEdge.user_id.in_(user_id)
 
 
 class NeuralEdgeRepository:
@@ -481,7 +497,7 @@ class NeuralEdgeRepository:
 
     async def get_outgoing_edges(
         self,
-        user_id: str | None,
+        user_id: OwnerFilter,
         src_id: UUID,
         min_weight: float = 0.0,
         edge_types: list[str] | None = None,
@@ -541,7 +557,7 @@ class NeuralEdgeRepository:
             NeuralMemoryEdge.weight >= min_weight,
         ]
         if user_id is not None:
-            conditions.append(NeuralMemoryEdge.user_id == user_id)
+            conditions.append(owner_condition(user_id))
 
         # Single Collection Migration: Add workspace and context filters
         if workspace_id:
@@ -577,7 +593,7 @@ class NeuralEdgeRepository:
 
     async def get_incoming_edges(
         self,
-        user_id: str | None,
+        user_id: OwnerFilter,
         dst_id: UUID,
         min_weight: float = 0.0,
         edge_types: list[str] | None = None,
@@ -629,7 +645,7 @@ class NeuralEdgeRepository:
             NeuralMemoryEdge.weight >= min_weight,
         ]
         if user_id is not None:
-            conditions.append(NeuralMemoryEdge.user_id == user_id)
+            conditions.append(owner_condition(user_id))
 
         # Single Collection Migration: Add workspace and context filters
         if workspace_id:
@@ -663,7 +679,7 @@ class NeuralEdgeRepository:
 
     async def get_all_edges(
         self,
-        user_id: str | None = None,
+        user_id: OwnerFilter = None,
         min_weight: float = 0.0,
         workspace_id: str | None = None,
         context_id: str | None = None,
@@ -695,7 +711,7 @@ class NeuralEdgeRepository:
 
         conditions = [NeuralMemoryEdge.weight >= min_weight]
         if user_id is not None:
-            conditions.append(NeuralMemoryEdge.user_id == user_id)
+            conditions.append(owner_condition(user_id))
 
         # Single Collection Migration: Use workspace_id/context_id for filtering
         if workspace_id:
@@ -901,7 +917,7 @@ class NeuralEdgeRepository:
 
     async def get_stats(
         self,
-        user_id: str | None = None,
+        user_id: OwnerFilter = None,
         workspace_id: str | None = None,
         context_id: str | None = None,
     ) -> dict[str, int | float]:
@@ -941,7 +957,7 @@ class NeuralEdgeRepository:
         # Build conditions
         conditions: list = []
         if user_id is not None:
-            conditions.append(NeuralMemoryEdge.user_id == user_id)
+            conditions.append(owner_condition(user_id))
 
         # Single Collection Migration: Use workspace_id/context_id for filtering
         if workspace_id:
@@ -979,7 +995,9 @@ class NeuralEdgeRepository:
             "min_weight": float(stats_row.min_weight or 0.0),
         }
 
-    async def get_node_degree(self, user_id: str, node_id: UUID) -> tuple[int, int]:
+    async def get_node_degree(
+        self, user_id: str | frozenset[str], node_id: UUID
+    ) -> tuple[int, int]:
         """Get node degree (in-degree, out-degree).
 
         Args:
@@ -992,7 +1010,7 @@ class NeuralEdgeRepository:
         # Count incoming edges
         in_stmt = select(func.count(NeuralMemoryEdge.id)).where(
             and_(
-                NeuralMemoryEdge.user_id == user_id,
+                owner_condition(user_id),
                 NeuralMemoryEdge.dst_id == node_id,
             )
         )
@@ -1002,7 +1020,7 @@ class NeuralEdgeRepository:
         # Count outgoing edges
         out_stmt = select(func.count(NeuralMemoryEdge.id)).where(
             and_(
-                NeuralMemoryEdge.user_id == user_id,
+                owner_condition(user_id),
                 NeuralMemoryEdge.src_id == node_id,
             )
         )
@@ -1013,7 +1031,7 @@ class NeuralEdgeRepository:
 
     async def get_top_connected_nodes(
         self,
-        user_id: str | None = None,
+        user_id: OwnerFilter = None,
         limit: int = 10,
         workspace_id: str | None = None,
         context_id: str | None = None,
@@ -1047,7 +1065,7 @@ class NeuralEdgeRepository:
         # Build filter conditions
         conditions: list = []
         if user_id is not None:
-            conditions.append(NeuralMemoryEdge.user_id == user_id)
+            conditions.append(owner_condition(user_id))
         if workspace_id:
             conditions.append(NeuralMemoryEdge.workspace_id == UUID(workspace_id))
         if context_id:
