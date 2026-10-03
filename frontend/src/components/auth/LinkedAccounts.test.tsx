@@ -656,4 +656,16 @@ describe("LinkedAccounts — i18n key coverage", () => {
   it("titles the section exactly 'Linked accounts' in English", () => {
     expect(en.linkedAccounts.title).toBe("Linked accounts");
   });
+
+  // #1838: the card and the dialog both say where a link takes effect.
+  it.each([
+    ["en", en, /both accounts are members of/],
+    ["ja", ja, /両方のアカウントがメンバーになっているワークスペース/],
+  ] as const)(
+    "says in %s that a link works only in shared workspaces",
+    (_locale, cat, sentence) => {
+      expect(cat.linkedAccounts.description).toMatch(sentence);
+      expect(cat.linkedAccounts.linkDescription).toMatch(sentence);
+    },
+  );
 });
