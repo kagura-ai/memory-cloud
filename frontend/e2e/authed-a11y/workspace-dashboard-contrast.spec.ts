@@ -3,6 +3,7 @@ import {
   assertNoColorContrastViolations,
   gotoAndWaitStable,
 } from "../fixtures";
+import { DASHBOARD_TEST_IDS } from "@/components/dashboard/dashboard.testids";
 
 /**
  * Color-contrast a11y guard for /workspace/dashboard (Issue #785).
@@ -33,10 +34,9 @@ test.describe("/workspace/dashboard color-contrast (#785)", () => {
       // what axe kept catching in dark mode (#1824). Wait for the KPI cards:
       // a positive signal that the stats rendered, not the absence of the
       // spinner (which would also pass before it ever appeared).
-      await expect(page.getByTestId("kpi-cards")).toBeVisible({
-        timeout: 15_000,
-      });
-      await assertNoColorContrastViolations(page, '[data-testid="kpi-cards"]');
+      const kpiCards = `[data-testid="${DASHBOARD_TEST_IDS.kpiCards}"]`;
+      await expect(page.locator(kpiCards)).toBeVisible({ timeout: 15_000 });
+      await assertNoColorContrastViolations(page, kpiCards);
     });
   }
 });

@@ -22,7 +22,10 @@ import {
 } from "@/components/ui/select";
 import { RefreshCw, AlertCircle } from "lucide-react";
 import { apiClient } from "@/lib/api/base";
-import { InlineSpinner } from "@/components/common/LoadingState";
+import {
+  InlineSpinner,
+  SpinnerLoading,
+} from "@/components/common/LoadingState";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { UsageStats } from "@/components/dashboard/UsageStats";
 import { KpiCards } from "@/components/dashboard/KpiCards";
@@ -246,12 +249,11 @@ export default function WorkspaceStatsPage() {
       )}
 
       {loading && !stats ? (
-        <div className="flex items-center justify-center py-12">
-          <InlineSpinner size="lg" />
-          <span className="ml-3 text-slate-500 dark:text-slate-400">
-            {t("loadingStats")}
-          </span>
-        </div>
+        <SpinnerLoading
+          size="lg"
+          message={t("loadingStats")}
+          className="py-12"
+        />
       ) : stats ? (
         <>
           {/* #1496: memories that were saved but cannot be found.

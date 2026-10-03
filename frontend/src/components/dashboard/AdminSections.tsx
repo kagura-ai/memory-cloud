@@ -19,7 +19,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { AlertCircle, Users, ChevronDown } from "lucide-react";
-import { InlineSpinner } from "@/components/common/LoadingState";
+import { SpinnerLoading } from "@/components/common/LoadingState";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import {
@@ -227,12 +227,11 @@ function UserActivitySection({
               </TableBody>
             </Table>
           ) : (
-            <div className="flex items-center justify-center py-8">
-              <InlineSpinner size="md" />
-              <span className="ml-3 text-slate-500 dark:text-slate-400">
-                {t("loadingUserActivity")}
-              </span>
-            </div>
+            <SpinnerLoading
+              size="md"
+              message={t("loadingUserActivity")}
+              className="py-8"
+            />
           )}
         </CardContent>
       </Card>

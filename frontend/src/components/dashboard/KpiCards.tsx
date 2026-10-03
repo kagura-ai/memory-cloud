@@ -5,6 +5,7 @@ import { useTranslations } from "next-intl";
 import { Brain, Layers, Zap, Users } from "lucide-react";
 import { KpiCard } from "@/components/ui/kpi-card";
 import type { ContextStatsResponse } from "@/lib/api/workspaces";
+import { DASHBOARD_TEST_IDS } from "@/components/dashboard/dashboard.testids";
 
 interface KpiCardsProps {
   totalMemories: number;
@@ -43,11 +44,11 @@ export function KpiCards({
   }, [contextStats]);
 
   return (
-    // data-testid: the authed a11y spec waits for the KPIs before it scans, so
-    // axe never sees the dashboard's loading state (#1824).
+    // The authed a11y spec waits for the KPIs before it scans, so axe never
+    // sees the dashboard's loading state (#1824).
     <div
       className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6"
-      data-testid="kpi-cards"
+      data-testid={DASHBOARD_TEST_IDS.kpiCards}
     >
       <KpiCard
         icon={Brain}
