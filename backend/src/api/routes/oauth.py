@@ -19,6 +19,7 @@ Security:
 - Automatic secret generation
 """
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -427,67 +428,73 @@ async def list_oauth2_clients(
     Example:
         GET /api/v1/oauth/clients
     """
-    db_session = get_sync_session()
 
-    try:
-        # Get current user ID (Issue #93-3: SECURITY)
-        current_user_id = get_current_user_id(request)
-        current_workspace_id = user.get("current_workspace_id")  # Issue #169, Migration 034
+    # #1831: the sync session work runs in a worker thread — never on the
+    # event loop, where a wait on a row lock would stall every request.
+    def _sync():
+        db_session = get_sync_session()
 
-        # Filter by owner_id AND workspace_id (Migration 034)
-        query = db_session.query(OAuth2Client).filter_by(owner_id=current_user_id)
+        try:
+            # Get current user ID (Issue #93-3: SECURITY)
+            current_user_id = get_current_user_id(request)
+            current_workspace_id = user.get("current_workspace_id")  # Issue #169, Migration 034
 
-        if current_workspace_id:
-            query = query.filter_by(workspace_id=str(current_workspace_id))
+            # Filter by owner_id AND workspace_id (Migration 034)
+            query = db_session.query(OAuth2Client).filter_by(owner_id=current_user_id)
 
-        clients = query.order_by(OAuth2Client.created_at.desc()).all()
+            if current_workspace_id:
+                query = query.filter_by(workspace_id=str(current_workspace_id))
 
-        # Migration 034-035: Decrypt secrets for visible + owner
-        from utils.encryption import get_encryptor
+            clients = query.order_by(OAuth2Client.created_at.desc()).all()
 
-        encryptor = get_encryptor()
-        response_list = []
+            # Migration 034-035: Decrypt secrets for visible + owner
+            from utils.encryption import get_encryptor
 
-        for client in clients:
-            plaintext_secret = None
-            # Check visibility: not hidden AND (no expiration OR not expired yet)
-            is_visible = client.hidden_at is None and (
-                client.visibility_expires_at is None or client.visibility_expires_at > utcnow()
-            )
+            encryptor = get_encryptor()
+            response_list = []
 
-            # Owner + visible の場合のみ復号化
-            if (
-                current_user_id == client.owner_id
-                and is_visible
-                and client.plaintext_secret_encrypted
-            ):
-                try:
-                    plaintext_secret = encryptor.decrypt(client.plaintext_secret_encrypted)
-                except Exception as e:
-                    logger.error(f"Failed to decrypt secret for client {client.client_id}: {e}")
-
-            response_list.append(
-                OAuth2ClientResponse(
-                    client_id=client.client_id,
-                    client_name=client.client_name,
-                    redirect_uris=client.redirect_uris,
-                    grant_types=client.grant_types,
-                    response_types=client.response_types,
-                    scope=client.scope,
-                    token_endpoint_auth_method=client.token_endpoint_auth_method,
-                    owner_id=client.owner_id,
-                    provider=client.provider,  # Migration 036
-                    created_at=to_utc_iso(client.created_at) or "",
-                    plaintext_secret=plaintext_secret,
-                    is_visible=is_visible,
-                    visibility_expires_at=to_utc_iso(client.visibility_expires_at),
+            for client in clients:
+                plaintext_secret = None
+                # Check visibility: not hidden AND (no expiration OR not expired yet)
+                is_visible = client.hidden_at is None and (
+                    client.visibility_expires_at is None or client.visibility_expires_at > utcnow()
                 )
-            )
 
-        return response_list
+                # Owner + visible の場合のみ復号化
+                if (
+                    current_user_id == client.owner_id
+                    and is_visible
+                    and client.plaintext_secret_encrypted
+                ):
+                    try:
+                        plaintext_secret = encryptor.decrypt(client.plaintext_secret_encrypted)
+                    except Exception as e:
+                        logger.error(f"Failed to decrypt secret for client {client.client_id}: {e}")
 
-    finally:
-        db_session.close()
+                response_list.append(
+                    OAuth2ClientResponse(
+                        client_id=client.client_id,
+                        client_name=client.client_name,
+                        redirect_uris=client.redirect_uris,
+                        grant_types=client.grant_types,
+                        response_types=client.response_types,
+                        scope=client.scope,
+                        token_endpoint_auth_method=client.token_endpoint_auth_method,
+                        owner_id=client.owner_id,
+                        provider=client.provider,  # Migration 036
+                        created_at=to_utc_iso(client.created_at) or "",
+                        plaintext_secret=plaintext_secret,
+                        is_visible=is_visible,
+                        visibility_expires_at=to_utc_iso(client.visibility_expires_at),
+                    )
+                )
+
+            return response_list
+
+        finally:
+            db_session.close()
+
+    return await asyncio.to_thread(_sync)
 
 
 @router.post(
@@ -526,91 +533,96 @@ async def create_oauth2_client(
     user_id = get_current_user_id(request)
     current_workspace_id = user.get("current_workspace_id")  # Issue #169, Migration 034
 
-    db_session = get_sync_session()
+    # #1831: the sync session work runs in a worker thread — never on the
+    # event loop, where a wait on a row lock would stall every request.
+    def _sync():
+        db_session = get_sync_session()
 
-    try:
-        # Generate client_id and client_secret
-        client_id = f"oauth_{secrets.token_urlsafe(16)}"
-        client_secret = secrets.token_urlsafe(32)
-        client_secret_hash = hashlib.sha256(client_secret.encode()).hexdigest()
+        try:
+            # Generate client_id and client_secret
+            client_id = f"oauth_{secrets.token_urlsafe(16)}"
+            client_secret = secrets.token_urlsafe(32)
+            client_secret_hash = hashlib.sha256(client_secret.encode()).hexdigest()
 
-        # Migration 035: Encrypt plaintext for storage
-        from datetime import timedelta
+            # Migration 035: Encrypt plaintext for storage
+            from datetime import timedelta
 
-        from utils.encryption import get_encryptor
+            from utils.encryption import get_encryptor
 
-        plaintext_secret_encrypted = get_encryptor().encrypt(client_secret)
-        visibility_expires_at = utcnow() + timedelta(minutes=10)  # 10 minutes
+            plaintext_secret_encrypted = get_encryptor().encrypt(client_secret)
+            visibility_expires_at = utcnow() + timedelta(minutes=10)  # 10 minutes
 
-        # Migration 036: Provider from request (claude, chatgpt, custom)
-        provider = data.provider
+            # Migration 036: Provider from request (claude, chatgpt, custom)
+            provider = data.provider
 
-        # Create OAuth2Client (Migration 034: workspace-scoped)
-        client = OAuth2Client(
-            client_id=client_id,
-            client_secret_hash=client_secret_hash,
-            client_name=data.client_name,
-            redirect_uris=data.redirect_uris,
-            grant_types=data.grant_types,
-            response_types=data.response_types,
-            scope=data.scope,
-            token_endpoint_auth_method=data.token_endpoint_auth_method,
-            owner_id=user_id,
-            workspace_id=str(current_workspace_id)
-            if current_workspace_id
-            else None,  # Migration 034
-            provider=provider,  # Migration 036
-            plaintext_secret_encrypted=plaintext_secret_encrypted,  # Migration 035
-            visibility_expires_at=visibility_expires_at,  # Migration 034
-        )
+            # Create OAuth2Client (Migration 034: workspace-scoped)
+            client = OAuth2Client(
+                client_id=client_id,
+                client_secret_hash=client_secret_hash,
+                client_name=data.client_name,
+                redirect_uris=data.redirect_uris,
+                grant_types=data.grant_types,
+                response_types=data.response_types,
+                scope=data.scope,
+                token_endpoint_auth_method=data.token_endpoint_auth_method,
+                owner_id=user_id,
+                workspace_id=str(current_workspace_id)
+                if current_workspace_id
+                else None,  # Migration 034
+                provider=provider,  # Migration 036
+                plaintext_secret_encrypted=plaintext_secret_encrypted,  # Migration 035
+                visibility_expires_at=visibility_expires_at,  # Migration 034
+            )
 
-        db_session.add(client)
-        db_session.commit()
-        db_session.refresh(client)
-        schedule_security_notification(
-            background_tasks,
-            user_id=user_id,
-            event=SecurityEvent.OAUTH_CLIENT_CREATED,
-            request=request,
-            client_name=client.client_name,
-        )
+            db_session.add(client)
+            db_session.commit()
+            db_session.refresh(client)
+            schedule_security_notification(
+                background_tasks,
+                user_id=user_id,
+                event=SecurityEvent.OAUTH_CLIENT_CREATED,
+                request=request,
+                client_name=client.client_name,
+            )
 
-        logger.info(
-            "oauth2_client_created",
-            client_id=client_id,
-            client_name=data.client_name,
-            owner_id=user_id,
-        )
+            logger.info(
+                "oauth2_client_created",
+                client_id=client_id,
+                client_name=data.client_name,
+                owner_id=user_id,
+            )
 
-        # Return response with client_secret (only shown once)
-        return OAuth2ClientWithSecretResponse(
-            client_id=client.client_id,
-            client_name=client.client_name,
-            redirect_uris=client.redirect_uris,
-            grant_types=client.grant_types,
-            response_types=client.response_types,
-            scope=client.scope,
-            token_endpoint_auth_method=client.token_endpoint_auth_method,
-            owner_id=client.owner_id,
-            provider=client.provider,  # Migration 036
-            created_at=to_utc_iso(client.created_at) or "",
-            client_secret=client_secret,  # ⚠️ Only shown once!
-            # Migration 034-035: Visibility fields
-            plaintext_secret=client_secret,  # Same as client_secret
-            is_visible=True,  # Newly created = visible
-            visibility_expires_at=to_utc_iso(visibility_expires_at),
-        )
+            # Return response with client_secret (only shown once)
+            return OAuth2ClientWithSecretResponse(
+                client_id=client.client_id,
+                client_name=client.client_name,
+                redirect_uris=client.redirect_uris,
+                grant_types=client.grant_types,
+                response_types=client.response_types,
+                scope=client.scope,
+                token_endpoint_auth_method=client.token_endpoint_auth_method,
+                owner_id=client.owner_id,
+                provider=client.provider,  # Migration 036
+                created_at=to_utc_iso(client.created_at) or "",
+                client_secret=client_secret,  # ⚠️ Only shown once!
+                # Migration 034-035: Visibility fields
+                plaintext_secret=client_secret,  # Same as client_secret
+                is_visible=True,  # Newly created = visible
+                visibility_expires_at=to_utc_iso(visibility_expires_at),
+            )
 
-    except Exception as e:
-        db_session.rollback()
-        logger.error("oauth2_client_create_failed", error=str(e), user_id=user_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create OAuth2 client: {str(e)}",
-        ) from e
+        except Exception as e:
+            db_session.rollback()
+            logger.error("oauth2_client_create_failed", error=str(e), user_id=user_id)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create OAuth2 client: {str(e)}",
+            ) from e
 
-    finally:
-        db_session.close()
+        finally:
+            db_session.close()
+
+    return await asyncio.to_thread(_sync)
 
 
 # --- Dynamic Client Registration (DCR) provider detection ----------------
@@ -883,74 +895,79 @@ async def dynamic_client_registration(
             ),
         )
 
-    db_session = get_sync_session()
+    # #1831: the sync session work runs in a worker thread — never on the
+    # event loop, where a wait on a row lock would stall every request.
+    def _sync():
+        db_session = get_sync_session()
 
-    try:
-        # See route-decorator comment above for the RFC 7591 §3.2.1 rationale.
-        # The sentinel ``client_secret_hash=""`` satisfies the NOT NULL column
-        # without storing a forgeable hash — authlib short-circuits the secret
-        # check on the "none" branch (kagura-memory 19adf25b).
-        client_id = f"oauth_{secrets.token_urlsafe(16)}"
+        try:
+            # See route-decorator comment above for the RFC 7591 §3.2.1 rationale.
+            # The sentinel ``client_secret_hash=""`` satisfies the NOT NULL column
+            # without storing a forgeable hash — authlib short-circuits the secret
+            # check on the "none" branch (kagura-memory 19adf25b).
+            client_id = f"oauth_{secrets.token_urlsafe(16)}"
 
-        # The requested scopes this server defines; DCR_DEFAULT_SCOPE when that
-        # holds no memory scope (#1686).
-        scope = registration_scope(data.scope)
+            # The requested scopes this server defines; DCR_DEFAULT_SCOPE when that
+            # holds no memory scope (#1686).
+            scope = registration_scope(data.scope)
 
-        client = OAuth2Client(
-            client_id=client_id,
-            client_secret_hash="",  # Public client sentinel (Issue #689)
-            client_name=data.client_name,
-            redirect_uris=data.redirect_uris,
-            grant_types=data.grant_types,
-            response_types=data.response_types,
-            scope=scope,
-            token_endpoint_auth_method="none",  # Force public client for DCR
-            owner_id=None,  # DCR clients have no owner
-            workspace_id=None,  # Global clients
-            provider=detected_provider,
-            plaintext_secret_encrypted=None,  # Issue #689: no secret to store
-            visibility_expires_at=None,
-        )
+            client = OAuth2Client(
+                client_id=client_id,
+                client_secret_hash="",  # Public client sentinel (Issue #689)
+                client_name=data.client_name,
+                redirect_uris=data.redirect_uris,
+                grant_types=data.grant_types,
+                response_types=data.response_types,
+                scope=scope,
+                token_endpoint_auth_method="none",  # Force public client for DCR
+                owner_id=None,  # DCR clients have no owner
+                workspace_id=None,  # Global clients
+                provider=detected_provider,
+                plaintext_secret_encrypted=None,  # Issue #689: no secret to store
+                visibility_expires_at=None,
+            )
 
-        db_session.add(client)
-        db_session.commit()
-        db_session.refresh(client)
+            db_session.add(client)
+            db_session.commit()
+            db_session.refresh(client)
 
-        logger.info(
-            "dcr_client_registered",
-            client_id=client_id,
-            provider=detected_provider,
-            ip=client_ip,
-        )
+            logger.info(
+                "dcr_client_registered",
+                client_id=client_id,
+                provider=detected_provider,
+                ip=client_ip,
+            )
 
-        # RFC 7591 §3.2.1: public client → omit client_secret / plaintext_secret
-        return OAuth2ClientWithSecretResponse(
-            client_id=client.client_id,
-            client_name=client.client_name,
-            redirect_uris=client.redirect_uris,
-            grant_types=client.grant_types,
-            response_types=client.response_types,
-            scope=client.scope,
-            token_endpoint_auth_method=client.token_endpoint_auth_method,
-            owner_id=client.owner_id,
-            provider=client.provider,
-            created_at=to_utc_iso(client.created_at) or "",
-            client_secret=None,
-            plaintext_secret=None,
-            is_visible=False,
-            visibility_expires_at=None,
-        )
+            # RFC 7591 §3.2.1: public client → omit client_secret / plaintext_secret
+            return OAuth2ClientWithSecretResponse(
+                client_id=client.client_id,
+                client_name=client.client_name,
+                redirect_uris=client.redirect_uris,
+                grant_types=client.grant_types,
+                response_types=client.response_types,
+                scope=client.scope,
+                token_endpoint_auth_method=client.token_endpoint_auth_method,
+                owner_id=client.owner_id,
+                provider=client.provider,
+                created_at=to_utc_iso(client.created_at) or "",
+                client_secret=None,
+                plaintext_secret=None,
+                is_visible=False,
+                visibility_expires_at=None,
+            )
 
-    except Exception as e:
-        db_session.rollback()
-        logger.error("dcr_registration_failed", error=str(e), ip=client_ip)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to register client: {str(e)}",
-        ) from e
+        except Exception as e:
+            db_session.rollback()
+            logger.error("dcr_registration_failed", error=str(e), ip=client_ip)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to register client: {str(e)}",
+            ) from e
 
-    finally:
-        db_session.close()
+        finally:
+            db_session.close()
+
+    return await asyncio.to_thread(_sync)
 
 
 @router.get("/clients/{client_id}", response_model=OAuth2ClientResponse)
@@ -970,53 +987,63 @@ async def get_oauth2_client(
     Example:
         GET /api/v1/oauth/clients/oauth_abc123
     """
-    db_session = get_sync_session()
 
-    try:
-        client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
+    # #1831: the sync session work runs in a worker thread — never on the
+    # event loop, where a wait on a row lock would stall every request.
+    def _sync():
+        db_session = get_sync_session()
 
-        if not client:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"OAuth2 client not found: {client_id}",
+        try:
+            client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
+
+            if not client:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"OAuth2 client not found: {client_id}",
+                )
+
+            # SECURITY: Check owner (Issue #93-3)
+            current_user_id = get_current_user_id(request)
+            if client.owner_id != current_user_id:
+                raise AuthorizationError(message="You are not allowed to access this client")
+
+            # Decrypt secret if visible + owner
+            from utils.encryption import get_encryptor
+
+            plaintext_secret = None
+            is_visible = client.hidden_at is None
+
+            if (
+                current_user_id == client.owner_id
+                and is_visible
+                and client.plaintext_secret_encrypted
+            ):
+                try:
+                    plaintext_secret = get_encryptor().decrypt(client.plaintext_secret_encrypted)
+                except Exception as e:
+                    logger.error(f"Failed to decrypt secret for client {client.client_id}: {e}")
+
+            return OAuth2ClientResponse(
+                client_id=client.client_id,
+                client_name=client.client_name,
+                redirect_uris=client.redirect_uris,
+                grant_types=client.grant_types,
+                response_types=client.response_types,
+                scope=client.scope,
+                token_endpoint_auth_method=client.token_endpoint_auth_method,
+                owner_id=client.owner_id,
+                provider=client.provider,
+                created_at=to_utc_iso(client.created_at) or "",
+                # Migration 034-035: Visibility fields
+                plaintext_secret=plaintext_secret,
+                is_visible=is_visible,
+                visibility_expires_at=to_utc_iso(client.visibility_expires_at),
             )
 
-        # SECURITY: Check owner (Issue #93-3)
-        current_user_id = get_current_user_id(request)
-        if client.owner_id != current_user_id:
-            raise AuthorizationError(message="You are not allowed to access this client")
+        finally:
+            db_session.close()
 
-        # Decrypt secret if visible + owner
-        from utils.encryption import get_encryptor
-
-        plaintext_secret = None
-        is_visible = client.hidden_at is None
-
-        if current_user_id == client.owner_id and is_visible and client.plaintext_secret_encrypted:
-            try:
-                plaintext_secret = get_encryptor().decrypt(client.plaintext_secret_encrypted)
-            except Exception as e:
-                logger.error(f"Failed to decrypt secret for client {client.client_id}: {e}")
-
-        return OAuth2ClientResponse(
-            client_id=client.client_id,
-            client_name=client.client_name,
-            redirect_uris=client.redirect_uris,
-            grant_types=client.grant_types,
-            response_types=client.response_types,
-            scope=client.scope,
-            token_endpoint_auth_method=client.token_endpoint_auth_method,
-            owner_id=client.owner_id,
-            provider=client.provider,
-            created_at=to_utc_iso(client.created_at) or "",
-            # Migration 034-035: Visibility fields
-            plaintext_secret=plaintext_secret,
-            is_visible=is_visible,
-            visibility_expires_at=to_utc_iso(client.visibility_expires_at),
-        )
-
-    finally:
-        db_session.close()
+    return await asyncio.to_thread(_sync)
 
 
 @router.put("/clients/{client_id}", response_model=OAuth2ClientResponse)
@@ -1046,83 +1073,89 @@ async def update_oauth2_client(
         - client_secret cannot be updated (create new client if needed)
         - Can update: name, redirect_uris, scope, token_endpoint_auth_method
     """
-    db_session = get_sync_session()
 
-    try:
-        client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
+    # #1831: the sync session work runs in a worker thread — never on the
+    # event loop, where a wait on a row lock would stall every request.
+    def _sync():
+        db_session = get_sync_session()
 
-        if not client:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"OAuth2 client not found: {client_id}",
+        try:
+            client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
+
+            if not client:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"OAuth2 client not found: {client_id}",
+                )
+
+            # SECURITY (issue #1021): only the owner may update the client. The
+            # sibling get/hide/regenerate handlers all enforce this; without it any
+            # authenticated user could overwrite another tenant's redirect_uris
+            # (authorization-code interception). DCR clients (owner_id is None, e.g.
+            # ChatGPT/Claude/Cursor connectors) have no owner and must never be
+            # mutable via this session-user endpoint — reject them explicitly rather
+            # than relying on the `None != user_id` coincidence.
+            current_user_id = get_current_user_id(request)
+            if client.owner_id is None or client.owner_id != current_user_id:
+                raise AuthorizationError(message="You are not allowed to modify this client")
+
+            # Update fields
+            if data.client_name is not None:
+                client.client_name = data.client_name
+
+            if data.redirect_uris is not None:
+                client.redirect_uris = data.redirect_uris
+
+            if data.scope is not None:
+                client.scope = data.scope
+
+            if data.token_endpoint_auth_method is not None:
+                client.token_endpoint_auth_method = data.token_endpoint_auth_method
+
+            db_session.commit()
+            db_session.refresh(client)
+
+            logger.info("oauth2_client_updated", client_id=client_id)
+
+            return OAuth2ClientResponse(
+                client_id=client.client_id,
+                client_name=client.client_name,
+                redirect_uris=client.redirect_uris,
+                grant_types=client.grant_types,
+                response_types=client.response_types,
+                scope=client.scope,
+                token_endpoint_auth_method=client.token_endpoint_auth_method,
+                owner_id=client.owner_id,
+                provider=client.provider,
+                created_at=to_utc_iso(client.created_at) or "",
+                # Migration 034-035: Visibility fields (no secret on update)
+                plaintext_secret=None,
+                is_visible=client.hidden_at is None,
+                visibility_expires_at=to_utc_iso(client.visibility_expires_at),
             )
 
-        # SECURITY (issue #1021): only the owner may update the client. The
-        # sibling get/hide/regenerate handlers all enforce this; without it any
-        # authenticated user could overwrite another tenant's redirect_uris
-        # (authorization-code interception). DCR clients (owner_id is None, e.g.
-        # ChatGPT/Claude/Cursor connectors) have no owner and must never be
-        # mutable via this session-user endpoint — reject them explicitly rather
-        # than relying on the `None != user_id` coincidence.
-        current_user_id = get_current_user_id(request)
-        if client.owner_id is None or client.owner_id != current_user_id:
-            raise AuthorizationError(message="You are not allowed to modify this client")
+        except HTTPException:
+            db_session.rollback()
+            raise
 
-        # Update fields
-        if data.client_name is not None:
-            client.client_name = data.client_name
+        except AuthorizationError:
+            # Surface as a 403 via the global MemoryCloudException handler — must
+            # not be swallowed by the generic 500 catch below (issue #1021).
+            db_session.rollback()
+            raise
 
-        if data.redirect_uris is not None:
-            client.redirect_uris = data.redirect_uris
+        except Exception as e:
+            db_session.rollback()
+            logger.error("oauth2_client_update_failed", client_id=client_id, error=str(e))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to update OAuth2 client: {str(e)}",
+            ) from e
 
-        if data.scope is not None:
-            client.scope = data.scope
+        finally:
+            db_session.close()
 
-        if data.token_endpoint_auth_method is not None:
-            client.token_endpoint_auth_method = data.token_endpoint_auth_method
-
-        db_session.commit()
-        db_session.refresh(client)
-
-        logger.info("oauth2_client_updated", client_id=client_id)
-
-        return OAuth2ClientResponse(
-            client_id=client.client_id,
-            client_name=client.client_name,
-            redirect_uris=client.redirect_uris,
-            grant_types=client.grant_types,
-            response_types=client.response_types,
-            scope=client.scope,
-            token_endpoint_auth_method=client.token_endpoint_auth_method,
-            owner_id=client.owner_id,
-            provider=client.provider,
-            created_at=to_utc_iso(client.created_at) or "",
-            # Migration 034-035: Visibility fields (no secret on update)
-            plaintext_secret=None,
-            is_visible=client.hidden_at is None,
-            visibility_expires_at=to_utc_iso(client.visibility_expires_at),
-        )
-
-    except HTTPException:
-        db_session.rollback()
-        raise
-
-    except AuthorizationError:
-        # Surface as a 403 via the global MemoryCloudException handler — must
-        # not be swallowed by the generic 500 catch below (issue #1021).
-        db_session.rollback()
-        raise
-
-    except Exception as e:
-        db_session.rollback()
-        logger.error("oauth2_client_update_failed", client_id=client_id, error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update OAuth2 client: {str(e)}",
-        ) from e
-
-    finally:
-        db_session.close()
+    return await asyncio.to_thread(_sync)
 
 
 @router.post("/clients/{client_id}/hide")
@@ -1141,48 +1174,56 @@ async def hide_oauth2_client_secret(
     Returns:
         Status message
     """
-    db_session = get_sync_session()
 
-    try:
-        client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
+    # #1831: the sync session work runs in a worker thread — never on the
+    # event loop, where a wait on a row lock would stall every request.
+    def _sync():
+        db_session = get_sync_session()
 
-        if not client:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"OAuth2 client not found: {client_id}",
+        try:
+            client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
+
+            if not client:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"OAuth2 client not found: {client_id}",
+                )
+
+            # SECURITY: Check owner
+            current_user_id = get_current_user_id(request)
+            if client.owner_id != current_user_id:
+                raise AuthorizationError(message="Only owner can hide OAuth2 client secret")
+
+            # Hide secret
+
+            client.hidden_at = utcnow()
+            client.visibility_expires_at = None  # Cancel auto-hide
+            client.plaintext_secret_encrypted = None  # Delete encrypted secret
+
+            db_session.commit()
+
+            logger.info(
+                "oauth2_client_secret_hidden", client_id=client_id, owner_id=current_user_id
             )
 
-        # SECURITY: Check owner
-        current_user_id = get_current_user_id(request)
-        if client.owner_id != current_user_id:
-            raise AuthorizationError(message="Only owner can hide OAuth2 client secret")
+            return {"status": "hidden", "client_id": client_id}
 
-        # Hide secret
+        except HTTPException:
+            db_session.rollback()
+            raise
 
-        client.hidden_at = utcnow()
-        client.visibility_expires_at = None  # Cancel auto-hide
-        client.plaintext_secret_encrypted = None  # Delete encrypted secret
+        except Exception as e:
+            db_session.rollback()
+            logger.error("oauth2_client_hide_failed", client_id=client_id, error=str(e))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to hide OAuth2 client secret: {str(e)}",
+            ) from e
 
-        db_session.commit()
+        finally:
+            db_session.close()
 
-        logger.info("oauth2_client_secret_hidden", client_id=client_id, owner_id=current_user_id)
-
-        return {"status": "hidden", "client_id": client_id}
-
-    except HTTPException:
-        db_session.rollback()
-        raise
-
-    except Exception as e:
-        db_session.rollback()
-        logger.error("oauth2_client_hide_failed", client_id=client_id, error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to hide OAuth2 client secret: {str(e)}",
-        ) from e
-
-    finally:
-        db_session.close()
+    return await asyncio.to_thread(_sync)
 
 
 @router.post(
@@ -1210,90 +1251,98 @@ async def regenerate_oauth2_client_secret(
     Example:
         POST /api/v1/oauth/clients/oauth_abc123/regenerate-secret
     """
-    db_session = get_sync_session()
 
-    try:
-        client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
+    # #1831: the sync session work runs in a worker thread — never on the
+    # event loop, where a wait on a row lock would stall every request.
+    def _sync():
+        db_session = get_sync_session()
 
-        if not client:
+        try:
+            client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
+
+            if not client:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"OAuth2 client not found: {client_id}",
+                )
+
+            # SECURITY: Check owner (Issue #93-3)
+            current_user_id = get_current_user_id(request)
+            if client.owner_id != current_user_id:
+                raise AuthorizationError(
+                    message="You are not allowed to regenerate this client's secret"
+                )
+
+            # Generate new secret
+            new_client_secret = secrets.token_urlsafe(32)
+            new_client_secret_hash = hashlib.sha256(new_client_secret.encode()).hexdigest()
+
+            # Migration 035: Encrypt plaintext for storage
+            from datetime import timedelta
+
+            from utils.encryption import get_encryptor
+
+            plaintext_secret_encrypted = get_encryptor().encrypt(new_client_secret)
+
+            # Update client
+            client.client_secret_hash = new_client_secret_hash
+            client.plaintext_secret_encrypted = plaintext_secret_encrypted  # Migration 035
+            client.hidden_at = None  # Make visible
+            client.visibility_expires_at = utcnow() + timedelta(minutes=10)  # 10 minutes
+
+            db_session.commit()
+            db_session.refresh(client)
+            schedule_security_notification(
+                background_tasks,
+                user_id=current_user_id,
+                event=SecurityEvent.OAUTH_SECRET_REGENERATED,
+                request=request,
+                client_name=client.client_name,
+            )
+
+            logger.info(
+                "oauth2_client_secret_regenerated",
+                client_id=client_id,
+                owner_id=current_user_id,
+            )
+
+            # Return response with new client_secret (only shown once)
+            return OAuth2ClientWithSecretResponse(
+                client_id=client.client_id,
+                client_name=client.client_name,
+                redirect_uris=client.redirect_uris,
+                grant_types=client.grant_types,
+                response_types=client.response_types,
+                scope=client.scope,
+                token_endpoint_auth_method=client.token_endpoint_auth_method,
+                owner_id=client.owner_id,
+                provider=client.provider,  # Migration 036
+                created_at=to_utc_iso(client.created_at) or "",
+                client_secret=new_client_secret,  # New secret - only shown once!
+                # Migration 034-035: Visibility fields
+                plaintext_secret=new_client_secret,  # Same as client_secret
+                is_visible=True,  # Newly regenerated = visible
+                visibility_expires_at=to_utc_iso(client.visibility_expires_at),
+            )
+
+        except HTTPException:
+            db_session.rollback()
+            raise
+
+        except Exception as e:
+            db_session.rollback()
+            logger.error(
+                "oauth2_client_secret_regenerate_failed", client_id=client_id, error=str(e)
+            )
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"OAuth2 client not found: {client_id}",
-            )
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to regenerate client secret: {str(e)}",
+            ) from e
 
-        # SECURITY: Check owner (Issue #93-3)
-        current_user_id = get_current_user_id(request)
-        if client.owner_id != current_user_id:
-            raise AuthorizationError(
-                message="You are not allowed to regenerate this client's secret"
-            )
+        finally:
+            db_session.close()
 
-        # Generate new secret
-        new_client_secret = secrets.token_urlsafe(32)
-        new_client_secret_hash = hashlib.sha256(new_client_secret.encode()).hexdigest()
-
-        # Migration 035: Encrypt plaintext for storage
-        from datetime import timedelta
-
-        from utils.encryption import get_encryptor
-
-        plaintext_secret_encrypted = get_encryptor().encrypt(new_client_secret)
-
-        # Update client
-        client.client_secret_hash = new_client_secret_hash
-        client.plaintext_secret_encrypted = plaintext_secret_encrypted  # Migration 035
-        client.hidden_at = None  # Make visible
-        client.visibility_expires_at = utcnow() + timedelta(minutes=10)  # 10 minutes
-
-        db_session.commit()
-        db_session.refresh(client)
-        schedule_security_notification(
-            background_tasks,
-            user_id=current_user_id,
-            event=SecurityEvent.OAUTH_SECRET_REGENERATED,
-            request=request,
-            client_name=client.client_name,
-        )
-
-        logger.info(
-            "oauth2_client_secret_regenerated",
-            client_id=client_id,
-            owner_id=current_user_id,
-        )
-
-        # Return response with new client_secret (only shown once)
-        return OAuth2ClientWithSecretResponse(
-            client_id=client.client_id,
-            client_name=client.client_name,
-            redirect_uris=client.redirect_uris,
-            grant_types=client.grant_types,
-            response_types=client.response_types,
-            scope=client.scope,
-            token_endpoint_auth_method=client.token_endpoint_auth_method,
-            owner_id=client.owner_id,
-            provider=client.provider,  # Migration 036
-            created_at=to_utc_iso(client.created_at) or "",
-            client_secret=new_client_secret,  # New secret - only shown once!
-            # Migration 034-035: Visibility fields
-            plaintext_secret=new_client_secret,  # Same as client_secret
-            is_visible=True,  # Newly regenerated = visible
-            visibility_expires_at=to_utc_iso(client.visibility_expires_at),
-        )
-
-    except HTTPException:
-        db_session.rollback()
-        raise
-
-    except Exception as e:
-        db_session.rollback()
-        logger.error("oauth2_client_secret_regenerate_failed", client_id=client_id, error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to regenerate client secret: {str(e)}",
-        ) from e
-
-    finally:
-        db_session.close()
+    return await asyncio.to_thread(_sync)
 
 
 @router.delete("/clients/{client_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
@@ -1317,51 +1366,57 @@ async def delete_oauth2_client(
         - Deleting a client will CASCADE delete all associated tokens
         - This action cannot be undone
     """
-    db_session = get_sync_session()
 
-    try:
-        client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
+    # #1831: the sync session work runs in a worker thread — never on the
+    # event loop, where a wait on a row lock would stall every request.
+    def _sync():
+        db_session = get_sync_session()
 
-        if not client:
+        try:
+            client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
+
+            if not client:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"OAuth2 client not found: {client_id}",
+                )
+
+            # SECURITY (issue #1021): only the owner may delete the client. Deleting
+            # CASCADE-removes all associated tokens, so without this guard any
+            # authenticated user could force-logout / DoS another tenant's
+            # integration by client_id alone. DCR clients (owner_id is None) have no
+            # owner and must never be deletable via this session-user endpoint.
+            current_user_id = get_current_user_id(request)
+            if client.owner_id is None or client.owner_id != current_user_id:
+                raise AuthorizationError(message="You are not allowed to delete this client")
+
+            db_session.delete(client)
+            db_session.commit()
+
+            logger.info("oauth2_client_deleted", client_id=client_id)
+
+        except HTTPException:
+            db_session.rollback()
+            raise
+
+        except AuthorizationError:
+            # Surface as a 403 via the global MemoryCloudException handler — must
+            # not be swallowed by the generic 500 catch below (issue #1021).
+            db_session.rollback()
+            raise
+
+        except Exception as e:
+            db_session.rollback()
+            logger.error("oauth2_client_delete_failed", client_id=client_id, error=str(e))
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"OAuth2 client not found: {client_id}",
-            )
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to delete OAuth2 client: {str(e)}",
+            ) from e
 
-        # SECURITY (issue #1021): only the owner may delete the client. Deleting
-        # CASCADE-removes all associated tokens, so without this guard any
-        # authenticated user could force-logout / DoS another tenant's
-        # integration by client_id alone. DCR clients (owner_id is None) have no
-        # owner and must never be deletable via this session-user endpoint.
-        current_user_id = get_current_user_id(request)
-        if client.owner_id is None or client.owner_id != current_user_id:
-            raise AuthorizationError(message="You are not allowed to delete this client")
+        finally:
+            db_session.close()
 
-        db_session.delete(client)
-        db_session.commit()
-
-        logger.info("oauth2_client_deleted", client_id=client_id)
-
-    except HTTPException:
-        db_session.rollback()
-        raise
-
-    except AuthorizationError:
-        # Surface as a 403 via the global MemoryCloudException handler — must
-        # not be swallowed by the generic 500 catch below (issue #1021).
-        db_session.rollback()
-        raise
-
-    except Exception as e:
-        db_session.rollback()
-        logger.error("oauth2_client_delete_failed", client_id=client_id, error=str(e))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete OAuth2 client: {str(e)}",
-        ) from e
-
-    finally:
-        db_session.close()
+    return await asyncio.to_thread(_sync)
 
 
 # ============================================================================
@@ -1779,91 +1834,96 @@ async def oauth_authorize_get(
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
         return RedirectResponse(f"{frontend_url}/login?return_to={return_to}")
 
-    db_session = get_sync_session()
-    try:
-        client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
-        if not client:
-            raise HTTPException(status_code=404, detail="Client not found")
-
-        # Issue #221: Detect locale for i18n
-        locale = _resolve_oauth_locale(request, db_session, user.email)
-
-        # Issue #218: Reject unregistered redirect_uri *before* rendering the
-        # consent screen. Without this guard, an attacker can craft a link
-        # with a legitimate client_id and a hostile redirect_uri; Kagura
-        # would render the real consent UI (with the real client name) and
-        # only fail at POST time. That turns the consent page itself into a
-        # phishing rendering gadget. RFC 6749 §4.1.2.1 also forbids
-        # redirecting on invalid redirect_uri — the AS must inform the
-        # resource owner directly, which is what the error template does.
-        if not client.check_redirect_uri(redirect_uri):
-            logger.warning(
-                "oauth_authorize_get_rejected_redirect_uri: "
-                f"client_id={client_id!r}, "
-                f"redirect_uri={_redact_redirect_uri_for_log(redirect_uri)!r}"
-            )
-            return _render_invalid_redirect_uri_error(request, locale, redirect_uri)
-
+    # #1831: the sync session work runs in a worker thread — never on the
+    # event loop, where a wait on a row lock would stall every request.
+    def _sync():
+        db_session = get_sync_session()
         try:
-            granted_scope = validate_authorization_parameters(
-                client, StarletteOAuth2Payload(request)
+            client = db_session.query(OAuth2Client).filter_by(client_id=client_id).first()
+            if not client:
+                raise HTTPException(status_code=404, detail="Client not found")
+
+            # Issue #221: Detect locale for i18n
+            locale = _resolve_oauth_locale(request, db_session, user.email)
+
+            # Issue #218: Reject unregistered redirect_uri *before* rendering the
+            # consent screen. Without this guard, an attacker can craft a link
+            # with a legitimate client_id and a hostile redirect_uri; Kagura
+            # would render the real consent UI (with the real client name) and
+            # only fail at POST time. That turns the consent page itself into a
+            # phishing rendering gadget. RFC 6749 §4.1.2.1 also forbids
+            # redirecting on invalid redirect_uri — the AS must inform the
+            # resource owner directly, which is what the error template does.
+            if not client.check_redirect_uri(redirect_uri):
+                logger.warning(
+                    "oauth_authorize_get_rejected_redirect_uri: "
+                    f"client_id={client_id!r}, "
+                    f"redirect_uri={_redact_redirect_uri_for_log(redirect_uri)!r}"
+                )
+                return _render_invalid_redirect_uri_error(request, locale, redirect_uri)
+
+            try:
+                granted_scope = validate_authorization_parameters(
+                    client, StarletteOAuth2Payload(request)
+                )
+            except OAuth2Error as error:
+                logger.info(
+                    "oauth_authorize_get_rejected",
+                    client_id=client_id,
+                    error=error.error,
+                )
+                return _render_authorization_request_error(request, locale, error)
+
+            # Get i18n messages
+            messages = get_oauth_messages(locale)
+
+            # Build query string for POST action (maintain OAuth2 params in query)
+            query_params = {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "response_type": response_type,
+            }
+            if scope:
+                query_params["scope"] = scope
+            if state:
+                query_params["state"] = state
+            if resource:
+                query_params["resource"] = resource  # RFC 8707 (Issue #157)
+            if code_challenge:
+                query_params["code_challenge"] = code_challenge  # PKCE (RFC 7636)
+            if code_challenge_method:
+                query_params["code_challenge_method"] = code_challenge_method  # PKCE (RFC 7636)
+
+            query_string = urlencode(query_params)
+
+            # Use Jinja2 template (Issue #52, #221 i18n).
+            # Modern Starlette TemplateResponse takes ``request`` as the first
+            # positional argument; the legacy form
+            # ``TemplateResponse(name, context_with_request)`` causes
+            # ``TypeError: unhashable type: 'dict'`` deep inside Jinja2's cache
+            # because Starlette interprets the dict as the template name.
+            return templates.TemplateResponse(
+                request,
+                "oauth_authorize.html",
+                {
+                    "client_name": client.client_name,
+                    "user_email": user.email,
+                    "query_string": query_string,
+                    "locale": locale,
+                    "messages": messages,
+                    "permission_keys": _consent_permission_keys(granted_scope),
+                    # #1741: name where the user is sent next, and warn when the
+                    # client can only redirect to this computer (its name is then
+                    # self-asserted and unverifiable).
+                    "redirect_host": redirect_uri_display_host(redirect_uri),
+                    "loopback_only": bool(client.redirect_uris)
+                    and all(is_loopback_redirect_uri(uri) for uri in client.redirect_uris),
+                },
             )
-        except OAuth2Error as error:
-            logger.info(
-                "oauth_authorize_get_rejected",
-                client_id=client_id,
-                error=error.error,
-            )
-            return _render_authorization_request_error(request, locale, error)
+        finally:
+            db_session.close()
 
-        # Get i18n messages
-        messages = get_oauth_messages(locale)
-
-        # Build query string for POST action (maintain OAuth2 params in query)
-        query_params = {
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "response_type": response_type,
-        }
-        if scope:
-            query_params["scope"] = scope
-        if state:
-            query_params["state"] = state
-        if resource:
-            query_params["resource"] = resource  # RFC 8707 (Issue #157)
-        if code_challenge:
-            query_params["code_challenge"] = code_challenge  # PKCE (RFC 7636)
-        if code_challenge_method:
-            query_params["code_challenge_method"] = code_challenge_method  # PKCE (RFC 7636)
-
-        query_string = urlencode(query_params)
-
-        # Use Jinja2 template (Issue #52, #221 i18n).
-        # Modern Starlette TemplateResponse takes ``request`` as the first
-        # positional argument; the legacy form
-        # ``TemplateResponse(name, context_with_request)`` causes
-        # ``TypeError: unhashable type: 'dict'`` deep inside Jinja2's cache
-        # because Starlette interprets the dict as the template name.
-        return templates.TemplateResponse(
-            request,
-            "oauth_authorize.html",
-            {
-                "client_name": client.client_name,
-                "user_email": user.email,
-                "query_string": query_string,
-                "locale": locale,
-                "messages": messages,
-                "permission_keys": _consent_permission_keys(granted_scope),
-                # #1741: name where the user is sent next, and warn when the
-                # client can only redirect to this computer (its name is then
-                # self-asserted and unverifiable).
-                "redirect_host": redirect_uri_display_host(redirect_uri),
-                "loopback_only": bool(client.redirect_uris)
-                and all(is_loopback_redirect_uri(uri) for uri in client.redirect_uris),
-            },
-        )
-    finally:
-        db_session.close()
+    return await asyncio.to_thread(_sync)
 
 
 def _run_oauth_sync(action: str, request, **kwargs):
@@ -1965,18 +2025,26 @@ async def oauth_authorize_post(
     # CWE-601 Open Redirect that turns /authorize into a phishing pivot.
     # RFC 6749 §4.1.2.1 forbids redirecting on invalid redirect_uri; we
     # render the error page directly instead.
-    pre_check_session = get_sync_session()
-    try:
-        if not _validate_authorize_redirect_uri(pre_check_session, client_id, redirect_uri):
-            logger.warning(
-                "oauth_authorize_post_rejected_redirect_uri: "
-                f"client_id={client_id!r}, "
-                f"redirect_uri={_redact_redirect_uri_for_log(redirect_uri)!r}"
-            )
-            locale = _resolve_oauth_locale(request, pre_check_session, user.email)
-            return _render_invalid_redirect_uri_error(request, locale, redirect_uri)
-    finally:
-        pre_check_session.close()
+    # #1831: the pre-check reads the client row in a worker thread, like every
+    # other sync DB step of this route.
+    def _pre_check():
+        pre_check_session = get_sync_session()
+        try:
+            if not _validate_authorize_redirect_uri(pre_check_session, client_id, redirect_uri):
+                logger.warning(
+                    "oauth_authorize_post_rejected_redirect_uri: "
+                    f"client_id={client_id!r}, "
+                    f"redirect_uri={_redact_redirect_uri_for_log(redirect_uri)!r}"
+                )
+                locale = _resolve_oauth_locale(request, pre_check_session, user.email)
+                return _render_invalid_redirect_uri_error(request, locale, redirect_uri)
+            return None
+        finally:
+            pre_check_session.close()
+
+    rejected = await asyncio.to_thread(_pre_check)
+    if rejected is not None:
+        return rejected
 
     if confirm != "yes":
         params = {"error": "access_denied"}
@@ -2417,68 +2485,75 @@ async def device_authorize(request: Request) -> DeviceAuthorizationResponse | JS
             error="invalid_request", description=e.description, status_code=e.status_code
         )
 
-    db_session = get_sync_session()
+    # #1831: the sync session work runs in a worker thread — never on the
+    # event loop, where a wait on a row lock would stall every request.
+    def _sync():
+        db_session = get_sync_session()
 
-    try:
-        client = db_session.query(OAuth2Client).filter_by(client_id=body.client_id).first()
-        if not client:
-            # RFC 8628 §3.2 answers with RFC 6749 §5.2 errors, which name an
-            # unknown client ``invalid_client``.
-            return rfc6749_error_response(error="invalid_client", description="Unknown client_id")
+        try:
+            client = db_session.query(OAuth2Client).filter_by(client_id=body.client_id).first()
+            if not client:
+                # RFC 8628 §3.2 answers with RFC 6749 §5.2 errors, which name an
+                # unknown client ``invalid_client``.
+                return rfc6749_error_response(
+                    error="invalid_client", description="Unknown client_id"
+                )
 
-        # The /authorize rule (#1686): requested ∩ registered ∩ defined, or the
-        # registered scope when no memory scope is left.
-        scope = granted_scope(body.scope, client_registered_scope(client))
-        if not scope:
-            return rfc6749_error_response(
-                error="invalid_scope",
-                description="This client is registered without a memory scope.",
+            # The /authorize rule (#1686): requested ∩ registered ∩ defined, or the
+            # registered scope when no memory scope is left.
+            scope = granted_scope(body.scope, client_registered_scope(client))
+            if not scope:
+                return rfc6749_error_response(
+                    error="invalid_scope",
+                    description="This client is registered without a memory scope.",
+                )
+
+            device_code = secrets.token_urlsafe(32)
+            user_code = generate_user_code()
+
+            expires_at_val = utcnow() + timedelta(seconds=settings.oauth_device_code_expires_in)
+
+            device = OAuth2DeviceCode(
+                device_code=device_code,
+                user_code=user_code,
+                client_id=client.client_id,
+                scope=scope,
+                expires_at=expires_at_val,
+            )
+            db_session.add(device)
+            db_session.commit()
+
+            verification_uri = f"{settings.frontend_url}/device"
+            verification_uri_complete = f"{verification_uri}?user_code={user_code}"
+
+            logger.info(
+                "device_authorization_created",
+                client_id=body.client_id,
+                device_code_prefix=device_code[:8],
             )
 
-        device_code = secrets.token_urlsafe(32)
-        user_code = generate_user_code()
+            return DeviceAuthorizationResponse(
+                device_code=device_code,
+                user_code=user_code,
+                verification_uri=verification_uri,
+                verification_uri_complete=verification_uri_complete,
+                expires_in=settings.oauth_device_code_expires_in,
+                interval=settings.oauth_device_polling_interval,
+            )
 
-        expires_at_val = utcnow() + timedelta(seconds=settings.oauth_device_code_expires_in)
+        except Exception as e:
+            db_session.rollback()
+            logger.error("device_authorize_failed", error=str(e))
+            # RFC 6749 §5.2 shape like every other error here and like /token.
+            return rfc6749_error_response(
+                error="server_error",
+                description="Failed to create device authorization",
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        finally:
+            db_session.close()
 
-        device = OAuth2DeviceCode(
-            device_code=device_code,
-            user_code=user_code,
-            client_id=client.client_id,
-            scope=scope,
-            expires_at=expires_at_val,
-        )
-        db_session.add(device)
-        db_session.commit()
-
-        verification_uri = f"{settings.frontend_url}/device"
-        verification_uri_complete = f"{verification_uri}?user_code={user_code}"
-
-        logger.info(
-            "device_authorization_created",
-            client_id=body.client_id,
-            device_code_prefix=device_code[:8],
-        )
-
-        return DeviceAuthorizationResponse(
-            device_code=device_code,
-            user_code=user_code,
-            verification_uri=verification_uri,
-            verification_uri_complete=verification_uri_complete,
-            expires_in=settings.oauth_device_code_expires_in,
-            interval=settings.oauth_device_polling_interval,
-        )
-
-    except Exception as e:
-        db_session.rollback()
-        logger.error("device_authorize_failed", error=str(e))
-        # RFC 6749 §5.2 shape like every other error here and like /token.
-        return rfc6749_error_response(
-            error="server_error",
-            description="Failed to create device authorization",
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-    finally:
-        db_session.close()
+    return await asyncio.to_thread(_sync)
 
 
 @router.post(
@@ -2506,40 +2581,47 @@ async def device_verify(request: Request, body: DeviceVerifyRequest) -> DeviceVe
             headers={"Retry-After": str(_DEVICE_FLOW_RATE_WINDOW_SECONDS)},
         )
 
-    db_session = get_sync_session()
+    # #1831: the sync session work runs in a worker thread — never on the
+    # event loop, where a wait on a row lock would stall every request.
+    def _sync():
+        db_session = get_sync_session()
 
-    try:
-        device = (
-            db_session.query(OAuth2DeviceCode).filter_by(user_code=body.user_code.upper()).first()
-        )
-
-        if not device:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Invalid user code",
+        try:
+            device = (
+                db_session.query(OAuth2DeviceCode)
+                .filter_by(user_code=body.user_code.upper())
+                .first()
             )
 
-        client = db_session.query(OAuth2Client).filter_by(client_id=device.client_id).first()
-        client_name = client.client_name if client else "Unknown"
+            if not device:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Invalid user code",
+                )
 
-        is_expired = device.is_expired()
-        is_authorized = (
-            not is_expired and device.authorized_at is not None and device.user_id is not None
-        )
+            client = db_session.query(OAuth2Client).filter_by(client_id=device.client_id).first()
+            client_name = client.client_name if client else "Unknown"
 
-        return DeviceVerifyResponse(
-            user_code=device.user_code,
-            client_name=client_name,
-            scope=device.scope,
-            expires_at=to_utc_iso(device.expires_at) or "",
-            is_authorized=is_authorized,
-            is_expired=is_expired,
-        )
+            is_expired = device.is_expired()
+            is_authorized = (
+                not is_expired and device.authorized_at is not None and device.user_id is not None
+            )
 
-    except HTTPException:
-        raise
-    finally:
-        db_session.close()
+            return DeviceVerifyResponse(
+                user_code=device.user_code,
+                client_name=client_name,
+                scope=device.scope,
+                expires_at=to_utc_iso(device.expires_at) or "",
+                is_authorized=is_authorized,
+                is_expired=is_expired,
+            )
+
+        except HTTPException:
+            raise
+        finally:
+            db_session.close()
+
+    return await asyncio.to_thread(_sync)
 
 
 @router.post(
@@ -2924,59 +3006,64 @@ async def introspect_token(
     caller_ip = request.client.host if request.client else "unknown"
     token_prefix = token[:8] + "..." if token else "(empty)"
 
-    db_session = get_sync_session()
-    try:
-        caller = _authenticate_endpoint_client(
-            request, db_session, client_id, client_secret, allow_public=False
-        )
-        if isinstance(caller, JSONResponse):
-            logger.info("oauth_introspect_unauthenticated", caller_ip=caller_ip)
-            return caller
+    # #1831: the sync session work runs in a worker thread — never on the
+    # event loop, where a wait on a row lock would stall every request.
+    def _sync():
+        db_session = get_sync_session()
+        try:
+            caller = _authenticate_endpoint_client(
+                request, db_session, client_id, client_secret, allow_public=False
+            )
+            if isinstance(caller, JSONResponse):
+                logger.info("oauth_introspect_unauthenticated", caller_ip=caller_ip)
+                return caller
 
-        oauth_token = db_session.query(OAuth2Token).filter_by(access_token=token).first()
+            oauth_token = db_session.query(OAuth2Token).filter_by(access_token=token).first()
 
-        reason: str | None
-        if oauth_token is None:
-            reason = "not_found"
-        elif oauth_token.client_id != caller.client_id:
-            reason = "other_client"
-        elif oauth_token.is_expired():
-            reason = "expired"
-        elif oauth_token.is_revoked():
-            reason = "revoked"
-        else:
-            reason = None
+            reason: str | None
+            if oauth_token is None:
+                reason = "not_found"
+            elif oauth_token.client_id != caller.client_id:
+                reason = "other_client"
+            elif oauth_token.is_expired():
+                reason = "expired"
+            elif oauth_token.is_revoked():
+                reason = "revoked"
+            else:
+                reason = None
 
-        logger.info(
-            "oauth_introspect",
-            caller_ip=caller_ip,
-            caller_client_id=caller.client_id,
-            token_prefix=token_prefix,
-            active=reason is None,
-            reason=reason,
-        )
+            logger.info(
+                "oauth_introspect",
+                caller_ip=caller_ip,
+                caller_client_id=caller.client_id,
+                token_prefix=token_prefix,
+                active=reason is None,
+                reason=reason,
+            )
 
-        if oauth_token is None or reason is not None:
-            return TokenIntrospectionResponse(active=False)
+            if oauth_token is None or reason is not None:
+                return TokenIntrospectionResponse(active=False)
 
-        return TokenIntrospectionResponse(
-            active=True,
-            client_id=oauth_token.client_id,
-            scope=oauth_token.scope,
-            exp=int(oauth_token.get_expires_at()),
-            iat=int(oauth_token.issued_at.timestamp()),
-            token_type="Bearer",
-            aud=oauth_token.resource,  # RFC 8707 (None if not set)
-        )
+            return TokenIntrospectionResponse(
+                active=True,
+                client_id=oauth_token.client_id,
+                scope=oauth_token.scope,
+                exp=int(oauth_token.get_expires_at()),
+                iat=int(oauth_token.issued_at.timestamp()),
+                token_type="Bearer",
+                aud=oauth_token.resource,  # RFC 8707 (None if not set)
+            )
 
-    except SQLAlchemyError as e:
-        logger.error("oauth_introspect_db_error", error=str(e), caller_ip=caller_ip)
-        db_session.rollback()
-        raise HTTPException(
-            status_code=500, detail="Internal server error during token introspection"
-        ) from e
-    finally:
-        db_session.close()
+        except SQLAlchemyError as e:
+            logger.error("oauth_introspect_db_error", error=str(e), caller_ip=caller_ip)
+            db_session.rollback()
+            raise HTTPException(
+                status_code=500, detail="Internal server error during token introspection"
+            ) from e
+        finally:
+            db_session.close()
+
+    return await asyncio.to_thread(_sync)
 
 
 @router.post(
@@ -3006,43 +3093,52 @@ async def oauth_revoke(
     like an unknown token, ``200`` (§2.2). Revoking a refresh token also
     revokes the access token issued with it.
     """
-    db_session = get_sync_session()
-    try:
-        caller = _authenticate_endpoint_client(
-            request, db_session, client_id, client_secret, allow_public=True
-        )
-        if isinstance(caller, JSONResponse):
-            return caller
 
-        oauth_token = (
-            db_session.query(OAuth2Token)
-            .filter((OAuth2Token.access_token == token) | (OAuth2Token.refresh_token == token))
-            .first()
-        )
-
-        if oauth_token is not None and oauth_token.client_id != caller.client_id:
-            logger.info(
-                "oauth_token_revoke_ignored_other_client",
-                caller_client_id=caller.client_id,
-                token_prefix=token[:8],
+    # #1831: the sync session work runs in a worker thread — never on the
+    # event loop, where a wait on a row lock would stall every request.
+    def _sync():
+        db_session = get_sync_session()
+        try:
+            caller = _authenticate_endpoint_client(
+                request, db_session, client_id, client_secret, allow_public=True
             )
-        elif oauth_token is not None:
-            now = utcnow()
-            if token == oauth_token.access_token and oauth_token.access_token_revoked_at is None:
-                oauth_token.access_token_revoked_at = now
-            if token == oauth_token.refresh_token:
-                if oauth_token.refresh_token_revoked_at is None:
-                    oauth_token.refresh_token_revoked_at = now
-                if oauth_token.access_token_revoked_at is None:
+            if isinstance(caller, JSONResponse):
+                return caller
+
+            oauth_token = (
+                db_session.query(OAuth2Token)
+                .filter((OAuth2Token.access_token == token) | (OAuth2Token.refresh_token == token))
+                .first()
+            )
+
+            if oauth_token is not None and oauth_token.client_id != caller.client_id:
+                logger.info(
+                    "oauth_token_revoke_ignored_other_client",
+                    caller_client_id=caller.client_id,
+                    token_prefix=token[:8],
+                )
+            elif oauth_token is not None:
+                now = utcnow()
+                if (
+                    token == oauth_token.access_token
+                    and oauth_token.access_token_revoked_at is None
+                ):
                     oauth_token.access_token_revoked_at = now
-            db_session.commit()
-            logger.info(
-                "oauth_token_revoked",
-                caller_client_id=caller.client_id,
-                token_prefix=token[:8],
-                token_type_hint=token_type_hint,
-            )
+                if token == oauth_token.refresh_token:
+                    if oauth_token.refresh_token_revoked_at is None:
+                        oauth_token.refresh_token_revoked_at = now
+                    if oauth_token.access_token_revoked_at is None:
+                        oauth_token.access_token_revoked_at = now
+                db_session.commit()
+                logger.info(
+                    "oauth_token_revoked",
+                    caller_client_id=caller.client_id,
+                    token_prefix=token[:8],
+                    token_type_hint=token_type_hint,
+                )
 
-        return {"status": "ok"}
-    finally:
-        db_session.close()
+            return {"status": "ok"}
+        finally:
+            db_session.close()
+
+    return await asyncio.to_thread(_sync)
