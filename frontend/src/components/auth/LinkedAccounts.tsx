@@ -93,9 +93,13 @@ interface IdentityLinksResponse {
 // OAuth app setup). "stale": it did, but older than the link window.
 type LinkProofResult = "unproved" | "stale";
 
-/** Whether a Google sign-in could prove this account (unknown counts as yes). */
+/**
+ * Whether a Google sign-in could prove this account. Unknown counts as yes:
+ * an older backend omits `providers`, and the current one sends `[]` for an
+ * account it knows nothing about — neither is a reason to hide the button.
+ */
 function googleCanProve(providers: string[] | undefined): boolean {
-  return providers === undefined || providers.includes("google");
+  return !providers?.length || providers.includes("google");
 }
 
 // The backend's window, should a response ever omit it.
@@ -139,7 +143,10 @@ export default function LinkedAccounts() {
 
   // The callback reports the result on the URL we asked it to come back to;
   // read it once and strip it, so a reload or the back button does not
-  // repeat it (#1382 mechanics).
+  // repeat it (#1382 mechanics). The profile page consumes its own params
+  // (`linked`, `link_error`, `refreshed`) under the same cleanUrl; the two
+  // never share a URL, because each arrives through its own full-page OAuth
+  // redirect, and this consumer returns false for anything but `link_proof`.
   useConsumeSearchParams(
     (params) => {
       const result = params.get("link_proof");

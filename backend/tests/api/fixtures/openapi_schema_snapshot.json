@@ -4545,6 +4545,13 @@
             },
             "type": "array"
           },
+          "providers": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "sign_in_window_minutes": {
             "default": 10,
             "type": "integer"
@@ -4732,6 +4739,13 @@
                 "type": "null"
               }
             ]
+          },
+          "providers": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "signed_in_recently": {
             "default": false,

@@ -521,11 +521,15 @@ describe("LinkedAccounts — link-proof result", () => {
     ).toBeTruthy();
   });
 
-  it("keeps offering it when the backend says nothing about providers", async () => {
+  it.each([
+    ["omits the field (older backend)", undefined],
+    ["knows nothing about the account (empty list)", []],
+  ])("keeps offering it when the backend %s", async (_case, providers) => {
     mockApiGet.mockResolvedValueOnce({
       linked: [],
-      linkable: [{ ...GOOGLE, signed_in_recently: false }],
+      linkable: [{ ...GOOGLE, signed_in_recently: false, providers }],
       signed_in_recently: true,
+      providers,
     });
 
     render(<LinkedAccounts />);
