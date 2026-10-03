@@ -4,6 +4,27 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.92.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.92.0) — 2026-10-03
+
+Linked accounts see the same graph and health picture inside a private context, a failed Confirm with Google says why, forget removes a resource-ingested memory's vector point, the OAuth routes stop blocking the event loop, and the credentials page is rebuilt around one MCP connection card.
+
+### Added
+- **Graph, explore and memory health follow the identity-link set** ([#1834](https://github.com/kagura-ai/memory-cloud/issues/1834)): in a private context, `GET /graph/stats`, `GET /graph/data`, the `list_edges` tool and `explore` include a linked account's edges, so a seed written by the linked account no longer returns `seed_not_in_graph`. The memory-health report covers the caller's contexts plus the link set's private contexts, with every signal scoped the same way. Edge writes, deletes and Sleep stay per account.
+- **Confirm with Google reports why a proof failed** ([#1833](https://github.com/kagura-ai/memory-cloud/issues/1833)): the Google callback returns to the Linked accounts card with `link_proof=unproved` (Google sent no authentication time) or `link_proof=stale` (older than the 10-minute window), and the card shows a distinct message for each. `GET /me/account/identity-links` gains `providers` (attached OAuth providers plus `"password"`) for the caller and each linkable account, and the *Confirm with Google* button is offered only when an account that still needs a proof can sign in with Google.
+
+### Changed
+- **Credentials page: one MCP connection card** ([#1836](https://github.com/kagura-ai/memory-cloud/issues/1836)): the page opens with the bare `/mcp` URL, the Claude Code OAuth one-liner and, for users in more than one workspace, a collapsed `/mcp/w/<id>` pin form. The *API keys* tab keeps the key-bearing snippets next to the key; the *Custom OAuth apps* tab drops the Claude and ChatGPT presets (connectors register through Dynamic Client Registration), and apps created from them are flagged as no longer needed. Docs and `.mcp.json.example` use the bare `/mcp` endpoint.
+- **OAuth routes run their sync database work off the event loop** ([#1831](https://github.com/kagura-ai/memory-cloud/issues/1831)): client CRUD, dynamic client registration, authorize, device authorization and verify, introspect and revoke run the Authlib sync session in a bounded `oauth-sync` thread pool (10 workers) that copies the request context, so a row lock held by an async transaction no longer stalls the loop. Hiding or regenerating another owner's client returns 403 instead of 500, and `GET /oauth/clients/{id}` honours the visibility window. A test parses the module and fails if a sync session is opened inside an `async def` again.
+- **"Profile Settings" is now "Settings"** ([#1837](https://github.com/kagura-ai/memory-cloud/issues/1837)): the user-menu item, the `/profile` page title and the legal copy that points at the page read *Settings* / 「設定」; keys and the route are unchanged.
+- **The identity-link dialog says where a link applies** ([#1838](https://github.com/kagura-ai/memory-cloud/issues/1838)): the confirmation dialog and the Linked accounts card explain that linked accounts see each other's private contexts only inside workspaces both are members of.
+
+### Fixed
+- **`forget` removes a resource-ingested memory's vector point** ([#1829](https://github.com/kagura-ai/memory-cloud/issues/1829)): every vector delete (forget by id and by query, working-memory cleanup, the legacy archive task, dedup merge) uses `Memory.point_id`, the `uuid5(resource:doc:version)` id a resource-ingested row carries, instead of the row id. A point still owned by another live row is kept. The resource indexer writes the row's id into the point payload, and the orphan sweep now classifies resource points in live contexts (`resource_tombstoned`, `resource_no_row`, shown as "doc gone" in the CLI) instead of keeping them all. Leftover points are cleaned by the next daily sweep; run `cli/sweep_orphan_vectors.py` in dry-run first to see the count.
+- **Flaky a11y lanes** ([#1824](https://github.com/kagura-ai/memory-cloud/issues/1824)): the dashboard spec waits for the KPI cards before scanning, the loading and empty-state texts get a dark-mode colour that passes contrast, and the shared contrast helper rescans after a `next dev` reload instead of failing with "Execution context was destroyed". The dashboard and admin loading blocks use the `SpinnerLoading` primitive.
+
+### Notes
+- No migration, no new environment variables, no operator action. Existing leftover resource vector points are removed by the next daily orphan sweep ([#1829](https://github.com/kagura-ai/memory-cloud/issues/1829)).
+
 ## [v0.91.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.91.0) — 2026-10-02
 
 Identity links and sessions get stricter and easier to manage: a link needs a proved credential rather than any recent sign-in, an account can leave a link set, a password reset can no longer race a sign-in, and the memory-health report stops flagging contexts that are simply unused.
