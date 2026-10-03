@@ -39,13 +39,20 @@ def _memory(**overrides) -> Memory:
     return Memory(**fields)
 
 
-def _ref(point_id, *, context_id=None, is_resource=False, resource_key=None) -> PointRef:
+def _ref(
+    point_id, *, context_id=None, is_resource=False, resource_key=None, updated_at=None
+) -> PointRef:
     return PointRef(
         point_id=str(point_id),
         context_id=str(context_id) if context_id else None,
         is_resource=is_resource,
         resource_key=resource_key,
+        updated_at=updated_at,
     )
+
+
+# A resource point old enough for the no-row rule (the sweep's default grace is 1 h).
+OLD_ENOUGH = utcnow() - timedelta(days=1)
 
 
 async def _live_context(db_session) -> Context:
@@ -269,12 +276,14 @@ class TestWhatCountsAsAnOrphan:
                     context_id=context.id,
                     is_resource=True,
                     resource_key=("res_1", "doc_1", 1),
+                    updated_at=OLD_ENOUGH,
                 ),
                 _ref(
                     gone_id,
                     context_id=context.id,
                     is_resource=True,
                     resource_key=("res_1", "doc_9", 1),
+                    updated_at=OLD_ENOUGH,
                 ),
             ]
         )
@@ -283,6 +292,35 @@ class TestWhatCountsAsAnOrphan:
 
         assert store.deleted == [str(gone_id)]
         assert result.collections[0].resource_no_row == 1
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_point_with_no_row_is_kept(self, db_session):
+        """The indexer writes the point before the transaction that owns the row
+        commits: a point younger than the grace period is never a no-row orphan."""
+        context = await _live_context(db_session)
+        store = _FakeStore(
+            [
+                _ref(
+                    uuid4(),
+                    context_id=context.id,
+                    is_resource=True,
+                    resource_key=("res_1", "doc_new", 1),
+                    updated_at=utcnow() - timedelta(minutes=2),
+                ),
+                # No timestamp at all: undecidable, kept.
+                _ref(
+                    uuid4(),
+                    context_id=context.id,
+                    is_resource=True,
+                    resource_key=("res_1", "doc_old", 1),
+                ),
+            ]
+        )
+
+        result = await _sweep(db_session, store, dry_run=False)
+
+        assert result.orphans == 0
+        assert store.deleted == []
 
     @pytest.mark.asyncio
     async def test_resource_point_without_a_natural_key_and_no_row_is_kept(self, db_session):
