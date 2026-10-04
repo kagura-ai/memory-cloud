@@ -25,11 +25,13 @@ from mcp_server.tools._helpers import (
     execute_with_timeout,
 )
 from services.memory_listing import (
+    CHANGE_CURSOR_RESERVE,
     DEFAULT_LIMIT,
     DIRECTIONS,
     KINDS,
     MAX_LIMIT,
     ORDER_COLUMNS,
+    change_item,
     changes_since,
     compile_memory_filters,
     encode_change_cursor,
@@ -64,9 +66,8 @@ def _memory_item(m: Any, *, include_details: bool) -> dict[str, Any]:
     return item
 
 
-# Widest continuation token either lane emits: a changes_since keyset cursor is
-# base64 of "<iso>|<kind>|<uuid>" (~90 characters); list's offset is shorter.
-CURSOR_RESERVE = 96
+# list's offset cursor is shorter than the change log's keyset token; one reserve serves both.
+CURSOR_RESERVE = CHANGE_CURSOR_RESERVE
 
 
 def _bound(envelope: dict[str, Any], lane: str, max_chars: int) -> tuple[dict[str, Any], int]:
@@ -246,16 +247,7 @@ async def handle_changes_since(
             )
             envelope: dict[str, Any] = {
                 "status": "success",
-                "changes": [
-                    {
-                        "memory_id": str(c.memory_id),
-                        "kind": c.kind,
-                        "at": to_utc_iso(c.at),
-                        "summary": c.summary,
-                        **({"superseded_by": str(c.superseded_by)} if c.superseded_by else {}),
-                    }
-                    for c in page.changes
-                ],
+                "changes": [change_item(c) for c in page.changes],
                 "count": len(page.changes),
                 "has_more": page.next_cursor is not None,
                 "next_cursor": page.next_cursor,

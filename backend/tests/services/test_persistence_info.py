@@ -762,7 +762,10 @@ def test_mcp_helper_emits_the_block_when_present(sleep_pass):
     assert payload["committed"] is True
     assert payload["promotes_via"] == SLEEP_CONSOLIDATION
     assert payload["consolidation_archive_min_age_days"] == consolidation_archive_min_age_days()
-    assert payload["detail"]
+    # #1851: the prose rides along only on request; guide(["persistence"]) has it.
+    assert "detail" not in payload
+    verbose = _persistence_response_field(persistence_info("working"), verbose=True)
+    assert verbose["persistence"]["detail"]
 
 
 def test_mcp_helper_omits_the_key_when_scope_is_unclassifiable():

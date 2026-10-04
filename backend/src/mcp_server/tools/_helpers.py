@@ -297,11 +297,15 @@ def _context_response_fields(context: Any) -> dict[str, Any]:
     }
 
 
-def _persistence_response_field(persistence: Any) -> dict[str, Any]:
+def _persistence_response_field(persistence: Any, *, verbose: bool = False) -> dict[str, Any]:
     """Render the Issue #1505 durability block for a write-tool response.
 
     Args:
         persistence: ``PersistenceInfo`` from the service response, or None.
+        verbose: ``True`` keeps the ``detail`` prose (#1851). By default the
+            block carries only the machine-readable fields — scope, committed,
+            promotes_via, consolidation_archive_min_age_days — because the
+            prose is the same on every write and lives in ``guide(["persistence"])``.
 
     Returns:
         ``{"persistence": {...}}``, or an empty dict when the service could not
@@ -310,7 +314,10 @@ def _persistence_response_field(persistence: Any) -> dict[str, Any]:
     """
     if persistence is None:
         return {}
-    return {"persistence": persistence.model_dump()}
+    block = persistence.model_dump()
+    if not verbose:
+        block.pop("detail", None)
+    return {"persistence": block}
 
 
 def _lint_response_field(lint: Any) -> dict[str, Any]:

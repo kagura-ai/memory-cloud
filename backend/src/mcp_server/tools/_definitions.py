@@ -59,12 +59,16 @@ Returns: {status, binding: {key_id, name, context_id, context_name, created_at, 
             "name": "remember",
             "description": """Store a new memory (a decision, fix, pattern, fact or note) for later recall. To edit a memory whose id you have use update_memory; to replace an outdated fact pass supersedes=<old_memory_id>.
 Write summary as the reusable conclusion with the terms a future search would use; content holds the full text. SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context.
-Returns: {status, memory_id, scope, persistence?, lint?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, validation_error.
+Returns: {status, memory_id, scope, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days}, lint?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, validation_error.
 Manual: guide(["remember"]).""",
             "inputSchema": {
                 "type": "object",
                 "required": ["summary", "content", "type", "context_id"],
                 "properties": {
+                    "verbose": {
+                        "type": "boolean",
+                        "description": "true keeps persistence.detail (the lifecycle prose); default false — see guide(['persistence']).",
+                    },
                     "summary": {
                         "type": "string",
                         "description": "Search summary, 10-500 chars (best 100-250). This is what recall matches.",
@@ -145,6 +149,10 @@ Manual: guide(["update_memory"]).""",
                 "type": "object",
                 "required": ["context_id"],
                 "properties": {
+                    "verbose": {
+                        "type": "boolean",
+                        "description": "true keeps persistence.detail (the lifecycle prose); default false — see guide(['persistence']).",
+                    },
                     "memory_id": {
                         "type": "string",
                         "format": "uuid",
@@ -209,7 +217,7 @@ Manual: guide(["update_memory"]).""",
             "readOnly": True,
             "description": """Search a context's memories by meaning and keywords (hybrid semantic + BM25 with Neural Memory boosting); returns ranked summaries, not full content. reference(memory_id) reads one hit, explore(memory_id) walks its graph, load_pinned() / recall_upcoming() / recall_nearby() return deterministic sets.
 Tip: search with the answer you expect ('JWT expiry caused 401; fixed with refresh token rotation'), not the question. Read confidence.level (high|moderate|low|none) first: none/low means the topic is probably not stored here, prefer an external source; degraded=true means the semantic half was unavailable. Searches may also strengthen associations and promote returned memories.
-Returns: {status, results: [{memory_id, summary, context_summary?, type, importance, scope, score, tags, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?}], count, related_tags: [{tag, count}], confidence: {level, top_score, prominence, relative_margin, result_count, rationale}, explore_hints?, tag_suggestions?, degraded?, degraded_reason?, context_summary_omitted?, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. Keys marked ? are absent, never null. supersede_candidate is an older near-duplicate (a suggestion): accept with create_edge(source_id, target_id, edge_type='supersedes'), reject with update_memory(dismiss_supersede_candidate=true).
+Returns: {status, results: [{memory_id, summary, context_summary?, type, importance, scope, score, tags?, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?}], count, related_tags?: [{tag, count}], confidence: {level, top_score, prominence, relative_margin, result_count, rationale}, explore_hints?, tag_suggestions?, degraded?, degraded_reason?, context_summary_omitted?, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. Keys marked ? are absent, never null. supersede_candidate is an older near-duplicate (a suggestion): accept with create_edge(source_id, target_id, edge_type='supersedes'), reject with update_memory(dismiss_supersede_candidate=true).
 Manual: guide(["recall"]).""",
             "inputSchema": {
                 "type": "object",
@@ -1918,6 +1926,37 @@ Manual: guide(["changes_since"]).""",
                     },
                 },
                 "required": ["context_id", "since"],
+            },
+        },
+        {
+            "name": "bootstrap",
+            "readOnly": True,
+            "description": """Start an interactive session on one context in ONE call. Composes the context block, the pinned memories, upcoming Time Memories and what changed since a time, plus the context's guardrails — each bounded like its standalone tool, fail-soft per component (degraded: true when one failed). Deterministic: no recall; search by topic afterwards if the change list does not answer it.
+Returns: {status, degraded, context, instructions, guardrails?, components: {pinned: {status, memories, total_available, truncated, cap}, upcoming: {status, results, from, truncated?}, changes: {status, changes, has_more, next_cursor, truncated?}}, since, generated_at, context_summary_omitted?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. A failed component is {status: 'error', error}; a cut changes page's next_cursor continues from the last change kept.
+Manual: guide(["bootstrap"]).""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Context UUID from list_contexts(). Do NOT guess or fabricate IDs.",
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "Start of the changes window: ISO 8601 (naive = UTC) or '<N>d' for N days back (default '7d').",
+                    },
+                    "include": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["pinned", "upcoming", "changes"]},
+                        "description": "Components to compose (default all three).",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Response budget in characters, not tokens (default 20000).",
+                    },
+                },
+                "required": ["context_id"],
             },
         },
         {

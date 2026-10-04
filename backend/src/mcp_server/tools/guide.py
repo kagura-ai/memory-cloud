@@ -44,7 +44,9 @@ GUIDE_TOPICS: dict[str, str] = {
     ),
     "persistence": (
         "Durability: a memory is committed before remember() / update_memory() "
-        "returns — never re-write it or wait. scope is its consolidation lifecycle, "
+        "returns — never re-write it or wait; the write reply carries persistence "
+        "{scope, committed, promotes_via, consolidation_archive_min_age_days}, and "
+        "verbose=true adds this text as persistence.detail. scope is its consolidation lifecycle, "
         "not whether it was saved: 'working' (default) may be promoted to "
         "'persistent' by the pass named in persistence.promotes_via (null if none "
         "runs); 'persistent' is outside consolidation (delivery_mode='always' writes "
@@ -187,8 +189,8 @@ GUIDE_TOPICS: dict[str, str] = {
     ),
     "recall.returns": (
         "Returns: {status, results: [{memory_id, summary, context_summary?, type, "
-        "importance, scope, score, tags, created_at, updated_at, superseded_by?, "
-        "contradicts?, supersede_candidate?}], count, related_tags: [{tag, count}], "
+        "importance, scope, score, tags?, created_at, updated_at, superseded_by?, "
+        "contradicts?, supersede_candidate?}], count, related_tags?: [{tag, count}], "
         "context_id, context_name, context_display_name, context_is_private, "
         "context_is_locked, confidence: {level, top_score, prominence, "
         "relative_margin, result_count, rationale}, explore_hints?: [{memory_id, "
@@ -201,7 +203,7 @@ GUIDE_TOPICS: dict[str, str] = {
         "requested; tag_suggestions unless a tag filter returned nothing and similar "
         "stored tags exist (advisory — the filter was not widened); degraded / "
         "degraded_reason unless the search was degraded. score is rounded to 4 "
-        "decimals. related_tags: the up-to-10 most frequent tags among these results "
+        "decimals. related_tags (absent when none): the up-to-10 most frequent tags among these results "
         "(candidates for a tag filter). Over max_chars, context_summary is dropped "
         "first (context_summary_omitted), then the lowest-ranked results (truncated: "
         "true). Cross-context recall (context_ids, 2-20 contexts) requires one "
@@ -381,6 +383,22 @@ GUIDE_TOPICS: dict[str, str] = {
         "never shifted by rows written after you read it. Pair it with "
         "set_state / get_state to remember the last since you processed."
     ),
+    # ----------------------------------------------------------- bootstrap
+    "bootstrap.usage": (
+        "bootstrap(context_id, since?) is the interactive session's one-call start. "
+        "It returns the context block, the context's guardrails (guardrails.items), the "
+        "pinned memories (trusted, cap 20), upcoming Time Memories (from now, k 20) and "
+        "the change log since `since` (default 7 days back; ISO 8601 or '<N>d'; "
+        "changes_since semantics, first 50 with a keyset next_cursor). Each component "
+        "reports status ok | error; one failing lane sets degraded: true and the rest "
+        "still return. Over max_chars, context_summary leaves the pinned items first, "
+        "then pinned → upcoming → changes keep the prefix that fits (truncated: true). "
+        "It replaces the three probabilistic session-start recalls: recall by topic "
+        "afterwards only when the change list does not answer the question. Render "
+        "the standing-guardrails section from pinned + guardrails.items (dedupe by "
+        "memory_id) and the upcoming section from upcoming.results; omit a section "
+        "that is empty."
+    ),
     # -------------------------------------------------------------- list_tags
     "list_tags.usage": (
         "Tag filters match exactly, and drift (troubleshoot / troubleshooting / "
@@ -431,6 +449,7 @@ GUIDE_INDEX: dict[str, tuple[str, ...]] = {
     "list_tags": ("list_tags.usage",),
     "list": ("list.filters", "ids"),
     "changes_since": ("changes_since.usage", "ids"),
+    "bootstrap": ("bootstrap.usage", "guardrails", "ids"),
 }
 
 SHARED_TOPICS: tuple[str, ...] = ("security", "ids", "persistence", "time-memories", "guardrails")

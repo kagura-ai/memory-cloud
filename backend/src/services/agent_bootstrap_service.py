@@ -206,6 +206,86 @@ def validate_recall_evaluation_usage(params: BootstrapParams) -> None:
         )
 
 
+async def context_and_instructions(db: AsyncSession, context: Any) -> tuple[dict[str, Any], str]:
+    """The context block (byte-compatible with ``get_context_info``) and the
+    static instructions string. Shared by the agent bootstrap and the session
+    ``bootstrap`` tool (#1851) so the block cannot drift between them."""
+    from sqlalchemy import select
+
+    from config.settings import get_settings
+    from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
+    from models.config import ContextSearchConfig
+
+    settings = get_settings()
+    config = (
+        await db.execute(
+            select(ContextSearchConfig).where(ContextSearchConfig.context_id == context.id)
+        )
+    ).scalar_one_or_none()
+
+    usage_guide = context.usage_guide or (
+        "No usage guide provided. Please add usage guidelines in the context settings."
+    )
+    context_block = {
+        "id": str(context.id),
+        "name": context.name,
+        "display_name": context.display_name,
+        "summary": context.summary
+        or "No summary provided. Please add a summary in the context settings.",
+        "usage_guide": usage_guide,
+        "is_private": context.is_private,
+        "is_locked": context.is_locked,
+        "embedding_model": config.embedding_model if config else settings.embedding_model,
+        "embedding_dimensions": config.embedding_dimensions
+        if config
+        else settings.embedding_dimensions,
+    }
+    # #1682: ``instructions`` is the static quick reference only — the same
+    # string get_context_info returns. The owner-written usage_guide is data
+    # and stays in context_block["usage_guide"]; it used to be prefixed here,
+    # which put stored text inside the ``instructions`` field.
+    return context_block, KAGURA_MEMORY_INSTRUCTIONS
+
+
+def pinned_item(m: Any) -> dict[str, Any]:
+    """One ``load_pinned`` memory as the bootstrap envelopes render it."""
+    return {
+        "memory_id": str(m.memory_id),
+        "summary": m.summary,
+        "context_summary": m.context_summary,
+        "type": m.type,
+        "importance": m.importance,
+        "delivery_mode": m.delivery_mode,
+    }
+
+
+async def fail_soft_component(
+    db: AsyncSession, name: str, fn: Any, *, error_code: str
+) -> dict[str, Any]:
+    """Run one component whose service may own the transaction, fail-soft.
+
+    ``{status: ok, ...}`` on success. On any exception a guarded full rollback
+    clears the failed transaction so the components after this one still run
+    (``MemoryService.recall`` and ``load_pinned`` commit their own writes, so a
+    SAVEPOINT is not safe here); the component becomes ``{status: error,
+    error: <error_code>}``. The rollback itself can raise (a dead connection),
+    so it is guarded too — this boundary always returns.
+    """
+    try:
+        body = await fn()
+        return {"status": STATUS_OK, **body}
+    except Exception as exc:
+        try:
+            await db.rollback()
+        except Exception as rollback_exc:  # noqa: BLE001 — fail-soft boundary
+            logger.error(
+                f"bootstrap_component_rollback_failed: {name}: {rollback_exc}",
+                exc_info=True,
+            )
+        logger.error(f"bootstrap_component_failed: {name}: {exc}", exc_info=True)
+        return {"status": STATUS_ERROR, "error": error_code}
+
+
 class AgentBootstrapService:
     """Compose the agent bootstrap envelope from existing primitives."""
 
@@ -458,24 +538,10 @@ class AgentBootstrapService:
         the savepoint context, so ``__aexit__`` turns a valid read into
         ``component_error``. On failure, a full rollback is the safe boundary:
         earlier bootstrap components are reads, while later audit writes have
-        not been staged yet.
+        not been staged yet. The boundary itself is ``fail_soft_component``,
+        shared with the session ``bootstrap`` tool.
         """
-        try:
-            body = await fn()
-            return {"status": STATUS_OK, **body}
-        except Exception as exc:
-            # The rollback itself can raise (e.g. a dead connection). Guard it
-            # so this handler always returns the fail-soft component error
-            # instead of aborting the whole bootstrap request.
-            try:
-                await self.db.rollback()
-            except Exception as rollback_exc:  # noqa: BLE001 — fail-soft boundary
-                logger.error(
-                    f"bootstrap_component_rollback_failed: {name}: {rollback_exc}",
-                    exc_info=True,
-                )
-            logger.error(f"bootstrap_component_failed: {name}: {exc}", exc_info=True)
-            return {"status": STATUS_ERROR, "error": "component_error"}
+        return await fail_soft_component(self.db, name, fn, error_code="component_error")
 
     def _correlation_block(self, agent: Any, params: BootstrapParams) -> dict[str, Any]:
         """Build the correlation block, populating trace/span from the P0-4
@@ -529,42 +595,7 @@ class AgentBootstrapService:
         )
 
     async def _context_and_instructions(self, context: Any) -> tuple[dict[str, Any], str]:
-        from sqlalchemy import select
-
-        from config.settings import get_settings
-        from mcp_server.tools._constants import KAGURA_MEMORY_INSTRUCTIONS
-        from models.config import ContextSearchConfig
-
-        settings = get_settings()
-        config = (
-            await self.db.execute(
-                select(ContextSearchConfig).where(ContextSearchConfig.context_id == context.id)
-            )
-        ).scalar_one_or_none()
-
-        usage_guide = context.usage_guide or (
-            "No usage guide provided. Please add usage guidelines in the context settings."
-        )
-        context_block = {
-            "id": str(context.id),
-            "name": context.name,
-            "display_name": context.display_name,
-            "summary": context.summary
-            or "No summary provided. Please add a summary in the context settings.",
-            "usage_guide": usage_guide,
-            "is_private": context.is_private,
-            "is_locked": context.is_locked,
-            "embedding_model": config.embedding_model if config else settings.embedding_model,
-            "embedding_dimensions": config.embedding_dimensions
-            if config
-            else settings.embedding_dimensions,
-        }
-        # #1682: ``instructions`` is the static quick reference only — the same
-        # string get_context_info returns. The owner-written usage_guide is data
-        # and stays in context_block["usage_guide"]; it used to be prefixed here,
-        # which put stored text inside the ``instructions`` field.
-        instructions = KAGURA_MEMORY_INSTRUCTIONS
-        return context_block, instructions
+        return await context_and_instructions(self.db, context)
 
     async def _pinned(
         self, context: Any, principal: BootstrapPrincipal, pinned_cap: int | None = None
@@ -585,17 +616,7 @@ class AgentBootstrapService:
             trusted_only=True,
         )
         return {
-            "memories": [
-                {
-                    "memory_id": str(m.memory_id),
-                    "summary": m.summary,
-                    "context_summary": m.context_summary,
-                    "type": m.type,
-                    "importance": m.importance,
-                    "delivery_mode": m.delivery_mode,
-                }
-                for m in result.memories
-            ],
+            "memories": [pinned_item(m) for m in result.memories],
             "total_available": result.total_available,
             "truncated": result.truncated,
             "cap": result.cap,

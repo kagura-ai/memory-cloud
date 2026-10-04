@@ -49,6 +49,7 @@ CORE_TOOLS: tuple[str, ...] = (
     "describe_tools",
     "list",
     "changes_since",
+    "bootstrap",
 )
 
 # ``None`` = no filter. Insertion order is the order error messages list them in.

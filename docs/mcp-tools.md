@@ -2,16 +2,16 @@
 
 See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concepts](concepts.md) for the memory model behind these tools.
 
-68 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+69 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
 ## Tool Profiles
 
-`tools/list` returns the 16 core tools by default (#1849); a client that loads every tool schema eagerly would otherwise pay for the whole list in each session. The endpoint URL — which the client's local MCP configuration already stores — picks another view:
+`tools/list` returns the 17 core tools by default (#1849); a client that loads every tool schema eagerly would otherwise pay for the whole list in each session. The endpoint URL — which the client's local MCP configuration already stores — picks another view:
 
 | Endpoint URL | `tools/list` returns | Approx. size |
 |--------------|----------------------|--------------|
-| `/mcp` (or `?profile=core`) | The 16 core tools — the default: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback`, `guide`, `describe_tools`, `list`, `changes_since` | ≈ 30k chars |
-| `/mcp?profile=full` | All 68 tools | ≈ 97k chars (about 3.2× the default) |
+| `/mcp` (or `?profile=core`) | The 17 core tools — the default: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback`, `guide`, `describe_tools`, `list`, `changes_since`, `bootstrap` | ≈ 32k chars |
+| `/mcp?profile=full` | All 69 tools | ≈ 99k chars (about 3.1× the default) |
 | `/mcp?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 15k chars for these three |
 
 Sizes are the compact JSON of the `tools` array, measured at v0.93.0, when the core profile became the default, the core descriptions were cut to three to five lines and the manual moved into the [`guide`](#guide-2) tool (≈ 95k / 32k / 15k at v0.78.0, which added a `title` and [annotations](#tool-annotations) to every tool; ≈ 84k / 28k / 14k at v0.73.0; ≈ 111k / 45k / 23k at v0.72.0). Per-client instructions: [MCP Client Setup › List fewer tools](mcp-clients.md#list-fewer-tools).
@@ -73,7 +73,7 @@ The descriptions in `tools/list` keep three to five lines per core tool (purpose
 | Tool | Description | Required Role |
 |------|------------|---------------|
 | `remember` | Store a new memory (summary + content + type; optional `delivery_mode`) | Member+ |
-| `recall` | Search memories with Hybrid Search (supports `trust_tier` filter). Results are Layers 1-2; `related_tags` is `[{tag, count}]`. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories ([Tool annotations](#tool-annotations)) | Viewer+ |
+| `recall` | Search memories with Hybrid Search (supports `trust_tier` filter). Results are Layers 1-2; `related_tags` is `[{tag, count}]`, absent when there are none, as is an empty `tags` on a result. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories ([Tool annotations](#tool-annotations)) | Viewer+ |
 | `recall_nearby` | Deterministic WHERE-axis query — memories with `details.location` within `radius_m` of a point, nearest first | Viewer+ |
 | `reference` | Get full 3-layer details of a memory | Viewer+ |
 | `update_memory` | Update an existing memory in-place or upsert by external ID | Member+ |
@@ -82,7 +82,7 @@ The descriptions in `tools/list` keep three to five lines per core tool (purpose
 
 > **Response format.** Every tool returns one JSON text block, serialized as compact UTF-8 — non-ASCII text (e.g. Japanese) arrives as-is, never as `\uXXXX` escapes, because the calling model pays for every character. Fields that are empty on most results are omitted rather than sent as `null` / `[]`: a `recall` result carries `context_summary`, `superseded_by`, `contradicts` and `supersede_candidate` only when they have a value, and `score` is rounded to 4 decimals. Treat an absent key as "none". The authoritative per-tool shape is the `Returns:` line of each tool description (`tools/list`).
 
-## Agent Substrate (10)
+## Agent Substrate (11)
 
 The primitives an autonomous agent loop needs beyond a knowledge store — see [Concepts › Agent Memory Substrate](concepts.md#agent-memory-substrate).
 
@@ -98,6 +98,7 @@ The primitives an autonomous agent loop needs beyond a knowledge store — see [
 | `feedback` | Record whether a recalled memory was helpful (append-only signal) | Viewer+ |
 | `list` | Deterministic sibling of `recall`: every live memory of a context matching exact filters (recall's vocabulary plus `details.<key>` equality), ordered by `updated_at` / `created_at` / `importance` with stable pages (`has_more`, `next_cursor`); no ranking, no Hebbian write | Viewer+ |
 | `changes_since` | A context's memory change log since a time, oldest first: `created`, `updated`, `superseded` (with `superseded_by`), `forgotten` (while the soft-deleted row exists); keyset `next_cursor` | Viewer+ |
+| `bootstrap` | The interactive session's one-call start: the context block, its guardrails, the pinned set, upcoming Time Memories and the change log since a time (default 7 days), each bounded like its standalone tool and fail-soft (`degraded`); the user-credential sibling of `get_agent_bootstrap` | Viewer+ |
 
 ## Server instructions
 
@@ -655,7 +656,7 @@ Good: remember(summary="OAuth2 login implementation",  content=<login function>,
 - `working` (the default for a normal write) — a nightly consolidation pass can promote it to `persistent`; `persistence.promotes_via` names the pass this server actually runs (null if none is enabled). That pass will not archive a working memory younger than `persistence.consolidation_archive_min_age_days`, and only one that has never been adopted.
 - `persistent` — outside consolidation's reach. `delivery_mode="always"` pins straight here on write; that is a delivery guarantee, not a stronger durability guarantee than a working-scope write already has.
 
-The age floor is scoped to consolidation and is not a retention SLA: separate near-duplicate merge maintenance can retire an unpinned memory at any age (its tags and edges move to the memory it merged into; `delivery_mode="always"` memories and tool guardrails (`details.tool_trigger`) never enter that pass), and `forget()` removes one on demand. The response carries a `persistence` block for the scope you actually got.
+The age floor is scoped to consolidation and is not a retention SLA: separate near-duplicate merge maintenance can retire an unpinned memory at any age (its tags and edges move to the memory it merged into; `delivery_mode="always"` memories and tool guardrails (`details.tool_trigger`) never enter that pass), and `forget()` removes one on demand. The response carries a `persistence` block for the scope you actually got: `{scope, committed, promotes_via, consolidation_archive_min_age_days}`. The lifecycle prose above used to ride along as `persistence.detail` on every write; it now does so only with `verbose=true` on `remember` / `update_memory`, and `guide(["persistence"])` returns it on demand.
 
 **Write lint.** `lint: [{code, hint, subject?}]` appears only when something about the write will hurt future recall — `summary_short`, `summary_long`, `summary_narrative`, `no_tags`, `tag_near_duplicate` (a tag that near-duplicates one already in the context). A near-duplicate is a mechanical variant, a prefix abbreviation (`dev-env` / `dev-environment`) or a typo within two edits — never two tags of the same shape that differ only in the values of their numbers, so a new `issue:#1599`, `v0.73.0` or `session-2026-09-21` is not flagged against other issue, version or date tags written the same way (a different count of numbers — `v0.73` / `v0.73.0`, `session-2026-09` / `session-2026-09-21` — or the same number padded differently — `sprint-07` / `sprint-7` — still goes through the prefix and typo rules). Nor is a compound tag flagged against its own leading segment(s), in either direction: `session-cookie` next to a stored `session`, `cache-layer-redis` next to `cache-layer`, `some-repo#62` or `session-2026-09-11` next to `some-repo` / `session` are a topic and a sub-topic, not two spellings of one tag (segments are split on whitespace, `_`, `-`, `/`, `:` and `#` — not `.`, so `node` / `node.js` still hints — and a partial segment such as `dev-env` / `dev-environment` or `deploy-check` / `deploy-checklist` is still an abbreviation). When several stored tags match, one that folds to exactly the written tag (`session_cookie` for `session-cookie`) is reported ahead of the most-used one. `tag_suggestions` on `recall` uses the same near-duplicate relation but does not skip the compound case — there, a narrower or broader stored tag is the useful answer. A clean write has no `lint` key. It is advisory: the memory is already stored, and acting on a hint means calling `update_memory()`.
 
@@ -738,6 +739,12 @@ Always verify before deleting: show the memory's summary, warn when `importance 
 ### `changes_since`
 
 **"What changed since my last session?"** `changes_since(context_id, since, until?)` returns the context's memory-level change log, oldest first: `created` (`created_at` in the window), `updated` (`updated_at` in the window and later than `created_at` — an edit or a scope promotion, never the write itself: the embedding pipeline keeps its own clock), `superseded` (a `supersedes` edge in the window — `at` is when the edge became `supersedes`, `superseded_by` the newer memory, the older memory's summary is shown) and `forgotten` (`deleted_at` in the window, listed while the soft-deleted row still exists; its earlier events stay in the log). `since` is inclusive, `until` exclusive. `next_cursor` is a keyset token over `(at, kind, id)` — pass it back unchanged; rows written after the first read never shift a page. Remember the last `since` you processed with `set_state` / `get_state`.
+
+### `bootstrap`
+
+**Session start in one call.** `bootstrap(context_id, since?, include?, max_chars?)` composes the deterministic session-start reads for a user credential (the agent-side sibling is `get_agent_bootstrap`): `context` + `instructions` (the `get_context_info` block), `guardrails` (the same block `get_context_info` returns; absent with `?guardrails=off`, `null` when the read failed), and `components.pinned` (`load_pinned`, trusted tier, cap 20), `components.upcoming` (`recall_upcoming` from now, k 20, trusted tier) and `components.changes` (`changes_since` over `[since, now)`, all four kinds, first 50 with a keyset `next_cursor`). `since` is ISO 8601 (naive = UTC) or `"<N>d"` for N days back; the default is `"7d"`. `include` narrows the components. There is no recall component on purpose — recall by topic afterwards when the change list does not answer the question.
+
+Each component carries `status: ok | error`; one failing lane sets `degraded: true` and the others still return. Over `max_chars` (default 20,000) `context_summary` leaves the pinned items first, then `pinned` → `upcoming` → `changes` keep the prefix that fits, each marked `truncated: true` (`changes.has_more` is set to true when its page was cut). The `kagura-memory` plugin's session-start skill calls `bootstrap` when the tool list has it and falls back to the seven-call sequence on an older server.
 
 ### `list_tags`
 

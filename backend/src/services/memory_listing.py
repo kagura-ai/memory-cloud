@@ -29,7 +29,7 @@ from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
 from models.memory import EDGE_TYPE_SUPERSEDES, SOURCE_TYPE_CONNECTOR, Memory, NeuralMemoryEdge
 from services.agent_binding_service import binding_memory_sql_predicate
 from services.identity_link_service import owned_by
-from utils.datetime import parse_iso8601_to_aware
+from utils.datetime import parse_iso8601_to_aware, to_utc_iso
 
 ORDER_COLUMNS = {
     "updated_at": func.coalesce(Memory.updated_at, Memory.created_at),
@@ -40,6 +40,9 @@ DIRECTIONS = ("asc", "desc")
 MAX_LIMIT = 100
 DEFAULT_LIMIT = 50
 KINDS = ("created", "updated", "superseded", "forgotten")
+# Widest continuation token the change log emits: base64 of "<iso>|<kind>|<uuid>"
+# (~90 characters). Envelopes that append next_cursor after measuring reserve it.
+CHANGE_CURSOR_RESERVE = 96
 
 _DETAILS_KEY = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 _SEPARATORS_SQL = "[[:space:]_-]+"
@@ -279,6 +282,17 @@ class Change:
 class ChangePage:
     changes: list[Change]
     next_cursor: str | None
+
+
+def change_item(c: Change) -> dict[str, Any]:
+    """One change as every envelope renders it (``changes_since`` and ``bootstrap``)."""
+    return {
+        "memory_id": str(c.memory_id),
+        "kind": c.kind,
+        "at": to_utc_iso(c.at),
+        "summary": c.summary,
+        **({"superseded_by": str(c.superseded_by)} if c.superseded_by else {}),
+    }
 
 
 def encode_change_cursor(change: Change) -> str:

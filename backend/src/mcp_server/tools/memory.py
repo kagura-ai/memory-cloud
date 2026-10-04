@@ -130,6 +130,9 @@ async def handle_remember(
     from models.schemas import RememberRequest
     from services.memory_service import MemoryService
 
+    verbose = args.get("verbose", False)
+    if not isinstance(verbose, bool):
+        return _error_response("validation_error", "verbose must be a boolean.")
     request = RememberRequest(
         summary=args["summary"],
         context_summary=args.get("context_summary"),
@@ -192,7 +195,7 @@ async def handle_remember(
                             "scope": result.scope,
                             # #1505: scope alone reads as "not saved yet" — say
                             # what it actually implies for durability.
-                            **_persistence_response_field(result.persistence),
+                            **_persistence_response_field(result.persistence, verbose=verbose),
                             # #1502: advisory recall-ability hints; absent when
                             # the write looks fine.
                             **_lint_response_field(result.lint),
@@ -274,6 +277,9 @@ async def handle_update_memory(
     memory_id = args.get("memory_id")
     external_id = args.get("external_id")
 
+    verbose = args.get("verbose", False)
+    if not isinstance(verbose, bool):
+        return _error_response("validation_error", "verbose must be a boolean.")
     try:
         request = UpdateMemoryRequest(
             memory_id=UUID(memory_id) if memory_id else None,
@@ -341,7 +347,9 @@ async def handle_update_memory(
                             "operation": result.operation,
                             "re_embedded": result.re_embedded,
                             "scope": result.scope,
-                            **_persistence_response_field(result.persistence),  # #1505
+                            **_persistence_response_field(
+                                result.persistence, verbose=verbose
+                            ),  # #1505
                             # #1504: echo WHICH pairing was tombstoned, so the
                             # caller can confirm it rejected what it meant to.
                             **(
@@ -845,7 +853,6 @@ def _recall_result_item(r: Any) -> dict[str, Any]:
             # 4 decimals keep the ranking readable; the full float is 16+
             # digits of noise per result.
             "score": round(r.score, 4) if r.score is not None else None,
-            "tags": r.tags,
             # Issue #1047: recency/staleness cues for the agent. created_at
             # is the always-present floor; updated_at is the last real change
             # (null if never edited) — an old value means the fact may be stale.
@@ -856,6 +863,10 @@ def _recall_result_item(r: Any) -> dict[str, Any]:
     # #1208: fact-succession annotations. superseded_by is only set under
     # include_superseded=true; contradicts lists opposing memories (never
     # hidden, both sides annotated).
+    # #1851: an untagged result says nothing with ``"tags": []``; absent like
+    # the other empty annotations.
+    if r.tags:
+        item["tags"] = r.tags
     if r.superseded_by:
         item["superseded_by"] = str(r.superseded_by)
     if r.contradicts:
@@ -886,12 +897,16 @@ def _recall_envelope(result: Any, context: Any) -> dict[str, Any]:
         "status": "success",
         "results": results_data,
         "count": len(results_data),
-        # #1599: tag + count only. ``RelatedTagItem.sample_summary`` (still
-        # served over REST) repeats, in full, a summary that is already in
-        # ``results`` — up to 10 times per response on this surface.
-        "related_tags": [{"tag": tag.tag, "count": tag.count} for tag in result.related_tags],
         **_context_response_fields(context),
     }
+    # #1599: tag + count only. ``RelatedTagItem.sample_summary`` (still served
+    # over REST) repeats, in full, a summary that is already in ``results`` —
+    # up to 10 times per response on this surface. #1851: absent when there
+    # are none (an empty recall), like the other empty annotations.
+    if result.related_tags:
+        response_data["related_tags"] = [
+            {"tag": tag.tag, "count": tag.count} for tag in result.related_tags
+        ]
 
     if result.explore_hints is not None:
         response_data["explore_hints"] = [

@@ -37,6 +37,9 @@
         "context_id"
       ],
       "properties": {
+        "verbose": {
+          "type": "boolean"
+        },
         "summary": {
           "type": "string"
         },
@@ -118,6 +121,9 @@
         "context_id"
       ],
       "properties": {
+        "verbose": {
+          "type": "boolean"
+        },
         "memory_id": {
           "type": "string",
           "format": "uuid"
@@ -1666,6 +1672,40 @@
       "required": [
         "context_id",
         "since"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "bootstrap",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "since": {
+          "type": "string"
+        },
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "pinned",
+              "upcoming",
+              "changes"
+            ]
+          }
+        },
+        "max_chars": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "context_id"
       ],
       "additionalProperties": false
     }

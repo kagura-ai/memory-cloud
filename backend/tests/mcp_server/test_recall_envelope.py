@@ -117,9 +117,9 @@ class TestResultItems:
             "importance",
             "scope",
             "score",
-            "tags",
             "created_at",
             "updated_at",
+            "tags",  # #1851: conditional, so it joins the omittable keys at the end
         ]
 
     def test_present_annotations_are_unchanged(self):
@@ -165,11 +165,23 @@ class TestResultItems:
     def test_falsy_values_of_unconditional_fields_are_kept(self):
         # Only the ? keys are omit-when-empty. A 0.0 score is a real ranking
         # value, not a missing one, and must not be nulled by a truthiness check.
-        memory = _memory(score=0.0, importance=0.0, tags=[])
+        memory = _memory(score=0.0, importance=0.0)
         item = _envelope(RecallResponse(results=[memory]))["results"][0]
         assert item["score"] == 0.0
         assert item["importance"] == 0.0
-        assert item["tags"] == []
+
+    def test_empty_tags_and_related_tags_are_omitted(self):
+        # #1851: an untagged result and an empty recall say nothing with `[]`;
+        # both follow the empty -> absent rule. Present values are unchanged.
+        envelope = _envelope(RecallResponse(results=[_memory(tags=[])], related_tags=[]))
+        assert "tags" not in envelope["results"][0]
+        assert "related_tags" not in envelope
+        assert envelope["count"] == 1  # count stays, 0 or not
+        tagged = _envelope(
+            RecallResponse(results=[_memory()], related_tags=[RelatedTagItem(tag="auth", count=1)])
+        )
+        assert tagged["results"][0]["tags"] == ["auth", "jwt"]
+        assert tagged["related_tags"] == [{"tag": "auth", "count": 1}]
 
     def test_empty_string_context_summary_is_omitted(self):
         # remember() accepts context_summary="" (no min_length) and stores it
@@ -455,7 +467,7 @@ class TestToolDescription:
     def test_returns_lists_related_tags_as_tag_and_count(self):
         description = self._recall_tool()["description"]
         returns = description.rsplit("Returns: {", 1)[1]
-        assert "related_tags: [{tag, count}]" in returns
+        assert "related_tags?: [{tag, count}]" in returns  # #1851: absent when none
         assert "sample_summary" not in description
 
     def test_returns_marks_the_omittable_keys(self):
