@@ -9,9 +9,10 @@ title and one summary line; with ``names`` it returns those tools' complete
 definitions (the same dicts ``tools/list`` would send) so the model can call
 them right away. The response always says how to list more by URL.
 
-"The current view" is the request URL's selection, stored per request by the
-transport (``set_mcp_tool_view``). A direct call with no request (tests) falls
-back to the core set.
+"The current view" is derived from the request URL's query, which the
+transport stores per request (``set_mcp_tool_view_query``); the registry work
+happens here, not at the auth seam. A direct call with no request (tests), or a
+URL whose profile is broken, falls back to the core set.
 """
 
 from __future__ import annotations
@@ -23,8 +24,15 @@ from uuid import UUID
 from mcp.types import TextContent
 
 from mcp_server.tools._definitions import get_tool_definitions
-from mcp_server.tools._helpers import _error_response, _success_response, get_mcp_tool_view
+from mcp_server.tools._helpers import (
+    _error_response,
+    _success_response,
+    get_mcp_tool_view_query,
+)
 from mcp_server.tools._profiles import CORE_TOOLS
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 MAX_NAMES = 20
 SUMMARY_CHARS = 160
@@ -35,7 +43,9 @@ URL_HINT: dict[str, str] = {
     "note": "Every tool is callable now, listed or not; a profile only picks what tools/list shows.",
 }
 
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s")
+# A sentence ends at ``. `` / ``! `` / ``? `` — except after the abbreviations
+# the descriptions use mid-sentence (``e.g.``, ``i.e.``, ``vs.``, ``etc.``).
+_SENTENCE_END = re.compile(r"(?<!\be\.g\.)(?<!\bi\.e\.)(?<!\bvs\.)(?<!\betc\.)(?<=[.!?])\s")
 
 
 def summarize(description: str) -> str:
@@ -49,8 +59,17 @@ def summarize(description: str) -> str:
 
 
 def current_view() -> frozenset[str]:
-    """The names the request's URL lists, or the core set when no request set one."""
-    view = get_mcp_tool_view()
+    """The names the request URL's ``tools/list`` returns; the core set without a request."""
+    query = get_mcp_tool_view_query()
+    if query is None:
+        return frozenset(CORE_TOOLS)
+    from services.guardrail_digest import tool_view_names
+
+    try:
+        view = tool_view_names(query)
+    except Exception:  # pure function; anything but ToolProfileError is a bug
+        logger.warning("describe_tools_view_failed", exc_info=True)
+        view = None
     return view if view is not None else frozenset(CORE_TOOLS)
 
 
@@ -97,7 +116,7 @@ async def handle_describe_tools(
     query = args.get("query")
     if query is not None and not isinstance(query, str):
         return _error_response("validation_error", "query must be a string.")
-    if names is not None:
+    if names is not None and names != []:  # an empty list means "list the hidden tools"
         if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
             return _error_response(
                 "validation_error", 'names must be a list of tool names, e.g. ["get_usage"].'

@@ -93,23 +93,23 @@ describe("McpConnectionCard — endpoint", () => {
     expect(screen.queryByText(/\/\/mcp/)).not.toBeInTheDocument();
   });
 
-  it("'Core tools only' puts ?profile=core on the URL, the command and the pinned URL (#1609)", () => {
+  it("'All tools' puts ?profile=full on the URL, the command and the pinned URL (#1609, #1849)", () => {
     render(<McpConnectionCard />);
 
     fireEvent.click(screen.getByRole("switch"));
 
     expect(
-      screen.getByText("https://memory.example.test/mcp?profile=core"),
+      screen.getByText("https://memory.example.test/mcp?profile=full"),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        'claude mcp add --transport http kagura-memory "https://memory.example.test/mcp?profile=core"',
+        'claude mcp add --transport http kagura-memory "https://memory.example.test/mcp?profile=full"',
       ),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("pinToggle"));
     expect(
-      screen.getByText("https://memory.example.test/mcp/w/ws-1?profile=core"),
+      screen.getByText("https://memory.example.test/mcp/w/ws-1?profile=full"),
     ).toBeInTheDocument();
   });
 });

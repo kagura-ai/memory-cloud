@@ -1788,8 +1788,8 @@
     "copyClaudeOAuthCommand": "Copy command",
     "claudeOAuthCopied": "Command copied",
     "claudeManualConfigLabel": "Or configure manually with .mcp.json (API key):",
-    "coreProfileLabel": "Core tools only (smaller tool list)",
-    "coreProfileHelp": "Adds ?profile=core to the URLs below. Pick it when your client loads every tool schema at session start — the tool list is about 73% smaller. It lists the core memory and context tools (the exact set is under Tool Profiles in the docs) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane; those stay callable, they are just not listed. Switch back to the default URL to see them.",
+    "allToolsLabel": "All tools (larger tool list)",
+    "allToolsHelp": "Adds ?profile=full to the URLs below. The default URL lists the core memory and context tools (the exact set is under Tool Profiles in the docs) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane; those stay callable, and describe_tools lists them from inside a session. Pick this when your client should see every tool schema up front — the tool list is about 3.6 times larger.",
     "clients": {
       "claudeCode": "Claude Code",
       "chatgpt": "ChatGPT",

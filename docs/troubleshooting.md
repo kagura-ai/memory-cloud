@@ -4,14 +4,14 @@ Solutions to client-configuration and environment-specific setup problems. If yo
 
 ## A tool I expect is missing from my client
 
-**You are probably on `?profile=core`.** The client lists `remember`, `recall` and the other core tools, but not, say, `create_edge`, `list_files`, `get_sleep_report` or `secret_get`.
+**The default tool list is the core profile (since v0.93.0).** The client lists `remember`, `recall` and the other core tools, but not, say, `create_edge`, `list_files`, `get_sleep_report` or `secret_get`. Every tool is still callable: `describe_tools` lists the hidden ones and returns their schemas from inside the session, and `?profile=full` on the URL lists them all up front.
 
 Look at the endpoint URL your client stores — `"url"` in `.mcp.json` / `.gemini/settings.json`, `url` in `~/.codex/config.toml`, or the URL field of the connector form:
 
 | URL ends with | The client lists |
 |---|---|
-| `/mcp` | All tools (default) |
-| `?profile=core` | Core tools only — the core memory and context tools (see Tool Profiles). Sleep, analyses, files, edges, secrets, resources and the agent control plane are left out |
+| `/mcp` (or `?profile=core`) | Core tools (default) — the core memory and context tools (see Tool Profiles). Sleep, analyses, files, edges, secrets, resources and the agent control plane are left out; `describe_tools` lists them |
+| `?profile=full` | All tools |
 | `?tools=…` | Exactly the names in the list |
 
 The missing tool is still **callable** — a profile filters the list, not access — but most clients only offer what they list. To see it, switch back to the default URL (or add its name to `?tools=`), then restart or reconnect the client so it lists tools again. Background: [Tool Profiles](mcp-tools.md#tool-profiles).

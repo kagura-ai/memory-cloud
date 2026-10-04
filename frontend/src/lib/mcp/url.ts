@@ -3,15 +3,16 @@
  *
  * One module for every place that derives a URL from `NEXT_PUBLIC_API_URL`
  * (McpConnectionCard, APIKeysTabPanel, MCPConfigBlock), so the `/api/v1`
- * strip, the bare / workspace-pinned forms and the `?profile=core` query are
- * written once (#1836). Pure functions; no React.
+ * strip, the bare / workspace-pinned forms and the `?profile=` query are
+ * written once (#1836, #1849). Pure functions; no React.
  */
 
 /** The environment variable Codex reads the API key from (#1624). */
 export const CODEX_BEARER_TOKEN_ENV_VAR = "KAGURA_API_KEY";
 
-/** The query the server reads to list the core tools only (#1601). */
-const CORE_PROFILE_QUERY = "profile=core";
+/** The tool profiles the server reads from the URL (#1601, #1849): `core` is
+ * the default view, `full` lists every tool. */
+export type ToolProfile = "core" | "full";
 
 /**
  * The server origin behind an API base URL: `NEXT_PUBLIC_API_URL` may carry
@@ -49,7 +50,7 @@ export function toBareMcpUrl(mcpUrl: string): string {
 }
 
 /**
- * Put `profile=core` on an MCP endpoint URL (#1609).
+ * Put `profile=<profile>` on an MCP endpoint URL (#1609, #1849).
  *
  * Plain string handling rather than `new URL()`: the snippet must show the
  * URL exactly as issued (no normalization), and a placeholder URL must not
@@ -57,18 +58,30 @@ export function toBareMcpUrl(mcpUrl: string): string {
  * parameter is replaced rather than repeated, which also makes the helper
  * idempotent; a fragment stays last.
  */
-export function withCoreProfile(mcpUrl: string): string {
+export function withProfile(mcpUrl: string, profile: ToolProfile): string {
+  const profileQuery = `profile=${profile}`;
   const hashAt = mcpUrl.indexOf("#");
   const beforeHash = hashAt === -1 ? mcpUrl : mcpUrl.slice(0, hashAt);
   const hash = hashAt === -1 ? "" : mcpUrl.slice(hashAt);
   const queryAt = beforeHash.indexOf("?");
-  if (queryAt === -1) return `${beforeHash}?${CORE_PROFILE_QUERY}${hash}`;
+  if (queryAt === -1) return `${beforeHash}?${profileQuery}${hash}`;
   const params = beforeHash
     .slice(queryAt + 1)
     .split("&")
     .filter((p) => p !== "" && p !== "profile" && !p.startsWith("profile="));
-  const query = [...params, CORE_PROFILE_QUERY].join("&");
+  const query = [...params, profileQuery].join("&");
   return `${beforeHash.slice(0, queryAt)}?${query}${hash}`;
+}
+
+/** `?profile=full` — list every tool; the bare URL lists the core profile (#1849). */
+export function withFullProfile(mcpUrl: string): string {
+  return withProfile(mcpUrl, "full");
+}
+
+/** `?profile=core` — the default view spelled out; used by tests and kept for
+ * configurations that pin the profile explicitly. */
+export function withCoreProfile(mcpUrl: string): string {
+  return withProfile(mcpUrl, "core");
 }
 
 /**

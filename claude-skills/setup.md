@@ -698,7 +698,7 @@ The full Claude Code block — B1–B5 rows around A5's three:
 ```
 Kagura Memory setup
   MCP entry    kagura-memory — project (.mcp.json) — CLI profile (kagura-mcp --profile default --guardrails off --tool-profile core)
-  Upstream     https://<host>/mcp?guardrails=off&profile=core — guardrails from --guardrails, profile from --tool-profile (profile default: https://<host>/mcp)
+  Upstream     https://<host>/mcp?guardrails=off&profile=core — guardrails from --guardrails, profile from --tool-profile (profile default: https://<host>/mcp, which lists the core profile)
   Shadowed     user (~/.claude.json) — OAuth — https://<host>/mcp
   Plugin       kagura-memory@kagura-memory-cloud 0.74.0 — Hooks (4)
   server_url   https://<host>/mcp

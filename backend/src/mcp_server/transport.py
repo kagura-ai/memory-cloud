@@ -1508,7 +1508,7 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
         from mcp_server.tools._helpers import (
             set_mcp_guardrails_selection,
             set_mcp_key_workspace_scope,
-            set_mcp_tool_view,
+            set_mcp_tool_view_query,
         )
 
         set_mcp_key_workspace_scope(api_key_workspace_id)
@@ -1521,13 +1521,8 @@ async def mcp_asgi_app(scope: Scope, receive: Receive, send: Send) -> None:
 
         set_mcp_guardrails_selection(select_guardrail_context(scope.get("query_string", b"")))
         # #1849: the same URL picks what ``tools/list`` shows; ``describe_tools``
-        # reads it to list what was left out. Pure, no I/O.
-        from services.guardrail_digest import tool_view_names
-
-        try:
-            set_mcp_tool_view(tool_view_names(scope.get("query_string", b"")))
-        except Exception:  # advisory only — a broken registry must not fail auth
-            set_mcp_tool_view(None)
+        # derives the view from these bytes when (and only when) it is called.
+        set_mcp_tool_view_query(scope.get("query_string", b""))
 
         # RFC-0002 P0-4 (#1277): parse W3C traceparent + baggage into the
         # per-request correlation contextvar at the same auth seam (sibling of

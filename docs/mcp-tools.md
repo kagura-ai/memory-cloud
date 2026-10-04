@@ -2,25 +2,27 @@
 
 See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concepts](concepts.md) for the memory model behind these tools.
 
-65 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+66 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
 ## Tool Profiles
 
-`tools/list` returns all 65 definitions by default. A client that loads every tool schema eagerly pays for the whole list in each session, so the endpoint URL — which the client's local MCP configuration already stores — can ask for fewer:
+`tools/list` returns the 14 core tools by default (#1849); a client that loads every tool schema eagerly would otherwise pay for the whole list in each session. The endpoint URL — which the client's local MCP configuration already stores — picks another view:
 
 | Endpoint URL | `tools/list` returns | Approx. size |
 |--------------|----------------------|--------------|
-| `/mcp` (or `?profile=full`) | All 65 tools — the default, unchanged | ≈ 91k chars |
-| `/mcp?profile=core` | The 13 core tools: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback`, `guide` | ≈ 24k chars (about 73% smaller) |
+| `/mcp` (or `?profile=core`) | The 14 core tools — the default: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback`, `guide`, `describe_tools` | ≈ 26k chars |
+| `/mcp?profile=full` | All 66 tools | ≈ 93k chars (about 3.6× the default) |
 | `/mcp?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 15k chars for these three |
 
-Sizes are the compact JSON of the `tools` array, measured at v0.93.0, when the core descriptions were cut to three to five lines and the manual moved into the [`guide`](#guide-1) tool (≈ 95k / 32k / 15k at v0.78.0, which added a `title` and [annotations](#tool-annotations) to every tool; ≈ 84k / 28k / 14k at v0.73.0; ≈ 111k / 45k / 23k at v0.72.0). Per-client instructions: [MCP Client Setup › List fewer tools](mcp-clients.md#list-fewer-tools).
+Sizes are the compact JSON of the `tools` array, measured at v0.93.0, when the core profile became the default, the core descriptions were cut to three to five lines and the manual moved into the [`guide`](#guide-2) tool (≈ 95k / 32k / 15k at v0.78.0, which added a `title` and [annotations](#tool-annotations) to every tool; ≈ 84k / 28k / 14k at v0.73.0; ≈ 111k / 45k / 23k at v0.72.0). Per-client instructions: [MCP Client Setup › List fewer tools](mcp-clients.md#list-fewer-tools).
 
 - Tool names are comma-separated and case-sensitive; surrounding whitespace is trimmed, duplicates collapse, and at most 100 names are read. The result is always in registry order, whatever order the URL uses.
 - Unknown names are ignored (and logged by the server), so a URL keeps working if a tool is later renamed or removed. If **no** name matches, or `profile` is anything other than `full` / `core`, `tools/list` fails with JSON-RPC `-32602` (invalid params) and a message naming the valid values.
 - Both transports honour the parameters — session-based Streamable HTTP and stateless MCP 2026-07-28 — on `/mcp` as well as `/mcp/w/{workspace_id}`.
 
-> **A profile is a view, not an authorization boundary.** It filters `tools/list` and nothing else. `tools/call` never reads it: a tool left out of the list stays callable by anyone whose role allows it. To restrict what a key can do, use workspace and context roles.
+> **A profile is a view, not an authorization boundary.** It filters `tools/list` and nothing else. `tools/call` never reads it: a tool left out of the list stays callable by anyone whose role allows it, and [`describe_tools`](#guide-2) returns its schema from inside the session. To restrict what a key can do, use workspace and context roles.
+
+> **Upgrading from v0.92.0 or earlier.** The bare `/mcp` URL used to list every tool; it now lists the core profile. A client that must see the whole list at connect time adds `?profile=full` to its URL (`&profile=full` when the URL already has a query). Nothing becomes uncallable; connectors that cache `tools/list` (ChatGPT until Refresh, Codex per `initialize`) show the new list at their next read.
 
 ## Tool annotations
 
@@ -57,13 +59,14 @@ With an OAuth access token, `tools/call` checks the token's scope before the too
 
 The 401 challenges, the token audience rule and session handling on `/mcp` are in [API Reference › Authentication and sessions on /mcp](api-reference.md#authentication-and-sessions-on-mcp).
 
-## Guide (1)
+## Guide (2)
 
 | Tool | Description | Required Role |
 |------|------------|---------------|
+| `describe_tools` | The tools this URL's `tools/list` left out. Without arguments: `{name, title, summary}` per hidden tool (optionally narrowed by `query`) plus the URL hint (`?profile=full`, `?tools=a,b`); with `names` (≤ 20): their complete definitions, the same dicts `tools/list` sends, so the model can call them in this session. Registry data only — no database, exempt from the rate limit, needs no context | Any authenticated caller |
 | `guide` | The tool manual on demand: `guide(["recall"])` returns every section of one tool, `guide(["recall.reading-results"])` one section, `guide(["index"])` the list of topics. Static text shipped with the server — no database, no caller-specific content, exempt from the rate limit. Unknown topics come back in `unknown` with a hint, not as an error | Any authenticated caller |
 
-The descriptions in `tools/list` keep three to five lines per core tool (purpose, the parameters that matter, the rule that prevents damage, the response keys) and end with `Manual: guide([...])`. A manual read once stays in the session, so the expected cost is one call per tool actually used. A caller error from any core tool (`validation_error`, `missing_fields`, `invalid_argument`, `context_id_required`) carries `help: 'Manual: guide(["<tool>"])'`, added once in the dispatcher.
+The descriptions in `tools/list` keep three to five lines per core tool (purpose, the parameters that matter, the rule that prevents damage, the response keys) and end with `Manual: guide([...])`. A manual read once stays in the session, so the expected cost is one call per tool actually used. `describe_tools` is the same idea for the tools outside the default view. A caller error from any core tool (`validation_error`, `missing_fields`, `invalid_argument`, `context_id_required`) carries `help: 'Manual: guide(["<tool>"])'`, added once in the dispatcher.
 
 ## Memory (7)
 
@@ -385,7 +388,7 @@ The v0.49.0 control plane builds on existing workspace RBAC: agents are registry
 
 Envelope: `{status, contexts, count, total, limit, can_create, has_more, next_cursor}`, plus `hint` on an empty list (below). `has_more: true` means more contexts match: pass `next_cursor` as `cursor`. `count` is the number of contexts in the workspace (quota usage against `limit`; it can exceed what you are allowed to see and is not affected by `name_contains`), `total` is the number of contexts in this response. A non-boolean flag or an over-long `name_contains` returns a `validation_error`; an explicit `null` for any parameter is treated as omitted.
 
-When you can see no context at all, the envelope also carries `hint`: one line saying that a workspace owner can create one with `create_context(name=...)` and an admin with `create_context(name=..., is_private=false)` (only owners can create private contexts, the default), that a member can ask an owner or admin for a context or for access, and that a client whose tool list has no `create_context` (for example under `?profile=core`) can create it in the web UI or reconnect without `?profile=core`. With no current workspace, `create_context` would fail with `workspace_required`, so the hint instead says to create or select a workspace in the web UI and call `list_contexts` again. It is absent whenever at least one context is visible, including when `name_contains` matches nothing, and when the access lookup itself failed (that still answers an empty list, as before, but is not an empty account). No context is ever created automatically ([#1658](https://github.com/kagura-ai/memory-cloud/issues/1658)).
+When you can see no context at all, the envelope also carries `hint`: one line saying that a workspace owner can create one with `create_context(name=...)` and an admin with `create_context(name=..., is_private=false)` (only owners can create private contexts, the default), that a member can ask an owner or admin for a context or for access, and that a client whose tool list has no `create_context` (the default core profile leaves it out) can create it in the web UI, fetch its schema with `describe_tools`, or reconnect with `?profile=full`. With no current workspace, `create_context` would fail with `workspace_required`, so the hint instead says to create or select a workspace in the web UI and call `list_contexts` again. It is absent whenever at least one context is visible, including when `name_contains` matches nothing, and when the access lookup itself failed (that still answers an empty list, as before, but is not an empty account). No context is ever created automatically ([#1658](https://github.com/kagura-ai/memory-cloud/issues/1658)).
 
 ## Tags (1)
 
@@ -563,7 +566,7 @@ Write-side caps keep the stored data these replies carry in proportion. They app
 
 ## Usage notes
 
-The descriptions an agent receives from `tools/list` are paid for on every session, so they carry only what is needed to call a tool correctly: its purpose, when to use it instead of a neighbour, what each parameter means, the response keys, and the rules that must not be missed. The walkthroughs, rationale and longer examples live here and, section by section, in the [`guide`](#guide-1) tool, which an agent calls once per tool it uses; the plugin's `guide` skill carries the short version for a client without the tool.
+The descriptions an agent receives from `tools/list` are paid for on every session, so they carry only what is needed to call a tool correctly: its purpose, when to use it instead of a neighbour, what each parameter means, the response keys, and the rules that must not be missed. The walkthroughs, rationale and longer examples live here and, section by section, in the [`guide`](#guide-2) tool, which an agent calls once per tool it uses; the plugin's `guide` skill carries the short version for a client without the tool.
 
 ### `recall`
 

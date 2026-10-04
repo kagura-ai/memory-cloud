@@ -15,7 +15,7 @@
  * only when the user belongs to more than one, which is when the pinning
  * section is shown at all.
  *
- * "Core tools only" (#1609) puts `?profile=core` on every URL and command the
+ * "All tools" (#1609, #1849) puts `?profile=full` on every URL and command the
  * card renders and copies — the same switch the key-bearing snippets have —
  * so the Claude Code OAuth one-liner keeps its core-profile form here.
  *
@@ -44,7 +44,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   buildClaudeOAuthCommand,
   mcpEndpoints,
-  withCoreProfile,
+  withFullProfile,
 } from "@/lib/mcp/url";
 
 const PYTHON_SDK_URL = "https://github.com/kagura-ai/kagura-memory-python-sdk";
@@ -65,20 +65,21 @@ export function McpConnectionCard() {
     [apiUrl, currentWorkspaceId],
   );
 
-  // Not persisted, like MCPConfigBlock's switch: the full list is the safe
-  // default. One derived URL feeds every display and copy below.
-  const [coreOnly, setCoreOnly] = useState(false);
-  const coreSwitchId = useId();
-  const coreHelpId = useId();
-  const shownUrl = coreOnly ? withCoreProfile(mcpUrl) : mcpUrl;
+  // Not persisted, like MCPConfigBlock's switch: the bare URL (the core
+  // profile, #1849) is the default. One derived URL feeds every display and
+  // copy below.
+  const [allTools, setAllTools] = useState(false);
+  const allToolsSwitchId = useId();
+  const allToolsHelpId = useId();
+  const shownUrl = allTools ? withFullProfile(mcpUrl) : mcpUrl;
   const claudeCodeCommand = buildClaudeOAuthCommand(shownUrl);
 
   // Pinning only means something when there is another workspace the OAuth
   // connector could otherwise drift to.
   const pinnedUrlToOffer = workspaces.length > 1 ? pinnedUrl : null;
   const shownPinnedUrl =
-    pinnedUrlToOffer && coreOnly
-      ? withCoreProfile(pinnedUrlToOffer)
+    pinnedUrlToOffer && allTools
+      ? withFullProfile(pinnedUrlToOffer)
       : pinnedUrlToOffer;
 
   const handleCopy = async (text: string, key: string) => {
@@ -118,22 +119,24 @@ export function McpConnectionCard() {
           {t("oauthHint")}
         </p>
 
-        {/* Core tools only (#1609) — applies to every URL on the card */}
+        {/* All tools (#1609, #1849) — applies to every URL on the card */}
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <Switch
-              id={coreSwitchId}
-              checked={coreOnly}
-              onCheckedChange={setCoreOnly}
-              aria-describedby={coreHelpId}
+              id={allToolsSwitchId}
+              checked={allTools}
+              onCheckedChange={setAllTools}
+              aria-describedby={allToolsHelpId}
             />
-            <Label htmlFor={coreSwitchId}>{tApiKeys("coreProfileLabel")}</Label>
+            <Label htmlFor={allToolsSwitchId}>
+              {tApiKeys("allToolsLabel")}
+            </Label>
           </div>
           <p
-            id={coreHelpId}
+            id={allToolsHelpId}
             className="text-xs text-gray-600 dark:text-gray-400"
           >
-            {tApiKeys("coreProfileHelp")}
+            {tApiKeys("allToolsHelp")}
           </p>
         </div>
 

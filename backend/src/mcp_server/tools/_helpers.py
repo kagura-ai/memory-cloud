@@ -91,17 +91,19 @@ def get_mcp_guardrails_selection() -> "GuardrailSelection | None":
 # needs the URL's selection, which the transport parses once per request at
 # the same seam as the two contextvars above. ``None`` (never set — a direct
 # handler call in tests) makes the handler fall back to the core set.
-_mcp_tool_view: ContextVar["frozenset[str] | None"] = ContextVar("mcp_tool_view", default=None)
+_mcp_tool_view_query: ContextVar["bytes | None"] = ContextVar("mcp_tool_view_query", default=None)
 
 
-def set_mcp_tool_view(names: "frozenset[str] | None") -> None:
-    """Store the names the request URL's ``tools/list`` returns (``None`` = unknown)."""
-    _mcp_tool_view.set(names)
+def set_mcp_tool_view_query(query_string: "bytes | None") -> None:
+    """Store the request URL's raw query so ``describe_tools`` can derive the view
+    it is asked about. Storing the bytes keeps the auth seam free of registry
+    work: the view is computed only by the one tool that needs it."""
+    _mcp_tool_view_query.set(query_string)
 
 
-def get_mcp_tool_view() -> "frozenset[str] | None":
-    """Read the request URL's tool view; ``None`` = not evaluated."""
-    return _mcp_tool_view.get()
+def get_mcp_tool_view_query() -> "bytes | None":
+    """Read the request URL's raw query; ``None`` = no request (direct handler call)."""
+    return _mcp_tool_view_query.get()
 
 
 # ============================================================================

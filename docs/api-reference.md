@@ -1013,7 +1013,7 @@ same scheme and host (compared case-insensitively after dropping a trailing
 dot and IDNA encoding; the default port may be given or left out) and its path
 is `MCP_BASE_PATH` or a path beneath it, such as `/mcp/`,
 `/mcp/w/<workspace-id>` or `/mcp/sse`. Its query and fragment are
-ignored (`/mcp?profile=core` names it). Any other origin or path is
+ignored (`/mcp?profile=full` names it). Any other origin or path is
 `invalid_target`. Codes and tokens store the published value.
 
 **Token requests.** Errors use the RFC 6749 §5.2 body
@@ -1546,7 +1546,7 @@ System-admin (`role=admin`) lifecycle API for platform worker app identities (Sl
 
 ## MCP Tools
 
-Kagura Memory Cloud provides 65 MCP tools for AI assistants across 14 categories (Guide, Memory, Agent Substrate, Agent Control Plane, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
+Kagura Memory Cloud provides 66 MCP tools for AI assistants across 14 categories (Guide, Memory, Agent Substrate, Agent Control Plane, Neural Edges, Contexts, Tags, Files / R2, Analyses, Resources, Secrets, Sleep Maintenance, Usage, API-Key Bindings). See [README › MCP Tools](../README.md#mcp-tools) for the full table with required roles. The examples below illustrate the most commonly used tools; every other tool shares the same JSON-RPC call shape.
 
 ### Authentication and sessions on /mcp
 

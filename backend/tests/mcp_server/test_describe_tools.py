@@ -9,13 +9,14 @@ reading the request's view from the contextvar the transport sets.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
 from mcp_server.tools import _RATE_LIMIT_EXEMPT_TOOLS, _TOOLS_WITHOUT_CONTEXT_ID
 from mcp_server.tools._annotations import TOOL_ANNOTATIONS
 from mcp_server.tools._definitions import get_tool_definitions
-from mcp_server.tools._helpers import set_mcp_tool_view
+from mcp_server.tools._helpers import set_mcp_tool_view_query
 from mcp_server.tools._profiles import CORE_TOOLS, DEFAULT_PROFILE, PROFILES
 from mcp_server.tools.describe import (
     MAX_NAMES,
@@ -29,9 +30,9 @@ from mcp_server.tools.describe import (
 
 @pytest.fixture(autouse=True)
 def _no_request_view():
-    set_mcp_tool_view(None)
+    set_mcp_tool_view_query(None)
     yield
-    set_mcp_tool_view(None)
+    set_mcp_tool_view_query(None)
 
 
 def test_the_default_profile_is_core():
@@ -57,10 +58,14 @@ def test_hidden_tools_are_exactly_the_registry_minus_the_view():
         assert 0 < len(row["summary"]) <= SUMMARY_CHARS
 
 
-def test_the_view_comes_from_the_request_contextvar():
-    set_mcp_tool_view(frozenset({"recall"}))
+def test_the_view_is_derived_from_the_request_url_query():
+    set_mcp_tool_view_query(b"tools=recall")
     names = {row["name"] for row in hidden_tools()}
     assert "remember" in names and "recall" not in names
+    set_mcp_tool_view_query(b"profile=full")
+    assert hidden_tools() == []
+    set_mcp_tool_view_query(b"profile=typo")  # broken profile → core fallback
+    assert "get_usage" in {row["name"] for row in hidden_tools()}
 
 
 def test_query_narrows_by_name_title_or_summary_case_insensitively():
@@ -76,6 +81,18 @@ def test_full_definitions_are_the_registry_dicts_with_annotations():
     assert found[1] == by_name["get_usage"]
     assert "annotations" in found[1] and "title" in found[1]
     assert unknown == ["nope"]
+
+
+def test_no_registry_summary_ends_on_an_abbreviation():
+    for row in hidden_tools():
+        assert not re.search(r"\b(e\.g\.|i\.e\.|vs\.|etc\.)$", row["summary"]), row
+
+
+def test_summarize_does_not_split_after_an_abbreviation():
+    assert (
+        summarize("Copy memories, e.g. for a merge. Then stop.")
+        == "Copy memories, e.g. for a merge."
+    )
 
 
 def test_summarize_takes_the_first_sentence_and_cuts_on_a_word():
@@ -94,6 +111,12 @@ async def test_handle_lists_hidden_tools_with_the_url_hint():
     assert payload["listed"] == sorted(CORE_TOOLS)
     assert "profile=full" in payload["url"]["list_all"]
     assert "describe_tools(names=" in payload["hint"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_names_list_lists_the_hidden_tools():
+    (block,) = await handle_describe_tools({"names": []}, "u", None)
+    assert "tools" in json.loads(block.text)
 
 
 @pytest.mark.asyncio

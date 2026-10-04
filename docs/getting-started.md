@@ -128,12 +128,12 @@ The Web UI credentials page (`/workspace/integrations/credentials`) shows the MC
 
 Every snippet below takes one of two endpoint URLs — same server, same API key:
 
-- **All tools (default):** `http://localhost:8080/mcp`
-- **Core tools only — smaller tool list:** `http://localhost:8080/mcp?profile=core`
+- **Core tools (default):** `http://localhost:8080/mcp`
+- **All tools:** `http://localhost:8080/mcp?profile=full`
 
 An API key created on the credentials page is scoped to its workspace, so the URL needs no workspace segment. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) also uses `/mcp` and connects to the workspace selected in the web UI; `http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID` pins such a connector (or a key minted before workspace scoping existed) to one workspace.
 
-Pick core when your client loads every tool schema at session start (it is about 73% smaller). It lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. See [Tool Profiles](mcp-tools.md#tool-profiles) for the exact tool set. The snippets show the default URL; in the Web UI, the **Core tools only** switch above them writes `?profile=core` into every snippet.
+The default URL lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed, and `describe_tools` lists them with their schemas from inside a session. Add `?profile=full` when your client should see every tool schema up front (the list is about 3.6 times larger). See [Tool Profiles](mcp-tools.md#tool-profiles) for the exact tool set. The snippets show the default URL; in the Web UI, the **All tools** switch above them writes `?profile=full` into every snippet.
 
 ### Claude Code / Claude Desktop
 
@@ -153,7 +153,7 @@ The `create_admin` CLI automatically generates `.mcp.json`. If you need to creat
 }
 ```
 
-Core tools only: set `"url"` to `"http://localhost:8080/mcp?profile=core"` instead ([which one?](#which-url)). The generated `.mcp.json` and `.mcp.json.example` both carry the default URL.
+All tools: set `"url"` to `"http://localhost:8080/mcp?profile=full"` instead ([which one?](#which-url)). The generated `.mcp.json` and `.mcp.json.example` both carry the default (core) URL.
 
 Restart Claude Code to pick up the config, then test with `remember` and `recall` tools.
 
@@ -173,9 +173,9 @@ ChatGPT → Settings → Custom Connectors → New connector
   Authorization: Bearer YOUR_API_KEY
 ```
 
-Core tools only: use `http://localhost:8080/mcp?profile=core` as the URL instead ([which one?](#which-url)).
+All tools: use `http://localhost:8080/mcp?profile=full` as the URL instead ([which one?](#which-url)).
 
-ChatGPT runs no client hooks, so tool guardrails travel through the server: add `?guardrails=YOUR_CONTEXT_ID` to the URL (or `&guardrails=…` after `?profile=core`) and the connector's server instructions carry a digest of that context's guardrails — see [MCP Client Setup › ChatGPT web (developer mode)](mcp-clients.md#chatgpt-web-developer-mode).
+ChatGPT runs no client hooks, so tool guardrails travel through the server: add `?guardrails=YOUR_CONTEXT_ID` to the URL (or `&guardrails=…` after `?profile=full`) and the connector's server instructions carry a digest of that context's guardrails — see [MCP Client Setup › ChatGPT web (developer mode)](mcp-clients.md#chatgpt-web-developer-mode).
 
 ### Codex CLI
 
@@ -202,7 +202,7 @@ bearer_token_env_var = "KAGURA_API_KEY"
 
 These two keys only. Codex rejects an inline `bearer_token` on an HTTP server, and the whole `config.toml` then fails to load ([Troubleshooting](troubleshooting.md#codex-cli--bearer_token-is-not-supported-for-streamable_http)); `type` is not a Codex key.
 
-Core tools only: set `url = "http://localhost:8080/mcp?profile=core"` instead ([which one?](#which-url)).
+All tools: set `url = "http://localhost:8080/mcp?profile=full"` instead ([which one?](#which-url)).
 
 Restart Codex CLI to pick up the config.
 
@@ -222,7 +222,7 @@ The Codex marketplace file is `.agents/plugins/marketplace.json` (it points at `
 The plugin also bundles hooks (`hooks/hooks.json`) that deliver tool guardrails — memories marked with `details.tool_trigger` — at the matching tool call: `inform` adds the memory as context, `block` denies the call once with the memory as the reason ([contract](mcp-tools.md#tool-guardrails)). Nothing runs until you set them up:
 
 1. Ask the skill to "turn on Kagura guardrails". It shows the `{"context_id": …, "max_action": "block"}` it will write to `config.json` in the plugin's data directory (`~/.codex/plugins/data/kagura-memory-*/`) and writes it after you confirm.
-2. Add `?guardrails=off` to the `url` above (`&guardrails=off` when the URL already has a query, such as `?profile=core`) so the server does not also send a guardrail digest.
+2. Add `?guardrails=off` to the `url` above (`&guardrails=off` when the URL already has a query, such as `?profile=full`) so the server does not also send a guardrail digest.
 3. Open `/hooks` in Codex and trust the kagura-memory hooks. Codex skips plugin-bundled hooks until each user trusts them, and asks again only when `hooks.json` changes.
 
 The hooks read the `[mcp_servers.kagura-memory]` entry above (`bearer_token_env_var`, `env_http_headers` or `http_headers` — exactly one; never a project-level `.codex/config.toml`) and need `python3` 3.11+ on `PATH`. Windows, web and cloud tasks are not supported. If nothing happens, see [Troubleshooting](troubleshooting.md#codex-cli--kagura-memory-hooks-never-run).

@@ -12,8 +12,8 @@
  * - visible→hidden transition force-hides revealed state and removes
  *   the live key from the DOM (regression test from CSO pre-review)
  * - 60s clipboard auto-clear (fake timers)
- * - "Core tools only" switch (#1609): default OFF leaves every snippet
- *   without a query; ON puts `?profile=core` on every rendered URL and on
+ * - "All tools" switch (#1609, #1849): default OFF leaves every snippet
+ *   without a query (the core profile); ON puts `?profile=full` on every rendered URL and on
  *   what each Copy button writes; OFF removes it again; nothing is persisted
  */
 
@@ -27,6 +27,7 @@ import {
   buildTomlConfig,
   toBareMcpUrl,
   withCoreProfile,
+  withFullProfile,
 } from "./MCPConfigBlock";
 
 // Stable references defined OUTSIDE beforeEach so React's useCallback /
@@ -613,16 +614,16 @@ describe("MCPConfigBlock", () => {
       expect(mockWriteText).toHaveBeenCalledWith(toml);
     });
   });
-  // "Core tools only" switch (#1609). The server lists the core tools
-  // instead of all of them when the endpoint URL carries `?profile=core`; the
+  // "All tools" switch (#1609, #1849). The server lists the core tools by
+  // default and every tool when the endpoint URL carries `?profile=full`; the
   // block only has to put that query on every URL it renders and copies.
   // As above, the non-default tabs are reached by pre-populating localStorage.
-  describe("core tool profile switch (#1609)", () => {
-    const CORE_URL = `${MCP_URL}?profile=core`;
+  describe("all-tools profile switch (#1609, #1849)", () => {
+    const FULL_URL = `${MCP_URL}?profile=full`;
     // The query makes the URL a glob pattern in zsh (`?`), so the one-liner
-    // quotes it — see withCoreProfile's caller in the component.
+    // quotes it — see withFullProfile's caller in the component.
     const BARE_URL = toBareMcpUrl(MCP_URL);
-    const CORE_OAUTH_CMD = `claude mcp add --transport http kagura-memory "${BARE_URL}?profile=core"`;
+    const FULL_OAUTH_CMD = `claude mcp add --transport http kagura-memory "${BARE_URL}?profile=full"`;
 
     /** Text of every rendered snippet (<pre>) that embeds an endpoint URL. */
     const urlSnippets = (container: HTMLElement): string[] =>
@@ -631,7 +632,7 @@ describe("MCPConfigBlock", () => {
         .filter((text) => text.includes("/mcp"));
 
     const coreSwitch = () =>
-      screen.getByRole("switch", { name: "coreProfileLabel" });
+      screen.getByRole("switch", { name: "allToolsLabel" });
 
     const flushCopy = async () => {
       await act(async () => {
@@ -642,8 +643,8 @@ describe("MCPConfigBlock", () => {
     it("renders a labelled switch, OFF by default, described by the help text", () => {
       render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
       expect(coreSwitch()).toHaveAttribute("aria-checked", "false");
-      expect(coreSwitch()).toHaveAccessibleDescription("coreProfileHelp");
-      expect(screen.getByText("coreProfileHelp")).toBeInTheDocument();
+      expect(coreSwitch()).toHaveAccessibleDescription("allToolsHelp");
+      expect(screen.getByText("allToolsHelp")).toBeInTheDocument();
     });
 
     it("stays usable when the API-key window is closed (the URL needs no key)", () => {
@@ -664,7 +665,7 @@ describe("MCPConfigBlock", () => {
       expect(mockWriteText.mock.calls[0][0]).not.toContain("?");
     });
 
-    it("ON: the claude-code tab's OAuth one-liner and .mcp.json both carry ?profile=core", () => {
+    it("ON: the claude-code tab's OAuth one-liner and .mcp.json both carry ?profile=full", () => {
       const { container } = render(
         <MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />,
       );
@@ -673,12 +674,12 @@ describe("MCPConfigBlock", () => {
       expect(coreSwitch()).toHaveAttribute("aria-checked", "true");
       const snippets = urlSnippets(container);
       expect(snippets).toHaveLength(2);
-      for (const text of snippets) expect(text).toContain("?profile=core");
-      expect(snippets).toContain(CORE_OAUTH_CMD);
-      expect(snippets.join("\n")).toContain(`"url": "${CORE_URL}"`);
+      for (const text of snippets) expect(text).toContain("?profile=full");
+      expect(snippets).toContain(FULL_OAUTH_CMD);
+      expect(snippets.join("\n")).toContain(`"url": "${FULL_URL}"`);
     });
 
-    it("ON: Copy config writes the .mcp.json with the core URL and the live key", async () => {
+    it("ON: Copy config writes the .mcp.json with the full URL and the live key", async () => {
       render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
       fireEvent.click(coreSwitch());
       fireEvent.click(screen.getByRole("button", { name: "copyConfig" }));
@@ -686,19 +687,19 @@ describe("MCPConfigBlock", () => {
 
       const written = mockWriteText.mock.calls[0][0] as string;
       expect(JSON.parse(written).mcpServers["kagura-memory"].url).toBe(
-        CORE_URL,
+        FULL_URL,
       );
       expect(written).toContain("kag_real_secret_xyz");
     });
 
-    it("ON: Copy command writes the quoted OAuth one-liner with the core URL", async () => {
+    it("ON: Copy command writes the quoted OAuth one-liner with the full URL", async () => {
       render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
       fireEvent.click(coreSwitch());
       fireEvent.click(
         screen.getByRole("button", { name: "copyClaudeOAuthCommand" }),
       );
       await flushCopy();
-      expect(mockWriteText).toHaveBeenCalledWith(CORE_OAUTH_CMD);
+      expect(mockWriteText).toHaveBeenCalledWith(FULL_OAUTH_CMD);
     });
 
     it("ON: an explicit mcpBaseUrl prop gets the query too", () => {
@@ -712,11 +713,11 @@ describe("MCPConfigBlock", () => {
       fireEvent.click(coreSwitch());
       // The prop wins over stripping mcpUrl, so the host differs from MCP_URL's.
       expect(urlSnippets(container)).toContain(
-        'claude mcp add --transport http kagura-memory "http://localhost:8080/mcp?profile=core"',
+        'claude mcp add --transport http kagura-memory "http://localhost:8080/mcp?profile=full"',
       );
     });
 
-    it("ON: the chatgpt connector instructions and their copy carry the core URL", async () => {
+    it("ON: the chatgpt connector instructions and their copy carry the full URL", async () => {
       localStorageStore["kagura_last_mcp_client"] = "chatgpt";
       const { container } = render(
         <MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />,
@@ -725,16 +726,16 @@ describe("MCPConfigBlock", () => {
 
       const snippets = urlSnippets(container);
       expect(snippets).toHaveLength(1);
-      expect(snippets[0]).toContain(`//   URL: ${CORE_URL}\n`);
+      expect(snippets[0]).toContain(`//   URL: ${FULL_URL}\n`);
 
       fireEvent.click(screen.getByRole("button", { name: "copyConfig" }));
       await flushCopy();
       expect(mockWriteText.mock.calls[0][0]).toContain(
-        `//   URL: ${CORE_URL}\n`,
+        `//   URL: ${FULL_URL}\n`,
       );
     });
 
-    it("ON: the codex add command and the manual TOML, and their copies, carry the core URL", async () => {
+    it("ON: the codex add command and the manual TOML, and their copies, carry the full URL", async () => {
       localStorageStore["kagura_last_mcp_client"] = "codex";
       const { container } = render(
         <MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />,
@@ -745,12 +746,12 @@ describe("MCPConfigBlock", () => {
       );
 
       // The query makes the URL a glob in zsh, so the command quotes it.
-      const CORE_ADD_CMD = buildCodexAddCommand(CORE_URL);
-      expect(CORE_ADD_CMD).toContain(`--url "${CORE_URL}"`);
+      const CORE_ADD_CMD = buildCodexAddCommand(FULL_URL);
+      expect(CORE_ADD_CMD).toContain(`--url "${FULL_URL}"`);
       const snippets = urlSnippets(container);
       expect(snippets).toHaveLength(2); // add command + config.toml
       expect(snippets).toContain(CORE_ADD_CMD);
-      expect(snippets.join("\n")).toContain(`url = "${CORE_URL}"`);
+      expect(snippets.join("\n")).toContain(`url = "${FULL_URL}"`);
 
       fireEvent.click(
         screen.getByRole("button", { name: "copyCodexAddCommand" }),
@@ -760,7 +761,7 @@ describe("MCPConfigBlock", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "copyManualConfig" }));
       await flushCopy();
-      expect(mockWriteText.mock.calls[1][0]).toContain(`url = "${CORE_URL}"`);
+      expect(mockWriteText.mock.calls[1][0]).toContain(`url = "${FULL_URL}"`);
     });
 
     it("OFF again: the query disappears from every snippet and from the copied text", async () => {
@@ -792,6 +793,19 @@ describe("MCPConfigBlock", () => {
 
       render(<MCPConfigBlock apiKey={VISIBLE_KEY} mcpUrl={MCP_URL} />);
       expect(coreSwitch()).toHaveAttribute("aria-checked", "false");
+    });
+  });
+
+  describe("withFullProfile (#1849)", () => {
+    it("adds ?profile=full and replaces an existing profile parameter", () => {
+      expect(withFullProfile("http://localhost:8080/mcp")).toBe(
+        "http://localhost:8080/mcp?profile=full",
+      );
+      expect(withFullProfile("http://localhost:8080/mcp?profile=core")).toBe(
+        "http://localhost:8080/mcp?profile=full",
+      );
+      const once = withFullProfile("http://localhost:8080/mcp?foo=1");
+      expect(withFullProfile(once)).toBe(once);
     });
   });
 

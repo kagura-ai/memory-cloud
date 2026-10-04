@@ -77,6 +77,7 @@ import {
   buildCodexAddCommand,
   toBareMcpUrl,
   withCoreProfile,
+  withFullProfile,
 } from "@/lib/mcp/url";
 
 export {
@@ -85,6 +86,7 @@ export {
   buildCodexAddCommand,
   toBareMcpUrl,
   withCoreProfile,
+  withFullProfile,
 };
 
 export interface MCPConfigBlockProps {
@@ -300,16 +302,16 @@ export function MCPConfigBlock({
     }
   }, [client]);
 
-  // "Core tools only" (#1609). Deliberately NOT persisted, unlike the client
-  // tab: the full list is the safe default (a tool missing from a client is
-  // hard to diagnose), so every visit starts from it. One derived URL feeds
-  // every display AND copy builder below — they cannot drift apart.
-  const [coreOnly, setCoreOnly] = useState(false);
-  const coreSwitchId = useId();
-  const coreHelpId = useId();
+  // "All tools" (#1609, #1849). Deliberately NOT persisted, unlike the client
+  // tab: the bare URL (the core profile) is the default, so every visit
+  // starts from it. One derived URL feeds every display AND copy builder
+  // below — they cannot drift apart.
+  const [allTools, setAllTools] = useState(false);
+  const allToolsSwitchId = useId();
+  const allToolsHelpId = useId();
   const endpointUrl = useMemo(
-    () => (coreOnly ? withCoreProfile(mcpUrl) : mcpUrl),
-    [coreOnly, mcpUrl],
+    () => (allTools ? withFullProfile(mcpUrl) : mcpUrl),
+    [allTools, mcpUrl],
   );
 
   const liveKey =
@@ -380,9 +382,9 @@ export function MCPConfigBlock({
   const claudeOAuthCommand = useMemo(() => {
     const bareUrl = mcpBaseUrl ?? toBareMcpUrl(mcpUrl);
     return buildClaudeOAuthCommand(
-      coreOnly ? withCoreProfile(bareUrl) : bareUrl,
+      allTools ? withFullProfile(bareUrl) : bareUrl,
     );
-  }, [mcpBaseUrl, mcpUrl, coreOnly]);
+  }, [mcpBaseUrl, mcpUrl, allTools]);
 
   // Track which Copy button the user pressed last, so the Check icon only
   // flashes on the button they actually clicked. Without this, the shared
@@ -437,15 +439,18 @@ export function MCPConfigBlock({
       <div className="space-y-1">
         <div className="flex items-center gap-2">
           <Switch
-            id={coreSwitchId}
-            checked={coreOnly}
-            onCheckedChange={setCoreOnly}
-            aria-describedby={coreHelpId}
+            id={allToolsSwitchId}
+            checked={allTools}
+            onCheckedChange={setAllTools}
+            aria-describedby={allToolsHelpId}
           />
-          <Label htmlFor={coreSwitchId}>{t("coreProfileLabel")}</Label>
+          <Label htmlFor={allToolsSwitchId}>{t("allToolsLabel")}</Label>
         </div>
-        <p id={coreHelpId} className="text-xs text-gray-600 dark:text-gray-400">
-          {t("coreProfileHelp")}
+        <p
+          id={allToolsHelpId}
+          className="text-xs text-gray-600 dark:text-gray-400"
+        >
+          {t("allToolsHelp")}
         </p>
       </div>
 

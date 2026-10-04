@@ -778,8 +778,8 @@ _LIST_CONTEXTS_ENVELOPE_RESERVE = 1_500
 # #1658: a new account has a workspace but no context, and every memory tool
 # needs a context_id. Sent only when the caller can see no context at all
 # (``name_contains`` matching nothing is not that case). Static text, so it
-# stays right under ``?profile=core``, whose tools/list leaves out
-# create_context, without passing the URL query into the handler. Worded for a
+# stays right under the default core profile (#1849), whose tools/list leaves
+# out create_context, without passing the URL query into the handler. Worded for a
 # member with no access as well as for an owner of an empty workspace.
 # create_context defaults to is_private=true, which only an owner may create
 # (ContextService.create_context), so an admin is told to pass
@@ -789,8 +789,9 @@ _EMPTY_CONTEXTS_HINT = (
     "No contexts are visible to you yet. A workspace owner can create one with "
     'create_context(name="my-project"); an admin must add is_private=false. '
     "Otherwise ask an owner or admin to create a context or give you access. If "
-    "create_context is not in your tool list (for example under ?profile=core), "
-    "create the context in the web UI, or reconnect without ?profile=core."
+    "create_context is not in your tool list (the default core profile leaves it "
+    "out), create the context in the web UI, fetch its schema with "
+    'describe_tools(names=["create_context"]), or reconnect with ?profile=full.'
 )
 # Without a workspace create_context refuses with ``workspace_required``, so
 # this variant never suggests calling it. The workspace is resolved on every

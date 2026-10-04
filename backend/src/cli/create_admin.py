@@ -160,7 +160,8 @@ def _create_api_key(db: Session, user_id: str, workspace_id) -> str:
 
 def _build_mcp_config(api_key: str) -> dict:
     # The API key is workspace-scoped, so the bare /mcp endpoint is enough;
-    # /mcp/w/<id> only pins an OAuth connector to one workspace (#1836).
+    # /mcp/w/<id> only pins an OAuth connector to one workspace (#1836). The bare
+    # URL lists the core tool profile (#1849); ?profile=full lists every tool.
     return {
         "mcpServers": {
             "kagura-memory": {
@@ -401,7 +402,7 @@ def create_admin(skip_mcp_json: bool = False):
         print(f"  MFA:          {'enabled' if totp_enabled else 'disabled'}")
         print(f"  Workspace ID: {workspace.id}")
         print(f"  API Key:      {api_key}")
-        print("  MCP URL:      http://localhost:8080/mcp")
+        print("  MCP URL:      http://localhost:8080/mcp  (core tools; ?profile=full for all)")
         print(f"  MCP:          {'.mcp.json written' if mcp_written else 'config printed above'}")
         print("  Login:        http://localhost:3000/login")
         print("=" * 50)
