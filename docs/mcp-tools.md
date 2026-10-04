@@ -2,16 +2,16 @@
 
 See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concepts](concepts.md) for the memory model behind these tools.
 
-66 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+68 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
 ## Tool Profiles
 
-`tools/list` returns the 14 core tools by default (#1849); a client that loads every tool schema eagerly would otherwise pay for the whole list in each session. The endpoint URL — which the client's local MCP configuration already stores — picks another view:
+`tools/list` returns the 16 core tools by default (#1849); a client that loads every tool schema eagerly would otherwise pay for the whole list in each session. The endpoint URL — which the client's local MCP configuration already stores — picks another view:
 
 | Endpoint URL | `tools/list` returns | Approx. size |
 |--------------|----------------------|--------------|
-| `/mcp` (or `?profile=core`) | The 14 core tools — the default: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback`, `guide`, `describe_tools` | ≈ 26k chars |
-| `/mcp?profile=full` | All 66 tools | ≈ 93k chars (about 3.6× the default) |
+| `/mcp` (or `?profile=core`) | The 16 core tools — the default: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback`, `guide`, `describe_tools`, `list`, `changes_since` | ≈ 30k chars |
+| `/mcp?profile=full` | All 68 tools | ≈ 97k chars (about 3.2× the default) |
 | `/mcp?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 15k chars for these three |
 
 Sizes are the compact JSON of the `tools` array, measured at v0.93.0, when the core profile became the default, the core descriptions were cut to three to five lines and the manual moved into the [`guide`](#guide-2) tool (≈ 95k / 32k / 15k at v0.78.0, which added a `title` and [annotations](#tool-annotations) to every tool; ≈ 84k / 28k / 14k at v0.73.0; ≈ 111k / 45k / 23k at v0.72.0). Per-client instructions: [MCP Client Setup › List fewer tools](mcp-clients.md#list-fewer-tools).
@@ -82,7 +82,7 @@ The descriptions in `tools/list` keep three to five lines per core tool (purpose
 
 > **Response format.** Every tool returns one JSON text block, serialized as compact UTF-8 — non-ASCII text (e.g. Japanese) arrives as-is, never as `\uXXXX` escapes, because the calling model pays for every character. Fields that are empty on most results are omitted rather than sent as `null` / `[]`: a `recall` result carries `context_summary`, `superseded_by`, `contradicts` and `supersede_candidate` only when they have a value, and `score` is rounded to 4 decimals. Treat an absent key as "none". The authoritative per-tool shape is the `Returns:` line of each tool description (`tools/list`).
 
-## Agent Substrate (8)
+## Agent Substrate (10)
 
 The primitives an autonomous agent loop needs beyond a knowledge store — see [Concepts › Agent Memory Substrate](concepts.md#agent-memory-substrate).
 
@@ -96,6 +96,8 @@ The primitives an autonomous agent loop needs beyond a knowledge store — see [
 | `record_measurement` | Append one numeric observation to a metric's series (HOW-MUCH lane; excluded from recall, untouched by Sleep) | Editor+ |
 | `recall_series` | Read a metric's series bucketed by day/week/month with avg/min/max/sum/count/last | Viewer+ |
 | `feedback` | Record whether a recalled memory was helpful (append-only signal) | Viewer+ |
+| `list` | Deterministic sibling of `recall`: every live memory of a context matching exact filters (recall's vocabulary plus `details.<key>` equality), ordered by `updated_at` / `created_at` / `importance` with stable pages (`has_more`, `next_cursor`); no ranking, no Hebbian write | Viewer+ |
+| `changes_since` | A context's memory change log since a time, oldest first: `created`, `updated`, `superseded` (with `superseded_by`), `forgotten` (while the soft-deleted row exists); keyset `next_cursor` | Viewer+ |
 
 ## Server instructions
 
@@ -726,6 +728,16 @@ Always verify before deleting: show the memory's summary, warn when `importance 
 | `relation_types` | `neural_association` (Hebbian, automatic), `related_to`, `depends_on`, `learned_from`, `continues_from`, `references_file` (producer-asserted structural edges). Omit to follow every type |
 
 `metadata.total_activated` is the number of nodes the traversal reached and `returned` the number left after `min_weight` filtering. `returned = 0` with `total_activated > 0` means the threshold is too high — lower `min_weight` to 0.0-0.05. Results are ranked by activation strength (graph-based relevance), top 10.
+
+### `list`
+
+**The deterministic sibling of `recall`.** `recall` ranks and caps; `list` returns every live memory of one context that matches exact filters, in a stable order (`order_by` + `id`), paged with an offset `next_cursor` and `total` for the full match count. Use it for "which memories of type `task` are still open?" — `list(context_id, filters={"type": "task", "details.status": "open"})` — and for inventories by tag, type, source or time window.
+
+**Filters** take recall's vocabulary: `type` / `scope` / `source_type` / `delivery_mode` (string or list), `tags` (+ `tags_match: "all"`, `tags_normalize: true` for case / separator drift — plural tolerance stays recall-only), `importance {gte|lte|gt|lt}`, `created_after` / `updated_after` (inclusive) and `*_before` (exclusive) in ISO 8601 (naive = UTC), `source_uri_prefix`, `trust_tier: "trusted"`, and `details.<key>` equality for one scalar. `near` / `within` are refused — [`recall_nearby`](#memory-7) is the deterministic place query. `include_details=true` adds `details` and is dropped first (`details_omitted`) when the reply exceeds `max_chars`. In a private context only the owner's (identity-link set's) rows are listed.
+
+### `changes_since`
+
+**"What changed since my last session?"** `changes_since(context_id, since, until?)` returns the context's memory-level change log, oldest first: `created` (`created_at` in the window), `updated` (`updated_at` in the window and later than `created_at` — an edit or a scope promotion, never the write itself: the embedding pipeline keeps its own clock), `superseded` (a `supersedes` edge in the window — `at` is when the edge became `supersedes`, `superseded_by` the newer memory, the older memory's summary is shown) and `forgotten` (`deleted_at` in the window, listed while the soft-deleted row still exists; its earlier events stay in the log). `since` is inclusive, `until` exclusive. `next_cursor` is a keyset token over `(at, kind, id)` — pass it back unchanged; rows written after the first read never shift a page. Remember the last `since` you processed with `set_state` / `get_state`.
 
 ### `list_tags`
 

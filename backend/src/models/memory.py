@@ -177,6 +177,13 @@ class Memory(Base):
     embedding_retry_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0", default=0
     )
+    # The embedding pipeline's own clock: stamped when a row is claimed
+    # (``processing``) and when an attempt fails. The stale-claim recovery
+    # and the #979 retry backoff read it. It used to be ``updated_at``, which
+    # made every freshly embedded memory look edited to anyone reading
+    # ``updated_at`` as "a person changed this" (``list`` / ``changes_since``,
+    # #1852); ``updated_at`` is now written by edits and promotions only.
+    embedding_attempted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Layer 2: 文脈説明
     context_summary: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -35,7 +35,7 @@ from mcp_server.tools._profiles import (
 # parameters) took it to 32,999; a tool joining ``CORE_TOOLS`` still overshoots.
 # #1743 (paging / max_chars parameters on the bounded tools) took it to 34,203.
 # #1850 moved the manual into ``guide`` and trimmed every core description: 25,590.
-CORE_CHAR_BUDGET = 27_200  # (#1850) was 35,000
+CORE_CHAR_BUDGET = 33_000  # (#1852) was 27,200
 
 REGISTRY = [tool["name"] for tool in get_tool_definitions()]
 
@@ -86,6 +86,8 @@ def test_core_tools_are_the_documented_set():
         "feedback",
         "guide",
         "describe_tools",
+        "list",
+        "changes_since",
     }
 
 

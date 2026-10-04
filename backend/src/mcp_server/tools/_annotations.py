@@ -132,6 +132,8 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     "feedback": _additive("Record Recall Feedback"),  # re-ranking reads it
     "guide": _read("Tool Manual"),  # #1850: static text
     "describe_tools": _read("Describe Hidden Tools"),  # #1849: registry data
+    "list": _read("List Memories"),  # #1852: deterministic, no Hebbian write
+    "changes_since": _read("List Memory Changes"),  # #1852
     # The upsert overwrites the key; ttl_seconds restarts the expiry on every call.
     "set_state": _destructive("Set Agent State", idempotent=False),
     "get_state": _read("Get Agent State"),

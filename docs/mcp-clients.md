@@ -323,12 +323,12 @@ The recipe is extracted from this page and exercised by `backend/tests/api/test_
 
 ## List fewer tools
 
-By default `tools/list` returns the 14 core tools (≈ 26k characters of JSON); the whole registry is 66 tools (≈ 93k). A client that puts every schema into the model's context when a session starts pays for the list in each session, so the default is the small one; `describe_tools` names the rest from inside a session, and `?profile=full` lists them for a client that needs them. To change what is listed, add a query parameter to the endpoint URL your client already stores:
+By default `tools/list` returns the 16 core tools (≈ 30k characters of JSON); the whole registry is 68 tools (≈ 97k). A client that puts every schema into the model's context when a session starts pays for the list in each session, so the default is the small one; `describe_tools` names the rest from inside a session, and `?profile=full` lists them for a client that needs them. To change what is listed, add a query parameter to the endpoint URL your client already stores:
 
 | URL suffix | `tools/list` returns |
 |---|---|
-| *(none)* or `?profile=core` | The 14 core memory and context tools (incl. `guide` and `describe_tools`) — the default, ≈ 26k characters |
-| `?profile=full` | Everything — 66 tools, ≈ 93k characters |
+| *(none)* or `?profile=core` | The 16 core memory and context tools (incl. `guide`, `describe_tools`, `list`, `changes_since`) — the default, ≈ 30k characters |
+| `?profile=full` | Everything — 68 tools, ≈ 97k characters |
 | `?tools=remember,recall,reference` | Exactly the named tools (an allowlist; wins over `profile`) |
 
 Only the URL changes; the `Authorization` header stays as it is. The client sections above show the default URL in full; this is where the URL lives in each client's configuration:

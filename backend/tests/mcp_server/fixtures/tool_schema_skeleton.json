@@ -1575,6 +1575,102 @@
     }
   },
   {
+    "name": "list",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "filters": {
+          "type": "object"
+        },
+        "order_by": {
+          "type": "string",
+          "enum": [
+            "updated_at",
+            "created_at",
+            "importance"
+          ]
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ]
+        },
+        "include_details": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "max_chars": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "context_id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "changes_since",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "context_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "since": {
+          "type": "string"
+        },
+        "until": {
+          "type": "string"
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "created",
+              "updated",
+              "superseded",
+              "forgotten"
+            ]
+          }
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "max_chars": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "context_id",
+        "since"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "set_state",
     "inputSchema": {
       "type": "object",

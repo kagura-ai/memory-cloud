@@ -345,6 +345,42 @@ GUIDE_TOPICS: dict[str, str] = {
         "default 100; a page also stops at 20000 characters); hint = present only "
         "when you can see no context, says how to create one."
     ),
+    # --------------------------------------------------------------- list
+    "list.filters": (
+        "list is the deterministic sibling of recall: every live memory of one "
+        "context that matches exact filters, ordered by updated_at (default; a "
+        "never-edited memory sorts by created_at), created_at or importance, with id "
+        "as the tiebreak so pages are stable, and an offset cursor (next_cursor). "
+        "Filters AND together: type / scope / source_type / delivery_mode take a "
+        "string or a list (IN); tags matches ANY (tags_match='all' for every tag); "
+        "tags_normalize=true ignores case and hyphen / underscore / space (not plural "
+        "forms — that tolerance is recall's); importance {gte|lte|gt|lt}; "
+        "created_after / updated_after are inclusive, *_before exclusive (ISO 8601, "
+        "naive = UTC); source_uri_prefix; trust_tier='trusted' excludes "
+        "connector-ingested contexts; details.<key> compares one scalar in details "
+        "({'details.status': 'open'}; key ^[A-Za-z0-9_]{1,64}$). near / within are not "
+        "accepted — recall_nearby is the deterministic place query. total is the full "
+        "match count; include_details=true adds details and is dropped first "
+        "(details_omitted) when the reply exceeds max_chars. In a private context "
+        "only the owner's (identity-link set's) rows are listed; shared contexts list "
+        "every member's. No ranking, no embedding, no Hebbian write."
+    ),
+    # ------------------------------------------------------- changes_since
+    "changes_since.usage": (
+        "changes_since(context_id, since, until?) is the memory-level change log of one "
+        "context, oldest first, for 'what changed since my last session?'. Kinds: "
+        "created (created_at in the window), updated (updated_at in the window and "
+        "later than created_at — an edit or a scope promotion, never the write "
+        "itself), superseded (a supersedes edge in the window; at is when the edge "
+        "became supersedes, superseded_by the newer memory; "
+        "the older memory's summary is shown) and forgotten (deleted_at in the window, "
+        "listed while the soft-deleted row still exists — the deployment's cleanup "
+        "window, default 30 days; its earlier created / updated events stay in the "
+        "log). since is inclusive, until exclusive; naive ISO 8601 is UTC. next_cursor "
+        "is a keyset token over (at, kind, id): pass it back unchanged, and a page is "
+        "never shifted by rows written after you read it. Pair it with "
+        "set_state / get_state to remember the last since you processed."
+    ),
     # -------------------------------------------------------------- list_tags
     "list_tags.usage": (
         "Tag filters match exactly, and drift (troubleshoot / troubleshooting / "
@@ -393,6 +429,8 @@ GUIDE_INDEX: dict[str, tuple[str, ...]] = {
     "get_context_info": ("get_context_info.returns", "guardrails"),
     "list_contexts": ("list_contexts.usage", "ids"),
     "list_tags": ("list_tags.usage",),
+    "list": ("list.filters", "ids"),
+    "changes_since": ("changes_since.usage", "ids"),
 }
 
 SHARED_TOPICS: tuple[str, ...] = ("security", "ids", "persistence", "time-memories", "guardrails")

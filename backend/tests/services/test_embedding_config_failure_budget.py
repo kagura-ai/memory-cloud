@@ -121,6 +121,9 @@ class TestWhatGetsStampedOnTheRow:
         counter and break the countdown to terminal.
         """
         values = embedding_failure_values(OpenAIError("boom"), NOW)
+        # #1852: the failure stamps the pipeline's clock, not the edit timestamp.
+        assert values["embedding_attempted_at"] == NOW
+        assert "updated_at" not in values
         assert "embedding_retry_count" not in values
 
     def test_it_resets_rather_than_decrements(self):
@@ -135,8 +138,10 @@ class TestWhatGetsStampedOnTheRow:
         for exc in (ConfigurationError("x"), OpenAIError("y"), a_spend_cap_error()):
             values = embedding_failure_values(exc, NOW)
             assert values["embedding_status"] == "failed"
-            # #1317: the backoff anchors on updated_at, so it must be explicit.
-            assert values["updated_at"] == NOW
+            # The backoff anchors on the pipeline's own clock (#1852), stamped
+            # explicitly; updated_at is left to edits.
+            assert values["embedding_attempted_at"] == NOW
+            assert "updated_at" not in values
 
     def test_the_error_is_recorded_and_bounded(self):
         """Admins need the reason; the column (String(500)) must not overrun.

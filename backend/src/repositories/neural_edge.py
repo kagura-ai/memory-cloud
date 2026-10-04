@@ -283,6 +283,17 @@ class NeuralEdgeRepository:
                 "metadata": stmt.excluded.metadata,
                 "origin": origin_set,
                 "last_updated": utcnow(),
+                # #1852: created_at is "when the edge became this type". An
+                # existing semantic / co-activation link that a later
+                # remember(supersedes=...) or create_edge(overwrite=True)
+                # retypes is dated at the retype, so changes_since's
+                # ``superseded`` event (keyed on created_at) lands in the
+                # window it happened in instead of the one the first link did.
+                # A same-type upsert (a Hebbian re-touch) keeps the date.
+                "created_at": case(
+                    (edge_type_set != NeuralMemoryEdge.edge_type, utcnow()),
+                    else_=NeuralMemoryEdge.created_at,
+                ),
             },
         ).returning(NeuralMemoryEdge)
 

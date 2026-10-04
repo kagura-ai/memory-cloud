@@ -77,6 +77,7 @@ async def sweep_pending_embeddings() -> None:
     from db.base import get_db
     from models.memory import Memory
     from services.memory_service import (
+        embedding_clock_before,
         embedding_retry_eligible_clause,
         process_pending_embedding,
     )
@@ -110,7 +111,7 @@ async def sweep_pending_embeddings() -> None:
                         ),
                         and_(
                             Memory.embedding_status == "processing",
-                            Memory.updated_at < stale_cutoff,
+                            embedding_clock_before(stale_cutoff),
                         ),
                         # #979: shared with the claim gate so they cannot drift.
                         embedding_retry_eligible_clause(now),

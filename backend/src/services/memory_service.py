@@ -6329,10 +6329,10 @@ def embedding_failure_values(exc: BaseException, now: datetime) -> dict[str, Any
     values: dict[str, Any] = {
         "embedding_status": "failed",
         "embedding_error": str(exc)[:500],
-        # #1317: the column's onupdate is gone — stamp the failure time
-        # explicitly; the #979 retry backoff (embedding_retry_eligible_clause)
-        # anchors on it.
-        "updated_at": now,
+        # The #979 retry backoff (embedding_retry_eligible_clause) anchors on
+        # the pipeline's own clock (#1852; it was updated_at until then, which
+        # made every embedded memory look edited).
+        "embedding_attempted_at": now,
     }
     if is_configuration_failure(exc):
         values["embedding_retry_count"] = 0
@@ -6344,18 +6344,17 @@ def embedding_retry_eligible_clause(now: datetime):
 
     Eligible when it still has retry budget (``embedding_retry_count <
     MAX_EMBEDDING_RETRIES``) and its backoff has elapsed. The backoff is
-    measured from ``updated_at`` (the failure ``UPDATE`` stamps it to the
-    failure time EXPLICITLY — #1317 removed the column's ``onupdate``, so
-    nothing stamps it implicitly anymore); a NULL ``updated_at`` is treated as
-    immediately eligible so a row can never get permanently stuck ``failed``
-    — the exact state #979 exists to prevent.
+    measured from ``embedding_attempted_at``, the pipeline's own clock (#1852;
+    the failure ``UPDATE`` stamps it — until #1852 it stamped ``updated_at``);
+    a NULL clock is treated as immediately eligible so a row can never get
+    permanently stuck ``failed`` — the exact state #979 exists to prevent.
 
     Shared by the sweep prefilter (``tasks/embedding_tasks.py``) and the atomic
     claim in ``process_pending_embedding`` so the two gates cannot drift.
     """
     from datetime import timedelta
 
-    from sqlalchemy import and_, or_
+    from sqlalchemy import and_
 
     from config.constants import EMBEDDING_RETRY_BACKOFF_SECONDS, MAX_EMBEDDING_RETRIES
     from models.memory import Memory
@@ -6364,8 +6363,22 @@ def embedding_retry_eligible_clause(now: datetime):
     return and_(
         Memory.embedding_status == "failed",
         Memory.embedding_retry_count < MAX_EMBEDDING_RETRIES,
-        or_(Memory.updated_at.is_(None), Memory.updated_at < retry_cutoff),
+        embedding_clock_before(retry_cutoff),
     )
+
+
+def embedding_clock_before(cutoff: datetime):
+    """``embedding_attempted_at`` older than ``cutoff`` — NULL counts as older.
+
+    NULL is a row the pipeline has not stamped: one written before #1852 added
+    the column, or one whose claim never happened. Both must be picked up, not
+    skipped, so the clause is NULL-safe in the permissive direction.
+    """
+    from sqlalchemy import or_
+
+    from models.memory import Memory
+
+    return or_(Memory.embedding_attempted_at.is_(None), Memory.embedding_attempted_at < cutoff)
 
 
 def build_memory_point(memory: Memory) -> tuple[dict[str, Any], list[int], list[float]]:
@@ -6472,14 +6485,15 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                         Memory.embedding_status == "pending",
                         and_(
                             Memory.embedding_status == "processing",
-                            Memory.updated_at < stale_cutoff,
+                            embedding_clock_before(stale_cutoff),
                         ),
                         embedding_retry_eligible_clause(now),
                     ),
                 )
                 .values(
                     embedding_status="processing",
-                    updated_at=now,
+                    # #1852: the pipeline's own clock; updated_at is an edit's.
+                    embedding_attempted_at=now,
                     # Count only retries of a previously-failed row. The CASE
                     # reads the pre-UPDATE status, so pending/stale-processing
                     # claims leave the counter untouched.

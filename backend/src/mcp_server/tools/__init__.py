@@ -119,6 +119,9 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "guide",
         # #1849: registry introspection — no database, no embedding.
         "describe_tools",
+        # #1852: deterministic SQL reads, no embedding, no Hebbian write (like load_pinned).
+        "list",
+        "changes_since",
         # Issue #1128: secret-store tools carry NO embedding/LLM cost (the memory
         # quota's cost driver) and must stay callable on EVERY plan — an agent has
         # to be able to fetch its deploy key even after heavy recall use. Available
@@ -230,6 +233,7 @@ def _build_registry() -> dict[str, Any]:
         handle_list_files,
     )
     from mcp_server.tools.guide import handle_guide
+    from mcp_server.tools.listing import handle_changes_since, handle_list
     from mcp_server.tools.measurement import handle_recall_series, handle_record_measurement
     from mcp_server.tools.resource import (
         handle_get_resource_impact,
@@ -271,6 +275,8 @@ def _build_registry() -> dict[str, Any]:
         "explore": handle_explore,
         "guide": handle_guide,  # #1850
         "describe_tools": handle_describe_tools,  # #1849
+        "list": handle_list,  # #1852
+        "changes_since": handle_changes_since,  # #1852
         # Issue #889: agent session-state lane (TTL, recall-excluded)
         "set_state": handle_set_state,
         "get_state": handle_get_state,

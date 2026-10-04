@@ -53,9 +53,13 @@ async def test_claim_gate_includes_failed_with_retry_budget_and_increments():
     assert "< 3" in sql  # MAX_EMBEDDING_RETRIES default
     # ...and increments the counter via a CASE (only for failed rows).
     assert "CASE" in sql
-    # NULL-safe backoff: a failed row with NULL updated_at is still eligible
+    # NULL-safe backoff: a failed row with a NULL clock is still eligible
     # (never permanently stuck — the state #979 exists to prevent).
     assert "IS NULL" in sql
+    # #1852: the pipeline keeps its own clock; the claim must not stamp the
+    # user-visible updated_at, which list / changes_since read as an edit.
+    assert "EMBEDDING_ATTEMPTED_AT" in sql
+    assert "UPDATED_AT" not in sql
     # existing branches preserved
     assert "'PENDING'" in sql
     assert "'PROCESSING'" in sql
@@ -74,7 +78,8 @@ def test_retry_eligibility_clause_is_bounded_and_null_safe():
     ).upper()
     assert "'FAILED'" in sql
     assert "EMBEDDING_RETRY_COUNT < 3" in sql  # bounded by MAX_EMBEDDING_RETRIES
-    assert "IS NULL" in sql  # NULL updated_at -> eligible, never stuck
+    assert "IS NULL" in sql  # NULL clock -> eligible, never stuck
+    assert "EMBEDDING_ATTEMPTED_AT" in sql and "UPDATED_AT" not in sql  # #1852
 
 
 @pytest.mark.asyncio
