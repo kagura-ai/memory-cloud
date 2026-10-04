@@ -2,7 +2,7 @@
 
 See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concepts](concepts.md) for the memory model behind these tools.
 
-64 tools across 13 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+65 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
 ## Tool Profiles
 
@@ -11,7 +11,7 @@ See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concep
 | Endpoint URL | `tools/list` returns | Approx. size |
 |--------------|----------------------|--------------|
 | `/mcp` (or `?profile=full`) | All 65 tools — the default, unchanged | ≈ 91k chars |
-| `/mcp?profile=core` | The 13 core tools: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback`, `guide` | ≈ 24k chars (about 74% smaller) |
+| `/mcp?profile=core` | The 13 core tools: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback`, `guide` | ≈ 24k chars (about 73% smaller) |
 | `/mcp?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 15k chars for these three |
 
 Sizes are the compact JSON of the `tools` array, measured at v0.93.0, when the core descriptions were cut to three to five lines and the manual moved into the [`guide`](#guide-1) tool (≈ 95k / 32k / 15k at v0.78.0, which added a `title` and [annotations](#tool-annotations) to every tool; ≈ 84k / 28k / 14k at v0.73.0; ≈ 111k / 45k / 23k at v0.72.0). Per-client instructions: [MCP Client Setup › List fewer tools](mcp-clients.md#list-fewer-tools).

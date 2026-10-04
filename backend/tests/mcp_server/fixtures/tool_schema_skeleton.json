@@ -1551,9 +1551,6 @@
           "maxItems": 20
         }
       },
-      "required": [
-        "topics"
-      ],
       "additionalProperties": false
     }
   },

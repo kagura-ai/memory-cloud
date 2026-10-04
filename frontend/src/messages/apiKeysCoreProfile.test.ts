@@ -44,7 +44,7 @@ describe("apiKeys core tool profile messages", () => {
       expect(t("coreProfileLabel")).toBeTruthy();
       const help = t("coreProfileHelp");
       expect(help).toContain("?profile=core");
-      expect(help).toContain("70%");
+      expect(help).toContain("73%");
       // #1850: the core set is named by Tool Profiles, not by a count in the copy.
       expect(help).not.toMatch(/\b12\b/);
     },

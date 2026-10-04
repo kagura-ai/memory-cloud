@@ -82,7 +82,10 @@ GUIDE_TOPICS: dict[str, str] = {
         'rotation and clock skew handling." Bad: "Discussed auth errors in today\'s '
         'meeting." Long material (>2000 chars): store several memories, one per '
         "topic, linked by shared tags — never 'part 1/3'. Call list_tags() first and "
-        "reuse existing tag spellings."
+        "reuse existing tag spellings. Tags: at most 50, 100 characters each; mix "
+        "category tags ('category:auth') and entity tags ('oauth2', 'fastapi'); for "
+        "Japanese include the script variants (['鯖', 'サバ', 'さば']) so a filter in "
+        "any spelling matches."
     ),
     "remember.supersedes": (
         "Updating a fact: pass supersedes=<old_memory_id>. The old memory is shadowed "
@@ -130,7 +133,11 @@ GUIDE_TOPICS: dict[str, str] = {
         "search_mode='keyword'. search_mode: hybrid (default) combines semantic and "
         "BM25 with Neural Memory boosting; semantic is vectors only — you know the "
         "concept, not the wording; keyword is BM25 only — exact terms, ids, error "
-        "strings, hiragana-only Japanese, or when semantic results are noisy."
+        "strings, hiragana-only Japanese, or when semantic results are noisy. "
+        "use_rerank=true re-scores the candidates with a cross-encoder; it needs the "
+        "context's search config to allow it and a usable provider (a BYOK Voyage/Cohere "
+        "key, or the deployment's self_hosted reranker) and is plan-gated — when it has no "
+        "effect, check both before blaming the query."
     ),
     "recall.filters": (
         "filters keys AND together. type / scope: exact match. tags: [..] matches "
@@ -225,7 +232,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "true only when summary, context_summary or content changed. Keys marked ? "
         "are omitted, never null: persistence and lint as in remember() (lint "
         "reflects the memory AFTER the update); supersede_candidate_dismissed is the "
-        "rejected candidate's memory_id, absent when nothing was dismissed. The write "
+        "rejected candidate's memory_id, absent when nothing was dismissed (also when no "
+        "live suggestion existed). The write "
         "is committed before this returns. Errors to branch on: memory_not_found, "
         "validation_error."
     ),
@@ -309,7 +317,9 @@ GUIDE_TOPICS: dict[str, str] = {
         "workspace: {id, name, description, description_truncated?}, stats: "
         "{total_memories, working_memories, persistent_memories, details?: {by_type, "
         "by_type_truncated?, by_type_total_types?, by_importance, recent_7days}}, "
-        "instructions}. is_private: true = only you can see it, false = workspace "
+        "instructions, guardrails?: {provenance, items: [{memory_id, summary, importance, "
+        "authored_by_caller}]}}. guardrails is the context's tool-guardrail set (absent when "
+        "the URL carries ?guardrails=off). is_private: true = only you can see it, false = workspace "
         "members can. by_type keeps the 20 largest types and folds the rest into "
         "'other'. include_details=false drops stats.details."
     ),
@@ -380,14 +390,14 @@ GUIDE_INDEX: dict[str, tuple[str, ...]] = {
     "list_tags": ("list_tags.usage",),
 }
 
-_SHARED_TOPICS: tuple[str, ...] = ("security", "ids", "persistence", "time-memories", "guardrails")
+SHARED_TOPICS: tuple[str, ...] = ("security", "ids", "persistence", "time-memories", "guardrails")
 
 
 def _index_text() -> str:
     lines = ["Topics by tool (a bare tool name returns all of its sections):"]
     for tool, topics in GUIDE_INDEX.items():
         lines.append(f"- {tool}: " + ", ".join(topics))
-    lines.append("Shared: " + ", ".join(_SHARED_TOPICS))
+    lines.append("Shared: " + ", ".join(SHARED_TOPICS))
     return "\n".join(lines)
 
 

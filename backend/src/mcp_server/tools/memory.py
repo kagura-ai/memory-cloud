@@ -234,7 +234,7 @@ async def handle_remember(
             await _log_tool_usage(
                 db, user_id, "remember", start_time, 422, args.get("context_id"), workspace_id
             )
-            return _error_response("validation_error", str(e))
+            return _error_response("validation_error", str(e), hint='guide(["remember"])')
         except AuthorizationError:
             # Tool guardrails: details.tool_trigger needs context EDITOR or
             # above — membership (already proven by the context resolution
@@ -294,10 +294,10 @@ async def handle_update_memory(
         # #1323: plain field/constraint summary — no pydantic internals.
         # #1850: the manual is no longer in the description; name the topic.
         return _error_response(
-            "validation_error", _format_validation_error(e), hint='guide(["remember"])'
+            "validation_error", _format_validation_error(e), hint='guide(["update_memory"])'
         )
     except ValueError as e:
-        return _error_response("validation_error", str(e), hint='guide(["remember"])')
+        return _error_response("validation_error", str(e), hint='guide(["update_memory"])')
 
     start_time = time.time()
     async for db in get_db():
@@ -940,7 +940,9 @@ async def handle_recall(
 ) -> list[TextContent]:
     """Search memories with configurable mode (hybrid/semantic/keyword)."""
     if "query" not in args:
-        return _error_response("missing_fields", "Missing required field: query")
+        return _error_response(
+            "missing_fields", "Missing required field: query", hint='guide(["recall"])'
+        )
 
     # Issue #81: Require either context_id or context_ids
     if "context_id" not in args and "context_ids" not in args:

@@ -19,10 +19,10 @@ from mcp_server.tools._annotations import TOOL_ANNOTATIONS
 from mcp_server.tools._definitions import get_tool_definitions
 from mcp_server.tools._profiles import CORE_TOOLS
 from mcp_server.tools.guide import (
-    _SHARED_TOPICS,
     GUIDE_INDEX,
     GUIDE_TOPICS,
     MAX_TOPICS,
+    SHARED_TOPICS,
     handle_guide,
     resolve_topics,
 )
@@ -45,7 +45,7 @@ def test_guide_is_a_core_read_tool_that_needs_no_context():
     assert TOOL_ANNOTATIONS["guide"]["readOnlyHint"] is True
     assert "guide" in _TOOLS_WITHOUT_CONTEXT_ID
     assert "guide" in _RATE_LIMIT_EXEMPT_TOOLS
-    assert tool["inputSchema"]["required"] == ["topics"]
+    assert "required" not in tool["inputSchema"]  # no topics → index
     assert tool["inputSchema"]["properties"]["topics"]["maxItems"] == MAX_TOPICS
 
 
@@ -53,7 +53,7 @@ def test_index_covers_every_topic_and_every_topic_exists():
     for tool, topics in GUIDE_INDEX.items():
         for topic in topics:
             assert topic in GUIDE_TOPICS, f"{tool} lists unknown topic {topic!r}"
-    indexed = {t for topics in GUIDE_INDEX.values() for t in topics} | set(_SHARED_TOPICS)
+    indexed = {t for topics in GUIDE_INDEX.values() for t in topics} | set(SHARED_TOPICS)
     assert set(GUIDE_TOPICS) == indexed, "a topic is not reachable from the index"
     (index,), unknown = resolve_topics(["index"])
     assert unknown == []
@@ -148,6 +148,11 @@ def test_every_manual_pointer_names_an_existing_topic():
         "Soft-deleted memories are not counted",
         "no search, no ranking",
         "omit month/day for fuzzy timing",
+        # review follow-ups: text that left a description must stay reachable
+        "BYOK Voyage/Cohere",
+        "['鯖', 'サバ', 'さば']",
+        "also when no live suggestion existed",
+        "guardrails?",
     ],
 )
 def test_guidance_removed_from_the_descriptions_lives_in_the_guide(phrase):
@@ -163,3 +168,33 @@ def test_every_usage_note_in_the_docs_has_a_guide_topic():
     # non-core tool (update_search_config) still lives in the docs alone.
     missing = [t for t in tools if t in CORE_TOOLS and t not in GUIDE_INDEX]
     assert missing == [], f"Usage notes without a guide topic: {missing}"
+
+
+# ------------------------------------------------------- hints on errors
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler_name", "args", "topic"),
+    [
+        (
+            "handle_update_memory",
+            {"context_id": "00000000-0000-4000-8000-000000000001"},
+            "update_memory",
+        ),
+        ("handle_recall", {"context_id": "00000000-0000-4000-8000-000000000001"}, "recall"),
+    ],
+)
+async def test_validation_errors_name_their_guide_topic(handler_name, args, topic):
+    """A caller that got the arguments wrong is told where the manual is (#1850).
+
+    These paths fail before any database access, so the handlers run bare.
+    """
+    from mcp_server.tools import memory
+
+    (block,) = await getattr(memory, handler_name)(args, "user-1", None)
+    payload = json.loads(block.text)
+    assert payload["status"] == "error"
+    assert payload["error"] in {"validation_error", "missing_fields"}
+    assert payload["hint"] == f'guide(["{topic}"])'
+    assert topic in GUIDE_INDEX

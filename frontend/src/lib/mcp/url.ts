@@ -10,7 +10,7 @@
 /** The environment variable Codex reads the API key from (#1624). */
 export const CODEX_BEARER_TOKEN_ENV_VAR = "KAGURA_API_KEY";
 
-/** The query the server reads to list the 12 core tools only (#1601). */
+/** The query the server reads to list the core tools only (#1601). */
 const CORE_PROFILE_QUERY = "profile=core";
 
 /**

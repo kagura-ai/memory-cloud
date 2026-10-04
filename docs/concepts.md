@@ -327,7 +327,7 @@ The v0.49.0 milestone shipped the registry, context-level bindings, agent-bound 
 
 ## MCP Tools
 
-Kagura Memory Cloud exposes 64 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 13 categories:
+Kagura Memory Cloud exposes 65 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 14 categories:
 
 | Category | Tools | Purpose |
 |----------|-------|---------|

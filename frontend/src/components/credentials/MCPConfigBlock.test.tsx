@@ -613,7 +613,7 @@ describe("MCPConfigBlock", () => {
       expect(mockWriteText).toHaveBeenCalledWith(toml);
     });
   });
-  // "Core tools only" switch (#1609). The server lists the 12 core tools
+  // "Core tools only" switch (#1609). The server lists the core tools
   // instead of all of them when the endpoint URL carries `?profile=core`; the
   // block only has to put that query on every URL it renders and copies.
   // As above, the non-default tabs are reached by pre-populating localStorage.
