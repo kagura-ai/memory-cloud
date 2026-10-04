@@ -105,7 +105,7 @@ Ask for an action per item number. Anything not named stays as it is.
 | unpin | `update_memory(memory_id=..., context_id=..., delivery_mode="on_recall")` |
 | delete | `forget(memory_id=..., context_id=...)` |
 
-If the client does not list `create_edge` or `list_edges`, say so in one line: they are callable but left out of the default core listing; `describe_tools(names=["create_edge"])` returns their schemas, or reconnect with `?profile=full`.
+If the client does not list `create_edge` or `list_edges`, say so in one line: they are left out of the default core listing, so the client cannot call them until the MCP URL carries `?profile=full` (or `?tools=…`); `describe_tools` confirms they exist.
 
 ### 5. Apply
 

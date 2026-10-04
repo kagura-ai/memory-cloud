@@ -17,7 +17,7 @@
  *
  * "All tools" (#1609, #1849) puts `?profile=full` on every URL and command the
  * card renders and copies — the same switch the key-bearing snippets have —
- * so the Claude Code OAuth one-liner keeps its core-profile form here.
+ * so the Claude Code OAuth one-liner takes its full-profile form here.
  *
  * Key-bearing snippets (.mcp.json, ChatGPT Bearer, Codex CLI) stay on the
  * API-key tab next to the key they embed (MCPConfigBlock).

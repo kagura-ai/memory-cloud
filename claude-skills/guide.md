@@ -45,7 +45,7 @@ Create or update `.mcp.json`:
 }
 ```
 
-That URL lists the core tools (the default); everything else stays callable, and `describe_tools` lists it with schemas from inside a session. To list every tool up front use `{server_url}/mcp?profile=full` instead.
+That URL lists the core tools (the default); `describe_tools` names the rest from inside a session, but most clients let the model call listed tools only — to use them, use `{server_url}/mcp?profile=full` instead.
 
 If `.mcp.json` already exists with other servers, merge the kagura-memory entry.
 

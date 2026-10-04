@@ -158,3 +158,12 @@ def _apply_profile(definitions: list[dict], profile: str) -> list[dict]:
     if selected is None:
         return definitions
     return [tool for tool in definitions if tool["name"] in selected]
+
+
+def tool_view_names(query_string: bytes | str | None) -> frozenset[str]:
+    """Names ``tools/list`` returns for this URL (the default profile with no selection).
+
+    Raises:
+        ToolProfileError: the selection is broken — the same error ``tools/list`` fails with.
+    """
+    return frozenset(tool["name"] for tool in select_tool_definitions(query_string))

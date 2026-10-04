@@ -288,7 +288,7 @@ def test_candidate_sources_make_no_promise_they_cannot_keep(text) -> None:
 def test_create_edge_absence_is_explained(text) -> None:
     flat = _flat(text())
     assert re.search(r"`create_edge`[^.]*say so", flat)
-    assert "describe_tools" in flat and "`?profile=full`" in flat
+    assert "`?profile=full`" in flat  # the way to make the hidden tools callable
 
 
 def test_follow_up_outcome_is_saved_without_a_supersedes_edge() -> None:

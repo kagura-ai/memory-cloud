@@ -168,12 +168,14 @@ def tool_view_names(query_string: bytes | str | None) -> frozenset[str] | None:
     """Names ``tools/list`` would return for this URL, or ``None`` on a broken profile.
 
     The digest suffix names ``load_guardrails`` only when the same URL lists
-    it; ``None`` (a ``ToolProfileError``) is treated as "not listed".
+    it; ``None`` (a ``ToolProfileError``) is treated as "not listed". The view
+    itself is owned by ``mcp_server.tools._profiles`` (#1849).
     """
-    from mcp_server.tools._profiles import ToolProfileError, select_tool_definitions
+    from mcp_server.tools._profiles import ToolProfileError
+    from mcp_server.tools._profiles import tool_view_names as _view
 
     try:
-        return frozenset(tool["name"] for tool in select_tool_definitions(query_string))
+        return _view(query_string)
     except ToolProfileError:
         return None
 

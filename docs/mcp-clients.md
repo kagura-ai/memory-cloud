@@ -15,7 +15,7 @@ Every client below takes one of two endpoint URLs — same server, same credenti
 
 An API key created on the credentials page is scoped to its workspace, so `/mcp` is all it needs. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) signs in on first connect and follows the workspace selected in the web UI; use the pinned form to keep one connector on one workspace. The same applies to a key minted before workspace scoping existed (no workspace on the key): pin it, or create a new key.
 
-The default URL lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed, and `describe_tools` lists them with their schemas from inside a session. Add `?profile=full` when your client should see every tool schema up front (the list is about 3.6 times larger). The exact tool set and sizes are in [Tool Profiles](mcp-tools.md#tool-profiles); a narrower allowlist (`?tools=…`) is under [List fewer tools](#list-fewer-tools). In the Web UI, the API Keys tab's **Connect with this key** section has an **All tools** switch that writes `?profile=full` into its snippets for you.
+The default URL lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — they are just not listed — `describe_tools` names them from inside a session, and most clients let the model call listed tools only, so a task that needs them reconnects with the URL below. Add `?profile=full` when your client should see every tool schema up front (the list is about 3.6 times larger). The exact tool set and sizes are in [Tool Profiles](mcp-tools.md#tool-profiles); a narrower allowlist (`?tools=…`) is under [List fewer tools](#list-fewer-tools). In the Web UI, the API Keys tab's **Connect with this key** section has an **All tools** switch that writes `?profile=full` into its snippets for you.
 
 ## Claude Code (Recommended)
 
@@ -323,7 +323,7 @@ The recipe is extracted from this page and exercised by `backend/tests/api/test_
 
 ## List fewer tools
 
-By default `tools/list` returns the 14 core tools (≈ 26k characters of JSON); the whole registry is 66 tools (≈ 93k). A client that puts every schema into the model's context when a session starts pays for the list in each session, so the default is the small one; `describe_tools` lists the rest from inside a session. To change what is listed, add a query parameter to the endpoint URL your client already stores:
+By default `tools/list` returns the 14 core tools (≈ 26k characters of JSON); the whole registry is 66 tools (≈ 93k). A client that puts every schema into the model's context when a session starts pays for the list in each session, so the default is the small one; `describe_tools` names the rest from inside a session, and `?profile=full` lists them for a client that needs them. To change what is listed, add a query parameter to the endpoint URL your client already stores:
 
 | URL suffix | `tools/list` returns |
 |---|---|

@@ -21,11 +21,19 @@ from mcp_server.tools._profiles import CORE_TOOLS, DEFAULT_PROFILE, PROFILES
 from mcp_server.tools.describe import (
     MAX_NAMES,
     SUMMARY_CHARS,
+    current_view,
     full_definitions,
     handle_describe_tools,
     hidden_tools,
     summarize,
 )
+
+REGISTRY = get_tool_definitions()
+
+
+def _hidden(query=None):
+    view, _ = current_view()
+    return hidden_tools(REGISTRY, view, query)
 
 
 @pytest.fixture(autouse=True)
@@ -48,11 +56,11 @@ def test_describe_tools_is_a_core_read_tool_that_needs_no_context():
 
 
 def test_hidden_tools_are_exactly_the_registry_minus_the_view():
-    names = [row["name"] for row in hidden_tools()]
-    expected = [t["name"] for t in get_tool_definitions() if t["name"] not in CORE_TOOLS]
+    names = [row["name"] for row in _hidden()]
+    expected = [t["name"] for t in REGISTRY if t["name"] not in CORE_TOOLS]
     assert names == expected  # registry order, nothing from the core set
     assert "get_usage" in names and "recall" not in names
-    for row in hidden_tools():
+    for row in _hidden():
         assert set(row) == {"name", "title", "summary"}
         assert row["title"] == TOOL_ANNOTATIONS[row["name"]]["title"]
         assert 0 < len(row["summary"]) <= SUMMARY_CHARS
@@ -60,31 +68,36 @@ def test_hidden_tools_are_exactly_the_registry_minus_the_view():
 
 def test_the_view_is_derived_from_the_request_url_query():
     set_mcp_tool_view_query(b"tools=recall")
-    names = {row["name"] for row in hidden_tools()}
+    names = {row["name"] for row in _hidden()}
     assert "remember" in names and "recall" not in names
     set_mcp_tool_view_query(b"profile=full")
-    assert hidden_tools() == []
-    set_mcp_tool_view_query(b"profile=typo")  # broken profile → core fallback
-    assert "get_usage" in {row["name"] for row in hidden_tools()}
+    assert _hidden() == []
+
+
+def test_a_broken_url_selection_is_reported_not_papered_over():
+    set_mcp_tool_view_query(b"profile=typo")
+    view, error = current_view()
+    assert view == frozenset(CORE_TOOLS)
+    assert error and "unknown tool profile" in error
 
 
 def test_query_narrows_by_name_title_or_summary_case_insensitively():
-    rows = hidden_tools("SLEEP")
+    rows = _hidden("SLEEP")
     assert rows and all("sleep" in " ".join(row.values()).lower() for row in rows)
-    assert hidden_tools("no-such-tool-xyz") == []
+    assert _hidden("no-such-tool-xyz") == []
 
 
 def test_full_definitions_are_the_registry_dicts_with_annotations():
-    found, unknown = full_definitions(["get_usage", "nope", " recall "])
-    by_name = {t["name"]: t for t in get_tool_definitions()}
+    found, unknown = full_definitions(REGISTRY, ["get_usage", "nope", " recall ", "nope", " nope "])
+    by_name = {t["name"]: t for t in REGISTRY}
     assert [t["name"] for t in found] == ["recall", "get_usage"]  # registry order
     assert found[1] == by_name["get_usage"]
     assert "annotations" in found[1] and "title" in found[1]
-    assert unknown == ["nope"]
+    assert unknown == ["nope"]  # trimmed and de-duplicated
 
 
 def test_no_registry_summary_ends_on_an_abbreviation():
-    for row in hidden_tools():
+    for row in _hidden():
         assert not re.search(r"\b(e\.g\.|i\.e\.|vs\.|etc\.)$", row["summary"]), row
 
 
@@ -110,7 +123,16 @@ async def test_handle_lists_hidden_tools_with_the_url_hint():
     assert payload["count"] == len(payload["tools"]) > 40
     assert payload["listed"] == sorted(CORE_TOOLS)
     assert "profile=full" in payload["url"]["list_all"]
-    assert "describe_tools(names=" in payload["hint"]
+    assert "describe_tools(names=" in payload["hint"] and "reconnect" in payload["hint"]
+    assert "url_error" not in payload
+
+
+@pytest.mark.asyncio
+async def test_handle_reports_a_broken_url_selection():
+    set_mcp_tool_view_query(b"tools=bogus")
+    (block,) = await handle_describe_tools({}, "u", None)
+    payload = json.loads(block.text)
+    assert "matches no known tool" in payload["url_error"]
 
 
 @pytest.mark.asyncio

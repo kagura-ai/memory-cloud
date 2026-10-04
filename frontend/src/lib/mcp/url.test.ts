@@ -1,7 +1,7 @@
 /**
  * lib/mcp/url — the single MCP URL derivation (#1836).
  *
- * withCoreProfile / toBareMcpUrl / the command builders are exercised through
+ * withProfile / toBareMcpUrl / the command builders are exercised through
  * MCPConfigBlock.test.tsx (re-exported there); this file pins the parts that
  * module did not cover: the API-origin strip and the bare / pinned pair.
  */

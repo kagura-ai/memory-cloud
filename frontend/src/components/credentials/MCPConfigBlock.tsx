@@ -76,8 +76,8 @@ import {
   buildClaudeOAuthCommand,
   buildCodexAddCommand,
   toBareMcpUrl,
-  withCoreProfile,
   withFullProfile,
+  withProfile,
 } from "@/lib/mcp/url";
 
 export {
@@ -85,8 +85,8 @@ export {
   buildClaudeOAuthCommand,
   buildCodexAddCommand,
   toBareMcpUrl,
-  withCoreProfile,
   withFullProfile,
+  withProfile,
 };
 
 export interface MCPConfigBlockProps {

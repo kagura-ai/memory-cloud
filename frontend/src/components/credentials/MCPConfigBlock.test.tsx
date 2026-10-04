@@ -26,8 +26,8 @@ import {
   buildCodexAddCommand,
   buildTomlConfig,
   toBareMcpUrl,
-  withCoreProfile,
   withFullProfile,
+  withProfile,
 } from "./MCPConfigBlock";
 
 // Stable references defined OUTSIDE beforeEach so React's useCallback /
@@ -809,38 +809,38 @@ describe("MCPConfigBlock", () => {
     });
   });
 
-  describe("withCoreProfile", () => {
+  describe('withProfile(url, "core")', () => {
     it("adds ?profile=core to a URL without a query", () => {
-      expect(withCoreProfile("http://localhost:8080/mcp/w/ws-1")).toBe(
+      expect(withProfile("http://localhost:8080/mcp/w/ws-1", "core")).toBe(
         "http://localhost:8080/mcp/w/ws-1?profile=core",
       );
     });
 
     it("appends with & when the URL already has a query string", () => {
-      expect(withCoreProfile("http://localhost:8080/mcp?foo=1&bar=2")).toBe(
+      expect(withProfile("http://localhost:8080/mcp?foo=1&bar=2", "core")).toBe(
         "http://localhost:8080/mcp?foo=1&bar=2&profile=core",
       );
     });
 
     it("does not double the separator after a dangling ? or &", () => {
-      expect(withCoreProfile("http://localhost:8080/mcp?")).toBe(
+      expect(withProfile("http://localhost:8080/mcp?", "core")).toBe(
         "http://localhost:8080/mcp?profile=core",
       );
-      expect(withCoreProfile("http://localhost:8080/mcp?foo=1&")).toBe(
+      expect(withProfile("http://localhost:8080/mcp?foo=1&", "core")).toBe(
         "http://localhost:8080/mcp?foo=1&profile=core",
       );
     });
 
     it("replaces an existing profile parameter instead of repeating it (idempotent)", () => {
-      expect(withCoreProfile("http://localhost:8080/mcp?profile=full")).toBe(
-        "http://localhost:8080/mcp?profile=core",
-      );
-      const once = withCoreProfile("http://localhost:8080/mcp?foo=1");
-      expect(withCoreProfile(once)).toBe(once);
+      expect(
+        withProfile("http://localhost:8080/mcp?profile=full", "core"),
+      ).toBe("http://localhost:8080/mcp?profile=core");
+      const once = withProfile("http://localhost:8080/mcp?foo=1", "core");
+      expect(withProfile(once, "core")).toBe(once);
     });
 
     it("keeps a fragment after the query", () => {
-      expect(withCoreProfile("http://localhost:8080/mcp#top")).toBe(
+      expect(withProfile("http://localhost:8080/mcp#top", "core")).toBe(
         "http://localhost:8080/mcp?profile=core#top",
       );
     });

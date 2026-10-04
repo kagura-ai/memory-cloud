@@ -82,7 +82,7 @@ def test_session_summary_keeps_touched_memories_current_on_the_users_pick():
     assert "show the summary and full id again" in step
     assert "above 0.8" in step
     assert "Copy ids verbatim from tool results" in step
-    assert "describe_tools" in step
+    assert "`?profile=full`" in step
     # forget removes the memory's edges, so the outcome note is saved without one.
     assert "supersedes=<time" not in step
     assert len(step.encode("utf-8")) <= 2200, len(step.encode("utf-8"))

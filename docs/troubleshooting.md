@@ -4,7 +4,7 @@ Solutions to client-configuration and environment-specific setup problems. If yo
 
 ## A tool I expect is missing from my client
 
-**The default tool list is the core profile (since v0.93.0).** The client lists `remember`, `recall` and the other core tools, but not, say, `create_edge`, `list_files`, `get_sleep_report` or `secret_get`. Every tool is still callable: `describe_tools` lists the hidden ones and returns their schemas from inside the session, and `?profile=full` on the URL lists them all up front.
+**The default tool list is the core profile (since v0.93.0).** The client lists `remember`, `recall` and the other core tools, but not, say, `create_edge`, `list_files`, `get_sleep_report` or `secret_get`. `describe_tools` names the hidden ones from inside the session; to use one, put `?profile=full` (or `?tools=a,b`) on the URL and reconnect — most clients let the model call listed tools only.
 
 Look at the endpoint URL your client stores — `"url"` in `.mcp.json` / `.gemini/settings.json`, `url` in `~/.codex/config.toml`, or the URL field of the connector form:
 

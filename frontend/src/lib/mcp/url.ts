@@ -78,12 +78,6 @@ export function withFullProfile(mcpUrl: string): string {
   return withProfile(mcpUrl, "full");
 }
 
-/** `?profile=core` — the default view spelled out; used by tests and kept for
- * configurations that pin the profile explicitly. */
-export function withCoreProfile(mcpUrl: string): string {
-  return withProfile(mcpUrl, "core");
-}
-
 /**
  * Render a URL as one shell argument. `?` is a glob character (zsh aborts the
  * command with "no matches found") and `&` ends the command, so a URL with a

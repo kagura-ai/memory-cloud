@@ -1189,11 +1189,12 @@ async def _dispatch_message(scope: Scope, send: Send, session: "MCPSession", bod
 
         from mcp_server.tools._profiles import ToolProfileError, select_tool_definitions
 
-        # #1601: the endpoint URL (``?profile=`` / ``?tools=``) picks what is
-        # listed; without either this is the whole registry, as before. It is
-        # a view, not an authorization boundary — ``tools/call`` below never
+        # #1601 / #1849: the endpoint URL (``?profile=`` / ``?tools=``) picks
+        # what is listed; without either this is the core profile. It is a
+        # view, not an authorization boundary — ``tools/call`` below never
         # reads it, so an unlisted tool stays callable under the usual role
-        # checks.
+        # checks (clients, however, call listed tools only; ``describe_tools``
+        # names the rest).
         try:
             tools = select_tool_definitions(scope.get("query_string"))
         except ToolProfileError as e:

@@ -1804,8 +1804,8 @@ Returns: {status, topics: [{topic, text}], unknown?, hint?}.""",
         {
             "name": "describe_tools",
             "readOnly": True,
-            "description": """List the tools this URL's tools/list left out (the default view is the core memory tools), or return their full schemas. Every tool is callable whether listed or not; call this when a task needs Sleep, analyses, files, edges, secrets, resources or the agent control plane.
-Without names: {status, tools: [{name, title, summary}], count, listed, url, hint}. With names: {status, definitions: [<complete tool definitions>], unknown?, url}. To list more by URL: ?profile=full (everything) or ?tools=a,b.""",
+            "description": """List the tools this URL's tools/list left out (the default view is the core memory tools), or return their full schemas. Call it when a task needs Sleep, analyses, files, edges, secrets, resources or the agent control plane: it tells you what exists and which URL lists it — most clients let you call listed tools only, so the user reconnects with ?profile=full (everything) or ?tools=a,b.
+Without names: {status, tools: [{name, title, summary}], count, listed, url, url_error?, hint}. With names: {status, definitions: [<complete tool definitions>], unknown?, url, url_error?}.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1813,7 +1813,7 @@ Without names: {status, tools: [{name, title, summary}], count, listed, url, hin
                         "type": "array",
                         "items": {"type": "string"},
                         "maxItems": 20,
-                        "description": "Tool names whose complete definitions (inputSchema, annotations) you want, so you can call them now.",
+                        "description": "Tool names whose complete definitions (inputSchema, annotations) you want to inspect before asking for a URL that lists them.",
                     },
                     "query": {
                         "type": "string",

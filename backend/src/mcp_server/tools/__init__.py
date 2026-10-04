@@ -426,7 +426,10 @@ async def execute_tool_call(
         return _error_response(
             "unknown_tool",
             f"Unknown tool: {tool_name}",
-            help="Call tools/list to see the tools this server provides.",
+            help=(
+                "Call tools/list to see the tools this URL lists; describe_tools() names the "
+                "rest, and ?profile=full on the URL lists every tool."
+            ),
         )
 
     # #1742: both transports check this too; a direct caller gets the same
