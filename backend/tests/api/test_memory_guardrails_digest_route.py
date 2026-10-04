@@ -110,7 +110,8 @@ async def test_instructions_target_previews_exactly_what_lane_a_serves(source):
     ctx = uuid4()
     source.result = _entries(ctx, "a", total=3)
 
-    full = await _call(context_id=str(ctx), target="instructions")
+    bare = await _call(context_id=str(ctx), target="instructions")
+    full = await _call(context_id=str(ctx), target="instructions", profile="full")
     core = await _call(context_id=str(ctx), target="instructions", profile="core")
     allow = await _call(context_id=str(ctx), target="instructions", tools="remember,recall")
 
@@ -120,6 +121,8 @@ async def test_instructions_target_previews_exactly_what_lane_a_serves(source):
     )
     assert full.body.decode().startswith(SERVER_INSTRUCTIONS_BASE + "\n\n")
     assert full.body.decode().endswith("(+2 more: load_guardrails(context_id))")
+    # The bare URL lists the core profile (#1849), whose suffix names get_context_info.
+    assert bare.body.decode() == core.body.decode()
     assert core.body.decode().endswith("(+2 more: get_context_info(context_id))")
     assert allow.body.decode().endswith("(+2 more: get_context_info(context_id))")
     assert source.kwargs["limit"] == 5
