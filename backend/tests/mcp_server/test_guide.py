@@ -170,31 +170,59 @@ def test_every_usage_note_in_the_docs_has_a_guide_topic():
     assert missing == [], f"Usage notes without a guide topic: {missing}"
 
 
-# ------------------------------------------------------- hints on errors
+# -------------------------------------------------------- help on errors
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("handler_name", "args", "topic"),
+    ("tool", "args", "error"),
     [
+        # pydantic Request model → the dispatcher's invalid_argument envelope
         (
-            "handle_update_memory",
-            {"context_id": "00000000-0000-4000-8000-000000000001"},
-            "update_memory",
+            "remember",
+            {
+                "context_id": "00000000-0000-4000-8000-000000000001",
+                "summary": "x" * 600,
+                "content": "c",
+                "type": "note",
+            },
+            "invalid_argument",
         ),
-        ("handle_recall", {"context_id": "00000000-0000-4000-8000-000000000001"}, "recall"),
+        # handler-level missing field
+        ("recall", {"context_id": "00000000-0000-4000-8000-000000000001"}, "missing_fields"),
+        # handler-level ValueError (neither memory_id nor external_id)
+        (
+            "update_memory",
+            {"context_id": "00000000-0000-4000-8000-000000000001"},
+            "validation_error",
+        ),
+        # pre-dispatch context_id check
+        ("reference", {"memory_id": "00000000-0000-4000-8000-000000000002"}, "context_id_required"),
     ],
 )
-async def test_validation_errors_name_their_guide_topic(handler_name, args, topic):
-    """A caller that got the arguments wrong is told where the manual is (#1850).
+async def test_caller_errors_on_core_tools_point_at_the_manual(tool, args, error):
+    """One place (the dispatcher) adds ``help: Manual: guide([...])`` (#1850)."""
+    from mcp_server.tools import execute_tool_call
 
-    These paths fail before any database access, so the handlers run bare.
-    """
-    from mcp_server.tools import memory
-
-    (block,) = await getattr(memory, handler_name)(args, "user-1", None)
+    (block,) = await execute_tool_call(tool, args, "user-1", None)
     payload = json.loads(block.text)
     assert payload["status"] == "error"
-    assert payload["error"] in {"validation_error", "missing_fields"}
-    assert payload["hint"] == f'guide(["{topic}"])'
-    assert topic in GUIDE_INDEX
+    assert payload["error"] == error
+    assert f'guide(["{tool}"])' in payload["help"]
+    assert tool in GUIDE_INDEX
+
+
+@pytest.mark.asyncio
+async def test_a_tool_without_a_manual_gets_no_pointer():
+    from mcp_server.tools import execute_tool_call
+
+    (block,) = await execute_tool_call("feedback", {}, "user-1", None)
+    payload = json.loads(block.text)
+    assert payload["error"] == "context_id_required"
+    assert "guide(" not in payload.get("help", "")
+
+
+@pytest.mark.asyncio
+async def test_an_empty_topics_list_is_the_index():
+    (block,) = await handle_guide({"topics": []}, "u", None)
+    assert json.loads(block.text)["topics"][0]["topic"] == "index"

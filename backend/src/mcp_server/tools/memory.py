@@ -234,7 +234,7 @@ async def handle_remember(
             await _log_tool_usage(
                 db, user_id, "remember", start_time, 422, args.get("context_id"), workspace_id
             )
-            return _error_response("validation_error", str(e), hint='guide(["remember"])')
+            return _error_response("validation_error", str(e))
         except AuthorizationError:
             # Tool guardrails: details.tool_trigger needs context EDITOR or
             # above — membership (already proven by the context resolution
@@ -292,12 +292,9 @@ async def handle_update_memory(
         )
     except ValidationError as e:
         # #1323: plain field/constraint summary — no pydantic internals.
-        # #1850: the manual is no longer in the description; name the topic.
-        return _error_response(
-            "validation_error", _format_validation_error(e), hint='guide(["update_memory"])'
-        )
+        return _error_response("validation_error", _format_validation_error(e))
     except ValueError as e:
-        return _error_response("validation_error", str(e), hint='guide(["update_memory"])')
+        return _error_response("validation_error", str(e))
 
     start_time = time.time()
     async for db in get_db():
@@ -940,9 +937,7 @@ async def handle_recall(
 ) -> list[TextContent]:
     """Search memories with configurable mode (hybrid/semantic/keyword)."""
     if "query" not in args:
-        return _error_response(
-            "missing_fields", "Missing required field: query", hint='guide(["recall"])'
-        )
+        return _error_response("missing_fields", "Missing required field: query")
 
     # Issue #81: Require either context_id or context_ids
     if "context_id" not in args and "context_ids" not in args:
@@ -1163,7 +1158,7 @@ async def handle_recall(
             await _log_tool_usage(
                 db, user_id, "recall", start_time, 422, current_context_id, workspace_id
             )
-            return _error_response("validation_error", str(e), hint='guide(["recall"])')
+            return _error_response("validation_error", str(e))
         except Exception:
             await db.rollback()
             await _log_tool_usage(

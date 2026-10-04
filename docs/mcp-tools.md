@@ -63,7 +63,7 @@ The 401 challenges, the token audience rule and session handling on `/mcp` are i
 |------|------------|---------------|
 | `guide` | The tool manual on demand: `guide(["recall"])` returns every section of one tool, `guide(["recall.reading-results"])` one section, `guide(["index"])` the list of topics. Static text shipped with the server — no database, no caller-specific content, exempt from the rate limit. Unknown topics come back in `unknown` with a hint, not as an error | Any authenticated caller |
 
-The descriptions in `tools/list` keep three to five lines per core tool (purpose, the parameters that matter, the rule that prevents damage, the response keys) and end with `Manual: guide([...])`. A manual read once stays in the session, so the expected cost is one call per tool actually used. Validation errors from `remember` and `recall` carry `hint: 'guide(["<tool>"])'`.
+The descriptions in `tools/list` keep three to five lines per core tool (purpose, the parameters that matter, the rule that prevents damage, the response keys) and end with `Manual: guide([...])`. A manual read once stays in the session, so the expected cost is one call per tool actually used. A caller error from any core tool (`validation_error`, `missing_fields`, `invalid_argument`, `context_id_required`) carries `help: 'Manual: guide(["<tool>"])'`, added once in the dispatcher.
 
 ## Memory (7)
 

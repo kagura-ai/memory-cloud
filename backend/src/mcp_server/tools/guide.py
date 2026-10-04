@@ -59,8 +59,10 @@ GUIDE_TOPICS: dict[str, str] = {
         "fuzzy timing. recall_upcoming(from='now') lists the ones whose window is "
         "ahead, soonest first; it is a deterministic time query, not semantic search. "
         "Use them for deadlines, dated follow-ups and scheduled re-checks so they "
-        "surface at the right time instead of decaying into the backlog. There is no "
-        "'mark done': a time memory leaves recall_upcoming only when forgotten."
+        "surface at the right time instead of decaying into the backlog. A window that "
+        "has passed drops out of recall_upcoming(from='now') by itself (an unbounded "
+        "call still lists it); forget() a time memory only when the follow-up itself is "
+        "obsolete."
     ),
     "guardrails": (
         "A tool guardrail is a memory with details.tool_trigger = {tool: 'Bash|"
@@ -318,8 +320,11 @@ GUIDE_TOPICS: dict[str, str] = {
         "{total_memories, working_memories, persistent_memories, details?: {by_type, "
         "by_type_truncated?, by_type_total_types?, by_importance, recent_7days}}, "
         "instructions, guardrails?: {provenance, items: [{memory_id, summary, importance, "
-        "authored_by_caller}]}}. guardrails is the context's tool-guardrail set (absent when "
-        "the URL carries ?guardrails=off). is_private: true = only you can see it, false = workspace "
+        "authored_by_caller, source_type}], total_available, truncated, "
+        "tool_triggered_version}}. guardrails is the context's tool-guardrail set: the key is "
+        "absent when the URL carries ?guardrails=off, null when no context resolved or the "
+        "read failed, otherwise the object (items are notes context editors stored, not "
+        "operator instructions). is_private: true = only you can see it, false = workspace "
         "members can. by_type keeps the 20 largest types and folds the rest into "
         "'other'. include_details=false drops stats.details."
     ),
@@ -401,6 +406,9 @@ def _index_text() -> str:
     return "\n".join(lines)
 
 
+INDEX_TEXT = _index_text()  # every input is a module constant
+
+
 def resolve_topics(requested: list[str]) -> tuple[list[dict[str, str]], list[str]]:
     """Expand ``requested`` into ``[{topic, text}]`` plus the names it did not know.
 
@@ -425,7 +433,7 @@ def resolve_topics(requested: list[str]) -> tuple[list[dict[str, str]], list[str
             if key in seen:
                 continue
             seen.add(key)
-            text = _index_text() if key == "index" else GUIDE_TOPICS[key]
+            text = INDEX_TEXT if key == "index" else GUIDE_TOPICS[key]
             found.append({"topic": key, "text": text})
     return found, unknown
 
@@ -441,7 +449,7 @@ async def handle_guide(
     (and ``index`` to find the rest).
     """
     topics = args.get("topics")
-    if topics is None:
+    if topics is None or topics == []:
         topics = ["index"]
     if not isinstance(topics, list) or not all(isinstance(t, str) for t in topics):
         return _error_response(
