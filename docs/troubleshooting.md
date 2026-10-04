@@ -11,7 +11,7 @@ Look at the endpoint URL your client stores — `"url"` in `.mcp.json` / `.gemin
 | URL ends with | The client lists |
 |---|---|
 | `/mcp` | All tools (default) |
-| `?profile=core` | Core tools only — the 12 memory and context tools. Sleep, analyses, files, edges, secrets, resources and the agent control plane are left out |
+| `?profile=core` | Core tools only — the core memory and context tools (see Tool Profiles). Sleep, analyses, files, edges, secrets, resources and the agent control plane are left out |
 | `?tools=…` | Exactly the names in the list |
 
 The missing tool is still **callable** — a profile filters the list, not access — but most clients only offer what they list. To see it, switch back to the default URL (or add its name to `?tools=`), then restart or reconnect the client so it lists tools again. Background: [Tool Profiles](mcp-tools.md#tool-profiles).

@@ -6,15 +6,15 @@ See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concep
 
 ## Tool Profiles
 
-`tools/list` returns all 64 definitions by default. A client that loads every tool schema eagerly pays for the whole list in each session, so the endpoint URL — which the client's local MCP configuration already stores — can ask for fewer:
+`tools/list` returns all 65 definitions by default. A client that loads every tool schema eagerly pays for the whole list in each session, so the endpoint URL — which the client's local MCP configuration already stores — can ask for fewer:
 
 | Endpoint URL | `tools/list` returns | Approx. size |
 |--------------|----------------------|--------------|
-| `/mcp` (or `?profile=full`) | All 64 tools — the default, unchanged | ≈ 95k chars |
-| `/mcp?profile=core` | The 12 core tools: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback` | ≈ 32k chars (about 65% smaller) |
+| `/mcp` (or `?profile=full`) | All 65 tools — the default, unchanged | ≈ 91k chars |
+| `/mcp?profile=core` | The 13 core tools: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback`, `guide` | ≈ 24k chars (about 74% smaller) |
 | `/mcp?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 15k chars for these three |
 
-Sizes are the compact JSON of the `tools` array, measured at v0.78.0, which added a `title` and [annotations](#tool-annotations) to every tool (≈ 84k / 28k / 14k at v0.73.0, when the descriptions were trimmed; ≈ 111k / 45k / 23k at v0.72.0). Per-client instructions: [MCP Client Setup › List fewer tools](mcp-clients.md#list-fewer-tools).
+Sizes are the compact JSON of the `tools` array, measured at v0.93.0, when the core descriptions were cut to three to five lines and the manual moved into the [`guide`](#guide-1) tool (≈ 95k / 32k / 15k at v0.78.0, which added a `title` and [annotations](#tool-annotations) to every tool; ≈ 84k / 28k / 14k at v0.73.0; ≈ 111k / 45k / 23k at v0.72.0). Per-client instructions: [MCP Client Setup › List fewer tools](mcp-clients.md#list-fewer-tools).
 
 - Tool names are comma-separated and case-sensitive; surrounding whitespace is trimmed, duplicates collapse, and at most 100 names are read. The result is always in registry order, whatever order the URL uses.
 - Unknown names are ignored (and logged by the server), so a URL keeps working if a tool is later renamed or removed. If **no** name matches, or `profile` is anything other than `full` / `core`, `tools/list` fails with JSON-RPC `-32602` (invalid params) and a message naming the valid values.
@@ -56,6 +56,14 @@ With an OAuth access token, `tools/call` checks the token's scope before the too
 - API keys, agent-bound keys and session cookies carry no OAuth scope; only roles apply to them.
 
 The 401 challenges, the token audience rule and session handling on `/mcp` are in [API Reference › Authentication and sessions on /mcp](api-reference.md#authentication-and-sessions-on-mcp).
+
+## Guide (1)
+
+| Tool | Description | Required Role |
+|------|------------|---------------|
+| `guide` | The tool manual on demand: `guide(["recall"])` returns every section of one tool, `guide(["recall.reading-results"])` one section, `guide(["index"])` the list of topics. Static text shipped with the server — no database, no caller-specific content, exempt from the rate limit. Unknown topics come back in `unknown` with a hint, not as an error | Any authenticated caller |
+
+The descriptions in `tools/list` keep three to five lines per core tool (purpose, the parameters that matter, the rule that prevents damage, the response keys) and end with `Manual: guide([...])`. A manual read once stays in the session, so the expected cost is one call per tool actually used. Validation errors from `remember` and `recall` carry `hint: 'guide(["<tool>"])'`.
 
 ## Memory (7)
 
@@ -555,7 +563,7 @@ Write-side caps keep the stored data these replies carry in proportion. They app
 
 ## Usage notes
 
-The descriptions an agent receives from `tools/list` are paid for on every session, so they carry only what is needed to call a tool correctly: its purpose, when to use it instead of a neighbour, what each parameter means, the response keys, and the rules that must not be missed. The walkthroughs, rationale and longer examples live here. The plugin's `guide` skill carries the short version for an agent that wants it in-session.
+The descriptions an agent receives from `tools/list` are paid for on every session, so they carry only what is needed to call a tool correctly: its purpose, when to use it instead of a neighbour, what each parameter means, the response keys, and the rules that must not be missed. The walkthroughs, rationale and longer examples live here and, section by section, in the [`guide`](#guide-1) tool, which an agent calls once per tool it uses; the plugin's `guide` skill carries the short version for a client without the tool.
 
 ### `recall`
 

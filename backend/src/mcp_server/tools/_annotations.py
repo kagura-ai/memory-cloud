@@ -130,6 +130,7 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     "delete_file": _destructive("Delete File", idempotent=True),
     "list_files": _read("List Files"),
     "feedback": _additive("Record Recall Feedback"),  # re-ranking reads it
+    "guide": _read("Tool Manual"),  # #1850: static text
     # The upsert overwrites the key; ttl_seconds restarts the expiry on every call.
     "set_state": _destructive("Set Agent State", idempotent=False),
     "get_state": _read("Get Agent State"),

@@ -15,7 +15,7 @@ Every client below takes one of two endpoint URLs — same server, same credenti
 
 An API key created on the credentials page is scoped to its workspace, so `/mcp` is all it needs. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) signs in on first connect and follows the workspace selected in the web UI; use the pinned form to keep one connector on one workspace. The same applies to a key minted before workspace scoping existed (no workspace on the key): pin it, or create a new key.
 
-Pick core when your client loads every tool schema at session start (it is about 65% smaller). It lists the 12 memory and context tools and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. The exact tool set and sizes are in [Tool Profiles](mcp-tools.md#tool-profiles); a narrower allowlist (`?tools=…`) is under [List fewer tools](#list-fewer-tools). In the Web UI, the API Keys tab's **Connect with this key** section has a **Core tools only** switch that writes the query into its snippets for you.
+Pick core when your client loads every tool schema at session start (it is about 70% smaller). It lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. The exact tool set and sizes are in [Tool Profiles](mcp-tools.md#tool-profiles); a narrower allowlist (`?tools=…`) is under [List fewer tools](#list-fewer-tools). In the Web UI, the API Keys tab's **Connect with this key** section has a **Core tools only** switch that writes the query into its snippets for you.
 
 ## Claude Code (Recommended)
 
@@ -327,7 +327,7 @@ By default `tools/list` returns all 64 tool definitions (≈ 95k characters of J
 
 | URL suffix | `tools/list` returns |
 |---|---|
-| `?profile=core` | The 12 core memory tools — ≈ 32k characters, about 65% smaller |
+| `?profile=core` | The 12 core memory tools — ≈ 32k characters, about 70% smaller |
 | `?tools=remember,recall,reference` | Exactly the named tools (an allowlist; wins over `profile`) |
 | *(none)* or `?profile=full` | Everything — the default |
 

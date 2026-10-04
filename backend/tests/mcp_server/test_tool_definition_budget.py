@@ -67,11 +67,15 @@ SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 # #1749 named the side effect of recall, secret_put and update_context's
 # resource_id in one sentence each: full list 99,686, core list 33,186, recall
 # 6,855. Every ceiling still holds, so none moved.
-FULL_LIST_BUDGET = 100_500  # (#1743) was 96,000
-CORE_LIST_BUDGET = 33_600  # (#1743) was 32,500
-RECALL_BUDGET = 6_900  # (#1743) was 6,600
-REMEMBER_BUDGET = 6_200  # (#1683) was 6,000
-PER_TOOL_BUDGET = 6_900  # (#1743) was 6,600
+#
+# #1850 moved the manual out of the core descriptions into the ``guide`` tool
+# (3-5 lines each, Returns keys only, one-line parameters): full list 91,334,
+# core list 24,646 (13 tools incl. guide), recall 3,722, remember 3,687.
+FULL_LIST_BUDGET = 96_900  # (#1850) was 100,500
+CORE_LIST_BUDGET = 26_200  # (#1850) was 33,600
+RECALL_BUDGET = 4_000  # (#1850) was 6,900
+REMEMBER_BUDGET = 4_000  # (#1850) was 6,200
+PER_TOOL_BUDGET = 4_700  # (#1850) was 6,900; the largest is now setup_connector
 
 # A ceiling more than this far above the measured size is a stale constant.
 MAX_SLACK = 0.15

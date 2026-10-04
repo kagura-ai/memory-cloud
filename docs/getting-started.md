@@ -133,7 +133,7 @@ Every snippet below takes one of two endpoint URLs — same server, same API key
 
 An API key created on the credentials page is scoped to its workspace, so the URL needs no workspace segment. An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) also uses `/mcp` and connects to the workspace selected in the web UI; `http://localhost:8080/mcp/w/YOUR_WORKSPACE_ID` pins such a connector (or a key minted before workspace scoping existed) to one workspace.
 
-Pick core when your client loads every tool schema at session start (it is about 65% smaller). It lists the 12 memory and context tools and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. See [Tool Profiles](mcp-tools.md#tool-profiles) for the exact tool set. The snippets show the default URL; in the Web UI, the **Core tools only** switch above them writes `?profile=core` into every snippet.
+Pick core when your client loads every tool schema at session start (it is about 70% smaller). It lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. See [Tool Profiles](mcp-tools.md#tool-profiles) for the exact tool set. The snippets show the default URL; in the Web UI, the **Core tools only** switch above them writes `?profile=core` into every snippet.
 
 ### Claude Code / Claude Desktop
 

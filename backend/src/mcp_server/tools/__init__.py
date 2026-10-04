@@ -38,6 +38,7 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         # context_id pre-dispatch.
         "list_my_bindings",
         "describe_binding",
+        "guide",  # #1850: static manual text, no context
         "list_contexts",
         "create_context",
         "update_context",
@@ -110,6 +111,8 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         # Tool guardrails: the session-start hook read — plain SQL, no
         # embedding, no Hebbian write; a rate-limited hook would fail open.
         "load_guardrails",
+        # #1850: the tool manual is static text — no database, no embedding.
+        "guide",
         # Issue #1128: secret-store tools carry NO embedding/LLM cost (the memory
         # quota's cost driver) and must stay callable on EVERY plan — an agent has
         # to be able to fetch its deploy key even after heavy recall use. Available
@@ -188,6 +191,7 @@ def _build_registry() -> dict[str, Any]:
         handle_init_file_upload,
         handle_list_files,
     )
+    from mcp_server.tools.guide import handle_guide
     from mcp_server.tools.measurement import handle_recall_series, handle_record_measurement
     from mcp_server.tools.resource import (
         handle_get_resource_impact,
@@ -227,6 +231,7 @@ def _build_registry() -> dict[str, Any]:
         "forget": handle_forget,
         "reference": handle_reference,
         "explore": handle_explore,
+        "guide": handle_guide,  # #1850
         # Issue #889: agent session-state lane (TTL, recall-excluded)
         "set_state": handle_set_state,
         "get_state": handle_get_state,

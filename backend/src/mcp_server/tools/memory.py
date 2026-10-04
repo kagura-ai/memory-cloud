@@ -292,9 +292,12 @@ async def handle_update_memory(
         )
     except ValidationError as e:
         # #1323: plain field/constraint summary — no pydantic internals.
-        return _error_response("validation_error", _format_validation_error(e))
+        # #1850: the manual is no longer in the description; name the topic.
+        return _error_response(
+            "validation_error", _format_validation_error(e), hint='guide(["remember"])'
+        )
     except ValueError as e:
-        return _error_response("validation_error", str(e))
+        return _error_response("validation_error", str(e), hint='guide(["remember"])')
 
     start_time = time.time()
     async for db in get_db():
@@ -1158,7 +1161,7 @@ async def handle_recall(
             await _log_tool_usage(
                 db, user_id, "recall", start_time, 422, current_context_id, workspace_id
             )
-            return _error_response("validation_error", str(e))
+            return _error_response("validation_error", str(e), hint='guide(["recall"])')
         except Exception:
             await db.rollback()
             await _log_tool_usage(

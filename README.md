@@ -241,7 +241,7 @@ cp .mcp.json.example .mcp.json
 
 An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) uses the same `/mcp` URL and connects to the workspace selected in the web UI; `/mcp/w/{workspace_id}` pins such a connector to one workspace when you belong to several.
 
-Pick core when your client loads every tool schema at session start (it is about 65% smaller). It lists the 12 memory and context tools and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. See [Tool Profiles](docs/mcp-tools.md#tool-profiles).
+Pick core when your client loads every tool schema at session start (it is about 70% smaller). It lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — those stay callable, they are just not listed; switch back to the default URL to see them. See [Tool Profiles](docs/mcp-tools.md#tool-profiles).
 
 3. Restart Claude Code and verify:
 

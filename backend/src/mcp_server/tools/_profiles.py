@@ -43,6 +43,7 @@ CORE_TOOLS: tuple[str, ...] = (
     "list_contexts",
     "list_tags",
     "feedback",
+    "guide",
 )
 
 # ``None`` = no filter. Insertion order is the order error messages list them in.
