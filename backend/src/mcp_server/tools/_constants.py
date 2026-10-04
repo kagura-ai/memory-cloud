@@ -18,6 +18,7 @@ def _get_timeout(tool_name: str, default: float) -> float:
 # Issue #163: Tool execution timeouts (seconds)
 TOOL_TIMEOUTS: dict[str, float] = {
     "remember": _get_timeout("remember", 30.0),
+    "remember_batch": _get_timeout("remember_batch", 300.0),  # #1853: up to 50 remembers
     "update_memory": _get_timeout("update_memory", 30.0),
     "recall": _get_timeout("recall", 60.0),
     "forget": _get_timeout("forget", 15.0),

@@ -210,6 +210,7 @@ def _build_registry() -> dict[str, Any]:
         handle_list_analyses,
     )
     from mcp_server.tools.api_keys import handle_describe_binding, handle_list_my_bindings
+    from mcp_server.tools.batch import handle_remember_batch
     from mcp_server.tools.bootstrap import handle_bootstrap
     from mcp_server.tools.context import (
         handle_create_context,
@@ -281,6 +282,7 @@ def _build_registry() -> dict[str, Any]:
         "list": handle_list,  # #1852
         "changes_since": handle_changes_since,  # #1852
         "bootstrap": handle_bootstrap,  # #1851
+        "remember_batch": handle_remember_batch,  # #1853
         # Issue #889: agent session-state lane (TTL, recall-excluded)
         "set_state": handle_set_state,
         "get_state": handle_get_state,

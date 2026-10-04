@@ -2,16 +2,16 @@
 
 See [MCP Client Setup](mcp-clients.md) for connecting a client, and [Core Concepts](concepts.md) for the memory model behind these tools.
 
-69 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
+70 tools across 14 categories. Workspace roles: **Owner** > Admin > Member > **Viewer** (read-only). Context roles: **Owner** > Editor > Viewer. Private contexts are visible only to the creator. Members may be restricted to specific contexts via allowlist.
 
 ## Tool Profiles
 
-`tools/list` returns the 17 core tools by default (#1849); a client that loads every tool schema eagerly would otherwise pay for the whole list in each session. The endpoint URL — which the client's local MCP configuration already stores — picks another view:
+`tools/list` returns the 18 core tools by default (#1849); a client that loads every tool schema eagerly would otherwise pay for the whole list in each session. The endpoint URL — which the client's local MCP configuration already stores — picks another view:
 
 | Endpoint URL | `tools/list` returns | Approx. size |
 |--------------|----------------------|--------------|
-| `/mcp` (or `?profile=core`) | The 17 core tools — the default: `remember`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback`, `guide`, `describe_tools`, `list`, `changes_since`, `bootstrap` | ≈ 32k chars |
-| `/mcp?profile=full` | All 69 tools | ≈ 99k chars (about 3.1× the default) |
+| `/mcp` (or `?profile=core`) | The 18 core tools — the default: `remember`, `remember_batch`, `update_memory`, `recall`, `reference`, `recall_upcoming`, `load_pinned`, `forget`, `explore`, `get_context_info`, `list_contexts`, `list_tags`, `feedback`, `guide`, `describe_tools`, `list`, `changes_since`, `bootstrap` | ≈ 35k chars |
+| `/mcp?profile=full` | All 70 tools | ≈ 102k chars (about 2.9× the default) |
 | `/mcp?tools=remember,recall,reference` | Exactly the named tools — an explicit allowlist, wins over `profile` | ≈ 15k chars for these three |
 
 Sizes are the compact JSON of the `tools` array, measured at v0.93.0, when the core profile became the default, the core descriptions were cut to three to five lines and the manual moved into the [`guide`](#guide-2) tool (≈ 95k / 32k / 15k at v0.78.0, which added a `title` and [annotations](#tool-annotations) to every tool; ≈ 84k / 28k / 14k at v0.73.0; ≈ 111k / 45k / 23k at v0.72.0). Per-client instructions: [MCP Client Setup › List fewer tools](mcp-clients.md#list-fewer-tools).
@@ -68,11 +68,12 @@ The 401 challenges, the token audience rule and session handling on `/mcp` are i
 
 The descriptions in `tools/list` keep three to five lines per core tool (purpose, the parameters that matter, the rule that prevents damage, the response keys) and end with `Manual: guide([...])`. A manual read once stays in the session, so the expected cost is one call per tool actually used. `describe_tools` is the same idea for the tools outside the default view. A caller error from any core tool (`validation_error`, `missing_fields`, `invalid_argument`, `context_id_required`) carries `help: 'Manual: guide(["<tool>"])'`, added once in the dispatcher.
 
-## Memory (7)
+## Memory (8)
 
 | Tool | Description | Required Role |
 |------|------------|---------------|
-| `remember` | Store a new memory (summary + content + type; optional `delivery_mode`) | Member+ |
+| `remember` | Store a new memory (summary + content + type; optional `delivery_mode`); `tags_normalize` stores the context's established tag spellings, `dedupe="check"` asks before writing a near-duplicate | Member+ |
+| `remember_batch` | Store up to 50 memories in one call, independently or `atomic`; per-item results | Member+ |
 | `recall` | Search memories with Hybrid Search (supports `trust_tier` filter). Results are Layers 1-2; `related_tags` is `[{tag, count}]`, absent when there are none, as is an empty `tags` on a result. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories ([Tool annotations](#tool-annotations)) | Viewer+ |
 | `recall_nearby` | Deterministic WHERE-axis query — memories with `details.location` within `radius_m` of a point, nearest first | Viewer+ |
 | `reference` | Get full 3-layer details of a memory | Viewer+ |
@@ -745,6 +746,14 @@ Always verify before deleting: show the memory's summary, warn when `importance 
 **Session start in one call.** `bootstrap(context_id, since?, include?, max_chars?)` composes the deterministic session-start reads for a user credential (the agent-side sibling is `get_agent_bootstrap`): `context` + `instructions` (the `get_context_info` block), `guardrails` (the same block `get_context_info` returns; absent with `?guardrails=off`, `null` when the read failed), and `components.pinned` (`load_pinned`, trusted tier, cap 20), `components.upcoming` (`recall_upcoming` from now, k 20, trusted tier) and `components.changes` (`changes_since` over `[since, now)`, all four kinds, first 50 with a keyset `next_cursor`). `since` is ISO 8601 (naive = UTC) or `"<N>d"` for N days back; the default is `"7d"`. `include` narrows the components. There is no recall component on purpose — recall by topic afterwards when the change list does not answer the question.
 
 Each component carries `status: ok | error`; one failing lane sets `degraded: true` and the others still return. Over `max_chars` (default 20,000) `context_summary` leaves the pinned items first, then `pinned` → `upcoming` → `changes` keep the prefix that fits, each marked `truncated: true` (`changes.has_more` is set to true when its page was cut). The `kagura-memory` plugin's session-start skill calls `bootstrap` when the tool list has it and falls back to the seven-call sequence on an older server.
+
+### `remember_batch`
+
+**The end-of-session save in one call.** `remember_batch(context_id, items, atomic?, tags_normalize?, dedupe?)` takes up to 50 items, each with `remember`'s arguments (no `context_id` of its own) and each validated and limited like a single `remember` (summary length, 1 MB per memory, the daily quota per item). The reply lists one result per item — `{index, status, memory_id, scope, persistence, lint}` or `{index, status: "error", error, message}` — and its own `status` is `success`, `partial` or, when nothing was written, an error envelope. With `atomic=false` (default) the items are written independently and a failure does not stop the rest; with `atomic=true` they are written in one transaction and a failing item — a `dedupe="check"` candidate included — rolls the batch back, the other items reading `skipped`. A rolled-back atomic batch keeps its daily-quota reservations. The whole call is one tool-argument payload: keep it to about 20 items when the items are long. The `kagura-memory` plugin's session-summary skill uses it when the tool list has it.
+
+**`tags_normalize`** (`remember` and `remember_batch`, default `false`) stores each tag as the context's established spelling when the two differ only by case, hyphen / underscore / space or a simple plural — the rule `recall`'s `tags_normalize` filter matches on; abbreviations and edit-distance variants stay `tag_near_duplicate` hints. Each mapping is reported in `lint` as `{code: "tag_normalized", subject: <written>, replacement: <stored>}`.
+
+**`dedupe`** (`remember` and `remember_batch`): `suggest` (default) writes and lets a later `recall` / `reference` flag the older near-duplicate as `supersede_candidate`; `check` embeds the summary first and, when the nearest live memory scores ≥ 0.85, returns `{status: "duplicate_candidate", candidate: {memory_id, summary, similarity}}` without writing (store with `supersedes=<id>`, update the existing memory, or repeat with `dedupe="off"`; an unavailable embedder is the error `dedupe_unavailable`, also without a write); `off` writes and never suggests for that memory.
 
 ### `list_tags`
 

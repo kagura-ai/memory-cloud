@@ -519,9 +519,10 @@ def _ids(rs: list[Refusal]) -> list[str]:
 # ``gate`` on the wire.
 NOT_GATE_REFUSALS: frozenset[str] = frozenset(
     {
-        # A 1 MB request-body guard, not a plan cap. Every tier has the same
-        # ceiling and no tier raises it, so there is no upgrade to advertise.
-        "services.memory_service:MemoryService.remember",
+        # A 1 MB request-body guard (raised where remember prepares its row,
+        # #1853), not a plan cap. Every tier has the same ceiling and no tier
+        # raises it, so there is no upgrade to advertise.
+        "services.memory_service:MemoryService._prepare_remember",
         "services.memory_service:MemoryService._update_guard_size",
         "services.memory_service:MemoryService._patch_guard_size",
         # "Workspace {id} not found" raised as a quota error: a server-side
@@ -1034,7 +1035,7 @@ async def _memory_quota_total_cap() -> QuotaExceededError:
 # code. Keyed by site so a new entry in ``NOT_GATE_REFUSALS`` fails
 # ``test_every_non_gate_site_is_driven`` until it is exercised here too.
 NON_GATE_DRIVERS = {
-    "services.memory_service:MemoryService.remember": [_remember_size_guard],
+    "services.memory_service:MemoryService._prepare_remember": [_remember_size_guard],
     "services.memory_service:MemoryService._update_guard_size": [_update_size_guard],
     "services.memory_service:MemoryService._patch_guard_size": [_patch_size_guard],
     "services.quota_service:QuotaService.check_memories_per_day": [

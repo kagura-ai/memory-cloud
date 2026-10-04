@@ -78,6 +78,7 @@ def _destructive(title: str, *, idempotent: bool) -> dict[str, Any]:
 TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     "list_my_bindings": _read("List My Key Bindings"),
     "describe_binding": _read("Describe Key Binding"),
+    "remember_batch": _additive("Store Memories"),  # #1853: remember, several times
     "remember": _additive("Store Memory"),  # supersedes adds an edge; the old memory is untouched
     # external_id mode replaces the memory with a new one on every call.
     "update_memory": _destructive("Update Memory", idempotent=False),

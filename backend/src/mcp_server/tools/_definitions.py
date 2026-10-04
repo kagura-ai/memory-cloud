@@ -59,7 +59,7 @@ Returns: {status, binding: {key_id, name, context_id, context_name, created_at, 
             "name": "remember",
             "description": """Store a new memory (a decision, fix, pattern, fact or note) for later recall. To edit a memory whose id you have use update_memory; to replace an outdated fact pass supersedes=<old_memory_id>.
 Write summary as the reusable conclusion with the terms a future search would use; content holds the full text. SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context.
-Returns: {status, memory_id, scope, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days}, lint?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, validation_error.
+Returns: {status, memory_id, scope, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days}, lint?, — or, with dedupe='check', {status: 'duplicate_candidate', candidate}; plus context_id, context_name, context_display_name, context_is_private, context_is_locked}. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, validation_error.
 Manual: guide(["remember"]).""",
             "inputSchema": {
                 "type": "object",
@@ -68,6 +68,15 @@ Manual: guide(["remember"]).""",
                     "verbose": {
                         "type": "boolean",
                         "description": "true keeps persistence.detail (the lifecycle prose); default false — see guide(['persistence']).",
+                    },
+                    "tags_normalize": {
+                        "type": "boolean",
+                        "description": "true stores each tag as the context's established spelling (case / separator / plural variants) and reports each mapping in lint as tag_normalized; default false.",
+                    },
+                    "dedupe": {
+                        "type": "string",
+                        "enum": ["suggest", "check", "off"],
+                        "description": "suggest (default): write, flag a near-duplicate on a later recall. check: ask first — a live memory scoring >= 0.85 comes back as {status: 'duplicate_candidate', candidate} and nothing is written. off: write, never suggest. Manual: guide(['remember']).",
                     },
                     "summary": {
                         "type": "string",
@@ -137,6 +146,47 @@ Manual: guide(["remember"]).""",
                         "description": "ID of the outdated memory this one replaces: it is shadowed out of default recall, not deleted (deleting the supersedes edge restores it).",
                     },
                 },
+            },
+        },
+        {
+            "name": "remember_batch",
+            "description": """Store up to 50 memories in one call — the end-of-session save. Each item takes remember's arguments except context_id (the batch's applies) and is validated and limited like a single remember. atomic=false (default): items are written independently and reported per item. atomic=true: all or nothing — a failing item, or a dedupe='check' candidate, rolls the batch back and nothing is written.
+Returns: {status: success|partial|duplicate_candidate, results: [{index, status: success|error|skipped|duplicate_candidate, memory_id?, scope?, persistence?, lint?, error?, message?, candidate?}], count, succeeded, candidates, failed, context_id, context_name, context_display_name, context_is_private, context_is_locked}.
+Manual: guide(["remember_batch"]).""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "description": "Target context UUID from list_contexts(). Do NOT guess or fabricate IDs.",
+                    },
+                    "items": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 50,
+                        "items": {"type": "object"},
+                        "description": "One object per memory with remember's arguments (summary, content, type required; tags, importance, context_summary, details, supersedes, ... optional; no context_id).",
+                    },
+                    "atomic": {
+                        "type": "boolean",
+                        "description": "true: one transaction, all or nothing (default false).",
+                    },
+                    "tags_normalize": {
+                        "type": "boolean",
+                        "description": "As remember's, applied to every item (default false).",
+                    },
+                    "dedupe": {
+                        "type": "string",
+                        "enum": ["suggest", "check", "off"],
+                        "description": "As remember's, applied per item. With atomic=true a check candidate rolls the batch back.",
+                    },
+                    "verbose": {
+                        "type": "boolean",
+                        "description": "true keeps persistence.detail on each item (default false).",
+                    },
+                },
+                "required": ["context_id", "items"],
             },
         },
         {

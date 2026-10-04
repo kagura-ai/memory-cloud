@@ -327,11 +327,11 @@ The v0.49.0 milestone shipped the registry, context-level bindings, agent-bound 
 
 ## MCP Tools
 
-Kagura Memory Cloud exposes 69 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 14 categories:
+Kagura Memory Cloud exposes 70 tools via the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), grouped into 14 categories:
 
 | Category | Tools | Purpose |
 |----------|-------|---------|
-| Memory | 7 | `remember`, `recall`, `recall_nearby`, `reference`, `update_memory`, `forget`, `explore` — store / search / discover memories |
+| Memory | 8 | `remember`, `remember_batch`, `recall`, `recall_nearby`, `reference`, `update_memory`, `forget`, `explore` — store / search / discover memories |
 | Agent Substrate | 11 | `load_pinned`, `load_guardrails`, `recall_upcoming`, `set_state`, `get_state`, `record_measurement`, `recall_series`, `feedback`, `list`, `changes_since`, `bootstrap` — delivery-mode-aware retrieval, deterministic listing and change log, one-call session start, agent state lane, measurement series, feedback signal (see [Agent Memory Substrate](#agent-memory-substrate)) |
 | Agent Control Plane (preview) | 10 | `register_agent`, `list_agents`, `get_agent`, `update_agent`, `delete_agent`, `bind_agent_context`, `list_agent_bindings`, `update_agent_binding`, `unbind_agent_context`, `get_agent_bootstrap` — registry, subtractive scoping, and session bootstrap |
 | Neural Edges | 4 | `list_edges`, `create_edge`, `update_edge`, `delete_edge` — manage the Hebbian graph manually |

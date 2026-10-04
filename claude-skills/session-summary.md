@@ -42,7 +42,9 @@ Default: the project's development context. When names alone don't settle it, ca
 
 Show the candidates (type + one-line summary) and save only the ones the user chooses to keep. If the user already said to save everything, save them all.
 
-For each kept item, use `remember` with:
+**One call when the server lists `remember_batch`** (v0.93.0 and later): save every kept item with `remember_batch(context_id=..., items=[{...}, ...], tags_normalize=true)` — each item carries the `remember` fields below (no `context_id`). Read the per-item results: `status: "success"` with `memory_id`, or `status: "error"` with `error` / `message` for the item to fix and resend alone; a `lint` entry `tag_normalized {subject, replacement}` says a tag was stored under the context's established spelling. Keep a call to about 20 items; split a longer list. Leave `atomic` off — a session summary is a list of independent facts. For an item the user flagged as a possible duplicate of a memory whose id is not in this session's results, save that item alone with `remember(..., dedupe="check")`: a `duplicate_candidate` reply names the existing memory, then store it with `supersedes=<candidate.memory_id>`, update the existing one, or repeat with `dedupe="off"`. Older servers (no `remember_batch` in the tool list): one `remember` per item.
+
+For each kept item (a batch item or a single `remember`), set:
 
 - **summary**: Searchable conclusion (not process). Include synonyms/related terms. 100-250 chars.
 - **content**: Full details — what, why, how, evidence

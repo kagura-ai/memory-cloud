@@ -73,6 +73,19 @@ def build_tombstone(candidate: dict[str, Any], *, drop_baseline: bool = False) -
     return {"dismissed": dismissed}
 
 
+WILDCARD_TARGET = "*"
+
+
+def unconditional_tombstone() -> dict[str, Any]:
+    """Tombstone that suppresses EVERY future suggestion for a memory (#1853).
+
+    ``remember(dedupe="off")`` declares the write a non-duplicate before any
+    candidate exists, so the target is the wildcard and there is no baseline:
+    :func:`is_dismissed` reads it as "still rejected" for any pair.
+    """
+    return {"dismissed": {"memory_id": WILDCARD_TARGET, "dismissed_at": to_utc_iso(utcnow())}}
+
+
 def dismissed_entry(stored: Any) -> dict[str, Any] | None:
     """The tombstone inside a stored column value, or None."""
     if not isinstance(stored, dict):
@@ -96,7 +109,7 @@ def is_dismissed(stored: Any, *, target_id: str, similarity: float) -> bool:
         nothing about another.
     """
     entry = dismissed_entry(stored)
-    if entry is None or entry.get("memory_id") != target_id:
+    if entry is None or entry.get("memory_id") not in (target_id, WILDCARD_TARGET):
         return False
 
     prior = entry.get("similarity")

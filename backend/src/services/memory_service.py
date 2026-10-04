@@ -14,6 +14,7 @@ import math
 import os
 import statistics
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import UUID, uuid4
@@ -79,6 +80,7 @@ from services.recall_selection import (
     plan_recall_selection,
 )
 from services.search_service import SearchService
+from services.supersede_dismissal import unconditional_tombstone
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     ConfigurationError,
@@ -233,6 +235,49 @@ _UPDATE_CONTENT_FIELDS = (
     "context",
     "delivery_mode",
 )
+
+
+# ---------------------------------------------------------------- #1853 writes
+DEDUPE_SUGGEST = "suggest"  # today: write, flag a near-duplicate on a later recall
+DEDUPE_CHECK = "check"  # ask first: a candidate comes back, nothing is written
+DEDUPE_OFF = "off"  # write, and never suggest for this memory
+DEDUPE_MODES: tuple[str, ...] = (DEDUPE_SUGGEST, DEDUPE_CHECK, DEDUPE_OFF)
+MAX_BATCH_ITEMS = 50
+_DEDUPE_CHECK_K = 5  # hits read per duplicate check; the first live, permitted one counts
+
+
+class DuplicateCandidateError(Exception):
+    """``dedupe="check"`` found a live near-duplicate; nothing was written."""
+
+    def __init__(self, candidate: dict[str, Any]):
+        super().__init__(f"duplicate candidate {candidate.get('memory_id')}")
+        self.candidate = candidate
+
+
+class DedupeUnavailableError(Exception):
+    """The duplicate check could not run (embedder down); nothing was written."""
+
+
+class BatchItemError(Exception):
+    """``remember_many`` failed on ``index``; the whole batch was rolled back."""
+
+    def __init__(self, index: int, cause: BaseException):
+        super().__init__(f"batch item {index}: {cause}")
+        self.index = index
+        self.cause = cause
+
+
+@dataclass
+class _PreparedRemember:
+    """A ``remember`` row that is built and gated but not yet committed."""
+
+    memory: Memory
+    request: RememberRequest
+    user_id: str
+    workspace_id_str: str
+    context_id_str: str
+    tag_hints: list[WriteLintHint]
+    embedding_scheduled: bool = False
 
 
 class MemoryService:
@@ -567,6 +612,10 @@ class MemoryService:
         current_workspace_id: UUID | None = None,  # NEW: Workspace ID (Issue #146)
         key_workspace_id: UUID | None = None,  # Issue #963/#1281: pure key scope
         _skip_daily_quota: bool = False,  # Issue #1549: internal, see _upsert_by_external_id
+        *,
+        tags_normalize: bool = False,
+        dedupe: str = DEDUPE_SUGGEST,
+        tag_canonical: dict[str, tuple[str, int]] | None = None,
     ) -> RememberResponse:
         """Store new memory.
 
@@ -602,6 +651,59 @@ class MemoryService:
             >>> result.scope
             'working'
         """
+        prepared = await self._prepare_remember(
+            request,
+            user_id,
+            client=client,
+            current_context_id=current_context_id,
+            current_workspace_id=current_workspace_id,
+            key_workspace_id=key_workspace_id,
+            _skip_daily_quota=_skip_daily_quota,
+            tags_normalize=tags_normalize,
+            dedupe=dedupe,
+            tag_canonical=tag_canonical,
+        )
+        try:
+            await self.memory_repo.create(prepared.memory)
+            await self.db.commit()
+            return await self._finish_remember(prepared)
+        except Exception as e:
+            await self.db.rollback()
+            logger.error(
+                "memory_creation_failed",
+                memory_id=str(prepared.memory.id),
+                user_id=user_id,
+                error=str(e),
+            )
+            raise
+
+    async def _prepare_remember(
+        self,
+        request: RememberRequest,
+        user_id: str,
+        *,
+        client: str,
+        current_context_id: UUID | None,
+        current_workspace_id: UUID | None,
+        key_workspace_id: UUID | None,
+        _skip_daily_quota: bool,
+        tags_normalize: bool,
+        dedupe: str,
+        isolation: tuple[Any, str | None, str | None] | None = None,
+        tag_canonical: dict[str, tuple[str, int]] | None = None,
+    ) -> _PreparedRemember:
+        """Everything ``remember`` does before the row is committed (#1853).
+
+        ``isolation`` is the already-resolved ``(context, workspace_id_str,
+        context_id_str)`` when the caller prepares several rows for one
+        context (``remember_many``); ``tag_canonical`` the per-call fold map
+        for ``tags_normalize``, shared so later items see earlier spellings.
+
+        Context resolution and the write gate, the optional duplicate check,
+        quotas, size, the details transforms and the row itself — but no
+        ``create`` / ``commit``: ``remember`` commits one row, ``remember_many``
+        several in one transaction. The caller owns the transaction.
+        """
         # Single Collection Migration: Extract isolation params (optimized).
         # Issue #1275: remember is a WRITE — gate the declared context against
         # the agent binding (no-op for non-agent credentials).
@@ -613,17 +715,30 @@ class MemoryService:
         # shared context the caller is also a member of, a different workspace
         # (the wrong counter). A workspace-scoped key or a binding denial is
         # still refused here, before any counter is touched.
-        context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
-            user_id,
-            current_context_id,
-            access="write",
-            key_workspace_id=key_workspace_id,
-            operation="remember",  # #1286 (P0-5): deny-capture audit identity
-        )
+        if isolation is None:
+            isolation = await self._get_context_isolation_params(
+                user_id,
+                current_context_id,
+                access="write",
+                key_workspace_id=key_workspace_id,
+                operation="remember",  # #1286 (P0-5): deny-capture audit identity
+            )
+        context, workspace_id_str, context_id_str = isolation
 
         # Validate required parameters
         if not workspace_id_str or not context_id_str:
             raise ValueError("remember() requires current_context_id")
+
+        # #1853: dedupe="check" asks BEFORE the quota is charged and the row
+        # exists — a candidate above the suggestion threshold comes back to
+        # the caller as a decision (DuplicateCandidateError), nothing is stored.
+        if dedupe == DEDUPE_CHECK:
+            await self._refuse_duplicate(
+                request,
+                user_id=user_id,
+                workspace_id_str=workspace_id_str,
+                context_id_str=context_id_str,
+            )
 
         # Issue #149: Check quota before creating memory
         # Single Collection Migration: Memory count only (storage size removed)
@@ -719,6 +834,19 @@ class MemoryService:
             await self._require_guardrail_author(user_id, context_id_str)
         self._reject_context_location(request.context)
 
+        # #1853: tags_normalize maps each tag onto the established spelling
+        # that differs only mechanically (case / separators / simple plural —
+        # recall's tags_normalize rule) and reports the mapping in lint.
+        tag_hints: list[WriteLintHint] = []
+        if tags_normalize and request.tags:
+            request.tags, tag_hints = await self._normalize_tags_for_write(
+                request.tags,
+                workspace_id=UUID(workspace_id_str),
+                context_id=UUID(context_id_str),
+                user_id=user_id,
+                canonical=tag_canonical,
+            )
+
         # Create memory entity first with pending status
         memory = Memory(
             id=memory_id,
@@ -749,83 +877,390 @@ class MemoryService:
             # remember path can never forge external-ingestion provenance.
             # NULL coerces to 'manual' to satisfy the NOT NULL column.
             source_type=request.source_type or SOURCE_TYPE_MANUAL,
+            # #1853 dedupe="off": no suggestion later either — the wildcard
+            # tombstone tells the post-embed detection this write was declared
+            # a non-duplicate (is_dismissed reads it as "still rejected").
+            supersede_candidate=unconditional_tombstone() if dedupe == DEDUPE_OFF else None,
         )
         # Issue #886: pin-on-write. delivery_mode='always' pins straight to
         # persistent (so it is exempt from sleep consolidation — which only acts
         # on scope='working' — without waiting for a consolidation pass).
         self._apply_pin_on_write(memory)
+        return _PreparedRemember(
+            memory=memory,
+            request=request,
+            user_id=user_id,
+            workspace_id_str=workspace_id_str,
+            context_id_str=context_id_str,
+            tag_hints=tag_hints,
+        )
+
+    async def _finish_remember(self, prepared: _PreparedRemember) -> RememberResponse:
+        """Everything ``remember`` does after the row is committed (#1853):
+        declared links, the embedding task, the access event and the response
+        with its persistence block and lint."""
+        memory = prepared.memory
+        request = prepared.request
+        user_id = prepared.user_id
+        memory_id = memory.id
+        workspace_id_str = prepared.workspace_id_str
+        context_id_str = prepared.context_id_str
+
+        logger.info(
+            "memory_created_pending",
+            memory_id=str(memory_id),
+            user_id=user_id,
+            type=request.type,
+        )
+
+        # Issue #215: Create declared_link edges (best-effort, after commit).
+        # BEFORE the embedding task: the post-embed detection checks for an
+        # existing supersedes edge, and a cached embedding makes that check
+        # race the edge write if the task is started first.
+        await self._create_declared_links(
+            memory_id=memory_id,
+            request=request,
+            user_id=user_id,
+            workspace_id=workspace_id_str,
+            context_id=context_id_str,
+        )
+
+        self._schedule_embedding(prepared)
+
+        # #1278/#1281 item 7: audit the write (no-op unless verified agent).
+        from services.memory_access_event_writer import emit_memory_access_event
+
+        await emit_memory_access_event(
+            operation="remember",
+            outcome="success",
+            workspace_id=UUID(workspace_id_str),
+            user_id=user_id,
+            context_id=UUID(context_id_str),
+            memory_id=memory_id,
+        )
+
+        # #1502: advisory recall-ability hints. Deliberately AFTER the
+        # commit and the audit row — the memory is stored either way, and
+        # lint_write swallows its own errors, so nothing here can turn a
+        # successful write into a failure.
+        return RememberResponse(
+            memory_id=memory_id,
+            scope=memory.scope,
+            # #1505: say what 'working' means for durability instead of
+            # leaving the caller to guess.
+            persistence=persistence_info(
+                memory.scope,
+                pinned=memory.is_pinned,
+                tool_triggered=self._carries_tool_trigger(memory.details),
+            ),
+            lint=prepared.tag_hints
+            + await self._lint_write(
+                workspace_id=UUID(workspace_id_str),
+                context_id=UUID(context_id_str),
+                user_id=user_id,
+                summary=request.summary,
+                tags=request.tags,
+                memory_id=memory_id,
+            ),
+        )
+
+    async def remember_many(
+        self,
+        requests: list[RememberRequest],
+        *,
+        user_id: str,
+        client: str = "unknown",
+        current_context_id: UUID | None = None,
+        current_workspace_id: UUID | None = None,
+        key_workspace_id: UUID | None = None,
+        tags_normalize: bool = False,
+        dedupe: str = DEDUPE_SUGGEST,
+    ) -> list[RememberResponse]:
+        """Store several memories in ONE transaction (#1853, ``atomic=true``).
+
+        Every request is prepared and its row added first; one failure —
+        including a ``dedupe="check"`` candidate — rolls everything back and
+        is re-raised as :class:`BatchItemError` carrying the failing index, so
+        nothing is written. Only after the single commit do the per-row
+        post-commit steps run (embedding tasks, declared links, access
+        events). The daily quota is reserved per item while preparing; a
+        rolled-back batch keeps those reservations (Redis), which is the
+        documented cost of asking for atomicity.
+        """
+        # Resolved once for the whole batch (same write gate as remember; the
+        # audit identity stays "remember" — the items are remembers).
+        isolation = await self._get_context_isolation_params(
+            user_id,
+            current_context_id,
+            access="write",
+            key_workspace_id=key_workspace_id,
+            operation="remember",
+        )
+        _context, workspace_id_str, context_id_str = isolation
+        if not workspace_id_str or not context_id_str:
+            raise ValueError("remember_batch() requires current_context_id")
+        tag_canonical = (
+            await self.tag_canonical_map(
+                workspace_id=UUID(workspace_id_str),
+                context_id=UUID(context_id_str),
+                user_id=user_id,
+            )
+            if tags_normalize
+            else None
+        )
+        if dedupe == DEDUPE_CHECK:
+            # All duplicate checks BEFORE any row or quota lock: the first
+            # prepare takes the workspace row lock (check_memory_quota), and
+            # an embedder round trip per item must not run under it. Items of
+            # one batch are not compared with each other (none is in the
+            # vector store yet).
+            for index, request in enumerate(requests):
+                try:
+                    await self._refuse_duplicate(
+                        request,
+                        user_id=user_id,
+                        workspace_id_str=workspace_id_str,
+                        context_id_str=context_id_str,
+                    )
+                except Exception as exc:
+                    raise BatchItemError(index, exc) from exc
+            dedupe = DEDUPE_SUGGEST  # checked; the rows carry no tombstone
+        prepared: list[_PreparedRemember] = []
+        try:
+            for index, request in enumerate(requests):
+                try:
+                    item = await self._prepare_remember(
+                        request,
+                        user_id,
+                        client=client,
+                        current_context_id=current_context_id,
+                        current_workspace_id=current_workspace_id,
+                        key_workspace_id=key_workspace_id,
+                        _skip_daily_quota=False,
+                        tags_normalize=tags_normalize,
+                        dedupe=dedupe,
+                        isolation=isolation,
+                        tag_canonical=tag_canonical,
+                    )
+                    await self.memory_repo.create(item.memory)
+                except Exception as exc:
+                    raise BatchItemError(index, exc) from exc
+                prepared.append(item)
+            await self.db.commit()
+        except BaseException:  # a timeout's CancelledError must roll back too
+            await self.db.rollback()
+            raise
+        responses: list[RememberResponse] = []
+        for item in prepared:
+            try:
+                responses.append(await self._finish_remember(item))
+            except Exception as exc:  # the row is committed; the batch must still report it
+                logger.error(
+                    "remember_many_finish_failed",
+                    memory_id=str(item.memory.id),
+                    error=str(exc),
+                    exc_info=True,
+                )
+                self._schedule_embedding(item)  # the row must still become searchable
+                responses.append(self._bare_response(item))
+        return responses
+
+    def _schedule_embedding(self, prepared: _PreparedRemember) -> None:
+        """Start the embedding task for a committed row, once."""
+        if prepared.embedding_scheduled:
+            return
+        memory_id = prepared.memory.id
+        task = asyncio.create_task(process_pending_embedding(memory_id))
+        task.add_done_callback(
+            functools.partial(_log_embedding_task_result, memory_id=str(memory_id))
+        )
+        prepared.embedding_scheduled = True
+
+    def _bare_response(self, prepared: _PreparedRemember) -> RememberResponse:
+        """The response for a committed row whose post-commit steps failed:
+        id, scope and persistence only — no lint, nothing that needs the session."""
+        memory = prepared.memory
+        return RememberResponse(
+            memory_id=memory.id,
+            scope=memory.scope,
+            persistence=persistence_info(
+                memory.scope,
+                pinned=memory.is_pinned,
+                tool_triggered=self._carries_tool_trigger(memory.details),
+            ),
+            lint=list(prepared.tag_hints),
+        )
+
+    async def _refuse_duplicate(
+        self,
+        request: RememberRequest,
+        *,
+        user_id: str,
+        workspace_id_str: str,
+        context_id_str: str,
+    ) -> None:
+        """``dedupe="check"``: raise :class:`DuplicateCandidateError` when a live
+        near-duplicate exists — unless the request already supersedes that very
+        memory, which is the documented way to resolve the candidate."""
+        candidate = await self._find_duplicate_candidate(
+            user_id=user_id,
+            workspace_id_str=workspace_id_str,
+            context_id_str=context_id_str,
+            summary=request.summary,
+        )
+        if candidate is None:
+            return
+        if request.supersedes is not None and str(request.supersedes) == candidate["memory_id"]:
+            return
+        raise DuplicateCandidateError(candidate)
+
+    async def tag_canonical_map(
+        self, *, workspace_id: UUID, context_id: UUID, user_id: str
+    ) -> dict[str, tuple[str, int]]:
+        """``normalize_tag`` fold → (most frequent stored spelling, count) for the
+        caller's view of the context (the #1512 vocabulary cache). Built once per
+        write call; ``_normalize_tags_for_write`` adds the spellings it stores so
+        later tags of the same request or batch fold onto them."""
+        from services.tag_resolution import fetch_vocabulary_cached
+        from utils.tag_normalize import normalize_tag
+
+        vocabulary = await fetch_vocabulary_cached(
+            self.db, workspace_id=workspace_id, context_id=context_id, user_id=user_id
+        )
+        canonical: dict[str, tuple[str, int]] = {}
+        for stored, count in vocabulary.items():
+            fold = normalize_tag(stored)
+            if fold and (fold not in canonical or count > canonical[fold][1]):
+                canonical[fold] = (stored, count)
+        return canonical
+
+    async def _normalize_tags_for_write(
+        self,
+        tags: list[str],
+        *,
+        workspace_id: UUID,
+        context_id: UUID,
+        user_id: str,
+        canonical: dict[str, tuple[str, int]] | None = None,
+    ) -> tuple[list[str], list[WriteLintHint]]:
+        """Map each tag onto the context's established spelling of it (#1853).
+
+        Two tags are the same tag written differently when ``normalize_tag``
+        folds them to one form (NFKC, case, separators, a conservative plural
+        strip) — the rule recall's ``tags_normalize`` filter matches on.
+        Abbreviations and edit-distance variants are NOT mapped; they stay
+        ``tag_near_duplicate`` hints. Among several stored spellings with one
+        fold the most frequent wins. The vocabulary is the #1512 cache.
+        """
+        from utils.tag_normalize import normalize_tag
+
+        if canonical is None:
+            canonical = await self.tag_canonical_map(
+                workspace_id=workspace_id, context_id=context_id, user_id=user_id
+            )
+        out: list[str] = []
+        hints: list[WriteLintHint] = []
+        for tag in tags:
+            fold = normalize_tag(tag)
+            match = canonical.get(fold) if fold else None
+            if match is None or match[0] == tag:
+                stored = tag
+            else:
+                stored, count = match
+                hints.append(
+                    WriteLintHint(
+                        code="tag_normalized",
+                        hint=(
+                            f"tag '{tag}' was stored as '{stored}' ({count} memories), "
+                            "the established spelling in this context."
+                            if count
+                            else f"tag '{tag}' was stored as '{stored}', the spelling used "
+                            "earlier in this request."
+                        ),
+                        subject=tag,
+                        replacement=stored,
+                    )
+                )
+            if stored not in out:
+                out.append(stored)
+            # Within one request the first spelling wins too ('Foo' then 'foo').
+            canonical.setdefault(fold, (stored, 0))
+        return out, hints
+
+    async def _find_duplicate_candidate(
+        self,
+        *,
+        user_id: str,
+        workspace_id_str: str,
+        context_id_str: str,
+        summary: str,
+    ) -> dict[str, Any] | None:
+        """The nearest live memory when it is above the supersede-suggestion
+        threshold, else None (#1853 ``dedupe="check"``).
+
+        Same embedder, collection, scoping and threshold as the post-embed
+        detection in ``_create_knn_seed_edges``, so the answer is the
+        suggestion the caller would otherwise see on a later recall. An
+        embedder that cannot run (no key, spend cap, outage) is
+        :class:`DedupeUnavailableError`: the caller decides, nothing is
+        written silently.
+        """
+        from db.qdrant import search_memories_qdrant
+        from services.context_routing import resolve_context_routing
+        from services.embedding_service import EmbeddingService
+        from utils.text import normalize_for_search
 
         try:
-            # Save to PostgreSQL first (with pending status)
-            await self.memory_repo.create(memory)
-            await self.db.commit()
-
-            logger.info(
-                "memory_created_pending",
-                memory_id=str(memory_id),
-                user_id=user_id,
-                type=request.type,
+            collection, embed_svc = await resolve_context_routing(
+                self.db, UUID(context_id_str), default_service=EmbeddingService(self.db)
             )
-
-            # Issue #215: Create declared_link edges (best-effort, after commit)
-            await self._create_declared_links(
-                memory_id=memory_id,
-                request=request,
+            vector = await embed_svc.embed(
+                normalize_for_search(summary),
+                user_id,
+                context_id=UUID(context_id_str),
+                workspace_id=UUID(workspace_id_str),
+            )
+            hits = await search_memories_qdrant(
                 user_id=user_id,
+                query_vector=vector,
                 workspace_id=workspace_id_str,
                 context_id=context_id_str,
+                limit=_DEDUPE_CHECK_K,
+                collection_name=collection,
             )
+        except Exception as exc:
+            raise DedupeUnavailableError(str(exc)) from exc
+        from services.agent_binding_service import filter_memory_rows_by_binding
 
-            task = asyncio.create_task(process_pending_embedding(memory_id))
-            task.add_done_callback(
-                functools.partial(_log_embedding_task_result, memory_id=str(memory_id))
+        # Nearest first; a point whose row is gone (soft-deleted, the sweep
+        # not yet run) or that the agent binding denies is skipped for the
+        # next hit above the threshold, not taken as "no duplicate".
+        for hit in sorted(hits, key=lambda c: float(c["score"]), reverse=True):
+            score = float(hit["score"])
+            if score < _SUPERSEDE_SUGGEST_THRESHOLD:
+                return None
+            row = (
+                await self.db.execute(
+                    select(Memory).where(
+                        Memory.id == UUID(str(hit["id"])), Memory.deleted_at.is_(None)
+                    )
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                continue
+            # #1299: an agent-bound credential denied this memory's type/source
+            # must not learn its summary (or that it exists) through a write tool.
+            kept, _denied = await filter_memory_rows_by_binding(
+                self.db, [row], operation="remember", user_id=user_id
             )
-
-            # #1278/#1281 item 7: audit the write (no-op unless verified agent).
-            from services.memory_access_event_writer import emit_memory_access_event
-
-            await emit_memory_access_event(
-                operation="remember",
-                outcome="success",
-                workspace_id=UUID(workspace_id_str),
-                user_id=user_id,
-                context_id=UUID(context_id_str),
-                memory_id=memory_id,
-            )
-
-            # #1502: advisory recall-ability hints. Deliberately AFTER the
-            # commit and the audit row — the memory is stored either way, and
-            # lint_write swallows its own errors, so nothing here can turn a
-            # successful write into a failure.
-            return RememberResponse(
-                memory_id=memory_id,
-                scope=memory.scope,
-                # #1505: say what 'working' means for durability instead of
-                # leaving the caller to guess.
-                persistence=persistence_info(
-                    memory.scope,
-                    pinned=memory.is_pinned,
-                    tool_triggered=self._carries_tool_trigger(memory.details),
-                ),
-                lint=await self._lint_write(
-                    workspace_id=UUID(workspace_id_str),
-                    context_id=UUID(context_id_str),
-                    user_id=user_id,
-                    summary=request.summary,
-                    tags=request.tags,
-                    memory_id=memory_id,
-                ),
-            )
-
-        except Exception as e:
-            await self.db.rollback()
-            logger.error(
-                "memory_creation_failed",
-                memory_id=str(memory_id),
-                user_id=user_id,
-                error=str(e),
-            )
-            raise
+            if not kept:
+                continue
+            return {
+                "memory_id": str(row.id),
+                "summary": row.summary,
+                "similarity": round(score, 4),
+            }
+        return None
 
     async def update_memory(
         self,

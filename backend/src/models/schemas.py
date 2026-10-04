@@ -249,13 +249,20 @@ class WriteLintHint(BaseModel):
     code: str = Field(
         description=(
             "Stable machine-readable hint id: summary_short, summary_long, "
-            "summary_narrative, no_tags, tag_near_duplicate."
+            "summary_narrative, no_tags, tag_near_duplicate, tag_normalized."
         )
     )
     hint: str = Field(description="What to do differently, in one sentence.")
     subject: str | None = Field(
         default=None,
         description="The specific value the hint is about (e.g. the tag), when applicable.",
+    )
+    replacement: str | None = Field(
+        default=None,
+        description=(
+            "tag_normalized only: the stored spelling that replaced ``subject`` "
+            "(remember(tags_normalize=true), #1853)."
+        ),
     )
 
 

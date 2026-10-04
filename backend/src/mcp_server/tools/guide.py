@@ -211,6 +211,53 @@ GUIDE_TOPICS: dict[str, str] = {
         "(else workspace_mismatch / context_privacy_mismatch / "
         "embedding_model_mismatch)."
     ),
+    "remember.tags_normalize": (
+        "remember(tags_normalize=true) / remember_batch(tags_normalize=true) store each "
+        "tag as the context's established spelling when the two differ only "
+        "mechanically — case, hyphen / underscore / space, a simple plural "
+        "(the rule recall's tags_normalize filter matches on; 'Dev-Environment' → "
+        "'dev-environment', 'troubleshoot' stays, it is not a spelling variant). The "
+        "most frequent stored spelling wins. Each mapping is reported in lint as "
+        "{code: 'tag_normalized', subject: <written>, replacement: <stored>}; a tag "
+        "with no established variant is stored as written. Default false this release; "
+        "call list_tags() instead when you want to choose the spelling yourself."
+    ),
+    "remember.dedupe": (
+        "dedupe selects how a near-duplicate is handled on a write. 'suggest' (default): "
+        "the memory is written and a later recall / reference flags the older "
+        "near-duplicate as supersede_candidate. 'check': the summary is embedded first "
+        "and the nearest live memory of the context compared — at similarity >= 0.85 "
+        "the reply is {status: 'duplicate_candidate', candidate: {memory_id, summary, "
+        "similarity}} and nothing is written (no quota charged); decide: store with "
+        "supersedes=<candidate.memory_id> (the check skips the memory you supersede, so "
+        "dedupe='check' may stay on), update_memory(<candidate.memory_id>), or repeat "
+        "with dedupe='off'. If the embedder cannot run the reply is error "
+        "dedupe_unavailable and nothing is written. 'off': the memory is written and "
+        "never flagged as a duplicate afterwards. 'check' costs one embedding call; use "
+        "it for the memory you suspect already exists, not for every write."
+    ),
+    # ----------------------------------------------------------- remember_batch
+    "remember_batch.usage": (
+        "remember_batch(context_id, items, atomic=false, tags_normalize=false, "
+        "dedupe='suggest') stores up to 50 memories in one call — the end-of-session "
+        "save. Each item is remember's arguments without context_id, validated and "
+        "limited like a single remember (summary 10-500 chars, 1 MB per memory, the "
+        "daily quota per item). Per-item results carry index, status and either "
+        "memory_id / scope / persistence / lint or error / message (or candidate for "
+        "a dedupe='check' hit); the envelope's status is success, partial, or "
+        "duplicate_candidate when nothing was written and every refusal was a "
+        "candidate (a decision, not an error); an error envelope (batch_failed) only "
+        "when nothing was written and something failed. "
+        "atomic=false writes each item independently and continues past a failure; "
+        "atomic=true writes all items in one transaction and a failing item — a "
+        "duplicate_candidate included — rolls everything back (the other items read "
+        "'skipped'). With atomic=true and dedupe='check' every check runs before any "
+        "row is written; items of one batch are not compared with each other. A "
+        "rolled-back atomic batch keeps its daily-quota reservations. "
+        "Keep a call to about 20 items when the items are long: the whole call is one "
+        "tool-argument payload. Older servers (no remember_batch listed): one remember "
+        "per item."
+    ),
     # ----------------------------------------------------------- update_memory
     "update_memory.modes": (
         "Supply exactly ONE of: memory_id — edit fields in place; the id, graph edges "
@@ -429,6 +476,14 @@ GUIDE_INDEX: dict[str, tuple[str, ...]] = {
         "security",
         "persistence",
         "ids",
+        "remember.tags_normalize",
+        "remember.dedupe",
+    ),
+    "remember_batch": (
+        "remember_batch.usage",
+        "remember.tags_normalize",
+        "remember.dedupe",
+        "security",
     ),
     "recall": (
         "recall.which-tool",

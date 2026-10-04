@@ -34,6 +34,7 @@ logger = get_logger(__name__)
 # together with a character budget — adding a tool here costs every ``core`` client.
 CORE_TOOLS: tuple[str, ...] = (
     "remember",
+    "remember_batch",
     "update_memory",
     "recall",
     "reference",

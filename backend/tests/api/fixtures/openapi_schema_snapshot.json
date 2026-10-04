@@ -11590,6 +11590,16 @@
           "hint": {
             "type": "string"
           },
+          "replacement": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "subject": {
             "anyOf": [
               {

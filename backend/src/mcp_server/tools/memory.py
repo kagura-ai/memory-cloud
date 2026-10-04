@@ -35,6 +35,12 @@ from mcp_server.tools._helpers import (
     _validate_memory_id,
     execute_with_timeout,
 )
+from services.memory_service import (
+    DEDUPE_MODES,
+    DEDUPE_SUGGEST,
+    DedupeUnavailableError,
+    DuplicateCandidateError,
+)
 from utils.datetime import to_utc_iso
 from utils.exceptions import AuthorizationError, NotFoundException, QuotaExceededError
 from utils.response_budget import (
@@ -113,27 +119,12 @@ def _guardrail_author_denied(operation: str) -> list[TextContent]:
     )
 
 
-async def handle_remember(
-    args: dict[str, Any], user_id: str, workspace_id: UUID | None
-) -> list[TextContent]:
-    """Store a new memory."""
-    # #1742: name only the fields that are actually missing.
-    missing = [name for name in ("summary", "content", "type") if name not in args]
-    if missing:
-        return _error_response(
-            "missing_fields",
-            f"Missing required fields: {', '.join(missing)}",
-            missing_fields=missing,
-        )
-
-    from db.base import get_db
+def remember_request_from_args(args: dict[str, Any]) -> Any:
+    """The ``RememberRequest`` for ``remember``'s arguments — also one ``remember_batch``
+    item, so a new ``remember`` field reaches both tools from this one place."""
     from models.schemas import RememberRequest
-    from services.memory_service import MemoryService
 
-    verbose = args.get("verbose", False)
-    if not isinstance(verbose, bool):
-        return _error_response("validation_error", "verbose must be a boolean.")
-    request = RememberRequest(
+    return RememberRequest(
         summary=args["summary"],
         context_summary=args.get("context_summary"),
         content=args["content"],
@@ -149,6 +140,43 @@ async def handle_remember(
         linked_source_uris=args.get("linked_source_uris"),
         supersedes=args.get("supersedes"),  # #1208
     )
+
+
+def parse_write_options(args: dict[str, Any]) -> tuple[bool, str]:
+    """``tags_normalize`` (bool, default false) and ``dedupe`` (suggest | check | off) of a write (#1853)."""
+    tags_normalize = args.get("tags_normalize", False)
+    if not isinstance(tags_normalize, bool):
+        raise ValueError("tags_normalize must be a boolean.")
+    dedupe = args.get("dedupe", DEDUPE_SUGGEST)
+    if dedupe not in DEDUPE_MODES:
+        raise ValueError(f"dedupe must be one of {', '.join(DEDUPE_MODES)}.")
+    return tags_normalize, dedupe
+
+
+async def handle_remember(
+    args: dict[str, Any], user_id: str, workspace_id: UUID | None
+) -> list[TextContent]:
+    """Store a new memory."""
+    # #1742: name only the fields that are actually missing.
+    missing = [name for name in ("summary", "content", "type") if name not in args]
+    if missing:
+        return _error_response(
+            "missing_fields",
+            f"Missing required fields: {', '.join(missing)}",
+            missing_fields=missing,
+        )
+
+    from db.base import get_db
+    from services.memory_service import MemoryService
+
+    verbose = args.get("verbose", False)
+    if not isinstance(verbose, bool):
+        return _error_response("validation_error", "verbose must be a boolean.")
+    try:
+        tags_normalize, dedupe = parse_write_options(args)
+    except ValueError as e:
+        return _error_response("validation_error", str(e))
+    request = remember_request_from_args(args)
 
     start_time = time.time()
     async for db in get_db():
@@ -173,6 +201,8 @@ async def handle_remember(
                     client="mcp",
                     current_context_id=current_context_id,
                     current_workspace_id=workspace_id,
+                    tags_normalize=tags_normalize,
+                    dedupe=dedupe,
                 ),
                 operation_name="remember",
             )
@@ -204,6 +234,37 @@ async def handle_remember(
                     ),
                 )
             ]
+        except DuplicateCandidateError as e:
+            # #1853 dedupe="check": a decision for the caller, not an error —
+            # nothing was written. Store with supersedes=<id>, update the
+            # existing memory, or repeat with dedupe="off".
+            context_fields = _context_response_fields(
+                current_context
+            )  # before the rollback expires it
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "remember", start_time, 200, current_context_id, workspace_id
+            )
+            return [
+                TextContent(
+                    type="text",
+                    text=_dumps(
+                        {
+                            "status": "duplicate_candidate",
+                            "candidate": e.candidate,
+                            **context_fields,
+                        }
+                    ),
+                )
+            ]
+        except DedupeUnavailableError as e:
+            await db.rollback()
+            return _error_response(
+                "dedupe_unavailable",
+                "The duplicate check could not run (embedding unavailable); nothing was "
+                "written. Retry with dedupe='suggest' or 'off'.",
+                detail=str(e)[:200],
+            )
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()

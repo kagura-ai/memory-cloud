@@ -104,6 +104,7 @@ _RESERVED_KEYS = frozenset({"status", "error", "message"})
 # ``_REPEAT_SAFE_WRITES`` or in ``_UNVERIFIABLE_WRITES``.
 _VERIFY_WITH: dict[str, str] = {
     "remember": "recall",
+    "remember_batch": "recall",  # #1853: the items are remembers
     "update_memory": "reference",
     "forget": "reference",
     "create_edge": "list_edges",

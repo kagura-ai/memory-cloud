@@ -74,11 +74,11 @@ SKELETON_PATH = Path(__file__).parent / "fixtures" / "tool_schema_skeleton.json"
 #
 # #1849 added describe_tools (core 25,884) and #1852 list + changes_since: full list
 # 96,664, core list 29,976 (16 tools).
-FULL_LIST_BUDGET = 104_700  # (#1851) bootstrap joined
-CORE_LIST_BUDGET = 34_000  # (#1851) 17 core tools
+FULL_LIST_BUDGET = 107_500  # (#1853) remember_batch joined
+CORE_LIST_BUDGET = 36_900  # (#1853) 18 core tools
 RECALL_BUDGET = 4_000  # (#1850) was 6,900
-REMEMBER_BUDGET = 4_200  # (#1851) verbose param
-PER_TOOL_BUDGET = 4_700  # (#1850) was 6,900; the largest is now setup_connector
+REMEMBER_BUDGET = 4_800  # (#1853) tags_normalize + dedupe
+PER_TOOL_BUDGET = 4_800  # (#1853) the largest definition
 
 # A ceiling more than this far above the measured size is a stale constant.
 MAX_SLACK = 0.15
