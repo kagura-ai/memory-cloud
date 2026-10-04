@@ -508,9 +508,8 @@ describe("Change-plan dialog plan labels (#1848)", () => {
     render(<UserDetailPage />);
     fireEvent.click(await screen.findByText("workspaces.changePlanButton"));
     await screen.findByText("changePlanDialog.title");
-    const select = within(
-      screen.getByTestId(USER_DETAIL_TEST_IDS.planDialogNewPlan),
-    ).getByTestId("select-mock");
+    // The page has one Select: the dialog's new-plan picker.
+    const select = screen.getByTestId("select-mock");
     return within(select).getAllByRole("option") as HTMLOptionElement[];
   };
 
@@ -540,8 +539,10 @@ describe("Change-plan dialog plan labels (#1848)", () => {
       "Pro",
       "Max",
     ]);
-    // The current-plan line goes through the same resolver (was planOptions.basic).
-    expect(screen.getByRole("dialog").textContent).toContain("Starter");
-    expect(screen.getByRole("dialog").textContent).not.toContain("Basic");
+    // The current-plan PlanBadge resolves the same way: "Starter" appears
+    // twice inside the dialog (badge + option) and the raw/legacy names never.
+    const dialogText = screen.getByRole("dialog").textContent ?? "";
+    expect(dialogText.match(/Starter/g)).toHaveLength(2);
+    expect(dialogText).not.toMatch(/basic/i);
   });
 });

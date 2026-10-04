@@ -11,6 +11,8 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useTranslations, useLocale } from "next-intl";
+import { useLocale as usePlanLocale } from "@/i18n";
+import { PlanBadge } from "@/components/common/PlanBadge";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { LoadingState, InlineSpinner } from "@/components/common/LoadingState";
@@ -61,12 +63,7 @@ import {
   type WorkspaceSummary,
 } from "@/lib/api/admin";
 import { formatRelativeTime } from "@/lib/utils/datetime";
-import {
-  PLAN_TIER_ORDER,
-  isPlanTier,
-  planAtLeast,
-  planLabelFromEnv,
-} from "@/lib/utils/planLabel";
+import { PLAN_TIER_ORDER, planLabelFromEnv } from "@/lib/utils/planLabel";
 import { useToast } from "@/hooks/use-toast";
 import { USER_DETAIL_TEST_IDS } from "./testids";
 
@@ -122,6 +119,8 @@ export default function UserDetailPage() {
   const t = useTranslations("admin.users.detail");
   const tCommon = useTranslations("admin.common");
   const locale = useLocale();
+  // The plan-label locale comes from the same hook PlanBadge reads (#1848).
+  const { locale: planLocale } = usePlanLocale();
   const userId = params.userId as string;
   const [userDetail, setUserDetail] = useState<UserDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -160,14 +159,6 @@ export default function UserDetailPage() {
     )
       ? t(`roles.${role}`)
       : role;
-  };
-
-  // Plan names come from the same resolver as PlanBadge (env override, then
-  // the OSS default S/M/L/XL), so the dialog never disagrees with the badge
-  // on the same page (#1848). A plan_name outside PlanTier (an API value this
-  // build does not know) is shown verbatim, as before.
-  const getLocalizedPlan = (plan: string) => {
-    return isPlanTier(plan) ? planLabelFromEnv(plan, locale) : plan;
   };
 
   useEffect(() => {
@@ -550,17 +541,10 @@ export default function UserDetailPage() {
                       <Badge>{getLocalizedRole(workspace.role)}</Badge>
                     </TableCell>
                     <TableCell>
-                      <Badge
-                        variant={
-                          planAtLeast(workspace.plan_name, "pro")
-                            ? "destructive"
-                            : workspace.plan_name === "basic"
-                              ? "default"
-                              : "secondary"
-                        }
-                      >
-                        {getLocalizedPlan(workspace.plan_name || "free")}
-                      </Badge>
+                      <PlanBadge
+                        planName={workspace.plan_name || "free"}
+                        size="sm"
+                      />
                     </TableCell>
                     <TableCell className="text-sm text-gray-500">
                       {workspace.joined_at
@@ -703,18 +687,10 @@ export default function UserDetailPage() {
                             className="flex items-center justify-between text-sm"
                           >
                             <span className="font-medium">{ws.name}</span>
-                            <Badge
-                              variant={
-                                planAtLeast(ws.plan_name, "pro")
-                                  ? "destructive"
-                                  : ws.plan_name === "basic"
-                                    ? "default"
-                                    : "secondary"
-                              }
-                              className="text-xs"
-                            >
-                              {ws.plan_name}
-                            </Badge>
+                            <PlanBadge
+                              planName={ws.plan_name || "free"}
+                              size="sm"
+                            />
                           </li>
                         ))}
                       </ul>
@@ -846,17 +822,10 @@ export default function UserDetailPage() {
                 {t("changePlanDialog.currentPlanLabel")}
               </label>
               <div className="mt-2">
-                <Badge
-                  variant={
-                    planAtLeast(planDialog.currentPlan, "pro")
-                      ? "destructive"
-                      : "default"
-                  }
-                >
-                  {planDialog.currentPlan
-                    ? getLocalizedPlan(planDialog.currentPlan)
-                    : ""}
-                </Badge>
+                <PlanBadge
+                  planName={planDialog.currentPlan || "free"}
+                  size="sm"
+                />
               </div>
             </div>
 
@@ -864,20 +833,19 @@ export default function UserDetailPage() {
               <label className="text-sm font-medium">
                 {t("changePlanDialog.newPlanLabel")}
               </label>
-              <div data-testid={USER_DETAIL_TEST_IDS.planDialogNewPlan}>
-                <Select value={newPlan} onValueChange={setNewPlan}>
-                  <SelectTrigger className="mt-2">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {PLAN_TIER_ORDER.map((plan) => (
-                      <SelectItem key={plan} value={plan}>
-                        {planLabelFromEnv(plan, locale)}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+              <Select value={newPlan} onValueChange={setNewPlan}>
+                <SelectTrigger className="mt-2">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {PLAN_TIER_ORDER.map((plan) => (
+                    <SelectItem key={plan} value={plan}>
+                      {/* Same resolver as the PlanBadge above (#1848). */}
+                      {planLabelFromEnv(plan, planLocale)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="bg-yellow-50 border border-yellow-200 rounded p-3">

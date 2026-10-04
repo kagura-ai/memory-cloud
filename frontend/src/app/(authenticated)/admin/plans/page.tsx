@@ -14,7 +14,8 @@
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
-import { useLocale, useTranslations } from "next-intl";
+import { useTranslations } from "next-intl";
+import { useLocale } from "@/i18n";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import {
@@ -245,7 +246,7 @@ type TierRowKey = (typeof TIER_ROW_DEFINITIONS)[number]["key"];
 export default function AdminPlansPage() {
   const t = useTranslations("admin.plans");
   const tCommon = useTranslations("admin.common");
-  const locale = useLocale();
+  const { locale } = useLocale();
 
   const [workspaces, setWorkspaces] = useState<WorkspacePlan[]>([]);
   const [auditLog, setAuditLog] = useState<PlanChangeAudit[]>([]);
