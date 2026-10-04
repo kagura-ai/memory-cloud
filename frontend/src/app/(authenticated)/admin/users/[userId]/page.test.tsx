@@ -14,8 +14,15 @@
  * gating once `open` is true, so role queries work cleanly.
  */
 
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PLAN_TIER_ORDER } from "@/lib/utils/planLabel";
 
 const mockGet = vi.fn();
 const mockUpdateBonus = vi.fn();
@@ -62,6 +69,42 @@ vi.mock("next-intl", () => ({
 }));
 
 // Reduce layout chrome.
+// Radix Select does not render its items in jsdom; the mock renders a plain
+// <select> so the change-plan dialog's option labels can be asserted (#1848).
+vi.mock("@/components/ui/select", () => ({
+  Select: ({
+    value,
+    onValueChange,
+    children,
+  }: {
+    value: string;
+    onValueChange?: (v: string) => void;
+    children: React.ReactNode;
+  }) => (
+    <select
+      data-testid="select-mock"
+      value={value}
+      onChange={(e) => onValueChange?.(e.target.value)}
+    >
+      {children}
+    </select>
+  ),
+  SelectTrigger: ({ children }: { children: React.ReactNode }) => (
+    <>{children}</>
+  ),
+  SelectValue: () => null,
+  SelectContent: ({ children }: { children: React.ReactNode }) => (
+    <>{children}</>
+  ),
+  SelectItem: ({
+    value,
+    children,
+  }: {
+    value: string;
+    children: React.ReactNode;
+  }) => <option value={value}>{children}</option>,
+}));
+
 vi.mock("@/components/common/PageContainer", () => ({
   PageContainer: ({ children }: { children: React.ReactNode }) => (
     <div>{children}</div>
@@ -447,5 +490,58 @@ describe("Workspace Capacity section (#676)", () => {
     expect(
       screen.getByTestId(USER_DETAIL_TEST_IDS.workspaceCapacityDecrement),
     ).toBeDisabled();
+  });
+});
+
+describe("Change-plan dialog plan labels (#1848)", () => {
+  const WORKSPACE = {
+    workspace_id: "ws-1",
+    workspace_name: "Personal",
+    role: "owner",
+    is_primary: true,
+    plan_name: "basic",
+    joined_at: new Date().toISOString(),
+  };
+  const detailWithWorkspace = { ...BASE_USER_DETAIL, workspaces: [WORKSPACE] };
+
+  const openPlanDialog = async () => {
+    render(<UserDetailPage />);
+    fireEvent.click(await screen.findByText("workspaces.changePlanButton"));
+    await screen.findByText("changePlanDialog.title");
+    const select = within(
+      screen.getByTestId(USER_DETAIL_TEST_IDS.planDialogNewPlan),
+    ).getByTestId("select-mock");
+    return within(select).getAllByRole("option") as HTMLOptionElement[];
+  };
+
+  afterEach(() => {
+    delete process.env.NEXT_PUBLIC_PLAN_DISPLAY_NAMES;
+  });
+
+  it("labels the plan options with the OSS default S/M/L/XL when no env map is set", async () => {
+    mockGet.mockResolvedValueOnce(detailWithWorkspace);
+    const options = await openPlanDialog();
+    expect(options.map((o) => o.value)).toEqual([...PLAN_TIER_ORDER]);
+    expect(options.map((o) => o.textContent)).toEqual(["S", "M", "L", "XL"]);
+    expect(
+      screen.queryByText(/changePlanDialog\.planOptions/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("labels the options and the current plan with the configured display names, like PlanBadge", async () => {
+    process.env.NEXT_PUBLIC_PLAN_DISPLAY_NAMES = JSON.stringify({
+      en: { free: "Free", basic: "Starter", pro: "Pro", promax: "Max" },
+    });
+    mockGet.mockResolvedValueOnce(detailWithWorkspace);
+    const options = await openPlanDialog();
+    expect(options.map((o) => o.textContent)).toEqual([
+      "Free",
+      "Starter",
+      "Pro",
+      "Max",
+    ]);
+    // The current-plan line goes through the same resolver (was planOptions.basic).
+    expect(screen.getByRole("dialog").textContent).toContain("Starter");
+    expect(screen.getByRole("dialog").textContent).not.toContain("Basic");
   });
 });

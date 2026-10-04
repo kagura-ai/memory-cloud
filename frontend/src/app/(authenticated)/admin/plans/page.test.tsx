@@ -533,10 +533,34 @@ describe("AdminPlansPage — workspaces tab change-plan dialog (#1548)", () => {
     ) as HTMLOptionElement[];
     expect(options).toHaveLength(4);
     expect(options.map((o) => o.value)).toEqual([...PLAN_TIER_ORDER]);
-    // Labels come from the tiersTable codes (S/M/L/XL), not a second list.
-    expect(options.map((o) => o.textContent)).toEqual(
-      PLAN_TIER_ORDER.map((p) => `admin.plans.tiersTable.${p}`),
-    );
+    // Labels come from planLabelFromEnv (OSS default S/M/L/XL), the same
+    // resolver PlanBadge uses — not from the tiersTable message keys (#1848).
+    expect(options.map((o) => o.textContent)).toEqual(["S", "M", "L", "XL"]);
+  });
+
+  it("labels the options with the configured plan display names (#1848)", async () => {
+    process.env.NEXT_PUBLIC_PLAN_DISPLAY_NAMES = JSON.stringify({
+      en: { free: "Free", basic: "Starter", pro: "Pro", promax: "Max" },
+    });
+    try {
+      render(<AdminPlansPage />);
+      fireEvent.click(
+        await screen.findByText("admin.plans.workspacesTable.changePlan"),
+      );
+      await screen.findByText("admin.plans.changePlanDialog.title");
+
+      const options = within(screen.getByTestId("select-mock")).getAllByRole(
+        "option",
+      ) as HTMLOptionElement[];
+      expect(options.map((o) => o.textContent)).toEqual([
+        "Free",
+        "Starter",
+        "Pro",
+        "Max",
+      ]);
+    } finally {
+      delete process.env.NEXT_PUBLIC_PLAN_DISPLAY_NAMES;
+    }
   });
 });
 

@@ -2626,12 +2626,6 @@
           "description": "Change plan tier for {workspaceName}",
           "currentPlanLabel": "Current Plan",
           "newPlanLabel": "New Plan",
-          "planOptions": {
-            "free": "Free",
-            "basic": "Basic",
-            "pro": "Pro",
-            "promax": "Pro Max"
-          },
           "warningText": "⚠️ Plan changes take effect immediately and will update quota limits.",
           "confirm": "Change Plan"
         },

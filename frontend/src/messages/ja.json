@@ -2626,12 +2626,6 @@
           "description": "{workspaceName} のプラン階層を変更",
           "currentPlanLabel": "現在のプラン",
           "newPlanLabel": "新しいプラン",
-          "planOptions": {
-            "free": "Free",
-            "basic": "Basic",
-            "pro": "Pro",
-            "promax": "Pro Max"
-          },
           "warningText": "⚠️ プラン変更は即時反映され、クォータ上限が更新されます。",
           "confirm": "プラン変更"
         },

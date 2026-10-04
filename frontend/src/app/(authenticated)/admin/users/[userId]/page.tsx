@@ -65,6 +65,7 @@ import {
   PLAN_TIER_ORDER,
   isPlanTier,
   planAtLeast,
+  planLabelFromEnv,
 } from "@/lib/utils/planLabel";
 import { useToast } from "@/hooks/use-toast";
 import { USER_DETAIL_TEST_IDS } from "./testids";
@@ -161,8 +162,12 @@ export default function UserDetailPage() {
       : role;
   };
 
+  // Plan names come from the same resolver as PlanBadge (env override, then
+  // the OSS default S/M/L/XL), so the dialog never disagrees with the badge
+  // on the same page (#1848). A plan_name outside PlanTier (an API value this
+  // build does not know) is shown verbatim, as before.
   const getLocalizedPlan = (plan: string) => {
-    return isPlanTier(plan) ? t(`changePlanDialog.planOptions.${plan}`) : plan;
+    return isPlanTier(plan) ? planLabelFromEnv(plan, locale) : plan;
   };
 
   useEffect(() => {
@@ -554,7 +559,7 @@ export default function UserDetailPage() {
                               : "secondary"
                         }
                       >
-                        {workspace.plan_name || "free"}
+                        {getLocalizedPlan(workspace.plan_name || "free")}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-sm text-gray-500">
@@ -859,18 +864,20 @@ export default function UserDetailPage() {
               <label className="text-sm font-medium">
                 {t("changePlanDialog.newPlanLabel")}
               </label>
-              <Select value={newPlan} onValueChange={setNewPlan}>
-                <SelectTrigger className="mt-2">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {PLAN_TIER_ORDER.map((plan) => (
-                    <SelectItem key={plan} value={plan}>
-                      {t(`changePlanDialog.planOptions.${plan}`)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div data-testid={USER_DETAIL_TEST_IDS.planDialogNewPlan}>
+                <Select value={newPlan} onValueChange={setNewPlan}>
+                  <SelectTrigger className="mt-2">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {PLAN_TIER_ORDER.map((plan) => (
+                      <SelectItem key={plan} value={plan}>
+                        {planLabelFromEnv(plan, locale)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
             </div>
 
             <div className="bg-yellow-50 border border-yellow-200 rounded p-3">

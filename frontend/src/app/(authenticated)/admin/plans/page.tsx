@@ -14,7 +14,7 @@
 
 import React, { useEffect, useState } from "react";
 import Link from "next/link";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import {
@@ -105,7 +105,11 @@ import {
   type AddonValuesByKey,
 } from "./_addon-types";
 import { SpendCapEditDialog } from "./SpendCapEditDialog";
-import { PLAN_TIER_ORDER, type PlanTier } from "@/lib/utils/planLabel";
+import {
+  PLAN_TIER_ORDER,
+  planLabelFromEnv,
+  type PlanTier,
+} from "@/lib/utils/planLabel";
 
 const PLAN_TABS = ["workspaces", "tiers", "audit"] as const;
 
@@ -241,6 +245,7 @@ type TierRowKey = (typeof TIER_ROW_DEFINITIONS)[number]["key"];
 export default function AdminPlansPage() {
   const t = useTranslations("admin.plans");
   const tCommon = useTranslations("admin.common");
+  const locale = useLocale();
 
   const [workspaces, setWorkspaces] = useState<WorkspacePlan[]>([]);
   const [auditLog, setAuditLog] = useState<PlanChangeAudit[]>([]);
@@ -924,7 +929,8 @@ export default function AdminPlansPage() {
                 <SelectContent>
                   {PLAN_TIER_ORDER.map((plan) => (
                     <SelectItem key={plan} value={plan}>
-                      {t(`tiersTable.${plan}`)}
+                      {/* Same resolver as the PlanBadge beside it (#1848). */}
+                      {planLabelFromEnv(plan, locale)}
                     </SelectItem>
                   ))}
                 </SelectContent>

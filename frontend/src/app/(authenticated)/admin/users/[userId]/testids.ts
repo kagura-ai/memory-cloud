@@ -18,4 +18,5 @@ export const USER_DETAIL_TEST_IDS = {
   reasonModal: "reason-modal",
   reasonModalInput: "reason-modal-input",
   reasonModalConfirm: "reason-modal-confirm",
+  planDialogNewPlan: "plan-dialog-new-plan",
 } as const;
