@@ -118,10 +118,25 @@ DRIVERS = pytest.mark.parametrize("drive", [_legacy, _stateless], ids=["session"
 # --------------------------------------------------------------------- default
 
 
+def _core_definitions() -> list[dict]:
+    return [tool for tool in get_tool_definitions() if tool["name"] in CORE_TOOLS]
+
+
 @DRIVERS
 @pytest.mark.asyncio
-@pytest.mark.parametrize("query", [None, b"", b"profile=full", b"session_id=mcp-1"])
-async def test_without_a_selection_the_full_list_is_unchanged(drive, query):
+@pytest.mark.parametrize("query", [None, b"", b"profile=core", b"session_id=mcp-1"])
+async def test_without_a_selection_the_core_list_is_returned(drive, query):
+    """#1849: no selection means the core profile."""
+    send = await drive(query)
+
+    assert send.status == 200
+    assert send.body["result"]["tools"] == _core_definitions()
+
+
+@DRIVERS
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", [b"profile=full", b"session_id=mcp-1&profile=full"])
+async def test_profile_full_returns_the_whole_registry(drive, query):
     send = await drive(query)
 
     assert send.status == 200
@@ -129,20 +144,20 @@ async def test_without_a_selection_the_full_list_is_unchanged(drive, query):
 
 
 @pytest.mark.asyncio
-async def test_session_default_response_is_byte_for_byte_todays():
+async def test_session_default_response_is_byte_for_byte_the_core_profile():
     send = await _legacy(None)
 
     assert (
         send.raw
         == json.dumps(
-            {"jsonrpc": "2.0", "id": 4, "result": {"tools": get_tool_definitions()}}
+            {"jsonrpc": "2.0", "id": 4, "result": {"tools": _core_definitions()}}
         ).encode()
     )
-    assert send.raw == (await _legacy(b"profile=full")).raw
+    assert send.raw == (await _legacy(b"profile=core")).raw
 
 
 @pytest.mark.asyncio
-async def test_stateless_default_response_is_byte_for_byte_todays():
+async def test_stateless_default_response_is_byte_for_byte_the_core_profile():
     send = await _stateless(None)
 
     server_info = send.body["result"]["_meta"]
@@ -154,7 +169,7 @@ async def test_stateless_default_response_is_byte_for_byte_todays():
                 "id": 4,
                 "result": {
                     "resultType": "complete",
-                    "tools": get_tool_definitions(),
+                    "tools": _core_definitions(),
                     "ttlMs": TOOLS_LIST_TTL_MS,
                     "cacheScope": "public",
                     "_meta": server_info,
@@ -162,7 +177,7 @@ async def test_stateless_default_response_is_byte_for_byte_todays():
             }
         ).encode()
     )
-    assert send.raw == (await _stateless(b"profile=full")).raw
+    assert send.raw == (await _stateless(b"profile=core")).raw
 
 
 # ------------------------------------------------------------------- selection
@@ -175,7 +190,7 @@ async def test_core_profile_lists_only_the_core_tools(drive):
 
     assert send.status == 200
     assert _listed(send) == list(CORE_TOOLS)
-    assert len(send.raw) < len((await drive(None)).raw) / 2
+    assert len(send.raw) < len((await drive(b"profile=full")).raw) / 2
 
 
 @DRIVERS

@@ -9,8 +9,10 @@ already stores the endpoint URL, so that is where the choice lives::
     /mcp/w/{workspace_id}?profile=core
     /mcp/w/{workspace_id}?tools=remember,recall,reference
 
-``tools`` is an explicit allowlist and wins over ``profile``; with neither (or
-``profile=full``) the list is exactly ``get_tool_definitions()``.
+``tools`` is an explicit allowlist and wins over ``profile``. With neither, the
+list is the ``core`` profile (#1849 — ``DEFAULT_PROFILE``); ``profile=full`` is
+exactly ``get_tool_definitions()``. A tool left out of the list stays callable:
+``describe_tools`` names the hidden ones and returns their schemas on request.
 
 A profile is a VIEW, NOT AN AUTHORIZATION BOUNDARY. It filters ``tools/list``
 and nothing else: ``tools/call`` never reads it, so a tool left out of the list
@@ -44,10 +46,15 @@ CORE_TOOLS: tuple[str, ...] = (
     "list_tags",
     "feedback",
     "guide",
+    "describe_tools",
 )
 
 # ``None`` = no filter. Insertion order is the order error messages list them in.
 PROFILES: dict[str, tuple[str, ...] | None] = {"full": None, "core": CORE_TOOLS}
+
+# What ``tools/list`` returns when the URL selects nothing (#1849). ``full``
+# remains one query parameter away; ``tools/call`` never reads a profile.
+DEFAULT_PROFILE = "core"
 
 # Names read from one ``tools`` value; the rest is ignored. The registry holds
 # far fewer tools, so a longer list is a mistake or abuse, never a real request.
@@ -92,7 +99,8 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
 
     Returns:
         The selected definitions, always in registry order. With no selection
-        this is ``get_tool_definitions()`` unchanged.
+        this is the ``DEFAULT_PROFILE`` (core) list; ``profile=full`` is
+        ``get_tool_definitions()`` unchanged.
 
     Raises:
         ToolProfileError: ``profile`` names no known profile, or ``tools``
@@ -100,7 +108,7 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
     """
     definitions = get_tool_definitions()
     if not query_string:
-        return definitions
+        return _apply_profile(definitions, DEFAULT_PROFILE)
 
     if isinstance(query_string, bytes):
         query_string = query_string.decode("utf-8", "replace")
@@ -140,8 +148,13 @@ def select_tool_definitions(query_string: bytes | str | None) -> list[dict]:
                 f"Invalid params: unknown tool profile {profile[:_SHOWN_CHARS]!r}. "
                 f"Valid profiles: {', '.join(PROFILES)}."
             )
-        selected = PROFILES[profile]
-        if selected is not None:
-            return [tool for tool in definitions if tool["name"] in selected]
+        return _apply_profile(definitions, profile)
 
-    return definitions
+    return _apply_profile(definitions, DEFAULT_PROFILE)
+
+
+def _apply_profile(definitions: list[dict], profile: str) -> list[dict]:
+    selected = PROFILES[profile]
+    if selected is None:
+        return definitions
+    return [tool for tool in definitions if tool["name"] in selected]

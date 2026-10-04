@@ -1555,6 +1555,26 @@
     }
   },
   {
+    "name": "describe_tools",
+    "readOnly": true,
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "set_state",
     "inputSchema": {
       "type": "object",

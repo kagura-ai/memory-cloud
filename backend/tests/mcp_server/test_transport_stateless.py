@@ -1239,11 +1239,12 @@ async def test_digest_suffix_follows_the_urls_tool_profile(digest_source):
     ctx = uuid4()
     digest_source.entries = _digest_entries(ctx, "a", total=4)
 
-    full = await _post(_request("server/discover"), query_string=f"guardrails={ctx}".encode())
-    core = await _post(
+    full = await _post(
         _request("server/discover"),
-        query_string=f"guardrails={ctx}&profile=core".encode(),
+        query_string=f"guardrails={ctx}&profile=full".encode(),
     )
+    # No profile = the core view since #1849, so the suffix names get_context_info.
+    core = await _post(_request("server/discover"), query_string=f"guardrails={ctx}".encode())
 
     assert full.body["result"]["instructions"].endswith("(+3 more: load_guardrails(context_id))")
     assert core.body["result"]["instructions"].endswith("(+3 more: get_context_info(context_id))")

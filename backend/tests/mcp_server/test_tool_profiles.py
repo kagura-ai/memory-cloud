@@ -85,6 +85,7 @@ def test_core_tools_are_the_documented_set():
         "list_tags",
         "feedback",
         "guide",
+        "describe_tools",
     }
 
 
@@ -113,11 +114,19 @@ def test_core_list_stays_under_its_character_budget():
 
 @pytest.mark.parametrize(
     "query",
-    [None, b"", "", b"profile=full", "profile=full", b"session_id=mcp-1", b"unrelated=1&x=core"],
+    [None, b"", "", b"profile=core", b"session_id=mcp-1", b"unrelated=1&x=core"],
 )
-def test_no_selection_returns_todays_full_list_unchanged(query):
-    assert select_tool_definitions(query) == get_tool_definitions()
+def test_no_selection_returns_the_core_list(query):
+    """#1849: the default view is the core profile; ``full`` is one parameter away."""
+    core = [tool for tool in get_tool_definitions() if tool["name"] in CORE_TOOLS]
+    assert select_tool_definitions(query) == core
     # Byte-for-byte: what reaches the wire is the serialization.
+    assert json.dumps(select_tool_definitions(query)) == json.dumps(core)
+
+
+@pytest.mark.parametrize("query", [b"profile=full", "profile=full", b"session_id=x&profile=full"])
+def test_profile_full_returns_the_whole_registry_unchanged(query):
+    assert select_tool_definitions(query) == get_tool_definitions()
     assert json.dumps(select_tool_definitions(query)) == json.dumps(get_tool_definitions())
 
 

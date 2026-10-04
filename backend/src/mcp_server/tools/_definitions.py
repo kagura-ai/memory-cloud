@@ -1802,6 +1802,27 @@ Returns: {status, topics: [{topic, text}], unknown?, hint?}.""",
             },
         },
         {
+            "name": "describe_tools",
+            "readOnly": True,
+            "description": """List the tools this URL's tools/list left out (the default view is the core memory tools), or return their full schemas. Every tool is callable whether listed or not; call this when a task needs Sleep, analyses, files, edges, secrets, resources or the agent control plane.
+Without names: {status, tools: [{name, title, summary}], count, listed, url, hint}. With names: {status, definitions: [<complete tool definitions>], unknown?, url}. To list more by URL: ?profile=full (everything) or ?tools=a,b.""",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 20,
+                        "description": "Tool names whose complete definitions (inputSchema, annotations) you want, so you can call them now.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Case-insensitive substring to narrow the hidden-tool list by name, title or summary.",
+                    },
+                },
+            },
+        },
+        {
             "name": "set_state",
             "description": """Upsert ephemeral agent run-state at (context_id, key): the current task, step, scratch flags. For transient state, NOT durable knowledge — use remember() for knowledge. State is not a memory: never embedded, never returned by recall().
 

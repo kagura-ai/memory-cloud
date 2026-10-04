@@ -194,14 +194,15 @@ def test_select_never_logs_the_value():
 # --------------------------------------------------------------- tool view names
 
 
-@pytest.mark.parametrize("raw", [b"", b"profile=full"])
+@pytest.mark.parametrize("raw", [b"profile=full", b"session_id=x&profile=full"])
 def test_tool_view_names_lists_load_guardrails_for_the_full_view(raw):
     names = tool_view_names(raw)
     assert names is not None and "load_guardrails" in names
 
 
-@pytest.mark.parametrize("raw", [b"profile=core", b"tools=remember,recall"])
+@pytest.mark.parametrize("raw", [b"", b"profile=core", b"tools=remember,recall"])
 def test_tool_view_names_omits_load_guardrails_for_narrow_views(raw):
+    """``b""`` is the default view, which is the core profile since #1849."""
     names = tool_view_names(raw)
     assert names is not None and "load_guardrails" not in names
 

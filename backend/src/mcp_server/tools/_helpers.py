@@ -84,6 +84,27 @@ def get_mcp_guardrails_selection() -> "GuardrailSelection | None":
 
 
 # ============================================================================
+# #1849: per-request tool view (what this URL's ``tools/list`` shows)
+# ============================================================================
+# ``tools/list`` defaults to the core profile, so most sessions never see the
+# other tools. ``describe_tools`` lists what the URL left out; to know that it
+# needs the URL's selection, which the transport parses once per request at
+# the same seam as the two contextvars above. ``None`` (never set — a direct
+# handler call in tests) makes the handler fall back to the core set.
+_mcp_tool_view: ContextVar["frozenset[str] | None"] = ContextVar("mcp_tool_view", default=None)
+
+
+def set_mcp_tool_view(names: "frozenset[str] | None") -> None:
+    """Store the names the request URL's ``tools/list`` returns (``None`` = unknown)."""
+    _mcp_tool_view.set(names)
+
+
+def get_mcp_tool_view() -> "frozenset[str] | None":
+    """Read the request URL's tool view; ``None`` = not evaluated."""
+    return _mcp_tool_view.get()
+
+
+# ============================================================================
 # Timeout
 # ============================================================================
 

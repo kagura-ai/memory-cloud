@@ -42,6 +42,7 @@ _TOOLS_WITHOUT_CONTEXT_ID = frozenset(
         "list_my_bindings",
         "describe_binding",
         "guide",  # #1850: static manual text, no context
+        "describe_tools",  # #1849: registry data, no context
         "list_contexts",
         "create_context",
         "update_context",
@@ -116,6 +117,8 @@ _RATE_LIMIT_EXEMPT_TOOLS = frozenset(
         "load_guardrails",
         # #1850: the tool manual is static text — no database, no embedding.
         "guide",
+        # #1849: registry introspection — no database, no embedding.
+        "describe_tools",
         # Issue #1128: secret-store tools carry NO embedding/LLM cost (the memory
         # quota's cost driver) and must stay callable on EVERY plan — an agent has
         # to be able to fetch its deploy key even after heavy recall use. Available
@@ -211,6 +214,7 @@ def _build_registry() -> dict[str, Any]:
         handle_merge_contexts,
         handle_update_context,
     )
+    from mcp_server.tools.describe import handle_describe_tools
     from mcp_server.tools.edge import (
         handle_create_edge,
         handle_delete_edge,
@@ -266,6 +270,7 @@ def _build_registry() -> dict[str, Any]:
         "reference": handle_reference,
         "explore": handle_explore,
         "guide": handle_guide,  # #1850
+        "describe_tools": handle_describe_tools,  # #1849
         # Issue #889: agent session-state lane (TTL, recall-excluded)
         "set_state": handle_set_state,
         "get_state": handle_get_state,
