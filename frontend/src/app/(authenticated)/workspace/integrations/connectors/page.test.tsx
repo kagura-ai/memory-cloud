@@ -1954,6 +1954,9 @@ describe("ConnectorsPage RBAC gate", () => {
 
     // #1880: an OAuth sign-in, so the variant with the refresh sentence.
     expect(await screen.findByText("hereOAuth")).toBeInTheDocument();
+    // …and the list was re-read: the refresh may have bumped the existing
+    // connector's config_version, which its editor sends back on save.
+    expect(mockListConnectors).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole("button", { name: "editExisting" }));
 
     expect(await screen.findByText("settingsTitle")).toBeInTheDocument();

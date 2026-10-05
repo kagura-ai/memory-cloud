@@ -796,6 +796,10 @@ export default function ConnectorsPage() {
       if (err instanceof ApiError && err.gate) {
         setCreateRefusal(err);
       } else if (conflict) {
+        // #1880: this sign-in may have stored a new bot token on the existing
+        // connector, which bumps its config_version. Reload before offering
+        // its editor, so the first save does not ride a stale version.
+        if (conflict.kind === "here") await reload();
         setCreateConflict(conflict);
       } else {
         setCreateError(err instanceof Error ? err.message : String(err));
