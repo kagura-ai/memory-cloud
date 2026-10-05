@@ -1067,6 +1067,11 @@ class ResourceIndexer:
         projected text embedded, and ``build_resource_point`` under the id the
         row already names (``Memory.point_id``). The row itself is not touched.
 
+        The row is the source, as it is for recall's hydration: a row whose
+        content was edited into another JSON object is rebuilt from what it
+        holds now, not checked against the event it came from (events carry
+        no context and may be pruned).
+
         The generic embedding path must not take such a row: it would embed
         the row's summary, which is only the label ``[resource] doc vN``, and
         store it under the row id, leaving ``Memory.point_id`` naming nothing.
@@ -1081,8 +1086,8 @@ class ResourceIndexer:
 
         Raises:
             ResourceRebuildError: The row does not own a resource point, its
-                resource or schema is gone, or its content is not the
-                ingested document. Ingesting the document again (a newer
+                resource or schema is gone, or its content is not a JSON
+                object. Ingesting the document again (a newer
                 version; the same one is refused as a duplicate) rebuilds it.
             QdrantError: The upsert failed.
         """
@@ -1108,7 +1113,7 @@ class ResourceIndexer:
             document = None
         if not isinstance(document, dict):
             raise ResourceRebuildError(
-                f"Memory {memory.id} does not hold the ingested document "
+                f"Memory {memory.id} does not hold a JSON document for "
                 f"'{doc_id}' v{version}; ingest the document again as a newer version to rebuild its vector"
             )
 

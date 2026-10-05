@@ -1067,11 +1067,13 @@ would to a re-index.
   its entries in members' context restrictions (`allowed_context_ids` — grant
   them again), and the resource tokens revoked with it.
 - The vector of an ingested document the sweep cannot rebuild from its row: the
-  resource has no schema left, or the memory's content was edited and is no
-  longer the ingested document. The memory is live but ends `failed`, with an
-  `embedding_error` that names the document, instead of being given a vector of
-  its label; ingest the document again as a newer version (the same version is
-  refused as a duplicate) to make it searchable.
+  resource has no schema left, or the memory's content was edited into
+  something that is not a JSON document. The memory is live but ends `failed`,
+  with an `embedding_error` that names the document, instead of being given a
+  vector of its label; ingest the document again as a newer version (the same
+  version is refused as a duplicate) to make it searchable. The rebuild reads
+  the row, not the ingest history: a memory whose content was edited into
+  another JSON document is rebuilt from what it holds now.
 
 **Refusals.** A context that is not deleted; a context of a deleted workspace
 (deleting a workspace is final); a context whose name a live context of the

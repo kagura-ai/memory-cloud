@@ -539,6 +539,37 @@ async def test_resource_row_that_cannot_be_rebuilt_fails_instead_of_a_label_vect
 
 
 @pytest.mark.asyncio
+async def test_resource_row_is_rebuilt_from_what_it_holds_now(db_session, seed):
+    context, indexed = await _index_resource(db_session, seed)
+    context_id = context.id
+    rows = await _memories(db_session, context_id)
+    edited = next(m for m in rows.values() if m.resource_doc_id == "doc_1")
+    not_json = next(m for m in rows.values() if m.resource_doc_id == "doc_2")
+    edited_id, not_json_id = edited.id, not_json.id
+    # Edited in place: one into another JSON document, one into plain text.
+    edited.content = '{"title": "Annual revenue report", "category": "finance", "price": 7}'
+    not_json.content = "free text, no longer a document"
+    await db_session.commit()
+    await _delete(db_session, context_id)
+    await restore_deleted_context(db_session, context_id, dry_run=False)
+
+    client, generic_writer = await _run_pending_embedding(db_session, edited_id)
+    generic_writer.assert_not_awaited()
+    rebuilt = client.upsert.await_args.kwargs["points"][0]
+    assert rebuilt.id == indexed["doc_1"].id
+    assert rebuilt.payload["content"] == "Title: Annual revenue report"
+    assert rebuilt.payload["sortable"] == {"price": 7}
+
+    client, generic_writer = await _run_pending_embedding(db_session, not_json_id)
+    client.upsert.assert_not_awaited()
+    generic_writer.assert_not_awaited()
+    rows = await _memories(db_session, context_id)
+    assert rows[edited_id].embedding_status == "success"
+    assert rows[not_json_id].embedding_status == "failed"
+    assert "does not hold a JSON document" in (rows[not_json_id].embedding_error or "")
+
+
+@pytest.mark.asyncio
 async def test_rebuild_point_refuses_a_row_that_owns_no_resource_point(db_session, seed):
     context = seed.context()
     db_session.add(context)
