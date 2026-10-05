@@ -343,7 +343,16 @@ class OwnerLockTimeout(Exception):
 # than this is parked on a worker thread for nothing the client can use, so
 # it gives up and the client retries. Postgres syntax; the sync engine is
 # Postgres everywhere but the SQLite unit fixtures, which skip the SET.
+#
+# The bound covers the owner row only (#1878): ``share_lock_owner`` resets
+# ``lock_timeout`` once the row is locked, as ``connector_provisioning`` and
+# ``quota_service`` do after their own bounded lock. The alternative — keep
+# the bound for the rest of the transaction and map lock-not-available on
+# every later lock (the device-code row in ``_confirm_device_sync``, the
+# grant rows) to the same 503 — was not taken: each caller would need its own
+# mapping, and a later lock that timed out without one surfaces as a 500.
 _GRANT_LOCK_TIMEOUT_SQL = text("SET LOCAL lock_timeout = '5000ms'")
+_GRANT_LOCK_TIMEOUT_RESET_SQL = text("SET LOCAL lock_timeout = '0'")
 _PG_LOCK_NOT_AVAILABLE = "55P03"
 
 
@@ -353,8 +362,14 @@ def share_lock_owner(session: Session, user_id: str) -> bool:
     Returns whether the row exists (an erasure deletes it inside the
     transaction that held it). Raises ``OwnerLockTimeout`` when the wait ran
     out; any other database error propagates.
+
+    The timeout applies to this lock only: on return ``lock_timeout`` is back
+    to ``0`` for the rest of the caller's transaction (#1878). It is not reset
+    when the lock fails — the failed statement aborted the transaction, and
+    the caller's rollback discards the ``SET LOCAL``.
     """
-    if session.get_bind().dialect.name == "postgresql":
+    bounded = session.get_bind().dialect.name == "postgresql"
+    if bounded:
         session.execute(_GRANT_LOCK_TIMEOUT_SQL)
     try:
         owner = (
@@ -367,6 +382,8 @@ def share_lock_owner(session: Session, user_id: str) -> bool:
         if getattr(exc.orig, "pgcode", None) == _PG_LOCK_NOT_AVAILABLE:
             raise OwnerLockTimeout() from exc
         raise
+    if bounded:
+        session.execute(_GRANT_LOCK_TIMEOUT_RESET_SQL)
     return owner is not None
 
 

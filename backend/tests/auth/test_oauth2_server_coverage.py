@@ -557,8 +557,19 @@ class TestShareLockOwner:
 
     def test_sets_the_lock_timeout_on_postgres_then_locks(self) -> None:
         session = self._session("postgresql")
+        events: list[str] = []
+        session.execute.side_effect = lambda stmt: events.append(str(stmt))
+        query = session.query.return_value.filter_by.return_value.with_for_update.return_value
+        query.first.side_effect = lambda: events.append("lock") or ("u-1",)
+
         assert share_lock_owner(session, "u-1") is True
-        assert "lock_timeout" in str(session.execute.call_args.args[0])
+        # #1878: the bound covers the owner row only — it is lifted before
+        # the caller locks anything else in the transaction.
+        assert events == [
+            "SET LOCAL lock_timeout = '5000ms'",
+            "lock",
+            "SET LOCAL lock_timeout = '0'",
+        ]
         session.query.return_value.filter_by.assert_called_once_with(user_id="u-1")
         session.query.return_value.filter_by.return_value.with_for_update.assert_called_once_with(
             read=True, key_share=True
@@ -585,6 +596,36 @@ class TestShareLockOwner:
         )
         with pytest.raises(OwnerLockTimeout):
             share_lock_owner(session, "u-1")
+        # The failed statement aborted the transaction: no reset is sent.
+        session.execute.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_the_timeout_does_not_outlive_the_owner_lock(self, async_engine) -> None:
+        """#1878, against PostgreSQL: after the owner lock, the same
+        transaction waits on its next lock without the 5s bound.
+
+        ``async_engine`` is requested for the schema it creates (and its skip
+        when there is no database); the lock itself runs on a sync session,
+        off the loop, as the grant paths do.
+        """
+        import asyncio
+
+        from sqlalchemy import create_engine, text
+        from sqlalchemy.orm import Session
+
+        from config.database import to_sync_database_url
+        from tests.conftest import TEST_DATABASE_URL
+
+        def _lock_then_show() -> tuple[bool, str]:
+            engine = create_engine(to_sync_database_url(TEST_DATABASE_URL))
+            try:
+                with Session(engine) as session:
+                    found = share_lock_owner(session, "no-such-user-1878")
+                    return found, session.execute(text("SHOW lock_timeout")).scalar_one()
+            finally:
+                engine.dispose()
+
+        assert await asyncio.to_thread(_lock_then_show) == (False, "0")
 
     def test_other_database_errors_propagate(self) -> None:
         from sqlalchemy.exc import OperationalError
