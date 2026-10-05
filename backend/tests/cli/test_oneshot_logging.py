@@ -9,6 +9,7 @@ operator to scroll past — on top of the plan report. No database needed.
 
 from __future__ import annotations
 
+import ast
 import logging
 import sys
 import uuid
@@ -23,7 +24,12 @@ _BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_BACKEND_SRC) not in sys.path:
     sys.path.insert(0, str(_BACKEND_SRC))
 
-from cli import apply_rerank_defaults, transfer_context_creator  # noqa: E402
+from cli import (  # noqa: E402
+    apply_rerank_defaults,
+    restore_context,
+    sweep_orphan_vectors,
+    transfer_context_creator,
+)
 from cli._oneshot import INSECURE_QDRANT_WARNING, configure_logging  # noqa: E402
 
 _PER_REQUEST = ("httpx", "httpcore")
@@ -116,7 +122,43 @@ _CLI_ARGV = [
         ["--from", "a", "--to", "b", "--workspace", "00000000-0000-0000-0000-000000000001"],
     ),
     (apply_rerank_defaults, ["--all"]),
+    (sweep_orphan_vectors, []),
+    (restore_context, ["00000000-0000-0000-0000-000000000002"]),
 ]
+
+
+def _imports_run_plan_apply(path: Path) -> bool:
+    """Whether the module at ``path`` imports the plan/apply scaffold."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in ("cli._oneshot", "_oneshot"):
+            if any(alias.name in ("run_plan_apply", "*") for alias in node.names):
+                return True
+        if isinstance(node, ast.Attribute) and node.attr == "run_plan_apply":
+            return True  # ``import cli._oneshot`` + ``_oneshot.run_plan_apply(...)``
+    return False
+
+
+def test_every_one_shot_cli_is_covered_by_the_logging_tests():
+    # conftest.py stubs ``setup_logger`` for every other CLI test, so the two
+    # parametrized tests below are the only place a ``_main`` that forgot
+    # ``configure_logging`` (or a ``_parse`` without ``--log-level``) fails.
+    # A new command built on the scaffold has to be listed in ``_CLI_ARGV``.
+    cli_dir = _BACKEND_SRC / "cli"
+    on_the_scaffold = {
+        f"cli.{path.stem}"
+        for path in cli_dir.glob("*.py")
+        if path.name != "_oneshot.py" and _imports_run_plan_apply(path)
+    }
+    assert on_the_scaffold, "expected one-shot CLIs under src/cli"
+    covered = {module.__name__ for module, _ in _CLI_ARGV}
+    assert on_the_scaffold - covered == set(), (
+        "one-shot CLI(s) missing from _CLI_ARGV: " + ", ".join(sorted(on_the_scaffold - covered))
+    )
+    assert covered - on_the_scaffold == set(), (
+        "_CLI_ARGV lists module(s) that no longer use run_plan_apply: "
+        + ", ".join(sorted(covered - on_the_scaffold))
+    )
 
 
 @pytest.mark.parametrize(("module", "argv"), _CLI_ARGV)
