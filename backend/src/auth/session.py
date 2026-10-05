@@ -741,20 +741,11 @@ class SessionManager:
             logger.error(f"Failed to read sign-in time: {e}")
             return None
 
-    def signed_in_within(self, session_id: str, account_id: str, window: timedelta) -> bool:
-        """Whether ``account_id`` signed in on this session within ``window``.
-
-        Not a proof for an identity link (#1818) — use ``proven_within``.
-
-        A time in the future (clock skew, a tampered record) does not count,
-        and neither does a missing one.
-        """
-        return _within(self.signed_in_at(session_id, account_id), window)
-
     def proven_within(self, session_id: str, account_id: str, window: timedelta) -> bool:
         """Whether ``account_id`` proved its credential within ``window`` (#1818).
 
-        What an identity link asks for. Same rules as ``signed_in_within``.
+        What an identity link asks for. A time in the future (clock skew, a
+        tampered record) does not count, and neither does a missing one.
         """
         return _within(self.proven_at(session_id, account_id), window)
 
