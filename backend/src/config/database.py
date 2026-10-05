@@ -18,6 +18,15 @@ SYNC_DRIVERNAME = "postgresql+psycopg2"
 # through unchanged.
 _NORMALIZED_SCHEMES = frozenset({"postgresql", ASYNC_DRIVERNAME, SYNC_DRIVERNAME})
 
+# Raised in place of the URL parser's own error when REDIS_URL does not parse
+# (#1881). The parser quotes the text before the first reserved character,
+# which for ``redis://:<password>@host`` with an unencoded ``/``, ``#`` or
+# ``?`` in the password is the start of the password, so both Redis clients
+# raise this fixed text and chain nothing to it.
+INVALID_REDIS_URL_MESSAGE = (
+    "REDIS_URL is not a valid URL: percent-encode the password or use a hex password"
+)
+
 
 def _with_drivername(url: str, drivername: str) -> str:
     """Swap the URL's scheme for ``drivername``, leaving the rest verbatim.

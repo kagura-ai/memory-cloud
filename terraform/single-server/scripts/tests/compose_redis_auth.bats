@@ -32,6 +32,19 @@ PROJECT_DIR="$BATS_TEST_DIRNAME/../.."
 PASSWORD='k1794 p@ss:w/rd#%x"q$y'
 # A password that needs no URL-encoding (what `openssl rand -hex` produces).
 HEX='k1794abcdef0123456789abcdef0123456789'
+# #1881: passwords that break the URL the compose file builds, one per env
+# file "reserved-<name>.env". / # ? [ make it unparseable (/ is a base64
+# character, so `openssl rand -base64` produces it); %41 parses but decodes to
+# "A", so the API would send another password. HEAD is what the URL parser
+# quotes in its error.
+RESERVED_HEAD='k1881head'
+RESERVED="slash|${RESERVED_HEAD}/tail
+hash|${RESERVED_HEAD}#tail
+question|${RESERVED_HEAD}?tail
+bracket|${RESERVED_HEAD}[tail
+percent|${RESERVED_HEAD}%41tail
+digits|1881/tail"
+DEPLOYMENT_DOC="$BATS_TEST_DIRNAME/../../../../docs/deployment.md"
 
 setup_file() {
     export COMPOSE_MISSING=0 LIVE_SKIP=""
@@ -90,6 +103,20 @@ expose|-f docker-compose.data.yml -f docker-compose.data-expose.yml"
                         config --format json) > "$WORK/$env-$name.json" 2> "$WORK/$env-$name.err" || true
         done <<< "$COMPOSITIONS"
     done
+
+    # #1881: the single-host render for each password that breaks the built
+    # URL (no REDIS_URL in the env file).
+    local value
+    while IFS='|' read -r name value; do
+        { cat "$d/base.env"; printf "REDIS_PASSWORD='%s'\n" "$value"; } > "$d/.env.prod"
+        (cd "$d" \
+            && env -u QDRANT_API_KEY -u DB_PASSWORD -u KAGURA_DOMAIN \
+                   -u POSTGRES_HOST -u QDRANT_HOST -u REDIS_HOST \
+                   -u REDIS_PASSWORD -u REDIS_URL \
+                   -u COMPOSE_PROJECT_NAME -u COMPOSE_FILE \
+                docker compose -p single-server -f docker-compose.prod.yml --env-file .env.prod \
+                    config --format json) > "$WORK/reserved-$name.json" 2> "$WORK/reserved-$name.err" || true
+    done <<< "$RESERVED"
 
     # Live part: the image the compose files pin.
     IMAGE="$(awk '$1 == "image:" && $2 ~ /^redis:/ { print $2; exit }' "$PROJECT_DIR/docker-compose.data.yml")"
@@ -255,6 +282,61 @@ print("IDENTICAL" if single == split else "DIFFERENT")
 PYEOF
         [ "$output" = "IDENTICAL" ]
     done
+}
+
+# --- the documented render check (#1881) --------------------------------------
+
+# Run step 1 of docs/deployment.md "Turning it on" against a render: the
+# Python program quoted after `config --format json | python3 -c`, taken from
+# the document so the test and the docs cannot drift.
+# doc_render_check <render>
+doc_render_check() {
+    local program
+    program="$(python3 - "$DEPLOYMENT_DOC" <<'PYEOF'
+import re, sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+section = text.split("## Redis Password (single-server compose)", 1)[1].split("\n## ", 1)[0]
+found = re.findall(r"config --format json \| python3 -c '\n(.*?)'\n", section, re.S)
+if len(found) != 1:
+    sys.exit(f"expected one render check in the Redis Password section, found {len(found)}")
+print(found[0])
+PYEOF
+    )" || return 1
+    python3 -c "$program" < "$WORK/$1.json"
+}
+
+@test "documented check: True True for a hex password and for an encoded REDIS_URL" {
+    require_compose
+    run doc_render_check hex-prod
+    [ "$status" -eq 0 ]
+    [ "$output" = "True True" ]
+    run doc_render_check password-prod
+    [ "$status" -eq 0 ]
+    [ "$output" = "True True" ]
+}
+
+@test "documented check: without a password the first word is False" {
+    require_compose
+    run doc_render_check base-prod
+    [ "$status" -eq 0 ]
+    [ "$output" = "False True" ]
+}
+
+@test "documented check: a password with / # ? [ or %XX fails the URL and is never printed" {
+    require_compose
+    local name value
+    while IFS='|' read -r name value; do
+        [ -s "$WORK/reserved-$name.json" ] || { cat "$WORK/reserved-$name.err"; false; }
+        # Not vacuous: the password did reach Redis as written.
+        run svc_field "reserved-$name" redis command.-1
+        [ "$output" = "$value" ]
+        run doc_render_check "reserved-$name"
+        [ "$status" -eq 0 ]
+        [ "$output" = "True False" ] || { echo "$name: $output"; false; }
+        [[ "$output" != *"${value%%[/#?[%]*}"* ]]
+        [[ "$output" != *tail* ]]
+    done <<< "$RESERVED"
 }
 
 # --- live --------------------------------------------------------------------

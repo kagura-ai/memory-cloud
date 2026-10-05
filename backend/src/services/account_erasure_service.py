@@ -1021,7 +1021,8 @@ class AccountErasureService:
 
         # Direct per-user tables.
         # #1769: the FK cascades too; deleted and counted here so the erasure
-        # summary lists them (the same statement the password reset runs).
+        # summary lists them (the password reset deletes the same rows with
+        # ``known_devices_delete``, which does not count them).
         counts["user_known_devices"] = await self._count_and_delete(
             UserKnownDevice, UserKnownDevice.user_id == user_id
         )

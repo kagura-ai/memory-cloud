@@ -267,6 +267,18 @@ class BatchItemError(Exception):
         self.cause = cause
 
 
+class BatchCommittedError(Exception):
+    """``remember_many`` was cancelled (a timeout) AFTER its commit (#1873).
+
+    Every row is stored and has its embedding task; ``responses`` holds one
+    per request, in order. The caller must not report a rollback, and the
+    batch must not be sent again."""
+
+    def __init__(self, responses: list[RememberResponse]):
+        super().__init__(f"batch of {len(responses)} committed before the cancellation")
+        self.responses = responses
+
+
 @dataclass
 class _PreparedRemember:
     """A ``remember`` row that is built and gated but not yet committed."""
@@ -983,9 +995,23 @@ class MemoryService:
         is re-raised as :class:`BatchItemError` carrying the failing index, so
         nothing is written. Only after the single commit do the per-row
         post-commit steps run (embedding tasks, declared links, access
-        events). The daily quota is reserved per item while preparing; a
-        rolled-back batch keeps those reservations (Redis), which is the
-        documented cost of asking for atomicity.
+        events).
+
+        Daily quota (#1873): the whole batch is reserved once, all or
+        nothing (``QuotaService.reserve_memories_per_day``, the
+        ``check_memories_per_day`` gate with ``count=len(requests)``), after
+        the duplicate checks and before any row. A batch that does not fit
+        raises :class:`QuotaExceededError` itself (not wrapped: no single
+        item is at fault) and charges nothing; a batch that is rolled back
+        later — a failing item, a failed commit, a cancellation before the
+        commit — gives back exactly what it reserved, so a refused batch
+        never uses up the day's budget.
+
+        Cancellation (#1873): the commit is shielded, so a timeout either
+        lands before it (rolled back, ``CancelledError`` propagates) or after
+        it. After it, every remaining row still gets its embedding task and
+        :class:`BatchCommittedError` carries the responses — the rows exist
+        and the caller must say so.
         """
         # Resolved once for the whole batch (same write gate as remember; the
         # audit identity stays "remember" — the items are remembers).
@@ -1025,6 +1051,18 @@ class MemoryService:
                 except Exception as exc:
                     raise BatchItemError(index, exc) from exc
             dedupe = DEDUPE_SUGGEST  # checked; the rows carry no tombstone
+
+        from services.quota_service import QuotaService
+
+        # #1873: one all-or-nothing reservation on the workspace the rows land
+        # in. ``reservation`` is what was really added to the counter (None
+        # when the counter was unreachable): a rollback releases that and
+        # nothing else.
+        quota_service = QuotaService(self.db)
+        reservation = await quota_service.reserve_memories_per_day(
+            UUID(workspace_id_str), len(requests)
+        )
+
         prepared: list[_PreparedRemember] = []
         try:
             for index, request in enumerate(requests):
@@ -1036,7 +1074,7 @@ class MemoryService:
                         current_context_id=current_context_id,
                         current_workspace_id=current_workspace_id,
                         key_workspace_id=key_workspace_id,
-                        _skip_daily_quota=False,
+                        _skip_daily_quota=True,  # reserved above, for the whole batch
                         tags_normalize=tags_normalize,
                         dedupe=dedupe,
                         isolation=isolation,
@@ -1046,14 +1084,25 @@ class MemoryService:
                 except Exception as exc:
                     raise BatchItemError(index, exc) from exc
                 prepared.append(item)
-            await self.db.commit()
+            cancelled = await self._commit_shielded()
         except BaseException:  # a timeout's CancelledError must roll back too
             await self.db.rollback()
+            await self._release_daily_reservation(quota_service, reservation)
             raise
         responses: list[RememberResponse] = []
         for item in prepared:
+            if cancelled:
+                # No further await: the caller is being cancelled. The row is
+                # committed, so it still gets its embedding task and an answer.
+                self._schedule_embedding(item)
+                responses.append(self._bare_response(item))
+                continue
             try:
                 responses.append(await self._finish_remember(item))
+            except asyncio.CancelledError:
+                cancelled = True
+                self._schedule_embedding(item)
+                responses.append(self._bare_response(item))
             except Exception as exc:  # the row is committed; the batch must still report it
                 logger.error(
                     "remember_many_finish_failed",
@@ -1063,7 +1112,41 @@ class MemoryService:
                 )
                 self._schedule_embedding(item)  # the row must still become searchable
                 responses.append(self._bare_response(item))
+        if cancelled:
+            logger.warning(
+                "remember_many_cancelled_after_commit", user_id=user_id, count=len(responses)
+            )
+            raise BatchCommittedError(responses)
         return responses
+
+    async def _commit_shielded(self) -> bool:
+        """Commit so that a cancellation cannot leave the outcome unknown (#1873).
+
+        The commit runs in its own task behind ``asyncio.shield``; a
+        cancellation that arrives meanwhile is held until the commit has
+        finished. Returns True when one arrived — the transaction is committed
+        all the same. A commit that fails raises its own error.
+        """
+        commit = asyncio.ensure_future(self.db.commit())
+        cancelled = False
+        while not commit.done():
+            try:
+                await asyncio.shield(commit)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception:  # noqa: S110 - re-raised from commit.result() below
+                pass
+        commit.result()
+        return cancelled
+
+    @staticmethod
+    async def _release_daily_reservation(quota_service: Any, reservation: Any) -> None:
+        """Give a rolled-back batch's daily reservation back. Best-effort: it
+        runs while another error is propagating and must not replace it."""
+        try:
+            await quota_service.release_memories_per_day(reservation)
+        except Exception as exc:
+            logger.warning("memories_per_day_release_failed", error=str(exc))
 
     def _schedule_embedding(self, prepared: _PreparedRemember) -> None:
         """Start the embedding task for a committed row, once."""
@@ -1110,7 +1193,15 @@ class MemoryService:
         )
         if candidate is None:
             return
-        if request.supersedes is not None and str(request.supersedes) == candidate["memory_id"]:
+        # Only a memory the caller can actually supersede resolves the
+        # candidate this way: for another member's memory the write would
+        # succeed without the edge (``_create_declared_links`` refuses the
+        # target) and the duplicate would stay visible.
+        if (
+            request.supersedes is not None
+            and str(request.supersedes) == candidate["memory_id"]
+            and candidate.get("supersedable", True)
+        ):
             return
         raise DuplicateCandidateError(candidate)
 
@@ -1220,10 +1311,15 @@ class MemoryService:
         """The nearest live memory when it is above the supersede-suggestion
         threshold, else None (#1853 ``dedupe="check"``).
 
-        Same embedder, collection, scoping and threshold as the post-embed
-        detection in ``_create_knn_seed_edges``, so the answer is the
-        suggestion the caller would otherwise see on a later recall. An
-        embedder that cannot run (no key, spend cap, outage) is
+        Same embedder, collection and threshold as the post-embed detection
+        in ``_create_knn_seed_edges``. The scope is what ``recall`` by the
+        same caller searches (#1873, as ``SearchService`` derives it): every
+        member's memories in a shared context; in a private one the caller's
+        own and those of the accounts linked to it (#1784). A candidate
+        another member wrote carries ``supersedable: False``: the caller can
+        read it but ``supersedes`` only takes the caller's own memories
+        (#1803), so that resolution is not offered for it. An embedder that
+        cannot run (no key, spend cap, outage) is
         :class:`DedupeUnavailableError`: the caller decides, nothing is
         written silently.
         """
@@ -1232,6 +1328,9 @@ class MemoryService:
         from services.embedding_service import EmbeddingService
         from utils.text import normalize_for_search
 
+        is_shared_context = await self.context_service.is_context_shared(UUID(context_id_str))
+        linked = await link_set_reads(self.db, user_id, not is_shared_context)
+        owner_ids = sorted(linked) if linked and len(linked) > 1 else None
         try:
             collection, embed_svc = await resolve_context_routing(
                 self.db, UUID(context_id_str), default_service=EmbeddingService(self.db)
@@ -1249,6 +1348,8 @@ class MemoryService:
                 context_id=context_id_str,
                 limit=_DEDUPE_CHECK_K,
                 collection_name=collection,
+                is_shared_context=is_shared_context,
+                owner_ids=owner_ids,
             )
         except Exception as exc:
             raise DedupeUnavailableError(str(exc)) from exc
@@ -1277,11 +1378,21 @@ class MemoryService:
             )
             if not kept:
                 continue
-            return {
+            candidate: dict[str, Any] = {
                 "memory_id": str(row.id),
                 "summary": row.summary,
                 "similarity": round(score, 4),
             }
+            # The ownership rule of ``_create_declared_links`` (#1803): the
+            # caller's own memory, or in a private context a linked account's.
+            own = row.user_id == user_id or (
+                linked is not None
+                and row.user_id in linked
+                and await self._is_private_context(context_id_str)
+            )
+            if not own:
+                candidate["supersedable"] = False
+            return candidate
         return None
 
     async def update_memory(
@@ -6771,6 +6882,31 @@ def is_configuration_failure(exc: BaseException) -> bool:
     )
 
 
+def is_unrebuildable_resource_failure(exc: BaseException) -> bool:
+    """Is this a resource-ingested row whose point cannot be rebuilt? (#1897)
+
+    ``ResourceIndexer.rebuild_point`` raises ``ResourceRebuildError`` when the
+    row's resource has no schema any more, or the row no longer holds a JSON
+    document. Both are permanent until an operator acts — publishes the schema
+    again, or ingests the document as a newer version — so a retry changes
+    nothing: the row is final on the first attempt instead of waiting out the
+    backoff ``MAX_EMBEDDING_RETRIES`` times.
+
+    The opposite of ``is_configuration_failure`` in what it does to the
+    budget. A missing credential is re-probed without bound because adding the
+    key is all it takes and the probe is free. Here the sweep cannot tell that
+    the schema is back, and every probe reads the context, the resource and
+    its schema, so the row stops and the admin retry
+    (``POST /admin/embedding/retry-failed``) starts it again.
+
+    The type arrives intact: ``rebuild_point`` raises it before it calls the
+    embedding service, and nothing between it and the failure handler wraps it.
+    """
+    from services.resource_indexer import ResourceRebuildError
+
+    return isinstance(exc, ResourceRebuildError)
+
+
 def embedding_failure_values(exc: BaseException, now: datetime) -> dict[str, Any]:
     """Column values to stamp on a memory whose embedding failed (#1496).
 
@@ -6785,7 +6921,15 @@ def embedding_failure_values(exc: BaseException, now: datetime) -> dict[str, Any
     pre-UPDATE status, so `-1` would over-decrement a re-claimed stale
     `processing` row. It also matches the doctrine the success path already
     states — the budget is per failure-episode, not a lifetime tally.
+
+    A row that cannot be rebuilt (#1897, ``is_unrebuildable_resource_failure``)
+    is put at the ceiling instead: ``embedding_retry_eligible_clause`` claims a
+    ``failed`` row only below it, so no retry is scheduled, and the counts of
+    rows nothing will retry (``embedding_retry_count >= MAX_EMBEDDING_RETRIES``)
+    include it. The admin retry resets the counter along with the status.
     """
+    from config.constants import MAX_EMBEDDING_RETRIES
+
     values: dict[str, Any] = {
         "embedding_status": "failed",
         "embedding_error": str(exc)[:500],
@@ -6796,6 +6940,8 @@ def embedding_failure_values(exc: BaseException, now: datetime) -> dict[str, Any
     }
     if is_configuration_failure(exc):
         values["embedding_retry_count"] = 0
+    elif is_unrebuildable_resource_failure(exc):
+        values["embedding_retry_count"] = MAX_EMBEDDING_RETRIES
     return values
 
 
@@ -7106,7 +7252,9 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             # tested without a live session and a Qdrant client; see its
             # docstring for why a configuration failure must not spend the
             # budget, and `is_configuration_failure` for which failures those
-            # are (and the one known gap).
+            # are (and the one known gap). #1897: it also makes a resource row
+            # that cannot be rebuilt final on this attempt
+            # (`is_unrebuildable_resource_failure`).
             from config.constants import MAX_EMBEDDING_RETRIES
 
             values = embedding_failure_values(e, utcnow())
@@ -7145,7 +7293,13 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 "error_code": getattr(e, "error_code", None),
                 "retry_count": final_count,
             }
-            if final_count is not None and final_count >= MAX_EMBEDDING_RETRIES:
+            if is_unrebuildable_resource_failure(e):
+                # #1897: final too, but no budget was spent and no provider
+                # failed. Expected after restoring a context whose resource
+                # lost its schema, so a warning under its own name; the row
+                # carries the reason and waits for the admin retry.
+                logger.warning("embedding_resource_unrebuildable", **common)
+            elif final_count is not None and final_count >= MAX_EMBEDDING_RETRIES:
                 logger.error("embedding_budget_exhausted", **common)
             else:
                 logger.warning("embedding_failed", **common)

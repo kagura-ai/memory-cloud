@@ -109,9 +109,11 @@ class CostAggregationRowResponse(TZAwareBaseModel):
     period_start: date
     workspace_id: UUID | None
     # #1861: what an operator reads, resolved per response like the sleep
-    # reports' context_name / user_email. None when the workspace row is gone
-    # or the user_id is a connector / service identity with no ``users`` row —
-    # the UI falls back to the shortened id.
+    # reports' context_name / user_email. ``workspace_name`` is None when the
+    # workspace row is gone or soft-deleted. ``user_email`` is None when the
+    # user_id is a connector / service identity with no ``users`` row, or — on
+    # the workspace-scoped route — an account that is not a current member of
+    # that workspace (#1862). The UI falls back to the shortened id.
     workspace_name: str | None = None
     user_id: str
     user_email: str | None = None

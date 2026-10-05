@@ -33,6 +33,7 @@ import unicodedata
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import TypeVar
 from urllib.parse import parse_qsl, unquote_plus, urlencode, urlparse, urlsplit, urlunsplit
@@ -1941,6 +1942,19 @@ async def oauth_authorize_get(
 # pooled connection, so an unbounded pool could park 15 requests on one lock and
 # starve every other OAuth route (QueuePool timeout → 500). Ten workers keep
 # head-room on the pool for the Authlib paths and the rest of the app.
+#
+# Every sync DB step of a route goes through _run_sync, including the two
+# module-level helpers that are not Authlib calls: _consent_is_new (authorize
+# POST) and _confirm_device_sync (device confirm, which waits on the owner's
+# row lock — the very case the bound is for).
+#
+# The one thing left on the default pool is _run_oauth_sync, called through
+# asyncio.to_thread by the authorize POST (create_authorization_response) and
+# the token endpoint (create_token_response). Those are the Authlib paths: a
+# token request has to keep being served while the ten workers above are busy
+# or parked on a lock, so it does not queue behind them and draws on the
+# head-room instead. tests/api/test_oauth_sync_off_loop.py allows no other
+# asyncio.to_thread target in this module (#1885).
 T = TypeVar("T")
 
 _OAUTH_SYNC_EXECUTOR = ThreadPoolExecutor(max_workers=10, thread_name_prefix="oauth-sync")
@@ -1985,7 +1999,7 @@ def _consent_is_new(client_id: str | None, user_id: str | None, scope: str | Non
     New means a first authorization, a scope the user has not granted this
     client before, or a client changed since the user's last grant
     (:func:`is_new_client_authorization`). Runs on its own sync session (call
-    it via ``asyncio.to_thread``). A failed check answers True: an extra
+    it via ``_run_sync``). A failed check answers True: an extra
     notice is better than a missed one.
     """
     if not client_id or not user_id:
@@ -2082,8 +2096,8 @@ async def oauth_authorize_post(
         )
 
     # Decided before the grant writes its authorization code (Issue #1752).
-    new_authorization = await asyncio.to_thread(
-        _consent_is_new, client_id, user.user_id, request.query_params.get("scope")
+    new_authorization = await _run_sync(
+        partial(_consent_is_new, client_id, user.user_id, request.query_params.get("scope"))
     )
 
     # Run Authlib operations in thread pool to avoid blocking event loop
@@ -2843,12 +2857,14 @@ async def device_confirm(
     if not user:
         raise AuthenticationError("Authentication required")
 
-    status_str, device_user_id, client_id = await asyncio.to_thread(
-        _confirm_device_sync,
-        user_id=user.get("user_id") or user.get("sub"),
-        session_id=user.get("session_id"),
-        user_code=body.user_code,
-        approve=body.approve,
+    status_str, device_user_id, client_id = await _run_sync(
+        partial(
+            _confirm_device_sync,
+            user_id=user.get("user_id") or user.get("sub"),
+            session_id=user.get("session_id"),
+            user_code=body.user_code,
+            approve=body.approve,
+        )
     )
 
     if status_str == "approved" and device_user_id:

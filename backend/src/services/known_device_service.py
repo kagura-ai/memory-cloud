@@ -181,7 +181,11 @@ async def record_sign_in(db: AsyncSession, *, user_id: str, digest: str, now: da
 
 
 def known_devices_delete(user_id: str) -> Delete:
-    """DELETE of every known device of an account (password reset, erasure)."""
+    """DELETE of every known device of an account (the password reset).
+
+    Account erasure deletes the same rows through its own counted delete
+    (``AccountErasureService``), not through this statement.
+    """
     return delete(UserKnownDevice).where(UserKnownDevice.user_id == user_id)
 
 

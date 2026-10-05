@@ -13,7 +13,9 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
+from config.database import INVALID_REDIS_URL_MESSAGE
 from utils.datetime import utcnow
+from utils.url_redact import redis_location
 
 logger = logging.getLogger(__name__)
 
@@ -338,8 +340,10 @@ class SessionManager:
         # Get or create shared Redis client (singleton pattern)
         self._redis = self._get_or_create_redis_client(redis_url)
 
+        # Host and port only: the URL can hold a password in its userinfo or
+        # in its query (#1898).
         logger.info(
-            f"Initialized SessionManager (ttl={session_ttl}s, redis={redis_url.split('@')[-1]})"
+            f"Initialized SessionManager (ttl={session_ttl}s, redis={redis_location(redis_url)})"
         )
 
     @staticmethod
@@ -365,28 +369,39 @@ class SessionManager:
             try:
                 from redis import Redis
 
-                logger.info(f"Creating new Redis client for sessions: {redis_url.split('@')[-1]}")
+                logger.info(f"Creating new Redis client for sessions: {redis_location(redis_url)}")
 
-                client = Redis.from_url(
-                    redis_url,
-                    decode_responses=True,  # Auto-decode bytes to str
-                    socket_connect_timeout=5,
-                    socket_timeout=5,
-                    retry_on_timeout=True,
-                )
+                client = None
+                try:
+                    client = Redis.from_url(
+                        redis_url,
+                        decode_responses=True,  # Auto-decode bytes to str
+                        socket_connect_timeout=5,
+                        socket_timeout=5,
+                        retry_on_timeout=True,
+                    )
+                except ValueError:
+                    # #1881: the URL did not parse. The parser's text quotes
+                    # part of the password, so it is neither interpolated nor
+                    # chained: the fixed error is raised below, outside this
+                    # handler, which leaves __cause__ and __context__ empty.
+                    pass
 
-                # Test connection
-                client.ping()
+                if client is not None:
+                    # Test connection
+                    client.ping()
 
-                _redis_client_cache[redis_url] = client
+                    _redis_client_cache[redis_url] = client
             except ImportError as e:
                 raise ImportError(
                     "redis package not installed. Install with: pip install redis"
                 ) from e
             except Exception as e:
                 raise ConnectionError(f"Failed to connect to Redis: {e}") from e
+            if redis_url not in _redis_client_cache:
+                raise ConnectionError(INVALID_REDIS_URL_MESSAGE)
         else:
-            logger.debug(f"Reusing cached Redis client for {redis_url.split('@')[-1]}")
+            logger.debug(f"Reusing cached Redis client for {redis_location(redis_url)}")
 
         return _redis_client_cache[redis_url]
 

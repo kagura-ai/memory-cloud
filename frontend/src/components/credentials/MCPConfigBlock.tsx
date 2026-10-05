@@ -82,7 +82,6 @@ import {
 
 export {
   CODEX_BEARER_TOKEN_ENV_VAR,
-  buildClaudeOAuthCommand,
   buildCodexAddCommand,
   toBareMcpUrl,
   withFullProfile,

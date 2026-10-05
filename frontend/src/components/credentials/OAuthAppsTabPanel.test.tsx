@@ -101,6 +101,33 @@ describe("OAuthAppsTabPanel — custom-only (#1836)", () => {
     expect(screen.queryByText("mcpConnection")).not.toBeInTheDocument();
   });
 
+  it("lists a non-custom app from outside the two presets with a translated badge (#1884)", async () => {
+    mockGetOAuth2Clients.mockResolvedValue([
+      makeClient({
+        client_id: "oauth_cursor",
+        client_name: "My Cursor app",
+        provider: "cursor",
+      }),
+      makeClient({
+        client_id: "oauth_future",
+        client_name: "Future app",
+        provider: "some_new_client",
+      }),
+    ]);
+
+    render(<OAuthAppsTabPanel />);
+
+    // Both stay listed, so their owner can still delete them.
+    expect(await screen.findByText("My Cursor app")).toBeInTheDocument();
+    expect(screen.getByText("Future app")).toBeInTheDocument();
+    expect(screen.getAllByText("legacyPresetNote")).toHaveLength(2);
+    expect(screen.getByText("legacyProvider.cursor")).toBeInTheDocument();
+    // A provider this client does not know reads "Other", never the raw value.
+    expect(screen.getByText("legacyProvider.other")).toBeInTheDocument();
+    expect(screen.queryByText("cursor")).not.toBeInTheDocument();
+    expect(screen.queryByText("some_new_client")).not.toBeInTheDocument();
+  });
+
   it("still lists a preset app created before this change, flagged as no longer needed, and lets its owner delete it", async () => {
     mockGetOAuth2Clients.mockResolvedValue([
       makeClient({
@@ -118,6 +145,9 @@ describe("OAuthAppsTabPanel — custom-only (#1836)", () => {
     expect(screen.getByText("My Connector")).toBeInTheDocument();
     // One legacy note for the preset app, none for the custom one.
     expect(screen.getAllByText("legacyPresetNote")).toHaveLength(1);
+    // The badge is a translated label, not the raw provider value.
+    expect(screen.getByText("legacyProvider.claude")).toBeInTheDocument();
+    expect(screen.queryByText("claude")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getAllByText("delete")[0]);
 
