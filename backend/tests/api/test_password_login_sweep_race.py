@@ -6,6 +6,10 @@ These tests pin what the routes do with the answer: the sign-in re-checks the
 password AFTER its session exists, and when the password it verified is no
 longer the committed one, deletes that session and answers 401 — for a plain
 sign-in and for one finished with a second factor.
+
+A refused sign-in has no other effect (#1878): the account's other sessions,
+its personal workspace and ``last_login_at`` are touched only once the
+re-check has accepted the sign-in.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from fastapi import HTTPException
 
 from api.routes import auth as auth_routes
 from auth.password import hash_password
+from auth.session import SessionManager
 from services.password_account_service import credential_fingerprint
 from tests.redis_fake_ops import SessionFakeOps
 from utils.exceptions import AuthenticationError, InvalidCredentialsError
@@ -85,6 +90,12 @@ def wired(monkeypatch, manager) -> SimpleNamespace:
         order.append("session")
         return "sess-1"
 
+    complete = AsyncMock()
+
+    async def _complete(*args):
+        order.append("complete")
+        await complete(*args)
+
     recheck = AsyncMock(return_value=True)
 
     async def _recheck(*args):
@@ -93,12 +104,13 @@ def wired(monkeypatch, manager) -> SimpleNamespace:
 
     user = _user()
     monkeypatch.setattr(auth_routes, "get_db", _fake_db)
-    monkeypatch.setattr(auth_routes, "_create_session_and_workspace", _create)
+    monkeypatch.setattr(auth_routes, "_create_password_session", _create)
+    monkeypatch.setattr(auth_routes, "_complete_password_sign_in", _complete)
     monkeypatch.setattr(auth_routes, "_record_terms_acceptance", AsyncMock())
     monkeypatch.setattr(auth_routes, "note_browser_sign_in", AsyncMock())
     monkeypatch.setattr(auth_routes, "resolve_password_login_user", AsyncMock(return_value=user))
     monkeypatch.setattr(auth_routes, "password_unchanged", _recheck)
-    return SimpleNamespace(user=user, db=db, order=order, recheck=recheck)
+    return SimpleNamespace(user=user, db=db, order=order, recheck=recheck, complete=complete)
 
 
 def _login_body() -> auth_routes.PasswordLoginRequest:
@@ -113,7 +125,9 @@ class TestPasswordLogin:
         response = await auth_routes.password_login(_login_body(), _request(), return_to=None)
 
         assert response.status_code == 200
-        assert wired.order == ["session", "recheck"]
+        # #1878: the other sessions, the workspace and last_login_at come last.
+        assert wired.order == ["session", "recheck", "complete"]
+        wired.complete.assert_awaited_once_with("u-1", "person@example.test", "sess-1")
         _db, user_id, fingerprint = wired.recheck.await_args.args
         assert user_id == "u-1"
         assert fingerprint == credential_fingerprint(wired.user.password_hash)
@@ -131,6 +145,8 @@ class TestPasswordLogin:
             await auth_routes.password_login(_login_body(), _request(), return_to=None)
 
         manager.delete_session.assert_called_once_with("sess-1")
+        assert wired.order == ["session", "recheck"]
+        manager.delete_user_sessions.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_a_failed_recheck_fails_closed_as_an_outage(self, wired, manager) -> None:
@@ -143,6 +159,8 @@ class TestPasswordLogin:
 
         assert exc_info.value.status_code == 503
         manager.delete_session.assert_called_once_with("sess-1")
+        assert wired.order == ["session", "recheck"]
+        manager.delete_user_sessions.assert_not_called()
 
 
 class TestMfaVerify:
@@ -190,6 +208,7 @@ class TestMfaVerify:
         _db, _uid, fingerprint = mfa.recheck.await_args.args
         assert fingerprint == credential_fingerprint(mfa.user.password_hash)
         manager.delete_session.assert_called_once_with("sess-1")
+        manager.delete_user_sessions.assert_not_called()
         # Single use, like the pending token.
         assert f"mfa_pending_cred:{token}" not in manager._redis.store
 
@@ -201,6 +220,29 @@ class TestMfaVerify:
         )
         assert response.status_code == 200
         manager.delete_session.assert_not_called()
+        assert mfa.order == ["session", "recheck", "complete"]
+
+    @pytest.mark.asyncio
+    async def test_a_wrong_code_deletes_only_the_pending_token(self, mfa, manager) -> None:
+        # The single-use guard already took the fingerprint key; the wrong-code
+        # branch has only the pending token left to delete (#1878).
+        token = await self._password_step()
+        deleted: list[tuple[str, ...]] = []
+        real_delete = manager._redis.delete
+
+        def _spy(*keys: str) -> int:
+            deleted.append(keys)
+            return real_delete(*keys)
+
+        manager._redis.delete = _spy
+        body = auth_routes.MfaVerifyRequest(mfa_session_token=token, totp_code="000000")
+
+        with pytest.raises(AuthenticationError):
+            await auth_routes.mfa_verify(body, _request(), return_to=None)
+
+        assert deleted == [(f"mfa_pending_cred:{token}",), (f"mfa_pending:{token}",)]
+        assert f"mfa_pending:{token}" not in manager._redis.store
+        assert mfa.order == []
 
     @pytest.mark.asyncio
     async def test_a_pending_step_without_a_fingerprint_signs_nobody_in(self, mfa, manager) -> None:
@@ -252,3 +294,155 @@ class TestMfaVerify:
 
         assert checked == []
         assert f"mfa_pending_terms:{token}" in manager._redis.store
+
+
+class StoreRedis(FakeRedis):
+    """``FakeRedis`` plus the calls a real ``SessionManager`` makes."""
+
+    def ttl(self, _key: str) -> int:
+        return 100
+
+
+class TestARefusedSignInHasNoSideEffects:
+    """#1878, against a real SessionManager: what a refused sign-in leaves behind.
+
+    A password change, set-up or removal keeps the session it was made from.
+    A sign-in that verified the OLD password and is refused by the re-check
+    must leave that session — and ``last_login_at`` — alone.
+    """
+
+    @pytest.fixture
+    def real(self, monkeypatch) -> SimpleNamespace:
+        fake = StoreRedis()
+        monkeypatch.setattr(
+            SessionManager, "_get_or_create_redis_client", staticmethod(lambda _url: fake)
+        )
+        manager = SessionManager(redis_url="redis://fake:6379")
+        monkeypatch.setattr(auth_routes, "_session_manager", manager)
+
+        user = _user(last_login_at=None)
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = user
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=result)
+        db.commit = AsyncMock()
+        db.rollback = AsyncMock()
+
+        async def _fake_db():
+            yield db
+
+        workspaces = MagicMock()
+        workspaces.return_value.ensure_personal_workspace = AsyncMock()
+        recheck = AsyncMock(return_value=True)
+        monkeypatch.setattr(auth_routes, "get_db", _fake_db)
+        monkeypatch.setattr(auth_routes, "WorkspaceService", workspaces)
+        monkeypatch.setattr(auth_routes, "_record_terms_acceptance", AsyncMock())
+        monkeypatch.setattr(auth_routes, "note_browser_sign_in", AsyncMock())
+        monkeypatch.setattr(
+            auth_routes, "resolve_password_login_user", AsyncMock(return_value=user)
+        )
+        monkeypatch.setattr(auth_routes, "password_unchanged", recheck)
+        monkeypatch.setattr(
+            auth_routes, "get_encryptor", lambda: SimpleNamespace(decrypt=lambda _s: "secret")
+        )
+        monkeypatch.setattr(auth_routes, "verify_totp", lambda _secret, code: code == "123456")
+
+        kept = manager.create_session(
+            {"sub": "u-1", "user_id": "u-1", "email": user.email, "name": "Person", "role": "user"}
+        )
+        return SimpleNamespace(
+            manager=manager,
+            user=user,
+            db=db,
+            recheck=recheck,
+            kept=kept,
+            workspace=workspaces.return_value.ensure_personal_workspace,
+        )
+
+    def _sessions(self, real: SimpleNamespace) -> set[str]:
+        prefix = "session:"
+        return {k[len(prefix) :] for k in real.manager._redis.store if k.startswith(prefix)}
+
+    def _assert_untouched(self, real: SimpleNamespace) -> None:
+        # Only the session that was there before; the new one is gone.
+        assert self._sessions(real) == {real.kept}
+        assert real.manager.get_session(real.kept) is not None
+        assert real.user.last_login_at is None
+        real.db.commit.assert_not_awaited()
+        real.workspace.assert_not_awaited()
+
+    async def _mfa_token(self, real: SimpleNamespace) -> str:
+        real.user.totp_enabled = True
+        real.user.totp_secret = "enc"
+        result = await auth_routes.password_login(_login_body(), _request(), return_to=None)
+        return result.mfa_session_token
+
+    @pytest.mark.asyncio
+    async def test_a_superseded_sign_in_keeps_the_other_session(self, real) -> None:
+        real.recheck.return_value = False
+
+        with pytest.raises(InvalidCredentialsError):
+            await auth_routes.password_login(_login_body(), _request(), return_to=None)
+
+        self._assert_untouched(real)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_recheck_keeps_the_other_session(self, real) -> None:
+        real.recheck.side_effect = RuntimeError("db down")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await auth_routes.password_login(_login_body(), _request(), return_to=None)
+
+        assert exc_info.value.status_code == 503
+        self._assert_untouched(real)
+
+    @pytest.mark.asyncio
+    async def test_a_superseded_second_factor_keeps_the_other_session(self, real) -> None:
+        token = await self._mfa_token(real)
+        real.recheck.return_value = False
+        body = auth_routes.MfaVerifyRequest(mfa_session_token=token, totp_code="123456")
+
+        with pytest.raises(InvalidCredentialsError):
+            await auth_routes.mfa_verify(body, _request(), return_to=None)
+
+        self._assert_untouched(real)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_recheck_at_the_second_factor_keeps_the_other_session(
+        self, real
+    ) -> None:
+        token = await self._mfa_token(real)
+        real.recheck.side_effect = RuntimeError("db down")
+        body = auth_routes.MfaVerifyRequest(mfa_session_token=token, totp_code="123456")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await auth_routes.mfa_verify(body, _request(), return_to=None)
+
+        assert exc_info.value.status_code == 503
+        self._assert_untouched(real)
+
+    @pytest.mark.asyncio
+    async def test_an_accepted_sign_in_replaces_the_other_sessions(self, real) -> None:
+        response = await auth_routes.password_login(_login_body(), _request(), return_to=None)
+
+        assert response.status_code == 200
+        sessions = self._sessions(real)
+        assert len(sessions) == 1 and real.kept not in sessions
+        (new_session,) = sessions
+        assert f"kagura_session={new_session}" in response.headers["set-cookie"]
+        assert real.manager.get_session(new_session) is not None
+        assert real.user.last_login_at is not None
+        real.db.commit.assert_awaited_once()
+        real.workspace.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_an_accepted_second_factor_replaces_the_other_sessions(self, real) -> None:
+        token = await self._mfa_token(real)
+        body = auth_routes.MfaVerifyRequest(mfa_session_token=token, totp_code="123456")
+
+        response = await auth_routes.mfa_verify(body, _request(), return_to=None)
+
+        assert response.status_code == 200
+        sessions = self._sessions(real)
+        assert len(sessions) == 1 and real.kept not in sessions
+        assert real.user.last_login_at is not None

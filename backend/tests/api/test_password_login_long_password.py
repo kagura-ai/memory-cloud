@@ -76,9 +76,8 @@ def _password_user(monkeypatch, password_hash: str) -> SimpleNamespace:
         yield db
 
     monkeypatch.setattr(auth_routes, "get_db", _fake_db)
-    monkeypatch.setattr(
-        auth_routes, "_create_session_and_workspace", AsyncMock(return_value="sess-1")
-    )
+    monkeypatch.setattr(auth_routes, "_create_password_session", AsyncMock(return_value="sess-1"))
+    monkeypatch.setattr(auth_routes, "_complete_password_sign_in", AsyncMock())
     monkeypatch.setattr(auth_routes, "_record_terms_acceptance", AsyncMock())
     return user
 

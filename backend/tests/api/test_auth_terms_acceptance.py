@@ -473,8 +473,9 @@ class TestPasswordLogin:
         monkeypatch.setattr(auth_routes, "get_db", _fake_db)
         monkeypatch.setattr(auth_routes, "verify_password", lambda *_: True)
         monkeypatch.setattr(
-            auth_routes, "_create_session_and_workspace", AsyncMock(return_value="sess-1")
+            auth_routes, "_create_password_session", AsyncMock(return_value="sess-1")
         )
+        monkeypatch.setattr(auth_routes, "_complete_password_sign_in", AsyncMock())
         record = AsyncMock()
         monkeypatch.setattr(auth_routes, "_record_terms_acceptance", record)
         return SimpleNamespace(user=user, record=record)

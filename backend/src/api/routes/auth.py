@@ -2342,23 +2342,22 @@ class AuthConfigResponse(BaseModel):
     github_oauth_enabled: bool
 
 
-async def _create_session_and_workspace(
+async def _create_password_session(
     user_id: str,
     email: str,
     name: str | None,
     role: str,
     picture: str | None = None,
 ) -> str:
-    """Create session and ensure personal workspace exists.
+    """Write the session of a password (or password + MFA) sign-in, nothing else.
 
-    Used by the password and MFA sign-ins; the OAuth callbacks build their own.
+    The account's other sessions, its personal workspace and ``last_login_at``
+    are left to ``_complete_password_sign_in``, which runs only once the
+    password re-check has accepted the sign-in (#1878). The OAuth callbacks
+    build their own session.
     """
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Session manager not initialized")
-
-    deleted_count = _session_manager.delete_user_sessions(user_id)
-    if deleted_count > 0:
-        logger.info(f"Invalidated {deleted_count} old session(s) for {email}")
 
     session_data = {
         "sub": user_id,
@@ -2369,7 +2368,22 @@ async def _create_session_and_workspace(
         "role": role,
     }
     # #1818: a password (and MFA) sign-in proves the account here and now.
-    session_id = _session_manager.create_session(session_data, proven_at=utcnow())
+    return _session_manager.create_session(session_data, proven_at=utcnow())
+
+
+async def _complete_password_sign_in(user_id: str, email: str, session_id: str) -> None:
+    """The side effects of an ACCEPTED password sign-in (#1878).
+
+    Signs the account out everywhere else (#114) but spares ``session_id``,
+    the session this sign-in just wrote, then ensures the personal workspace
+    and stamps ``last_login_at``. Never raises: the sign-in stands.
+    """
+    if not _session_manager:
+        return
+
+    deleted_count = _session_manager.delete_user_sessions(user_id, exclude_session_id=session_id)
+    if deleted_count > 0:
+        logger.info(f"Invalidated {deleted_count} old session(s) for {email}")
 
     try:
         async for db in get_db():
@@ -2387,8 +2401,6 @@ async def _create_session_and_workspace(
             break
     except Exception as e:
         logger.error(f"Error ensuring personal workspace for {user_id}: {e}", exc_info=True)
-
-    return session_id
 
 
 def _set_session_cookie(response: Response, session_id: str) -> None:
@@ -2642,8 +2654,13 @@ async def _open_password_session(user: User, fingerprint: str | None) -> str:
     so the session is written first and the password re-read second: if it
     changed in between, the session is deleted and the sign-in fails like a
     wrong password (#1809).
+
+    Only the new session exists while the password is re-read. The sweep of
+    the account's other sessions, the personal workspace and ``last_login_at``
+    wait for the answer (#1878): a sign-in that is refused here must not sign
+    out the session a password change deliberately kept, nor record a login.
     """
-    session_id = await _create_session_and_workspace(
+    session_id = await _create_password_session(
         user_id=user.user_id, email=user.email, name=user.name, role=user.role
     )
     try:
@@ -2664,6 +2681,7 @@ async def _open_password_session(user: User, fingerprint: str | None) -> str:
             _session_manager.delete_session(session_id)
         logger.warning("password_login_superseded", user_id=user.user_id)
         raise InvalidCredentialsError()
+    await _complete_password_sign_in(user.user_id, user.email, session_id)
     return session_id
 
 
@@ -2810,11 +2828,9 @@ async def mfa_verify(
     accepted_terms = _take_mfa_accepted_terms(body.mfa_session_token)
 
     if not verify_totp(totp_secret, body.totp_code):
-        # Delete MFA token on failed attempt (prevent brute-force replay)
-        _session_manager._redis.delete(
-            f"mfa_pending:{body.mfa_session_token}",
-            _MFA_PENDING_CRED_KEY.format(token=body.mfa_session_token),
-        )
+        # Delete MFA token on failed attempt (prevent brute-force replay). The
+        # fingerprint key is already gone: the single-use guard above took it.
+        _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
         raise AuthenticationError("Invalid TOTP code. Please login again.")
 
     _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")

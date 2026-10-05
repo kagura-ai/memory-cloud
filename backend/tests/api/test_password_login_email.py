@@ -214,9 +214,8 @@ def resolver(monkeypatch) -> AsyncMock:
         yield MagicMock()
 
     monkeypatch.setattr(auth_routes, "get_db", _fake_db)
-    monkeypatch.setattr(
-        auth_routes, "_create_session_and_workspace", AsyncMock(return_value="sess-1")
-    )
+    monkeypatch.setattr(auth_routes, "_create_password_session", AsyncMock(return_value="sess-1"))
+    monkeypatch.setattr(auth_routes, "_complete_password_sign_in", AsyncMock())
     monkeypatch.setattr(auth_routes, "_record_terms_acceptance", AsyncMock())
     mock = AsyncMock(return_value=None)
     monkeypatch.setattr(auth_routes, "resolve_password_login_user", mock)
@@ -259,7 +258,7 @@ async def test_email_sign_in_with_mfa_stops_at_the_second_factor(redis, resolver
     assert result.mfa_required is True
     assert result.mfa_session_token
     assert redis.store[f"mfa_pending:{result.mfa_session_token}"] == "u-email"
-    auth_routes._create_session_and_workspace.assert_not_awaited()
+    auth_routes._create_password_session.assert_not_awaited()
 
 
 @pytest.mark.asyncio

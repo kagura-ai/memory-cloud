@@ -432,7 +432,7 @@ async def test_a_password_sign_in_proves_the_account_now(monkeypatch, strict) ->
     monkeypatch.setattr(auth_routes, "WorkspaceService", workspaces)
 
     before = utcnow()
-    await auth_routes._create_session_and_workspace("local:admin", "a@local", None, "admin")
+    await auth_routes._create_password_session("local:admin", "a@local", None, "admin")
 
     assert before <= _proof(m) <= utcnow()
 

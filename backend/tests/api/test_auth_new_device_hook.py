@@ -52,9 +52,8 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
         yield MagicMock()
 
     monkeypatch.setattr(auth_routes, "get_db", _fake_db)
-    monkeypatch.setattr(
-        auth_routes, "_create_session_and_workspace", AsyncMock(return_value="sess-1")
-    )
+    monkeypatch.setattr(auth_routes, "_create_password_session", AsyncMock(return_value="sess-1"))
+    monkeypatch.setattr(auth_routes, "_complete_password_sign_in", AsyncMock())
     monkeypatch.setattr(auth_routes, "_record_terms_acceptance", AsyncMock())
     resolver = AsyncMock(return_value=_user())
     monkeypatch.setattr(auth_routes, "resolve_password_login_user", resolver)
