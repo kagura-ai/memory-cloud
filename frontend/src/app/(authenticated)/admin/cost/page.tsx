@@ -22,6 +22,7 @@ import { CostDashboard } from "@/components/cost/CostDashboard";
 import { useAuth } from "@/contexts/AuthContext";
 import { isAdmin } from "@/lib/auth/rbac";
 import { fetchAdminCostAggregation } from "@/lib/api";
+import { adminUserPath } from "@/lib/api/admin";
 
 export default function AdminCostPage() {
   const t = useTranslations("admin.cost");
@@ -56,6 +57,7 @@ export default function AdminCostPage() {
       description={t("description")}
       fetchData={fetchAdminCostAggregation}
       showWorkspaceColumn
+      userHref={adminUserPath}
     />
   );
 }

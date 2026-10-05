@@ -14,6 +14,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
 import { apiClient } from "@/lib/api";
+import { adminUserPath } from "@/lib/api/admin";
 import { formatRelativeTime } from "@/lib/utils/datetime";
 import {
   Table,
@@ -140,7 +141,7 @@ export default function AdminUsersPage() {
   // inc/dec UI, leaving the workspace_slot_bonus admin flow unreachable
   // from the standard list-click path.
   const handleUserClick = (userId: string) => {
-    router.push(`/admin/users/${userId}`);
+    router.push(adminUserPath(userId));
   };
 
   const handleRoleChange = async (userId: string, newRole: string) => {

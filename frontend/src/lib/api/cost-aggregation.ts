@@ -78,7 +78,15 @@ export interface CostAggregationRow {
   /** ISO date string (YYYY-MM-DD) at the period bucket start. */
   period_start: string;
   workspace_id: string | null;
+  /**
+   * What an operator reads (#1861), resolved per response like the sleep
+   * reports' ``context_name`` / ``user_email``. ``null`` when the workspace
+   * row is gone or the user_id is a connector / service identity with no
+   * users row — render the shortened id instead.
+   */
+  workspace_name: string | null;
   user_id: string;
+  user_email: string | null;
   calls: number;
   tokens_in: number;
   tokens_out: number;

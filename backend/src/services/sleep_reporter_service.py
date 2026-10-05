@@ -16,8 +16,9 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import Context, User
+from models.auth import Context
 from models.sleep import SleepAction, SleepReport
+from services.label_resolver import resolve_user_labels
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -177,25 +178,8 @@ class SleepReporterService:
         multiple rows (one per member / connector identity). Resolving the
         owning user's email lets the UI tell those rows apart.
 
-        The join key is ``User.user_id`` (the OAuth ``sub`` claim, a String) —
-        NOT ``User.id`` (an Integer autoincrement PK). ``sleep_reports.user_id``
-        stores the ``sub`` claim, so it matches ``User.user_id``.
-
-        One query, no N+1 — mirrors ``resolve_context_names``.
-
-        Returns:
-            Map of ``user_id → email`` for ids that resolve to a ``users`` row.
-            Ids with no matching user (e.g. connector/service identities that
-            wrote memories) are OMITTED from the map, so the caller can fall
-            back to a shortened id in the UI rather than rendering a bare UUID.
+        Delegates to ``services.label_resolver.resolve_user_labels`` (#1861),
+        which the cost-aggregation routes share. One query, no N+1; ids with
+        no ``users`` row are omitted so the UI falls back to a shortened id.
         """
-        labels: dict[str, str] = {}
-        if not user_ids:
-            return labels
-
-        result = await self.db.execute(
-            select(User.user_id, User.email).where(User.user_id.in_(user_ids))
-        )
-        for uid, email in result.all():
-            labels[uid] = email
-        return labels
+        return await resolve_user_labels(self.db, user_ids)
