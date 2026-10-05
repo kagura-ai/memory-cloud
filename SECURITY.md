@@ -29,10 +29,13 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
 - **Email + password** for existing accounts. A password reset — by emailed
   link, or by an operator with the `reset_password` CLI (choices 1 and 3) —
   signs out every browser session and revokes every OAuth / MCP token and
-  pending grant (authorization code, device code) of the account, in the same
-  transaction as the new password; a consent or device approval racing the
-  reset is refused rather than left behind as a grant the reset could not
-  see. API keys and OAuth client secrets are not revoked automatically —
+  pending grant (authorization code, device code) of the account. The grant
+  revocations are in the database transaction of the new password; the
+  sessions live in Redis and are deleted just before that transaction
+  commits, so the password is never committed while old sessions survive (a
+  commit that then fails leaves the old password with the sessions already
+  signed out). A consent or device approval racing the reset is refused
+  rather than left behind as a grant the reset could not see. API keys and OAuth client secrets are not revoked automatically —
   review them in Settings after a suspected compromise. The two paths differ
   in three ways:
   - the CLI reset writes no audit row and sends no notice (see below);
