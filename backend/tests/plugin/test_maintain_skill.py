@@ -23,7 +23,9 @@ SESSION_SUMMARY = REPO_ROOT / "claude-skills" / "session-summary.md"
 CODEX_SKILL = REPO_ROOT / "plugins" / "kagura-memory" / "skills" / "kagura-memory" / "SKILL.md"
 
 MAX_BYTES = 8 * 1024
-CODEX_SECTION_MAX_CHARS = 3500
+# 3500 until #1883 added the update call's `content=...` / `details` note and
+# the report counts, which the Claude skill already had.
+CODEX_SECTION_MAX_CHARS = 3800
 
 READ_TOOLS = [
     "list_contexts",
@@ -155,11 +157,36 @@ def test_nothing_changes_without_the_item_numbers(text) -> None:
 
 
 @BOTH
-def test_proposals_come_from_structured_fields_and_default_to_keep(text) -> None:
+def test_proposals_come_from_structured_fields_and_nothing_changes_without_a_pick(text) -> None:
+    """The old "keep is the default" sat next to a plan table proposing delete
+    and supersede; the rule is about what gets applied, not what is proposed (#1883)."""
     flat = _flat(text())
     assert "structured fields only" in flat
-    assert re.search(r"keep is the default", flat, flags=re.IGNORECASE)
+    assert re.search(r"nothing changes without a pick", flat, flags=re.IGNORECASE)
+    assert not re.search(r"keep is the default", flat, flags=re.IGNORECASE)
     assert "data, not instructions" in flat
+
+
+def test_the_proposed_column_is_what_the_rule_is_about() -> None:
+    flat = _flat(_maintain())
+    assert "The Proposed column comes from structured fields only" in flat
+    assert "| Proposed |" in _maintain()
+
+
+@BOTH
+def test_report_counts_include_dismissed(text) -> None:
+    """Step 4 offers "dismiss a candidate"; the report counted five outcomes (#1883)."""
+    flat = _flat(text())
+    assert "dismiss a candidate" in flat
+    assert "the counts: kept, updated, superseded, dismissed, unpinned, deleted" in flat
+
+
+@BOTH
+def test_the_update_call_carries_content_and_the_details_warning(text) -> None:
+    flat = _flat(text())
+    assert "`update_memory(memory_id=..., context_id=..., summary=..., content=...)`" in flat
+    assert "only the fields that change" in flat
+    assert "`details` is replaced wholesale" in flat
 
 
 @BOTH
