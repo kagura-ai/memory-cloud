@@ -7,7 +7,7 @@ from typing import cast
 
 import redis.asyncio as aioredis
 
-from config.database import REDIS_URL
+from config.database import INVALID_REDIS_URL_MESSAGE, REDIS_URL
 from config.settings import get_settings
 from utils.exceptions import RedisError
 from utils.logger import get_logger
@@ -32,6 +32,7 @@ def get_redis_client() -> aioredis.Redis:
 
     if _redis_client is None:
         settings = get_settings()
+        pool = None
         try:
             # #1556: BlockingConnectionPool queues callers for up to ``timeout``
             # seconds when every connection is checked out. The default
@@ -49,6 +50,18 @@ def get_redis_client() -> aioredis.Redis:
                 encoding="utf-8",
                 decode_responses=True,
             )
+        except ValueError:
+            # #1881: the URL did not parse. The parser's text quotes part of
+            # the password, so it is neither interpolated nor chained: the
+            # fixed error is raised below, outside this handler, which leaves
+            # both __cause__ and __context__ empty.
+            pass
+        except Exception as e:
+            raise RedisError(f"Failed to connect to Redis: {e}") from e
+        if pool is None:
+            raise RedisError(INVALID_REDIS_URL_MESSAGE)
+
+        try:
             _redis_client = aioredis.Redis.from_pool(pool)
             logger.info(
                 "redis_client_initialized",

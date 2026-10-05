@@ -354,3 +354,63 @@ class TestDeleteUserSessions:
 
         # Only 2 deletions succeeded
         assert deleted_count == 2
+
+
+def _chain_text(exc: BaseException) -> str:
+    """Every message reachable from ``exc`` through __cause__ / __context__."""
+    seen: list[BaseException] = []
+    todo: list[BaseException | None] = [exc]
+    while todo:
+        cur = todo.pop()
+        if cur is None or cur in seen:
+            continue
+        seen.append(cur)
+        todo += [cur.__cause__, cur.__context__]
+    return " | ".join(f"{e!s} {e!r}" for e in seen)
+
+
+class TestUnparseableRedisUrl:
+    """#1881: a password with / # or ? pasted into REDIS_URL unencoded."""
+
+    @pytest.mark.parametrize("reserved", ["/", "#", "?", "[x/"])
+    def test_parse_failure_raises_fixed_message_without_the_password(self, reserved):
+        """The URL parser quotes the text before the reserved character.
+
+        Unpatched redis-py, no network I/O: ``from_url`` fails while parsing.
+        """
+        import traceback
+
+        from config.database import INVALID_REDIS_URL_MESSAGE
+
+        head, tail = "k1881Sess10nHead", "k1881Sess10nTail"
+        url = f"redis://:{head}{reserved}{tail}@redis:6379"
+
+        with pytest.raises(ConnectionError) as excinfo:
+            SessionManager._get_or_create_redis_client(url)
+
+        err = excinfo.value
+        assert str(err) == INVALID_REDIS_URL_MESSAGE
+        assert err.__cause__ is None
+        assert err.__context__ is None
+        rendered = "".join(traceback.format_exception(err))
+        for text in (_chain_text(err), rendered):
+            assert head not in text
+            assert tail not in text
+
+    def test_parse_failure_does_not_log_the_password(self, caplog):
+        head = "k1881Sess10nHead"
+        with caplog.at_level("DEBUG"), pytest.raises(ConnectionError):
+            SessionManager._get_or_create_redis_client(f"redis://:{head}/tail@redis:6379")
+        assert head not in caplog.text
+
+    def test_connect_failure_keeps_its_message_and_cause(self):
+        """Only the parse failure is rewritten; a refused connection is not."""
+        boom = OSError("connection refused")
+        client = MagicMock()
+        client.ping.side_effect = boom
+        with (
+            patch("redis.Redis.from_url", return_value=client),
+            pytest.raises(ConnectionError, match="Failed to connect to Redis") as excinfo,
+        ):
+            SessionManager._get_or_create_redis_client("redis://k1881-unreachable:6379")
+        assert excinfo.value.__cause__ is boom
