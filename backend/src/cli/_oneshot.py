@@ -95,6 +95,7 @@ async def run_plan_apply(
     assume_yes: bool,
     verb: str = "change",
     print_applied: Callable[[R], None] | None = None,
+    summary: Callable[[R], str] | None = None,
 ) -> int:
     """Plan, print, confirm, apply — the body of every one-shot command's main.
 
@@ -108,12 +109,22 @@ async def run_plan_apply(
             "delete").
         print_applied: Renders the applied result after the one-line report,
             for a command whose outcome is more than a count.
+        summary: Names what the result changes, for a command that changes
+            more than one kind of row ("2 context(s), 5 memory row(s)"). It
+            replaces "<changes> <noun>(s)" in the prompt and the report;
+            ``changes`` still decides whether there is anything to do.
         apply: ``--apply`` was given.
         assume_yes: ``--yes`` was given.
 
     Returns:
         Process exit code: 0 ok, 1 error.
     """
+
+    def describe(result: R) -> str:
+        if summary is not None:
+            return summary(result)
+        return f"{changes(result)} {noun}(s)"
+
     try:
         async for db in get_db():
             plan = await run(db, True)
@@ -124,11 +135,11 @@ async def run_plan_apply(
                 return 0
             if not changes(plan):
                 return 0
-            if not confirm(f"{verb.capitalize()} {changes(plan)} {noun}(s)?", assume_yes):
+            if not confirm(f"{verb.capitalize()} {describe(plan)}?", assume_yes):
                 print("  skipped")
                 return 0
             applied = await run(db, False)
-            print(f"{verb}d {changes(applied)} {noun}(s)")
+            print(f"{verb}d {describe(applied)}")
             if print_applied is not None:
                 print_applied(applied)
     except Exception as exc:  # noqa: BLE001 - CLI boundary: report and exit non-zero
