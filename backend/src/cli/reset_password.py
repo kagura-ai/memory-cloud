@@ -20,10 +20,15 @@ password here (choices 1 and 3) does what the emailed-link reset does
   (Redis, ``REDIS_URL``) with ``strict=True`` before the commit.
 
 The session store must be reachable. It is probed before the password prompt
-and the reset is refused when it cannot be reached; a delete that fails later
-rolls the transaction back. Either way the password, MFA and grants are left
-as they were and the CLI exits non-zero: a reset that reported success while the old sessions survived would
-not contain the incident. There is no "continue anyway" prompt — while the
+and the reset is refused when it cannot be reached; a delete that fails
+later rolls the transaction back. Either way the password, MFA and grants
+are left as they were and the CLI exits non-zero: a reset that reported
+success while the old sessions survived would not contain the incident. If
+the commit itself fails after the sessions were deleted, the CLI rolls back
+and says so: the password is unchanged, the sessions are already signed out
+and the reset has to be run again. Messages name only the store's host and
+port and an exception's type, never the URL's credentials or a statement's
+parameters. There is no "continue anyway" prompt — while the
 session store is down nobody can sign in either, so the operator loses
 nothing by bringing it back first. Run the CLI where ``REDIS_URL`` points at
 the Redis the API uses (the default ``redis://localhost:6379`` is the port
@@ -34,12 +39,13 @@ row and no notification email are written (operator CLI actions run outside
 the API).
 
 Decision — "Disable MFA only" (choice 2) revokes nothing. It is the recovery
-for a lost authenticator, not for a leaked credential: the password, and with
-it everything a session or grant was obtained with, stays the same, so ending
-the sessions would contain nothing and would only sign the owner out of every
-browser and MCP client. It also keeps the lost-authenticator recovery usable
-while the session store is down. After a suspected compromise the operator
-resets the password (choice 1 or 3), and the CLI prints that hint.
+for a lost authenticator, not for a leaked credential: the password, and
+with it everything a session or grant was obtained with, stays the same, so
+ending the sessions would contain nothing and would only sign the owner out
+of every browser and MCP client. It also keeps the lost-authenticator
+recovery usable while the session store is down. After a suspected
+compromise the operator resets the password (choice 1 or 3), and the CLI
+prints that hint.
 """
 
 import getpass
@@ -47,6 +53,8 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
+from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -93,30 +101,60 @@ def _get_env_from_docker(key: str) -> str | None:
 
 
 def _redis_location(redis_url: str) -> str:
-    """The store's host part, without credentials, for operator messages."""
-    return redis_url.rsplit("@", 1)[-1]
+    """``host:port`` of the store, for operator messages.
+
+    Built from the parsed host and port only: a URL can carry a password in
+    its userinfo (``redis://:pw@host``) or its query (``?password=pw``), and
+    neither may reach the terminal.
+    """
+    try:
+        parts = urlsplit(redis_url)
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return "the configured REDIS_URL"
+    if not host:
+        return "the configured REDIS_URL"
+    return f"{host}:{port}" if port else host
+
+
+def _refuse_reset(*lines: str) -> NoReturn:
+    """Print why the reset cannot start, then exit 1 (nothing was written)."""
+    print(f"\n✗ {lines[0]}")
+    for line in lines[1:]:
+        print(f"  {line}")
+    print("  A password reset must sign out every browser session of the account.")
+    print("  Nothing was changed.")
+    raise SystemExit(1)
 
 
 def _session_store_or_exit() -> SessionManager:
     """Connect to the browser-session store, or refuse the reset (#1866).
 
     A password reset that cannot sign the old sessions out must not happen:
-    exit before anything is prompted for or written.
+    exit before anything is prompted for or written. Fail closed — every
+    failure to get a working store ends here, each with its own message, and
+    only the exception's type is printed (its text may quote the URL).
     """
     redis_url = get_redis_url()
     try:
         return SessionManager(redis_url=redis_url)
-    except Exception as exc:
-        print(
-            f"\n✗ Cannot reach the session store at {_redis_location(redis_url)}"
-            f" ({type(exc).__name__})."
+    except ImportError:
+        _refuse_reset(
+            "The 'redis' package is not installed in this Python environment.",
+            "Run this command from the backend environment (or the API container).",
         )
-        print("  A password reset must sign out every browser session of the account.")
-        print("  Nothing was changed. Start Redis, or set REDIS_URL to the Redis the API")
-        print("  uses, and run this command again.")
-        # ``raise`` rather than ``sys.exit``: every path of this function
-        # visibly returns the store or raises.
-        raise SystemExit(1) from exc
+    except OSError as exc:
+        # ``SessionManager`` reports a refused, timed-out or unresolvable
+        # store — whatever the redis client raised — as the builtin
+        # ``ConnectionError`` (an ``OSError``).
+        _refuse_reset(
+            f"Cannot reach the session store at {_redis_location(redis_url)}"
+            f" ({type(exc).__name__}).",
+            "Start Redis, or set REDIS_URL to the Redis the API runs on, and run",
+            "this command again.",
+        )
+    except Exception as exc:
+        _refuse_reset(f"Could not open the session store ({type(exc).__name__}).")
 
 
 def reset_password():
@@ -214,7 +252,20 @@ def reset_password():
                 print("  Check the session store (REDIS_URL) and run this command again.")
                 sys.exit(1)
 
-        db.commit()
+        try:
+            db.commit()
+        except Exception as exc:
+            # Never the exception text: a driver error quotes the statement
+            # and its parameters, the new password hash among them.
+            db.rollback()
+            print(f"\n✗ The database commit failed ({type(exc).__name__}).")
+            if session_store is not None:
+                print("  The password was NOT changed; MFA and the OAuth grants are as before.")
+                print("  The browser sessions of the account were already signed out.")
+                print("  Run this command again to complete the reset.")
+            else:
+                print("  Nothing was changed. Run this command again.")
+            sys.exit(1)
 
         if grants is not None:
             pending_codes = grants.authorization_codes + grants.device_codes

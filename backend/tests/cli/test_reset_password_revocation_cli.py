@@ -60,13 +60,17 @@ class _Run:
         *,
         store_error: Exception | None = None,
         delete_error: Exception | None = None,
+        commit_error: Exception | None = None,
+        redis_url: str = "redis://store:6379",
     ) -> None:
         self.choice = choice
         self.user = _user()
         self.events: list[Any] = []
         self.db = MagicMock()
         self.db.execute.side_effect = self._execute
-        self.db.commit.side_effect = lambda: self.events.append("commit")
+        self.db.commit.side_effect = self._commit
+        self.commit_error = commit_error
+        self.redis_url = redis_url
         self.db.rollback.side_effect = lambda: self.events.append("rollback")
         self.manager = MagicMock()
         self.manager.delete_user_sessions.side_effect = self._delete_sessions
@@ -83,6 +87,12 @@ class _Run:
         result.rowcount = _ROWCOUNTS.get(_table_of(statement), 0)
         return result
 
+    def _commit(self) -> None:
+        if self.commit_error is not None:
+            self.events.append("commit-failed")
+            raise self.commit_error
+        self.events.append("commit")
+
     def _delete_sessions(self, *args: Any, **kwargs: Any) -> int:
         self.events.append(("sessions", args, kwargs))
         if self.delete_error is not None:
@@ -98,7 +108,7 @@ class _Run:
         with (
             patch.object(reset_password, "create_engine"),
             patch.object(reset_password, "get_sync_database_url", return_value="x"),
-            patch.object(reset_password, "get_redis_url", return_value="redis://store:6379"),
+            patch.object(reset_password, "get_redis_url", return_value=self.redis_url),
             patch.object(reset_password, "Session", session),
             patch.object(reset_password, "SessionManager", self.manager_cls),
             patch("builtins.input", side_effect=answers),
@@ -182,8 +192,23 @@ def test_password_reset_reports_what_was_revoked_and_what_was_not(capsys) -> Non
 
 
 @pytest.mark.parametrize("choice", ["1", "3"])
-def test_unreachable_session_store_aborts_before_anything_changes(choice: str, capsys) -> None:
-    run = _Run(choice, store_error=ConnectionError("Failed to connect to Redis"))
+@pytest.mark.parametrize(
+    "redis_url",
+    [
+        "redis://store:6379",
+        "redis://:s3cret@store:6379/0",
+        "redis://user:s3cret@store:6379/0",
+        "redis://store:6379/0?password=s3cret",
+    ],
+)
+def test_unreachable_session_store_aborts_before_anything_changes(
+    choice: str, redis_url: str, capsys
+) -> None:
+    run = _Run(
+        choice,
+        store_error=ConnectionError(f"Failed to connect to Redis at {redis_url}"),
+        redis_url=redis_url,
+    )
 
     with pytest.raises(SystemExit) as exit_info:
         run.run()
@@ -195,12 +220,96 @@ def test_unreachable_session_store_aborts_before_anything_changes(choice: str, c
     assert "commit" not in run.events
     assert run.user.password_hash == "old-hash"
     assert run.user.totp_enabled is True
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    out = captured.out
     assert "Password updated" not in out
     assert "Done for" not in out
-    assert "session store" in out
-    assert "store:6379" in out
+    assert "Cannot reach the session store at store:6379 " in out
     assert "Nothing was changed" in out
+    # Only host and port are printed: no userinfo, no query, no exception text.
+    assert "s3cret" not in out + captured.err
+    assert "user" not in out
+
+
+def test_unusable_redis_url_is_refused_without_echoing_it(capsys) -> None:
+    run = _Run("1", store_error=ConnectionError("x"), redis_url="redis://:s3cret@store:notaport")
+
+    with pytest.raises(SystemExit) as exit_info:
+        run.run()
+
+    assert exit_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "s3cret" not in out
+    assert "Nothing was changed" in out
+
+
+def test_missing_redis_package_is_not_reported_as_an_unreachable_store(capsys) -> None:
+    run = _Run("1", store_error=ImportError("redis package not installed"))
+
+    with pytest.raises(SystemExit) as exit_info:
+        run.run()
+
+    assert exit_info.value.code == 1
+    run.getpass.assert_not_called()
+    assert run.statements == []
+    out = capsys.readouterr().out
+    assert "Cannot reach" not in out
+    assert "'redis' package" in out
+    assert "Nothing was changed" in out
+
+
+def test_any_other_store_failure_still_aborts_before_anything_changes(capsys) -> None:
+    run = _Run("1", store_error=RuntimeError("s3cret"))
+
+    with pytest.raises(SystemExit) as exit_info:
+        run.run()
+
+    assert exit_info.value.code == 1
+    run.getpass.assert_not_called()
+    assert run.statements == []
+    out = capsys.readouterr().out
+    assert "RuntimeError" in out and "s3cret" not in out
+    assert "Nothing was changed" in out
+
+
+@pytest.mark.parametrize("choice", ["1", "3"])
+def test_failed_commit_after_the_session_delete_is_reported_without_details(
+    choice: str, capsys
+) -> None:
+    # A driver error carries the statement and its parameters — the new hash.
+    run = _Run(choice, commit_error=_StoreDown("UPDATE users SET password_hash='new-hash'"))
+
+    with pytest.raises(SystemExit) as exit_info:
+        run.run()
+
+    assert exit_info.value.code == 1
+    assert run.events[-2:] == ["commit-failed", "rollback"]
+    assert "commit" not in run.events
+    captured = capsys.readouterr()
+    out = captured.out
+    assert "new-hash" not in out + captured.err
+    assert "_StoreDown" in out
+    assert "Password updated" not in out
+    assert "MFA disabled" not in out
+    assert "Done for" not in out
+    assert "password was NOT changed" in out
+    assert "already signed out" in out
+    assert "again" in out
+
+
+def test_failed_commit_of_an_mfa_only_reset_is_reported_without_details(capsys) -> None:
+    run = _Run("2", commit_error=_StoreDown("UPDATE users SET totp_secret=NULL -- s3cret"))
+
+    with pytest.raises(SystemExit) as exit_info:
+        run.run()
+
+    assert exit_info.value.code == 1
+    assert run.events[-1] == "rollback"
+    out = capsys.readouterr().out
+    assert "s3cret" not in out
+    assert "MFA disabled" not in out
+    assert "Nothing was changed" in out
+    assert "signed out" not in out
 
 
 @pytest.mark.parametrize("choice", ["1", "3"])

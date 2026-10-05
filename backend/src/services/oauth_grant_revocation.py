@@ -30,11 +30,11 @@ Nothing here commits: the caller owns the transaction.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import Result, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.expression import Executable
@@ -134,7 +134,7 @@ def revoke_oauth_grants_sync(
     return _revoked(results)
 
 
-def _revoked(results: list[Any]) -> RevokedGrants:
+def _revoked(results: Sequence[Result[Any]]) -> RevokedGrants:
     _lock, codes, devices, tokens = results
     return RevokedGrants(
         authorization_codes=_rowcount(codes),
