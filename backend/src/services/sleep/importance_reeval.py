@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from neural.config import NeuralMemoryConfig
     from services.sleep.reporter import SleepReporter
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -217,7 +217,10 @@ class ImportanceReevalPhase:
             Memory.deleted_at.is_(None),
             Memory.importance >= IMPORTANCE_MIN,
             Memory.importance <= IMPORTANCE_MAX,
-            Memory.updated_at < cutoff,
+            # #1868: ``updated_at`` is NULL until a memory is edited (#1852
+            # moved the embedding stamp off it), and ``NULL < cutoff`` is never
+            # true — a never-edited row ages from its ``created_at``.
+            func.coalesce(Memory.updated_at, Memory.created_at) < cutoff,
             # #1523: pinned rows keep the importance their owner set; the
             # deterministic load_pinned() lane orders by it.
             not_pinned_predicate(),

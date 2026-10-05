@@ -40,14 +40,14 @@ def _memory(**overrides) -> Memory:
 
 
 def _ref(
-    point_id, *, context_id=None, is_resource=False, resource_key=None, updated_at=None
+    point_id, *, context_id=None, is_resource=False, resource_key=None, written_at=None
 ) -> PointRef:
     return PointRef(
         point_id=str(point_id),
         context_id=str(context_id) if context_id else None,
         is_resource=is_resource,
         resource_key=resource_key,
-        updated_at=updated_at,
+        written_at=written_at,
     )
 
 
@@ -276,14 +276,14 @@ class TestWhatCountsAsAnOrphan:
                     context_id=context.id,
                     is_resource=True,
                     resource_key=("res_1", "doc_1", 1),
-                    updated_at=OLD_ENOUGH,
+                    written_at=OLD_ENOUGH,
                 ),
                 _ref(
                     gone_id,
                     context_id=context.id,
                     is_resource=True,
                     resource_key=("res_1", "doc_9", 1),
-                    updated_at=OLD_ENOUGH,
+                    written_at=OLD_ENOUGH,
                 ),
             ]
         )
@@ -305,7 +305,7 @@ class TestWhatCountsAsAnOrphan:
                     context_id=context.id,
                     is_resource=True,
                     resource_key=("res_1", "doc_new", 1),
-                    updated_at=utcnow() - timedelta(minutes=2),
+                    written_at=utcnow() - timedelta(minutes=2),
                 ),
                 # No timestamp at all: undecidable, kept.
                 _ref(
@@ -321,6 +321,67 @@ class TestWhatCountsAsAnOrphan:
 
         assert result.orphans == 0
         assert store.deleted == []
+
+    @pytest.mark.asyncio
+    async def test_a_backlog_point_written_just_now_with_no_row_is_kept(self, db_session):
+        """#1869: the indexer working through a backlog writes points whose
+        payload ``updated_at`` (the event time) is long past the grace period
+        while the batch that owns their rows has not committed. The sweep reads
+        the real write time (``indexed_at``), so such a point is kept."""
+        from types import SimpleNamespace
+
+        from db.qdrant import _point_ref
+
+        context = await _live_context(db_session)
+        now = utcnow()
+        point = SimpleNamespace(
+            id=str(uuid4()),
+            payload={
+                "context_id": str(context.id),
+                "resource_id": "res_1",
+                "doc_id": "doc_backlog",
+                "version": 1,
+                "updated_at": (now - timedelta(days=3)).isoformat() + "Z",
+                "indexed_at": (now - timedelta(minutes=2)).isoformat() + "Z",
+            },
+        )
+        store = _FakeStore([_point_ref(point)])
+
+        result = await _sweep(db_session, store, dry_run=False)
+
+        assert result.orphans == 0
+        assert store.deleted == []
+
+    @pytest.mark.asyncio
+    async def test_a_point_left_by_a_rolled_back_batch_is_swept_after_the_grace_period(
+        self, db_session
+    ):
+        """#1869: a batch that rolled back leaves its points without rows for
+        good; once the write time is past the grace period they are orphans."""
+        from types import SimpleNamespace
+
+        from db.qdrant import _point_ref
+
+        context = await _live_context(db_session)
+        now = utcnow()
+        point_id = str(uuid4())
+        point = SimpleNamespace(
+            id=point_id,
+            payload={
+                "context_id": str(context.id),
+                "resource_id": "res_1",
+                "doc_id": "doc_rolled_back",
+                "version": 1,
+                "updated_at": (now - timedelta(days=3)).isoformat() + "Z",
+                "indexed_at": (now - timedelta(hours=2)).isoformat() + "Z",
+            },
+        )
+        store = _FakeStore([_point_ref(point)])
+
+        result = await _sweep(db_session, store, dry_run=False)
+
+        assert store.deleted == [point_id]
+        assert result.collections[0].resource_no_row == 1
 
     @pytest.mark.asyncio
     async def test_resource_point_without_a_natural_key_and_no_row_is_kept(self, db_session):

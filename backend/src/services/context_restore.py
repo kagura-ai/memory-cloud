@@ -8,7 +8,10 @@ default 30 days), so a deleted context can be brought back from them:
 * the context row gets its ``deleted_at`` / ``deleted_by`` cleared;
 * the memories the deletion tombstoned get theirs cleared too, and go back to
   ``embedding_status='pending'`` so the embedding sweep
-  (``tasks/embedding_tasks.py``) builds their points again.
+  (``tasks/embedding_tasks.py``) builds their points again. A memory the
+  resource indexer wrote gets the indexer's point back — the document
+  re-projected from the row, under the id the row names — not a vector of its
+  summary (``ResourceIndexer.rebuild_point``, #1870).
 
 "The memories the deletion tombstoned" are the context's rows with the same
 ``deleted_by`` as the context, soft-deleted at the context's ``deleted_at``.
@@ -217,6 +220,9 @@ async def restore_deleted_context(
                 func.count().filter(by_the_deletion),
                 func.count(),
             ).where(
+                # The scope of the UPDATE below (``by_the_deletion``), so
+                # "left deleted" counts rows of the same set (#1870).
+                Memory.workspace_id == context.workspace_id,
                 Memory.context_id == context.id,
                 Memory.deleted_at.is_not(None),
             )

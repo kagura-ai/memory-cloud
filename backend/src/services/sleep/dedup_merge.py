@@ -794,7 +794,15 @@ class DedupMergePhase:
                 # their summary — a same-summary occurrence is not a duplicate.
                 Memory.type != MEMORY_TYPE_TIME,
             )
-            .order_by(Memory.updated_at.desc())
+            # #1868: ``updated_at`` is NULL until a memory is edited, and
+            # PostgreSQL sorts NULLs first under DESC — the bare column put
+            # every never-edited row ahead of every edited one, unordered.
+            # Fall back to ``created_at`` and break ties on ``id`` so the cap
+            # keeps the most recent memories, the same ones on every run.
+            .order_by(
+                func.coalesce(Memory.updated_at, Memory.created_at).desc(),
+                Memory.id.desc(),
+            )
             .limit(limit)
         )
         if workspace_id:

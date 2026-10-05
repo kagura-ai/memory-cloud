@@ -12,7 +12,7 @@ audit rows, rule-based end-to-end merge).
 Target module: ``services.sleep.dedup_merge``.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -615,6 +615,95 @@ class TestExecuteMergeRealDB:
 
         del_qdrant.assert_not_called()
         phase.edge_repo.transfer_edges.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# #1868: candidate fetch ordering with never-edited rows (real db_session)
+# ---------------------------------------------------------------------------
+
+
+class TestFetchActiveMemoriesOrdering:
+    """#1868: ``updated_at`` is NULL until a memory is edited. Ordering the
+    capped candidate fetch on the bare column put every never-edited row ahead
+    of every edited one (PostgreSQL sorts NULLs first under DESC), in no
+    defined order. The fetch orders by ``coalesce(updated_at, created_at)``
+    with ``id`` as the tie-break instead."""
+
+    async def _phase_for_db(self, db_session):
+        with (
+            patch("services.sleep.dedup_merge.NeuralEdgeRepository"),
+            patch("services.sleep.dedup_merge.EmbeddingService"),
+        ):
+            return DedupMergePhase(db_session, AsyncMock())
+
+    @staticmethod
+    async def _add(db_session, user_id, *, created_days_ago, updated_days_ago=None):
+        now = utcnow()
+        mem = Memory(
+            id=uuid4(),
+            user_id=user_id,
+            summary="m",
+            content="full content",
+            type="note",
+            importance=0.5,
+            client="pytest",
+            scope="working",
+            created_at=now - timedelta(days=created_days_ago),
+            updated_at=(
+                None if updated_days_ago is None else now - timedelta(days=updated_days_ago)
+            ),
+        )
+        db_session.add(mem)
+        await db_session.flush()
+        return mem
+
+    async def test_never_edited_and_edited_rows_interleave_newest_first(self, db_session):
+        """Above the cap, the kept set is the most recent memories whichever
+        clock made them recent, and the oldest never-edited row is the one cut."""
+        user_id = f"dedup-order-{uuid4()}"
+        never_1d = await self._add(db_session, user_id, created_days_ago=1)
+        edited_2d = await self._add(db_session, user_id, created_days_ago=30, updated_days_ago=2)
+        never_3d = await self._add(db_session, user_id, created_days_ago=3)
+        edited_4d = await self._add(db_session, user_id, created_days_ago=40, updated_days_ago=4)
+        never_5d = await self._add(db_session, user_id, created_days_ago=5)
+        never_6d = await self._add(db_session, user_id, created_days_ago=6)
+        phase = await self._phase_for_db(db_session)
+
+        first = await phase._fetch_active_memories(user_id, None, None, limit=4)
+        second = await phase._fetch_active_memories(user_id, None, None, limit=4)
+
+        expected = [never_1d.id, edited_2d.id, never_3d.id, edited_4d.id]
+        assert [m.id for m in first] == expected
+        assert [m.id for m in second] == expected
+        assert never_5d.id not in expected and never_6d.id not in expected
+
+    async def test_equal_timestamps_break_ties_on_id(self, db_session):
+        """Rows sharing a timestamp (a bulk import) come back in a defined
+        order, so the capped subset is the same on every run."""
+        user_id = f"dedup-order-{uuid4()}"
+        stamp = utcnow() - timedelta(days=2)
+        ids = []
+        for _ in range(6):
+            mem = Memory(
+                id=uuid4(),
+                user_id=user_id,
+                summary="m",
+                content="full content",
+                type="note",
+                importance=0.5,
+                client="pytest",
+                scope="working",
+                created_at=stamp,
+            )
+            db_session.add(mem)
+            ids.append(mem.id)
+        await db_session.flush()
+        phase = await self._phase_for_db(db_session)
+
+        fetched = await phase._fetch_active_memories(user_id, None, None, limit=4)
+
+        # PostgreSQL orders uuid by its bytes, which is the order of the hex text.
+        assert [m.id for m in fetched] == sorted(ids, key=lambda i: i.hex, reverse=True)[:4]
 
 
 # ---------------------------------------------------------------------------

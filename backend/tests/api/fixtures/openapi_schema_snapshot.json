@@ -3885,6 +3885,16 @@
           "created_at": {
             "type": "string"
           },
+          "embedding_attempted_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "embedding_error": {
             "anyOf": [
               {

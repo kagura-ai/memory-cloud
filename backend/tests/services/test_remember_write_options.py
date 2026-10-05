@@ -480,3 +480,130 @@ async def test_declared_links_are_written_before_the_embedding_task_starts(db_se
         )
         await asyncio.sleep(0)  # let the scheduled task run
     assert order == ["links", "embed"]
+
+
+# ------------------------------------------- tags_normalize: numbers (#1871)
+
+
+def _tagged(owner, ws, ctx, tags: list[str]) -> Memory:
+    memory = _existing(owner, ws, ctx, summary=f"stored {uuid4().hex[:6]}")
+    memory.tags = tags
+    return memory
+
+
+async def _remember_tags(db, owner, ws, ctx, tags: list[str]):
+    clear_vocabulary_cache()
+    result = await MemoryService(db).remember(
+        _req(f"a tagged note {uuid4().hex[:6]}", tags=tags),
+        user_id=owner,
+        client="pytest",
+        current_context_id=ctx.id,
+        current_workspace_id=ws.id,
+        tags_normalize=True,
+    )
+    row = (await db.execute(select(Memory).where(Memory.id == result.memory_id))).scalar_one()
+    mapped = {h.subject: h.replacement for h in result.lint if h.code == "tag_normalized"}
+    return row.tags, mapped
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored", "written"),
+    [
+        ("v0.1.10", "v0.11.0"),
+        ("pr-1-23", "pr-123"),
+        ("v0.9.4", "v0.94"),
+        ("2026-1-12", "2026-11-2"),
+    ],
+)
+async def test_tags_normalize_never_maps_a_tag_onto_one_with_other_numbers(
+    db_session, quiet_write, stored, written
+):
+    """One ``normalize_tag`` fold, two identifiers: the tag is stored as written."""
+    owner = f"o-{uuid4().hex[:6]}"
+    ws, ctx = await _scope(db_session, owner)
+    db_session.add_all([_tagged(owner, ws, ctx, [stored]) for _ in range(3)])
+    await db_session.commit()
+    tags, mapped = await _remember_tags(db_session, owner, ws, ctx, [written])
+    assert tags == [written]
+    assert mapped == {}
+
+
+@pytest.mark.asyncio
+async def test_tags_normalize_still_maps_mechanical_variants_that_carry_numbers(
+    db_session, quiet_write
+):
+    owner = f"o-{uuid4().hex[:6]}"
+    ws, ctx = await _scope(db_session, owner)
+    db_session.add(_tagged(owner, ws, ctx, ["dev-environment", "v0.94.0", "pr-123"]))
+    await db_session.commit()
+    tags, mapped = await _remember_tags(
+        db_session, owner, ws, ctx, ["Dev_Environment", "V0.94.0", "PR_123"]
+    )
+    assert tags == ["dev-environment", "v0.94.0", "pr-123"]
+    assert mapped == {
+        "Dev_Environment": "dev-environment",
+        "V0.94.0": "v0.94.0",
+        "PR_123": "pr-123",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("frequent", ["v0.1.10", "v0.11.0"])
+async def test_tags_normalize_reaches_the_true_variant_behind_a_colliding_spelling(
+    db_session, quiet_write, frequent
+):
+    """Two stored spellings share a fold; frequency must not decide which is reachable."""
+    owner = f"o-{uuid4().hex[:6]}"
+    ws, ctx = await _scope(db_session, owner)
+    for spelling in ("v0.1.10", "v0.11.0"):
+        copies = 3 if spelling == frequent else 1
+        db_session.add_all([_tagged(owner, ws, ctx, [spelling]) for _ in range(copies)])
+    await db_session.commit()
+    tags, mapped = await _remember_tags(db_session, owner, ws, ctx, ["V0.11.0", "V0.1.10"])
+    assert tags == ["v0.11.0", "v0.1.10"]
+    assert mapped == {"V0.11.0": "v0.11.0", "V0.1.10": "v0.1.10"}
+
+
+@pytest.mark.asyncio
+async def test_tags_with_other_numbers_do_not_fold_within_one_request(db_session, quiet_write):
+    owner = f"o-{uuid4().hex[:6]}"
+    ws, ctx = await _scope(db_session, owner)
+    await db_session.commit()
+    tags, mapped = await _remember_tags(
+        db_session, owner, ws, ctx, ["v0.11.0", "v0.1.10", "V0.1.10", "V0.11.0"]
+    )
+    assert tags == ["v0.11.0", "v0.1.10"]
+    assert mapped == {"V0.1.10": "v0.1.10", "V0.11.0": "v0.11.0"}
+
+
+@pytest.mark.asyncio
+async def test_atomic_batch_keeps_tags_with_other_numbers_apart(db_session, quiet_write):
+    """Across the items of one batch: variants still fold, colliding numbers do not."""
+    owner = f"o-{uuid4().hex[:6]}"
+    ws, ctx = await _scope(db_session, owner)
+    await db_session.commit()
+    clear_vocabulary_cache()
+    results = await MemoryService(db_session).remember_many(
+        [
+            _req("the first release note", tags=["v0.1.10", "Dev_Environment"]),
+            _req("the second release note", tags=["v0.11.0", "dev-environment"]),
+            _req("the third release note", tags=["V0.11.0"]),
+        ],
+        user_id=owner,
+        client="pytest",
+        current_context_id=ctx.id,
+        current_workspace_id=ws.id,
+        tags_normalize=True,
+    )
+    stored = []
+    for result in results:
+        row = (
+            await db_session.execute(select(Memory).where(Memory.id == result.memory_id))
+        ).scalar_one()
+        stored.append(row.tags)
+    assert stored == [["v0.1.10", "Dev_Environment"], ["v0.11.0", "Dev_Environment"], ["v0.11.0"]]
+    mapped = [
+        {h.subject: h.replacement for h in r.lint if h.code == "tag_normalized"} for r in results
+    ]
+    assert mapped == [{}, {"dev-environment": "Dev_Environment"}, {"V0.11.0": "v0.11.0"}]
