@@ -80,6 +80,7 @@ import {
 } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import {
+  adminUserPath,
   getAdminWorkspaces,
   getAdminPlanAudit,
   getAdminPlanTiers,
@@ -862,7 +863,7 @@ export default function AdminPlansPage() {
                         <TableCell>
                           {entry.changed_by_email ? (
                             <Link
-                              href={`/admin/users/${entry.changed_by}`}
+                              href={adminUserPath(entry.changed_by)}
                               className="block hover:underline"
                             >
                               {entry.changed_by_name && (

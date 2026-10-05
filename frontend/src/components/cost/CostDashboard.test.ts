@@ -15,6 +15,7 @@ import {
   buildChartData,
   formatCost,
   MAX_LOOKBACK_DAYS,
+  userLabel,
   workspaceLabel,
 } from "./CostDashboard";
 
@@ -177,6 +178,20 @@ describe("workspaceLabel", () => {
   it("renders an em-dash for a row with no workspace", () => {
     expect(workspaceLabel({ workspace_id: null, workspace_name: null })).toBe(
       "—",
+    );
+  });
+});
+
+describe("userLabel", () => {
+  it("prefers the resolved email", () => {
+    expect(
+      userLabel({ user_id: "104714482900000", user_email: "alice@example.com" }),
+    ).toBe("alice@example.com");
+  });
+
+  it("falls back to the sleep-reports uid:<8> shape", () => {
+    expect(userLabel({ user_id: "104714482900000", user_email: null })).toBe(
+      "uid:10471448",
     );
   });
 });

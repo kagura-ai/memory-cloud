@@ -8,6 +8,15 @@ import { apiClient } from "./base";
 import { ContextRole, WorkspaceRole } from "@/lib/auth/rbac";
 import type { PlanTier } from "@/lib/utils/planLabel";
 
+/**
+ * The admin user page for a stable ``user_id`` (OAuth2 sub). Ids may carry
+ * ``:`` (``local:admin``, connector identities), so the segment is encoded.
+ * One place for every admin table that links a user (#1861).
+ */
+export function adminUserPath(userId: string): string {
+  return `/admin/users/${encodeURIComponent(userId)}`;
+}
+
 export interface WorkspacePlanInfo {
   id: string;
   name: string;

@@ -8,6 +8,7 @@ import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { CostAggregationRow } from "@/lib/api";
+import { adminUserPath } from "@/lib/api/admin";
 import { CostDashboard } from "./CostDashboard";
 
 vi.mock("next-intl", () => ({
@@ -84,7 +85,7 @@ describe("CostDashboard rows", () => {
         description="d"
         fetchData={async () => ({ rows })}
         showWorkspaceColumn
-        userHref={(id) => `/admin/users/${encodeURIComponent(id)}`}
+        userHref={adminUserPath}
       />,
     );
     expect(await screen.findByText("Team Alpha")).toBeInTheDocument();

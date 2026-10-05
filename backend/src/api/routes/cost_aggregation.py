@@ -29,7 +29,6 @@ from datetime import date, datetime, time
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import (
@@ -48,6 +47,7 @@ from services.cost_aggregation_service import (
     CostAggregationService,
     window_exceeds_cap,
 )
+from services.label_resolver import resolve_user_labels, resolve_workspace_names
 from services.permission_service import PermissionService
 
 # No router-level tags so each route picks its own group ("admin" vs
@@ -214,47 +214,43 @@ def _round(v: float | None) -> float | None:
 
 
 async def _resolve_row_labels(
-    db: AsyncSession, rows: list[CostAggregationRow]
+    db: AsyncSession, rows: list[CostAggregationRow], *, member_of: UUID | None = None
 ) -> tuple[dict[UUID, str], dict[str, str]]:
     """Batch-resolve ``workspace_id → name`` and ``user_id → email`` for the
     rows of one response (#1861): two queries, no N+1, the sleep-reports
-    pattern. Ids with no row are left out so the UI falls back to the id."""
-    from models.auth import Workspace
-    from services.sleep_reporter_service import SleepReporterService
+    pattern. Ids with no row are left out so the UI falls back to the id.
 
-    workspace_ids = {r.workspace_id for r in rows if r.workspace_id is not None}
-    workspace_names: dict[UUID, str] = {}
-    if workspace_ids:
-        result = await db.execute(
-            select(Workspace.id, Workspace.name).where(Workspace.id.in_(workspace_ids))
-        )
-        for wid, name in result.all():
-            workspace_names[wid] = name
-    user_emails = await SleepReporterService(db).resolve_user_labels({r.user_id for r in rows})
+    ``member_of`` (the workspace-scoped route) limits the emails to current
+    members of that workspace; the admin route passes ``None``.
+    """
+    workspace_names = await resolve_workspace_names(
+        db, {r.workspace_id for r in rows if r.workspace_id is not None}
+    )
+    user_emails = await resolve_user_labels(db, {r.user_id for r in rows}, member_of=member_of)
     return workspace_names, user_emails
 
 
 async def _to_response_rows(
-    db: AsyncSession, rows: list[CostAggregationRow]
+    db: AsyncSession, rows: list[CostAggregationRow], *, member_of: UUID | None = None
 ) -> list[CostAggregationRowResponse]:
-    workspace_names, user_emails = await _resolve_row_labels(db, rows)
+    workspace_names, user_emails = await _resolve_row_labels(db, rows, member_of=member_of)
     return [_to_response_row(r, workspace_names, user_emails) for r in rows]
 
 
 def _to_response_row(
     row: CostAggregationRow,
-    workspace_names: dict[UUID, str] | None = None,
-    user_emails: dict[str, str] | None = None,
+    workspace_names: dict[UUID, str],
+    user_emails: dict[str, str],
 ) -> CostAggregationRowResponse:
     """Convert the service's plain container into the response model."""
     return CostAggregationRowResponse(
         period_start=row.period_start,
         workspace_id=row.workspace_id,
-        workspace_name=(workspace_names or {}).get(row.workspace_id)
+        workspace_name=workspace_names.get(row.workspace_id)
         if row.workspace_id is not None
         else None,
         user_id=row.user_id,
-        user_email=(user_emails or {}).get(row.user_id),
+        user_email=user_emails.get(row.user_id),
         calls=row.calls,
         tokens_in=row.tokens_in,
         tokens_out=row.tokens_out,
@@ -391,4 +387,4 @@ async def workspace_cost_aggregation(
         source=source,
         paid_by=paid_by,
     )
-    return CostAggregationResponse(rows=await _to_response_rows(db, rows))
+    return CostAggregationResponse(rows=await _to_response_rows(db, rows, member_of=workspace_id))

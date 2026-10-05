@@ -83,6 +83,11 @@ function defaultDateRange(): { from: string; to: string } {
  *
  * Exported for unit testing; not re-exported from the package barrel.
  */
+export function formatCost(value: number | null): string {
+  if (value === null) return "—";
+  return `$${value.toFixed(4)}`;
+}
+
 /**
  * The workspace cell's text (#1861): the name when the API resolved it, else
  * the shortened id (the sleep reports' fallback shape), else an em-dash for a
@@ -95,9 +100,14 @@ export function workspaceLabel(
   return row.workspace_id ? row.workspace_id.slice(0, 8) : "—";
 }
 
-export function formatCost(value: number | null): string {
-  if (value === null) return "—";
-  return `$${value.toFixed(4)}`;
+/**
+ * The user cell's text (#1861): the email when the API resolved it, else
+ * ``uid:<8>`` — the sleep-reports list's shape, so the two admin tables agree.
+ */
+export function userLabel(
+  row: Pick<CostAggregationRow, "user_id" | "user_email">,
+): string {
+  return formatUserPartitionLabel(row.user_email, row.user_id);
 }
 
 export interface ChartPoint {
@@ -494,18 +504,10 @@ export function CostDashboard({
                           className="text-blue-600 hover:underline dark:text-blue-400"
                           title={row.user_id}
                         >
-                          {formatUserPartitionLabel(
-                            row.user_email,
-                            row.user_id,
-                          )}
+                          {userLabel(row)}
                         </Link>
                       ) : (
-                        <span title={row.user_id}>
-                          {formatUserPartitionLabel(
-                            row.user_email,
-                            row.user_id,
-                          )}
-                        </span>
+                        <span title={row.user_id}>{userLabel(row)}</span>
                       )}
                     </TableCell>
                     <TableCell className="text-right font-mono text-sm">
