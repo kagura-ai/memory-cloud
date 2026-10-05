@@ -169,7 +169,7 @@ async def test_reset_keeps_the_account_armed(db_session: AsyncSession) -> None:
 async def test_concurrent_first_sign_ins_cannot_both_be_first(async_engine) -> None:
     """Two independent transactions: the second waits on the users row lock
     and, once the first commits, sees the marker — so it is NEW_DEVICE, not a
-    second FIRST_DEVICE. Would fail without ``with_for_update()``."""
+    second FIRST_DEVICE. Would fail without the row lock."""
     import asyncio
 
     from sqlalchemy import delete
@@ -184,7 +184,7 @@ async def test_concurrent_first_sign_ins_cannot_both_be_first(async_engine) -> N
         async with maker() as a, maker() as b:
             first = await record_sign_in(a, user_id=uid, digest="a" * 64, now=now)
             assert first is SignIn.FIRST_DEVICE
-            # b blocks on a's FOR UPDATE lock until a commits.
+            # b blocks on a's FOR NO KEY UPDATE lock until a commits.
             second_task = asyncio.create_task(
                 record_sign_in(b, user_id=uid, digest="b" * 64, now=now)
             )
@@ -194,6 +194,97 @@ async def test_concurrent_first_sign_ins_cannot_both_be_first(async_engine) -> N
             second = await asyncio.wait_for(second_task, timeout=10)
             await b.commit()
         assert second is SignIn.NEW_DEVICE
+    finally:
+        async with maker() as cleanup:
+            await cleanup.execute(delete(User).where(User.user_id == uid))
+            await cleanup.commit()
+
+
+async def test_an_open_fk_insert_does_not_delay_the_sign_in(async_engine) -> None:
+    """#1878: an uncommitted row that references the user holds the ``users``
+    row ``FOR KEY SHARE``. ``FOR NO KEY UPDATE`` does not conflict with it, so
+    the recorder goes straight through. Would hang with ``FOR UPDATE``."""
+    import asyncio
+
+    from sqlalchemy import delete
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+    async with maker() as setup:
+        uid = await _user(setup)
+        await setup.commit()
+    now = utcnow()
+    try:
+        async with maker() as holder, maker() as signer:
+            holder.add(
+                UserKnownDevice(user_id=uid, device_hash="f" * 64, first_seen=now, last_seen=now)
+            )
+            await holder.flush()  # FK check done, transaction left open
+
+            outcome = await asyncio.wait_for(
+                record_sign_in(signer, user_id=uid, digest="a" * 64, now=now), timeout=3
+            )
+            await signer.commit()
+            await holder.rollback()
+        assert outcome is SignIn.FIRST_DEVICE
+    finally:
+        async with maker() as cleanup:
+            await cleanup.execute(delete(User).where(User.user_id == uid))
+            await cleanup.commit()
+
+
+async def test_a_held_user_row_costs_the_sign_in_five_seconds_at_most(
+    async_engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1878: another transaction holds the ``users`` row (as a password reset
+    or an erasure does). The recorder gives up after ``lock_timeout``, logs
+    ``sign_in_device_record_failed`` and returns — the sign-in it was called
+    from already has its session and keeps it."""
+    import asyncio
+    import time
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from fastapi import Response
+    from sqlalchemy import delete
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    maker = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def _get_db():
+        async with maker() as session:
+            yield session
+
+    logger = MagicMock()
+    monkeypatch.setattr(svc, "get_db", _get_db)
+    monkeypatch.setattr(svc, "logger", logger)
+
+    async with maker() as setup:
+        uid = await _user(setup)
+        await setup.commit()
+    request = SimpleNamespace(cookies={}, headers={}, client=SimpleNamespace(host="203.0.113.5"))
+    response = Response()
+    try:
+        async with maker() as holder:
+            await holder.execute(select(User).where(User.user_id == uid).with_for_update())
+
+            started = time.monotonic()
+            await asyncio.wait_for(
+                svc.note_browser_sign_in(request, response, user_id=uid, sign_in_method="Password"),
+                timeout=15,
+            )
+            waited = time.monotonic() - started
+            await holder.rollback()
+
+        assert 4 <= waited < 10
+        logger.error.assert_called_once()
+        assert logger.error.call_args.args == ("sign_in_device_record_failed",)
+        assert logger.error.call_args.kwargs["user_id"] == uid
+        logger.info.assert_not_called()
+        # The device cookie is issued even so.
+        assert response.headers["set-cookie"].startswith(f"{svc.DEVICE_COOKIE_NAME}=")
+        async with maker() as check:
+            assert await _hashes(check, uid) == []
     finally:
         async with maker() as cleanup:
             await cleanup.execute(delete(User).where(User.user_id == uid))

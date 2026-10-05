@@ -45,7 +45,7 @@ from enum import StrEnum
 from typing import Any
 
 from fastapi import Request, Response
-from sqlalchemy import Boolean, Delete, delete, literal_column, select
+from sqlalchemy import Boolean, Delete, delete, literal_column, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,6 +69,13 @@ DEVICE_COOKIE_MAX_AGE = 365 * 24 * 3600
 _COOKIE_VALUE_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 # Domain separation: the audit HMAC key also hashes emails and queries.
 _HASH_PREFIX = "known-device:"
+
+
+# How long a sign-in waits for the account's ``users`` row (#1878), the bound
+# the other writers of this row use. Transaction-scoped, and the recorder's
+# transaction does nothing after ``record_sign_in`` but commit, so it is not
+# reset. Postgres syntax, like the upsert below.
+_SIGN_IN_LOCK_TIMEOUT_SQL = text("SET LOCAL lock_timeout = '5s'")
 
 
 class SignIn(StrEnum):
@@ -121,10 +128,19 @@ def device_hash(cookie_value: str) -> str:
 async def record_sign_in(db: AsyncSession, *, user_id: str, digest: str, now: datetime) -> SignIn:
     """Register the browser for the account, or refresh it, and say which.
 
-    Locks the ``users`` row ``FOR UPDATE`` so two sign-ins of one account
-    serialize here (two unknown browsers cannot both pass as the first), then
-    upserts the device row: one statement, so a concurrent retention DELETE
-    of a stale row cannot strand an ORM UPDATE. Caller owns commit/rollback.
+    Locks the ``users`` row ``FOR NO KEY UPDATE`` so two sign-ins of one
+    account serialize here (two unknown browsers cannot both pass as the
+    first), then upserts the device row: one statement, so a concurrent
+    retention DELETE of a stale row cannot strand an ORM UPDATE. Caller owns
+    commit/rollback.
+
+    The lock is the weakest that serializes (#1878): it does not conflict
+    with the ``FOR KEY SHARE`` an open insert referencing ``users.user_id``
+    holds, nor with a grant's owner lock, so those never delay a sign-in. A
+    transaction that holds the row more strongly (a password reset, an
+    erasure) is waited for at most 5s; after that the statement fails with
+    lock-not-available (55P03) and the caller's transaction is aborted.
+    ``lock_timeout`` stays set for the rest of that transaction.
 
     Args:
         db: Async session.
@@ -136,9 +152,15 @@ async def record_sign_in(db: AsyncSession, *, user_id: str, digest: str, now: da
         ``KNOWN`` when the browser was already registered, ``FIRST_DEVICE``
         when the account had never had a known device, ``NEW_DEVICE``
         otherwise.
+
+    Raises:
+        sqlalchemy.exc.DBAPIError: The row stayed locked for more than 5s.
     """
+    await db.execute(_SIGN_IN_LOCK_TIMEOUT_SQL)
     user = (
-        await db.execute(select(User).where(User.user_id == user_id).with_for_update())
+        await db.execute(
+            select(User).where(User.user_id == user_id).with_for_update(key_share=True)
+        )
     ).scalar_one()
     first = user.known_devices_since is None
     if first:
@@ -205,9 +227,10 @@ async def note_browser_sign_in(
     """Record the browser that just signed in and alert the owner if it is new.
 
     Call it after the session cookie is set, on every browser sign-in path.
-    Never raises: a failure here is logged and the sign-in stands. The device
-    cookie is (re-)issued even then, so the next sign-in can recognize the
-    browser.
+    Never raises and waits at most 5s for the account's row (see
+    :func:`record_sign_in`): a failure here, a lock timeout included, is
+    logged and the sign-in stands. The device cookie is (re-)issued even then,
+    so the next sign-in can recognize the browser.
 
     Args:
         request: The sign-in request (device cookie, IP, user agent).

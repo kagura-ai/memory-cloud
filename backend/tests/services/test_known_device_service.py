@@ -84,7 +84,7 @@ class TestCookie:
 
 
 def _db(*, armed: bool, inserted: bool) -> tuple[AsyncMock, SimpleNamespace]:
-    """A session whose statements answer in order: user lock, upsert, prune."""
+    """A session whose statements answer in order: lock timeout, user lock, upsert, prune."""
     user = SimpleNamespace(known_devices_since=datetime(2026, 1, 1) if armed else None)
     lock_result = MagicMock()
     lock_result.scalar_one.return_value = user
@@ -93,7 +93,7 @@ def _db(*, armed: bool, inserted: bool) -> tuple[AsyncMock, SimpleNamespace]:
     prune_result = MagicMock()
     prune_result.rowcount = 0
     db = AsyncMock()
-    db.execute.side_effect = [lock_result, upsert_result, prune_result]
+    db.execute.side_effect = [MagicMock(), lock_result, upsert_result, prune_result]
     return db, user
 
 
@@ -104,7 +104,7 @@ async def test_known_device_is_one_upsert_that_updated() -> None:
     outcome = await record_sign_in(db, user_id="u1", digest="d" * 64, now=datetime(2026, 10, 1))
 
     assert outcome == SignIn.KNOWN
-    assert db.execute.await_count == 2  # lock + upsert, no prune
+    assert db.execute.await_count == 3  # timeout + lock + upsert, no prune
     assert user.known_devices_since == datetime(2026, 1, 1)
 
 
@@ -117,7 +117,7 @@ async def test_first_device_arms_the_account_without_alert() -> None:
 
     assert outcome == SignIn.FIRST_DEVICE
     assert user.known_devices_since == now
-    assert db.execute.await_count == 2
+    assert db.execute.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -127,7 +127,7 @@ async def test_unknown_device_on_an_armed_account_is_new_and_prunes() -> None:
     outcome = await record_sign_in(db, user_id="u1", digest="d" * 64, now=datetime(2026, 10, 1))
 
     assert outcome == SignIn.NEW_DEVICE
-    assert db.execute.await_count == 3  # lock + upsert + prune to the cap
+    assert db.execute.await_count == 4  # timeout + lock + upsert + prune to the cap
 
 
 @pytest.mark.asyncio
@@ -149,11 +149,17 @@ def test_upsert_locks_the_user_row_and_returns_whether_it_inserted() -> None:
     import asyncio
 
     asyncio.run(record_sign_in(db, user_id="u1", digest="d" * 64, now=datetime(2026, 10, 1)))
-    lock_stmt, upsert_stmt, prune_stmt = (c.args[0] for c in db.execute.await_args_list)
+    timeout_stmt, lock_stmt, upsert_stmt, prune_stmt = (
+        c.args[0] for c in db.execute.await_args_list
+    )
+    # #1878: the wait on the users row is bounded before the row is locked.
+    assert str(timeout_stmt) == "SET LOCAL lock_timeout = '5s'"
     lock_sql = str(lock_stmt.compile(dialect=postgresql.dialect()))
     upsert_sql = str(upsert_stmt.compile(dialect=postgresql.dialect()))
     prune_sql = str(prune_stmt.compile(dialect=postgresql.dialect()))
-    assert "FOR UPDATE" in lock_sql
+    # #1878: the weakest lock that serializes two sign-ins — it does not
+    # conflict with the FOR KEY SHARE of an open FK insert.
+    assert lock_sql.rstrip().endswith("FOR NO KEY UPDATE")
     assert "ON CONFLICT ON CONSTRAINT user_known_devices_user_device_key DO UPDATE" in upsert_sql
     assert "RETURNING user_known_devices.id, (xmax = 0)" in upsert_sql
     assert "DELETE FROM user_known_devices" in prune_sql and "LIMIT" in prune_sql
