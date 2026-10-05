@@ -294,6 +294,7 @@ async def live(db_session):
     quota = MagicMock(
         check_memory_quota=AsyncMock(return_value=(True, None)),
         check_memories_per_day=AsyncMock(return_value=None),
+        reserve_memories_per_day=AsyncMock(return_value=None),
         release_memories_per_day=AsyncMock(return_value=None),
     )
     with (
@@ -493,7 +494,7 @@ async def test_an_atomic_batch_over_the_daily_quota_is_refused_as_quota_exceeded
     ctx_id, ctx_name = ctx.id, ctx.name
     quota = MagicMock(
         check_memory_quota=AsyncMock(return_value=(True, None)),
-        check_memories_per_day=AsyncMock(
+        reserve_memories_per_day=AsyncMock(
             side_effect=QuotaExceededError("Daily memory-creation quota exceeded.", requested=3)
         ),
         release_memories_per_day=AsyncMock(return_value=None),

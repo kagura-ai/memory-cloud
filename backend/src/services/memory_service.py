@@ -998,11 +998,13 @@ class MemoryService:
         events).
 
         Daily quota (#1873): the whole batch is reserved once, all or
-        nothing, after the duplicate checks and before any row. A batch that
-        does not fit raises :class:`QuotaExceededError` itself (not wrapped:
-        no single item is at fault) and charges nothing; a batch that is
-        rolled back later — a failing item, a failed commit, a cancellation
-        before the commit — gives its reservation back, so a refused batch
+        nothing (``QuotaService.reserve_memories_per_day``, the
+        ``check_memories_per_day`` gate with ``count=len(requests)``), after
+        the duplicate checks and before any row. A batch that does not fit
+        raises :class:`QuotaExceededError` itself (not wrapped: no single
+        item is at fault) and charges nothing; a batch that is rolled back
+        later — a failing item, a failed commit, a cancellation before the
+        commit — gives back exactly what it reserved, so a refused batch
         never uses up the day's budget.
 
         Cancellation (#1873): the commit is shielded, so a timeout either
@@ -1053,13 +1055,12 @@ class MemoryService:
         from services.quota_service import QuotaService
 
         # #1873: one all-or-nothing reservation on the workspace the rows land
-        # in. The day is read BEFORE reserving: a release after a midnight
-        # crossing must never decrement the new day's counter.
-        target_workspace_id = UUID(workspace_id_str)
+        # in. ``reservation`` is what was really added to the counter (None
+        # when the counter was unreachable): a rollback releases that and
+        # nothing else.
         quota_service = QuotaService(self.db)
-        reserved_day = utcnow().date()
-        await quota_service.check_memories_per_day(
-            target_workspace_id, count=len(requests), raise_on_exceeded=True
+        reservation = await quota_service.reserve_memories_per_day(
+            UUID(workspace_id_str), len(requests)
         )
 
         prepared: list[_PreparedRemember] = []
@@ -1086,9 +1087,7 @@ class MemoryService:
             cancelled = await self._commit_shielded()
         except BaseException:  # a timeout's CancelledError must roll back too
             await self.db.rollback()
-            await self._release_daily_reservation(
-                quota_service, target_workspace_id, len(requests), reserved_day
-            )
+            await self._release_daily_reservation(quota_service, reservation)
             raise
         responses: list[RememberResponse] = []
         for item in prepared:
@@ -1141,20 +1140,13 @@ class MemoryService:
         return cancelled
 
     @staticmethod
-    async def _release_daily_reservation(
-        quota_service: Any, workspace_id: UUID, count: int, day: Any
-    ) -> None:
+    async def _release_daily_reservation(quota_service: Any, reservation: Any) -> None:
         """Give a rolled-back batch's daily reservation back. Best-effort: it
         runs while another error is propagating and must not replace it."""
         try:
-            await quota_service.release_memories_per_day(workspace_id, count, day=day)
+            await quota_service.release_memories_per_day(reservation)
         except Exception as exc:
-            logger.warning(
-                "memories_per_day_release_failed",
-                workspace_id=str(workspace_id),
-                count=count,
-                error=str(exc),
-            )
+            logger.warning("memories_per_day_release_failed", error=str(exc))
 
     def _schedule_embedding(self, prepared: _PreparedRemember) -> None:
         """Start the embedding task for a committed row, once."""
@@ -1201,7 +1193,15 @@ class MemoryService:
         )
         if candidate is None:
             return
-        if request.supersedes is not None and str(request.supersedes) == candidate["memory_id"]:
+        # Only a memory the caller can actually supersede resolves the
+        # candidate this way: for another member's memory the write would
+        # succeed without the edge (``_create_declared_links`` refuses the
+        # target) and the duplicate would stay visible.
+        if (
+            request.supersedes is not None
+            and str(request.supersedes) == candidate["memory_id"]
+            and candidate.get("supersedable", True)
+        ):
             return
         raise DuplicateCandidateError(candidate)
 
@@ -1315,7 +1315,10 @@ class MemoryService:
         in ``_create_knn_seed_edges``. The scope is what ``recall`` by the
         same caller searches (#1873, as ``SearchService`` derives it): every
         member's memories in a shared context; in a private one the caller's
-        own and those of the accounts linked to it (#1784). An embedder that
+        own and those of the accounts linked to it (#1784). A candidate
+        another member wrote carries ``supersedable: False``: the caller can
+        read it but ``supersedes`` only takes the caller's own memories
+        (#1803), so that resolution is not offered for it. An embedder that
         cannot run (no key, spend cap, outage) is
         :class:`DedupeUnavailableError`: the caller decides, nothing is
         written silently.
@@ -1375,11 +1378,21 @@ class MemoryService:
             )
             if not kept:
                 continue
-            return {
+            candidate: dict[str, Any] = {
                 "memory_id": str(row.id),
                 "summary": row.summary,
                 "similarity": round(score, 4),
             }
+            # The ownership rule of ``_create_declared_links`` (#1803): the
+            # caller's own memory, or in a private context a linked account's.
+            own = row.user_id == user_id or (
+                linked is not None
+                and row.user_id in linked
+                and await self._is_private_context(context_id_str)
+            )
+            if not own:
+                candidate["supersedable"] = False
+            return candidate
         return None
 
     async def update_memory(

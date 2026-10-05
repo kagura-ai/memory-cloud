@@ -9,7 +9,9 @@ Responsibilities:
 - Provide quota status and warnings
 """
 
+import asyncio
 import time
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -45,6 +47,45 @@ logger = get_logger(__name__)
 # Issue #1549: the day counter is keyed by UTC date, so a key outlives its day
 # by at most this TTL (the date in the key keeps stale counters inert).
 _MEMORIES_PER_DAY_TTL = 86400
+
+
+@dataclass(frozen=True)
+class DailyReservation:
+    """What one ``reserve_memories_per_day`` call added to the daily counter:
+    the exact Redis key (the UTC day the reservation read) and the amount."""
+
+    key: str
+    count: int
+
+
+# Background undo tasks for reservations whose caller was cancelled mid-way;
+# held here so they are not garbage-collected before they run.
+_PENDING_UNDO: set[asyncio.Task[Any]] = set()
+
+
+def _undo_when_settled(increment: asyncio.Future[int], key: str, count: int) -> None:
+    """Take ``count`` back off ``key`` once ``increment`` has landed (#1873).
+
+    For a reservation whose caller was cancelled while the INCRBY was in
+    flight: the caller never learns whether it was charged and writes
+    nothing, so the charge is undone in the background. Best-effort.
+    """
+
+    def _undo(done: asyncio.Future[int]) -> None:
+        if done.cancelled() or done.exception() is not None:
+            return  # nothing was added
+
+        async def _decrement() -> None:
+            try:
+                await incrby_counter(key, -count, ttl=_MEMORIES_PER_DAY_TTL)
+            except RedisError as e:
+                logger.warning("memories_per_day_release_failed", count=count, error=str(e))
+
+        task = asyncio.ensure_future(_decrement())
+        _PENDING_UNDO.add(task)
+        task.add_done_callback(_PENDING_UNDO.discard)
+
+    increment.add_done_callback(_undo)
 
 
 def _memories_per_day_key(workspace_id: UUID, today: date) -> str:
@@ -203,8 +244,10 @@ class QuotaService:
         A reservation is not refunded if the write fails later (validation,
         DB error): a failed attempt costs one unit, like an MCP call does.
         The exception is the atomic batch (``MemoryService.remember_many``,
-        #1873): it reserves ``count=len(items)`` once and, when it rolls
-        back, returns the reservation with ``release_memories_per_day``.
+        #1873): it reserves ``count=len(items)`` once through
+        ``reserve_memories_per_day`` — this same gate, which also says what
+        was actually added — and, when it rolls back, returns exactly that
+        with ``release_memories_per_day``.
         Redis unavailable → fail-open with a warning log, exactly like
         ``RateLimitMiddleware._check_daily_quota`` (``RedisError`` caught).
 
@@ -222,6 +265,36 @@ class QuotaService:
                 does not fit. ``details`` carries ``quota_type="memories_per_day"``,
                 ``limit``, ``used_today``, ``requested`` and ``resets_at``.
         """
+        can_create, error, _reservation = await self._reserve_memories_per_day(
+            workspace_id, count, raise_on_exceeded=raise_on_exceeded
+        )
+        return can_create, error
+
+    async def reserve_memories_per_day(
+        self, workspace_id: UUID, count: int
+    ) -> DailyReservation | None:
+        """``check_memories_per_day`` for a caller that may give the reservation
+        back (#1873, the atomic batch).
+
+        Returns what this call added to the counter, or None when it added
+        nothing although the write may proceed (Redis unavailable — fail-open
+        — or ``count <= 0``). A release must be for exactly this value: the
+        day key is the one read here, so a midnight crossing or a counter
+        that was down at reservation time cannot make the release lower a
+        counter this call never raised.
+
+        Raises:
+            QuotaExceededError: The reservation does not fit (nothing is kept).
+        """
+        _ok, _error, reservation = await self._reserve_memories_per_day(
+            workspace_id, count, raise_on_exceeded=True
+        )
+        return reservation
+
+    async def _reserve_memories_per_day(
+        self, workspace_id: UUID, count: int, *, raise_on_exceeded: bool
+    ) -> tuple[bool, str | None, DailyReservation | None]:
+        """The daily gate itself: ``(can_create, error, what was reserved)``."""
         workspace_result = await self.db.execute(
             select(Workspace).where(Workspace.id == workspace_id)
         )
@@ -231,16 +304,16 @@ class QuotaService:
             error = f"Workspace {workspace_id} not found"
             if raise_on_exceeded:
                 raise QuotaExceededError(error)
-            return False, error
+            return False, error, None
 
         if count <= 0:
-            return True, None
+            return True, None, None
 
         limit = workspace.effective_memories_per_day
         today = utcnow().date()
         resets_at = _next_utc_midnight_iso(today)
 
-        def _refuse(used_today: int) -> tuple[bool, str | None]:
+        def _refuse(used_today: int) -> tuple[bool, str | None, None]:
             error = (
                 f"Daily memory-creation quota exceeded. "
                 f"Limit: {limit}/day ({workspace.plan_name} plan), "
@@ -271,7 +344,7 @@ class QuotaService:
                     used_today=used_today,
                     requested=count,
                 )
-            return False, error
+            return False, error, None
 
         # Zero-floor (#569): 0 means the tier cannot create memories at all.
         # Nothing to reserve, so Redis is not touched.
@@ -279,8 +352,14 @@ class QuotaService:
             return _refuse(0)
 
         key = _memories_per_day_key(workspace_id, today)
+        # Shielded (#1873): a cancellation between the INCRBY and its TTL
+        # bookkeeping would leave a charge the caller never learns of.
+        increment = asyncio.ensure_future(incrby_counter(key, count, ttl=_MEMORIES_PER_DAY_TTL))
         try:
-            new_total = await incrby_counter(key, count, ttl=_MEMORIES_PER_DAY_TTL)
+            new_total = await asyncio.shield(increment)
+        except asyncio.CancelledError:
+            _undo_when_settled(increment, key, count)
+            raise
         except RedisError as e:
             # Fail-open: never block a write because the counter is down.
             logger.warning(
@@ -288,7 +367,7 @@ class QuotaService:
                 workspace_id=str(workspace_id),
                 error=str(e),
             )
-            return True, None
+            return True, None, None
 
         if new_total > limit:
             # Release the reservation so the refused attempt does not consume
@@ -305,24 +384,21 @@ class QuotaService:
                 )
             return _refuse(new_total - count)
 
-        return True, None
+        return True, None, DailyReservation(key=key, count=count)
 
-    async def release_memories_per_day(self, workspace_id: UUID, count: int, *, day: date) -> None:
-        """Give back ``count`` creations reserved on ``day`` (#1873).
+    async def release_memories_per_day(self, reservation: DailyReservation | None) -> None:
+        """Give a reservation from ``reserve_memories_per_day`` back (#1873).
 
         For a batch that reserved up front and then wrote nothing
-        (``MemoryService.remember_many`` rolled back). ``day`` is the UTC day
-        the caller read BEFORE reserving, so a release that runs after
-        midnight lands on the old day's key and never lowers the new day's
-        counter. The TTL is passed for that case: a key recreated by the
-        decrement still expires. Raises ``RedisError`` when the counter is
-        unreachable — the reservation then expires with the day key.
+        (``MemoryService.remember_many`` rolled back). None — nothing was
+        reserved — is a no-op. The TTL is passed in case the day key expired
+        meanwhile: a key recreated by the decrement still expires. Raises
+        ``RedisError`` when the counter is unreachable — the reservation then
+        expires with the day key.
         """
-        if count <= 0:
+        if reservation is None:
             return
-        await incrby_counter(
-            _memories_per_day_key(workspace_id, day), -count, ttl=_MEMORIES_PER_DAY_TTL
-        )
+        await incrby_counter(reservation.key, -reservation.count, ttl=_MEMORIES_PER_DAY_TTL)
 
     async def count_memories_created_today(
         self, workspace_id: UUID, *, today: date | None = None
