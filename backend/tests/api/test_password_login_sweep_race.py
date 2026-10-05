@@ -18,6 +18,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import fakeredis
 import pytest
 from fastapi import HTTPException
 
@@ -297,13 +298,6 @@ class TestMfaVerify:
         assert f"mfa_pending_terms:{token}" in manager._redis.store
 
 
-class StoreRedis(FakeRedis):
-    """``FakeRedis`` plus the calls a real ``SessionManager`` makes."""
-
-    def ttl(self, _key: str) -> int:
-        return 100
-
-
 class TestARefusedSignInHasNoSideEffects:
     """#1878, against a real SessionManager: what a refused sign-in leaves behind.
 
@@ -314,7 +308,7 @@ class TestARefusedSignInHasNoSideEffects:
 
     @pytest.fixture
     def real(self, monkeypatch) -> SimpleNamespace:
-        fake = StoreRedis()
+        fake = fakeredis.FakeRedis(decode_responses=True)
         monkeypatch.setattr(
             SessionManager, "_get_or_create_redis_client", staticmethod(lambda _url: fake)
         )
@@ -361,8 +355,7 @@ class TestARefusedSignInHasNoSideEffects:
         )
 
     def _sessions(self, real: SimpleNamespace) -> set[str]:
-        prefix = "session:"
-        return {k[len(prefix) :] for k in real.manager._redis.store if k.startswith(prefix)}
+        return {k.removeprefix("session:") for k in real.manager._redis.scan_iter("session:*")}
 
     def _assert_untouched(self, real: SimpleNamespace) -> None:
         # Only the session that was there before; the new one is gone.
@@ -483,7 +476,7 @@ class TestARefusedSignInHasNoSideEffects:
         assert f"kagura_session={survivor}" in winners[0].headers["set-cookie"]
         assert real.manager.get_session(survivor) is not None
         # The lock is released.
-        assert "signin_sweep_lock:u-1" not in real.manager._redis.store
+        assert real.manager._redis.get("signin_sweep_lock:u-1") is None
 
     @pytest.mark.asyncio
     async def test_a_session_swept_after_the_recheck_signs_nobody_in(self, real) -> None:
@@ -500,7 +493,7 @@ class TestARefusedSignInHasNoSideEffects:
 
         assert exc_info.value.status_code == 503
         self._assert_untouched(real)
-        assert "signin_sweep_lock:u-1" not in real.manager._redis.store
+        assert real.manager._redis.get("signin_sweep_lock:u-1") is None
 
     @pytest.mark.asyncio
     async def test_a_sweep_lock_that_stays_held_fails_closed(self, real, monkeypatch) -> None:
@@ -513,4 +506,47 @@ class TestARefusedSignInHasNoSideEffects:
         assert exc_info.value.status_code == 503
         self._assert_untouched(real)
         # Another holder's lock is not released by the loser.
-        assert real.manager._redis.store["signin_sweep_lock:u-1"] == "someone-else"
+        assert real.manager._redis.get("signin_sweep_lock:u-1") == "someone-else"
+
+    @pytest.mark.asyncio
+    async def test_a_session_swept_during_the_sweep_is_not_answered_with_a_dead_cookie(
+        self, real
+    ) -> None:
+        # A password write does not take the sweep lock. Its revocation lands
+        # after the liveness check and before the sweep: the candidate is
+        # gone, so the sign-in is refused instead of answering 200.
+        real_check = real.manager.session_holds_user
+        calls = 0
+
+        def _check_then_password_write(session_id: str, user_id: str) -> bool:
+            nonlocal calls
+            calls += 1
+            live = real_check(session_id, user_id)
+            if calls == 1:
+                real.manager.delete_user_sessions("u-1", exclude_session_id=real.kept)
+            return live
+
+        real.manager.session_holds_user = _check_then_password_write
+
+        with pytest.raises(HTTPException) as exc_info:
+            await auth_routes.password_login(_login_body(), _request(), return_to=None)
+
+        assert exc_info.value.status_code == 503
+        assert calls == 2
+        assert real.user.last_login_at is None
+        real.workspace.assert_not_awaited()
+        assert real.manager._redis.get("signin_sweep_lock:u-1") is None
+
+    @pytest.mark.asyncio
+    async def test_a_sweep_that_fails_in_redis_fails_closed(self, real) -> None:
+        # Not "0 sessions swept": the old sessions may all still be there.
+        sweep = MagicMock(side_effect=ConnectionError("redis down"))
+        real.manager.delete_user_sessions = sweep
+
+        with pytest.raises(HTTPException) as exc_info:
+            await auth_routes.password_login(_login_body(), _request(), return_to=None)
+
+        assert exc_info.value.status_code == 503
+        assert sweep.call_args.kwargs["strict"] is True
+        self._assert_untouched(real)
+        assert real.manager._redis.get("signin_sweep_lock:u-1") is None

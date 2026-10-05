@@ -80,6 +80,7 @@ from utils.encryption import get_encryptor
 from utils.exceptions import AuthenticationError, ConflictError, InvalidCredentialsError
 from utils.hashing import SHA256_HEX_PATTERN, sha256_hex
 from utils.logger import get_logger
+from utils.redis_lock import acquire_lock_sync, release_lock_sync
 from utils.utf8 import is_utf8_encodable
 
 # auth.py historically bound logger via stdlib ``logging.getLogger``
@@ -2375,8 +2376,8 @@ async def _create_password_session(
 # Two sign-ins of one account that overlap must not sweep each other's new
 # session (#1878): the liveness check and the sweep below run under this
 # per-account Redis lock, so the first to get there keeps its session and the
-# other finds its own gone. The lock frees itself if its holder died; the
-# section under it is a handful of Redis calls.
+# other finds its own gone. The lock frees itself if its holder died, and is
+# released by token so an expired holder cannot free its successor's.
 _SIGN_IN_SWEEP_LOCK_KEY = "signin_sweep_lock:{user_id}"
 _SIGN_IN_SWEEP_LOCK_TTL_SECONDS = 10
 _SIGN_IN_SWEEP_LOCK_WAIT_SECONDS = 2.0
@@ -2390,34 +2391,43 @@ async def _complete_password_sign_in(user_id: str, email: str, session_id: str) 
     the session this sign-in just wrote, then ensures the personal workspace
     and stamps ``last_login_at``.
 
-    Returns False, having changed nothing, when ``session_id`` is no longer
+    Returns False, having stamped nothing, when ``session_id`` is no longer
     live: an overlapping sign-in of the account completed first, or a
-    password write swept the sessions after the re-check. The caller must
+    password write swept the sessions after the re-check. Also False when a
+    password write swept ``session_id`` while this sweep ran. The caller must
     refuse the sign-in. Raises when the sweep lock cannot be taken or Redis
-    fails; nothing was swept then either.
+    fails, the sweep included.
     """
     if not _session_manager:
         raise HTTPException(status_code=500, detail="Session manager not initialized")
 
     redis = _session_manager._redis
     lock_key = _SIGN_IN_SWEEP_LOCK_KEY.format(user_id=user_id)
-    lock_token = secrets.token_hex(16)
     deadline = time.monotonic() + _SIGN_IN_SWEEP_LOCK_WAIT_SECONDS
-    while not redis.set(lock_key, lock_token, nx=True, ex=_SIGN_IN_SWEEP_LOCK_TTL_SECONDS):
+    while True:
+        lock_token = acquire_lock_sync(redis, lock_key, _SIGN_IN_SWEEP_LOCK_TTL_SECONDS)
+        if lock_token is not None:
+            break
         if time.monotonic() >= deadline:
             raise TimeoutError("sign-in sweep lock is held")
         await asyncio.sleep(_SIGN_IN_SWEEP_LOCK_POLL_SECONDS)
     try:
         if not _session_manager.session_holds_user(session_id, user_id):
             return False
+        # strict: a sweep that failed must not read as "nothing to sweep".
         deleted_count = _session_manager.delete_user_sessions(
-            user_id, exclude_session_id=session_id
+            user_id, exclude_session_id=session_id, strict=True
         )
+        # A password write sweeps without this lock (it holds the ``users``
+        # row instead). If it deleted the new session between the check and
+        # the sweep above, refuse rather than answer with a dead cookie. The
+        # session that write kept is gone too in that case: its owner signs
+        # in again with the new password.
+        if not _session_manager.session_holds_user(session_id, user_id):
+            return False
     finally:
-        # Release only our own lock: it may have expired and been retaken.
         try:
-            if redis.get(lock_key) == lock_token:
-                redis.delete(lock_key)
+            release_lock_sync(redis, lock_key, lock_token)
         except Exception as exc:
             logger.warning(
                 "password_login_sweep_lock_release_failed",
