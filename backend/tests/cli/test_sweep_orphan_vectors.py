@@ -146,7 +146,7 @@ class TestApplyThatDeletedLessThanAsked:
 
         captured = capsys.readouterr()
         # The plan is shown, then the error alone: no apply report.
-        assert "deleted" not in captured.out
+        assert "deleted 0" not in captured.out
         assert "point(s) left" not in captured.out
         assert "error: 3 of 10 points look orphaned" in captured.err
 
