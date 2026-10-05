@@ -3,7 +3,9 @@
 Recall and the memory list already return a linked account's memories there;
 graph stats/data, ``list_edges`` and ``explore`` filtered edges by the caller
 alone, so a seed written by the linked account looked ``seed_not_in_graph``.
-Writes, deletes and Sleep stay per account.
+Edge writes and deletes, and the Sleep / consolidation jobs, stay per account.
+The memory-health report is a read: inside a context it covers, it counts the
+link set's sleep windows, usage and read attributions (#1834, #1874).
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from auth.workspace_roles import WorkspaceRole
 from models.auth import (
     Context,
     ContextReadAttribution,
@@ -21,6 +24,7 @@ from models.auth import (
     UsageStats,
     User,
     Workspace,
+    WorkspaceMember,
 )
 from models.memory import DELETED_BY_SLEEP_MERGE, Memory
 from models.schemas import ExploreRequest, MemoryResponse
@@ -55,6 +59,13 @@ async def _private_scope(db, owner: str) -> tuple[UUID, UUID]:
     db.add(ctx)
     await db.flush()
     return ws.id, ctx.id
+
+
+async def _join_as_admin(db, workspace_id: UUID, user_id: str) -> None:
+    """#1874: a link widens ownership only — the health report covers a linked
+    account's private context where the caller is itself a member."""
+    db.add(WorkspaceMember(workspace_id=workspace_id, user_id=user_id, role=WorkspaceRole.ADMIN))
+    await db.flush()
 
 
 async def _link(db, *accounts: str) -> None:
@@ -476,13 +487,15 @@ class TestMemoryHealthCoversTheSet:
         a, b, c = f"a-{uuid4().hex[:6]}", f"b-{uuid4().hex[:6]}", f"c-{uuid4().hex[:6]}"
         await _link(db_session, a, b)
         _, mine = await _private_scope(db_session, a)
-        _, linked = await _private_scope(db_session, b)
+        ws_linked, linked = await _private_scope(db_session, b)
         _, other = await _private_scope(db_session, c)
         # A link grants ownership of PRIVATE contexts, not membership: B's
         # shared context stays out of A's report.
         ws_shared, shared = await _private_scope(db_session, b)
         (await db_session.get(Context, shared)).is_private = False
         await db_session.flush()
+        await _join_as_admin(db_session, ws_linked, a)
+        await _join_as_admin(db_session, ws_shared, a)
 
         owned = {cid for cid, _ in await MemoryHealthService(db_session)._fetch_owned_contexts(a)}
 
@@ -497,6 +510,7 @@ class TestMemoryHealthCoversTheSet:
         a, b, m = f"a-{uuid4().hex[:6]}", f"b-{uuid4().hex[:6]}", f"m-{uuid4().hex[:6]}"
         await _link(db_session, a, b)
         ws, linked = await _private_scope(db_session, b)
+        await _join_as_admin(db_session, ws, a)
         _, elsewhere = await _private_scope(db_session, b)
         (await db_session.get(Context, elsewhere)).is_private = False
         ws_a, mine_shared = await _private_scope(db_session, a)
