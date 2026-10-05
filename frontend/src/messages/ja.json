@@ -3621,7 +3621,10 @@
       "notFoundTitle": "リソースが見つかりません",
       "notFound": "このリソースはワークスペースに存在しないか、削除されています。",
       "fetchError": "リソース詳細の取得に失敗しました。",
-      "backToList": "リソース一覧へ戻る"
+      "backToList": "リソース一覧へ戻る",
+      "contextDeletedTitle": "コンテキスト削除済み",
+      "contextDeletedDescription": "このリソースのコンテキストはすべて削除されています。ingest データとインデクサー状態は参照できませんが、有効なトークンは引き続き認証に使えます。「トークン」タブで確認して失効させてください。",
+      "goToTokens": "トークンタブを開く"
     },
     "tabs": {
       "overview": "概要",

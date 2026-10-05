@@ -222,17 +222,26 @@ class ResourceTokenManager:
         include_revoked: bool = True,
         limit: int | None = None,
         offset: int = 0,
+        *,
+        workspace_id: UUID | None = None,
+        resource_pk: UUID | None = None,
     ) -> list[ResourceToken]:
         """List resource tokens with optional filters and pagination.
 
         Issue #264: Added pagination support and created_by filter.
+        #1863: ``workspace_id`` / ``resource_pk`` scope the list to one
+        workspace's tokens (and one resource by its ``resources.id``) — a bare
+        slug is shared across workspaces, so the slug filter alone would mix
+        same-slug tokens of another workspace in.
 
         Args:
-            resource_id: Optional resource_id filter
+            resource_id: Optional resource_id (slug) filter
             created_by: Optional created_by filter (for user-specific tokens)
             include_revoked: Include revoked tokens (default: True)
             limit: Maximum number of tokens to return (None = all)
             offset: Starting offset for pagination (default: 0)
+            workspace_id: Optional ``resource_tokens.workspace_id`` filter
+            resource_pk: Optional ``resource_tokens.resource_pk`` filter
 
         Returns:
             List of ResourceToken entities
@@ -244,6 +253,12 @@ class ResourceTokenManager:
 
         if created_by:
             query = query.where(ResourceToken.created_by == created_by)
+
+        if workspace_id is not None:
+            query = query.where(ResourceToken.workspace_id == workspace_id)
+
+        if resource_pk is not None:
+            query = query.where(ResourceToken.resource_pk == resource_pk)
 
         if not include_revoked:
             query = query.where(ResourceToken.is_active == True)  # noqa: E712
@@ -259,15 +274,20 @@ class ResourceTokenManager:
         resource_id: str | None = None,
         created_by: str | None = None,
         include_revoked: bool = True,
+        *,
+        workspace_id: UUID | None = None,
+        resource_pk: UUID | None = None,
     ) -> int:
         """Count resource tokens matching filters.
 
-        Issue #264: For pagination total count.
+        Issue #264: For pagination total count. Same filters as ``list_tokens``.
 
         Args:
-            resource_id: Optional resource_id filter
+            resource_id: Optional resource_id (slug) filter
             created_by: Optional created_by filter
             include_revoked: Include revoked tokens (default: True)
+            workspace_id: Optional ``resource_tokens.workspace_id`` filter
+            resource_pk: Optional ``resource_tokens.resource_pk`` filter
 
         Returns:
             Total count of matching tokens
@@ -279,6 +299,10 @@ class ResourceTokenManager:
             conditions.append(ResourceToken.resource_id == resource_id)
         if created_by:
             conditions.append(ResourceToken.created_by == created_by)
+        if workspace_id is not None:
+            conditions.append(ResourceToken.workspace_id == workspace_id)
+        if resource_pk is not None:
+            conditions.append(ResourceToken.resource_pk == resource_pk)
         if not include_revoked:
             conditions.append(ResourceToken.is_active == True)  # noqa: E712
 

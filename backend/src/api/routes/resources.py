@@ -198,21 +198,8 @@ async def list_resources(
                     Context.id.in_(accessible_ids),
                 )
             )
-            # "Most recent activity" = max across the three signals. PostgreSQL's
-            # GREATEST ignores NULLs, so a missing last_event_at still picks up
-            # context.updated_at (or created_at as the final fallback).
-            # Note: SELECT aliases are not visible inside function calls in ORDER BY
-            # per PG's scoping rules, so we reference the scalar_subquery object
-            # directly here. This does cause the subquery to be emitted twice, but
-            # with < 50 resources/workspace the duplication is negligible, and PG's
-            # query planner can often hoist the correlated subquery to a join.
-            .order_by(
-                func.greatest(
-                    last_event_subq,
-                    Context.updated_at,
-                    Context.created_at,
-                ).desc(),
-            )
+            # Ordering happens in Python below, where the context-less rows
+            # (#1863) are merged in by the same "most recent activity" key.
         )
         rows = result.all()
 
@@ -272,43 +259,49 @@ async def list_resources(
     # matches the ORDER BY greatest() above so the sort order agrees with
     # the rendered value. to_utc_iso() handles None + adds the explicit Z
     # suffix that JS clients need.
-    items: list[tuple[datetime | None, ResourceListItem]] = [
-        (
-            _latest(row.last_event_at, row.context_updated_at, row.created_at),
-            ResourceListItem(
-                resource_id=row.resource_id,
-                context_id=str(row.context_id),
-                context_name=row.context_name,
-                context_display_name=row.context_display_name,
-                token_count=row.token_count or 0,
-                memory_count=row.memory_count or 0,
-                current_schema_version=row.schema_version,
-                created_at=to_utc_iso(row.created_at),
-                updated_at=to_utc_iso(
-                    _latest(row.last_event_at, row.context_updated_at, row.created_at)
+    # Pick the most recent signal across the timestamps, ignoring None, and
+    # use it both as the sort key and as the rendered updated_at so the order
+    # agrees with the value. to_utc_iso() handles None + adds the explicit Z
+    # suffix that JS clients need.
+    items: list[tuple[datetime | None, ResourceListItem]] = []
+    for row in rows:
+        latest = _latest(row.last_event_at, row.context_updated_at, row.created_at)
+        items.append(
+            (
+                latest,
+                ResourceListItem(
+                    resource_id=row.resource_id,
+                    context_id=str(row.context_id),
+                    context_name=row.context_name,
+                    context_display_name=row.context_display_name,
+                    token_count=row.token_count or 0,
+                    memory_count=row.memory_count or 0,
+                    current_schema_version=row.schema_version,
+                    created_at=to_utc_iso(row.created_at),
+                    updated_at=to_utc_iso(latest),
                 ),
-            ),
+            )
         )
-        for row in rows
-    ] + [
-        (
-            _latest(row.last_event_at, row.created_at),
-            ResourceListItem(
-                resource_id=row.resource_id,
-                context_id=None,
-                context_name=None,
-                context_display_name=None,
-                token_count=row.token_count or 0,
-                memory_count=row.memory_count or 0,
-                current_schema_version=row.schema_version,
-                created_at=to_utc_iso(row.created_at),
-                updated_at=to_utc_iso(_latest(row.last_event_at, row.created_at)),
-            ),
+    for row in orphan_rows:
+        latest = _latest(row.last_event_at, row.created_at)
+        items.append(
+            (
+                latest,
+                ResourceListItem(
+                    resource_id=row.resource_id,
+                    context_id=None,
+                    context_name=None,
+                    context_display_name=None,
+                    token_count=row.token_count or 0,
+                    memory_count=row.memory_count or 0,
+                    current_schema_version=row.schema_version,
+                    created_at=to_utc_iso(row.created_at),
+                    updated_at=to_utc_iso(latest),
+                ),
+            )
         )
-        for row in orphan_rows
-    ]
-    # Both lists are already small (< 50 resources/workspace); merge them by
-    # most recent activity so the orphan rows take their natural place.
+    # Both lists are small (< 50 resources/workspace); merge them by most
+    # recent activity so the context-less rows take their natural place.
     items.sort(key=lambda it: (it[0] is not None, it[0]), reverse=True)
     resources = [item for _, item in items]
 

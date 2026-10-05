@@ -398,6 +398,39 @@ describe("ResourceDetailPage", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("skips the indexer fetch and points at the Tokens tab for a context-less resource (#1863)", async () => {
+    mockListResources.mockResolvedValue({
+      resources: [
+        makeResource({
+          context_id: null,
+          context_name: null,
+          context_display_name: null,
+          token_count: 1,
+          memory_count: 0,
+        }),
+      ],
+      total: 1,
+    });
+    mockGetSchema.mockRejectedValue(
+      new ApiError({ message: "Not found", status: 404 }),
+    );
+
+    render(<ResourceDetailPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("resources.detail.contextDeletedTitle")).toBeInTheDocument();
+    });
+    // The indexer endpoint resolves through a live context and would 404 —
+    // the page must not call it for such a row.
+    expect(mockGetIndexerStatus).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("indexer-panel")).not.toBeInTheDocument();
+    // The action switches to the Tokens tab, where the tokens are revocable
+    // (the tab itself is driven by the URL param, covered by the tab tests).
+    expect(
+      screen.getByRole("button", { name: "resources.detail.goToTokens" }),
+    ).toBeInTheDocument();
+  });
+
   it("exposes all four tabs (overview / data / schemas / tokens)", async () => {
     mockListResources.mockResolvedValue({
       resources: [makeResource()],

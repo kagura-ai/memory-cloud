@@ -113,8 +113,14 @@ async def scenario(async_engine, db_session):
     _, token_b = await manager.create_token(
         slug_b, resource_pk=resource_b_id, workspace_id=ws_b_id, created_by=owner_a_id
     )
+    # Minted by someone else in A's workspace (a departed member, a connector):
+    # the owner must still see and revoke it (#1863 "Done when").
+    _, token_c = await manager.create_token(
+        slug_a, resource_pk=resource_a_id, workspace_id=ws_a_id, created_by=f"gone_{tag}"
+    )
     token_a_public_id, token_a_id = token_a.public_id, token_a.id
     token_b_public_id = token_b.public_id
+    token_c_public_id = token_c.public_id
     await db_session.commit()
 
     async def override_auth():
@@ -139,6 +145,7 @@ async def scenario(async_engine, db_session):
         "token_a_public_id": token_a_public_id,
         "token_a_id": token_a_id,
         "token_b_public_id": token_b_public_id,
+        "token_c_public_id": token_c_public_id,
     }
 
     app.dependency_overrides.clear()
@@ -177,7 +184,10 @@ async def test_tokens_stay_listed_and_revocable_after_context_delete(scenario, d
     with TestClient(app) as client:
         before = client.get("/api/v1/resource-tokens", params={"resource_id": slug})
         assert before.status_code == 200, before.text
-        assert [t["id"] for t in before.json()["tokens"]] == [scenario["token_a_public_id"]]
+        # Both tokens of the resource, whoever minted them; none from workspace B.
+        assert sorted(t["id"] for t in before.json()["tokens"]) == sorted(
+            [scenario["token_a_public_id"], scenario["token_c_public_id"]]
+        )
 
         await _soft_delete(db_session, scenario["ctx_a_id"])
 
@@ -188,16 +198,24 @@ async def test_tokens_stay_listed_and_revocable_after_context_delete(scenario, d
         row = next(r for r in listing.json()["resources"] if r["resource_id"] == slug)
         assert row["context_id"] is None
         assert row["context_name"] is None
-        assert row["token_count"] == 1
+        assert row["token_count"] == 2
 
         # Filtered list and revoke still resolve the resource (both were 403
         # before #1863).
         after = client.get("/api/v1/resource-tokens", params={"resource_id": slug})
         assert after.status_code == 200, after.text
-        assert after.json()["total"] == 1
+        assert after.json()["total"] == 2
 
         revoked = client.delete(f"/api/v1/resource-tokens/{scenario['token_a_public_id']}")
         assert revoked.status_code == 204, revoked.text
+        # The row stays while the other minter's token is still active …
+        assert any(
+            r["resource_id"] == slug and r["token_count"] == 1
+            for r in client.get("/api/v1/resources").json()["resources"]
+        )
+        # … and the owner can revoke that one too.
+        revoked_c = client.delete(f"/api/v1/resource-tokens/{scenario['token_c_public_id']}")
+        assert revoked_c.status_code == 204, revoked_c.text
 
         # Once the last token is revoked the context-less row disappears.
         listing_after = client.get("/api/v1/resources")
@@ -214,7 +232,10 @@ async def test_tokens_stay_listed_and_revocable_after_context_delete(scenario, d
 
 @pytest.mark.asyncio
 async def test_cross_workspace_revoke_is_still_rejected(scenario):
-    """#268 boundary holds on the new ``resources``-row check."""
+    """#268 boundary holds: a token of another workspace is a uniform 404 (its
+    existence is not disclosed), even though the caller minted it."""
     with TestClient(app) as client:
         response = client.delete(f"/api/v1/resource-tokens/{scenario['token_b_public_id']}")
-        assert response.status_code == 403, response.text
+        assert response.status_code == 404, response.text
+        listed = client.get("/api/v1/resource-tokens").json()["tokens"]
+        assert scenario["token_b_public_id"] not in {t["id"] for t in listed}

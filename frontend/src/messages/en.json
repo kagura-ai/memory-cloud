@@ -3621,7 +3621,10 @@
       "notFoundTitle": "Resource not found",
       "notFound": "This resource does not exist in your workspace, or has been removed.",
       "fetchError": "Failed to load resource details.",
-      "backToList": "Back to resources"
+      "backToList": "Back to resources",
+      "contextDeletedTitle": "Context deleted",
+      "contextDeletedDescription": "Every context of this resource has been deleted. Ingest data and indexer status are no longer available, but its active tokens still authenticate — review and revoke them in the Tokens tab.",
+      "goToTokens": "Open the Tokens tab"
     },
     "tabs": {
       "overview": "Overview",

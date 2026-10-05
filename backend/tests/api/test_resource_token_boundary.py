@@ -41,6 +41,12 @@ def _token(resource_pk=None) -> ResourceToken:
     )
 
 
+def _no_contexts_query(db: AsyncMock) -> bool:
+    """True when none of the executed statements touches the contexts table —
+    the property the fix is about, stated without pinning a query count."""
+    return all("contexts" not in str(call.args[0]) for call in db.execute.await_args_list)
+
+
 def _db_returning(*scalars) -> AsyncMock:
     """A session whose successive ``execute`` calls yield the given scalars."""
     results = []
@@ -101,9 +107,10 @@ class TestTokenInWorkspace:
         assert await _token_in_workspace(db, _token(resource_pk=uuid4()), WORKSPACE_ID) is False
 
     @pytest.mark.asyncio
-    async def test_legacy_token_without_resource_pk_is_out_of_scope(self):
+    async def test_legacy_token_without_resource_pk_falls_back_to_its_workspace_id(self):
         db = AsyncMock()
-        assert await _token_in_workspace(db, _token(resource_pk=None), WORKSPACE_ID) is False
+        assert await _token_in_workspace(db, _token(resource_pk=None), WORKSPACE_ID) is True
+        assert await _token_in_workspace(db, _token(resource_pk=None), uuid4()) is False
         db.execute.assert_not_awaited()
 
 
@@ -111,33 +118,58 @@ class TestRevokeBoundary:
     def test_revokes_when_the_resources_row_matches_without_any_live_context(self, owner_client):
         pk = uuid4()
         token = _token(resource_pk=pk)
-        # 1st execute: token lookup; 2nd: resources row. No contexts query at all.
+        # token lookup (scoped by workspace), then the resources row — and no
+        # contexts query anywhere on the path.
         owner_client.state_["db"] = _db_returning(token, pk)
         response = owner_client.delete(f"/api/v1/resource-tokens/{PUBLIC_ID}")
         assert response.status_code == 204, response.text
         owner_client.manager_.revoke_token.assert_awaited_once_with(token.id)
-        assert owner_client.state_["db"].execute.await_count == 2
+        assert _no_contexts_query(owner_client.state_["db"])
 
-    def test_403_when_the_resources_row_is_in_another_workspace(self, owner_client):
+    def test_404_when_the_token_is_in_another_workspace(self, owner_client):
+        # The lookup is scoped to the caller's workspace, so a foreign token
+        # is a uniform 404 — its existence is not disclosed (#268 posture).
+        owner_client.state_["db"] = _db_returning(None)
+        response = owner_client.delete(f"/api/v1/resource-tokens/{PUBLIC_ID}")
+        assert response.status_code == 404
+        owner_client.manager_.revoke_token.assert_not_awaited()
+
+    def test_403_when_the_resources_row_points_outside_the_workspace(self, owner_client):
+        # Defense in depth: the token row says this workspace but its
+        # resource_pk resolves to a resources row elsewhere.
         owner_client.state_["db"] = _db_returning(_token(resource_pk=uuid4()), None)
         response = owner_client.delete(f"/api/v1/resource-tokens/{PUBLIC_ID}")
         assert response.status_code == 403
         owner_client.manager_.revoke_token.assert_not_awaited()
 
-    def test_403_for_a_legacy_token_without_resource_pk(self, owner_client):
-        owner_client.state_["db"] = _db_returning(_token(resource_pk=None))
+    def test_legacy_token_without_resource_pk_is_revocable_in_its_workspace(self, owner_client):
+        token = _token(resource_pk=None)
+        owner_client.state_["db"] = _db_returning(token)
         response = owner_client.delete(f"/api/v1/resource-tokens/{PUBLIC_ID}")
-        assert response.status_code == 403
+        assert response.status_code == 204, response.text
+        owner_client.manager_.revoke_token.assert_awaited_once_with(token.id)
 
-    def test_404_when_the_token_is_not_the_callers(self, owner_client):
-        owner_client.state_["db"] = _db_returning(None)
+    def test_revoke_does_not_depend_on_who_minted_the_token(self, owner_client):
+        # #1863 "Done when": the owner can revoke every active token in the
+        # workspace, including one minted by a departed member or a connector.
+        pk = uuid4()
+        token = _token(resource_pk=pk)
+        token.created_by = "someone_else"
+        owner_client.state_["db"] = _db_returning(token, pk)
         response = owner_client.delete(f"/api/v1/resource-tokens/{PUBLIC_ID}")
-        assert response.status_code == 404
+        assert response.status_code == 204, response.text
 
 
 class TestUpdateBoundary:
-    def test_403_when_the_resources_row_is_in_another_workspace(self, owner_client):
-        # Same boundary as revoke: token lookup, then the resources row — no
+    def test_404_when_the_token_is_in_another_workspace(self, owner_client):
+        owner_client.state_["db"] = _db_returning(None)
+        response = owner_client.patch(
+            f"/api/v1/resource-tokens/{PUBLIC_ID}", json={"description": "renamed"}
+        )
+        assert response.status_code == 404
+
+    def test_403_when_the_resources_row_points_outside_the_workspace(self, owner_client):
+        # Same boundary as revoke: token lookup, then the resources row, no
         # contexts query. (The success path continues into plan/quota lookups
         # that the integration test exercises against a real database.)
         owner_client.state_["db"] = _db_returning(_token(resource_pk=uuid4()), None)
@@ -145,24 +177,33 @@ class TestUpdateBoundary:
             f"/api/v1/resource-tokens/{PUBLIC_ID}", json={"description": "renamed"}
         )
         assert response.status_code == 403
-        assert owner_client.state_["db"].execute.await_count == 2
-
-    def test_403_for_a_legacy_token_without_resource_pk(self, owner_client):
-        owner_client.state_["db"] = _db_returning(_token(resource_pk=None))
-        response = owner_client.patch(
-            f"/api/v1/resource-tokens/{PUBLIC_ID}", json={"description": "renamed"}
-        )
-        assert response.status_code == 403
+        assert _no_contexts_query(owner_client.state_["db"])
 
 
 class TestListFilterBoundary:
-    def test_filter_resolves_through_the_resources_row(self, owner_client):
+    def test_filter_resolves_through_the_resources_row_and_pins_the_pk(self, owner_client):
+        pk = uuid4()
         with patch.object(
-            route_module, "resolve_resource_pk", new=AsyncMock(return_value=uuid4())
+            route_module, "resolve_resource_pk", new=AsyncMock(return_value=pk)
         ) as resolve:
             response = owner_client.get("/api/v1/resource-tokens", params={"resource_id": "orders"})
         assert response.status_code == 200, response.text
         resolve.assert_awaited_once_with(owner_client.state_["db"], WORKSPACE_ID, "orders")
+        # The slug is shared across workspaces; the list is pinned to the
+        # resolved resources row and the caller's workspace, never to the slug.
+        owner_client.manager_.list_tokens.assert_awaited_once_with(
+            include_revoked=True, limit=50, offset=0, workspace_id=WORKSPACE_ID, resource_pk=pk
+        )
+        owner_client.manager_.count_tokens.assert_awaited_once_with(
+            include_revoked=True, workspace_id=WORKSPACE_ID, resource_pk=pk
+        )
+
+    def test_unfiltered_list_is_the_whole_workspace(self, owner_client):
+        response = owner_client.get("/api/v1/resource-tokens")
+        assert response.status_code == 200, response.text
+        owner_client.manager_.list_tokens.assert_awaited_once_with(
+            include_revoked=True, limit=50, offset=0, workspace_id=WORKSPACE_ID, resource_pk=None
+        )
 
     def test_403_when_the_slug_has_no_resources_row_in_the_workspace(self, owner_client):
         with patch.object(route_module, "resolve_resource_pk", new=AsyncMock(return_value=None)):

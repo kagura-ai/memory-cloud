@@ -165,13 +165,19 @@ export default function ResourceDetailPage() {
     }
   }, [resourceId]);
 
+  // #1863: a resource whose contexts were all deleted is listed only so its
+  // still-active tokens can be revoked. The indexer / events endpoints
+  // resolve through a live context and would answer 404, so the page skips
+  // them and points at the Tokens tab instead.
+  const contextDeleted = resource !== null && resource.context_id === null;
+
   useEffect(() => {
     // Only fetch once the resource is confirmed accessible — avoids spamming
     // 404s from the indexer endpoint when the user hits a resource they
-    // cannot see.
-    if (!resource) return;
+    // cannot see (or one with no live context, see contextDeleted).
+    if (!resource || contextDeleted) return;
     fetchIndexerStatus();
-  }, [resource, fetchIndexerStatus]);
+  }, [resource, contextDeleted, fetchIndexerStatus]);
 
   useEffect(() => {
     const title = resource
@@ -271,15 +277,37 @@ export default function ResourceDetailPage() {
           schema is a define-time concern and the indexer state is runtime.
         */}
         <TabsContent value="overview" className="mt-6">
-          <IndexerStatusPanel
-            data={indexerStatus}
-            isLoading={indexerLoading}
-            error={indexerError}
-          />
+          {contextDeleted ? (
+            <EmptyState
+              icon={Key}
+              title={t("detail.contextDeletedTitle")}
+              description={t("detail.contextDeletedDescription")}
+              actionLabel={t("detail.goToTokens")}
+              onAction={() => setTab("tokens")}
+              compact
+            />
+          ) : (
+            <IndexerStatusPanel
+              data={indexerStatus}
+              isLoading={indexerLoading}
+              error={indexerError}
+            />
+          )}
         </TabsContent>
 
         <TabsContent value="data" className="mt-6">
-          <ResourceDataTab resourceId={resourceId} schema={schema} />
+          {contextDeleted ? (
+            <EmptyState
+              icon={Key}
+              title={t("detail.contextDeletedTitle")}
+              description={t("detail.contextDeletedDescription")}
+              actionLabel={t("detail.goToTokens")}
+              onAction={() => setTab("tokens")}
+              compact
+            />
+          ) : (
+            <ResourceDataTab resourceId={resourceId} schema={schema} />
+          )}
         </TabsContent>
 
         <TabsContent value="schemas" className="mt-6">
