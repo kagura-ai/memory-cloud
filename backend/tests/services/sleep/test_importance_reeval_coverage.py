@@ -140,6 +140,50 @@ class TestFetchCandidates:
 
         assert [c.id for c in candidates] == [kw["id"]]
 
+    async def test_never_edited_stale_memory_is_a_candidate(self, db_session):
+        """#1868: ``updated_at`` stays NULL until a memory is edited, so the
+        staleness clock of a never-edited row is its ``created_at``. Such a row
+        older than STALENESS_DAYS must be re-evaluated like an edited one."""
+        user_id = f"u-{uuid4()}"
+        kw = _mem_kwargs(user_id=user_id, importance=0.5)
+        kw["updated_at"] = None
+        kw["created_at"] = utcnow() - timedelta(days=STALENESS_DAYS + 1)
+        db_session.add(Memory(**kw))
+        await db_session.flush()
+
+        phase = ImportanceReevalPhase(db_session, AsyncMock())
+        candidates = await phase._fetch_candidates(user_id, None, None)
+
+        assert [c.id for c in candidates] == [kw["id"]]
+
+    async def test_never_edited_recent_memory_is_not_a_candidate(self, db_session):
+        """#1868: a never-edited row created inside the staleness window is fresh."""
+        user_id = f"u-{uuid4()}"
+        kw = _mem_kwargs(user_id=user_id, importance=0.5)
+        kw["updated_at"] = None
+        kw["created_at"] = utcnow() - timedelta(days=STALENESS_DAYS - 1)
+        db_session.add(Memory(**kw))
+        await db_session.flush()
+
+        phase = ImportanceReevalPhase(db_session, AsyncMock())
+        candidates = await phase._fetch_candidates(user_id, None, None)
+
+        assert candidates == []
+
+    async def test_recent_edit_outranks_old_created_at(self, db_session):
+        """#1868: the fallback applies only when ``updated_at`` is NULL — an old
+        row edited inside the window is still fresh."""
+        user_id = f"u-{uuid4()}"
+        kw = _mem_kwargs(user_id=user_id, importance=0.5, updated_delta_days=1)
+        kw["created_at"] = utcnow() - timedelta(days=STALENESS_DAYS + 30)
+        db_session.add(Memory(**kw))
+        await db_session.flush()
+
+        phase = ImportanceReevalPhase(db_session, AsyncMock())
+        candidates = await phase._fetch_candidates(user_id, None, None)
+
+        assert candidates == []
+
     async def test_excludes_pinned_memory(self, db_session):
         """#1523: pinned rows keep the importance their owner set — load_pinned()
         orders by it — so the shared exemption keeps them out of re-evaluation."""
