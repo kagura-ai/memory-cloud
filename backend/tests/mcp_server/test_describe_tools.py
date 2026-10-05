@@ -142,6 +142,26 @@ async def test_an_empty_names_list_lists_the_hidden_tools():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("names", [[""], [" "], ["", " ", "\t"]])
+async def test_names_with_no_non_blank_entry_list_the_hidden_tools(names):
+    """Blank names used to reach the ``names`` branch and return an empty
+    ``definitions`` list with no ``unknown`` and no hint (#1883)."""
+    (block,) = await handle_describe_tools({"names": names}, "u", None)
+    payload = json.loads(block.text)
+    (listing,) = await handle_describe_tools({}, "u", None)
+    assert payload == json.loads(listing.text)
+    assert "definitions" not in payload and payload["count"] > 40
+
+
+@pytest.mark.asyncio
+async def test_blank_names_are_dropped_next_to_real_ones():
+    (block,) = await handle_describe_tools({"names": [" ", " get_usage ", ""]}, "u", None)
+    payload = json.loads(block.text)
+    assert [d["name"] for d in payload["definitions"]] == ["get_usage"]
+    assert "unknown" not in payload
+
+
+@pytest.mark.asyncio
 async def test_handle_returns_full_schemas_for_names_and_reports_unknown():
     (block,) = await handle_describe_tools({"names": ["get_usage", "bogus"]}, "u", None)
     payload = json.loads(block.text)
@@ -153,7 +173,13 @@ async def test_handle_returns_full_schemas_for_names_and_reports_unknown():
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "args",
-    [{"names": "get_usage"}, {"names": ["x"] * (MAX_NAMES + 1)}, {"query": 3}],
+    [
+        {"names": "get_usage"},
+        {"names": ["get_usage", 3]},
+        {"names": ["x"] * (MAX_NAMES + 1)},
+        {"names": [" "] * (MAX_NAMES + 1)},
+        {"query": 3},
+    ],
 )
 async def test_handle_validates_its_arguments(args):
     (block,) = await handle_describe_tools(args, "u", None)
