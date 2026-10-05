@@ -81,11 +81,26 @@ def _undo_when_settled(increment: asyncio.Future[int], key: str, count: int) -> 
             except RedisError as e:
                 logger.warning("memories_per_day_release_failed", count=count, error=str(e))
 
+        # (after a TTL-bookkeeping failure the INCRBY may have landed too;
+        # that case is not refunded — an over-count is the safe direction)
         task = asyncio.ensure_future(_decrement())
         _PENDING_UNDO.add(task)
         task.add_done_callback(_PENDING_UNDO.discard)
 
     increment.add_done_callback(_undo)
+
+
+async def _refund(key: str, count: int, workspace_id: UUID) -> None:
+    """Take a refused reservation back off the counter. Never raises."""
+    try:
+        await incrby_counter(key, -count)
+    except RedisError as e:
+        logger.warning(
+            "memories_per_day_release_failed",
+            workspace_id=str(workspace_id),
+            count=count,
+            error=str(e),
+        )
 
 
 def _memories_per_day_key(workspace_id: UUID, today: date) -> str:
@@ -210,6 +225,7 @@ class QuotaService:
         count: int = 1,
         *,
         raise_on_exceeded: bool = False,
+        _reserved: list[DailyReservation] | None = None,
     ) -> tuple[bool, str | None]:
         """Reserve ``count`` memory creations against today's daily quota (#1549).
 
@@ -245,9 +261,9 @@ class QuotaService:
         DB error): a failed attempt costs one unit, like an MCP call does.
         The exception is the atomic batch (``MemoryService.remember_many``,
         #1873): it reserves ``count=len(items)`` once through
-        ``reserve_memories_per_day`` — this same gate, which also says what
-        was actually added — and, when it rolls back, returns exactly that
-        with ``release_memories_per_day``.
+        ``reserve_memories_per_day`` — this same gate, reporting what was
+        actually added — and, when it rolls back, returns exactly that with
+        ``release_memories_per_day``.
         Redis unavailable → fail-open with a warning log, exactly like
         ``RateLimitMiddleware._check_daily_quota`` (``RedisError`` caught).
 
@@ -256,6 +272,8 @@ class QuotaService:
             count: Memories about to be created (a batch reserves all at once)
             raise_on_exceeded: If True, raise QuotaExceededError instead of
                 returning False
+            _reserved: Private to ``reserve_memories_per_day``: receives what
+                this call really added to the counter (nothing on fail-open).
 
         Returns:
             Tuple of (can_create, error_message)
@@ -265,36 +283,6 @@ class QuotaService:
                 does not fit. ``details`` carries ``quota_type="memories_per_day"``,
                 ``limit``, ``used_today``, ``requested`` and ``resets_at``.
         """
-        can_create, error, _reservation = await self._reserve_memories_per_day(
-            workspace_id, count, raise_on_exceeded=raise_on_exceeded
-        )
-        return can_create, error
-
-    async def reserve_memories_per_day(
-        self, workspace_id: UUID, count: int
-    ) -> DailyReservation | None:
-        """``check_memories_per_day`` for a caller that may give the reservation
-        back (#1873, the atomic batch).
-
-        Returns what this call added to the counter, or None when it added
-        nothing although the write may proceed (Redis unavailable — fail-open
-        — or ``count <= 0``). A release must be for exactly this value: the
-        day key is the one read here, so a midnight crossing or a counter
-        that was down at reservation time cannot make the release lower a
-        counter this call never raised.
-
-        Raises:
-            QuotaExceededError: The reservation does not fit (nothing is kept).
-        """
-        _ok, _error, reservation = await self._reserve_memories_per_day(
-            workspace_id, count, raise_on_exceeded=True
-        )
-        return reservation
-
-    async def _reserve_memories_per_day(
-        self, workspace_id: UUID, count: int, *, raise_on_exceeded: bool
-    ) -> tuple[bool, str | None, DailyReservation | None]:
-        """The daily gate itself: ``(can_create, error, what was reserved)``."""
         workspace_result = await self.db.execute(
             select(Workspace).where(Workspace.id == workspace_id)
         )
@@ -304,16 +292,16 @@ class QuotaService:
             error = f"Workspace {workspace_id} not found"
             if raise_on_exceeded:
                 raise QuotaExceededError(error)
-            return False, error, None
+            return False, error
 
         if count <= 0:
-            return True, None, None
+            return True, None
 
         limit = workspace.effective_memories_per_day
         today = utcnow().date()
         resets_at = _next_utc_midnight_iso(today)
 
-        def _refuse(used_today: int) -> tuple[bool, str | None, None]:
+        def _refuse(used_today: int) -> tuple[bool, str | None]:
             error = (
                 f"Daily memory-creation quota exceeded. "
                 f"Limit: {limit}/day ({workspace.plan_name} plan), "
@@ -344,7 +332,7 @@ class QuotaService:
                     used_today=used_today,
                     requested=count,
                 )
-            return False, error, None
+            return False, error
 
         # Zero-floor (#569): 0 means the tier cannot create memories at all.
         # Nothing to reserve, so Redis is not touched.
@@ -367,24 +355,44 @@ class QuotaService:
                 workspace_id=str(workspace_id),
                 error=str(e),
             )
-            return True, None, None
+            return True, None
 
         if new_total > limit:
             # Release the reservation so the refused attempt does not consume
             # budget. Best-effort: if this fails the phantom reservation
-            # expires with the day key.
-            try:
-                await incrby_counter(key, -count)
-            except RedisError as e:
-                logger.warning(
-                    "memories_per_day_release_failed",
-                    workspace_id=str(workspace_id),
-                    count=count,
-                    error=str(e),
-                )
+            # expires with the day key. In a retained, shielded task (#1873):
+            # a cancellation arriving here must not strand the charge.
+            refund = asyncio.ensure_future(_refund(key, count, workspace_id))
+            _PENDING_UNDO.add(refund)
+            refund.add_done_callback(_PENDING_UNDO.discard)
+            await asyncio.shield(refund)
             return _refuse(new_total - count)
 
-        return True, None, DailyReservation(key=key, count=count)
+        if _reserved is not None:
+            _reserved.append(DailyReservation(key=key, count=count))
+        return True, None
+
+    async def reserve_memories_per_day(
+        self, workspace_id: UUID, count: int
+    ) -> DailyReservation | None:
+        """``check_memories_per_day`` for a caller that may give the reservation
+        back (#1873, the atomic batch).
+
+        Returns what this call added to the counter, or None when it added
+        nothing although the write may proceed (Redis unavailable — fail-open
+        — or ``count <= 0``). A release must be for exactly this value: the
+        day key is the one read here, so a midnight crossing or a counter
+        that was down at reservation time cannot make the release lower a
+        counter this call never raised.
+
+        Raises:
+            QuotaExceededError: The reservation does not fit (nothing is kept).
+        """
+        reserved: list[DailyReservation] = []
+        await self.check_memories_per_day(
+            workspace_id, count, raise_on_exceeded=True, _reserved=reserved
+        )
+        return reserved[0] if reserved else None
 
     async def release_memories_per_day(self, reservation: DailyReservation | None) -> None:
         """Give a reservation from ``reserve_memories_per_day`` back (#1873).

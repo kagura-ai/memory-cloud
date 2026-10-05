@@ -943,6 +943,40 @@ async def test_a_reservation_cancelled_in_flight_is_undone(db_session, daily_cou
     assert not quota_service._PENDING_UNDO
 
 
+@pytest.mark.asyncio
+async def test_a_refusal_cancelled_during_its_refund_still_gives_the_units_back(
+    db_session, daily_counter
+):
+    owner = f"o-{uuid4().hex[:6]}"
+    ws, _ctx = await _scope(db_session, owner)
+    await db_session.commit()
+    ws_id = ws.id
+    quota = QuotaService(db_session)
+    await quota.check_memories_per_day(ws_id, count=60)
+    (key,) = daily_counter
+    refunding = asyncio.Event()
+
+    async def slow_refund(key, amount, ttl=None):
+        if amount < 0:
+            refunding.set()
+            await asyncio.sleep(0.05)
+        daily_counter[key] = daily_counter.get(key, 0) + amount
+        return daily_counter[key]
+
+    with patch("services.quota_service.incrby_counter", new=slow_refund):
+        task = asyncio.ensure_future(quota.reserve_memories_per_day(ws_id, 50))
+        await refunding.wait()
+        assert daily_counter[key] == 110
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        for _ in range(100):
+            if daily_counter[key] == 60:
+                break
+            await asyncio.sleep(0.01)
+    assert daily_counter[key] == 60  # not 110: a 40-item retry still fits
+
+
 # ------------------------------------------ cross-author candidates (#1873 review)
 
 
