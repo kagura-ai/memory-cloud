@@ -202,6 +202,9 @@ class QuotaService:
 
         A reservation is not refunded if the write fails later (validation,
         DB error): a failed attempt costs one unit, like an MCP call does.
+        The exception is the atomic batch (``MemoryService.remember_many``,
+        #1873): it reserves ``count=len(items)`` once and, when it rolls
+        back, returns the reservation with ``release_memories_per_day``.
         Redis unavailable → fail-open with a warning log, exactly like
         ``RateLimitMiddleware._check_daily_quota`` (``RedisError`` caught).
 
@@ -303,6 +306,23 @@ class QuotaService:
             return _refuse(new_total - count)
 
         return True, None
+
+    async def release_memories_per_day(self, workspace_id: UUID, count: int, *, day: date) -> None:
+        """Give back ``count`` creations reserved on ``day`` (#1873).
+
+        For a batch that reserved up front and then wrote nothing
+        (``MemoryService.remember_many`` rolled back). ``day`` is the UTC day
+        the caller read BEFORE reserving, so a release that runs after
+        midnight lands on the old day's key and never lowers the new day's
+        counter. The TTL is passed for that case: a key recreated by the
+        decrement still expires. Raises ``RedisError`` when the counter is
+        unreachable — the reservation then expires with the day key.
+        """
+        if count <= 0:
+            return
+        await incrby_counter(
+            _memories_per_day_key(workspace_id, day), -count, ttl=_MEMORIES_PER_DAY_TTL
+        )
 
     async def count_memories_created_today(
         self, workspace_id: UUID, *, today: date | None = None

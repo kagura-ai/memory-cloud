@@ -267,6 +267,18 @@ class BatchItemError(Exception):
         self.cause = cause
 
 
+class BatchCommittedError(Exception):
+    """``remember_many`` was cancelled (a timeout) AFTER its commit (#1873).
+
+    Every row is stored and has its embedding task; ``responses`` holds one
+    per request, in order. The caller must not report a rollback, and the
+    batch must not be sent again."""
+
+    def __init__(self, responses: list[RememberResponse]):
+        super().__init__(f"batch of {len(responses)} committed before the cancellation")
+        self.responses = responses
+
+
 @dataclass
 class _PreparedRemember:
     """A ``remember`` row that is built and gated but not yet committed."""
@@ -983,9 +995,21 @@ class MemoryService:
         is re-raised as :class:`BatchItemError` carrying the failing index, so
         nothing is written. Only after the single commit do the per-row
         post-commit steps run (embedding tasks, declared links, access
-        events). The daily quota is reserved per item while preparing; a
-        rolled-back batch keeps those reservations (Redis), which is the
-        documented cost of asking for atomicity.
+        events).
+
+        Daily quota (#1873): the whole batch is reserved once, all or
+        nothing, after the duplicate checks and before any row. A batch that
+        does not fit raises :class:`QuotaExceededError` itself (not wrapped:
+        no single item is at fault) and charges nothing; a batch that is
+        rolled back later — a failing item, a failed commit, a cancellation
+        before the commit — gives its reservation back, so a refused batch
+        never uses up the day's budget.
+
+        Cancellation (#1873): the commit is shielded, so a timeout either
+        lands before it (rolled back, ``CancelledError`` propagates) or after
+        it. After it, every remaining row still gets its embedding task and
+        :class:`BatchCommittedError` carries the responses — the rows exist
+        and the caller must say so.
         """
         # Resolved once for the whole batch (same write gate as remember; the
         # audit identity stays "remember" — the items are remembers).
@@ -1025,6 +1049,19 @@ class MemoryService:
                 except Exception as exc:
                     raise BatchItemError(index, exc) from exc
             dedupe = DEDUPE_SUGGEST  # checked; the rows carry no tombstone
+
+        from services.quota_service import QuotaService
+
+        # #1873: one all-or-nothing reservation on the workspace the rows land
+        # in. The day is read BEFORE reserving: a release after a midnight
+        # crossing must never decrement the new day's counter.
+        target_workspace_id = UUID(workspace_id_str)
+        quota_service = QuotaService(self.db)
+        reserved_day = utcnow().date()
+        await quota_service.check_memories_per_day(
+            target_workspace_id, count=len(requests), raise_on_exceeded=True
+        )
+
         prepared: list[_PreparedRemember] = []
         try:
             for index, request in enumerate(requests):
@@ -1036,7 +1073,7 @@ class MemoryService:
                         current_context_id=current_context_id,
                         current_workspace_id=current_workspace_id,
                         key_workspace_id=key_workspace_id,
-                        _skip_daily_quota=False,
+                        _skip_daily_quota=True,  # reserved above, for the whole batch
                         tags_normalize=tags_normalize,
                         dedupe=dedupe,
                         isolation=isolation,
@@ -1046,14 +1083,27 @@ class MemoryService:
                 except Exception as exc:
                     raise BatchItemError(index, exc) from exc
                 prepared.append(item)
-            await self.db.commit()
+            cancelled = await self._commit_shielded()
         except BaseException:  # a timeout's CancelledError must roll back too
             await self.db.rollback()
+            await self._release_daily_reservation(
+                quota_service, target_workspace_id, len(requests), reserved_day
+            )
             raise
         responses: list[RememberResponse] = []
         for item in prepared:
+            if cancelled:
+                # No further await: the caller is being cancelled. The row is
+                # committed, so it still gets its embedding task and an answer.
+                self._schedule_embedding(item)
+                responses.append(self._bare_response(item))
+                continue
             try:
                 responses.append(await self._finish_remember(item))
+            except asyncio.CancelledError:
+                cancelled = True
+                self._schedule_embedding(item)
+                responses.append(self._bare_response(item))
             except Exception as exc:  # the row is committed; the batch must still report it
                 logger.error(
                     "remember_many_finish_failed",
@@ -1063,7 +1113,48 @@ class MemoryService:
                 )
                 self._schedule_embedding(item)  # the row must still become searchable
                 responses.append(self._bare_response(item))
+        if cancelled:
+            logger.warning(
+                "remember_many_cancelled_after_commit", user_id=user_id, count=len(responses)
+            )
+            raise BatchCommittedError(responses)
         return responses
+
+    async def _commit_shielded(self) -> bool:
+        """Commit so that a cancellation cannot leave the outcome unknown (#1873).
+
+        The commit runs in its own task behind ``asyncio.shield``; a
+        cancellation that arrives meanwhile is held until the commit has
+        finished. Returns True when one arrived — the transaction is committed
+        all the same. A commit that fails raises its own error.
+        """
+        commit = asyncio.ensure_future(self.db.commit())
+        cancelled = False
+        while not commit.done():
+            try:
+                await asyncio.shield(commit)
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception:  # noqa: S110 - re-raised from commit.result() below
+                pass
+        commit.result()
+        return cancelled
+
+    @staticmethod
+    async def _release_daily_reservation(
+        quota_service: Any, workspace_id: UUID, count: int, day: Any
+    ) -> None:
+        """Give a rolled-back batch's daily reservation back. Best-effort: it
+        runs while another error is propagating and must not replace it."""
+        try:
+            await quota_service.release_memories_per_day(workspace_id, count, day=day)
+        except Exception as exc:
+            logger.warning(
+                "memories_per_day_release_failed",
+                workspace_id=str(workspace_id),
+                count=count,
+                error=str(exc),
+            )
 
     def _schedule_embedding(self, prepared: _PreparedRemember) -> None:
         """Start the embedding task for a committed row, once."""
@@ -1220,10 +1311,12 @@ class MemoryService:
         """The nearest live memory when it is above the supersede-suggestion
         threshold, else None (#1853 ``dedupe="check"``).
 
-        Same embedder, collection, scoping and threshold as the post-embed
-        detection in ``_create_knn_seed_edges``, so the answer is the
-        suggestion the caller would otherwise see on a later recall. An
-        embedder that cannot run (no key, spend cap, outage) is
+        Same embedder, collection and threshold as the post-embed detection
+        in ``_create_knn_seed_edges``. The scope is what ``recall`` by the
+        same caller searches (#1873, as ``SearchService`` derives it): every
+        member's memories in a shared context; in a private one the caller's
+        own and those of the accounts linked to it (#1784). An embedder that
+        cannot run (no key, spend cap, outage) is
         :class:`DedupeUnavailableError`: the caller decides, nothing is
         written silently.
         """
@@ -1232,6 +1325,9 @@ class MemoryService:
         from services.embedding_service import EmbeddingService
         from utils.text import normalize_for_search
 
+        is_shared_context = await self.context_service.is_context_shared(UUID(context_id_str))
+        linked = await link_set_reads(self.db, user_id, not is_shared_context)
+        owner_ids = sorted(linked) if linked and len(linked) > 1 else None
         try:
             collection, embed_svc = await resolve_context_routing(
                 self.db, UUID(context_id_str), default_service=EmbeddingService(self.db)
@@ -1249,6 +1345,8 @@ class MemoryService:
                 context_id=context_id_str,
                 limit=_DEDUPE_CHECK_K,
                 collection_name=collection,
+                is_shared_context=is_shared_context,
+                owner_ids=owner_ids,
             )
         except Exception as exc:
             raise DedupeUnavailableError(str(exc)) from exc
