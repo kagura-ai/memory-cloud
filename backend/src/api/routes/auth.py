@@ -23,6 +23,7 @@ import functools
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
@@ -2371,17 +2372,58 @@ async def _create_password_session(
     return _session_manager.create_session(session_data, proven_at=utcnow())
 
 
-async def _complete_password_sign_in(user_id: str, email: str, session_id: str) -> None:
+# Two sign-ins of one account that overlap must not sweep each other's new
+# session (#1878): the liveness check and the sweep below run under this
+# per-account Redis lock, so the first to get there keeps its session and the
+# other finds its own gone. The lock frees itself if its holder died; the
+# section under it is a handful of Redis calls.
+_SIGN_IN_SWEEP_LOCK_KEY = "signin_sweep_lock:{user_id}"
+_SIGN_IN_SWEEP_LOCK_TTL_SECONDS = 10
+_SIGN_IN_SWEEP_LOCK_WAIT_SECONDS = 2.0
+_SIGN_IN_SWEEP_LOCK_POLL_SECONDS = 0.05
+
+
+async def _complete_password_sign_in(user_id: str, email: str, session_id: str) -> bool:
     """The side effects of an ACCEPTED password sign-in (#1878).
 
     Signs the account out everywhere else (#114) but spares ``session_id``,
     the session this sign-in just wrote, then ensures the personal workspace
-    and stamps ``last_login_at``. Never raises: the sign-in stands.
+    and stamps ``last_login_at``.
+
+    Returns False, having changed nothing, when ``session_id`` is no longer
+    live: an overlapping sign-in of the account completed first, or a
+    password write swept the sessions after the re-check. The caller must
+    refuse the sign-in. Raises when the sweep lock cannot be taken or Redis
+    fails; nothing was swept then either.
     """
     if not _session_manager:
-        return
+        raise HTTPException(status_code=500, detail="Session manager not initialized")
 
-    deleted_count = _session_manager.delete_user_sessions(user_id, exclude_session_id=session_id)
+    redis = _session_manager._redis
+    lock_key = _SIGN_IN_SWEEP_LOCK_KEY.format(user_id=user_id)
+    lock_token = secrets.token_hex(16)
+    deadline = time.monotonic() + _SIGN_IN_SWEEP_LOCK_WAIT_SECONDS
+    while not redis.set(lock_key, lock_token, nx=True, ex=_SIGN_IN_SWEEP_LOCK_TTL_SECONDS):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("sign-in sweep lock is held")
+        await asyncio.sleep(_SIGN_IN_SWEEP_LOCK_POLL_SECONDS)
+    try:
+        if not _session_manager.session_holds_user(session_id, user_id):
+            return False
+        deleted_count = _session_manager.delete_user_sessions(
+            user_id, exclude_session_id=session_id
+        )
+    finally:
+        # Release only our own lock: it may have expired and been retaken.
+        try:
+            if redis.get(lock_key) == lock_token:
+                redis.delete(lock_key)
+        except Exception as exc:
+            logger.warning(
+                "password_login_sweep_lock_release_failed",
+                user_id=user_id,
+                error_type=type(exc).__name__,
+            )
     if deleted_count > 0:
         logger.info(f"Invalidated {deleted_count} old session(s) for {email}")
 
@@ -2401,6 +2443,8 @@ async def _complete_password_sign_in(user_id: str, email: str, session_id: str) 
             break
     except Exception as e:
         logger.error(f"Error ensuring personal workspace for {user_id}: {e}", exc_info=True)
+
+    return True
 
 
 def _set_session_cookie(response: Response, session_id: str) -> None:
@@ -2659,6 +2703,8 @@ async def _open_password_session(user: User, fingerprint: str | None) -> str:
     the account's other sessions, the personal workspace and ``last_login_at``
     wait for the answer (#1878): a sign-in that is refused here must not sign
     out the session a password change deliberately kept, nor record a login.
+    Of two sign-ins that overlap, the first to finish keeps its session and
+    the other is told to try again (see ``_complete_password_sign_in``).
     """
     session_id = await _create_password_session(
         user_id=user.user_id, email=user.email, name=user.name, role=user.role
@@ -2681,7 +2727,28 @@ async def _open_password_session(user: User, fingerprint: str | None) -> str:
             _session_manager.delete_session(session_id)
         logger.warning("password_login_superseded", user_id=user.user_id)
         raise InvalidCredentialsError()
-    await _complete_password_sign_in(user.user_id, user.email, session_id)
+    try:
+        completed = await _complete_password_sign_in(user.user_id, user.email, session_id)
+    except Exception as exc:
+        # Fail closed, as above: the other sessions could not be swept.
+        if _session_manager:
+            _session_manager.delete_session(session_id)
+        logger.error(
+            "password_login_completion_failed",
+            user_id=user.user_id,
+            error_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503, detail="Sign-in is temporarily unavailable. Please try again."
+        ) from exc
+    if not completed:
+        # The new session is already gone: an overlapping sign-in won, or a
+        # password write swept it after the re-check. A retry gets the right
+        # answer in both cases (signed in, or wrong password).
+        logger.warning("password_login_displaced", user_id=user.user_id)
+        raise HTTPException(
+            status_code=503, detail="Sign-in is temporarily unavailable. Please try again."
+        )
     return session_id
 
 

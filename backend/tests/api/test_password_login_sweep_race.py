@@ -14,6 +14,7 @@ re-check has accepted the sign-in.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -90,11 +91,11 @@ def wired(monkeypatch, manager) -> SimpleNamespace:
         order.append("session")
         return "sess-1"
 
-    complete = AsyncMock()
+    complete = AsyncMock(return_value=True)
 
     async def _complete(*args):
         order.append("complete")
-        await complete(*args)
+        return await complete(*args)
 
     recheck = AsyncMock(return_value=True)
 
@@ -446,3 +447,70 @@ class TestARefusedSignInHasNoSideEffects:
         sessions = self._sessions(real)
         assert len(sessions) == 1 and real.kept not in sessions
         assert real.user.last_login_at is not None
+
+    @pytest.mark.asyncio
+    async def test_overlapping_sign_ins_leave_exactly_one_live_session(self, real) -> None:
+        # Both sign-ins write their session before either re-check answers.
+        # Without the sweep lock each would then delete the other's session
+        # and both would answer 200 with a dead cookie.
+        release = asyncio.Event()
+        waiting = 0
+
+        async def _held_recheck(*_args) -> bool:
+            nonlocal waiting
+            waiting += 1
+            await release.wait()
+            return True
+
+        real.recheck.side_effect = _held_recheck
+        tasks = [
+            asyncio.create_task(
+                auth_routes.password_login(_login_body(), _request(), return_to=None)
+            )
+            for _ in range(2)
+        ]
+        while waiting < 2:
+            await asyncio.sleep(0.01)
+        assert len(self._sessions(real)) == 3  # the old one and two candidates
+        release.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        winners = [r for r in results if not isinstance(r, BaseException)]
+        losers = [r for r in results if isinstance(r, BaseException)]
+        assert len(winners) == 1 and len(losers) == 1
+        assert isinstance(losers[0], HTTPException) and losers[0].status_code == 503
+        (survivor,) = self._sessions(real)
+        assert f"kagura_session={survivor}" in winners[0].headers["set-cookie"]
+        assert real.manager.get_session(survivor) is not None
+        # The lock is released.
+        assert "signin_sweep_lock:u-1" not in real.manager._redis.store
+
+    @pytest.mark.asyncio
+    async def test_a_session_swept_after_the_recheck_signs_nobody_in(self, real) -> None:
+        # A password write that starts after the re-check sweeps the new
+        # session and keeps its own: the sign-in must not then sweep that one.
+        async def _recheck_then_password_write(*_args) -> bool:
+            real.manager.delete_user_sessions("u-1", exclude_session_id=real.kept)
+            return True
+
+        real.recheck.side_effect = _recheck_then_password_write
+
+        with pytest.raises(HTTPException) as exc_info:
+            await auth_routes.password_login(_login_body(), _request(), return_to=None)
+
+        assert exc_info.value.status_code == 503
+        self._assert_untouched(real)
+        assert "signin_sweep_lock:u-1" not in real.manager._redis.store
+
+    @pytest.mark.asyncio
+    async def test_a_sweep_lock_that_stays_held_fails_closed(self, real, monkeypatch) -> None:
+        monkeypatch.setattr(auth_routes, "_SIGN_IN_SWEEP_LOCK_WAIT_SECONDS", 0.1)
+        real.manager._redis.set("signin_sweep_lock:u-1", "someone-else", nx=True, ex=10)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await auth_routes.password_login(_login_body(), _request(), return_to=None)
+
+        assert exc_info.value.status_code == 503
+        self._assert_untouched(real)
+        # Another holder's lock is not released by the loser.
+        assert real.manager._redis.store["signin_sweep_lock:u-1"] == "someone-else"
