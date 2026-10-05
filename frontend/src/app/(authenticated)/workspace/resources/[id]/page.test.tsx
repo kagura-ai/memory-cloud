@@ -431,6 +431,52 @@ describe("ResourceDetailPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows the context-deleted state on the Schemas tab, with no Create action (#1877)", async () => {
+    mockSearchParams = new URLSearchParams("tab=schemas");
+    mockListResources.mockResolvedValue({
+      resources: [
+        makeResource({
+          context_id: null,
+          context_name: null,
+          context_display_name: null,
+          token_count: 1,
+          memory_count: 0,
+          // The stats strip still shows the real version …
+          current_schema_version: 3,
+        }),
+      ],
+      total: 1,
+    });
+    // … while get_schema resolves through a live context and answers 404.
+    mockGetSchema.mockRejectedValue(
+      new ApiError({ message: "Not found", status: 404 }),
+    );
+
+    render(<ResourceDetailPage />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("resources.detail.contextDeletedTitle"),
+      ).toBeInTheDocument();
+    });
+    // Not the "no schema registered" state, and nothing that opens the
+    // create dialog: the API refuses a new version for a retired resource.
+    expect(
+      screen.queryByText("resources.schema.emptyTitle"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "resources.schema.createAction" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "resources.schema.createNewVersionAction",
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "resources.detail.goToTokens" }),
+    ).toBeInTheDocument();
+  });
+
   it("exposes all four tabs (overview / data / schemas / tokens)", async () => {
     mockListResources.mockResolvedValue({
       resources: [makeResource()],

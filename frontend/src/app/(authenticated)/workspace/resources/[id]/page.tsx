@@ -166,9 +166,11 @@ export default function ResourceDetailPage() {
   }, [resourceId]);
 
   // #1863: a resource whose contexts were all deleted is listed only so its
-  // still-active tokens can be revoked. The indexer / events endpoints
-  // resolve through a live context and would answer 404, so the page skips
-  // them and points at the Tokens tab instead.
+  // still-active tokens can be revoked. The indexer-status and schema
+  // endpoints resolve through a live context and answer 404 for it. The
+  // events endpoint resolves by resource_pk and would still answer, but the
+  // rows belong to a retired resource — so Overview, Data and Schemas all
+  // show the same state and point at the Tokens tab instead (#1877).
   const contextDeleted = resource !== null && resource.context_id === null;
 
   useEffect(() => {
@@ -221,6 +223,18 @@ export default function ResourceDetailPage() {
     resource.context_display_name ||
     resource.context_name ||
     resource.resource_id;
+
+  // Shared by the Overview, Data and Schemas tabs of a context-less resource.
+  const contextDeletedState = (
+    <EmptyState
+      icon={Key}
+      title={t("detail.contextDeletedTitle")}
+      description={t("detail.contextDeletedDescription")}
+      actionLabel={t("detail.goToTokens")}
+      onAction={() => setTab("tokens")}
+      compact
+    />
+  );
 
   return (
     <PageContainer>
@@ -278,14 +292,7 @@ export default function ResourceDetailPage() {
         */}
         <TabsContent value="overview" className="mt-6">
           {contextDeleted ? (
-            <EmptyState
-              icon={Key}
-              title={t("detail.contextDeletedTitle")}
-              description={t("detail.contextDeletedDescription")}
-              actionLabel={t("detail.goToTokens")}
-              onAction={() => setTab("tokens")}
-              compact
-            />
+            contextDeletedState
           ) : (
             <IndexerStatusPanel
               data={indexerStatus}
@@ -297,21 +304,20 @@ export default function ResourceDetailPage() {
 
         <TabsContent value="data" className="mt-6">
           {contextDeleted ? (
-            <EmptyState
-              icon={Key}
-              title={t("detail.contextDeletedTitle")}
-              description={t("detail.contextDeletedDescription")}
-              actionLabel={t("detail.goToTokens")}
-              onAction={() => setTab("tokens")}
-              compact
-            />
+            contextDeletedState
           ) : (
             <ResourceDataTab resourceId={resourceId} schema={schema} />
           )}
         </TabsContent>
 
         <TabsContent value="schemas" className="mt-6">
-          {schema ? (
+          {contextDeleted ? (
+            // #1877: no "no schema registered" + Create here. get_schema
+            // 404s without a live context even when versions exist (the
+            // stats strip shows the real one), and the API refuses to append
+            // a version to a retired resource.
+            contextDeletedState
+          ) : schema ? (
             // Schema rows are immutable per version (the version + JSONB
             // payload is what indexer_state.active_version + resource_events
             // pin against). "Edit" is therefore "create the next version" —
