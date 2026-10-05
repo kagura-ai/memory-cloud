@@ -10091,14 +10091,43 @@
             "type": "object"
           },
           "user": {
-            "additionalProperties": true,
-            "type": "object"
+            "$ref": "#/components/schemas/UserStatsUser"
           }
         },
         "required": [
           "api_usage",
           "memories",
           "user"
+        ],
+        "type": "object"
+      },
+      "UserStatsUser": {
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "role": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "name",
+          "role",
+          "user_id"
         ],
         "type": "object"
       },
