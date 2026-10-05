@@ -2399,7 +2399,7 @@ async def _complete_password_sign_in(user_id: str, email: str, session_id: str) 
     fails, the sweep included.
     """
     if not _session_manager:
-        raise HTTPException(status_code=500, detail="Session manager not initialized")
+        raise RuntimeError("Session manager not initialized")
 
     redis = _session_manager._redis
     lock_key = _SIGN_IN_SWEEP_LOCK_KEY.format(user_id=user_id)
@@ -2699,6 +2699,10 @@ async def _password_still_current(user_id: str, fingerprint: str | None) -> bool
     return False
 
 
+class _SignInDisplacedError(Exception):
+    """The session a sign-in wrote was swept before the sign-in completed."""
+
+
 async def _open_password_session(user: User, fingerprint: str | None) -> str:
     """Write the session for a verified password sign-in, then re-check the password.
 
@@ -2719,16 +2723,33 @@ async def _open_password_session(user: User, fingerprint: str | None) -> str:
     session_id = await _create_password_session(
         user_id=user.user_id, email=user.email, name=user.name, role=user.role
     )
+    # One fail-closed path for both steps: without the re-check's answer, or
+    # with the other sessions not swept, the new session cannot be kept. A
+    # correct password is not a credential failure, so say "try again".
+    step = "recheck"
+    still_current = False
     try:
         still_current = await _password_still_current(user.user_id, fingerprint)
+        if still_current:
+            step = "completion"
+            completed = await _complete_password_sign_in(user.user_id, user.email, session_id)
+            if not completed:
+                # The new session is already gone: an overlapping sign-in
+                # won, or a password write swept it after the re-check. A
+                # retry gets the right answer in both cases (signed in, or
+                # wrong password).
+                raise _SignInDisplacedError()
     except Exception as exc:
-        # Fail closed: without the answer the session cannot be trusted. A
-        # correct password is not a credential failure, so say "try again".
         if _session_manager:
             _session_manager.delete_session(session_id)
-        logger.error(
-            "password_login_recheck_failed", user_id=user.user_id, error_type=type(exc).__name__
-        )
+        if isinstance(exc, _SignInDisplacedError):
+            logger.warning("password_login_displaced", user_id=user.user_id)
+        else:
+            logger.error(
+                f"password_login_{step}_failed",
+                user_id=user.user_id,
+                error_type=type(exc).__name__,
+            )
         raise HTTPException(
             status_code=503, detail="Sign-in is temporarily unavailable. Please try again."
         ) from exc
@@ -2737,28 +2758,6 @@ async def _open_password_session(user: User, fingerprint: str | None) -> str:
             _session_manager.delete_session(session_id)
         logger.warning("password_login_superseded", user_id=user.user_id)
         raise InvalidCredentialsError()
-    try:
-        completed = await _complete_password_sign_in(user.user_id, user.email, session_id)
-    except Exception as exc:
-        # Fail closed, as above: the other sessions could not be swept.
-        if _session_manager:
-            _session_manager.delete_session(session_id)
-        logger.error(
-            "password_login_completion_failed",
-            user_id=user.user_id,
-            error_type=type(exc).__name__,
-        )
-        raise HTTPException(
-            status_code=503, detail="Sign-in is temporarily unavailable. Please try again."
-        ) from exc
-    if not completed:
-        # The new session is already gone: an overlapping sign-in won, or a
-        # password write swept it after the re-check. A retry gets the right
-        # answer in both cases (signed in, or wrong password).
-        logger.warning("password_login_displaced", user_id=user.user_id)
-        raise HTTPException(
-            status_code=503, detail="Sign-in is temporarily unavailable. Please try again."
-        )
     return session_id
 
 
