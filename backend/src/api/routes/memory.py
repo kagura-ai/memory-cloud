@@ -203,6 +203,7 @@ async def recall(
     request: RecallRequest,
     user: APIKeyOrSessionUser,
     memory_service: MemoryServiceDep,
+    db: AsyncSession = Depends(get_db),
 ):
     """Search memories with Hybrid Search.
 
@@ -211,9 +212,12 @@ async def recall(
     - BM25/Full-text (Qdrant) 40%
     - Cohere Reranking (optional)
 
-    Note:
-        Full implementation in Phase 2.3 (#17)
-        Currently returns empty results
+    ``filters.context_id`` names the context to search. It is resolved for the
+    caller first — workspace membership, suspension, the context whitelist,
+    private-context ownership and the API key's workspace scope — with the
+    uniform ``404`` on any deny, the gate every other UUID-addressed read
+    (``/memory/list``, ``/memory/stats``, graph, the MCP ``recall`` tool)
+    applies. The search then runs against the context's own workspace.
 
     Request:
         {
@@ -221,7 +225,7 @@ async def recall(
             "k": 5,
             "use_rerank": false,
             "filters": {
-                "context_id": "my-context",
+                "context_id": "<context-uuid>",
                 "scope": "persistent",
                 "type": "code"
             }
@@ -241,21 +245,51 @@ async def recall(
     # Issue #1036: scope recall to the requested context. The endpoint used to
     # hardcode current_context_id=None (a leftover from #246), but
     # MemoryService.recall() still requires a context, so every recall 500'd.
-    # Forward filters.context_id, mirroring how /remember resolves
-    # request.context["context_id"]. No filter → None (the service guard then
-    # rejects it, same as before — see test_recall_no_workspace).
-    context_id = request.filters.get("context_id") if request.filters else None
+    # No filter → None (the service guard then rejects it, same as before —
+    # see test_recall_no_workspace).
+    #
+    # The filter value is parsed up front (a non-UUID is a 422, as in /pinned)
+    # and resolved through the shared read chokepoint, so the service only
+    # ever sees a context this caller may open. The resolved context's
+    # workspace is the search / paying workspace, as the MCP handler passes
+    # it — never the caller's mutable ``current_workspace_id`` alone.
+    raw_context_id = request.filters.get("context_id") if request.filters else None
+    context_uuid: UUID | None = None
+    context_workspace_id: UUID | None = None
+    if raw_context_id is not None:
+        try:
+            context_uuid = (
+                raw_context_id if isinstance(raw_context_id, UUID) else UUID(str(raw_context_id))
+            )
+        except (ValueError, AttributeError, TypeError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"context_id must be a valid UUID: {raw_context_id!r}",
+            ) from e
+        # Raises the uniform 404 on non-existent context, non-member,
+        # suspended member, whitelist miss, private-context non-creator or a
+        # workspace-scoped key pointed at another workspace (CWE-639).
+        context = await PermissionService(db).resolve_context_for_workspace_read(
+            user_id=user["user_id"],
+            context_id=context_uuid,
+            # Issue #963/#1281 item 2: pure key scope (None unless workspace-scoped key).
+            key_workspace_id=user.get("api_key_workspace_id"),
+            operation="recall",
+        )
+        context_workspace_id = context.workspace_id
+
     try:
         result = await memory_service.recall(
             request,
             user_id=user["user_id"],
-            current_context_id=context_id,
+            current_context_id=context_uuid,
             current_workspace_id=user.get("current_workspace_id"),  # NEW: Issue #146
+            context_workspace_id=context_workspace_id,
         )
     except ValueError as e:
         # Mirror /remember: MemoryService.recall raises ValueError for bad
-        # requests (missing context, or a non-UUID context_id that fails to
-        # parse downstream). Map to 422 rather than letting it surface as 500.
+        # requests (missing context, malformed free-form filters). Map to 422
+        # rather than letting it surface as 500.
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 
     return result
