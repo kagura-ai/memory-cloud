@@ -1699,6 +1699,14 @@ describe("ConnectorsPage RBAC gate", () => {
 
     expect(await screen.findByText("missingScopesTitle")).toBeInTheDocument();
     expect(screen.getByText("missingScopesDesc")).toBeInTheDocument();
+    // #1880: one line per missing scope — nothing about the scopes granted.
+    expect(
+      screen.getByText("missingScopeFeatures.commands"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("missingScopeFeatures.appMentionsRead"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("missingScopeFeatures.groupsRead")).toBeNull();
   });
 
   it("shows no scope notice when the grant is complete (#1758)", async () => {
@@ -1939,16 +1947,41 @@ describe("ConnectorsPage RBAC gate", () => {
           reason: "connector_team_connected_here",
           connector_id: "connector-1",
           display_name: "Acme",
+          token_refreshed: true,
+        },
+      }),
+    );
+    await submitCreate();
+
+    // #1880: an OAuth sign-in the server confirmed, so the variant with the
+    // refresh sentence.
+    expect(await screen.findByText("hereOAuth")).toBeInTheDocument();
+    // …and the list was re-read: the refresh may have bumped the existing
+    // connector's config_version, which its editor sends back on save.
+    expect(mockListConnectors).toHaveBeenCalledTimes(2);
+    fireEvent.click(screen.getByRole("button", { name: "editExisting" }));
+
+    expect(await screen.findByText("settingsTitle")).toBeInTheDocument();
+    expect(screen.queryByText("createTitle")).toBeNull();
+  });
+
+  it("a team connected here without the server's confirmation claims no refresh (#1880)", async () => {
+    mockCreateConnector.mockRejectedValue(
+      new ApiError({
+        error: "RES-002",
+        message: "server text",
+        status: 409,
+        details: {
+          reason: "connector_team_connected_here",
+          connector_id: "connector-1",
+          display_name: "Acme",
         },
       }),
     );
     await submitCreate();
 
     expect(await screen.findByText("here")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "editExisting" }));
-
-    expect(await screen.findByText("settingsTitle")).toBeInTheDocument();
-    expect(screen.queryByText("createTitle")).toBeNull();
+    expect(screen.queryByText("hereOAuth")).toBeNull();
   });
 
   it("renders the plan refusal with the required tier's label (#1644)", async () => {
@@ -2097,6 +2130,35 @@ describe("ConnectorsPage RBAC gate", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "manualBind" }));
   }
+
+  it.each([
+    ["Acme", "hereManual"],
+    [null, "hereManualUnnamed"],
+  ])(
+    "manual bind: a team connected here (name %s) never claims a refresh (#1880)",
+    async (displayName, key) => {
+      mockCreateConnector.mockRejectedValue(
+        new ApiError({
+          error: "RES-002",
+          message: "server text",
+          status: 409,
+          details: {
+            reason: "connector_team_connected_here",
+            connector_id: "11111111-1111-1111-1111-111111111111",
+            display_name: displayName,
+          },
+        }),
+      );
+
+      await submitManualBind();
+
+      // No sign-in happened and the pasted token was dropped by the 409.
+      expect(await screen.findByText(key)).toBeInTheDocument();
+      expect(screen.queryByText(/^hereOAuth/)).toBeNull();
+      expect(screen.queryByText(/11111111/)).toBeNull();
+      expect(screen.queryByText("server text")).toBeNull();
+    },
+  );
 
   it("manual bind: the connector seat cap is a gate toast, not the server's English (#1646)", async () => {
     const serverText =

@@ -37,12 +37,32 @@ it and listed public channels only; since #1778 it is in the default scopes
 and the listing asks for `public_channel,private_channel`, so the private
 channels the bot is a member of appear with a lock marker. An install granted
 before #1778 answers the mixed request with `missing_scope`; the service
-retries once with `public_channel` only (skipped when Slack's `needed` says
-`channels:read` itself is missing) and the response carries
+retries once with `public_channel` only and the response carries
 `missing_scopes: ["groups:read"]`, which the picker renders as a reconnect
 hint next to the still-usable public list. The cached page records
 `private_listing` with no default (the #1451 pattern) so a page cached before
 the field existed is refetched rather than served as current.
+
+The public-only retry is skipped when Slack's `provided` (the scopes the token
+actually holds) is present and lacks `channels:read`: the retry could only fail
+the same way, so the endpoint answers `CONNECTOR-SCOPE` straight away. `needed`
+is not the signal — for `conversations.list` Slack fills it with the method's
+whole any-of scope family (`channels:read,groups:read,mpim:read,im:read`), not
+the subset that is missing, so it names `channels:read` even when only
+`groups:read` is absent. A `missing_scope` answer without `provided` is retried.
+
+A connector whose page came from the public-only retry is marked
+(`slack_channels_types:{connector_id}`, same 60 s TTL as the pages) so its
+cursor pages ask for `public_channel` directly — one Slack call per page, and a
+public-only cursor is never replayed into a mixed request. The marker applies
+to cursor pages only (#1880): the first page always probes the mixed listing,
+and a page that comes back mixed deletes the marker, so a grant widened by a
+reconnect is visible once the cached first page expires however often later
+pages re-arm the marker. An OAuth install that lands on an already-connected
+Slack workspace stores its bot token on the existing connector and drops that
+connector's cached pages and marker, so the listing is fresh immediately; the
+409 then carries `details.token_refreshed: true`, and the UI only says the
+permissions were refreshed when it does.
 
 Behavior when the token lacks the scope (legacy installs, manual binds of
 older apps): Slack returns `missing_scope`. The endpoint maps this to a

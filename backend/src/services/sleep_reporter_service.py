@@ -170,7 +170,9 @@ class SleepReporterService:
     # User identity resolution helper (#1201)
     # ------------------------------------------------------------------
 
-    async def resolve_user_labels(self, user_ids: set[str]) -> dict[str, str]:
+    async def resolve_user_labels(
+        self, user_ids: set[str], *, member_of: UUID | None = None
+    ) -> dict[str, str]:
         """Batch-resolve ``user_id → email`` for Sleep report rows.
 
         Issue #1201: Sleep runs per ``(user_id, workspace_id, context_id)``
@@ -181,5 +183,11 @@ class SleepReporterService:
         Delegates to ``services.label_resolver.resolve_user_labels`` (#1861),
         which the cost-aggregation routes share. One query, no N+1; ids with
         no ``users`` row are omitted so the UI falls back to a shortened id.
+
+        ``member_of`` (#1882) narrows the answer to current members of that
+        workspace. The workspace-scoped routes pass their path workspace: a
+        report outlives the membership of the account it ran for, and a
+        workspace owner may not learn the email of an account that has left.
+        The system-admin routes pass nothing.
         """
-        return await resolve_user_labels(self.db, user_ids)
+        return await resolve_user_labels(self.db, user_ids, member_of=member_of)
