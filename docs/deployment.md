@@ -1101,10 +1101,22 @@ would to a re-index.
   resource has no schema left, or the memory's content was edited into
   something that is not a JSON document. The memory is live but ends `failed`,
   with an `embedding_error` that names the document, instead of being given a
-  vector of its label; ingest the document again as a newer version (the same
-  version is refused as a duplicate) to make it searchable. The rebuild reads
-  the row, not the ingest history: a memory whose content was edited into
-  another JSON document is rebuilt from what it holds now.
+  vector of its label. It is final after the first attempt (retrying cannot
+  help until one of the two steps below is taken) and is logged once as
+  `embedding_resource_unrebuildable`, a warning, not as
+  `embedding_budget_exhausted`. The dry run and the restore both warn with the
+  number of memories whose resource has no schema. Two ways to make such a
+  memory searchable again:
+  - publish the resource's schema again, then reset the failed memories with
+    `POST /api/v1/admin/embedding/retry-failed?context_id=<context-id>` (system
+    admin); the sweep rebuilds their vectors from the rows, and nothing has to
+    be ingested again. This does not help a memory whose content is no longer
+    a JSON document;
+  - ingest the document again as a newer version (the same version is refused
+    as a duplicate).
+
+  The rebuild reads the row, not the ingest history: a memory whose content
+  was edited into another JSON document is rebuilt from what it holds now.
 
 **Refusals.** A context that is not deleted; a context of a deleted workspace
 (deleting a workspace is final); a context whose name a live context of the

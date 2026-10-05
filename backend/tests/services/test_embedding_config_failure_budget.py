@@ -38,7 +38,9 @@ from services import memory_service
 from services.memory_service import (
     embedding_failure_values,
     is_configuration_failure,
+    is_unrebuildable_resource_failure,
 )
+from services.resource_indexer import ResourceRebuildError
 from utils.exceptions import (
     ConfigurationError,
     EmbeddingSpendCapExceeded,
@@ -155,6 +157,48 @@ class TestWhatGetsStampedOnTheRow:
         assert len(values["embedding_error"]) == 500
 
 
+class TestAnUnrebuildableResourceRowIsFinalAtOnce:
+    """#1897: `ResourceRebuildError` is permanent until an operator acts.
+
+    The resource has no schema, or the row no longer holds a JSON document.
+    Retrying changes neither, so the row must not wait out the backoff three
+    times before it is final, and must not end under the event that stands for
+    "the embedding provider kept failing".
+    """
+
+    def test_it_is_its_own_class_of_failure(self):
+        exc = ResourceRebuildError("Resource 'docs' has no schema")
+        assert is_unrebuildable_resource_failure(exc) is True
+        # Not a workspace state the sweep should keep probing.
+        assert is_configuration_failure(exc) is False
+
+    @pytest.mark.parametrize(
+        "factory",
+        [
+            lambda: OpenAIError("Embedding generation failed: connection reset"),
+            lambda: ConfigurationError("OpenAI API key not configured"),
+            a_spend_cap_error,
+            lambda: TimeoutError("read timeout"),
+            lambda: RuntimeError("something else entirely"),
+        ],
+        ids=["provider-error", "no-credential", "spend-cap", "timeout", "unknown"],
+    )
+    def test_nothing_else_is(self, factory):
+        assert is_unrebuildable_resource_failure(factory()) is False
+
+    def test_the_row_is_put_at_the_ceiling(self):
+        """`retry_count >= MAX` is what the sweep's claim refuses, so the first
+        attempt is the last; the admin retry resets the counter with the status."""
+        values = embedding_failure_values(ResourceRebuildError("no schema"), NOW)
+        assert values["embedding_status"] == "failed"
+        assert values["embedding_retry_count"] == MAX_EMBEDDING_RETRIES
+        assert values["embedding_error"] == "no schema"
+        assert values["embedding_attempted_at"] == NOW
+
+    def test_a_transient_failure_keeps_its_budget(self):
+        assert "embedding_retry_count" not in embedding_failure_values(OpenAIError("boom"), NOW)
+
+
 class TestTheExceptionTypesSurviveTheServiceLayer:
     """The load-bearing assumption, pinned where it can actually break.
 
@@ -265,6 +309,13 @@ class TestTheOperatorSignal:
         """Logging every attempt at error level is why the terminal transition
         was invisible: it had no signal of its own to stand out from."""
         assert 'logger.warning("embedding_failed"' in self._src()
+
+    def test_an_unrebuildable_resource_row_has_its_own_event(self):
+        """#1897: a warning under its own name, decided before the ceiling
+        check (the row is at the ceiling, but no budget was exhausted)."""
+        src = self._src()
+        own = src.index('logger.warning("embedding_resource_unrebuildable"')
+        assert own < src.index('logger.error("embedding_budget_exhausted"')
 
     def test_the_events_carry_the_error_class(self):
         """`error_class` is what turns 467 messages into one grep."""
