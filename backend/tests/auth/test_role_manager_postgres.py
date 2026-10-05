@@ -304,9 +304,11 @@ class TestLinkedProviderSkipsSync:
 
 class TestAdoptsAPrimaryProvider:
     """#1875: an OAuth account with no ``auth_provider`` gets the signing-in
-    provider, so its email and name sync again — but only from an established
-    link: a provider row older than the identity-link window, or the identity
-    the account was created with."""
+    provider, so its email and name sync again — but only from the identity
+    the account was created with (its sub is the ``user_id``), and only once
+    its link is established: a row older than the identity-link window, or
+    written with the account. A provider attached to the account later is
+    never adopted, however old its link."""
 
     OLD = timedelta(days=365)
 
@@ -339,16 +341,39 @@ class TestAdoptsAPrimaryProvider:
             )
 
     @pytest.mark.asyncio
-    async def test_a_link_older_than_the_window_is_adopted_and_syncs(self, role_manager):
+    async def test_the_original_identity_with_a_link_older_than_the_window_is_adopted(
+        self, role_manager
+    ):
+        """Its sub is the ``user_id``; the row was written later than the
+        account (attached again after an unlink, or a legacy row healed on a
+        later sign-in) but has stood longer than the window."""
+        existing = self._account(user_id="g-1")
+        link = self._link(user_id="g-1", oauth_sub="g-1", linked=timedelta(minutes=11))
+        db = _make_db_mock(_execute_returns(link, existing))
+
+        await self._sign_in(role_manager, db, sub="g-1", provider="google")
+
+        assert existing.auth_provider == "google"
+        assert existing.email == "alice@new.com"
+        assert existing.name == "Alice New"
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("linked", [timedelta(minutes=11), timedelta(days=365)])
+    async def test_a_provider_attached_later_is_never_adopted(self, role_manager, linked):
+        """A link whose sub is not the ``user_id`` was attached to the account
+        through ``link-provider`` by whoever held a session. However old it
+        is, it signs in as a linked provider: no adoption, no profile sync."""
         existing = self._account()
-        link = self._link(linked=timedelta(minutes=11))
+        link = self._link(linked=linked)
         db = _make_db_mock(_execute_returns(link, existing))
 
         await self._sign_in(role_manager, db)
 
-        assert existing.auth_provider == "github"
-        assert existing.email == "alice@new.com"
-        assert existing.name == "Alice New"
+        assert existing.auth_provider is None
+        assert existing.email == "alice@old.com"
+        assert existing.name == "Alice"
+        db.add.assert_not_called()
         db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -395,9 +420,10 @@ class TestAdoptsAPrimaryProvider:
         ("linked", "adopted"), [(timedelta(minutes=11), True), (timedelta(minutes=3), False)]
     )
     async def test_race_retry_follows_the_same_rule(self, role_manager, linked, adopted):
-        """The racing request wrote this identity's link row for the account."""
+        """The racing request wrote this identity's link row for the account
+        (the row is selected by ``(provider, oauth_sub == user_id)``)."""
         race_existing = self._account()
-        link = self._link(oauth_sub="u1-sub", linked=linked)
+        link = self._link(oauth_sub="u1", linked=linked)
         db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing, link))
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 

@@ -13,8 +13,10 @@ Security edge cases enforced here:
 - Unlink never strips a user of their last sign-in method (password counts).
 - Unlinking the legacy "primary" provider repoints ``User.auth_provider`` to a
   surviving linked provider, or ``None`` when none remain (edge case 7).
-  Linking never sets the pointer: an OAuth account left with ``None`` gets it
-  back on a sign-in through an established link (``RoleManager``, #1875).
+  Linking never sets the pointer, and a provider attached here never becomes
+  primary: an OAuth account left with ``None`` gets the pointer back only on
+  a sign-in through the identity it was created with, once that link is
+  established (``RoleManager``, #1875).
 """
 
 from __future__ import annotations
