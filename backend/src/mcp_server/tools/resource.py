@@ -483,22 +483,33 @@ async def handle_list_resource_tokens(
                 return role_err
 
             resource_id = args.get("resource_id")
+            resource_pk: UUID | None = None
 
             # Validate + workspace boundary check if filtering by resource_id
             if resource_id:
                 format_err = _validate_resource_id(resource_id)
                 if format_err:
                     return format_err
-                boundary_err = await _check_resource_workspace_boundary(
-                    db, resource_id, workspace_id
-                )
-                if boundary_err:
-                    return boundary_err
+                # #1877: the boundary for *listing* is the ``resources`` row,
+                # not a live context (``_check_resource_workspace_boundary``
+                # stays the gate for minting and ``setup_resource``). A token
+                # outlives its context — it keeps passing ``verify_token`` —
+                # so an audit by slug must still find it. A slug with no row
+                # in this workspace (unknown, or another workspace's) answers
+                # the same ``resource_not_found``.
+                from services.resource_lookup import resolve_resource_pk
 
-            from sqlalchemy import and_, exists, func
+                resource_pk = await resolve_resource_pk(db, workspace_id, resource_id)
+                if resource_pk is None:
+                    return _error_response(
+                        "resource_not_found",
+                        f"Resource '{resource_id}' not found in your workspace.",
+                        help="Use setup_resource() to create a new resource, or check resource_id spelling.",
+                    )
+
+            from sqlalchemy import and_, func
             from sqlalchemy import select as sa_select
 
-            from models.auth import Context
             from models.resource import Resource, ResourceToken
 
             include_revoked = args.get("include_revoked", True)
@@ -517,21 +528,15 @@ async def handle_list_resource_tokens(
             # they are draining in production within the observation window
             # before Phase C tightens the column to NOT NULL.
             #
-            # Preserve the pre-#390 behavior of hiding tokens whose backing
-            # Context was soft-deleted — the existence filter runs as an
-            # EXISTS subquery against ``contexts`` so the CWE-639 fix
-            # (resource_pk-scoped reads) is not compromised.
-            active_context_exists = exists().where(
-                Context.workspace_id == Resource.workspace_id,
-                Context.resource_id == Resource.resource_id,
-                Context.deleted_at.is_(None),
-            )
-            conditions = [
-                Resource.workspace_id == workspace_id,
-                active_context_exists,
-            ]
-            if resource_id:
-                conditions.append(Resource.resource_id == resource_id)
+            # #1877: no live-context filter. #1863 made a resource without a
+            # live context a supported state — its tokens stay active until an
+            # owner revokes them — so hiding them here told an operator
+            # auditing credentials "nothing left" while the REST list showed
+            # them and ingest still accepted them. The ``resources`` join
+            # alone carries the CWE-639 fix (resource_pk-scoped reads).
+            conditions = [Resource.workspace_id == workspace_id]
+            if resource_pk is not None:
+                conditions.append(ResourceToken.resource_pk == resource_pk)
             if not include_revoked:
                 conditions.append(ResourceToken.is_active == True)  # noqa: E712
 

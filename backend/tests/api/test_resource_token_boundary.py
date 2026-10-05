@@ -19,6 +19,7 @@ import api.routes.resource_tokens as route_module
 from api.main import app
 from api.routes.resource_tokens import _token_in_workspace, get_resource_token_manager
 from auth.dependencies import get_user_from_api_key_or_session, require_workspace_owner
+from auth.resource_tokens import ResourceTokenManager
 from db.base import get_db
 from models.resource import ResourceToken
 
@@ -233,3 +234,42 @@ class TestCreateWithoutLiveContext:
             response = self._post(owner_client, _db_returning(None))
         assert response.status_code == 403
         assert "not found in your workspace" in response.json()["message"]
+
+
+class TestSlugFilterNeedsScope:
+    """#1877: a slug is shared across workspaces, so the manager refuses to
+    list or count by it unless a workspace or a ``resources`` row pins it —
+    the slug-only call that revoked another workspace's tokens cannot come
+    back unnoticed."""
+
+    @pytest.mark.asyncio
+    async def test_list_by_bare_slug_is_refused(self):
+        db = AsyncMock()
+        with pytest.raises(ValueError, match="workspace_id or resource_pk"):
+            await ResourceTokenManager(db).list_tokens(resource_id="orders")
+        db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_count_by_bare_slug_is_refused(self):
+        db = AsyncMock()
+        with pytest.raises(ValueError, match="workspace_id or resource_pk"):
+            await ResourceTokenManager(db).count_tokens(resource_id="orders")
+        db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("scope", [{"workspace_id": WORKSPACE_ID}, {"resource_pk": uuid4()}])
+    async def test_slug_with_a_scope_is_accepted(self, scope):
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        result.scalar.return_value = 0
+        db = AsyncMock(execute=AsyncMock(return_value=result))
+        manager = ResourceTokenManager(db)
+        assert await manager.list_tokens(resource_id="orders", **scope) == []
+        assert await manager.count_tokens(resource_id="orders", **scope) == 0
+
+    @pytest.mark.asyncio
+    async def test_unfiltered_list_is_still_allowed(self):
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        db = AsyncMock(execute=AsyncMock(return_value=result))
+        assert await ResourceTokenManager(db).list_tokens() == []

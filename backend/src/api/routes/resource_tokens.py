@@ -192,6 +192,74 @@ async def _token_in_workspace(db: AsyncSession, token: ResourceToken, workspace_
     return result.scalar_one_or_none() is not None
 
 
+async def _check_workspace_quota_ceiling(
+    db: AsyncSession, token: ResourceToken, workspace_id: UUID, new_quota: int
+) -> None:
+    """Refuse a quota raise that takes the workspace over its plan ceiling (#1877).
+
+    The ceiling is ``max_resource_tokens * 10000`` events/hour and the budget
+    is the WORKSPACE's: every other active token in it counts, whoever minted
+    it. (The sum used to be over ``created_by == caller``, which says nothing
+    about a token minted by another member — the route resolves any token of
+    the workspace since #1863.)
+
+    Connector-owned tokens are outside this budget, consistent with the
+    create-time cap (#858): a connector is gated by ``max_connectors`` seats
+    and its token never takes a ``max_resource_tokens`` slot, so it neither
+    counts toward the sum nor is checked against it when it is the target
+    (its quota stays bounded by the per-token maximum of the request model).
+
+    Raises:
+        HTTPException: 400 when the raise does not fit.
+    """
+    from sqlalchemy import func as sql_func
+
+    from config.plan_tiers import get_plan_tier
+    from models.auth import Workspace
+
+    if token.resource_pk is not None:
+        connector_result = await db.execute(
+            select(WorkspaceConnector.id).where(WorkspaceConnector.resource_pk == token.resource_pk)
+        )
+        if connector_result.scalar_one_or_none() is not None:
+            return
+
+    workspace_result = await db.execute(
+        select(Workspace.plan_name).where(Workspace.id == workspace_id)
+    )
+    plan_name = workspace_result.scalar_one_or_none()
+    if not plan_name:
+        return
+
+    max_total_quota = get_plan_tier(plan_name).max_resource_tokens * 10000
+
+    # Quota used by the workspace's OTHER regular tokens. The anti-join drops
+    # connector-owned ones (UNIQUE resource_pk, so no row inflation); a token
+    # with a NULL resource_pk never matches the join and is still counted.
+    other_tokens_result = await db.execute(
+        select(sql_func.sum(ResourceToken.quota_events_per_hour))
+        .outerjoin(
+            WorkspaceConnector,
+            WorkspaceConnector.resource_pk == ResourceToken.resource_pk,
+        )
+        .where(
+            and_(
+                ResourceToken.workspace_id == workspace_id,
+                ResourceToken.is_active == True,  # noqa: E712
+                ResourceToken.id != token.id,
+                WorkspaceConnector.id.is_(None),
+            )
+        )
+    )
+    used_by_others = other_tokens_result.scalar() or 0
+
+    if used_by_others + new_quota > max_total_quota:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Quota limit exceeded. Total quota (including this update) would be {used_by_others + new_quota}, but plan allows {max_total_quota}.",
+        )
+
+
 @router.get("", response_model=PaginatedResourceTokensResponse)
 async def list_resource_tokens(
     owner: WorkspaceOwner,
@@ -528,42 +596,16 @@ async def update_resource_token(
             )
 
         # Validate new quota doesn't exceed plan limits (Code review M-10)
-        if request.quota_events_per_hour is not None:
-            # Get user's plan
-            from sqlalchemy import func as sql_func
-
-            from config.plan_tiers import get_plan_tier
-            from models.auth import Workspace
-
-            workspace_id = current_workspace_id
-            if workspace_id:
-                workspace_result = await db.execute(
-                    select(Workspace.plan_name).where(Workspace.id == workspace_id)
-                )
-                plan_name = workspace_result.scalar_one_or_none()
-
-                if plan_name:
-                    plan = get_plan_tier(plan_name)
-                    max_total_quota = plan.max_resource_tokens * 10000
-
-                    # Calculate quota used by OTHER tokens
-                    other_tokens_result = await db.execute(
-                        select(sql_func.sum(ResourceToken.quota_events_per_hour)).where(
-                            and_(
-                                ResourceToken.created_by == user_id,
-                                ResourceToken.is_active == True,  # noqa: E712
-                                ResourceToken.id != token.id,
-                            )
-                        )
-                    )
-                    used_by_others = other_tokens_result.scalar() or 0
-
-                    # Check if new quota fits
-                    if used_by_others + request.quota_events_per_hour > max_total_quota:
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"Quota limit exceeded. Total quota (including this update) would be {used_by_others + request.quota_events_per_hour}, but plan allows {max_total_quota}.",
-                        )
+        # #1877: only a RAISE can breach the ceiling, so a lowering (or an
+        # unchanged value) is never checked — it used to be refused with 400
+        # whenever the sum was already over the ceiling.
+        if (
+            request.quota_events_per_hour is not None
+            and request.quota_events_per_hour > token.quota_events_per_hour
+        ):
+            await _check_workspace_quota_ceiling(
+                db, token, current_workspace_id, request.quota_events_per_hour
+            )
 
         # Update fields
         if request.description is not None:

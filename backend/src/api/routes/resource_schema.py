@@ -14,12 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import WorkspaceOwner
 from db.base import get_db
+from models.auth import Context
 from models.memory import Memory
 from models.resource import ResourceSchema, ResourceToken
 from services.permission_service import PermissionService
 from services.resource_lookup import resolve_resource_pk
 from utils.datetime import to_utc_iso
-from utils.exceptions import NotFoundException, ValidationError
+from utils.exceptions import ConflictError, NotFoundException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -193,6 +194,8 @@ async def create_schema(
     Raises:
         403: Not workspace owner
         400: Invalid resource_id or schema definition
+        404: No such resource in the caller's workspace
+        409: The resource has no live context (#1877)
 
     Notes:
         - Automatically increments schema_version
@@ -242,14 +245,31 @@ async def create_schema(
     # rather than relying on every future writer to remember.
     resource_pk = await resolve_resource_pk(db, workspace_id, resource_id)
     if resource_pk is None:
-        # Schema creation is owner-only and goes through WorkspaceOwner +
-        # resolve_resource_by_slug upstream (added in the read-path hardening
-        # for #390), but the POST endpoint here does not currently resolve
-        # the slug — the route pre-dates #326. A missing Resource row at
-        # this point means the caller supplied a slug that is not bound to
-        # any live Context in their workspace; reject with 404 for uniform
-        # disclosure (matches the GET side's cross-workspace probe contract).
+        # No ``resources`` row for this slug in the caller's workspace (an
+        # unknown slug, or another workspace's): 404 for uniform disclosure,
+        # matching the GET side's cross-workspace probe contract.
         raise NotFoundException("Resource", resource_id)
+
+    # #1877: a ``resources`` row does NOT imply a live context. The row
+    # outlives the soft-delete of its last context (#1863 keeps it listed
+    # while it has active tokens), and ``get_schema`` resolves through a live
+    # context — so a version appended here would be written to a retired
+    # resource and could not be read back. Same rule as token minting: a
+    # retired resource takes no new writes until a context is bound to it.
+    live_context = await db.execute(
+        select(Context.id)
+        .where(
+            Context.workspace_id == workspace_id,
+            Context.resource_id == resource_id,
+            Context.deleted_at.is_(None),
+        )
+        .limit(1)
+    )
+    if live_context.scalar_one_or_none() is None:
+        raise ConflictError(
+            f"Resource '{resource_id}' has no live context in your workspace; restore or "
+            "create a context bound to it before registering a schema."
+        )
 
     # Get next schema version (strict resource_pk filter — see get_schema).
     result = await db.execute(

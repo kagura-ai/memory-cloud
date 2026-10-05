@@ -943,8 +943,6 @@ async def update_context(
         )
 
     try:
-        from sqlalchemy import select
-
         # Context already retrieved by permission check (no second query needed)
 
         # Save workspace_id for later use (before potential rollback)
@@ -1007,36 +1005,24 @@ async def update_context(
 
             # If changing resource_id (not just setting it initially), revoke old tokens
             # ONLY revoke tokens created by current user (fix ownership bypass)
+            # #1877: and only those of THIS workspace's resource — the slug
+            # alone also matches a same-slug resource of another workspace.
             if old_resource_id and old_resource_id != request.resource_id:
-                from sqlalchemy import select
-
                 from auth.resource_tokens import ResourceTokenManager
-                from models.resource import ResourceToken
 
-                token_manager = ResourceTokenManager(db)
-
-                # Get tokens for old resource_id created by CURRENT USER only
-                user_tokens_result = await db.execute(
-                    select(ResourceToken).where(
-                        and_(
-                            ResourceToken.resource_id == old_resource_id,
-                            ResourceToken.created_by == user_id,
-                            ResourceToken.is_active == True,  # noqa: E712
-                        )
-                    )
+                revoked_count = await ResourceTokenManager(db).revoke_tokens_for_resource(
+                    existing_context.workspace_id,
+                    old_resource_id,
+                    created_by=user_id,
                 )
-                old_tokens = list(user_tokens_result.scalars().all())
 
-                if old_tokens:
-                    for token in old_tokens:
-                        await token_manager.revoke_token(token.id)
-
+                if revoked_count:
                     logger.info(
                         "auto_revoked_tokens_on_resource_id_change",
                         context_id=str(context_id),
                         old_resource_id=old_resource_id,
                         new_resource_id=request.resource_id,
-                        count=len(old_tokens),
+                        count=revoked_count,
                     )
 
         context = await service.update_context(
@@ -1143,6 +1129,10 @@ async def delete_context(
             )
 
         # Auto-revoke related resource tokens (Issue #242)
+        # #1877: scoped to the context's own workspace and ``resources`` row.
+        # The slug alone is shared across workspaces, so the old slug-only
+        # lookup also deactivated the leftover tokens of a same-slug resource
+        # in another workspace.
 
         from auth.resource_tokens import ResourceTokenManager
 
@@ -1150,18 +1140,16 @@ async def delete_context(
 
         # Note: context is guaranteed to exist (check_context_owner ensures it)
         if context.resource_id:
-            token_manager = ResourceTokenManager(db)
-            tokens = await token_manager.list_tokens(resource_id=context.resource_id)
+            revoked_count = await ResourceTokenManager(db).revoke_tokens_for_resource(
+                context.workspace_id, context.resource_id
+            )
 
-            for token in tokens:
-                await token_manager.revoke_token(token.id)
-
-            if tokens:
+            if revoked_count:
                 logger.info(
                     "auto_revoked_resource_tokens",
                     context_id=str(context_id),
                     resource_id=context.resource_id,
-                    count=len(tokens),
+                    count=revoked_count,
                 )
 
         await service.delete_context(user_id, context_id)

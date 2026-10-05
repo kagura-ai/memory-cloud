@@ -577,21 +577,13 @@ async def _apply_resource_id(
 
     old_rid = context.resource_id
     if old_rid and old_rid != rid:
-        from sqlalchemy import select as _select
-
         from auth.resource_tokens import ResourceTokenManager
-        from models.resource import ResourceToken
 
-        token_mgr = ResourceTokenManager(db)
-        old_tokens = await db.execute(
-            _select(ResourceToken).where(
-                ResourceToken.resource_id == old_rid,
-                ResourceToken.created_by == user_id,
-                ResourceToken.is_active == True,  # noqa: E712
-            )
+        # #1877: scoped to this context's workspace and ``resources`` row — the
+        # slug alone also matches a same-slug resource of another workspace.
+        await ResourceTokenManager(db).revoke_tokens_for_resource(
+            context.workspace_id, old_rid, created_by=user_id
         )
-        for token in old_tokens.scalars().all():
-            await token_mgr.revoke_token(token.id)
 
     context.resource_id = rid
     return None

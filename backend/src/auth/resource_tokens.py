@@ -11,16 +11,55 @@ import hashlib
 import secrets
 from uuid import UUID
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.resource import Resource, ResourceToken
+from services.resource_lookup import resolve_resource_pk
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 # Resource token prefix for easy identification
 RESOURCE_TOKEN_PREFIX = "kagura_resource_"
+
+
+def _require_scope_for_slug(
+    resource_id: str | None, workspace_id: UUID | None, resource_pk: UUID | None
+) -> None:
+    """Refuse a slug filter that is not pinned to a workspace or a resource (#1877).
+
+    A slug is only unique among one workspace's resources: another workspace
+    can hold the same one, and can take it over once a context is deleted. A
+    query by the bare slug therefore reads (and, for the callers that revoke
+    what they read, writes) across tenants.
+    """
+    if resource_id and workspace_id is None and resource_pk is None:
+        raise ValueError(
+            "resource_id is not unique across workspaces: pass workspace_id or resource_pk with it"
+        )
+
+
+def resource_token_scope(
+    workspace_id: UUID, resource_id: str, resource_pk: UUID | None
+) -> ColumnElement[bool]:
+    """Predicate for "the tokens of this workspace's resource" (#1877).
+
+    ``resource_pk`` identifies exactly one ``resources`` row, hence one
+    workspace, so a token carrying it matches on that alone — including a row
+    whose shadow ``workspace_id`` column was never backfilled. A legacy token
+    without ``resource_pk`` matches on slug **and** ``workspace_id``; one with
+    neither column cannot be attributed to a workspace and is left alone (it
+    cannot authenticate either: ``verify_token`` joins through ``resource_pk``).
+    """
+    legacy = and_(
+        ResourceToken.resource_pk.is_(None),
+        ResourceToken.resource_id == resource_id,
+        ResourceToken.workspace_id == workspace_id,
+    )
+    if resource_pk is None:
+        return legacy
+    return or_(ResourceToken.resource_pk == resource_pk, legacy)
 
 
 class ResourceTokenManager:
@@ -215,6 +254,41 @@ class ResourceTokenManager:
             resource_id=token.resource_id,
         )
 
+    async def revoke_tokens_for_resource(
+        self,
+        workspace_id: UUID,
+        resource_id: str,
+        *,
+        created_by: str | None = None,
+    ) -> int:
+        """Revoke the active tokens of one workspace's resource (#1877).
+
+        The chokepoint for the "context deleted" / "context re-slugged"
+        auto-revoke: scoped by :func:`resource_token_scope`, never by the bare
+        slug, so a same-slug resource of another workspace keeps its tokens.
+
+        Args:
+            workspace_id: Workspace that owns the resource
+            resource_id: Resource slug within that workspace
+            created_by: Only revoke tokens minted by this user (None = all)
+
+        Returns:
+            Number of tokens revoked
+        """
+        resource_pk = await resolve_resource_pk(self.db, workspace_id, resource_id)
+
+        query = select(ResourceToken).where(
+            resource_token_scope(workspace_id, resource_id, resource_pk),
+            ResourceToken.is_active == True,  # noqa: E712
+        )
+        if created_by is not None:
+            query = query.where(ResourceToken.created_by == created_by)
+
+        tokens = list((await self.db.execute(query)).scalars().all())
+        for token in tokens:
+            await self.revoke_token(token.id)
+        return len(tokens)
+
     async def list_tokens(
         self,
         resource_id: str | None = None,
@@ -232,7 +306,7 @@ class ResourceTokenManager:
         #1863: ``workspace_id`` / ``resource_pk`` scope the list to one
         workspace's tokens (and one resource by its ``resources.id``) — a bare
         slug is shared across workspaces, so the slug filter alone would mix
-        same-slug tokens of another workspace in.
+        same-slug tokens of another workspace in. #1877: that call is refused.
 
         Args:
             resource_id: Optional resource_id (slug) filter
@@ -245,7 +319,12 @@ class ResourceTokenManager:
 
         Returns:
             List of ResourceToken entities
+
+        Raises:
+            ValueError: ``resource_id`` without ``workspace_id`` or ``resource_pk``
         """
+        _require_scope_for_slug(resource_id, workspace_id, resource_pk)
+
         query = select(ResourceToken).order_by(ResourceToken.created_at.desc())
 
         if resource_id:
@@ -291,7 +370,12 @@ class ResourceTokenManager:
 
         Returns:
             Total count of matching tokens
+
+        Raises:
+            ValueError: ``resource_id`` without ``workspace_id`` or ``resource_pk``
         """
+        _require_scope_for_slug(resource_id, workspace_id, resource_pk)
+
         query = select(func.count(ResourceToken.id))
 
         conditions = []

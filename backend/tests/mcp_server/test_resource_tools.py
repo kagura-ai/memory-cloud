@@ -665,6 +665,126 @@ class TestListResourceTokensHappyPath:
         assert data["tokens"][1]["is_active"] is False
 
 
+class TestListResourceTokensWithoutLiveContext:
+    """#1877: a token outlives its context (it keeps passing ``verify_token``),
+    so the list must not depend on a live ``contexts`` row — neither the
+    unfiltered query nor the ``resource_id`` boundary. The real-DB walk-through
+    is ``tests/integration/test_resource_tokens_workspace_scope.py``."""
+
+    @staticmethod
+    def _owner_result():
+        role_result = MagicMock()
+        owner = MagicMock()
+        owner.role = "owner"
+        role_result.scalar_one_or_none.return_value = owner
+        return role_result
+
+    @staticmethod
+    def _token():
+        from datetime import UTC, datetime
+
+        token = MagicMock()
+        token.public_id = "rtok_" + "9" * 22
+        token.resource_id = "orders"
+        token.description = "left behind"
+        token.quota_events_per_hour = 1000
+        token.is_active = True
+        token.created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        token.last_used_at = None
+        return token
+
+    def _db(self, *extra):
+        total_result = MagicMock()
+        total_result.scalar.return_value = 1
+        tokens_result = MagicMock()
+        tokens_result.scalars.return_value.all.return_value = [self._token()]
+        mock_db = AsyncMock()
+        mock_db.execute.side_effect = [self._owner_result(), *extra, total_result, tokens_result]
+        return mock_db
+
+    @staticmethod
+    def _statements(mock_db) -> list[str]:
+        return [str(call.args[0]) for call in mock_db.execute.await_args_list]
+
+    @pytest.mark.asyncio
+    async def test_unfiltered_list_does_not_require_a_live_context(self):
+        workspace_id = uuid4()
+        mock_db = self._db()
+
+        async def mock_get_db():
+            yield mock_db
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch("mcp_server.tools.resource._log_tool_usage", new=AsyncMock()),
+        ):
+            result = await handle_list_resource_tokens({}, "user", workspace_id)
+        data = _json_of(result)
+        assert data["status"] == "success"
+        assert [t["id"] for t in data["tokens"]] == ["rtok_" + "9" * 22]
+        assert data["tokens"][0]["is_active"] is True
+        # role check, count, page — and none of them reads ``contexts``.
+        statements = self._statements(mock_db)
+        assert len(statements) == 3
+        assert all("contexts" not in sql for sql in statements)
+        # Still workspace-scoped through the ``resources`` join.
+        assert "resources.workspace_id" in statements[1]
+        assert "resources.workspace_id" in statements[2]
+
+    @pytest.mark.asyncio
+    async def test_filter_resolves_through_the_resources_row(self):
+        workspace_id = uuid4()
+        resource_pk = uuid4()
+        pk_result = MagicMock()
+        pk_result.scalar_one_or_none.return_value = resource_pk
+        mock_db = self._db(pk_result)
+
+        async def mock_get_db():
+            yield mock_db
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch("mcp_server.tools.resource._log_tool_usage", new=AsyncMock()),
+        ):
+            result = await handle_list_resource_tokens(
+                {"resource_id": "orders"}, "user", workspace_id
+            )
+        data = _json_of(result)
+        assert data["status"] == "success"
+        assert data["total"] == 1
+        statements = self._statements(mock_db)
+        assert all("contexts" not in sql for sql in statements)
+        # The boundary lookup is the ``resources`` row; the list is pinned to
+        # its primary key, never to the (cross-workspace) slug.
+        assert "FROM resources" in statements[1]
+        assert "resource_tokens.resource_pk =" in statements[2]
+        assert "resource_tokens.resource_pk =" in statements[3]
+
+    @pytest.mark.asyncio
+    async def test_slug_without_a_resources_row_in_the_workspace_is_not_found(self):
+        """Unknown slug or another workspace's: one uniform answer, and no
+        token query runs."""
+        pk_result = MagicMock()
+        pk_result.scalar_one_or_none.return_value = None
+        mock_db = AsyncMock()
+        mock_db.execute.side_effect = [self._owner_result(), pk_result]
+
+        async def mock_get_db():
+            yield mock_db
+
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch("mcp_server.tools.resource._log_tool_usage", new=AsyncMock()),
+        ):
+            result = await handle_list_resource_tokens(
+                {"resource_id": "someone_elses"}, "user", uuid4()
+            )
+        data = _json_of(result)
+        assert data["status"] == "error"
+        assert data["error"] == "resource_not_found"
+        assert mock_db.execute.await_count == 2
+
+
 @pytest.fixture
 def _stub_quota_for_ingest():
     """Issue #332: stub the workspace-scoped quota helper for ingest happy-paths."""

@@ -255,10 +255,6 @@ async def list_resources(
         present = [c for c in candidates if c is not None]
         return max(present) if present else None
 
-    # Pick the most recent signal across the timestamps, ignoring None —
-    # matches the ORDER BY greatest() above so the sort order agrees with
-    # the rendered value. to_utc_iso() handles None + adds the explicit Z
-    # suffix that JS clients need.
     # Pick the most recent signal across the timestamps, ignoring None, and
     # use it both as the sort key and as the rendered updated_at so the order
     # agrees with the value. to_utc_iso() handles None + adds the explicit Z
