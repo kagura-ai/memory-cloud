@@ -656,8 +656,9 @@ context** (`neural_memory_edges.origin != 'hebbian'`: declared links,
 `supersedes` / `contradicts`, sleep-discovered edges; Issue #1872), so the
 new owner can list, update and delete them — a `supersedes` edge keeps
 hiding a memory from default recall whoever holds it. Where `--to` already
-has an edge on the same pair of memories: a Hebbian row of `--to` is replaced
-by the moved edge, and a declared or semantic row of `--to` is kept while
+has an edge on the same pair of memories, the edge upsert's precedence
+decides: a Hebbian row of `--to`, or a semantic one when `--from`'s edge is
+declared, is replaced by the moved edge; otherwise `--to`'s row is kept and
 `--from`'s duplicate is dropped (the plan prints both counts). One
 `audit_logs` row (`context_creator_transferred`) is written per moved
 context with the memory and edge counts, and re-running after `--apply`
@@ -683,9 +684,12 @@ The command is **not fenced** against concurrent writers: a `remember` by the
 that loaded the old `user_id`, can land after it. Run it while the `--from`
 identity's clients (its API key, MCP sessions) are idle, then run it once more
 with `--repair-payloads` to sweep anything that slipped in. Run that final
-sweep **before the retired account is deleted**. The sweep itself still works
-afterwards (it needs the `--from` `user_id`, not its `users` row), but a plain
-transfer refuses an unknown `--from`.
+sweep **before the retired account is deleted or erased**. If only the
+`users` row was removed, the sweep still works (it needs the `--from`
+`user_id`, not its `users` row) while a plain transfer refuses an unknown
+`--from`. After an account erasure it finds nothing: the erasure replaces the
+`user_id` on the memories and edges that outlive the account with a
+pseudonym, so no row matches `--from` any more.
 
 The command does not move API keys: mint a new key for `--to` if MCP clients
 should keep seeing the private contexts afterwards. It also leaves other

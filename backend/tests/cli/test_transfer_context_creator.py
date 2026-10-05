@@ -518,6 +518,13 @@ async def test_non_hebbian_edges_follow_the_context(db_session, scenario, vector
             # edge replaces it, as a declared write through the API would.
             _edge(o, a, frm, edge_type=EDGE_TYPE_SUPERSEDES),
             _edge(o, a, to, edge_type=EDGE_TYPE_NEURAL_ASSOCIATION, origin=EDGE_ORIGIN_HEBBIAN),
+            # Declared beats semantic (#1406): --to's sleep-discovered link on
+            # the pair gives way to the old account's declared supersedes.
+            _edge(o, b, frm, edge_type=EDGE_TYPE_SUPERSEDES),
+            _edge(o, b, to, origin=EDGE_ORIGIN_SEMANTIC),
+            # Semantic does not beat semantic: --to's row is kept.
+            _edge(t, a, frm, origin=EDGE_ORIGIN_SEMANTIC, weight=0.9),
+            _edge(t, a, to, origin=EDGE_ORIGIN_SEMANTIC, weight=0.4),
             # Outside the transfer: an edge of --from in a context --to owned all along.
             _edge(m["pre_owned_by_from"], m["pre_owned_by_from"], frm),
         ]
@@ -528,17 +535,19 @@ async def test_non_hebbian_edges_follow_the_context(db_session, scenario, vector
         db_session, from_user_id=frm, to_user_id=to, workspace_id=s["ws"].id, dry_run=True
     )
     by_ctx = {line.context_id: line.edges for line in plan.lines}
-    assert (by_ctx[s["private_ctx"].id].moved, by_ctx[s["private_ctx"].id].dropped) == (4, 1)
-    assert by_ctx[s["private_ctx"].id].replaced == 1
+    assert (by_ctx[s["private_ctx"].id].moved, by_ctx[s["private_ctx"].id].dropped) == (5, 2)
+    assert by_ctx[s["private_ctx"].id].replaced == 2
     assert by_ctx[s["shared_ctx"].id].moved == 0
-    assert plan.edges_moved == 4
+    assert plan.edges_moved == 5
+    # The prompt counts every edge row the run touches, dropped duplicates included.
+    assert plan.summary() == "2 context(s), 4 memory row(s), 7 edge(s)"
     # Dry run wrote nothing.
     assert (frm, a.id, b.id) in await _edges(db_session, s["private_ctx"].id)
 
     result = await transfer_context_creator(
         db_session, from_user_id=frm, to_user_id=to, workspace_id=s["ws"].id, dry_run=False
     )
-    assert result.edges_moved == 4
+    assert result.edges_moved == 5
 
     edges = await _edges(db_session, s["private_ctx"].id)
     assert set(edges) == {
@@ -548,6 +557,8 @@ async def test_non_hebbian_edges_follow_the_context(db_session, scenario, vector
         (frm, a.id, t.id),  # Hebbian: left with the old account
         (to, b.id, o.id),
         (to, o.id, a.id),
+        (to, o.id, b.id),
+        (to, t.id, a.id),
     }
     assert edges[(to, a.id, b.id)].edge_type == EDGE_TYPE_SUPERSEDES
     assert edges[(to, b.id, a.id)].edge_type == EDGE_TYPE_RELATED_TO
@@ -559,6 +570,9 @@ async def test_non_hebbian_edges_follow_the_context(db_session, scenario, vector
     # The declared edge took the place of --to's Hebbian row.
     assert edges[(to, o.id, a.id)].edge_type == EDGE_TYPE_SUPERSEDES
     assert edges[(to, o.id, a.id)].origin == EDGE_ORIGIN_DECLARED
+    assert edges[(to, o.id, b.id)].edge_type == EDGE_TYPE_SUPERSEDES
+    assert edges[(to, o.id, b.id)].origin == EDGE_ORIGIN_DECLARED
+    assert edges[(to, t.id, a.id)].weight == 0.4
     # A context --to owned all along is out of scope.
     pre = m["pre_owned_by_from"]
     assert set(await _edges(db_session, s["pre_owned_ctx"].id)) == {(frm, pre.id, pre.id)}
@@ -566,9 +580,9 @@ async def test_non_hebbian_edges_follow_the_context(db_session, scenario, vector
     audit = await db_session.scalar(
         select(AuditLog).where(AuditLog.resource == f"context:{s['private_ctx'].id}")
     )
-    assert audit.user_metadata["edges"] == 4
-    assert audit.user_metadata["edges_dropped"] == 1
-    assert audit.user_metadata["edges_replaced"] == 1
+    assert audit.user_metadata["edges"] == 5
+    assert audit.user_metadata["edges_dropped"] == 2
+    assert audit.user_metadata["edges_replaced"] == 2
 
     # A second run, with and without the sweep, changes nothing.
     for repair in (False, True):

@@ -34,13 +34,16 @@ What moves, per live context in the workspace whose ``created_by`` is ``--from``
 move onto a pair ``--to`` already holds a row for. The rule follows the edge
 upsert's own precedence (``NeuralEdgeRepository.create_or_update_edge``):
 
-* ``--to``'s row is Hebbian — a co-activation weight, which any declared or
-  semantic write overwrites: it is deleted and ``--from``'s edge takes its
-  place, otherwise a ``supersedes`` would be lost to a retrieval counter;
-* ``--to``'s row is non-Hebbian — the new owner already said something about
-  the pair: it is kept as it is and ``--from``'s row is dropped. Skipping it
-  instead would leave a row that still shadows recall and that nobody can
-  manage, and the command would never reach "nothing left to move".
+* ``--to``'s row is outranked — it is Hebbian (a co-activation weight, which
+  any declared or semantic write overwrites), or it is semantic and
+  ``--from``'s edge is declared (a user assertion beats a machine guess,
+  #1406): it is deleted and ``--from``'s edge takes its place, otherwise a
+  declared ``supersedes`` would be lost to a retrieval counter or to a
+  sleep-discovered link;
+* otherwise (``--to``'s row is declared, or both are semantic) the new owner's
+  row is kept as it is and ``--from``'s row is dropped. Skipping it instead
+  would leave a row that still shadows recall and that nobody can manage, and
+  the command would never reach "nothing left to move".
 
 ``--to`` must be the workspace owner or an ``admin`` member — anyone else
 could end up owning a private context they cannot list. One ``audit_logs``
@@ -70,10 +73,13 @@ The command is not fenced against concurrent writes: a ``remember`` by the
 worker that loaded the old ``user_id``, can land after it. Run it while the
 ``--from`` identity's clients (the API key, MCP) are idle, then run it once
 more with ``--repair-payloads`` to sweep anything that slipped in. Do that
-final sweep before the retired account is deleted: it still runs afterwards
-(``--repair-payloads`` does not need the ``--from`` user row, only its
-``user_id``; its scope stays the audit rows matching from / to / workspace,
-so a mistyped ``--from`` finds nothing), but a plain transfer does not.
+final sweep before the retired account is deleted or erased. Once only the
+``users`` row is gone the sweep still runs (``--repair-payloads`` does not
+need the ``--from`` user row, only its ``user_id``; its scope stays the audit
+rows matching from / to / workspace, so a mistyped ``--from`` finds nothing)
+while a plain transfer does not. After an account erasure it finds nothing:
+the erasure replaces the ``user_id`` on the memories and edges that outlive
+the account with a pseudonym, so no row matches ``--from`` any more.
 
 What this does NOT do: move API keys (mint a new key for ``--to`` if MCP
 clients should keep seeing the private contexts), touch other ``created_by``
@@ -95,7 +101,17 @@ from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from sqlalchemy import delete, exists, func, select, update  # noqa: E402
+from sqlalchemy import (  # noqa: E402
+    ColumnElement,
+    and_,
+    delete,
+    exists,
+    func,
+    not_,
+    or_,
+    select,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 from sqlalchemy.orm import aliased  # noqa: E402
 
@@ -103,7 +119,13 @@ from auth.workspace_roles import WorkspaceRole  # noqa: E402
 from cli._oneshot import add_log_level_argument, configure_logging, run_plan_apply  # noqa: E402
 from db.qdrant import update_memory_payload_in_qdrant  # noqa: E402
 from models.auth import AuditLog, Context, User, Workspace, WorkspaceMember  # noqa: E402
-from models.memory import EDGE_ORIGIN_HEBBIAN, Memory, NeuralMemoryEdge  # noqa: E402
+from models.memory import (  # noqa: E402
+    EDGE_ORIGIN_DECLARED,
+    EDGE_ORIGIN_HEBBIAN,
+    EDGE_ORIGIN_SEMANTIC,
+    Memory,
+    NeuralMemoryEdge,
+)
 from services.context_routing import resolve_collection_name  # noqa: E402
 
 AUDIT_ACTION = "context_creator_transferred"
@@ -120,8 +142,9 @@ class EdgeCounts:
     """What happens to ``--from``'s non-Hebbian edges in a set of contexts.
 
     ``moved`` change hands; ``dropped`` are deleted because ``--to`` already
-    holds a non-Hebbian edge on the pair; ``replaced`` are Hebbian rows of
-    ``--to`` deleted to make room for a moved edge (see the module docstring).
+    holds an edge of equal or higher rank on the pair; ``replaced`` are
+    outranked rows of ``--to`` deleted to make room for a moved edge (see the
+    module docstring).
     """
 
     moved: int = 0
@@ -184,6 +207,11 @@ class TransferResult:
         return sum(line.edges.moved for line in self.lines)
 
     @property
+    def edges_touched(self) -> int:
+        """Edges of ``from`` the transfer moves or drops (sweep excluded)."""
+        return sum(line.edges.total for line in self.lines)
+
+    @property
     def planned(self) -> int:
         """Units of work the run would do: contexts to move plus repairs."""
         return self.transferred + self.repair_moved + self.repair_edges.total + self.repair_memories
@@ -193,7 +221,8 @@ class TransferResult:
         parts = [
             (self.transferred, "context(s)"),
             (self.memories + self.repair_moved, "memory row(s)"),
-            (self.edges_moved + self.repair_edges.moved, "edge(s)"),
+            # Dropped duplicates are rows the run deletes: they count as changed.
+            (self.edges_touched + self.repair_edges.total, "edge(s)"),
             (self.repair_memories, "vector payload repair(s)"),
         ]
         return ", ".join(f"{count} {label}" for count, label in parts if count) or "nothing"
@@ -283,6 +312,19 @@ def _edges_to_move(context_ids: list[UUID], from_user_id: str) -> list:
     ]
 
 
+def _outranked(theirs: type[NeuralMemoryEdge], mine: type[NeuralMemoryEdge]) -> ColumnElement[bool]:
+    """``theirs`` (a row of ``to``) gives way to ``mine`` (the edge that moves).
+
+    The edge upsert's precedence: anything non-Hebbian overwrites a Hebbian
+    row, and a declared edge overwrites a semantic one. ``mine`` is never
+    Hebbian here.
+    """
+    return or_(
+        theirs.origin == EDGE_ORIGIN_HEBBIAN,
+        and_(mine.origin == EDGE_ORIGIN_DECLARED, theirs.origin == EDGE_ORIGIN_SEMANTIC),
+    )
+
+
 async def _count_edges(
     db: AsyncSession, *, context_ids: list[UUID], from_user_id: str, to_user_id: str
 ) -> EdgeCounts:
@@ -296,14 +338,15 @@ async def _count_edges(
         theirs.src_id == NeuralMemoryEdge.src_id,
         theirs.dst_id == NeuralMemoryEdge.dst_id,
     ]
-    held = exists().where(*same_pair, theirs.origin != EDGE_ORIGIN_HEBBIAN)
-    hebbian = exists().where(*same_pair, theirs.origin == EDGE_ORIGIN_HEBBIAN)
+    outranked = _outranked(theirs, NeuralMemoryEdge)
+    kept = exists().where(*same_pair, not_(outranked))
+    gives_way = exists().where(*same_pair, outranked)
     total, dropped, replaced = (
         await db.execute(
             select(
                 func.count(),
-                func.count().filter(held),
-                func.count().filter(hebbian),
+                func.count().filter(kept),
+                func.count().filter(gives_way),
             )
             .select_from(NeuralMemoryEdge)
             .where(*_edges_to_move(context_ids, from_user_id))
@@ -317,22 +360,22 @@ async def _move_edges(
 ) -> None:
     """Hand ``from``'s non-Hebbian edges in the contexts to ``to`` (not committed).
 
-    Order matters: first make room where ``to`` only has a Hebbian row, then
-    drop ``from``'s duplicates of pairs ``to`` holds a non-Hebbian edge on,
-    then move what is left — by then no ``(to, src, dst)`` can collide.
+    Order matters: first make room where ``to``'s row is outranked, then drop
+    ``from``'s duplicates of the pairs ``to`` still holds an edge on, then
+    move what is left — by then no ``(to, src, dst)`` can collide.
     """
     mine = aliased(NeuralMemoryEdge)
     await db.execute(
         delete(NeuralMemoryEdge)
         .where(
             NeuralMemoryEdge.user_id == to_user_id,
-            NeuralMemoryEdge.origin == EDGE_ORIGIN_HEBBIAN,
             exists().where(
                 mine.context_id.in_(context_ids),
                 mine.user_id == from_user_id,
                 mine.origin != EDGE_ORIGIN_HEBBIAN,
                 mine.src_id == NeuralMemoryEdge.src_id,
                 mine.dst_id == NeuralMemoryEdge.dst_id,
+                _outranked(NeuralMemoryEdge, mine),
             ),
         )
         .execution_options(synchronize_session=False)
@@ -618,7 +661,7 @@ def _edge_note(edges: EdgeCounts) -> str:
     if edges.dropped:
         extras.append(f"{edges.dropped} duplicate(s) dropped")
     if edges.replaced:
-        extras.append(f"{edges.replaced} Hebbian row(s) replaced")
+        extras.append(f"{edges.replaced} outranked row(s) of --to replaced")
     return f"{note} [{', '.join(extras)}]" if extras else note
 
 
