@@ -660,7 +660,8 @@ has an edge on the same pair of memories, one of the two rows goes, chosen
 so that recall does not change: `--to`'s row is replaced by the moved edge
 when it is Hebbian, when it is semantic and `--from`'s edge is declared, or
 when `--from`'s edge is a `supersedes` / `contradicts` and `--to`'s row has
-another edge type; otherwise `--to`'s row is kept and `--from`'s duplicate is
+another edge type (a row `--to` declared by hand is never replaced by a
+sleep-discovered edge); otherwise `--to`'s row is kept and `--from`'s duplicate is
 dropped (the plan prints both counts). One
 `audit_logs` row (`context_creator_transferred`) is written per moved
 context with the memory and edge counts, and re-running after `--apply`

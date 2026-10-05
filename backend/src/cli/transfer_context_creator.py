@@ -43,7 +43,9 @@ recall returns:
   - it is semantic and ``--from``'s edge is declared (a user assertion beats
     a machine guess, #1406);
   - ``--from``'s edge is a ``supersedes`` or a ``contradicts`` and ``--to``'s
-    row has another ``edge_type``, whatever its origin. Supersede shadowing
+    row has another ``edge_type`` (unless ``--from``'s edge is semantic and
+    ``--to``'s row is declared: an automated edge never deletes a declared
+    one). Supersede shadowing
     and contradiction annotations in recall are keyed by ``edge_type`` and
     not by who holds the edge, so dropping ``--from``'s row for, say, a
     declared ``related_to`` of ``--to`` would silently un-hide a superseded
@@ -337,8 +339,9 @@ def _outranked(theirs: type[NeuralMemoryEdge], mine: type[NeuralMemoryEdge]) -> 
     Anything non-Hebbian overwrites a Hebbian row and a declared edge
     overwrites a semantic one (the edge upsert's precedence); on top of that
     a ``supersedes`` / ``contradicts`` that moves is never given up for a row
-    of another type, because recall acts on those two types. ``mine`` is
-    never Hebbian here.
+    of another type, because recall acts on those two types — unless the
+    moving edge is semantic and the row of ``to`` is declared: an automated
+    edge never deletes a declared one. ``mine`` is never Hebbian here.
     """
     return or_(
         theirs.origin == EDGE_ORIGIN_HEBBIAN,
@@ -346,6 +349,13 @@ def _outranked(theirs: type[NeuralMemoryEdge], mine: type[NeuralMemoryEdge]) -> 
         and_(
             mine.edge_type.in_((EDGE_TYPE_SUPERSEDES, EDGE_TYPE_CONTRADICTS)),
             theirs.edge_type != mine.edge_type,
+            # An automated edge never deletes what ``to`` declared by hand.
+            not_(
+                and_(
+                    mine.origin == EDGE_ORIGIN_SEMANTIC,
+                    theirs.origin == EDGE_ORIGIN_DECLARED,
+                )
+            ),
         ),
     )
 

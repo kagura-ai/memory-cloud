@@ -667,6 +667,38 @@ async def test_edge_type_decides_a_collision_recall_depends_on(
 
 
 @pytest.mark.asyncio
+async def test_an_automated_supersedes_does_not_delete_a_declared_edge(
+    db_session, scenario, vector_store
+):
+    """``--from``'s sleep-discovered ``supersedes`` meets a link ``--to``
+    declared by hand on the same pair: the declared row stays."""
+    s, m = scenario, scenario["memories"]
+    frm, to = s["cli_admin"].user_id, s["web_user"].user_id
+    a, b = m["private_a"], m["private_b"]
+    db_session.add_all(
+        [
+            _edge(a, b, frm, edge_type=EDGE_TYPE_SUPERSEDES, origin=EDGE_ORIGIN_SEMANTIC),
+            _edge(a, b, to, edge_type=EDGE_TYPE_CONTRADICTS, weight=0.3),
+        ]
+    )
+    await db_session.flush()
+
+    result = await transfer_context_creator(
+        db_session, from_user_id=frm, to_user_id=to, workspace_id=s["ws"].id, dry_run=False
+    )
+
+    edges = await _edges(db_session, s["private_ctx"].id)
+    assert set(edges) == {(to, a.id, b.id)}
+    row = edges[(to, a.id, b.id)]
+    assert (row.edge_type, row.origin, row.weight) == (
+        EDGE_TYPE_CONTRADICTS,
+        EDGE_ORIGIN_DECLARED,
+        0.3,
+    )
+    assert (result.edges_moved, result.edges_dropped) == (0, 1)
+
+
+@pytest.mark.asyncio
 async def test_repair_sweeps_edges_left_on_the_old_account(
     db_session, scenario, vector_store, cli_db, capsys
 ):
