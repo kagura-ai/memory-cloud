@@ -651,28 +651,47 @@ command moves `created_by` **and the memories in it authored by `--from`**:
 `memories.user_id` and the `user_id` field on each memory's vector-store
 point. A private context shows its owner only the memories whose `user_id`
 matches, so without that step the new owner would see the context and none
-of its content. One `audit_logs` row (`context_creator_transferred`) is
-written per moved context, and re-running after `--apply` changes 0 rows.
+of its content. It also moves **the non-Hebbian edges `--from` holds in the
+context** (`neural_memory_edges.origin != 'hebbian'`: declared links,
+`supersedes` / `contradicts`, sleep-discovered edges; Issue #1872), so the
+new owner can list, update and delete them — a `supersedes` edge keeps
+hiding a memory from default recall whoever holds it. Where `--to` already
+has an edge on the same pair of memories: a Hebbian row of `--to` is replaced
+by the moved edge, and a declared or semantic row of `--to` is kept while
+`--from`'s duplicate is dropped (the plan prints both counts). One
+`audit_logs` row (`context_creator_transferred`) is written per moved
+context with the memory and edge counts, and re-running after `--apply`
+changes 0 rows.
+
 Vector-store updates run after the database commit; if any fail the command
 exits 1 and lists the memory ids — the memory list is already right, recall
-may miss those memories until their payload is repaired. Re-run with
+may miss those memories until their payload is repaired. A memory that is
+not embedded yet (`embedding_status` other than `success`) has no vector
+point to update: it is listed as skipped and does not change the exit code,
+because the later embed writes the new `user_id`. Re-run with
 `--apply --yes --repair-payloads`: in every context an earlier run moved to
 `--to` (found by its audit row) it moves any memory still authored by
-`--from` and re-points the vector payload of every live memory `--to` owns
-(idempotent; a plain re-run finds 0 contexts to move). A context `--to`
-owned all along is never touched.
+`--from` and any non-Hebbian edge `--from` still holds — including the edges
+a transfer made before this fix left behind — and re-points the vector
+payload of every live memory `--to` owns (idempotent; a plain re-run finds 0
+contexts to move). Without `--apply`, `--repair-payloads` prints what the
+sweep would do and writes nothing. A context `--to` owned all along is never
+touched.
 
 The command is **not fenced** against concurrent writers: a `remember` by the
 `--from` identity that was authorized before the flip, or an embedding worker
 that loaded the old `user_id`, can land after it. Run it while the `--from`
 identity's clients (its API key, MCP sessions) are idle, then run it once more
-with `--repair-payloads` to sweep anything that slipped in.
+with `--repair-payloads` to sweep anything that slipped in. Run that final
+sweep **before the retired account is deleted**. The sweep itself still works
+afterwards (it needs the `--from` `user_id`, not its `users` row), but a plain
+transfer refuses an unknown `--from`.
 
 The command does not move API keys: mint a new key for `--to` if MCP clients
 should keep seeing the private contexts afterwards. It also leaves other
 `created_by` columns (resources, agents, files, secrets), per-user retrieval
-history (neural edges, feedback, sleep reports — boosting starts over) and the
-two user rows untouched.
+history (Hebbian edge weights, feedback, sleep reports — boosting starts over)
+and the two user rows untouched.
 
 ## Hosted-mode UI gates (Issue #1571)
 
