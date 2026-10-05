@@ -808,14 +808,23 @@ async def test_linked_provider_same_address_verifies_owner(db_session: AsyncSess
 # --- #1875: an OAuth account with no primary provider gets one back ----------
 
 
-async def _oauth_account_without_primary(db: AsyncSession, suffix: str) -> tuple[User, str]:
+async def _oauth_account_without_primary(
+    db: AsyncSession, suffix: str, *, linked: timedelta
+) -> tuple[User, str]:
     """An OAuth account whose last provider was unlinked (it has a password),
-    then linked again: a live provider row, ``auth_provider`` NULL — the state
-    every relink left behind before #1875."""
+    then linked again ``linked`` ago: a live provider row, ``auth_provider``
+    NULL — the state every relink left behind before #1875."""
     owner = await _make_user(db, suffix=suffix, password_hash="x")
     owner.email_verified_at = utcnow()
     gh_sub = f"gh-{suffix}"
-    db.add(UserOAuthProvider(user_id=owner.user_id, provider="github", oauth_sub=gh_sub))
+    db.add(
+        UserOAuthProvider(
+            user_id=owner.user_id,
+            provider="github",
+            oauth_sub=gh_sub,
+            linked_at=utcnow() - linked,
+        )
+    )
     owner.auth_provider = None
     await db.commit()
     return owner, gh_sub
@@ -826,7 +835,9 @@ async def test_sign_in_adopts_the_provider_of_an_oauth_account_without_one(
     db_session: AsyncSession,
 ):
     suffix = uuid4().hex[:8]
-    owner, gh_sub = await _oauth_account_without_primary(db_session, suffix)
+    owner, gh_sub = await _oauth_account_without_primary(
+        db_session, suffix, linked=timedelta(minutes=11)
+    )
     new_email = f"moved-{suffix}@example.com"
 
     with _sign_in_session(db_session):
@@ -843,6 +854,68 @@ async def test_sign_in_adopts_the_provider_of_an_oauth_account_without_one(
     assert user.email == new_email
     assert user.name == "Renamed"
     assert len(await _audit_rows(db_session, owner.user_id, "oauth_user_email_synced")) == 1
+
+
+@pytest.mark.asyncio
+async def test_sign_in_through_a_freshly_linked_provider_adopts_nothing(
+    db_session: AsyncSession,
+):
+    """A provider row younger than the identity-link window signs in, but does
+    not become primary: email and name stay the account's."""
+    suffix = uuid4().hex[:8]
+    owner, gh_sub = await _oauth_account_without_primary(
+        db_session, suffix, linked=timedelta(minutes=3)
+    )
+    old_email, old_name = owner.email, owner.name
+
+    with _sign_in_session(db_session) as notify:
+        role = await RoleManager(use_postgres=True).ensure_user(
+            email=f"moved-{suffix}@example.com",
+            user_id=gh_sub,
+            name="Renamed",
+            auth_provider="github",
+            email_verified=True,
+        )
+
+    assert role == Role.USER
+    user = await _reload(db_session, owner.user_id)
+    assert user.auth_provider is None
+    assert user.email == old_email
+    assert user.name == old_name
+    notify.assert_not_called()
+    assert await _audit_rows(db_session, owner.user_id, "oauth_user_email_synced") == []
+
+
+@pytest.mark.asyncio
+async def test_sign_in_through_the_original_identity_adopts_it(db_session: AsyncSession):
+    """The identity the account was created with: its sub is the ``user_id``
+    and its row carries the account's creation time."""
+    suffix = uuid4().hex[:8]
+    owner = await _make_user(db_session, suffix=suffix)
+    await db_session.refresh(owner)
+    db_session.add(
+        UserOAuthProvider(
+            user_id=owner.user_id,
+            provider="google",
+            oauth_sub=owner.user_id,
+            linked_at=owner.created_at,
+        )
+    )
+    owner.auth_provider = None
+    await db_session.commit()
+    new_email = f"moved-{suffix}@example.com"
+
+    with _sign_in_session(db_session):
+        await RoleManager(use_postgres=True).ensure_user(
+            email=new_email,
+            user_id=owner.user_id,
+            auth_provider="google",
+            email_verified=True,
+        )
+
+    user = await _reload(db_session, owner.user_id)
+    assert user.auth_provider == "google"
+    assert user.email == new_email
 
 
 @pytest.mark.asyncio
@@ -875,7 +948,7 @@ async def test_sign_in_leaves_a_password_account_without_a_primary_provider(
 
 
 @pytest.mark.asyncio
-async def test_relinking_after_the_last_provider_was_unlinked_restores_the_pointer(
+async def test_relinking_after_the_last_provider_was_unlinked_leaves_the_pointer_unset(
     db_session: AsyncSession,
 ):
     suffix = uuid4().hex[:8]
@@ -892,7 +965,9 @@ async def test_relinking_after_the_last_provider_was_unlinked_restores_the_point
         user_id=owner.user_id, provider="github", oauth_sub=f"gh-{suffix}", email=owner.email
     )
 
-    assert (await _reload(db_session, owner.user_id)).auth_provider == "github"
+    # Linking alone never makes a provider primary; a later sign-in through
+    # an established link does (see the sign-in tests above).
+    assert (await _reload(db_session, owner.user_id)).auth_provider is None
 
 
 @pytest.mark.asyncio

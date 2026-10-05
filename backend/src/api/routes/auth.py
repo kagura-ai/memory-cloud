@@ -45,6 +45,7 @@ import auth.oauth_endpoints as oauth_endpoints
 from auth.dependencies import SessionUser
 from auth.oauth2 import OAuth2Manager
 from auth.password import hash_password, verify_password
+from auth.provider_link import provider_link_established
 from auth.roles import get_role_manager
 from auth.session import (
     SESSION_COOKIE_NAME,
@@ -1722,13 +1723,6 @@ def _session_profile(owner: SessionOwner, user_info: dict[str, Any]) -> tuple[st
     return user_info.get("name"), user_info.get("picture")
 
 
-# How far apart a provider row and its account may be written and still count
-# as one first sign-in. ``RoleManager.ensure_user`` inserts both in one
-# transaction with the database's ``now()``, so they are normally equal; the
-# slack only allows for a future change of either default.
-_CREATED_TOGETHER = timedelta(seconds=5)
-
-
 def _identity_can_prove(owner: SessionOwner, idp_sub: str) -> bool:
     """Whether a sign-in through this identity may prove ``owner`` (#1875).
 
@@ -1739,29 +1733,19 @@ def _identity_can_prove(owner: SessionOwner, idp_sub: str) -> bool:
 
     Decision (#1875): the gate is here, on the proof, not on attaching — an
     OAuth-only account has no other credential to prove before it attaches a
-    second provider. A provider link row older than
-    ``IDENTITY_LINK_SIGN_IN_WINDOW`` counts. A younger one counts only when it
-    is the identity the account was created with: its sub is the account's
-    ``user_id`` AND the row was written together with the ``users`` row (a
-    first sign-in inserts both in one transaction, so their times agree).
-    Matching the sub alone is not enough — an account can unlink its original
-    identity and have it attached again, and subs are scoped by provider, so
-    another provider's could equal the id; a row attached later carries the
-    time of the attach. A linked row with no readable time proves nothing.
+    second provider. The identity counts once its link is established: see
+    :func:`auth.provider_link.provider_link_established`, the rule
+    ``RoleManager`` also reads before a provider becomes primary.
 
     An identity with no link row at all (the owner was found by the ``users``
     row keyed by the sub, or not found) was never attached, so it counts.
     """
-    linked_at = owner.provider_linked_at
-    if linked_at is None:
+    if owner.provider_linked_at is None:
         return owner.user_id == idp_sub
-    if utcnow() - linked_at > IDENTITY_LINK_SIGN_IN_WINDOW:
-        return True
-    created_at = owner.account_created_at
-    return (
-        owner.user_id == idp_sub
-        and created_at is not None
-        and abs(linked_at - created_at) <= _CREATED_TOGETHER
+    return provider_link_established(
+        sub_is_user_id=owner.user_id == idp_sub,
+        linked_at=owner.provider_linked_at,
+        account_created_at=owner.account_created_at,
     )
 
 

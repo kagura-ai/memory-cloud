@@ -12,9 +12,9 @@ Security edge cases enforced here:
   (3-arm ``link``: unbound INSERT / mine idempotent touch / other -> conflict).
 - Unlink never strips a user of their last sign-in method (password counts).
 - Unlinking the legacy "primary" provider repoints ``User.auth_provider`` to a
-  surviving linked provider, or ``None`` when none remain (edge case 7). An
-  OAuth account left with ``None`` gets the pointer back from the next
-  provider it links, or on its next OAuth sign-in (#1875).
+  surviving linked provider, or ``None`` when none remain (edge case 7).
+  Linking never sets the pointer: an OAuth account left with ``None`` gets it
+  back on a sign-in through an established link (``RoleManager``, #1875).
 """
 
 from __future__ import annotations
@@ -112,15 +112,6 @@ class AccountLinkingService:
                 last_used_at=now,
             )
         )
-        # #1875: an OAuth account whose last provider was removed has no
-        # primary pointer (``unlink`` sets None). Nothing else brings it back,
-        # and without it no sign-in syncs email or name and refresh-oauth
-        # answers 400 — so the first provider attached again becomes primary.
-        user = (
-            await self.db.execute(select(User).where(User.user_id == user_id))
-        ).scalar_one_or_none()
-        if user is not None and user.auth_method == "oauth" and user.auth_provider is None:
-            user.auth_provider = provider
         self._audit(user_id, email, "oauth_provider_linked", provider, ip_address, user_agent)
         await self.db.commit()
         logger.info("oauth_provider_linked", user_id=user_id, provider=provider)
