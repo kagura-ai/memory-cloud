@@ -88,6 +88,33 @@ def test_item_parsing_builds_a_request_or_names_the_problem():
     assert "pydantic" not in short["message"]
 
 
+def test_an_item_key_remember_does_not_declare_is_refused_not_dropped():
+    """#1873: a typo used to be ignored and the item reported success (#1742 for remember)."""
+    typo = _request_from_item({**ITEM, "importnace": 0.9, "tag": ["a"]}, CTX)
+    assert typo["error"] == "invalid_argument"
+    assert "'importnace' (did you mean 'importance'?)" in typo["message"]
+    assert "'tag' (did you mean 'tags'?)" in typo["message"]
+    for name in ("dedupe", "tags_normalize", "verbose"):
+        per_item = _request_from_item({**ITEM, name: True}, CTX)
+        assert per_item["error"] == "invalid_argument"
+        assert f"'{name}' (batch-level)" in per_item["message"]
+        assert "set them on remember_batch itself" in per_item["message"]
+    # Client-controlled names are bounded in the echo.
+    many = _request_from_item({**ITEM, **{f"k{i:02d}": 1 for i in range(15)}, "x" * 200: 1}, CTX)
+    assert "and 6 more" in many["message"] and "x" * 65 not in many["message"]
+    # Every argument remember declares (but the batch-level ones) is still an item key.
+    assert isinstance(
+        _request_from_item({**ITEM, "context_id": CTX, "importance": 0.9, "tags": ["a"]}, CTX),
+        RememberRequest,
+    )
+
+
+def test_item_values_get_remembers_json_string_coercion():
+    request = _request_from_item({**ITEM, "tags": '["a", "b"]', "details": '{"k": 1}'}, CTX)
+    assert isinstance(request, RememberRequest)
+    assert request.tags == ["a", "b"] and request.details == {"k": 1}
+
+
 def test_item_errors_map_onto_the_remember_error_codes():
     assert item_error(DuplicateCandidateError({"memory_id": "m"})) == {
         "status": "duplicate_candidate",
@@ -133,6 +160,19 @@ def test_envelope_status_reflects_how_many_items_were_written():
     assert _parse(_envelope([ok, cand], _ctx()))["status"] == "partial"
 
 
+def test_a_rolled_back_batch_whose_only_refusal_is_a_candidate_is_a_decision():
+    """#1873: skipped items are not failures."""
+    cand = {"index": 0, "status": "duplicate_candidate", "candidate": {"memory_id": "m"}}
+    skipped = {"index": 1, "status": "skipped", "message": "batch rolled back: item 0 failed"}
+    payload = _parse(_envelope([cand, skipped], _ctx()))
+    assert payload["status"] == "duplicate_candidate"
+    assert (payload["candidates"], payload["failed"], payload["skipped"]) == (1, 0, 1)
+    bad = {"index": 0, "status": "error", "error": "validation_error", "message": "no"}
+    failed = _parse(_envelope([bad, skipped], _ctx()))
+    assert failed["error"] == "batch_failed"
+    assert (failed["failed"], failed["skipped"]) == (1, 1)
+
+
 def test_usage_status_follows_the_dominant_outcome():
     ok = {"index": 0, "status": "success"}
     cand = {"index": 0, "status": "duplicate_candidate"}
@@ -145,6 +185,10 @@ def test_usage_status_follows_the_dominant_outcome():
     assert usage_status([quota, quota]) == 429
     assert usage_status([bad, skipped]) == 422
     assert usage_status([boom, skipped]) == 500
+    unknown = {"index": 0, "status": "error", "error": "invalid_argument"}
+    assert usage_status([unknown, bad]) == 422
+    down = {"index": 0, "status": "error", "error": "dedupe_unavailable"}
+    assert usage_status([down, skipped]) == 503  # as remember's
 
 
 # ------------------------------------------------------- handler, before any DB
@@ -186,7 +230,22 @@ async def test_an_atomic_batch_with_an_invalid_item_is_refused_whole_before_any_
     assert payload["error"] == "batch_refused"
     assert [r["status"] for r in payload["results"]] == ["skipped", "error", "skipped"]
     assert payload["results"][1]["error"] == "missing_fields"
-    assert (payload["succeeded"], payload["failed"]) == (0, 3)
+    # #1873: the same counters as every other batch envelope; skipped is not failed.
+    assert (payload["count"], payload["succeeded"], payload["candidates"]) == (3, 0, 0)
+    assert (payload["failed"], payload["skipped"]) == (1, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra", [{"dedupe": "check"}, {"importnace": 0.9}])
+async def test_an_undeclared_item_key_refuses_an_atomic_batch_whole(extra):
+    payload = _parse(
+        await handle_remember_batch(
+            {"context_id": CTX, "items": [ITEM, {**ITEM, **extra}], "atomic": True}, "user-1", None
+        )
+    )
+    assert payload["error"] == "batch_refused"
+    assert [r["status"] for r in payload["results"]] == ["skipped", "error"]
+    assert payload["results"][1]["error"] == "invalid_argument"
 
 
 # ------------------------------------------------------- handler, real session
@@ -235,6 +294,7 @@ async def live(db_session):
     quota = MagicMock(
         check_memory_quota=AsyncMock(return_value=(True, None)),
         check_memories_per_day=AsyncMock(return_value=None),
+        release_memories_per_day=AsyncMock(return_value=None),
     )
     with (
         patch("db.base.get_db", new=_db),
@@ -323,4 +383,163 @@ async def test_remember_dedupe_check_reply_carries_the_candidate_and_the_context
     assert payload["status"] == "duplicate_candidate"
     assert payload["candidate"] == candidate
     assert payload["context_name"] == ctx_name
+    assert await _rows(live, ctx_id) == 0
+
+
+# ------------------------------------------------------- follow-ups (#1873)
+
+
+@pytest.mark.asyncio
+async def test_an_undeclared_item_key_is_a_per_item_error_without_atomic(live):
+    from uuid import uuid4 as _uuid4
+
+    owner = f"o-{_uuid4().hex[:6]}"
+    ws, ctx = await _scope(live, owner)
+    ctx_id = ctx.id
+    payload = _parse(
+        await handle_remember_batch(
+            {"context_id": str(ctx_id), "items": [OK_ITEM, {**OK_ITEM, "dedupe": "off"}]},
+            owner,
+            ws.id,
+        )
+    )
+    assert payload["status"] == "partial"
+    assert [r["status"] for r in payload["results"]] == ["success", "error"]
+    assert payload["results"][1]["error"] == "invalid_argument"
+    assert await _rows(live, ctx_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_atomic_check_candidate_is_a_decision_through_the_handler(live):
+    from unittest.mock import patch
+    from uuid import uuid4 as _uuid4
+
+    from services.memory_service import MemoryService
+
+    owner = f"o-{_uuid4().hex[:6]}"
+    ws, ctx = await _scope(live, owner)
+    ctx_id = ctx.id
+    candidate = {"memory_id": str(_uuid4()), "summary": "the same fact", "similarity": 0.9}
+
+    async def find(self, *, summary, **_):
+        return candidate if "dup" in summary else None
+
+    dup = {"summary": "a dup of an existing memory", "content": "c", "type": "note"}
+    with patch.object(MemoryService, "_find_duplicate_candidate", new=find):
+        blocks = await handle_remember_batch(
+            {
+                "context_id": str(ctx_id),
+                "items": [OK_ITEM, dup, OK_ITEM],
+                "atomic": True,
+                "dedupe": "check",
+            },
+            owner,
+            ws.id,
+        )
+    payload = _parse(blocks)
+    assert payload["status"] == "duplicate_candidate"  # was the batch_failed error envelope
+    assert not getattr(blocks, "is_error", False)
+    assert [r["status"] for r in payload["results"]] == [
+        "skipped",
+        "duplicate_candidate",
+        "skipped",
+    ]
+    assert payload["results"][1]["candidate"] == candidate
+    assert (payload["candidates"], payload["failed"], payload["skipped"]) == (1, 0, 2)
+    assert await _rows(live, ctx_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_after_the_commit_reports_the_stored_items_not_a_rollback(live):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from uuid import uuid4 as _uuid4
+
+    from services.memory_service import MemoryService
+
+    owner = f"o-{_uuid4().hex[:6]}"
+    ws, ctx = await _scope(live, owner)
+    ctx_id, ctx_name = ctx.id, ctx.name
+    with (
+        patch.object(
+            MemoryService,
+            "_create_declared_links",
+            new=AsyncMock(side_effect=[None, asyncio.CancelledError(), None]),
+        ),
+        patch("services.memory_service.process_pending_embedding", new=AsyncMock()) as embed,
+    ):
+        blocks = await handle_remember_batch(
+            {"context_id": str(ctx_id), "items": [OK_ITEM, OK_ITEM, OK_ITEM], "atomic": True},
+            owner,
+            ws.id,
+        )
+    payload = _parse(blocks)
+    assert payload["status"] == "success" and payload["committed_after_timeout"] is True
+    assert "rolled back" not in blocks[0].text
+    assert "Do NOT send the batch again" in payload["message"]
+    assert len({r["memory_id"] for r in payload["results"]}) == 3
+    assert payload["succeeded"] == 3 and payload["context_name"] == ctx_name
+    assert embed.call_count == 3
+    assert await _rows(live, ctx_id) == 3
+
+
+@pytest.mark.asyncio
+async def test_an_atomic_batch_over_the_daily_quota_is_refused_as_quota_exceeded(live):
+    from unittest.mock import AsyncMock, patch
+    from uuid import uuid4 as _uuid4
+
+    owner = f"o-{_uuid4().hex[:6]}"
+    ws, ctx = await _scope(live, owner)
+    ctx_id, ctx_name = ctx.id, ctx.name
+    quota = MagicMock(
+        check_memory_quota=AsyncMock(return_value=(True, None)),
+        check_memories_per_day=AsyncMock(
+            side_effect=QuotaExceededError("Daily memory-creation quota exceeded.", requested=3)
+        ),
+        release_memories_per_day=AsyncMock(return_value=None),
+    )
+    with (
+        patch("services.quota_service.QuotaService", return_value=quota),
+        patch("mcp_server.tools.batch._log_tool_usage", new=AsyncMock()) as usage,
+    ):
+        payload = _parse(
+            await handle_remember_batch(
+                {"context_id": str(ctx_id), "items": [OK_ITEM] * 3, "atomic": True}, owner, ws.id
+            )
+        )
+    assert payload["error"] == "quota_exceeded"
+    assert payload["requested"] == 3 and payload["count"] == 3
+    assert payload["context_name"] == ctx_name
+    assert usage.await_args.args[4] == 429
+    quota.release_memories_per_day.assert_not_awaited()  # nothing was reserved
+    assert await _rows(live, ctx_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_remember_dedupe_unavailable_reply_has_no_exception_text_and_is_logged(live):
+    from unittest.mock import AsyncMock, patch
+    from uuid import uuid4 as _uuid4
+
+    from mcp_server.tools.memory import handle_remember
+    from services.memory_service import MemoryService
+
+    owner = f"o-{_uuid4().hex[:6]}"
+    ws, ctx = await _scope(live, owner)
+    ctx_id = ctx.id
+    with (
+        patch.object(
+            MemoryService,
+            "_find_duplicate_candidate",
+            new=AsyncMock(side_effect=DedupeUnavailableError("upstream said: key sk-secret-123")),
+        ),
+        patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()) as usage,
+    ):
+        blocks = await handle_remember(
+            {**OK_ITEM, "context_id": str(ctx_id), "dedupe": "check"}, owner, ws.id
+        )
+    payload = _parse(blocks)
+    assert payload["error"] == "dedupe_unavailable"
+    assert "detail" not in payload and "sk-secret-123" not in blocks[0].text  # #1684
+    usage.assert_awaited_once()
+    assert usage.await_args.args[2:5] == ("remember", usage.await_args.args[3], 503)
     assert await _rows(live, ctx_id) == 0
