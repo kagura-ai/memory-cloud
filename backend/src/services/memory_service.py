@@ -6964,29 +6964,44 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 db, memory.context_id, default_service=EmbeddingService(db)
             )
 
-            # Generate embedding
-            vector = await embed_svc.embed(
-                memory.summary,
-                memory.user_id,
-                context_id=memory.context_id,
-                workspace_id=memory.workspace_id,
-            )
+            # #1870: a row the resource indexer wrote owns the indexer's point
+            # (``Memory.point_id`` = uuid5 of the document, embedded from the
+            # document text, with the resource payload). Its summary is only
+            # the label ``[resource] doc vN``, so the path below would store a
+            # label vector under the row id and leave ``point_id`` naming
+            # nothing. The indexer rebuilds its own point from the row instead
+            # (a restored context's rows come here, #1804).
+            from services.resource_indexer import ResourceIndexer, owns_resource_point
 
-            # Payload + BM25 sparse vector (#1525: shared with the
-            # embedding-model migration so both paths write identical points).
-            payload, sparse_indices, sparse_values = build_memory_point(memory)
+            vector: list[float] | None = None
+            if owns_resource_point(memory):
+                await ResourceIndexer(db).rebuild_point(
+                    memory, collection_name=collection, embedding_service=embed_svc
+                )
+            else:
+                # Generate embedding
+                vector = await embed_svc.embed(
+                    memory.summary,
+                    memory.user_id,
+                    context_id=memory.context_id,
+                    workspace_id=memory.workspace_id,
+                )
 
-            await add_memory_to_qdrant(
-                user_id=memory.user_id,
-                memory_id=memory_id,
-                vector=vector,
-                payload=payload,
-                workspace_id=str(memory.workspace_id),
-                context_id=str(memory.context_id),
-                sparse_indices=sparse_indices,
-                sparse_values=sparse_values,
-                collection_name=collection,
-            )
+                # Payload + BM25 sparse vector (#1525: shared with the
+                # embedding-model migration so both paths write identical points).
+                payload, sparse_indices, sparse_values = build_memory_point(memory)
+
+                await add_memory_to_qdrant(
+                    user_id=memory.user_id,
+                    memory_id=memory_id,
+                    vector=vector,
+                    payload=payload,
+                    workspace_id=str(memory.workspace_id),
+                    context_id=str(memory.context_id),
+                    sparse_indices=sparse_indices,
+                    sparse_values=sparse_values,
+                    collection_name=collection,
+                )
 
             # Mark success. Clear the prior embedding_error AND reset
             # embedding_retry_count (#979): the retry budget is per
@@ -7019,6 +7034,11 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 return
 
             logger.info("embedding_completed", memory_id=str(memory_id))
+
+            if vector is None:
+                # #1870: a resource point, as the indexer writes it — the
+                # indexer seeds no edges for its rows, and neither does this.
+                return
 
             # ================================================================
             # Issue #221: k-NN cold-start seeding

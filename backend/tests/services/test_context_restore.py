@@ -2,7 +2,8 @@
 
 The restore commits, so every test commits its rows and removes them again.
 The vector store is not involved: the restore only marks rows ``pending`` and
-the embedding sweep rebuilds their points.
+the embedding sweep rebuilds their points. The resource tests (#1870) run that
+rebuild too, against a mocked vector store client.
 """
 
 from __future__ import annotations
@@ -17,12 +18,15 @@ from sqlalchemy import delete, select
 
 from models.auth import AuditLog, Context, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import DELETED_BY_SLEEP_MERGE, Memory
+from models.resource import Resource, ResourceEvent, ResourceSchema
 from services.context_restore import (
     AUDIT_ACTION,
     DELETION_WINDOW,
     restore_deleted_context,
 )
 from services.context_service import ContextService
+from services.memory_service import MemoryService, process_pending_embedding
+from services.resource_indexer import ResourceIndexer, ResourceRebuildError
 from utils.datetime import utcnow
 from utils.exceptions import ConflictError, NotFoundException, ValidationError
 
@@ -361,3 +365,231 @@ class TestRefusals:
     async def test_invalid_new_name(self, db_session, seed, name):
         with pytest.raises(ValidationError):
             await restore_deleted_context(db_session, uuid4(), new_name=name)
+
+
+# ---------------------------------------------------------------------------
+# #1870: resource-ingested memories, and the scope of the counts
+# ---------------------------------------------------------------------------
+
+_SCHEMA_FIELDS = [
+    {"name": "title", "classification": "public", "index_hint": "fulltext", "description": "Title"},
+    {"name": "category", "classification": "public", "index_hint": "facet"},
+    {"name": "price", "classification": "public", "index_hint": "sort"},
+    {"name": "internal", "classification": "internal", "index_hint": "fulltext"},
+]
+_DOCS = {
+    "doc_1": {"title": "Quarterly revenue report", "category": "finance", "price": 100},
+    "doc_2": {"title": "Onboarding checklist", "category": "people", "price": 5, "internal": "x"},
+}
+
+
+async def _embed(text: str, *_args, **_kwargs) -> list[float]:
+    """A vector that depends on the text embedded, to tell documents from labels."""
+    return [float(len(text))] + [0.25] * 511
+
+
+async def _index_resource(db_session, seed) -> tuple[Context, dict[str, object]]:
+    """A published context whose documents went through the real indexer.
+
+    Returns the context and the points the indexer wrote, by ``doc_id``.
+    """
+    slug = f"res-{uuid4().hex[:8]}"
+    context = seed.context(resource_id=slug)
+    resource = Resource(id=uuid4(), workspace_id=seed.workspace_id, resource_id=slug)
+    db_session.add_all([context, resource])
+    await db_session.flush()
+    schema = ResourceSchema(
+        resource_pk=resource.id,
+        resource_id=slug,
+        schema_version=1,
+        field_definitions=_SCHEMA_FIELDS,
+    )
+    events = [
+        ResourceEvent(
+            resource_pk=resource.id, resource_id=slug, op="upsert", doc_id=doc_id, version=2,
+            payload=payload, created_at=utcnow() - timedelta(days=3),
+        )
+        for doc_id, payload in _DOCS.items()
+    ]  # fmt: skip
+    db_session.add_all([schema, *events])
+    await db_session.flush()
+
+    client = AsyncMock()
+    with patch("services.resource_indexer.get_qdrant_client", return_value=client):
+        indexer = ResourceIndexer(db_session)
+    service = AsyncMock()
+    service.embed = AsyncMock(side_effect=_embed)
+    for event in events:
+        await indexer._apply_upsert(event, schema, context, "kagura_memories", service)
+    await db_session.commit()
+    indexed = {
+        call.kwargs["points"][0].payload["doc_id"]: call.kwargs["points"][0]
+        for call in client.upsert.await_args_list
+    }
+    assert set(indexed) == set(_DOCS)
+    return context, indexed
+
+
+async def _run_pending_embedding(db_session, memory_id: UUID) -> tuple[AsyncMock, AsyncMock]:
+    """Run the embedding sweep's worker on one row.
+
+    Returns the resource indexer's vector store client and the generic
+    ``add_memory_to_qdrant`` writer, both mocked.
+    """
+
+    async def _session():
+        yield db_session
+
+    client = AsyncMock()
+    generic_writer = AsyncMock()
+    with (
+        patch("db.base.get_db", return_value=_session()),
+        patch("services.resource_indexer.get_qdrant_client", return_value=client),
+        patch("services.memory_service.add_memory_to_qdrant", generic_writer),
+        patch("services.embedding_service.EmbeddingService.embed", AsyncMock(side_effect=_embed)),
+        patch("services.memory_service._create_knn_seed_edges", AsyncMock()),
+        patch("services.memory_service._create_tag_cooccurrence_seed_edges", AsyncMock()),
+    ):
+        await process_pending_embedding(memory_id)
+    return client, generic_writer
+
+
+@pytest.mark.asyncio
+async def test_restored_resource_rows_get_the_indexers_point_back(db_session, seed):
+    context, indexed = await _index_resource(db_session, seed)
+    context_id, slug = context.id, context.resource_id
+    note = seed.memory(context, summary="a note the API wrote")
+    db_session.add(note)
+    await db_session.commit()
+    note_id = note.id
+    before = await _memories(db_session, context_id)
+    by_doc = {m.resource_doc_id: m.id for m in before.values() if m.resource_doc_id}
+    assert set(by_doc) == set(_DOCS)
+    point_ids = {doc_id: before[memory_id].point_id for doc_id, memory_id in by_doc.items()}
+
+    await _delete(db_session, context_id)
+    plan = await restore_deleted_context(db_session, context_id)
+    assert plan.dry_run is True
+    assert plan.memories_restored == 3
+    assert plan.warnings == []
+
+    result = await restore_deleted_context(db_session, context_id, dry_run=False)
+    assert result.memories_restored == 3
+    assert result.warnings == []
+    rows = await _memories(db_session, context_id)
+    assert {m.embedding_status for m in rows.values()} == {"pending"}
+
+    for doc_id, memory_id in by_doc.items():
+        client, generic_writer = await _run_pending_embedding(db_session, memory_id)
+
+        # Not the generic path: that embeds the label and writes under the row id.
+        generic_writer.assert_not_awaited()
+        assert client.upsert.await_count == 1
+        rebuilt = client.upsert.await_args.kwargs["points"][0]
+        original = indexed[doc_id]
+        # The point the row names, with the document's vector and the
+        # resource payload: what the indexer wrote before the deletion.
+        assert rebuilt.id == str(point_ids[doc_id]) == original.id
+        assert rebuilt.id != str(memory_id)
+        assert rebuilt.vector == original.vector
+        assert rebuilt.payload == original.payload
+        assert rebuilt.payload["content"] == f"Title: {_DOCS[doc_id]['title']}"
+        assert rebuilt.payload["facets"] == {"category": _DOCS[doc_id]["category"]}
+        assert rebuilt.payload["sortable"] == {"price": _DOCS[doc_id]["price"]}
+        assert rebuilt.payload["memory_id"] == str(memory_id)
+
+    rows = await _memories(db_session, context_id)
+    for doc_id, memory_id in by_doc.items():
+        assert rows[memory_id].embedding_status == "success"
+        assert rows[memory_id].point_id == point_ids[doc_id]
+        assert rows[memory_id].summary == f"[{slug}] {doc_id} v2"
+
+    # A memory the API wrote still goes the generic way, under its own id.
+    client, generic_writer = await _run_pending_embedding(db_session, note_id)
+    client.upsert.assert_not_awaited()
+    assert generic_writer.await_args.kwargs["memory_id"] == note_id
+
+    # Forgetting a restored resource memory removes the point that was rebuilt.
+    forgotten = rows[by_doc["doc_1"]]
+    with patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()) as delete_point:
+        await MemoryService(db_session)._delete_memory_point(_USER, forgotten)
+    assert delete_point.await_args.args[1] == point_ids["doc_1"]
+
+
+@pytest.mark.asyncio
+async def test_resource_row_that_cannot_be_rebuilt_fails_instead_of_a_label_vector(
+    db_session, seed
+):
+    context, _ = await _index_resource(db_session, seed)
+    context_id, slug = context.id, context.resource_id
+    await _delete(db_session, context_id)
+    # The resource loses its schema while the context is deleted.
+    await db_session.execute(delete(ResourceSchema).where(ResourceSchema.resource_id == slug))
+    await db_session.commit()
+    await restore_deleted_context(db_session, context_id, dry_run=False)
+    memory_id = next(iter(await _memories(db_session, context_id)))
+
+    client, generic_writer = await _run_pending_embedding(db_session, memory_id)
+
+    client.upsert.assert_not_awaited()
+    generic_writer.assert_not_awaited()
+    row = (await _memories(db_session, context_id))[memory_id]
+    assert row.embedding_status == "failed"
+    assert "ingest the document again" in (row.embedding_error or "")
+
+
+@pytest.mark.asyncio
+async def test_rebuild_point_refuses_a_row_that_owns_no_resource_point(db_session, seed):
+    context = seed.context()
+    db_session.add(context)
+    await db_session.flush()
+    # ``remember(external_id=...)`` sets details.resource_id on an API-written row.
+    memory = seed.memory(context, details={"resource_id": "ext-1"})
+    db_session.add(memory)
+    await db_session.commit()
+
+    with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+        indexer = ResourceIndexer(db_session)
+    with pytest.raises(ResourceRebuildError):
+        await indexer.rebuild_point(
+            memory, collection_name="kagura_memories", embedding_service=AsyncMock()
+        )
+
+
+@pytest.mark.asyncio
+async def test_counts_cover_the_rows_the_update_touches(db_session, seed):
+    context = seed.context()
+    other_workspace = Workspace(id=uuid4(), name="Restore other", owner_user_id=_USER)
+    db_session.add_all([context, other_workspace])
+    await db_session.flush()
+    forgotten = seed.memory(context, deleted_at=utcnow() - timedelta(days=2), deleted_by=_USER)
+    # A row that names the context from another workspace is outside the
+    # restore's scope: neither restored nor counted as left deleted.
+    stray = seed.memory(
+        context,
+        workspace_id=other_workspace.id,
+        deleted_at=utcnow() - timedelta(days=2),
+        deleted_by=_USER,
+    )
+    db_session.add_all([seed.memory(context), seed.memory(context), forgotten, stray])
+    await db_session.commit()
+    context_id, other_workspace_id, stray_id = context.id, other_workspace.id, stray.id
+    try:
+        await _delete(db_session, context_id)
+
+        plan = await restore_deleted_context(db_session, context_id)
+        result = await restore_deleted_context(db_session, context_id, dry_run=False)
+
+        rows = await _memories(db_session, context_id)
+        live = [m for m in rows.values() if m.deleted_at is None]
+        in_scope = [m for m in rows.values() if m.workspace_id == seed.workspace_id]
+        assert plan.memories_restored == result.memories_restored == len(live) == 2
+        assert all(m.embedding_status == "pending" for m in live)
+        assert plan.memories_left_deleted == result.memories_left_deleted == 1
+        assert result.memories_restored + result.memories_left_deleted == len(in_scope)
+        assert rows[stray_id].deleted_at is not None
+    finally:
+        await db_session.rollback()
+        await db_session.execute(delete(Memory).where(Memory.id == stray_id))
+        await db_session.execute(delete(Workspace).where(Workspace.id == other_workspace_id))
+        await db_session.commit()

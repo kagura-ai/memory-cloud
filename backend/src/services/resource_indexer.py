@@ -16,7 +16,7 @@ import json  # Issue #262: JSON serialization for Memory content
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5  # Issue #262: uuid5 for deterministic point_id
 
 # Third-party imports (PEP8)
@@ -279,6 +279,115 @@ async def get_indexer_status_for_context(
         "state": state_dict,
         "recent_events": event_dicts,
     }
+
+
+def resource_point_source(resource_id: str, doc_id: str, version: int | None) -> str:
+    """The natural key a resource point's id is derived from."""
+    return f"{resource_id}:{doc_id}:v{version}"
+
+
+def resource_point_id(resource_id: str, doc_id: str, version: int | None) -> UUID:
+    """The vector store point id of one version of a resource document.
+
+    Deterministic (uuid5), so indexing the same version twice writes the same
+    point. The Memory row keeps it in ``summary_embedding_id`` (#1829).
+    """
+    return uuid5(NAMESPACE_DNS, resource_point_source(resource_id, doc_id, version))
+
+
+def owns_resource_point(memory: Memory) -> bool:
+    """Whether ``memory`` is a row the indexer wrote, owning an indexer point.
+
+    ``details.resource_id`` alone does not say so: ``remember(external_id=...)``
+    sets it on memories the API wrote, whose point is their own id. An indexer
+    row carries the full natural key and names the point derived from it.
+    """
+    if (
+        memory.resource_id is None
+        or memory.resource_doc_id is None
+        or memory.resource_version is None
+    ):
+        return False
+    return memory.summary_embedding_id == resource_point_id(
+        memory.resource_id, memory.resource_doc_id, memory.resource_version
+    )
+
+
+def resource_document_text(projected: dict[str, Any], doc_id: str) -> str:
+    """The text a resource document is embedded and BM25-indexed by.
+
+    The projected fulltext, or a minimal stand-in naming the document when the
+    schema projects none.
+    """
+    return projected["fulltext_content"] or f"Document ID: {doc_id}"
+
+
+def build_resource_point(
+    *,
+    context: Context,
+    resource_id: str,
+    doc_id: str,
+    version: int | None,
+    content: str,
+    projected: dict[str, Any],
+    embedding: list[float],
+    updated_at: datetime,
+    memory_id: UUID,
+) -> PointStruct:
+    """Build the point of one resource document version.
+
+    The one place the point's id, vectors and payload are put together: the
+    indexer (``_apply_upsert``) and the rebuild of a row whose point is gone
+    (``rebuild_point``, #1870) both use it, so a rebuilt point has the shape of
+    an indexed one.
+
+    Args:
+        context: The context the document is indexed into.
+        resource_id / doc_id / version: The document's natural key.
+        content: ``resource_document_text`` of ``projected``; what
+            ``embedding`` was computed from.
+        projected: ``ResourceIndexer._project_payload`` of the document.
+        embedding: Dense vector of ``content``.
+        updated_at: When the document version was ingested.
+        memory_id: The Memory row that owns the point.
+    """
+    # Issue #335: sparse BM25 vector from the same text as the dense
+    # embedding, so resource points participate in hybrid search instead of
+    # scoring zero on BM25.
+    sparse_indices, sparse_values = build_resource_sparse_vector(content)
+
+    # kagura_memories collections are configured with named vectors
+    # (dense + sparse bm25); anonymous vectors are rejected at upsert.
+    point_vector: dict[str, Any] = {KAGURA_MEMORIES_VECTOR_NAME: embedding}
+    if sparse_indices and sparse_values:
+        point_vector[KAGURA_MEMORIES_BM25_VECTOR_NAME] = SparseVector(
+            indices=sparse_indices, values=sparse_values
+        )
+
+    # Qdrant requires a UUID or integer point id, not a string.
+    return PointStruct(
+        id=str(resource_point_id(resource_id, doc_id, version)),
+        vector=point_vector,
+        payload={
+            "workspace_id": str(context.workspace_id),  # 3-level isolation
+            "context_id": str(context.id),  # 3-level isolation
+            "user_id": str(context.created_by),  # 3-level isolation
+            "resource_id": resource_id,
+            "doc_id": doc_id,
+            "version": version,
+            "content": content,
+            "facets": projected["facets"],
+            "sortable": projected["sortable"],
+            "metadata": projected["metadata"],
+            "updated_at": to_utc_iso(updated_at),
+            "memory_id": str(memory_id),
+            "point_id_source": resource_point_source(resource_id, doc_id, version),
+        },
+    )
+
+
+class ResourceRebuildError(Exception):
+    """A resource-ingested row's point cannot be rebuilt from the row (#1870)."""
 
 
 class ResourceIndexer:
@@ -646,13 +755,12 @@ class ResourceIndexer:
         # 2. Generate embedding for fulltext content
         # Use system user for public contexts (no personal API key needed)
         # TODO: Use workspace-scoped API key or system key
-        content = projected["fulltext_content"]
-        if not content:
+        if not projected["fulltext_content"]:
             logger.warning(
                 "upsert_event_no_fulltext_content", event_id=event.id, doc_id=event.doc_id
             )
-            # Use doc_id as minimal content
-            content = f"Document ID: {event.doc_id}"
+        # The fulltext, or the doc_id as minimal content
+        content = resource_document_text(projected, event.doc_id)
 
         try:
             # Generate embedding using workspace-scoped or owner's API key
@@ -671,8 +779,8 @@ class ResourceIndexer:
         # 3. Prepare Qdrant point
         # Bugfix: Qdrant requires UUID or integer point_id, not string
         # Use uuid5 for deterministic UUID generation (idempotent)
-        point_id_str = f"{event.resource_id}:{event.doc_id}:v{event.version}"
-        point_id_uuid = uuid5(NAMESPACE_DNS, point_id_str)
+        point_id_str = resource_point_source(event.resource_id, event.doc_id, event.version)
+        point_id_uuid = resource_point_id(event.resource_id, event.doc_id, event.version)
 
         # Resolve the Memory row BEFORE the point is built, so the payload's
         # ``memory_id`` is the row's id on a re-index too (#1829). It used to be
@@ -713,37 +821,16 @@ class ResourceIndexer:
         existing_memory = existing_memory_query.scalar_one_or_none()
         memory_id = existing_memory.id if existing_memory else uuid4()
 
-        # Issue #335: Build sparse BM25 vector from the same fulltext_content
-        # used for the dense embedding, so resource points participate in
-        # hybrid search instead of scoring zero on BM25.
-        sparse_indices, sparse_values = build_resource_sparse_vector(content)
-
-        # kagura_memories collections are configured with named vectors
-        # (dense + sparse bm25); anonymous vectors are rejected at upsert.
-        point_vector: dict[str, Any] = {KAGURA_MEMORIES_VECTOR_NAME: embedding}
-        if sparse_indices and sparse_values:
-            point_vector[KAGURA_MEMORIES_BM25_VECTOR_NAME] = SparseVector(
-                indices=sparse_indices, values=sparse_values
-            )
-
-        point = PointStruct(
-            id=str(point_id_uuid),
-            vector=point_vector,
-            payload={
-                "workspace_id": str(context.workspace_id),  # 3-level isolation
-                "context_id": str(context.id),  # 3-level isolation
-                "user_id": str(context.created_by),  # 3-level isolation
-                "resource_id": event.resource_id,
-                "doc_id": event.doc_id,
-                "version": event.version,
-                "content": content,
-                "facets": projected["facets"],
-                "sortable": projected["sortable"],
-                "metadata": projected["metadata"],
-                "updated_at": to_utc_iso(event.created_at),
-                "memory_id": str(memory_id),
-                "point_id_source": point_id_str,
-            },
+        point = build_resource_point(
+            context=context,
+            resource_id=event.resource_id,
+            doc_id=event.doc_id,
+            version=event.version,
+            content=content,
+            projected=projected,
+            embedding=embedding,
+            updated_at=event.created_at,
+            memory_id=memory_id,
         )
 
         # 4. Upsert to Qdrant (per-context collection, see #334). The point is
@@ -962,6 +1049,122 @@ class ResourceIndexer:
             )
             # Re-raise to trigger transaction rollback
             raise
+
+    async def rebuild_point(
+        self,
+        memory: Memory,
+        *,
+        collection_name: str,
+        embedding_service: EmbeddingService,
+    ) -> UUID:
+        """Write the point of a resource-ingested row again, from the row (#1870).
+
+        For a row whose point is gone while its events are already consumed —
+        a restored context's (#1804) — so the indexer will not come back to
+        it. The row holds the document as it was ingested (``content`` is the
+        event payload), so the point is rebuilt the way ``_apply_upsert`` built
+        it: the payload projected through the resource's latest schema, the
+        projected text embedded, and ``build_resource_point`` under the id the
+        row already names (``Memory.point_id``). The row itself is not touched.
+
+        The generic embedding path must not take such a row: it would embed
+        the row's summary, which is only the label ``[resource] doc vN``, and
+        store it under the row id, leaving ``Memory.point_id`` naming nothing.
+
+        Args:
+            memory: A row for which ``owns_resource_point`` holds.
+            collection_name: The context's collection (``resolve_context_routing``).
+            embedding_service: The context's EmbeddingService.
+
+        Returns:
+            The id of the point written, equal to ``memory.point_id``.
+
+        Raises:
+            ResourceRebuildError: The row does not own a resource point, its
+                resource or schema is gone, or its content is not the
+                ingested document. Ingesting the document again (a newer
+                version; the same one is refused as a duplicate) rebuilds it.
+            QdrantError: The upsert failed.
+        """
+        if not owns_resource_point(memory):
+            raise ResourceRebuildError(f"Memory {memory.id} does not own a resource point")
+        resource_id = cast(str, memory.resource_id)
+        doc_id = cast(str, memory.resource_doc_id)
+        version = cast(int, memory.resource_version)
+
+        from services.resource_lookup import resolve_resource_pk
+
+        context = await self._get_context(memory.context_id)
+        resource_pk = await resolve_resource_pk(self.db, context.workspace_id, resource_id)
+        schema = await self._get_latest_schema(resource_pk) if resource_pk else None
+        if resource_pk is None or schema is None:
+            raise ResourceRebuildError(
+                f"Resource '{resource_id}' has no schema to project document "
+                f"'{doc_id}' with; ingest the document again as a newer version to rebuild its vector"
+            )
+        try:
+            document = json.loads(memory.content or "")
+        except ValueError:
+            document = None
+        if not isinstance(document, dict):
+            raise ResourceRebuildError(
+                f"Memory {memory.id} does not hold the ingested document "
+                f"'{doc_id}' v{version}; ingest the document again as a newer version to rebuild its vector"
+            )
+
+        projected = self._project_payload(document, schema)
+        content = resource_document_text(projected, doc_id)
+        embedding = await embedding_service.embed(
+            text=content,
+            user_id=str(context.created_by),
+            context_id=str(context.id),
+            workspace_id=str(context.workspace_id) if context.workspace_id else None,
+        )
+
+        # The indexer stamps the point with the event's time. The event is
+        # still there unless it was pruned; the row's own time (set when the
+        # event was indexed) stands in for it then.
+        ingested_at = (
+            await self.db.execute(
+                select(ResourceEvent.created_at)
+                .where(
+                    ResourceEvent.resource_pk == resource_pk,
+                    ResourceEvent.doc_id == doc_id,
+                    ResourceEvent.version == version,
+                    ResourceEvent.op == "upsert",
+                )
+                .order_by(ResourceEvent.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+        point = build_resource_point(
+            context=context,
+            resource_id=resource_id,
+            doc_id=doc_id,
+            version=version,
+            content=content,
+            projected=projected,
+            embedding=embedding,
+            updated_at=ingested_at or memory.updated_at or memory.created_at or utcnow(),
+            memory_id=memory.id,
+        )
+        try:
+            await self.qdrant_client.upsert(
+                collection_name=collection_name,
+                points=[point],
+                wait=True,
+            )
+        except Exception as e:
+            raise QdrantError(f"Failed to upsert point: {e}") from e
+
+        logger.info(
+            "resource_point_rebuilt",
+            memory_id=str(memory.id),
+            point_id=str(point.id),
+            collection=collection_name,
+        )
+        return memory.point_id
 
     async def _apply_delete(
         self,
