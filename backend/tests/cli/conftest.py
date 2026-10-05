@@ -51,3 +51,18 @@ def _no_structlog_reconfigure(monkeypatch):
     the real configuration with throwaway loggers.
     """
     monkeypatch.setattr("cli._oneshot.setup_logger", lambda *args, **kwargs: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_session_store(monkeypatch):
+    """``reset_password`` must not reach a real Redis from a unit test (#1866).
+
+    A password reset deletes the account's browser sessions; a developer's
+    local Redis is not a test fixture. Tests that assert on the store patch
+    ``SessionManager`` themselves.
+    """
+    from unittest.mock import MagicMock
+
+    manager = MagicMock()
+    manager.delete_user_sessions.return_value = 0
+    monkeypatch.setattr("cli.reset_password.SessionManager", MagicMock(return_value=manager))

@@ -128,7 +128,10 @@ def test_reset_password_kills_outstanding_password_links() -> None:
     updates = [
         (i, call.args[0])
         for i, call in enumerate(c for c in db.mock_calls if c[0] in ("execute", "commit"))
-        if call[0] == "execute" and isinstance(call.args[0], Update)
+        if call[0] == "execute"
+        and isinstance(call.args[0], Update)
+        # The reset also revokes the OAuth tokens with an UPDATE (#1866).
+        and call.args[0].table.name == "email_action_tokens"
     ]
     assert len(updates) == 1
     index, statement = updates[0]

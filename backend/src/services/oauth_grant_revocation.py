@@ -1,7 +1,8 @@
 """Revoke every OAuth2 / MCP grant of an account, in the one lock order.
 
-Two flows end a user's OAuth grants at once — a password reset (#1738) and
-account erasure — and three flows write new ones while a user is signed in:
+Two flows end a user's OAuth grants at once — a password reset (#1738, by
+emailed link or by the operator CLI, #1866) and account erasure — and three
+flows write new ones while a user is signed in:
 the ``/authorize`` consent (``save_authorization_code``), the device-flow
 approval (``device_confirm``) and the refresh grant. They all meet on the
 owner's ``users`` row, so the order below is the one every one of them
@@ -29,10 +30,14 @@ Nothing here commits: the caller owns the transaction.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+from sqlalchemy.sql.expression import Executable
 
 from models.auth import OAuth2AuthorizationCode, OAuth2DeviceCode, OAuth2Token, User
 from utils.datetime import utcnow
@@ -45,6 +50,45 @@ class RevokedGrants:
     authorization_codes: int
     device_codes: int
     tokens: int
+
+
+def grant_revocation_statements(
+    user_id: str, *, delete_tokens: bool = False
+) -> Iterator[Executable]:
+    """Yield the revocation's statements in the one lock order.
+
+    ``users FOR UPDATE``, then the DELETE of the pending authorization codes,
+    the DELETE of the pending device codes and last the token statement (an
+    UPDATE that revokes, or a DELETE with ``delete_tokens=True``). The async
+    service and the synchronous operator CLI both execute exactly this
+    sequence, so the order cannot drift between them.
+
+    Lazy on purpose: execute each statement before asking for the next. The
+    token UPDATE takes its revocation time when it is built, i.e. after the
+    DELETEs returned — which may have waited for an exchange in flight.
+    """
+    yield select(User.user_id).where(User.user_id == user_id).with_for_update()
+    yield delete(OAuth2AuthorizationCode).where(OAuth2AuthorizationCode.user_id == user_id)
+    yield delete(OAuth2DeviceCode).where(OAuth2DeviceCode.user_id == user_id)
+    if delete_tokens:
+        yield delete(OAuth2Token).where(OAuth2Token.user_id == user_id)
+        return
+    now = utcnow()
+    yield (
+        update(OAuth2Token)
+        .where(
+            OAuth2Token.user_id == user_id,
+            or_(
+                OAuth2Token.access_token_revoked_at.is_(None),
+                OAuth2Token.refresh_token_revoked_at.is_(None),
+            ),
+        )
+        .values(
+            revoked=True,
+            access_token_revoked_at=func.coalesce(OAuth2Token.access_token_revoked_at, now),
+            refresh_token_revoked_at=func.coalesce(OAuth2Token.refresh_token_revoked_at, now),
+        )
+    )
 
 
 async def revoke_oauth_grants(
@@ -66,34 +110,32 @@ async def revoke_oauth_grants(
     Returns:
         The rows deleted (codes) and revoked or deleted (tokens), per table.
     """
-    await db.execute(select(User.user_id).where(User.user_id == user_id).with_for_update())
-    codes = await db.execute(
-        delete(OAuth2AuthorizationCode).where(OAuth2AuthorizationCode.user_id == user_id)
-    )
-    devices = await db.execute(delete(OAuth2DeviceCode).where(OAuth2DeviceCode.user_id == user_id))
-    if delete_tokens:
-        tokens = await db.execute(delete(OAuth2Token).where(OAuth2Token.user_id == user_id))
-        return RevokedGrants(
-            authorization_codes=_rowcount(codes),
-            device_codes=_rowcount(devices),
-            tokens=_rowcount(tokens),
-        )
-    now = utcnow()
-    tokens = await db.execute(
-        update(OAuth2Token)
-        .where(
-            OAuth2Token.user_id == user_id,
-            or_(
-                OAuth2Token.access_token_revoked_at.is_(None),
-                OAuth2Token.refresh_token_revoked_at.is_(None),
-            ),
-        )
-        .values(
-            revoked=True,
-            access_token_revoked_at=func.coalesce(OAuth2Token.access_token_revoked_at, now),
-            refresh_token_revoked_at=func.coalesce(OAuth2Token.refresh_token_revoked_at, now),
-        )
-    )
+    results = [
+        await db.execute(statement)
+        for statement in grant_revocation_statements(user_id, delete_tokens=delete_tokens)
+    ]
+    return _revoked(results)
+
+
+def revoke_oauth_grants_sync(
+    db: Session, user_id: str, *, delete_tokens: bool = False
+) -> RevokedGrants:
+    """``revoke_oauth_grants`` for a synchronous session (the operator CLI).
+
+    Same statements, same order, same transaction rules: nothing commits here.
+
+    Returns:
+        The rows deleted (codes) and revoked or deleted (tokens), per table.
+    """
+    results = [
+        db.execute(statement)
+        for statement in grant_revocation_statements(user_id, delete_tokens=delete_tokens)
+    ]
+    return _revoked(results)
+
+
+def _revoked(results: list[Any]) -> RevokedGrants:
+    _lock, codes, devices, tokens = results
     return RevokedGrants(
         authorization_codes=_rowcount(codes),
         device_codes=_rowcount(devices),
