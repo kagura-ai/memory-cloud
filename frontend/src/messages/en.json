@@ -998,7 +998,6 @@
     "signInMethodDesc": "How you authenticate to your account",
     "signInMethodGoogle": "Google",
     "signInMethodGitHub": "GitHub",
-    "signInMethodPassword": "Email + Password",
     "signInMethodOther": "Other",
     "signInMethodEmailPassword": "Email and password",
     "signInMethodSeparator": ", ",
@@ -1643,6 +1642,7 @@
       "mine": "Created by me",
       "shared": "Shared with me",
       "empty": "No contexts match this filter.",
+      "emptyDescription": "Choose another owner filter, or show all contexts.",
       "showAll": "Show all"
     },
     "admin": "Admin",
@@ -1875,7 +1875,13 @@
       "howItWorks": "Register your app → Users authorize via the OAuth flow → The app receives access tokens → Tokens are used for MCP or REST API calls."
     },
     "dcrNote": "Claude.ai, Claude Desktop, ChatGPT, Cursor and Claude Code register themselves when they connect (Dynamic Client Registration) — there is nothing to create here for them. Create a custom app only for an OAuth2 client you build yourself.",
-    "legacyPresetsTitle": "Earlier preset apps",
+    "legacyPresetsTitle": "Earlier connector apps",
+    "legacyProvider": {
+      "claude": "Claude",
+      "chatgpt": "ChatGPT",
+      "cursor": "Cursor",
+      "other": "Other"
+    },
     "legacyPresetNote": "This app is no longer needed: reconnecting the connector registers it automatically. Delete it when you no longer use it.",
     "clientId": "Client ID",
     "redirectUri": "Redirect URI",

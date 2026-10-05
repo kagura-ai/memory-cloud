@@ -1092,7 +1092,7 @@ export default function ContextsPage() {
                       compact
                       icon={FolderOpen}
                       title={t("ownerFilter.empty")}
-                      description={t("ownerFilter.label")}
+                      description={t("ownerFilter.emptyDescription")}
                       actionLabel={t("ownerFilter.showAll")}
                       onAction={() => setOwnerFilter("all")}
                     />

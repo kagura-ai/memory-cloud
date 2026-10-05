@@ -998,7 +998,6 @@
     "signInMethodDesc": "アカウントの認証方法",
     "signInMethodGoogle": "Google",
     "signInMethodGitHub": "GitHub",
-    "signInMethodPassword": "メール + パスワード",
     "signInMethodOther": "その他",
     "signInMethodEmailPassword": "メールアドレスとパスワード",
     "signInMethodSeparator": "、",
@@ -1643,6 +1642,7 @@
       "mine": "自分が作成",
       "shared": "共有されたもの",
       "empty": "この条件に一致するコンテキストはありません。",
+      "emptyDescription": "別の作成者フィルターを選ぶか、すべてのコンテキストを表示してください。",
       "showAll": "すべて表示"
     },
     "admin": "管理者",
@@ -1875,7 +1875,13 @@
       "howItWorks": "自作アプリを登録 → ユーザーがOAuthフローで認可 → アプリがアクセストークンを受け取り → MCP/REST API呼び出しに使用。"
     },
     "dcrNote": "Claude.ai、Claude Desktop、ChatGPT、Cursor、Claude Code は接続時に自動登録される（Dynamic Client Registration）ため、ここでアプリを作成する必要はありません。自作の OAuth2 クライアントを繋ぐ場合だけカスタムアプリを作成してください。",
-    "legacyPresetsTitle": "以前のプリセットアプリ",
+    "legacyPresetsTitle": "以前のコネクタ用アプリ",
+    "legacyProvider": {
+      "claude": "Claude",
+      "chatgpt": "ChatGPT",
+      "cursor": "Cursor",
+      "other": "その他"
+    },
     "legacyPresetNote": "このアプリは不要になりました。コネクタを再接続すると自動登録されます。使っていなければ削除してください。",
     "clientId": "クライアントID",
     "redirectUri": "リダイレクトURI",
