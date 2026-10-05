@@ -53,7 +53,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import NoReturn
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -117,14 +116,18 @@ def _redis_location(redis_url: str) -> str:
     return f"{host}:{port}" if port else host
 
 
-def _refuse_reset(*lines: str) -> NoReturn:
-    """Print why the reset cannot start, then exit 1 (nothing was written)."""
+def _refusal(*lines: str) -> SystemExit:
+    """Print why the reset cannot start; return the exit for the caller to raise.
+
+    Returned, not raised here, so each caller's ``raise`` shows on its own
+    line that the path ends (nothing was written at that point).
+    """
     print(f"\n✗ {lines[0]}")
     for line in lines[1:]:
         print(f"  {line}")
     print("  A password reset must sign out every browser session of the account.")
     print("  Nothing was changed.")
-    raise SystemExit(1)
+    return SystemExit(1)
 
 
 def _session_store_or_exit() -> SessionManager:
@@ -138,23 +141,23 @@ def _session_store_or_exit() -> SessionManager:
     redis_url = get_redis_url()
     try:
         return SessionManager(redis_url=redis_url)
-    except ImportError:
-        _refuse_reset(
+    except ImportError as exc:
+        raise _refusal(
             "The 'redis' package is not installed in this Python environment.",
             "Run this command from the backend environment (or the API container).",
-        )
+        ) from exc
     except OSError as exc:
         # ``SessionManager`` reports a refused, timed-out or unresolvable
         # store — whatever the redis client raised — as the builtin
         # ``ConnectionError`` (an ``OSError``).
-        _refuse_reset(
+        raise _refusal(
             f"Cannot reach the session store at {_redis_location(redis_url)}"
             f" ({type(exc).__name__}).",
             "Start Redis, or set REDIS_URL to the Redis the API runs on, and run",
             "this command again.",
-        )
+        ) from exc
     except Exception as exc:
-        _refuse_reset(f"Could not open the session store ({type(exc).__name__}).")
+        raise _refusal(f"Could not open the session store ({type(exc).__name__}).") from exc
 
 
 def reset_password():
