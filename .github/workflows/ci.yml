@@ -477,6 +477,8 @@ jobs:
           tests/services/test_orphan_vector_sweep.py
           tests/services/test_context_delete_removes_points.py
           tests/api/test_account_linking.py
+          tests/services/test_remember_write_options.py
+          tests/mcp_server/test_remember_batch_tool.py
           -v --timeout=120 --maxfail=3
 
   # Authenticated a11y (color-contrast) lane (#840). Unlike the hermetic
