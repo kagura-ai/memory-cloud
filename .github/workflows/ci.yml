@@ -318,6 +318,8 @@ jobs:
               - 'backend/tests/cli/**'
               - 'backend/tests/smoke/test_all_routes.py'
               - 'backend/tests/services/test_password_account_service.py'
+              - 'backend/tests/services/test_known_device_db.py'
+              - 'backend/tests/auth/test_oauth2_server_coverage.py'
               - 'backend/tests/services/test_orphan_vector_sweep.py'
               - 'backend/tests/services/test_context_delete_removes_points.py'
               - 'backend/pyproject.toml'
@@ -474,6 +476,8 @@ jobs:
         run: >-
           cd backend && pytest tests/integration/ tests/cli/ tests/smoke/test_all_routes.py
           tests/services/test_password_account_service.py
+          tests/services/test_known_device_db.py
+          tests/auth/test_oauth2_server_coverage.py::TestShareLockOwner
           tests/services/test_orphan_vector_sweep.py
           tests/services/test_context_delete_removes_points.py
           tests/api/test_account_linking.py

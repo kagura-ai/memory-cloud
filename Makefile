@@ -146,7 +146,7 @@ test-e2e-frontend:
 .PHONY: test-integration
 test-integration:
 	@echo "Running integration tests..."
-	cd $(BACKEND_DIR) && pytest tests/integration/ tests/cli/ tests/smoke/test_all_routes.py tests/services/test_password_account_service.py tests/services/test_orphan_vector_sweep.py tests/services/test_context_delete_removes_points.py tests/api/test_account_linking.py -v --timeout=120 --maxfail=3
+	cd $(BACKEND_DIR) && pytest tests/integration/ tests/cli/ tests/smoke/test_all_routes.py tests/services/test_password_account_service.py tests/services/test_known_device_db.py tests/auth/test_oauth2_server_coverage.py::TestShareLockOwner tests/services/test_orphan_vector_sweep.py tests/services/test_context_delete_removes_points.py tests/api/test_account_linking.py -v --timeout=120 --maxfail=3
 	@echo "Integration tests complete."
 
 .PHONY: test-urls
