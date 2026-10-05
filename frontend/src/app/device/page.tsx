@@ -63,6 +63,17 @@ function isRateLimited(err: unknown): boolean {
   return err instanceof ApiError && err.status === 429;
 }
 
+/**
+ * Where an unauthenticated visitor is sent: /login, with a return_to that
+ * brings them back to this page and keeps the user_code (#772).
+ */
+function loginRedirectUrl(userCode: string | null | undefined): string {
+  const returnPath = userCode
+    ? `/device?user_code=${encodeURIComponent(userCode)}`
+    : "/device";
+  return `/login?return_to=${encodeURIComponent(returnPath)}`;
+}
+
 /** Grid + blur-orb gradient background, shared with /login (Issue #633). */
 function PageBackground() {
   return (
@@ -135,10 +146,7 @@ function DevicePageInner() {
         })
         .catch(() => {});
 
-      const returnPath = codeFromUrl
-        ? `/device?user_code=${encodeURIComponent(codeFromUrl)}`
-        : "/device";
-      router.replace(`/login?return_to=${encodeURIComponent(returnPath)}`);
+      router.replace(loginRedirectUrl(codeFromUrl));
       return;
     }
 
@@ -186,6 +194,21 @@ function DevicePageInner() {
       const result = await confirmDevice(deviceInfo.user_code, approve);
       setPhase(result.status === "approved" ? "success" : "denied");
     } catch (err) {
+      const status = err instanceof ApiError ? err.status : undefined;
+      // The session ended while the consent screen was open (#1878): sign in
+      // again and come back to this code. The submitting state stays up, as
+      // the page shows nothing else while it navigates away.
+      if (status === 401) {
+        router.replace(loginRedirectUrl(deviceInfo.user_code));
+        return;
+      }
+      // The account row was locked for too long (a password reset or an
+      // erasure in progress). Nothing was decided: the user can try again.
+      if (status === 503) {
+        setError(t("device.accountBusy"));
+        setPhase("error");
+        return;
+      }
       const detail =
         err instanceof ApiError ? err.message : t("device.errorMessage");
       if (detail.includes("already been authorized")) {

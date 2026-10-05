@@ -15,6 +15,8 @@ import {
 } from "@testing-library/react";
 
 import { ApiError } from "@/lib/api";
+import enMessages from "@/messages/en.json";
+import jaMessages from "@/messages/ja.json";
 import DevicePage from "./page";
 
 // ---------- Mocks ------------------------------------------------------------
@@ -32,10 +34,21 @@ vi.mock("@/lib/auth/auth", () => ({
   confirmDevice: (...args: unknown[]) => mockConfirmDevice(...args),
 }));
 
+// Keys are rendered as-is unless a test sets a locale's messages (#1878).
+let activeMessages: Record<string, unknown> | null = null;
+
+function lookupMessage(key: string): string {
+  let node: unknown = activeMessages;
+  for (const part of key.split(".")) {
+    node = (node as Record<string, unknown> | undefined)?.[part];
+  }
+  return typeof node === "string" ? node : key;
+}
+
 vi.mock("next-intl", () => ({
   useTranslations: () => (k: string, params?: Record<string, string>) => {
     if (params?.scope) return k.replace("{scope}", params.scope);
-    return k;
+    return activeMessages ? lookupMessage(k) : k;
   },
 }));
 
@@ -78,6 +91,7 @@ function typeCode(code: string) {
 }
 
 beforeEach(() => {
+  activeMessages = null;
   mockVerifyDeviceCode.mockReset();
   mockConfirmDevice.mockReset();
   mockRouterReplace.mockReset();
@@ -356,6 +370,95 @@ describe("DevicePage", () => {
 
     await waitFor(() => {
       expect(screen.getByText("device.successTitle")).toBeDefined();
+    });
+  });
+
+  // --- Refusals under the owner lock (#1878) ---
+
+  describe("confirm refused under the owner lock (#1878)", () => {
+    const pendingCode = {
+      user_code: "ABCD1234",
+      client_name: "Test CLI",
+      scope: "memory:read",
+      expires_at: "2026-01-01T00:00:00Z",
+      is_authorized: false,
+      is_expired: false,
+    };
+
+    async function approve(messages: typeof enMessages) {
+      mockVerifyDeviceCode.mockResolvedValue(pendingCode);
+      render(<DevicePage />);
+
+      const input = screen.getByLabelText(messages.device.codeLabel);
+      fireEvent.change(input, { target: { value: "ABCD1234" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+
+      await waitFor(() => {
+        expect(screen.getByText(messages.device.approve)).toBeDefined();
+      });
+      fireEvent.click(screen.getByText(messages.device.approve));
+    }
+
+    it.each([
+      ["en", enMessages],
+      ["ja", jaMessages as typeof enMessages],
+    ])(
+      "shows the localized account-busy message on a 503 (%s)",
+      async (_locale, messages) => {
+        activeMessages = messages;
+        mockConfirmDevice.mockRejectedValue(
+          new ApiError({
+            message: "The account is being updated; please try again.",
+            status: 503,
+          }),
+        );
+
+        await approve(messages);
+
+        // The banner renders in both the code-input and the consent-retry block.
+        await waitFor(() => {
+          expect(
+            screen.getAllByText(messages.device.accountBusy).length,
+          ).toBeGreaterThan(0);
+        });
+        expect(messages.device.accountBusy).not.toBe("device.accountBusy");
+        expect(
+          screen.queryByText("The account is being updated; please try again."),
+        ).toBeNull();
+        // Nothing was decided, so the user can try the same code again.
+        expect(screen.getByText(messages.device.tryAgain)).toBeDefined();
+        expect(mockRouterReplace).not.toHaveBeenCalled();
+      },
+    );
+
+    it("has a distinct account-busy message per locale", () => {
+      expect(jaMessages.device.accountBusy).not.toBe(
+        enMessages.device.accountBusy,
+      );
+    });
+
+    it("sends the user to login with return_to when the session is gone (401)", async () => {
+      mockConfirmDevice.mockRejectedValue(
+        new ApiError({ message: "Authentication required", status: 401 }),
+      );
+      mockVerifyDeviceCode.mockResolvedValue(pendingCode);
+      render(<DevicePage />);
+
+      // The code was typed, not taken from the URL: return_to still carries it.
+      const input = screen.getByLabelText("device.codeLabel");
+      fireEvent.change(input, { target: { value: "ABCD1234" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await waitFor(() => {
+        expect(screen.getByText("device.approve")).toBeDefined();
+      });
+      fireEvent.click(screen.getByText("device.approve"));
+
+      await waitFor(() => {
+        expect(mockRouterReplace).toHaveBeenCalledWith(
+          "/login?return_to=%2Fdevice%3Fuser_code%3DABCD1234",
+        );
+      });
+      expect(screen.queryByText("Authentication required")).toBeNull();
     });
   });
 
