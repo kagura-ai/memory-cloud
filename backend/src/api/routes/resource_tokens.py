@@ -329,6 +329,19 @@ async def create_resource_token(
         context_exists = context_result.scalar_one_or_none()
 
         if not context_exists:
+            # #1863: minting a token still needs a live context — a retired
+            # resource gets no new credentials — but the resource may well be
+            # listed (its existing tokens are reachable while active), so say
+            # what is actually missing instead of "not found".
+            if await resolve_resource_pk(db, workspace_id, data.resource_id) is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        f"Resource ID '{data.resource_id}' has no live context in your "
+                        "workspace; restore or create a context bound to it before creating "
+                        "tokens."
+                    ),
+                )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Resource ID '{data.resource_id}' not found in your workspace or you don't have access to it.",

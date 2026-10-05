@@ -148,3 +148,27 @@ class TestListFilterBoundary:
         with patch.object(route_module, "resolve_resource_pk", new=AsyncMock(return_value=None)):
             response = owner_client.get("/api/v1/resource-tokens", params={"resource_id": "orders"})
         assert response.status_code == 403
+
+
+class TestCreateWithoutLiveContext:
+    """Minting still needs a live context (#268); the message says so when the
+    resource itself exists (#1863) instead of claiming it is not found."""
+
+    def _post(self, owner_client, db):
+        owner_client.state_["db"] = db
+        return owner_client.post(
+            "/api/v1/resource-tokens",
+            json={"resource_id": "orders", "description": "x", "quota_events_per_hour": 100},
+        )
+
+    def test_names_the_missing_context_when_the_resource_exists(self, owner_client):
+        with patch.object(route_module, "resolve_resource_pk", new=AsyncMock(return_value=uuid4())):
+            response = self._post(owner_client, _db_returning(None))
+        assert response.status_code == 403
+        assert "no live context" in response.json()["message"]
+
+    def test_keeps_the_uniform_message_when_the_resource_is_unknown(self, owner_client):
+        with patch.object(route_module, "resolve_resource_pk", new=AsyncMock(return_value=None)):
+            response = self._post(owner_client, _db_returning(None))
+        assert response.status_code == 403
+        assert "not found in your workspace" in response.json()["message"]

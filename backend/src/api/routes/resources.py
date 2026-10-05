@@ -222,6 +222,10 @@ async def list_resources(
     # the tokens tab is unreachable and the owner cannot revoke them. The
     # row carries null context fields and goes away once the last token is
     # revoked — a resource the owner deliberately retired does not linger.
+    #
+    # There is no context to run the ``accessible_ids`` filter against, so
+    # these rows rest on the ``WorkspaceOwner`` gate alone — the one caller
+    # the route admits, and the one who can revoke what is listed here.
     live_context_exists = (
         select(Context.id)
         .where(
