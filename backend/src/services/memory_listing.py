@@ -307,7 +307,8 @@ def change_item(c: Change) -> dict[str, Any]:
     """One change as every envelope renders it (``changes_since`` and ``bootstrap``).
 
     ``summary`` is omitted for an event of a forgotten memory, ``superseded_by``
-    for every kind but ``superseded`` (the omit-empty response convention).
+    for every kind but ``superseded`` (the omit-empty response convention); a
+    superseded event of a forgotten memory therefore keeps ``superseded_by``.
     """
     return {
         "memory_id": str(c.memory_id),
@@ -363,8 +364,9 @@ async def changes_since(
     forgotten: ``deleted_at`` in the window, listed while the tombstone exists;
     a forgotten row's earlier created / updated / superseded events stay in the
     log too. Every event of a forgotten memory, whatever its kind, carries
-    ``memory_id`` / ``kind`` / ``at`` only: ``summary`` is ``None`` (#1876), so
-    ``forget`` retracts the text from this lane as it does from the others
+    ``memory_id`` / ``kind`` / ``at`` only, plus ``superseded_by`` (the live
+    newer memory's id) on a superseded event: ``summary`` is ``None`` (#1876),
+    so ``forget`` retracts the text from this lane as it does from the others
     while the log keeps its shape.
     Keyset cursor over ``(at, kind, id)``, so a page is never shifted by rows
     written after it was read.

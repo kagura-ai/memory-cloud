@@ -566,6 +566,12 @@ def test_change_item_omits_the_summary_of_a_forgotten_memory():
     gone = Change(memory_id=uuid4(), kind="forgotten", at=at, summary=None, superseded_by=None)
     assert change_item(live)["summary"] == "kept"
     assert set(change_item(gone)) == {"memory_id", "kind", "at"}
+    newer = uuid4()
+    replaced = Change(
+        memory_id=uuid4(), kind="superseded", at=at, summary=None, superseded_by=newer
+    )
+    assert set(change_item(replaced)) == {"memory_id", "kind", "at", "superseded_by"}
+    assert change_item(replaced)["superseded_by"] == str(newer)
 
 
 @pytest.mark.asyncio

@@ -1933,7 +1933,7 @@ Manual: guide(["list"]).""",
         {
             "name": "changes_since",
             "readOnly": True,
-            "description": """List what changed in a context since a time, oldest first: created, updated (an edit, a scope promotion or a Sleep maintenance change (importance re-evaluation, dedup tag merge, rollback); never the initial write or an embedding retry), superseded (a supersedes edge; superseded_by is the newer memory) and forgotten (soft-deleted, while the row still exists). Events of a forgotten memory carry memory_id / kind / at only. Use it at session start for "what changed since I was last here?"; it is a deterministic log, not a search.
+            "description": """List what changed in a context since a time, oldest first: created, updated (an edit, a scope promotion or a Sleep maintenance change (importance re-evaluation, dedup tag merge, rollback); never the initial write or an embedding retry), superseded (a supersedes edge; superseded_by is the newer memory) and forgotten (soft-deleted, while the row still exists). Events of a forgotten memory omit summary: memory_id / kind / at only, plus superseded_by on a superseded event. Use it at session start for "what changed since I was last here?"; it is a deterministic log, not a search.
 Returns: {status, changes: [{memory_id, kind, at, summary?, superseded_by?}], count, has_more, next_cursor, since, until, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. next_cursor is a keyset token: pages never shift when rows are written after the first read.
 Manual: guide(["changes_since"]).""",
             "inputSchema": {
