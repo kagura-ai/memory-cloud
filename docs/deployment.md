@@ -471,6 +471,53 @@ CLI actions (`reset_password`, `create_admin`) send no notice. A send failure is
 change. Under `EMAIL_PROVIDER=logging` each notice is one
 `security_notification_email` log line (event and a keyed recipient hash only).
 
+## Which sign-in provider syncs the account's email (Issues #1811, #1875)
+
+`users.auth_provider` names the account's **primary** sign-in provider. Only
+a sign-in through it syncs the account's email and name from the identity
+provider; a sign-in through any other provider on the **Connected accounts**
+card updates nothing but that provider's last-used time.
+
+An OAuth account can have no primary provider (`auth_provider` NULL): a row
+from before the pointer existed, or an account that set a password and then
+unlinked its last provider. Such an account gets the pointer back on a
+sign-in through **the identity it was created with** — the Google / GitHub
+identity whose `sub` is the account's `user_id` — once that identity's link
+is older than 10 minutes or was written together with the account. A
+provider attached later through **Connected accounts** never becomes primary,
+however long ago it was attached: attaching needs only a live session, so a
+session alone can never choose whose email and name the account takes. Such
+a sign-in logs `oauth_primary_provider_not_adopted_attached_identity` and
+goes through as a linked sign-in.
+
+**After upgrading**, review the accounts whose primary provider is a later
+attached identity. The pointer legitimately lands there when an account
+unlinks its original provider (it moves to a surviving one), so this is a
+list to check with the owners, not a list of mistakes. On the database host:
+
+```bash
+docker exec kagura-postgres psql -U kagura -d kagura -c "
+  SELECT u.user_id, u.auth_provider, p.linked_at
+  FROM users u
+  JOIN user_oauth_providers p
+    ON p.user_id = u.user_id AND p.provider = u.auth_provider
+  WHERE u.auth_method = 'oauth' AND p.oauth_sub <> u.user_id
+  ORDER BY p.linked_at DESC;"
+```
+
+To point an account at a provider the owner confirms, or to clear the pointer
+so that no provider syncs the profile until the original identity signs in:
+
+```bash
+docker exec kagura-postgres psql -U kagura -d kagura -c \
+  "UPDATE users SET auth_provider = 'google' WHERE user_id = '<user_id>';"
+docker exec kagura-postgres psql -U kagura -d kagura -c \
+  "UPDATE users SET auth_provider = NULL WHERE user_id = '<user_id>';"
+```
+
+Setting the pointer by hand is also the way to make a later attached
+provider primary for an owner who asks for it; the sign-in path never does.
+
 ## One person, two accounts — identity links (Issue #1784)
 
 Two different things are called "linking" in Kagura, and they do not overlap:
