@@ -53,6 +53,9 @@ router = APIRouter(prefix="/me", tags=["me-oauth"])
 INTENT_KEY = "oauth2_state_intent:{state}"
 USER_KEY = "oauth2_state_user:{state}"
 RETURN_TO_KEY = "oauth2_return_to:{state}"
+# The browser session that started a link round-trip (me_account.link_provider);
+# the callback honours the link only when the same session cookie comes back.
+SESSION_KEY = "oauth2_state_session:{state}"
 STATE_TTL = 300  # 5 minutes — matches auth.py's existing oauth2_state TTL
 
 # Rate limit: per-user, per-minute window.
