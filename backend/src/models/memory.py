@@ -461,6 +461,17 @@ class Memory(Base):
             "context_id",
             postgresql_where=text("deleted_at IS NULL"),
         ),
+        # Issue #1869: partial B-tree for the shared-point check that runs once
+        # per forgotten row (MemoryService._delete_memory_point): "does another
+        # live row name this point?" filters by summary_embedding_id alone,
+        # across contexts. Partial on live rows that have a point, which is
+        # exactly the predicate of that query (migration
+        # e94_1869_summary_emb_idx).
+        Index(
+            "idx_memories_summary_embedding_live",
+            "summary_embedding_id",
+            postgresql_where=text("deleted_at IS NULL AND summary_embedding_id IS NOT NULL"),
+        ),
         # Issue #886: partial B-tree supporting the deterministic always-load
         # read path (load_pinned). Scopes to context_id and is partial on
         # delivery_mode='always' AND deleted_at IS NULL so only pinned, live

@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import ColumnElement, and_, func, or_, select
+from sqlalchemy import ColumnElement, and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.retention import should_promote_to_persistent
@@ -5195,16 +5195,19 @@ class MemoryService:
         """
         point_id = memory.point_id
         if point_id != memory.id:
-            others = await self.db.execute(
-                select(func.count())
-                .select_from(Memory)
-                .where(
-                    Memory.summary_embedding_id == point_id,
-                    Memory.id != memory.id,
-                    Memory.deleted_at.is_(None),
+            # Not scoped by context_id on purpose: the row to find is one in
+            # ANOTHER context that shares the collection. Served by the
+            # partial index idx_memories_summary_embedding_live (#1869).
+            shared = await self.db.execute(
+                select(
+                    exists().where(
+                        Memory.summary_embedding_id == point_id,
+                        Memory.id != memory.id,
+                        Memory.deleted_at.is_(None),
+                    )
                 )
             )
-            if (others.scalar() or 0) > 0:
+            if shared.scalar():
                 logger.info(
                     "memory_point_shared_kept",
                     memory_id=str(memory.id),
