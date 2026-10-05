@@ -537,9 +537,12 @@ class TestARecentlyAttachedProvider:
     @pytest.mark.parametrize(
         ("linked", "created", "expected"),
         [
-            # Created together a moment ago: the first sign-in.
+            # Created together: the first sign-in, and sign-ins soon after.
             (timedelta(seconds=2), timedelta(seconds=2), True),
             (timedelta(minutes=9), timedelta(minutes=9), True),
+            # A young account that attached this row a minute after it was
+            # created (another provider's sub that equals the id).
+            (timedelta(minutes=8), timedelta(minutes=9), False),
             # The same sub attached again to an old account (it unlinked its
             # original identity), or another provider's sub that equals the id.
             (timedelta(minutes=3), timedelta(days=365), False),

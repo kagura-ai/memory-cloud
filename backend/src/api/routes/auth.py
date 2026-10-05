@@ -1722,6 +1722,13 @@ def _session_profile(owner: SessionOwner, user_info: dict[str, Any]) -> tuple[st
     return user_info.get("name"), user_info.get("picture")
 
 
+# How far apart a provider row and its account may be written and still count
+# as one first sign-in. ``RoleManager.ensure_user`` inserts both in one
+# transaction with the database's ``now()``, so they are normally equal; the
+# slack only allows for a future change of either default.
+_CREATED_TOGETHER = timedelta(seconds=5)
+
+
 def _identity_can_prove(owner: SessionOwner, idp_sub: str) -> bool:
     """Whether a sign-in through this identity may prove ``owner`` (#1875).
 
@@ -1735,11 +1742,12 @@ def _identity_can_prove(owner: SessionOwner, idp_sub: str) -> bool:
     second provider. A provider link row older than
     ``IDENTITY_LINK_SIGN_IN_WINDOW`` counts. A younger one counts only when it
     is the identity the account was created with: its sub is the account's
-    ``user_id`` AND the account itself is younger than the window (a first
-    sign-in creates both together). Matching the sub alone is not enough — an
-    account can unlink its original identity and have it attached again, and
-    subs are scoped by provider, so another provider's could equal the id.
-    A linked row with no readable time proves nothing.
+    ``user_id`` AND the row was written together with the ``users`` row (a
+    first sign-in inserts both in one transaction, so their times agree).
+    Matching the sub alone is not enough — an account can unlink its original
+    identity and have it attached again, and subs are scoped by provider, so
+    another provider's could equal the id; a row attached later carries the
+    time of the attach. A linked row with no readable time proves nothing.
 
     An identity with no link row at all (the owner was found by the ``users``
     row keyed by the sub, or not found) was never attached, so it counts.
@@ -1747,14 +1755,13 @@ def _identity_can_prove(owner: SessionOwner, idp_sub: str) -> bool:
     linked_at = owner.provider_linked_at
     if linked_at is None:
         return owner.user_id == idp_sub
-    now = utcnow()
-    if now - linked_at > IDENTITY_LINK_SIGN_IN_WINDOW:
+    if utcnow() - linked_at > IDENTITY_LINK_SIGN_IN_WINDOW:
         return True
     created_at = owner.account_created_at
     return (
         owner.user_id == idp_sub
         and created_at is not None
-        and now - created_at <= IDENTITY_LINK_SIGN_IN_WINDOW
+        and abs(linked_at - created_at) <= _CREATED_TOGETHER
     )
 
 
