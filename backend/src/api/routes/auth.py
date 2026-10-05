@@ -20,12 +20,13 @@ Security features:
 
 import asyncio
 import functools
+import hashlib
 import os
 import re
 import secrets
 import time
 from datetime import datetime, timedelta
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, NoReturn
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
@@ -72,6 +73,7 @@ from services.security_notification_service import (
     PROVIDER_SIGN_IN_LABELS,
     SecurityEvent,
     schedule_security_notification,
+    spawn_security_notification,
 )
 from services.signup_gate_service import check_signup_access
 from services.terms_service import TermsService, current_terms_version
@@ -2676,8 +2678,13 @@ def _login_rate_key(identifier: str, user: User | None) -> str:
     proxy's, and such a counter becomes a global lockout.
     """
     if user is not None:
-        return f"user:{user.user_id}"
+        return _account_rate_key(user.user_id)
     return f"id:{_normalize_login_identifier(identifier)}"
+
+
+def _account_rate_key(user_id: str) -> str:
+    """The failure counter of an account — shared by the password and the TOTP step."""
+    return f"user:{user_id}"
 
 
 def _login_client_ip(request: Request) -> str:
@@ -2799,6 +2806,47 @@ def _take_mfa_accepted_terms(mfa_token: str) -> str | None:
 # The fingerprint of the password hash a pending MFA step verified (#1809),
 # beside ``mfa_pending:{token}`` and with the same lifetime.
 _MFA_PENDING_CRED_KEY = "mfa_pending_cred:{token}"
+
+# A TOTP code the second factor accepted, so it is not accepted again. The
+# marker is keyed by a digest of the code (never the code itself) and lives
+# past the code's validity: ``verify_totp`` accepts a code for its own 30 s
+# step and one on either side, so a code is good for at most 90 s.
+_MFA_USED_CODE_KEY = "mfa_totp_used:{user_id}:{digest}"
+_MFA_USED_CODE_TTL_SECONDS = 120
+
+
+def _claim_totp_code(user_id: str, code: str) -> bool:
+    """Mark an accepted TOTP code as used; False when it already was.
+
+    One ``SET NX``, so of two sign-ins presenting the same code at once only
+    one completes.
+    """
+    if not _session_manager:
+        return True
+    digest = hashlib.sha256(f"{user_id}:{code}".encode()).hexdigest()
+    key = _MFA_USED_CODE_KEY.format(user_id=user_id, digest=digest)
+    return bool(_session_manager._redis.set(key, "1", nx=True, ex=_MFA_USED_CODE_TTL_SECONDS))
+
+
+def _refuse_totp_code(user: User, mfa_token: str, request: Request) -> NoReturn:
+    """Answer a wrong (or already used) second-factor code.
+
+    The pending step is consumed and the attempt is counted against the
+    account's sign-in budget, the one wrong passwords draw on. The attempt
+    that spends the budget tells the owner: unlike a wrong password, which
+    anyone can send, a wrong code was sent by someone who had the password.
+    """
+    if _session_manager:
+        _session_manager._redis.delete(f"mfa_pending:{mfa_token}")
+        rate_key = _account_rate_key(user.user_id)
+        _record_login_failure(rate_key)
+        attempts = _session_manager._redis.get(f"{_LOGIN_ATTEMPT_PREFIX}{rate_key}")
+        if attempts and int(attempts) >= _MAX_LOGIN_ATTEMPTS:
+            logger.warning("mfa_second_factor_locked", user_id=user.user_id)
+            spawn_security_notification(
+                user_id=user.user_id, event=SecurityEvent.SECOND_FACTOR_LOCKED, request=request
+            )
+    raise AuthenticationError("Invalid TOTP code. Please login again.")
 
 
 async def _password_still_current(user_id: str, fingerprint: str | None) -> bool:
@@ -2934,10 +2982,11 @@ async def password_login(
         _record_login_failure(rate_key)
         raise InvalidCredentialsError()
 
-    _clear_login_failures(rate_key)
     verified = credential_fingerprint(user.password_hash)
 
-    # MFA check
+    # MFA check. The budget is NOT cleared here: the second factor draws on it
+    # (see ``_refuse_totp_code``), and a correct password must not refill it —
+    # someone who has the password would otherwise get unlimited code guesses.
     if user.totp_enabled and user.totp_secret:
         mfa_token = secrets.token_urlsafe(32)
         _session_manager._redis.setex(f"mfa_pending:{mfa_token}", 300, user.user_id)
@@ -2949,8 +2998,10 @@ async def password_login(
 
         return PasswordLoginResponse(success=True, mfa_required=True, mfa_session_token=mfa_token)
 
-    # No MFA — create session
+    # No MFA — create session. The budget is cleared only once the sign-in
+    # stands (a superseded password is refused above as a wrong one).
     session_id = await _open_password_session(user, verified)
+    _clear_login_failures(rate_key)
     await _record_terms_acceptance(
         user_id=user.user_id,
         email=user.email,
@@ -3001,6 +3052,11 @@ async def mfa_verify(
     if not user or not user.totp_secret:
         raise AuthenticationError("MFA not configured")
 
+    # The second factor draws on the account's sign-in budget, the one wrong
+    # passwords count against. Spent, the step answers 429 before anything is
+    # consumed: a pending token issued before the lockout expires with it.
+    _check_login_rate_limit(_account_rate_key(user.user_id))
+
     try:
         totp_secret = get_encryptor().decrypt(user.totp_secret)
     except Exception as e:
@@ -3022,15 +3078,19 @@ async def mfa_verify(
     # the success and the failure path alike.
     accepted_terms = _take_mfa_accepted_terms(body.mfa_session_token)
 
+    # A wrong code, or a code this account already signed in with, consumes
+    # the pending step, counts against the budget and is answered 401. The
+    # fingerprint key is already gone: the single-use guard above took it.
     if not verify_totp(totp_secret, body.totp_code):
-        # Delete MFA token on failed attempt (prevent brute-force replay). The
-        # fingerprint key is already gone: the single-use guard above took it.
-        _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
-        raise AuthenticationError("Invalid TOTP code. Please login again.")
+        _refuse_totp_code(user, body.mfa_session_token, request)
+    if not _claim_totp_code(user.user_id, body.totp_code):
+        _refuse_totp_code(user, body.mfa_session_token, request)
 
     _session_manager._redis.delete(f"mfa_pending:{body.mfa_session_token}")
 
     session_id = await _open_password_session(user, verified)
+    # The whole sign-in stands: only now is the budget cleared.
+    _clear_login_failures(_account_rate_key(user.user_id))
     await _record_terms_acceptance(
         user_id=user.user_id,
         email=user.email,

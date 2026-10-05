@@ -27,6 +27,7 @@ from fastapi.responses import RedirectResponse
 
 from api.routes import auth as auth_routes
 from config.settings import get_settings
+from tests.redis_fake_ops import SessionFakeOps
 from utils.datetime import utcnow
 from utils.hashing import sha256_hex
 
@@ -36,20 +37,24 @@ INVITE_KEY = "oauth2_beta_invite:{state}"
 INVITE = "Zk3v_9Qw-" + "a" * 34
 
 
-class FakeRedis:
+class FakeRedis(SessionFakeOps):
     def __init__(self) -> None:
-        self.store: dict[str, str] = {}
+        self.store: dict[str, object] = {}
         self.ttls: dict[str, int] = {}
 
     def setex(self, key: str, ttl: int, value: str) -> None:
         self.store[key] = value
         self.ttls[key] = ttl
 
-    def get(self, key: str) -> str | None:
+    def get(self, key: str):
         return self.store.get(key)
 
     def delete(self, *keys: str) -> int:
         return sum(1 for k in keys if self.store.pop(k, None) is not None)
+
+    def incr(self, key: str) -> int:
+        self.store[key] = int(self.store.get(key, 0)) + 1  # type: ignore[arg-type]
+        return self.store[key]  # type: ignore[return-value]
 
 
 class FakeRequest:
@@ -525,7 +530,8 @@ class TestPasswordLogin:
         kwargs = password_user.record.await_args.kwargs
         assert kwargs["accepted_terms"] == VERSION
         assert kwargs["source"] == "password"
-        assert redis.store == {}
+        # Every pending key is consumed; only the used-code marker remains.
+        assert all(k.startswith("mfa_totp_used:") for k in redis.store), redis.store
 
     @pytest.mark.asyncio
     async def test_failed_mfa_records_nothing_and_drops_the_acceptance(
@@ -552,7 +558,8 @@ class TestPasswordLogin:
             )
 
         password_user.record.assert_not_awaited()
-        assert redis.store == {}
+        # Every pending key is consumed; the wrong code counts against the account.
+        assert redis.store == {"login_attempts:user:admin-1": 1}
 
     @pytest.mark.asyncio
     async def test_mfa_binding_is_inert_while_disabled(self, redis, terms_off) -> None:

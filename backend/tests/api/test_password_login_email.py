@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.routes import auth as auth_routes
 from auth.password import hash_password
 from models.auth import User
+from tests.redis_fake_ops import SessionFakeOps
 from utils.datetime import utcnow
 from utils.exceptions import InvalidCredentialsError
 
@@ -170,7 +171,7 @@ class TestResolvePasswordLoginUser:
 # ---------------------------------------------------------------------------
 
 
-class FakeRedis:
+class FakeRedis(SessionFakeOps):
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
 

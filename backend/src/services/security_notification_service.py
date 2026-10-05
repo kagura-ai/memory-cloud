@@ -205,6 +205,7 @@ class SecurityEvent(StrEnum):
     NEW_DEVICE_SIGN_IN = "new_device_sign_in"
     ACCOUNT_LINKED = "account_linked"
     ACCOUNT_UNLINKED = "account_unlinked"
+    SECOND_FACTOR_LOCKED = "second_factor_locked"
 
 
 # The label of the sign-in method line, per event.
@@ -217,6 +218,11 @@ _SIGN_IN_METHOD_LABELS: dict[SecurityEvent, str] = {
 # Events that are a sign-in, not a change to the account (#1769): the email's
 # opening line and the digest wording say so.
 _SIGN_IN_EVENTS = frozenset({SecurityEvent.NEW_DEVICE_SIGN_IN})
+
+# Events that are a refused sign-in attempt: nothing on the account changed,
+# but someone had the password and failed the second factor until the sign-in
+# budget was spent. The opening line and the advice say so.
+_LOCKOUT_EVENTS = frozenset({SecurityEvent.SECOND_FACTOR_LOCKED})
 
 # How a linked / unlinked sign-in provider is named in a notice.
 PROVIDER_SIGN_IN_LABELS = {"google": "Google sign-in", "github": "GitHub sign-in"}
@@ -285,6 +291,12 @@ _EVENT_TEXT: dict[SecurityEvent, tuple[str, str]] = {
     SecurityEvent.NEW_DEVICE_SIGN_IN: (
         "New sign-in to your Kagura account from an unrecognized device",
         "Your account was signed in to from a browser it had not been used on before.",
+    ),
+    # Sign-in to the account is paused after repeated wrong second-factor codes.
+    SecurityEvent.SECOND_FACTOR_LOCKED: (
+        "Sign-in to your Kagura account was paused after failed verification codes",
+        "Your password was entered correctly, but the two-factor verification code "
+        "was wrong repeatedly. Sign-in to your account is paused for a few minutes.",
     ),
 }
 
@@ -493,7 +505,12 @@ def render_security_notification(
     count = max(total or 0, len(occurrences))
     listed = occurrences[:_DIGEST_MAX_OCCURRENCES]
 
-    what = "sign-in" if event in _SIGN_IN_EVENTS else "change"
+    if event in _SIGN_IN_EVENTS:
+        what = "sign-in"
+    elif event in _LOCKOUT_EVENTS:
+        what = "lockout"
+    else:
+        what = "change"
     lines: list[str] = []
     if digest:
         subject = f"{subject} ({count} more {'time' if count == 1 else 'times'})"
@@ -507,6 +524,13 @@ def render_security_notification(
             "Your Kagura Memory Cloud account was signed in to from a device we had not",
             "seen before. If this was you — a new browser, computer or phone, or a browser",
             "whose cookies were cleared — no action is needed.",
+        ]
+    elif event in _LOCKOUT_EVENTS:
+        lines += [
+            "Someone entered your Kagura Memory Cloud password correctly and then failed",
+            "the two-factor verification code repeatedly, so sign-in to your account is",
+            "paused for a few minutes. If this was you — a wrong authenticator app, or a",
+            "clock that is off — simply try again later.",
         ]
     else:
         lines += [
@@ -562,7 +586,16 @@ def render_security_notification(
         ]
 
     lines.append("Wasn't you?")
-    if event in _SIGN_IN_EVENTS:
+    if event in _LOCKOUT_EVENTS:
+        lines += [
+            "Then someone else knows your password. Change it from your profile page",
+            'once you can sign in, or use "Forgot password?" on the sign-in page (a',
+            "reset also signs every browser out and revokes the account's connected",
+            "apps). Then review your sign-in methods on your profile page, and your keys",
+            "and apps under Integrations > API Keys and OAuth Apps in your workspace.",
+            "Remove anything you do not recognize:",
+        ]
+    elif event in _SIGN_IN_EVENTS:
         lines += [
             'If the account has a password, reset it with "Forgot password?" on the',
             "sign-in page: a reset signs every browser out and revokes the account's",
