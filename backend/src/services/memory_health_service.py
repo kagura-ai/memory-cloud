@@ -39,16 +39,25 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import and_, func, literal_column, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import Context, ContextReadAttribution, UsageStats
+from auth.workspace_roles import WorkspaceRole
+from models.auth import (
+    Context,
+    ContextReadAttribution,
+    UsageStats,
+    Workspace,
+    WorkspaceMember,
+)
 from models.config import ContextSearchConfig
 from models.memory import DELETED_BY_SLEEP_MERGE, Memory, NeuralMemoryEdge
 from models.sleep import SleepReport
+from repositories.neural_edge import one_row_per_pair
 from services.identity_link_service import linked_user_ids
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
@@ -78,7 +87,15 @@ _USAGE_WINDOW_DAYS = 7
 # from an idle one (OK + note) — a failed read read nothing, a failed write
 # wrote nothing.
 _READ_TOOLS = frozenset({"recall", "recall_upcoming", "recall_nearby"})
-_WRITE_TOOLS = frozenset({"remember", "update_memory"})
+# remember_batch (#1853) logs ONE usage row per call, whatever the item count.
+_WRITE_TOOLS = frozenset({"remember", "remember_batch", "update_memory"})
+# The usage rows the retrieval section reads: every read and write tool, plus
+# explore (counted, but neither a read nor a write for the grading). Derived
+# from the tool sets so a tool cannot be classified above yet filtered out in
+# SQL (#1874).
+_WATCHED_ENDPOINTS = tuple(
+    sorted(f"mcp:{tool}" for tool in _READ_TOOLS | _WRITE_TOOLS | {"explore"})
+)
 
 _EDGE_WEIGHT_MIN = 0.0
 _EDGE_WEIGHT_MAX = 3.0
@@ -112,6 +129,22 @@ def _note(code: str, **params: Any) -> dict[str, Any]:
     return {"code": code, "params": params}
 
 
+@dataclass(frozen=True)
+class _CallerScope:
+    """What one report needs to know about the caller, resolved once (#1874).
+
+    ``owners`` is the identity-link set (the caller included). The other two
+    fields describe which contexts the caller can open as itself, and are only
+    filled when the caller has a linked account: ``open_workspaces`` are the
+    live workspaces where its membership admits every context,
+    ``whitelists`` the per-workspace ``allowed_context_ids`` of the others.
+    """
+
+    owners: frozenset[str]
+    open_workspaces: frozenset[uuid.UUID] = frozenset()
+    whitelists: tuple[tuple[uuid.UUID, frozenset[uuid.UUID]], ...] = ()
+
+
 def _empty_graph_stats() -> dict[str, Any]:
     return {
         "edges_by_origin": {},
@@ -140,10 +173,12 @@ class MemoryHealthService:
         A user with zero contexts and no unattributed signals gets an ok
         overall with an empty list.
         """
-        contexts = await self._fetch_owned_contexts(user_id)
+        caller = await self._resolve_caller_scope(user_id)
+        contexts = await self._fetch_owned_contexts(user_id, caller)
         owned_ids = {context_id for context_id, _ in contexts}
         signals = self._fold_orphan_scopes(
-            await self._fetch_signals(user_id, owned_ids=frozenset(owned_ids)), owned_ids
+            await self._fetch_signals(user_id, owned_ids=frozenset(owned_ids), caller=caller),
+            owned_ids,
         )
 
         scopes: list[tuple[uuid.UUID | None, str | None]] = list(contexts)
@@ -178,20 +213,22 @@ class MemoryHealthService:
         returns ``None`` when not owned (the route maps that to a uniform
         404 — no existence disclosure).
         """
+        caller = await self._resolve_caller_scope(user_id)
         if context_scope is not None:
-            context_name = await self._resolve_owned_context(user_id, context_scope)
+            context_name = await self._resolve_owned_context(user_id, context_scope, caller)
             if context_name is None:
                 return None
             # Scoped fetch: single-partition WHERE instead of grouping the
             # caller's entire partition to read one key.
             signals = await self._fetch_signals(
-                user_id, scope=context_scope, owned_ids=frozenset({context_scope})
+                user_id, scope=context_scope, owned_ids=frozenset({context_scope}), caller=caller
             )
         else:
             context_name = None
-            owned_ids = {cid for cid, _ in await self._fetch_owned_contexts(user_id)}
+            owned_ids = {cid for cid, _ in await self._fetch_owned_contexts(user_id, caller)}
             signals = self._fold_orphan_scopes(
-                await self._fetch_signals(user_id, owned_ids=frozenset(owned_ids)), owned_ids
+                await self._fetch_signals(user_id, owned_ids=frozenset(owned_ids), caller=caller),
+                owned_ids,
             )
 
         sections = self._grade_scope(signals, context_scope)
@@ -205,22 +242,72 @@ class MemoryHealthService:
 
     # -------------------------------------------------------------- scoping
 
+    async def _resolve_caller_scope(self, user_id: str) -> _CallerScope:
+        """The link set and, for a linked caller, its workspace memberships:
+        one lookup each per report (#1874)."""
+        owners = await linked_user_ids(self.db, user_id)
+        if owners <= {user_id}:
+            # No linked account: only ``created_by == caller`` can match, and
+            # that branch asks nothing of the caller's memberships.
+            return _CallerScope(owners=owners)
+        rows = await self.db.execute(
+            select(
+                WorkspaceMember.workspace_id,
+                WorkspaceMember.role,
+                WorkspaceMember.allowed_context_ids,
+            )
+            .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+            .where(WorkspaceMember.user_id == user_id, Workspace.deleted_at.is_(None))
+        )
+        open_workspaces: set[uuid.UUID] = set()
+        whitelists: list[tuple[uuid.UUID, frozenset[uuid.UUID]]] = []
+        for workspace_id, role, allowed in rows.all():
+            # The read rule of PermissionService.resolve_context_for_workspace_read
+            # (Migration 042): owner/admin ignore the whitelist; a viewer with
+            # none reads every context; a member with none is suspended; a
+            # whitelist ([] included) admits exactly what it names.
+            if role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN) or (
+                role == WorkspaceRole.VIEWER and allowed is None
+            ):
+                open_workspaces.add(workspace_id)
+            elif allowed:
+                whitelists.append((workspace_id, frozenset(allowed)))
+        return _CallerScope(
+            owners=owners,
+            open_workspaces=frozenset(open_workspaces),
+            whitelists=tuple(whitelists),
+        )
+
     @staticmethod
-    def _owned_context_filter(user_id: str, owners: frozenset[str]) -> tuple[Any, ...]:
+    def _owned_context_filter(user_id: str, caller: _CallerScope) -> tuple[Any, ...]:
         """The Phase-1 self-scope predicate, defined once. Phase 3 replaces
         this with workspace semantics — every consumer updates together."""
+        owned: Any = Context.created_by == user_id
         # #1834: the identity-link set owns PRIVATE contexts together, so the
         # report also covers the private contexts a linked account created.
         # Its shared contexts stay out: a link grants ownership, not
-        # membership. ``owners`` is the materialised set (linked_user_ids),
-        # so the predicate is indexable equalities, not a correlated subquery.
-        return (
-            or_(
-                Context.created_by == user_id,
-                and_(Context.created_by.in_(owners), Context.is_private.is_(True)),
-            ),
-            Context.deleted_at.is_(None),
-        )
+        # membership. ``caller`` holds materialised sets, so the predicate is
+        # indexable equalities, not a correlated subquery.
+        #
+        # #1874: ... and only where the caller can open the context as itself
+        # — the rule PermissionService applies on the context read path. The
+        # caller's own contexts (the branch above) are unchanged.
+        linked = caller.owners - {user_id}
+        openable: list[Any] = []
+        if caller.open_workspaces:
+            openable.append(Context.workspace_id.in_(caller.open_workspaces))
+        for workspace_id, context_ids in caller.whitelists:
+            openable.append(and_(Context.workspace_id == workspace_id, Context.id.in_(context_ids)))
+        if linked and openable:
+            owned = or_(
+                owned,
+                and_(
+                    Context.created_by.in_(linked),
+                    Context.is_private.is_(True),
+                    or_(*openable),
+                ),
+            )
+        return (owned, Context.deleted_at.is_(None))
 
     @staticmethod
     def _rows_of(
@@ -245,12 +332,19 @@ class MemoryHealthService:
         )
 
     async def _fetch_signals(
-        self, user_id: str, scope: Any = _ALL, owned_ids: frozenset = frozenset()
+        self,
+        user_id: str,
+        scope: Any = _ALL,
+        owned_ids: frozenset = frozenset(),
+        caller: _CallerScope | None = None,
     ) -> dict[str, Any]:
         """All grouped signal maps, one query per signal (no per-context
         fan-out — the gate1 N+1 concern). ``scope`` (a context UUID) narrows
-        every query to one partition for the detail path."""
-        owners = await linked_user_ids(self.db, user_id) if owned_ids else None
+        every query to one partition for the detail path. ``caller`` is the
+        scope the report already resolved; omitted, it is resolved here."""
+        owners = None
+        if owned_ids:
+            owners = (caller or await self._resolve_caller_scope(user_id)).owners
         return {
             "windows": await self._fetch_sleep_windows(user_id, scope, owned_ids, owners),
             "backlogs": await self._fetch_merge_backlogs(user_id, scope, owned_ids, owners),
@@ -355,22 +449,26 @@ class MemoryHealthService:
 
     # ------------------------------------------------------------- fetchers
 
-    async def _fetch_owned_contexts(self, user_id: str) -> list[tuple[uuid.UUID, str]]:
+    async def _fetch_owned_contexts(
+        self, user_id: str, caller: _CallerScope | None = None
+    ) -> list[tuple[uuid.UUID, str]]:
         """Owned, non-deleted contexts — the Phase-1 self-scope."""
-        owners = await linked_user_ids(self.db, user_id)
+        caller = caller or await self._resolve_caller_scope(user_id)
         rows = await self.db.execute(
             select(Context.id, Context.name, Context.display_name)
-            .where(*self._owned_context_filter(user_id, owners))
+            .where(*self._owned_context_filter(user_id, caller))
             .order_by(Context.name)
         )
         return [(cid, display_name or name) for cid, name, display_name in rows.all()]
 
-    async def _resolve_owned_context(self, user_id: str, context_id: uuid.UUID) -> str | None:
+    async def _resolve_owned_context(
+        self, user_id: str, context_id: uuid.UUID, caller: _CallerScope | None = None
+    ) -> str | None:
         """Display name of one owned context, or None (single indexed row)."""
-        owners = await linked_user_ids(self.db, user_id)
+        caller = caller or await self._resolve_caller_scope(user_id)
         rows = await self.db.execute(
             select(Context.name, Context.display_name).where(
-                Context.id == context_id, *self._owned_context_filter(user_id, owners)
+                Context.id == context_id, *self._owned_context_filter(user_id, caller)
             )
         )
         row = rows.one_or_none()
@@ -477,7 +575,17 @@ class MemoryHealthService:
         owners: frozenset[str] | None = None,
     ) -> dict[uuid.UUID | None, dict[str, Any]]:
         """Edge composition, weight-invariant violations and density, per
-        context. Edges always carry a context; active memories may not."""
+        context. Edges always carry a context; active memories may not.
+
+        #1895: when ``owners`` holds more than one account, each of them may
+        own a row for the same (src, dst) inside a covered context. The edge
+        counts then stand on pairs, not rows: a pair counts once, under the
+        origin of the row a link-set graph read stands for (the strongest,
+        then the most recently updated — ``one_row_per_pair``), so the totals
+        agree with the graph stats and the edge list. ``weight_violations``
+        stays a count of rows: a violation is a fact about a stored row, and
+        the weaker row of a pair must not hide behind the stronger one.
+        """
         edge_conditions = [
             self._rows_of(
                 NeuralMemoryEdge.user_id, NeuralMemoryEdge.context_id, user_id, owners, owned_ids
@@ -497,7 +605,7 @@ class MemoryHealthService:
                 NeuralMemoryEdge.origin,
                 func.count(NeuralMemoryEdge.id),
             )
-            .where(*edge_conditions)
+            .where(one_row_per_pair(owners, edge_conditions))
             .group_by(NeuralMemoryEdge.context_id, NeuralMemoryEdge.origin)
         )
         edges_by_scope: dict[uuid.UUID | None, dict[str, int]] = defaultdict(dict)
@@ -555,18 +663,10 @@ class MemoryHealthService:
         no longer false-WARNs write_only_store.
         """
         since = utcnow() - timedelta(days=_USAGE_WINDOW_DAYS)
-        watched_endpoints = [
-            "mcp:recall",
-            "mcp:recall_upcoming",
-            "mcp:recall_nearby",  # #1331: the WHERE-axis lane is a real read
-            "mcp:remember",
-            "mcp:update_memory",
-            "mcp:explore",
-        ]
         conditions = [
             self._rows_of(UsageStats.user_id, UsageStats.context_id, user_id, owners, owned_ids),
             UsageStats.created_at >= since,
-            UsageStats.endpoint.in_(watched_endpoints),
+            UsageStats.endpoint.in_(_WATCHED_ENDPOINTS),
         ]
         if scope is not _ALL:
             conditions.append(UsageStats.context_id == scope)
@@ -605,7 +705,7 @@ class MemoryHealthService:
                 owned_ids,
             ),
             ContextReadAttribution.created_at >= since,
-            ContextReadAttribution.endpoint.in_(watched_endpoints),
+            ContextReadAttribution.endpoint.in_(_WATCHED_ENDPOINTS),
         ]
         if scope is not _ALL:
             attr_conditions.append(ContextReadAttribution.context_id == scope)
@@ -820,6 +920,9 @@ class MemoryHealthService:
                 "recall_upcoming_calls": recall_upcoming,
                 "recall_nearby_calls": recall_nearby,
                 "remember_calls": usage.get("remember", 0),
+                # #1874: its own metric — one batch call writes several
+                # memories, so it is not folded into remember_calls.
+                "remember_batch_calls": usage.get("remember_batch", 0),
                 "successful_read_calls": reads,
                 "successful_write_calls": writes,
                 "explore_calls": usage.get("explore", 0),

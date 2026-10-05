@@ -279,3 +279,30 @@ async def test_private_context_lists_only_the_owners_changes(db_session):
     await db_session.refresh(ctx)
     env = await _build(db_session, owner, ws, ctx, include=("changes",))
     assert [c["memory_id"] for c in env["components"]["changes"]["changes"]] == [str(mine.id)]
+
+
+@pytest.mark.asyncio
+async def test_changes_component_withholds_the_summary_of_a_forgotten_memory(db_session, seeded):
+    """#1876: bootstrap reads the same log as ``changes_since`` — a forgotten
+    memory's events are listed with their kind and time, without the summary."""
+    owner, ws, ctx, rows = seeded
+    now = utcnow()
+    gone = await _row(
+        db_session,
+        owner,
+        ws.id,
+        ctx.id,
+        summary="stored by mistake",
+        created_at=now - timedelta(days=2),
+        deleted_at=now - timedelta(days=1, hours=23),
+    )
+    await db_session.commit()
+    await db_session.refresh(ctx)
+    env = await _build(db_session, owner, ws, ctx, include=("changes",))
+    changes = env["components"]["changes"]["changes"]
+    events = [c for c in changes if c["memory_id"] == str(gone.id)]
+    assert [c["kind"] for c in events] == ["created", "forgotten"]
+    assert all(set(c) == {"memory_id", "kind", "at"} for c in events)
+    assert "stored by mistake" not in str(env)
+    recent = next(c for c in changes if c["memory_id"] == str(rows["recent"].id))
+    assert recent["summary"] == "yesterday's decision"  # live rows keep theirs

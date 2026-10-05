@@ -1,14 +1,17 @@
 """``remember_batch`` — several memories in one call (#1853).
 
 Each item carries ``remember``'s arguments (no ``context_id``: the batch's
-applies) and is validated and limited like a single ``remember``. Without
-``atomic`` the items are written independently and reported per item; with
-``atomic=true`` the service writes them in one transaction and a single
-failure — a ``dedupe="check"`` candidate included — rolls everything back.
+applies; ``dedupe`` / ``tags_normalize`` / ``verbose`` are set on the batch)
+and is validated and limited like a single ``remember`` — an undeclared key is
+refused per item (#1873). Without ``atomic`` the items are written
+independently and reported per item; with ``atomic=true`` the service writes
+them in one transaction and a single failure — a ``dedupe="check"`` candidate
+included — rolls everything back.
 """
 
 from __future__ import annotations
 
+import difflib
 import time
 from typing import Any
 from uuid import UUID
@@ -16,6 +19,12 @@ from uuid import UUID
 from mcp.types import TextContent
 from pydantic import ValidationError
 
+from mcp_server.tools._arg_coercion import (
+    _MAX_UNKNOWN_SHOWN,
+    _TOOL_SCHEMAS,
+    _shown_name,
+    coerce_mcp_arguments,
+)
 from mcp_server.tools._errors import is_caller_value_error
 from mcp_server.tools._helpers import (
     _check_viewer_permission,
@@ -35,6 +44,7 @@ from mcp_server.tools._helpers import (
 from mcp_server.tools.memory import parse_write_options, remember_request_from_args
 from services.memory_service import (
     MAX_BATCH_ITEMS,
+    BatchCommittedError,
     BatchItemError,
     DedupeUnavailableError,
     DuplicateCandidateError,
@@ -45,12 +55,55 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 _REQUIRED = ("summary", "content", "type")
+# remember arguments that are set once, on the batch, and not per item.
+_BATCH_LEVEL = ("dedupe", "tags_normalize", "verbose")
+# What an item may carry: remember's declared arguments minus the batch-level
+# ones. context_id stays in (accepted when it repeats the batch's).
+_ITEM_KEYS = frozenset(_TOOL_SCHEMAS["remember"]) - frozenset(_BATCH_LEVEL)
+
+
+def _undeclared_keys(item: dict[str, Any]) -> dict[str, Any] | None:
+    """The per-item ``invalid_argument`` for keys an item may not carry (#1873).
+
+    A single ``remember`` refuses unknown arguments (#1742); an item that
+    dropped ``importnace`` silently and reported ``success`` did not. The
+    echoed names are client-controlled, hence bounded as in
+    ``find_unknown_arguments``.
+    """
+    unknown = sorted(str(key) for key in item if key not in _ITEM_KEYS)
+    if not unknown:
+        return None
+    allowed = sorted(_ITEM_KEYS - {"context_id"})
+    parts: list[str] = []
+    for name in unknown[:_MAX_UNKNOWN_SHOWN]:
+        shown = _shown_name(name)
+        if name in _BATCH_LEVEL:
+            parts.append(f"{shown} (batch-level)")
+            continue
+        close = difflib.get_close_matches(name, allowed, n=1, cutoff=0.6)
+        parts.append(f"{shown} (did you mean '{close[0]}'?)" if close else shown)
+    more = len(unknown) - _MAX_UNKNOWN_SHOWN
+    listed = ", ".join(parts) + (f" and {more} more" if more > 0 else "")
+    return {
+        "error": "invalid_argument",
+        "message": (
+            f"item does not accept {listed}. {', '.join(_BATCH_LEVEL)} are batch-level "
+            "arguments: set them on remember_batch itself, not on an item. "
+            f"An item accepts: {', '.join(allowed)}."
+        ),
+    }
 
 
 def _request_from_item(item: Any, batch_context_id: str) -> Any:
     """A ``RememberRequest`` for one item, or a per-item error dict."""
     if not isinstance(item, dict):
         return {"error": "validation_error", "message": "item must be an object"}
+    undeclared = _undeclared_keys(item)
+    if undeclared:
+        return undeclared
+    # #1873: the JSON-string coercion a single remember gets at dispatch
+    # (tags sent as '["a"]', details as '{"k": 1}').
+    item = coerce_mcp_arguments("remember", item)
     if "context_id" in item and item["context_id"] != batch_context_id:
         return {
             "error": "validation_error",
@@ -101,22 +154,31 @@ def _finish(index: int, body: dict[str, Any]) -> dict[str, Any]:
     return {"index": index, "status": status, **{k: v for k, v in body.items() if k != "status"}}
 
 
-def _envelope(results: list[dict[str, Any]], context_fields: dict[str, Any]) -> list[TextContent]:
+def _envelope(
+    results: list[dict[str, Any]], context_fields: dict[str, Any], **extra: Any
+) -> list[TextContent]:
     """``success`` (every item written), ``partial`` (some written), or
-    ``duplicate_candidate`` (nothing written, every other item a candidate —
-    a decision, not an error, as for ``remember``); an error envelope through
-    ``_error_response`` (so the transport marks it) only when nothing was
-    written and something failed."""
+    ``duplicate_candidate`` (nothing written and no item failed: the refusals
+    are candidates — a decision, not an error, as for ``remember``); an error
+    envelope through ``_error_response`` (so the transport marks it) only when
+    nothing was written and something failed.
+
+    ``skipped`` items — the rest of a rolled-back atomic batch — are counted
+    on their own (#1873): they did not fail, so an atomic batch whose only
+    refusal is a candidate is ``duplicate_candidate`` too."""
     succeeded = sum(1 for r in results if r["status"] == "success")
     candidates = sum(1 for r in results if r["status"] == "duplicate_candidate")
-    failed = len(results) - succeeded - candidates
+    skipped = sum(1 for r in results if r["status"] == "skipped")
+    failed = len(results) - succeeded - candidates - skipped
     body = {
         "results": results,
         "count": len(results),
         "succeeded": succeeded,
         "candidates": candidates,
         "failed": failed,
+        "skipped": skipped,
         **context_fields,
+        **extra,
     }
     if succeeded == 0 and failed:
         return _error_response("batch_failed", "No item was written; see results.", **body)
@@ -137,9 +199,11 @@ def usage_status(results: list[dict[str, Any]]) -> int:
     if errors and all(e == "quota_exceeded" for e in errors):
         return 429
     if errors and all(
-        e in ("validation_error", "missing_fields", "dedupe_unavailable") for e in errors
+        e in ("validation_error", "missing_fields", "invalid_argument") for e in errors
     ):
         return 422
+    if errors and all(e == "dedupe_unavailable" for e in errors):
+        return 503  # as remember's (#1873)
     if errors and all(e in ("forbidden", "not_found") for e in errors):
         return 403
     return 500
@@ -190,7 +254,9 @@ async def handle_remember_batch(
             results=results,
             count=len(results),
             succeeded=0,
-            failed=len(results),
+            candidates=0,
+            failed=len(invalid),
+            skipped=len(results) - len(invalid),
         )
 
     start = time.time()
@@ -221,13 +287,53 @@ async def handle_remember_batch(
                 "dedupe": dedupe,
             }
             results: list[dict[str, Any]] = []
+            note: dict[str, Any] = {}
             if atomic:
                 try:
                     responses = await execute_with_timeout(
                         service.remember_many(parsed, **write), operation_name="remember_batch"
                     )
+                except BatchCommittedError as e:
+                    # #1873: the time limit passed AFTER the commit. The rows
+                    # exist and have their embedding tasks; saying "rolled
+                    # back" would make the caller resend and duplicate them.
+                    # A cancelled statement may have left the session mid-flight.
+                    await db.rollback()
+                    rolled_back = True
+                    results = [
+                        _finish(i, _success_item(r, verbose=verbose))
+                        for i, r in enumerate(e.responses)
+                    ]
+                    note = {
+                        "committed_after_timeout": True,
+                        "message": (
+                            "The call passed its time limit after the batch was committed: "
+                            "every item is stored (memory_id per item). Do NOT send the batch "
+                            "again. Post-commit steps were cut short, so declared links "
+                            "(supersedes, linked_memory_ids) of some items may be missing — "
+                            "check with reference()."
+                        ),
+                    }
+                except QuotaExceededError as e:
+                    # #1873: the batch's one daily reservation did not fit —
+                    # nothing was reserved or written, so a smaller batch may
+                    # still fit. Same envelope and details as remember's.
+                    await db.rollback()
+                    await _log_tool_usage(
+                        db, user_id, "remember_batch", start, 429, context_id, workspace_id
+                    )
+                    return _error_response(
+                        "quota_exceeded",
+                        e.message,
+                        **{
+                            **{k: v for k, v in e.details.items() if v is not None},
+                            "count": len(parsed),
+                            **context_fields,
+                        },
+                    )
                 except TimeoutError:
-                    # remember_many rolled back on the cancellation; nothing was written.
+                    # Cancelled before the commit (it is shielded): remember_many
+                    # rolled back and released its quota reservation.
                     await _log_tool_usage(
                         db, user_id, "remember_batch", start, 504, context_id, workspace_id
                     )
@@ -294,7 +400,7 @@ async def handle_remember_batch(
                     await db.refresh(context)  # expired by the rollback; one indexed read
                 await _touch_context_last_used(db, context)
                 await db.commit()
-            return _envelope(results, context_fields)
+            return _envelope(results, context_fields, **note)
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()

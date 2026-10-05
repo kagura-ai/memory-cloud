@@ -16,12 +16,28 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from auth.workspace_roles import WorkspaceRole
+from models.auth import (
+    Context,
+    IdentityLink,
+    UsageStats,
+    User,
+    Workspace,
+    WorkspaceMember,
+)
+from models.memory import Memory
+from services.identity_link_service import linked_user_ids
 from services.memory_health_service import (
+    _READ_TOOLS,
+    _WATCHED_ENDPOINTS,
+    _WRITE_TOOLS,
     STATUS_FAIL,
     STATUS_OK,
     STATUS_WARN,
     MemoryHealthService,
+    _CallerScope,
 )
+from utils.datetime import utcnow
 
 _CTX_A = uuid.uuid4()
 _CTX_B = uuid.uuid4()
@@ -462,6 +478,16 @@ class TestFetchSleepWindowDefaults:
         assert windows[None][0]["status"] == "failed"
 
 
+def _solo_scope():
+    """#1874: the caller scope a report resolves once — here an unlinked
+    account, so the mocked session is never queried for it."""
+    return patch.object(
+        MemoryHealthService,
+        "_resolve_caller_scope",
+        new=AsyncMock(return_value=_CallerScope(owners=frozenset({"admin-user"}))),
+    )
+
+
 def _patched(svc: MemoryHealthService, *, contexts, signals):
     return (
         patch.object(svc, "_fetch_owned_contexts", new=AsyncMock(return_value=contexts)),
@@ -483,7 +509,7 @@ class TestBuildBreakdown:
         p1, p2 = _patched(
             svc, contexts=[(_CTX_A, "Context A"), (_CTX_B, "Context B")], signals=signals
         )
-        with p1, p2:
+        with p1, p2, _solo_scope():
             breakdown = await svc.build_breakdown("admin-user")
 
         assert breakdown["overall_status"] == STATUS_FAIL
@@ -498,7 +524,7 @@ class TestBuildBreakdown:
     async def test_zero_context_user_is_ok_with_empty_breakdown(self) -> None:
         svc = MemoryHealthService(AsyncMock())
         p1, p2 = _patched(svc, contexts=[], signals=_signals())
-        with p1, p2:
+        with p1, p2, _solo_scope():
             breakdown = await svc.build_breakdown("admin-user")
 
         assert breakdown["overall_status"] == STATUS_OK
@@ -510,13 +536,13 @@ class TestBuildBreakdown:
         svc = MemoryHealthService(AsyncMock())
         with_null = _signals(windows={None: [_report()]})
         p1, p2 = _patched(svc, contexts=[(_CTX_A, "A")], signals=with_null)
-        with p1, p2:
+        with p1, p2, _solo_scope():
             breakdown = await svc.build_breakdown("admin-user")
         ids = [e["context_id"] for e in breakdown["contexts"]]
         assert ids == [str(_CTX_A), None]
 
         p1, p2 = _patched(svc, contexts=[(_CTX_A, "A")], signals=_signals())
-        with p1, p2:
+        with p1, p2, _solo_scope():
             breakdown = await svc.build_breakdown("admin-user")
         assert [e["context_id"] for e in breakdown["contexts"]] == [str(_CTX_A)]
 
@@ -527,7 +553,10 @@ class TestBuildContextReport:
         """Ownership is a single-row lookup — un-owned (or soft-deleted, or
         unknown) resolves to None and the route maps that to a uniform 404."""
         svc = MemoryHealthService(AsyncMock())
-        with patch.object(svc, "_resolve_owned_context", new=AsyncMock(return_value=None)):
+        with (
+            _solo_scope(),
+            patch.object(svc, "_resolve_owned_context", new=AsyncMock(return_value=None)),
+        ):
             report = await svc.build_context_report("admin-user", _CTX_B)
         assert report is None
 
@@ -540,6 +569,7 @@ class TestBuildContextReport:
             usage={_CTX_A: {"recall": 2}},
         )
         with (
+            _solo_scope(),
             patch.object(svc, "_resolve_owned_context", new=AsyncMock(return_value="Context A")),
             patch.object(svc, "_fetch_signals", new=AsyncMock(return_value=signals)) as fetched,
         ):
@@ -558,7 +588,7 @@ class TestBuildContextReport:
     async def test_unattributed_scope_needs_no_ownership(self) -> None:
         svc = MemoryHealthService(AsyncMock())
         p1, p2 = _patched(svc, contexts=[], signals=_signals())
-        with p1, p2:
+        with p1, p2, _solo_scope():
             report = await svc.build_context_report("admin-user", None)
 
         assert report is not None
@@ -620,7 +650,7 @@ class TestFoldOrphanScopes:
         orphan = uuid.uuid4()
         signals = _signals(graphs={orphan: _healthy_graph(weight_violations=1)})
         p1, p2 = _patched(svc, contexts=[(_CTX_A, "A")], signals=signals)
-        with p1, p2:
+        with p1, p2, _solo_scope():
             breakdown = await svc.build_breakdown("admin-user")
 
         assert breakdown["overall_status"] == STATUS_FAIL
@@ -723,3 +753,315 @@ class TestFetchUsageCountsAttribution:
 
         assert section["status"] == STATUS_OK
         assert "write_only_store" not in _codes(section)
+
+
+class TestFetchUsageCountsBranches:
+    """#1874: the read/write classification branches of ``_fetch_usage_counts``
+    that no test pinned, plus ``remember_batch`` (#1853) as a write."""
+
+    def _db(self, usage_rows, attribution_rows):
+        db = AsyncMock()
+        first, second = MagicMock(), MagicMock()
+        first.all.return_value = usage_rows
+        second.all.return_value = attribution_rows
+        db.execute = AsyncMock(side_effect=[first, second])
+        return db
+
+    def test_watched_endpoints_cover_every_read_and_write_tool(self) -> None:
+        """The SQL filter is derived from the tool sets, so a new read or
+        write tool cannot be classified yet filtered out again."""
+        assert set(_WATCHED_ENDPOINTS) == {
+            f"mcp:{tool}" for tool in _READ_TOOLS | _WRITE_TOOLS | {"explore"}
+        }
+        assert "mcp:remember_batch" in _WATCHED_ENDPOINTS
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("lane", ["recall_upcoming", "recall_nearby"])
+    async def test_successful_read_lane_row_counts_as_a_read(self, lane: str) -> None:
+        db = self._db(
+            usage_rows=[(_CTX_A, f"mcp:{lane}", True, 2), (_CTX_A, f"mcp:{lane}", False, 1)],
+            attribution_rows=[],
+        )
+
+        usage = await MemoryHealthService(db)._fetch_usage_counts("user-1")
+
+        assert usage[_CTX_A] == {lane: 3, "successful_reads": 2}
+
+    @pytest.mark.asyncio
+    async def test_attribution_row_outside_read_tools_is_not_a_read(self) -> None:
+        db = self._db(usage_rows=[], attribution_rows=[(_CTX_A, "mcp:explore", 4)])
+
+        usage = await MemoryHealthService(db)._fetch_usage_counts("user-1")
+
+        assert usage[_CTX_A] == {"explore": 4}
+
+    @pytest.mark.asyncio
+    async def test_successful_remember_batch_is_a_write(self) -> None:
+        db = self._db(
+            usage_rows=[
+                (_CTX_A, "mcp:remember_batch", True, 2),
+                (_CTX_A, "mcp:remember_batch", False, 1),
+            ],
+            attribution_rows=[],
+        )
+
+        usage = await MemoryHealthService(db)._fetch_usage_counts("user-1")
+        section = MemoryHealthService._grade_retrieval(
+            usage[_CTX_A], _POSTURE_ON, active_memories=5
+        )
+
+        assert usage[_CTX_A] == {"remember_batch": 3, "successful_writes": 2}
+        assert section["status"] == STATUS_WARN
+        assert _codes(section) == ["write_only_store"]
+        assert section["metrics"]["remember_batch_calls"] == 3
+        assert section["metrics"]["remember_calls"] == 0
+        assert section["metrics"]["successful_write_calls"] == 2
+
+
+# --------------------------------------------------------------------------
+# DB-backed: the real SQL (endpoint filter, linked-account scope) — #1874.
+# --------------------------------------------------------------------------
+
+
+def _uid(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex[:8]}"
+
+
+async def _workspace(db, owner: str) -> uuid.UUID:
+    ws = Workspace(
+        id=uuid.uuid4(),
+        name=f"mh-ws-{uuid.uuid4().hex[:8]}",
+        plan_name="free",
+        owner_user_id=owner,
+        daily_api_limit=5000,
+        weekly_api_limit=25000,
+    )
+    db.add(ws)
+    await db.flush()
+    return ws.id
+
+
+async def _private_context(db, workspace_id: uuid.UUID, creator: str) -> uuid.UUID:
+    ctx = Context(
+        id=uuid.uuid4(),
+        workspace_id=workspace_id,
+        name=f"mh-ctx-{uuid.uuid4().hex[:8]}",
+        created_by=creator,
+        is_private=True,
+    )
+    db.add(ctx)
+    await db.flush()
+    return ctx.id
+
+
+async def _link(db, *accounts: str) -> None:
+    for account in accounts:
+        db.add(User(email=f"{account}@test.example", user_id=account, role="user"))
+    await db.flush()
+    group = uuid.uuid4()
+    for account in accounts:
+        db.add(IdentityLink(group_id=group, user_id=account, linked_by=accounts[0]))
+    await db.flush()
+
+
+async def _join(db, workspace_id, user_id, role, allowed=None) -> None:
+    db.add(
+        WorkspaceMember(
+            workspace_id=workspace_id, user_id=user_id, role=role, allowed_context_ids=allowed
+        )
+    )
+    await db.flush()
+
+
+async def _memory(db, user_id: str, workspace_id, context_id) -> None:
+    db.add(
+        Memory(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            workspace_id=workspace_id,
+            context_id=context_id,
+            summary="live",
+            content="c",
+            type="note",
+            client="pytest",
+            embedding_status="success",
+        )
+    )
+    await db.flush()
+
+
+async def _usage(db, user_id: str, workspace_id, context_id, endpoint: str, status: int) -> None:
+    db.add(
+        UsageStats(
+            user_id=user_id,
+            endpoint=endpoint,
+            method="POST",
+            status_code=status,
+            created_at=utcnow(),
+            date=utcnow().date(),
+            workspace_id=workspace_id,
+            context_id=context_id,
+        )
+    )
+    await db.flush()
+
+
+class TestRememberBatchIsAWrite:
+    """#1874: ``mcp:remember_batch`` rows reach the grading through the real
+    endpoint filter."""
+
+    async def _context_with_batch_calls(self, db, status: int) -> tuple[str, uuid.UUID]:
+        user = _uid("u")
+        ws = await _workspace(db, user)
+        ctx = await _private_context(db, ws, user)
+        await _memory(db, user, ws, ctx)
+        for _ in range(2):
+            await _usage(db, user, ws, ctx, "mcp:remember_batch", status)
+        return user, ctx
+
+    @pytest.mark.asyncio
+    async def test_batch_only_context_grades_write_only(self, db_session) -> None:
+        user, ctx = await self._context_with_batch_calls(db_session, 200)
+
+        report = await MemoryHealthService(db_session).build_context_report(user, ctx)
+
+        retrieval = report["sections"]["retrieval"]
+        assert retrieval["status"] == STATUS_WARN
+        assert _codes(retrieval) == ["write_only_store"]
+        assert retrieval["metrics"]["remember_batch_calls"] == 2
+        assert retrieval["metrics"]["successful_write_calls"] == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [429, 500])
+    async def test_failed_batch_calls_leave_the_context_idle(self, db_session, status: int) -> None:
+        user, ctx = await self._context_with_batch_calls(db_session, status)
+
+        report = await MemoryHealthService(db_session).build_context_report(user, ctx)
+
+        retrieval = report["sections"]["retrieval"]
+        assert retrieval["status"] == STATUS_OK
+        assert _codes(retrieval) == ["idle_store"]
+        assert retrieval["metrics"]["remember_batch_calls"] == 2
+        assert retrieval["metrics"]["successful_write_calls"] == 0
+
+
+class TestLinkedAccountScopeRespectsMembership:
+    """#1874: a link widens ownership only. The report covers a linked
+    account's private context when the caller can open it as itself —
+    the rule ``PermissionService.resolve_context_for_workspace_read`` applies."""
+
+    async def _linked_private_context(self, db) -> tuple[str, str, uuid.UUID, uuid.UUID]:
+        """Caller A linked to B; B owns a workspace with a private context."""
+        a, b = _uid("a"), _uid("b")
+        await _link(db, a, b)
+        ws = await _workspace(db, b)
+        ctx = await _private_context(db, ws, b)
+        await _memory(db, b, ws, ctx)
+        return a, b, ws, ctx
+
+    async def _covered(self, db, caller: str, ctx: uuid.UUID) -> bool:
+        svc = MemoryHealthService(db)
+        breakdown = await svc.build_breakdown(caller)
+        listed = str(ctx) in {e["context_id"] for e in breakdown["contexts"]}
+        detail = await svc.build_context_report(caller, ctx)
+        # The breakdown and the detail path must agree.
+        assert (detail is not None) is listed
+        return listed
+
+    @pytest.mark.asyncio
+    async def test_non_member_does_not_see_the_linked_private_context(self, db_session) -> None:
+        a, _, _, ctx = await self._linked_private_context(db_session)
+
+        assert await self._covered(db_session, a, ctx) is False
+        # The route maps this None to the uniform 404.
+        assert await MemoryHealthService(db_session).build_context_report(a, ctx) is None
+
+    @pytest.mark.asyncio
+    async def test_non_member_gets_no_linked_rows_in_unattributed(self, db_session) -> None:
+        """The excluded context's signals do not resurface in the caller's
+        unattributed bucket: they are the linked account's rows."""
+        a, _, _, _ = await self._linked_private_context(db_session)
+
+        breakdown = await MemoryHealthService(db_session).build_breakdown(a)
+
+        assert breakdown["contexts"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("allowed", [None, [], "other"])
+    async def test_member_without_an_admitting_whitelist_is_excluded(
+        self, db_session, allowed
+    ) -> None:
+        """NULL = suspended member (Migration 042), [] = no access, and a
+        whitelist naming another context omits this one."""
+        a, b, ws, ctx = await self._linked_private_context(db_session)
+        if allowed == "other":
+            allowed = [await _private_context(db_session, ws, b)]
+        await _join(db_session, ws, a, WorkspaceRole.MEMBER, allowed)
+
+        assert await self._covered(db_session, a, ctx) is False
+
+    @pytest.mark.asyncio
+    async def test_viewer_whose_whitelist_omits_the_context_is_excluded(self, db_session) -> None:
+        a, _, ws, ctx = await self._linked_private_context(db_session)
+        await _join(db_session, ws, a, WorkspaceRole.VIEWER, [])
+
+        assert await self._covered(db_session, a, ctx) is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("role", "whitelisted"),
+        [
+            (WorkspaceRole.OWNER, False),
+            (WorkspaceRole.ADMIN, False),
+            (WorkspaceRole.MEMBER, True),
+            (WorkspaceRole.VIEWER, True),
+            # A viewer with no whitelist reads every context (Migration 042).
+            (WorkspaceRole.VIEWER, False),
+        ],
+    )
+    async def test_linked_private_context_the_caller_can_open_is_covered(
+        self, db_session, role, whitelisted
+    ) -> None:
+        """No regression of #1834."""
+        a, _, ws, ctx = await self._linked_private_context(db_session)
+        await _join(db_session, ws, a, role, [ctx] if whitelisted else None)
+
+        assert await self._covered(db_session, a, ctx) is True
+        report = await MemoryHealthService(db_session).build_context_report(a, ctx)
+        # The linked account's memory is graded inside the covered context.
+        assert report["sections"]["graph"]["metrics"]["active_memories"] == 1
+
+    @pytest.mark.asyncio
+    async def test_membership_of_a_deleted_workspace_does_not_count(self, db_session) -> None:
+        a, _, ws, ctx = await self._linked_private_context(db_session)
+        await _join(db_session, ws, a, WorkspaceRole.ADMIN)
+        (await db_session.get(Workspace, ws)).deleted_at = utcnow()
+        await db_session.flush()
+
+        assert await self._covered(db_session, a, ctx) is False
+
+    @pytest.mark.asyncio
+    async def test_the_callers_own_context_needs_no_membership(self, db_session) -> None:
+        """The ``created_by == caller`` branch is unchanged."""
+        a, b = _uid("a"), _uid("b")
+        await _link(db_session, a, b)
+        ws = await _workspace(db_session, b)
+        mine = await _private_context(db_session, ws, a)
+
+        assert await self._covered(db_session, a, mine) is True
+
+    @pytest.mark.asyncio
+    async def test_link_set_and_memberships_are_resolved_once_per_report(self, db_session) -> None:
+        a, _, ws, ctx = await self._linked_private_context(db_session)
+        await _join(db_session, ws, a, WorkspaceRole.ADMIN)
+        svc = MemoryHealthService(db_session)
+
+        with patch(
+            "services.memory_health_service.linked_user_ids", wraps=linked_user_ids
+        ) as resolved:
+            await svc.build_breakdown(a)
+            assert resolved.await_count == 1
+            await svc.build_context_report(a, ctx)
+            assert resolved.await_count == 2
+            await svc.build_context_report(a, None)
+            assert resolved.await_count == 3

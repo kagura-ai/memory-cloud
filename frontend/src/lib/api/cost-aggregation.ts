@@ -80,9 +80,12 @@ export interface CostAggregationRow {
   workspace_id: string | null;
   /**
    * What an operator reads (#1861), resolved per response like the sleep
-   * reports' ``context_name`` / ``user_email``. ``null`` when the workspace
-   * row is gone or the user_id is a connector / service identity with no
-   * users row — render the shortened id instead.
+   * reports' ``context_name`` / ``user_email``. ``workspace_name`` is
+   * ``null`` when the workspace row is gone or soft-deleted. ``user_email``
+   * is ``null`` when the user_id is a connector / service identity with no
+   * users row, or — on the workspace-scoped route — an account that is not
+   * a current member of that workspace (#1862). Render the shortened id
+   * instead.
    */
   workspace_name: string | null;
   user_id: string;

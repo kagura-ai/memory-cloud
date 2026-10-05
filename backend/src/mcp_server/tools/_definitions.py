@@ -150,8 +150,8 @@ Manual: guide(["remember"]).""",
         },
         {
             "name": "remember_batch",
-            "description": """Store up to 50 memories in one call — the end-of-session save. Each item takes remember's arguments except context_id (the batch's applies) and is validated and limited like a single remember. atomic=false (default): items are written independently and reported per item. atomic=true: all or nothing — a failing item, or a dedupe='check' candidate, rolls the batch back and nothing is written.
-Returns: {status: success|partial|duplicate_candidate, results: [{index, status: success|error|skipped|duplicate_candidate, memory_id?, scope?, persistence?, lint?, error?, message?, candidate?}], count, succeeded, candidates, failed, context_id, context_name, context_display_name, context_is_private, context_is_locked}.
+            "description": """Store up to 50 memories in one call — the end-of-session save. Each item takes remember's arguments except context_id, dedupe, tags_normalize and verbose (the batch's apply) and is validated and limited like a single remember; an unknown item key is that item's invalid_argument error. atomic=false (default): items are written independently and reported per item. atomic=true: all or nothing — a failing item, or a dedupe='check' candidate, rolls the batch back and nothing is written.
+Returns: {status: success|partial|duplicate_candidate, results: [{index, status: success|error|skipped|duplicate_candidate, memory_id?, scope?, persistence?, lint?, error?, message?, candidate?}], count, succeeded, candidates, failed, skipped, context_id, context_name, context_display_name, context_is_private, context_is_locked}.
 Manual: guide(["remember_batch"]).""",
             "inputSchema": {
                 "type": "object",
@@ -166,7 +166,7 @@ Manual: guide(["remember_batch"]).""",
                         "minItems": 1,
                         "maxItems": 50,
                         "items": {"type": "object"},
-                        "description": "One object per memory with remember's arguments (summary, content, type required; tags, importance, context_summary, details, supersedes, ... optional; no context_id).",
+                        "description": "One object per memory with remember's arguments (summary, content, type required; tags, importance, context_summary, details, supersedes, ... optional). No context_id, dedupe, tags_normalize or verbose per item; undeclared keys are refused.",
                     },
                     "atomic": {
                         "type": "boolean",
@@ -1896,7 +1896,7 @@ Manual: guide(["list"]).""",
                     },
                     "filters": {
                         "type": "object",
-                        "description": "Exact-match filters, ANDed: type, scope, source_type, delivery_mode (string or list), tags (+ tags_match any|all, tags_normalize), importance {gte|lte|gt|lt}, created_after/before, updated_after/before (ISO 8601), source_uri_prefix, trust_tier='trusted', details.<key> (scalar). near/within: use recall_nearby.",
+                        "description": "Exact-match filters, ANDed: type, scope, source_type, delivery_mode (string or list), tags (+ tags_match any|all, tags_normalize), importance {gte|lte|gt|lt}, created_after/before, updated_after/before (ISO 8601), source_uri_prefix, trust_tier='trusted', details.<key> (scalar; same JSON type, numbers as written: 2 is not 2.0 or \"2\"). near/within: use recall_nearby.",
                     },
                     "order_by": {
                         "type": "string",
@@ -1933,8 +1933,8 @@ Manual: guide(["list"]).""",
         {
             "name": "changes_since",
             "readOnly": True,
-            "description": """List what changed in a context since a time, oldest first: created, updated (an edit after the write), superseded (a supersedes edge; superseded_by is the newer memory) and forgotten (soft-deleted, while the row still exists). Use it at session start for "what changed since I was last here?"; it is a deterministic log, not a search.
-Returns: {status, changes: [{memory_id, kind, at, summary, superseded_by?}], count, has_more, next_cursor, since, until, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. next_cursor is a keyset token: pages never shift when rows are written after the first read.
+            "description": """List what changed in a context since a time, oldest first: created, updated (an edit, a scope promotion or a Sleep maintenance change (importance re-evaluation, dedup tag merge, rollback); never the initial write or an embedding retry), superseded (a supersedes edge; superseded_by is the newer memory) and forgotten (soft-deleted, while the row still exists). Events of a forgotten memory omit summary: memory_id / kind / at only, plus superseded_by on a superseded event. Use it at session start for "what changed since I was last here?"; it is a deterministic log, not a search.
+Returns: {status, changes: [{memory_id, kind, at, summary?, superseded_by?}], count, has_more, next_cursor, since, until, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. next_cursor is a keyset token: pages never shift when rows are written after the first read.
 Manual: guide(["changes_since"]).""",
             "inputSchema": {
                 "type": "object",

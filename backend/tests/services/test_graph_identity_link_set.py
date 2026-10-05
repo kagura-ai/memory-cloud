@@ -3,7 +3,9 @@
 Recall and the memory list already return a linked account's memories there;
 graph stats/data, ``list_edges`` and ``explore`` filtered edges by the caller
 alone, so a seed written by the linked account looked ``seed_not_in_graph``.
-Writes, deletes and Sleep stay per account.
+Edge writes and deletes, and the Sleep / consolidation jobs, stay per account.
+The memory-health report is a read: inside a context it covers, it counts the
+link set's sleep windows, usage and read attributions (#1834, #1874).
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from auth.workspace_roles import WorkspaceRole
 from models.auth import (
     Context,
     ContextReadAttribution,
@@ -21,8 +24,14 @@ from models.auth import (
     UsageStats,
     User,
     Workspace,
+    WorkspaceMember,
 )
-from models.memory import DELETED_BY_SLEEP_MERGE, Memory
+from models.memory import (
+    DELETED_BY_SLEEP_MERGE,
+    EDGE_ORIGIN_HEBBIAN,
+    EDGE_ORIGIN_SEMANTIC,
+    Memory,
+)
 from models.schemas import ExploreRequest, MemoryResponse
 from neural.activation import ActivationSpreader
 from neural.config import NeuralMemoryConfig
@@ -55,6 +64,13 @@ async def _private_scope(db, owner: str) -> tuple[UUID, UUID]:
     db.add(ctx)
     await db.flush()
     return ws.id, ctx.id
+
+
+async def _join_as_admin(db, workspace_id: UUID, user_id: str) -> None:
+    """#1874: a link widens ownership only — the health report covers a linked
+    account's private context where the caller is itself a member."""
+    db.add(WorkspaceMember(workspace_id=workspace_id, user_id=user_id, role=WorkspaceRole.ADMIN))
+    await db.flush()
 
 
 async def _link(db, *accounts: str) -> None:
@@ -319,6 +335,63 @@ class TestParallelEdgesForOnePair:
         assert await repo.get_node_degree(g["b"], m1) == (0, 1)
 
     @pytest.mark.asyncio
+    async def test_stats_aggregate_over_pairs(self, db_session, parallel_graph):
+        """#1895: the count and the weight aggregates stand on one row per
+        pair — the strongest — like the edge list next to them."""
+        g = parallel_graph
+        repo = NeuralEdgeRepository(db_session)
+        scope = {"workspace_id": str(g["ws"]), "context_id": str(g["ctx"])}
+
+        stats = await repo.get_stats(g["owners"], **scope)
+
+        # (M1, M2) once on B's 0.9 row, plus A's 0.2 edge to M3.
+        assert stats["total_edges"] == 2
+        assert stats["avg_weight"] == pytest.approx((0.9 + 0.2) / 2)
+        assert stats["max_weight"] == pytest.approx(0.9)
+        assert stats["min_weight"] == pytest.approx(0.2)
+
+        service_stats = await _graph(
+            db_session, g["a"], g["ws"], g["ctx"], owner_ids=g["owners"]
+        ).stats()
+        assert service_stats["total_edges"] == 2
+        assert service_stats["total_nodes"] == 3
+        assert service_stats["avg_edge_weight"] == pytest.approx(0.55)
+
+        # Per account and unfiltered (shared-context) reads still count rows.
+        mine = await repo.get_stats(g["a"], **scope)
+        assert mine["total_edges"] == 2
+        assert mine["avg_weight"] == pytest.approx((0.4 + 0.2) / 2)
+        assert (await repo.get_stats(g["b"], **scope))["total_edges"] == 1
+        assert (await repo.get_stats(frozenset({g["a"]}), **scope))["total_edges"] == 2
+        every_row = await repo.get_stats(None, **scope)
+        assert every_row["total_edges"] == 3
+        assert every_row["avg_weight"] == pytest.approx((0.4 + 0.9 + 0.2) / 3)
+
+    @pytest.mark.asyncio
+    async def test_top_connected_nodes_count_the_pair_once(self, db_session, parallel_graph):
+        """#1895: the ranking degree is the number of distinct neighbours, as
+        ``get_node_degree`` reports it."""
+        g = parallel_graph
+        m1, m2, m3 = g["m"]
+        repo = NeuralEdgeRepository(db_session)
+        scope = {"workspace_id": str(g["ws"]), "context_id": str(g["ctx"])}
+
+        top = await repo.get_top_connected_nodes(user_id=g["owners"], **scope)
+
+        assert {node: int(degree) for node, degree in top} == {m1: 2, m2: 1, m3: 1}
+        assert top[0][0] == m1
+        for node in (m1, m2, m3):
+            assert dict(top)[node] == sum(await repo.get_node_degree(g["owners"], node))
+
+        # Per account and unfiltered (shared-context) reads still count rows.
+        mine = await repo.get_top_connected_nodes(user_id=g["a"], **scope)
+        assert {node: int(degree) for node, degree in mine} == {m1: 2, m2: 1, m3: 1}
+        theirs = await repo.get_top_connected_nodes(user_id=g["b"], **scope)
+        assert {node: int(degree) for node, degree in theirs} == {m1: 1, m2: 1}
+        every_row = await repo.get_top_connected_nodes(user_id=None, **scope)
+        assert {node: int(degree) for node, degree in every_row} == {m1: 3, m2: 2, m3: 1}
+
+    @pytest.mark.asyncio
     async def test_the_spread_does_not_double_count_the_pair(self, db_session, parallel_graph):
         """The spread sums what reaches a node over its incoming edges, so two
         rows for M1 -> M2 would pass M2's neighbour A's and B's weight added
@@ -388,6 +461,40 @@ class TestGraphDataRouteWithParallelEdges:
         assert {n.id: n.degree for n in data.nodes} == {str(m1): 2, str(m2): 1, str(m3): 1}
         assert data.stats["total_edges"] == 2
         assert data.stats["filtered_edges"] == 2
+
+
+class TestGraphStatsRouteWithParallelEdges:
+    @pytest.mark.asyncio
+    async def test_the_pair_is_one_edge_in_stats_and_top_connections(
+        self, db_session, parallel_graph
+    ):
+        """#1895: ``GET /graph/stats`` agrees with the edge list — one edge for
+        the shared pair, and top-connection degrees that count it once."""
+        from api.routes.graph import get_graph_stats
+
+        g = parallel_graph
+        m1, m2, m3 = g["m"]
+        context = await db_session.get(Context, g["ctx"])
+
+        with patch(
+            "api.routes.graph.PermissionService.resolve_context_for_workspace_read",
+            new=AsyncMock(return_value=context),
+        ):
+            response = await get_graph_stats(
+                user={"user_id": g["a"]}, db=db_session, context_id=g["ctx"]
+            )
+
+        stats = response.stats
+        assert stats.total_edges == 2
+        assert stats.total_nodes == 3
+        assert stats.avg_edge_weight == pytest.approx(0.55)
+        assert stats.max_edge_weight == pytest.approx(0.9)
+        assert stats.min_edge_weight == pytest.approx(0.2)
+        assert {c["node_id"]: c["degree"] for c in stats.top_connections} == {
+            str(m1): 2,
+            str(m2): 1,
+            str(m3): 1,
+        }
 
 
 class TestMemoryServiceInAPrivateContext:
@@ -476,13 +583,15 @@ class TestMemoryHealthCoversTheSet:
         a, b, c = f"a-{uuid4().hex[:6]}", f"b-{uuid4().hex[:6]}", f"c-{uuid4().hex[:6]}"
         await _link(db_session, a, b)
         _, mine = await _private_scope(db_session, a)
-        _, linked = await _private_scope(db_session, b)
+        ws_linked, linked = await _private_scope(db_session, b)
         _, other = await _private_scope(db_session, c)
         # A link grants ownership of PRIVATE contexts, not membership: B's
         # shared context stays out of A's report.
         ws_shared, shared = await _private_scope(db_session, b)
         (await db_session.get(Context, shared)).is_private = False
         await db_session.flush()
+        await _join_as_admin(db_session, ws_linked, a)
+        await _join_as_admin(db_session, ws_shared, a)
 
         owned = {cid for cid, _ in await MemoryHealthService(db_session)._fetch_owned_contexts(a)}
 
@@ -497,6 +606,7 @@ class TestMemoryHealthCoversTheSet:
         a, b, m = f"a-{uuid4().hex[:6]}", f"b-{uuid4().hex[:6]}", f"m-{uuid4().hex[:6]}"
         await _link(db_session, a, b)
         ws, linked = await _private_scope(db_session, b)
+        await _join_as_admin(db_session, ws, a)
         _, elsewhere = await _private_scope(db_session, b)
         (await db_session.get(Context, elsewhere)).is_private = False
         ws_a, mine_shared = await _private_scope(db_session, a)
@@ -592,3 +702,47 @@ class TestMemoryHealthCoversTheSet:
         assert usage[linked]["successful_reads"] == 2
         assert elsewhere not in usage
         assert mine_shared not in usage
+
+    @pytest.mark.asyncio
+    async def test_the_graph_signal_counts_a_parallel_pair_once(self, db_session, parallel_graph):
+        """#1895: A's and B's rows for (M1, M2) are one edge of the ``graphs``
+        signal, filed under the origin of the row a link-set read stands for
+        (the strongest). Weight violations stay per row."""
+        g = parallel_graph
+        m1, m2, _ = g["m"]
+        repo = NeuralEdgeRepository(db_session)
+        # B's row is the strongest; give it a different origin than A's.
+        theirs = await repo.get_edge(g["b"], m1, m2)
+        theirs.origin = EDGE_ORIGIN_SEMANTIC
+        await db_session.flush()
+        svc = MemoryHealthService(db_session)
+        owned_ids = frozenset(cid for cid, _ in await svc._fetch_owned_contexts(g["a"]))
+        assert g["ctx"] in owned_ids
+
+        for kwargs in ({}, {"scope": g["ctx"]}):
+            graph = (await svc._fetch_signals(g["a"], owned_ids=owned_ids, **kwargs))["graphs"][
+                g["ctx"]
+            ]
+            assert graph["edges_by_origin"] == {EDGE_ORIGIN_SEMANTIC: 1, EDGE_ORIGIN_HEBBIAN: 1}
+            assert graph["total_edges"] == 2
+            assert graph["active_memories"] == 3
+            assert graph["edges_per_memory"] == pytest.approx(round(2 / 3, 4))
+            assert graph["weight_violations"] == 0
+
+        # B reads the same context through the link: the same numbers.
+        b_owned = frozenset(cid for cid, _ in await svc._fetch_owned_contexts(g["b"]))
+        theirs_view = (await svc._fetch_signals(g["b"], owned_ids=b_owned))["graphs"][g["ctx"]]
+        assert theirs_view["edges_by_origin"] == graph["edges_by_origin"]
+
+        # Without the link set (no owned contexts) the caller's own rows count.
+        own = (await svc._fetch_signals(g["a"]))["graphs"][g["ctx"]]
+        assert own["edges_by_origin"] == {EDGE_ORIGIN_HEBBIAN: 2}
+
+        # A violation is a fact about a stored row, so the weaker row of a pair
+        # is not hidden behind the stronger one. The table's CHECK rejects a
+        # real out-of-range weight; move the bound instead: A's 0.4 row for the
+        # pair and A's 0.2 edge fall below it, B's 0.9 row does not.
+        with patch("services.memory_health_service._EDGE_WEIGHT_MIN", 0.5):
+            graph = (await svc._fetch_signals(g["a"], owned_ids=owned_ids))["graphs"][g["ctx"]]
+        assert graph["weight_violations"] == 2
+        assert graph["total_edges"] == 2

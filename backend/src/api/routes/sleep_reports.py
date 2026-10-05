@@ -56,8 +56,10 @@ class SleepReportSummary(TZAwareBaseModel):
     # #1201: email of the user whose partition this run belongs to. Sleep runs
     # per (user_id, workspace_id, context_id), so a workspace-scoped list can
     # show the same context on multiple rows; this disambiguates them. None
-    # when the user_id is a non-human/connector identity absent from ``users``
-    # (the frontend falls back to a shortened user_id).
+    # when the user_id is a non-human/connector identity absent from ``users``,
+    # or — on the workspace-scoped routes (#1882) — an account that is not a
+    # current member of that workspace (the frontend falls back to a shortened
+    # user_id).
     user_email: str | None = None
     status: str
     started_at: datetime
@@ -311,9 +313,10 @@ async def workspace_list_sleep_reports(
 
     # #1201: batch-resolve user_id → email so same-named contexts on different
     # partitions are distinguishable. None → the frontend falls back to a
-    # shortened user_id.
+    # shortened user_id. #1882: current members of this workspace only — a
+    # report outlives the membership of the account it ran for.
     user_ids = {r.user_id for r in reports}  # type: ignore[misc]
-    uid_map = await service.resolve_user_labels(user_ids)
+    uid_map = await service.resolve_user_labels(user_ids, member_of=workspace_id)
     for r in reports:
         r.user_email = uid_map.get(r.user_id)  # type: ignore[attr-defined]
 
@@ -365,7 +368,8 @@ async def workspace_get_sleep_report_detail(
     report.context_name = context_name  # type: ignore[attr-defined]
     report.context_deleted = context_deleted  # type: ignore[attr-defined]
     # #1201: resolve the owning user's email (None → frontend fallback).
-    uid_map = await service.resolve_user_labels({report.user_id})
+    # #1882: only while that user is still a member of this workspace.
+    uid_map = await service.resolve_user_labels({report.user_id}, member_of=workspace_id)
     report.user_email = uid_map.get(report.user_id)  # type: ignore[attr-defined]
     report_detail = SleepReportDetail.model_validate(report, from_attributes=True)
 

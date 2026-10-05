@@ -25,8 +25,9 @@ export interface SleepReportSummary {
   // #1201: email of the user whose partition this run belongs to. Always present
   // on the wire (computed fresh per response, mirroring context_name — hence
   // required, not optional). null when the user_id is a non-human/connector
-  // identity absent from the users table — the UI then falls back to a shortened
-  // user_id (see formatUserPartitionLabel).
+  // identity absent from the users table, or — on the workspace-scoped routes
+  // (#1882) — an account that is no longer a member of that workspace. The UI
+  // then falls back to a shortened user_id (see formatUserPartitionLabel).
   user_email: string | null;
   status: SleepStatus;
   started_at: string;

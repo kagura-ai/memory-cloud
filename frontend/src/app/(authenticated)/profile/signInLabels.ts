@@ -9,8 +9,6 @@
 
 import { hasPasswordSignIn, type User as AuthUser } from "@/lib/auth/auth";
 
-export { hasPasswordSignIn };
-
 /** OAuth providers the profile page can name, in display order. */
 const PROVIDER_LABEL_KEYS = {
   google: "signInMethodGoogle",
@@ -24,13 +22,15 @@ function isKnownProvider(provider: string): provider is KnownProvider {
 }
 
 /**
- * Issue #514 / #1751: derive the i18n label for how the user can sign in.
+ * Issue #514 / #1751 / #1884: derive the i18n label for how the user can
+ * sign in.
  *
- * - CLI admin accounts (`auth_method === "password"`) keep the single
- *   "Password" label.
- * - Everyone else gets every linked OAuth provider (Google first), plus
- *   "Email and password" when a password is set, joined by the localized
- *   separator.
+ * - Every linked OAuth provider (Google first), plus "Email and password"
+ *   when a password is set, joined by the localized separator.
+ * - `auth_method` only records how the account was created, so it does not
+ *   pick the label: a password-origin account that later links a provider
+ *   names it too, and stops naming the password once it is removed. One
+ *   with no linked provider reads "Email and password" alone.
  * - `linkedProviders` is the `/me/account/providers` list; until it loads (or
  *   if it fails) the legacy `auth_provider` pointer stands in for it.
  * - Nothing to name (pre-#361 OAuth row with no provider) → "Other".
@@ -40,7 +40,6 @@ export function getSignInMethodLabel(
   t: (key: string) => string,
   linkedProviders: readonly string[] | null = null,
 ): string {
-  if (user.auth_method === "password") return t("signInMethodPassword");
   const providers =
     linkedProviders ?? (user.auth_provider ? [user.auth_provider] : []);
   const labels = (Object.keys(PROVIDER_LABEL_KEYS) as KnownProvider[])
