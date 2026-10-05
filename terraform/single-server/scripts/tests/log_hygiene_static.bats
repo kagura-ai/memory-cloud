@@ -237,15 +237,21 @@ PYEOF
     [ "$log_at" -lt "$site_at" ]
 }
 
-@test "scrub: request>uri is rewritten by ONE regexp covering the three invite URL shapes" {
+@test "scrub: request>uri is rewritten by ONE regexp covering the six invite URL shapes" {
     for block in "$(log_block "$TPL")" "$(default_log_block "$TPL")"; do
         run grep -cE '^[[:space:]]*request>uri[[:space:]]' <<< "$block"
         [ "$output" -eq 1 ]
         line="$(grep -E '^[[:space:]]*request>uri[[:space:]]' <<< "$block")"
         [[ "$line" == *"request>uri regexp "* ]]
+        # Closed-beta invite links (#1581).
         [[ "$line" == *"(/join/)"* ]]
         [[ "$line" == *"(/beta-invites/)"*"(/preview)"* ]]
         [[ "$line" == *"([?&]invite=)"* ]]
+        # Workspace invitation links: the landing page, the preview API call,
+        # and the landing URL percent-encoded in the OAuth login's return_to.
+        [[ "$line" == *"(/invite/)"* ]]
+        [[ "$line" == *"(/v1/invitations/)"* ]]
+        [[ "$line" == *"(%2[Ff]invite%2[Ff])"* ]]
         # Plain `regexp` only: multi_regexp needs a newer Caddy than a
         # long-lived host is guaranteed to run under the floating
         # caddy:2-alpine tag.
