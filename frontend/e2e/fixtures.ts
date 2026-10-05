@@ -49,15 +49,14 @@ export async function assertNoColorContrastViolations(
   // as "the same screen, scanned again".
   const url = page.url();
   for (let rescans = 0; ; rescans++) {
+    // Only the scan sits in the `try`: the `catch` classifies errors by
+    // message, and a violation's message embeds page HTML and text, which
+    // may contain one of the navigation phrases (#1884).
+    let results: Awaited<ReturnType<AxeBuilder["analyze"]>>;
     try {
-      const results = await new AxeBuilder({ page })
+      results = await new AxeBuilder({ page })
         .options({ runOnly: ["color-contrast"] })
         .analyze();
-      expect(
-        results.violations,
-        JSON.stringify(results.violations, null, 2),
-      ).toEqual([]);
-      return;
     } catch (error) {
       if (!isNavigationError(error)) throw error;
       if (rescans >= RELOAD_RESCANS) {
@@ -69,7 +68,13 @@ export async function assertNoColorContrastViolations(
       await page.waitForLoadState("domcontentloaded");
       expect(page.url(), "the page navigated away during the scan").toBe(url);
       await waitForLandmark(page, landmark);
+      continue;
     }
+    expect(
+      results.violations,
+      JSON.stringify(results.violations, null, 2),
+    ).toEqual([]);
+    return;
   }
 }
 

@@ -22,8 +22,8 @@ import {
   getSignInMethodLabel,
   getProviderName,
   getRefreshProviderName,
-  hasPasswordSignIn,
 } from "./signInLabels";
+import { hasPasswordSignIn } from "@/lib/auth/auth";
 
 // ---------- Mocks ------------------------------------------------------------
 
@@ -167,13 +167,13 @@ describe("getSignInMethodLabel", () => {
     ).toBe("signInMethodGitHub");
   });
 
-  it("returns Password label for password auth_method (provider is ignored)", () => {
+  it("returns the email/password label for an unlinked password account", () => {
     expect(
       getSignInMethodLabel(
         { auth_method: "password", auth_provider: null },
         stableTranslator,
       ),
-    ).toBe("signInMethodPassword");
+    ).toBe("signInMethodEmailPassword");
   });
 
   it("returns Other label for legacy OAuth user with null provider", () => {
@@ -235,14 +235,34 @@ describe("getSignInMethodLabel — email and password (#1751)", () => {
     ).toBe("signInMethodGoogle, signInMethodEmailPassword");
   });
 
-  it("keeps the CLI admin label for auth_method=password", () => {
+  it("keeps a single password label for an unlinked password account", () => {
     expect(
       getSignInMethodLabel(
         { auth_method: "password", auth_provider: null, has_password: true },
         stableTranslator,
         [],
       ),
-    ).toBe("signInMethodPassword");
+    ).toBe("signInMethodEmailPassword");
+  });
+
+  it("names the linked provider on a password-origin account (#1884)", () => {
+    expect(
+      getSignInMethodLabel(
+        { auth_method: "password", has_password: true },
+        stableTranslator,
+        ["google"],
+      ),
+    ).toBe("signInMethodGoogle, signInMethodEmailPassword");
+  });
+
+  it("drops the password from a password-origin account once it is removed (#1884)", () => {
+    expect(
+      getSignInMethodLabel(
+        { auth_method: "password", has_password: false },
+        stableTranslator,
+        ["google"],
+      ),
+    ).toBe("signInMethodGoogle");
   });
 
   it("names only known providers; an unknown one alone reads Other", () => {
@@ -389,7 +409,7 @@ describe("ProfilePage — sign-in method section (#514)", () => {
     render(<ProfilePage />);
 
     const input = screen.getByLabelText("signInMethod") as HTMLInputElement;
-    expect(input.value).toBe("signInMethodPassword");
+    expect(input.value).toBe("signInMethodEmailPassword");
   });
 });
 

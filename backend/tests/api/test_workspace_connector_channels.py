@@ -17,7 +17,7 @@ from utils.exceptions import ConnectorScopeError, ExternalServiceError, NotFound
 
 
 class _FakeRedis:
-    """Minimal async Redis stub: setex / get over a dict."""
+    """Minimal async Redis stub: setex / get / delete over a dict."""
 
     def __init__(self, initial=None):
         self.store = dict(initial or {})
@@ -27,6 +27,9 @@ class _FakeRedis:
 
     async def get(self, key):
         return self.store.get(key)
+
+    async def delete(self, *keys):
+        return sum(1 for key in keys if self.store.pop(key, None) is not None)
 
 
 def _slack_response(*, status_code=200, json_body=None, headers=None):
@@ -396,6 +399,127 @@ async def test_public_only_marker_skips_the_mixed_request():
     assert http_client.get.call_args.kwargs["params"]["types"] == "public_channel"
     assert [c.id for c in result.channels] == ["C02"]
     assert result.missing_scopes == ["groups:read"]
+
+
+@pytest.mark.asyncio
+async def test_first_page_probes_the_mixed_listing_despite_the_marker():
+    """#1880: the marker only shortcuts cursor pages. The first page always
+    asks for the mixed listing, so a grant widened by a reconnect is seen on
+    the next dialog open however often later pages re-arm the marker; a
+    mixed page then removes the marker."""
+    admin = _admin()
+    connector_id = uuid4()
+    types_key = f"slack_channels_types:{connector_id}"
+    mixed = _slack_response(
+        json_body={
+            "ok": True,
+            "channels": [
+                {"id": "C01", "name": "general", "is_private": False, "is_member": True},
+                {"id": "G01", "name": "leadership", "is_private": True, "is_member": True},
+            ],
+            "response_metadata": {"next_cursor": "NEXT"},
+        }
+    )
+    ctx, http_client = _http_ctx(mixed)
+    redis = _FakeRedis({types_key: "public_channel"})
+
+    with (
+        patch("api.routes.workspace_connectors.ConnectorProvisioningService") as svc,
+        patch("services.slack_channels.httpx.AsyncClient", return_value=ctx),
+        patch("api.routes.workspace_connectors.get_cache", AsyncMock(side_effect=redis.get)),
+        patch("api.routes.workspace_connectors.get_redis_client", return_value=redis),
+    ):
+        svc.return_value.get_connector = AsyncMock(return_value=_connector())
+        result = await list_connector_channels(
+            connector_id, admin, cursor=None, q=None, db=MagicMock()
+        )
+
+    http_client.get.assert_awaited_once()
+    assert http_client.get.call_args.kwargs["params"]["types"] == "public_channel,private_channel"
+    assert [c.id for c in result.channels] == ["C01", "G01"]
+    assert result.missing_scopes == []
+    assert types_key not in redis.store  # the widened grant clears the marker
+    assert json.loads(redis.store[f"slack_channels:{connector_id}:"])["private_listing"] is True
+
+
+@pytest.mark.asyncio
+async def test_first_page_probe_still_denied_keeps_the_marker():
+    """#1880: the first-page probe of a still-narrow grant costs the mixed
+    request plus the public-only retry, and the marker stays armed for the
+    cursor pages that follow."""
+    admin = _admin()
+    connector_id = uuid4()
+    types_key = f"slack_channels_types:{connector_id}"
+    denied = _slack_response(
+        json_body={
+            "ok": False,
+            "error": "missing_scope",
+            "needed": "channels:read,groups:read,mpim:read,im:read",
+            "provided": "channels:history,channels:read,chat:write",
+        }
+    )
+    public_only = _slack_response(
+        json_body={
+            "ok": True,
+            "channels": [{"id": "C01", "name": "general", "is_private": False, "is_member": True}],
+            "response_metadata": {"next_cursor": "NEXT"},
+        }
+    )
+    ctx, http_client = _http_ctx(denied)
+    http_client.get = AsyncMock(side_effect=[denied, public_only])
+    redis = _FakeRedis({types_key: "public_channel"})
+
+    with (
+        patch("api.routes.workspace_connectors.ConnectorProvisioningService") as svc,
+        patch("services.slack_channels.httpx.AsyncClient", return_value=ctx),
+        patch("api.routes.workspace_connectors.get_cache", AsyncMock(side_effect=redis.get)),
+        patch("api.routes.workspace_connectors.get_redis_client", return_value=redis),
+    ):
+        svc.return_value.get_connector = AsyncMock(return_value=_connector())
+        result = await list_connector_channels(
+            connector_id, admin, cursor=None, q=None, db=MagicMock()
+        )
+
+    assert [call.kwargs["params"]["types"] for call in http_client.get.await_args_list] == [
+        "public_channel,private_channel",
+        "public_channel",
+    ]
+    assert result.missing_scopes == ["groups:read"]
+    assert redis.store[types_key] == "public_channel"
+
+
+@pytest.mark.asyncio
+async def test_mixed_cursor_page_removes_a_stale_marker():
+    """#1880: any page that comes back from the mixed listing removes the
+    marker — here a cursor page fetched after the marker's read missed."""
+    admin = _admin()
+    connector_id = uuid4()
+    types_key = f"slack_channels_types:{connector_id}"
+    mixed = _slack_response(
+        json_body={
+            "ok": True,
+            "channels": [{"id": "G02", "name": "board", "is_private": True, "is_member": True}],
+            "response_metadata": {"next_cursor": ""},
+        }
+    )
+    ctx, http_client = _http_ctx(mixed)
+    redis = _FakeRedis({types_key: "public_channel"})
+
+    with (
+        patch("api.routes.workspace_connectors.ConnectorProvisioningService") as svc,
+        patch("services.slack_channels.httpx.AsyncClient", return_value=ctx),
+        # The marker read misses (Redis blip / expiry race); the write side
+        # still sees the stale key.
+        patch("api.routes.workspace_connectors.get_cache", AsyncMock(return_value=None)),
+        patch("api.routes.workspace_connectors.get_redis_client", return_value=redis),
+    ):
+        svc.return_value.get_connector = AsyncMock(return_value=_connector())
+        result = await list_connector_channels(
+            connector_id, admin, cursor="PAGE2", q=None, db=MagicMock()
+        )
+
+    assert result.missing_scopes == []
+    assert types_key not in redis.store
 
 
 @pytest.mark.asyncio

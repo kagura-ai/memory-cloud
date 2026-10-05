@@ -1221,7 +1221,7 @@ describe("ContextsPage workspace scope, owner and filter (#1755)", () => {
     expect(screen.queryByText("subtitle")).toBeNull();
   });
 
-  it("shows an Owner column: You for own contexts, the creator's name for shared ones, a dash when unknown", async () => {
+  it("shows a Created by column: You for own contexts, the creator's name for shared ones, a dash when unknown", async () => {
     setupWithOwnedAndSharedContexts();
     render(<ContextsPage />);
     await waitFor(() => expect(screen.getByText("Mine")).toBeInTheDocument());
@@ -1234,7 +1234,7 @@ describe("ContextsPage workspace scope, owner and filter (#1755)", () => {
     expect(rowOf("Mine")).toHaveTextContent("ownerYou");
     expect(rowOf("Mine")).not.toHaveTextContent("Me Myself");
     expect(rowOf("From Bob")).toHaveTextContent("Bob");
-    // The Owner column is the second cell (Last Activity also shows a dash).
+    // The Created by column is the second cell (Last Activity also shows a dash).
     expect(within(rowOf("Legacy")).getAllByRole("cell")[1]).toHaveTextContent(
       "—",
     );
@@ -1310,6 +1310,11 @@ describe("ContextsPage workspace scope, owner and filter (#1755)", () => {
     expect(screen.queryByText("Mine")).toBeNull();
     expect(screen.getByText("ownerFilter.empty")).toBeInTheDocument();
     expect(screen.queryByText("noContextsYet")).toBeNull();
+    // #1884: the body is its own message, not the filter group's aria-label.
+    expect(
+      screen.getByText("ownerFilter.emptyDescription"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("ownerFilter.label")).toBeNull();
 
     // The empty state offers the way back.
     fireEvent.click(screen.getByRole("button", { name: "ownerFilter.showAll" }));

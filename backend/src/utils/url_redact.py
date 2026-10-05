@@ -12,12 +12,14 @@ had the same class of bug for the Redis URL.
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlsplit, urlunparse
 
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
 _REDACTED = "<redacted-url>"
+# What ``redis_location`` returns when it has no host to show (#1898).
+_REDIS_LOCATION_UNKNOWN = "the configured REDIS_URL"
 
 # #1581: closed-beta invite tokens travel in URLs by API contract — the public
 # preview's PATH, the OAuth login's QUERY, and the frontend landing URL itself.
@@ -167,3 +169,43 @@ def redact_generic_url(url: str) -> str:
         return _REDACTED
     except (ValueError, TypeError):
         return _REDACTED
+
+
+def redis_location(url: str) -> str:
+    """Return ``host:port`` of a Redis URL, for log lines and operator messages.
+
+    Built from the parsed host and port only. A Redis URL can carry its
+    password in the userinfo (``redis://:pw@host``) or in the query
+    (``redis://host:6379/0?password=pw``, which redis-py accepts), so neither
+    part — nor the path — is ever returned (#1866, #1898). Use this, not
+    :func:`redact_generic_url` (which keeps the query), wherever the location
+    of ``REDIS_URL`` is logged or printed.
+
+    Args:
+        url: A Redis connection URL (the value of ``REDIS_URL``).
+
+    Returns:
+        ``host:port``, or ``host`` when the URL names no port (an IPv6 host
+        keeps its brackets). The fixed text ``the configured REDIS_URL`` when
+        the URL has no host (a ``unix://`` socket, a scheme-less string, an
+        empty value) or does not parse.
+
+    Example:
+        >>> redis_location("redis://:s3cret@redis:6379/0")
+        'redis:6379'
+        >>> redis_location("redis://redis:6379/0?password=s3cret")
+        'redis:6379'
+        >>> redis_location("unix:///run/redis.sock?password=s3cret")
+        'the configured REDIS_URL'
+    """
+    try:
+        parts = urlsplit(url)
+        # ``.port`` raises ValueError on a port that is not a number.
+        host, port = parts.hostname, parts.port
+    except (ValueError, TypeError, AttributeError):
+        return _REDIS_LOCATION_UNKNOWN
+    if not host:
+        return _REDIS_LOCATION_UNKNOWN
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{host}:{port}" if port is not None else host

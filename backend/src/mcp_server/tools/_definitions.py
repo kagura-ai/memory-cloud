@@ -1896,7 +1896,7 @@ Manual: guide(["list"]).""",
                     },
                     "filters": {
                         "type": "object",
-                        "description": "Exact-match filters, ANDed: type, scope, source_type, delivery_mode (string or list), tags (+ tags_match any|all, tags_normalize), importance {gte|lte|gt|lt}, created_after/before, updated_after/before (ISO 8601), source_uri_prefix, trust_tier='trusted', details.<key> (scalar). near/within: use recall_nearby.",
+                        "description": "Exact-match filters, ANDed: type, scope, source_type, delivery_mode (string or list), tags (+ tags_match any|all, tags_normalize), importance {gte|lte|gt|lt}, created_after/before, updated_after/before (ISO 8601), source_uri_prefix, trust_tier='trusted', details.<key> (scalar; same JSON type, numbers as written: 2 is not 2.0 or \"2\"). near/within: use recall_nearby.",
                     },
                     "order_by": {
                         "type": "string",
@@ -1933,8 +1933,8 @@ Manual: guide(["list"]).""",
         {
             "name": "changes_since",
             "readOnly": True,
-            "description": """List what changed in a context since a time, oldest first: created, updated (an edit after the write), superseded (a supersedes edge; superseded_by is the newer memory) and forgotten (soft-deleted, while the row still exists). Use it at session start for "what changed since I was last here?"; it is a deterministic log, not a search.
-Returns: {status, changes: [{memory_id, kind, at, summary, superseded_by?}], count, has_more, next_cursor, since, until, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. next_cursor is a keyset token: pages never shift when rows are written after the first read.
+            "description": """List what changed in a context since a time, oldest first: created, updated (an edit, a scope promotion or a Sleep maintenance change (importance re-evaluation, dedup tag merge, rollback); never the initial write or an embedding retry), superseded (a supersedes edge; superseded_by is the newer memory) and forgotten (soft-deleted, while the row still exists). Events of a forgotten memory omit summary: memory_id / kind / at only, plus superseded_by on a superseded event. Use it at session start for "what changed since I was last here?"; it is a deterministic log, not a search.
+Returns: {status, changes: [{memory_id, kind, at, summary?, superseded_by?}], count, has_more, next_cursor, since, until, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. next_cursor is a keyset token: pages never shift when rows are written after the first read.
 Manual: guide(["changes_since"]).""",
             "inputSchema": {
                 "type": "object",

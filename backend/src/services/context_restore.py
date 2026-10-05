@@ -43,7 +43,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import AuditLog, Context, Workspace
 from models.memory import Memory
+from models.resource import Resource, ResourceSchema
 from services.context_service import CONTEXT_NAME_PATTERN, DEFAULT_CONTEXT_NAME
+from services.resource_indexer import resource_point_id
 from utils.datetime import to_utc_iso
 from utils.exceptions import ConflictError, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -101,6 +103,63 @@ def _deleted_by_the_deletion(context: Context, *, shared_timestamp: bool) -> Any
         when,
         Memory.deleted_by.is_not_distinct_from(context.deleted_by),
     )
+
+
+async def _resource_rows_without_schema(
+    db: AsyncSession, context: Context, by_the_deletion: Any
+) -> dict[str, int]:
+    """Rows the restore brings back that the embedding sweep cannot rebuild (#1897).
+
+    A resource-ingested row gets its vector back from
+    ``ResourceIndexer.rebuild_point``, which projects the stored document
+    through the resource's latest schema. Without a schema it raises, and the
+    row ends ``failed``. This counts those rows before they are queued, by the
+    lookup ``rebuild_point`` does: the resource of the context's workspace
+    named by the row, and any schema of it.
+
+    Args:
+        db: Async session.
+        context: The deleted context.
+        by_the_deletion: The predicate for the rows the restore takes.
+
+    Returns:
+        The number of such rows per ``resource_id``; empty when every
+        resource-ingested row has a schema to be rebuilt with.
+    """
+    has_schema = (
+        select(ResourceSchema.id)
+        .join(Resource, Resource.id == ResourceSchema.resource_pk)
+        .where(
+            Resource.workspace_id == context.workspace_id,
+            Resource.resource_id == Memory.resource_id,
+        )
+        .exists()
+    )
+    rows = await db.execute(
+        select(
+            Memory.summary_embedding_id,
+            Memory.resource_id,
+            Memory.resource_doc_id,
+            Memory.resource_version,
+        ).where(
+            by_the_deletion,
+            Memory.resource_id.is_not(None),
+            Memory.resource_doc_id.is_not(None),
+            Memory.resource_version.is_not(None),
+            Memory.summary_embedding_id.is_not(None),
+            ~has_schema,
+        )
+    )
+    counts: dict[str, int] = {}
+    for point_id, resource_id, doc_id, version in rows.tuples():
+        # NOT NULL by the filter above.
+        resource_id, doc_id = cast(str, resource_id), cast(str, doc_id)
+        # ``owns_resource_point``: ``remember(external_id=...)`` also puts a
+        # resource_id in a row's details, and that row is embedded from its
+        # summary. Only a row naming the indexer's point needs the schema.
+        if point_id == resource_point_id(resource_id, doc_id, version):
+            counts[resource_id] = counts.get(resource_id, 0) + 1
+    return counts
 
 
 async def restore_deleted_context(
@@ -258,6 +317,19 @@ async def restore_deleted_context(
         result.warnings.append(
             f"The workspace has {live_contexts} live context(s) and its plan allows "
             f"{max_contexts}; the restore puts it over the cap."
+        )
+
+    unrebuildable = await _resource_rows_without_schema(db, context, by_the_deletion)
+    if unrebuildable:
+        count = sum(unrebuildable.values())
+        resources = ", ".join(f"'{resource_id}'" for resource_id in sorted(unrebuildable))
+        result.warnings.append(
+            f"{count} resource-ingested {'memory' if count == 1 else 'memories'} cannot "
+            f"get a vector back: no schema is left for resource {resources}. "
+            "They are restored but end `failed` and recall does not find them. Either "
+            "publish the resource's schema again and retry the failed embeddings "
+            "(POST /api/v1/admin/embedding/retry-failed), or ingest the documents "
+            "again as a newer version."
         )
 
     if dry_run:

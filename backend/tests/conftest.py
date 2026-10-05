@@ -3,6 +3,7 @@
 import os
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 import pytest_asyncio
@@ -163,9 +164,33 @@ TEST_DATABASE_URL = os.getenv(
 )
 
 
+def _test_database_required() -> bool:
+    """Whether this run must have a usable test database (``REQUIRE_TEST_DATABASE=1``)."""
+    return os.environ.get("REQUIRE_TEST_DATABASE") == "1"
+
+
+def _test_database_unavailable(error: BaseException) -> NoReturn:
+    """End the ``async_engine`` setup: skip, or fail when the database is required.
+
+    The unit job and a local run without Postgres skip every ``db_session``
+    test. A job whose whole point is those tests sets
+    ``REQUIRE_TEST_DATABASE=1`` so that a schema the database rejects turns
+    it red instead of green-by-skip (#1885).
+    """
+    if _test_database_required():
+        pytest.fail(
+            f"Test database not usable but REQUIRE_TEST_DATABASE=1: {error}",
+            pytrace=False,
+        )
+    pytest.skip(f"Test database not available: {error}")
+
+
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def async_engine():
-    """Create async engine for tests. Skip if DB is unavailable."""
+    """Create async engine for tests.
+
+    Skips if the DB is unavailable, or fails under ``REQUIRE_TEST_DATABASE=1``.
+    """
     engine = create_async_engine(
         TEST_DATABASE_URL,
         poolclass=NullPool,
@@ -178,7 +203,7 @@ async def async_engine():
             await conn.run_sync(MemoryBase.metadata.create_all)
     except Exception as e:
         await engine.dispose()
-        pytest.skip(f"Test database not available: {e}")
+        _test_database_unavailable(e)
 
     yield engine
 

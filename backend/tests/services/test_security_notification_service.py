@@ -372,6 +372,93 @@ class TestLookups:
         assert task.kwargs["actor_user_id"] is None
         assert isinstance(task.kwargs["occurred_at"], datetime)
 
+    @staticmethod
+    def _kwargs(**overrides) -> dict:
+        from types import SimpleNamespace
+
+        values: dict = {
+            "request": SimpleNamespace(
+                client=SimpleNamespace(host="198.51.100.4"), headers={"user-agent": "UA/1"}
+            ),
+            "ip": None,
+            "user_agent": None,
+            "key_name": "k",
+            "client_id": None,
+            "client_name": None,
+            "sign_in_method": None,
+            "actor_user_id": None,
+        }
+        values.update(overrides)
+        return sns._notice_kwargs(OWNER, **values)
+
+    @pytest.mark.parametrize("actor", [None, OWNER])
+    def test_own_change_keeps_the_callers_ip_and_user_agent(self, actor) -> None:
+        kwargs = self._kwargs(actor_user_id=actor)
+        assert kwargs["ip"] == "198.51.100.4"
+        assert kwargs["user_agent"] == "UA/1"
+        assert kwargs["actor_user_id"] is None
+
+    def test_admin_change_drops_the_admins_ip_and_user_agent(self) -> None:
+        # #1879: the request is the administrator's, not the recipient's.
+        kwargs = self._kwargs(actor_user_id="admin-1")
+        assert kwargs["ip"] is None
+        assert kwargs["user_agent"] is None
+        assert kwargs["actor_user_id"] == "admin-1"
+
+    def test_admin_change_drops_explicit_ip_and_user_agent_too(self) -> None:
+        kwargs = self._kwargs(
+            request=None, ip="198.51.100.9", user_agent="UA/9", actor_user_id="admin-1"
+        )
+        assert kwargs["ip"] is None
+        assert kwargs["user_agent"] is None
+
+    @pytest.mark.asyncio
+    async def test_scheduled_admin_notice_names_the_admin_not_their_device(
+        self, redis, deliverable, monkeypatch
+    ) -> None:
+        # #1879 end to end: route helper -> background task -> email body.
+        from types import SimpleNamespace
+
+        from fastapi import BackgroundTasks
+
+        monkeypatch.setattr(
+            sns, "_actor_label", AsyncMock(return_value="Ada Admin (ada@example.test)")
+        )
+        tasks = BackgroundTasks()
+        sns.schedule_security_notification(
+            tasks,
+            user_id=OWNER,
+            event=SecurityEvent.API_KEY_REGENERATED,
+            request=SimpleNamespace(
+                client=SimpleNamespace(host="198.51.100.4"), headers={"user-agent": "AdminUA/1"}
+            ),
+            key_name="ci",
+            actor_user_id="admin-1",
+        )
+        (task,) = tasks.tasks
+        occurrences: list[SecurityOccurrence] = []
+        email = AsyncMock()
+
+        async def _send(**kwargs) -> bool:
+            occurrences.extend(kwargs["occurrences"])
+            return True
+
+        email.send_security_notification = _send
+        await task.func(*task.args, **task.kwargs, session_factory=_factory(), email_service=email)
+
+        (occurrence,) = occurrences
+        assert occurrence.ip is None and occurrence.user_agent is None
+        _, text = render_security_notification(
+            SecurityEvent.API_KEY_REGENERATED,
+            [occurrence],
+            digest=False,
+            window_minutes=10,
+            profile_page_url="https://app.example/profile",
+        )
+        assert "Done by:     Ada Admin (ada@example.test), an administrator" in text
+        assert "198.51.100.4" not in text and "AdminUA/1" not in text
+        assert "IP address:" not in text and "Device:" not in text
+
 
 # ---------------------------------------------------------------------------
 # Deliverable address (real Postgres)
@@ -567,6 +654,62 @@ class TestRender:
         assert '"Cursor"' in text and "registered itself with" in text
         assert "Google" in text
         assert "Ada Admin (ada@example.test)" in text and "administrator" in text
+
+    def test_own_change_lists_ip_and_device(self) -> None:
+        _, text = render_security_notification(
+            SecurityEvent.API_KEY_CREATED,
+            [self._occurrence(key_name="ci")],
+            digest=False,
+            window_minutes=10,
+            profile_page_url="https://app.example/profile",
+        )
+        assert "    IP address:  192.0.2.1\n" in text
+        assert "    Device:      UA/1\n" in text
+        assert "Done by:" not in text
+
+    def test_own_change_without_details_says_unknown(self) -> None:
+        _, text = render_security_notification(
+            SecurityEvent.API_KEY_CREATED,
+            [self._occurrence(ip=None, user_agent=None)],
+            digest=False,
+            window_minutes=10,
+            profile_page_url="https://app.example/profile",
+        )
+        assert "    IP address:  unknown\n" in text
+        assert "    Device:      unknown\n" in text
+
+    @pytest.mark.parametrize(
+        "details", [{"ip": None, "user_agent": None}, {"ip": "198.51.100.4", "user_agent": "UA/9"}]
+    )
+    def test_admin_change_omits_ip_and_device(self, details) -> None:
+        # #1879: the connection is the administrator's. An occurrence buffered
+        # by an older release may still carry it; it is not printed either.
+        _, text = render_security_notification(
+            SecurityEvent.API_KEY_REGENERATED,
+            [self._occurrence(key_name="ci", actor="Ada Admin (ada@example.test)", **details)],
+            digest=False,
+            window_minutes=10,
+            profile_page_url="https://app.example/profile",
+        )
+        assert "Done by:     Ada Admin (ada@example.test), an administrator" in text
+        assert "IP address:" not in text and "Device:" not in text
+        assert "unknown" not in text
+        assert "198.51.100.4" not in text and "UA/9" not in text
+        assert "    When:        2026-09-30T10:00:00 UTC\n" in text
+
+    def test_digest_mixes_own_and_admin_changes(self) -> None:
+        _, text = render_security_notification(
+            SecurityEvent.API_KEY_REGENERATED,
+            [
+                self._occurrence(),
+                self._occurrence(ip="198.51.100.4", user_agent="UA/9", actor="Ada (a@x.test)"),
+            ],
+            digest=True,
+            window_minutes=10,
+            profile_page_url="https://app.example/profile",
+        )
+        assert text.count("IP address:") == 1 and text.count("Device:") == 1
+        assert "192.0.2.1" in text and "198.51.100.4" not in text
 
     def test_digest_wording(self) -> None:
         subject, text = render_security_notification(
@@ -1009,6 +1152,36 @@ class TestFlushResilience:
 
         assert sent == 1
         assert await redis.zcard(sns._DUE_KEY) == 2  # left for the next run
+
+    @pytest.mark.asyncio
+    async def test_failed_discard_of_an_unparseable_entry_does_not_stop_the_run(
+        self, redis, deliverable, email, monkeypatch
+    ) -> None:
+        # #1879: "Never raises" — the entry that cannot be parsed is dropped
+        # best effort; the due windows after it are still flushed.
+        await _notify(email, key_name="first")
+        await _notify(email, key_name="second")
+        wid = await _wid(redis)
+        email.send_security_notification.reset_mock()
+        garbage = "not-a-member"
+        due_at = await redis.zscore(sns._DUE_KEY, _m(wid))
+        await redis.zadd(sns._DUE_KEY, {garbage: due_at - 1})  # read first
+        zrem = AsyncMock(side_effect=ConnectionError("redis blip"))
+        monkeypatch.setattr(redis, "zrem", zrem)
+        logger = MagicMock()
+        monkeypatch.setattr(sns, "logger", logger)
+
+        sent = await sns.flush_due_security_notifications(
+            now_score=_window_end() + 1, session_factory=_factory(), email_service=email
+        )
+
+        zrem.assert_awaited_once_with(sns._DUE_KEY, garbage)
+        assert sent == 1
+        kwargs = email.send_security_notification.await_args.kwargs
+        assert [o.key_name for o in kwargs["occurrences"]] == ["second"]
+        warnings = [c.args[0] for c in logger.warning.call_args_list]
+        assert "security_notification_due_entry_discard_failed" in warnings
+        assert await redis.zscore(sns._DUE_KEY, garbage) is not None  # next run retries
 
     def test_batch_is_bounded(self) -> None:
         assert sns._FLUSH_BATCH <= 50
