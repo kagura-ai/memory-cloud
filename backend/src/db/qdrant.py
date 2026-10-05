@@ -1392,7 +1392,8 @@ class PointRef:
     resource_key: tuple[str, str, int] | None = None
     # Resource points only: when the point was written, so a point whose row
     # has not committed yet is never taken for an orphan. Read from the payload
-    # ``indexed_at`` (#1869); a point written by an older release has only
+    # ``indexed_at`` (#1869), or ``updated_at`` if that is later; a point
+    # written by an older release has only
     # ``updated_at`` — the event time, which can be long before the write —
     # and falls back to it, so a row-less point such a release left behind is
     # still swept. A missing ``indexed_at`` cannot tell a historical point
@@ -1408,9 +1409,10 @@ def _payload_datetime(raw: Any) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
+        return parsed.astimezone(UTC).replace(tzinfo=None) if parsed.tzinfo else parsed
+    except (ValueError, OverflowError):
+        # OverflowError: an offset that pushes the value out of datetime's range.
         return None
-    return parsed.astimezone(UTC).replace(tzinfo=None) if parsed.tzinfo else parsed
 
 
 def _point_ref(point: Any) -> PointRef:
@@ -1423,9 +1425,18 @@ def _point_ref(point: Any) -> PointRef:
         doc_id, version = payload.get("doc_id"), payload.get("version")
         if isinstance(doc_id, str) and isinstance(version, int) and not isinstance(version, bool):
             resource_key = (str(payload["resource_id"]), doc_id, version)
-        written_at = _payload_datetime(payload.get("indexed_at")) or _payload_datetime(
-            payload.get("updated_at")
-        )
+        # The later of the two: ``indexed_at`` only ever keeps a point longer
+        # than ``updated_at`` alone did (an event dated ahead of this host's
+        # clock must not make its point look older than before #1869).
+        stamps = [
+            stamp
+            for stamp in (
+                _payload_datetime(payload.get("indexed_at")),
+                _payload_datetime(payload.get("updated_at")),
+            )
+            if stamp is not None
+        ]
+        written_at = max(stamps) if stamps else None
     return PointRef(
         point_id=str(point.id),
         context_id=payload.get("context_id"),

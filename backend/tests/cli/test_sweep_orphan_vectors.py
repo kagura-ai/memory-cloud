@@ -136,16 +136,18 @@ class TestApplyThatDeletedLessThanAsked:
         assert "8 point(s) left; 7 live embedded memories" in captured.out
         assert "error: a merge or a Sleep rollback was still writing points" in captured.err
 
-    def test_a_plan_time_refusal_prints_only_the_error(self, capsys):
-        """The ratio guard refuses before anything is deleted: no report."""
-        refused = _result(dry_run=True)
+    def test_a_refusal_with_nothing_deleted_prints_only_the_error(self, capsys):
+        """The ratio guard refuses in the apply pass before any delete: no report."""
+        refused = _result(dry_run=False, deleted=0)
         refused.refused = "3 of 10 points look orphaned, over 20%; nothing deleted"
-        sweep = AsyncMock(return_value=refused)
+        sweep = AsyncMock(side_effect=[_result(dry_run=True), refused])
 
         assert _run(["--apply", "--yes"], sweep) == 1
 
         captured = capsys.readouterr()
-        assert captured.out == ""
+        # The plan is shown, then the error alone: no apply report.
+        assert "deleted" not in captured.out
+        assert "point(s) left" not in captured.out
         assert "error: 3 of 10 points look orphaned" in captured.err
 
     def test_a_collection_skipped_during_apply_is_named(self, capsys):

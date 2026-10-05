@@ -1016,7 +1016,8 @@ on both and do not run the command.
 A merge or a Sleep rollback that is still writing points makes the delete pass
 wait, up to 30 seconds before each batch; past that the pass stops, keeps what
 it has already deleted, and the next run takes the rest. The command then
-prints the deleted count and what is left, and exits non-zero. Only one API
+prints what it deleted (if anything) and what is left, then the error, and
+exits non-zero. Only one API
 process per deployment runs the scheduled sweep.
 
 The sweep reads Postgres one page of points at a time and ends its

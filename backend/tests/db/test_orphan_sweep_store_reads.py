@@ -168,6 +168,39 @@ class TestScrollPointRefs:
 
         assert pages[0][0].written_at == datetime(2026, 1, 1)
 
+    async def test_write_time_is_never_earlier_than_updated_at(self, mock_client):
+        """An event dated ahead of the indexing host's clock: ``indexed_at``
+        may only keep a point longer than ``updated_at`` alone did."""
+        payload = {
+            "context_id": CTX,
+            "resource_id": "docs",
+            "doc_id": "d1",
+            "version": 2,
+            "updated_at": "2026-03-02T00:00:00Z",
+            "indexed_at": "2026-03-01T12:30:00Z",
+        }
+        mock_client.scroll.return_value = ([SimpleNamespace(id="r1", payload=payload)], None)
+
+        pages = [page async for page in scroll_point_refs(KAGURA_MEMORIES_COLLECTION)]
+
+        assert pages[0][0].written_at == datetime(2026, 3, 2)
+
+    async def test_out_of_range_timestamp_is_not_a_write_time(self, mock_client):
+        """An offset that pushes the value out of range is unparsable, not a crash."""
+        payload = {
+            "context_id": CTX,
+            "resource_id": "docs",
+            "doc_id": "d1",
+            "version": 2,
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "indexed_at": "0001-01-01T00:00:00+05:00",
+        }
+        mock_client.scroll.return_value = ([SimpleNamespace(id="r1", payload=payload)], None)
+
+        pages = [page async for page in scroll_point_refs(KAGURA_MEMORIES_COLLECTION)]
+
+        assert pages[0][0].written_at == datetime(2026, 1, 1)
+
     async def test_empty_collection_yields_nothing(self, mock_client):
         mock_client.scroll.return_value = ([], None)
 
