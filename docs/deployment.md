@@ -1609,11 +1609,18 @@ REDIS_PASSWORD=<output of: openssl rand -hex 32>
 - **Use a hex password.** It needs no quoting in `.env.prod` and no encoding in
   a URL. Any other value has to be single-quoted in `.env.prod` — unquoted, the
   env-file parser expands `$` and cuts the value at ` #`; double-quoted, it
-  still expands `$` — and needs an explicit `REDIS_URL` (below).
+  still expands `$`. With `/ # ? [ ]` or `%` in it, it also needs an explicit
+  `REDIS_URL` (below).
 - **`REDIS_URL` in `.env.prod` overrides the built URL**, whole: scheme,
-  password, host and port. Set it when the password has characters a URL
-  reserves (`@ : / # %` and the like — percent-encode them) or when Redis is
-  somewhere else. To encode without the password landing in your shell history:
+  password, host and port. Set it when Redis is somewhere else, or when the
+  password has a character that breaks the built URL — the compose file pastes
+  the password in as it is and cannot encode it. `/`, `#`, `?`, `[` and `]`
+  make the URL unparseable: the API refuses to start and, being
+  `restart: always`, keeps restarting. A `%` followed by two hex digits is
+  decoded into another character, so the API sends the wrong password. Other
+  characters (`@ : + =` among them) work unencoded. Step 1 of
+  [Turning it on](#turning-it-on) catches both cases before Redis is restarted.
+  To percent-encode the password without it landing in your shell history:
   `read -rs P && printf '%s' "$P" | python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))'`,
   then `REDIS_URL='redis://:<encoded>@redis:6379'`.
 - **Split host:** the data VM's `.env.prod` needs `REDIS_PASSWORD` (Redis
@@ -1655,10 +1662,25 @@ two commands of step 2 back to back.
 ```bash
 cd /opt/kagura-memory/src/terraform/single-server
 # 1. Add REDIS_PASSWORD to .env.prod (above), then check the render without
-#    printing the secret. It should print "True True":
+#    printing the secret. It prints two words and should print "True True":
+#    Redis gets a password, and the API's REDIS_URL parses to a host, a port
+#    and that same password. Do not go on to step 2 unless it does.
 docker compose -f docker-compose.prod.yml --env-file .env.prod config --format json | python3 -c '
-import json, sys; s = json.load(sys.stdin)["services"]
-print(s["redis"]["command"][-1] != "", s["api-blue"]["environment"]["REDIS_URL"].startswith("redis://:"))'
+import json, sys, urllib.parse
+s = json.load(sys.stdin)["services"]
+# The render writes a literal $ as $$.
+password = s["redis"]["command"][-1].replace("$$", "$")
+try:
+    u = urllib.parse.urlsplit(s["api-blue"]["environment"]["REDIS_URL"].replace("$$", "$"))
+    url_ok = (
+        u.scheme in ("redis", "rediss")
+        and bool(u.hostname)
+        and u.port is not None
+        and urllib.parse.unquote(u.password or "") == password
+    )
+except ValueError:
+    url_ok = False
+print(password != "", url_ok)'
 
 # 2. Restart Redis with the password, then recreate the running API colors so
 #    they reconnect (xargs -r: with no color running, recreate nothing rather
@@ -1673,6 +1695,15 @@ docker inspect -f '{{.State.Health.Status}}' kagura-redis      # healthy
 docker exec kagura-redis redis-cli ping                        # NOAUTH Authentication required.
 ./scripts/deploy.sh --status
 ```
+
+If step 1 prints `False` first, `REDIS_PASSWORD` did not reach Redis (not in
+`.env.prod`, or emptied by a variable exported in your shell). If it prints
+`False` second, the API would not reach Redis with that password: either the
+password has a character that breaks the built URL (`/ # ? [ ]`, or `%`), or
+an explicit `REDIS_URL` carries a different password. Switch to a hex password
+or set an explicit, percent-encoded `REDIS_URL` (above), then run step 1
+again. An API started with a URL that does not parse exits at start-up, and
+its log says `REDIS_URL is not a valid URL` without quoting the value.
 
 On a split host, step 2 runs in two places: Redis on the data VM
 (`DATA_BIND_ADDR=… docker compose -f docker-compose.data.yml -f docker-compose.data-expose.yml --env-file .env.prod up -d --no-deps redis`),
