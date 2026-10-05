@@ -337,6 +337,13 @@ async def expand_tag_filter(
     Note:
         Returns the input unchanged if the vocabulary read fails — widening is
         an enhancement and must never break a recall.
+
+        The widening is by the ``normalize_tag`` fold alone, without the number
+        guard the write path applies (``is_mechanical_variant``, #1871): a
+        filter on ``v0.11.0`` also matches a stored ``v0.1.10``. Deliberate —
+        an over-wide filter only returns more and each result shows its tags,
+        whereas a write would store the memory under the other identifier.
+        ``docs/mcp-tools.md`` documents the difference.
     """
     try:
         # #1512: widening only needs the mechanical variants, so a vocabulary up
