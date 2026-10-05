@@ -127,6 +127,7 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
         return 0  # --plan only
 
     requeue_since = None
+    skipped: list[UUID] = []
     if args.reembed or args.run:
 
         def _progress(done: int, total: int) -> None:
@@ -135,9 +136,9 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
         result = await reembed_context(db, plan, batch_size=args.batch_size, progress=_progress)
         requeue_since = result.started_at
         print(f"  re-embed done: {result.embedded} points in {result.batches} batches")
-        if result.unrebuildable and not (args.verify or args.run):
-            # --verify prints the same list; say it once.
-            _print_unrebuildable(result.unrebuildable)
+        skipped = result.unrebuildable
+        if not (args.verify or args.run):
+            _print_unrebuildable(skipped)
 
     if args.verify or args.run:
         verified = await verify_context_migration(db, plan)
@@ -145,7 +146,9 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
             f"  verify: {verified.present}/{verified.expected} present, "
             f"{verified.stale_removed} stale target point(s) removed"
         )
-        _print_unrebuildable(verified.unrebuildable)
+        # One line for both steps. Verify alone would leave out a row the
+        # re-embed skipped whose point another live row keeps in the target.
+        _print_unrebuildable(sorted({*skipped, *verified.unrebuildable}))
         if not verified.ok:
             print(
                 f"  MISSING {len(verified.missing)}: {', '.join(str(m) for m in verified.missing[:20])}"
