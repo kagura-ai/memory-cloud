@@ -21,6 +21,12 @@ from uuid import UUID
 from mcp.types import TextContent
 
 from mcp_server.tools._helpers import _error_response, _success_response
+from utils.response_budget import (
+    BudgetArgumentError,
+    parse_limit,
+    parse_offset_cursor,
+    text_preview,
+)
 
 # Fields accepted by update_agent, forwarded verbatim to the service (which
 # validates values and rejects unknown fields).
@@ -142,8 +148,6 @@ def _serialize_agent_list_item(agent: Any) -> dict[str, Any]:
     Slices by code point; ``description_truncated`` is present only on items
     that were cut (the list_contexts ``summary_truncated`` convention).
     """
-    from utils.response_budget import text_preview
-
     item = _serialize_agent(agent)
     item["description"], cut = text_preview(item["description"], _LIST_AGENTS_DESCRIPTION_PREVIEW)
     if cut:
@@ -157,8 +161,6 @@ async def handle_list_agents(
     """List the active workspace's registered agents, a page at a time (owner/admin only)."""
     if not workspace_id:
         return _error_response("workspace_required", "No active workspace.")
-    from utils.response_budget import BudgetArgumentError, parse_limit, parse_offset_cursor
-
     try:
         limit = parse_limit(
             args.get("limit"), default=_LIST_AGENTS_DEFAULT_LIMIT, maximum=_LIST_AGENTS_MAX_LIMIT

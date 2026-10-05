@@ -387,6 +387,137 @@ class TestWorkspaceGetSleepReportDetail:
 
 
 # ============================================================================
+# Former-member emails (#1882)
+# ============================================================================
+
+_USERS = {"member_1": "member@test.com", "former_1": "former@test.com"}
+_MEMBERSHIPS = {(_WORKSPACE_ID, "member_1")}
+
+
+async def _membership_aware_resolver(_db, user_ids, *, member_of=None):
+    """Stand-in for ``label_resolver.resolve_user_labels`` over a fixed
+    ``users`` / ``workspace_members`` pair: both accounts have a ``users``
+    row, only ``member_1`` is still a member of ``_WORKSPACE_ID``."""
+    return {
+        uid: email
+        for uid, email in _USERS.items()
+        if uid in user_ids and (member_of is None or (member_of, uid) in _MEMBERSHIPS)
+    }
+
+
+class TestWorkspaceSleepReportsHideFormerMemberEmail:
+    """#1882: the workspace routes resolve emails of current members only —
+    the same rule as the workspace cost route (#1862). A report outlives the
+    membership of the account it ran for."""
+
+    @pytest.fixture(autouse=True)
+    def _resolver(self, monkeypatch):
+        import services.sleep_reporter_service as _service_module
+
+        monkeypatch.setattr(_service_module, "resolve_user_labels", _membership_aware_resolver)
+
+    def _list_db(self, reports):
+        mock_db = AsyncMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = len(reports)
+        list_result = MagicMock()
+        list_result.scalars.return_value.all.return_value = reports
+        mock_db.execute.side_effect = [count_result, list_result]
+        return mock_db
+
+    def _detail_db(self, report):
+        mock_db = AsyncMock()
+        report_result = MagicMock()
+        report_result.scalar_one_or_none.return_value = report
+        actions_result = MagicMock()
+        actions_result.scalars.return_value.all.return_value = []
+        mock_db.execute.side_effect = [report_result, actions_result]
+        return mock_db
+
+    def test_list_hides_former_member_and_keeps_current_member(self, client):
+        former, member = _make_mock_report(), _make_mock_report()
+        former.user_id = "former_1"
+        member.user_id = "member_1"
+        _install_workspace_overrides(
+            client, user=_owner_user(), db_mock=self._list_db([former, member])
+        )
+
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports")
+
+        assert response.status_code == 200
+        emails = {r["user_id"]: r["user_email"] for r in response.json()["reports"]}
+        assert emails == {"former_1": None, "member_1": "member@test.com"}
+
+    def test_detail_hides_former_member_email(self, client):
+        report = _make_mock_report()
+        report.user_id = "former_1"
+        _install_workspace_overrides(client, user=_owner_user(), db_mock=self._detail_db(report))
+
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports/{report.id}")
+
+        assert response.status_code == 200
+        body = response.json()["report"]
+        assert body["user_id"] == "former_1"
+        assert body["user_email"] is None
+
+    def test_detail_keeps_current_member_email(self, client):
+        report = _make_mock_report()
+        report.user_id = "member_1"
+        _install_workspace_overrides(client, user=_owner_user(), db_mock=self._detail_db(report))
+
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports/{report.id}")
+
+        assert response.status_code == 200
+        assert response.json()["report"]["user_email"] == "member@test.com"
+
+
+class TestWorkspaceSleepReportsMembershipQuery:
+    """The real resolver runs with the path workspace as ``member_of``: the
+    label query is narrowed by ``workspace_members`` for that workspace."""
+
+    def _label_sql(self, mock_db) -> str:
+        from sqlalchemy.dialects import postgresql
+
+        statement = mock_db.execute.await_args_list[-1].args[0]
+        return str(
+            statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+        )
+
+    def test_list_label_query_is_scoped_to_path_workspace(self, client):
+        mock_db = AsyncMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = 1
+        list_result = MagicMock()
+        list_result.scalars.return_value.all.return_value = [_make_mock_report()]
+        mock_db.execute.side_effect = [count_result, list_result, _user_result()]
+        _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
+
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports")
+
+        assert response.status_code == 200
+        sql = self._label_sql(mock_db)
+        assert "workspace_members" in sql
+        assert str(_WORKSPACE_ID) in sql
+
+    def test_detail_label_query_is_scoped_to_path_workspace(self, client):
+        report = _make_mock_report()
+        mock_db = AsyncMock()
+        report_result = MagicMock()
+        report_result.scalar_one_or_none.return_value = report
+        actions_result = MagicMock()
+        actions_result.scalars.return_value.all.return_value = []
+        mock_db.execute.side_effect = [report_result, actions_result, _user_result()]
+        _install_workspace_overrides(client, user=_owner_user(), db_mock=mock_db)
+
+        response = client.get(f"/api/v1/workspaces/{_WORKSPACE_ID}/sleep-reports/{report.id}")
+
+        assert response.status_code == 200
+        sql = self._label_sql(mock_db)
+        assert "workspace_members" in sql
+        assert str(_WORKSPACE_ID) in sql
+
+
+# ============================================================================
 # Anonymous access
 # ============================================================================
 

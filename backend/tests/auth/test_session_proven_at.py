@@ -36,7 +36,7 @@ class TestProvenAt:
         """Fail closed: the default is no proof, even though it is a sign-in."""
         sid = manager.create_session(USER)
 
-        assert manager.signed_in_within(sid, "google_1", WINDOW)
+        assert manager.signed_in_at(sid, "google_1") is not None
         assert manager.proven_at(sid, "google_1") is None
         assert not manager.proven_within(sid, "google_1", WINDOW)
 
@@ -51,7 +51,7 @@ class TestProvenAt:
         """Google's auth_time from hours ago, delivered by a sign-in just now."""
         sid = manager.create_session(USER, proven_at=utcnow() - timedelta(hours=3))
 
-        assert manager.signed_in_within(sid, "google_1", WINDOW)
+        assert utcnow() - manager.signed_in_at(sid, "google_1") < WINDOW
         assert not manager.proven_within(sid, "google_1", WINDOW)
 
     def test_add_account_records_the_added_account_only(self, manager):

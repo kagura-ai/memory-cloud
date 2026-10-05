@@ -105,6 +105,7 @@
     "confirmWithGoogle": "Google で確認",
     "linkProofUnproved": "この環境では Google アカウントを確認できません。Google が最終サインイン時刻を返していないためです。運用者に設定（確認済みの OAuth アプリと Session age claims）を依頼するか、パスワードでサインインしてアカウントを確認してください。",
     "linkProofStale": "Google が確認したサインインは {minutes} 分より前のもので、リンクには古すぎます。Google からサインアウトしてサインインし直し、もう一度「Google で確認」を押してください。",
+    "linkProofRecentProvider": "この Google はこのアカウントに追加されてから {minutes} 分経っていないサインイン方法のため、まだアカウントの確認には使えません。{minutes} 分経ってからもう一度「Google で確認」を押すか、パスワードでサインインしてアカウントを確認してください。",
     "confirmWithGoogleHint": "「Google で確認」で確認できるのは、そこで選んだ Google アカウントだけです。直近数分以内に Google 自体にサインインしていて、かつ運用者が設定している場合にのみ有効です。確認済みにならない場合は、Google からサインアウトしてサインインし直し、もう一度お試しください。",
     "linkLimitError": "これ以上アカウントをリンクできません。先にいずれかのリンクを解除してください。",
     "unlinkError": "{account} のリンクを解除できませんでした。もう一度お試しください。",
@@ -998,7 +999,6 @@
     "signInMethodDesc": "アカウントの認証方法",
     "signInMethodGoogle": "Google",
     "signInMethodGitHub": "GitHub",
-    "signInMethodPassword": "メール + パスワード",
     "signInMethodOther": "その他",
     "signInMethodEmailPassword": "メールアドレスとパスワード",
     "signInMethodSeparator": "、",
@@ -1643,6 +1643,7 @@
       "mine": "自分が作成",
       "shared": "共有されたもの",
       "empty": "この条件に一致するコンテキストはありません。",
+      "emptyDescription": "別の作成者フィルターを選ぶか、すべてのコンテキストを表示してください。",
       "showAll": "すべて表示"
     },
     "admin": "管理者",
@@ -1875,7 +1876,13 @@
       "howItWorks": "自作アプリを登録 → ユーザーがOAuthフローで認可 → アプリがアクセストークンを受け取り → MCP/REST API呼び出しに使用。"
     },
     "dcrNote": "Claude.ai、Claude Desktop、ChatGPT、Cursor、Claude Code は接続時に自動登録される（Dynamic Client Registration）ため、ここでアプリを作成する必要はありません。自作の OAuth2 クライアントを繋ぐ場合だけカスタムアプリを作成してください。",
-    "legacyPresetsTitle": "以前のプリセットアプリ",
+    "legacyPresetsTitle": "以前のコネクタ用アプリ",
+    "legacyProvider": {
+      "claude": "Claude",
+      "chatgpt": "ChatGPT",
+      "cursor": "Cursor",
+      "other": "その他"
+    },
     "legacyPresetNote": "このアプリは不要になりました。コネクタを再接続すると自動登録されます。使っていなければ削除してください。",
     "clientId": "クライアントID",
     "redirectUri": "リダイレクトURI",
@@ -2850,7 +2857,7 @@
         "merge_backlog_old": "最古のマージ敗者が {oldest_days} 日前のものです（{threshold_days} 日超）— 保持期間の設定を検討してください。",
         "edge_weight_violations": "{count} 本のエッジが重み範囲 [{min}, {max}] を外れています — 未クランプ累積系のバグです。",
         "cold_graph": "アクティブメモリが {active_memories} 件あるのにエッジが 0 本 — グラフが一度も温まっていません。エッジ形成ゲートと sleep モードを確認してください。",
-        "write_only_store": "アクティブメモリが {active_memories} 件あるのに直近 {window_days} 日間 recall 呼び出しがありません — ストアが書き込み専用になっています。",
+        "write_only_store": "直近 {window_days} 日間、メモリの書き込みはあるのに成功した recall 呼び出しがありません（アクティブメモリ {active_memories} 件） — ストアが書き込み専用になっています。",
         "idle_store": "直近 {window_days} 日間、成功した MCP の recall も書き込みもありません（アクティブメモリ {active_memories} 件） — 書き込み専用ではなく、使われていない状態に見えます。Web UI・REST API・コネクタ経由の書き込みはここでは数えていません。",
         "unknown": "未知のヘルス注記です（コード: {code}）。"
       }
@@ -4061,11 +4068,23 @@
     "createTitle": "Slack コネクタを作成",
     "createDesc": "{team} を接続します。取り込んだ会話を保持するプライベートコンテキストを作成します。",
     "missingScopesTitle": "すべての機能を使うには Slack を再接続してください",
-    "missingScopesDesc": "このインストールでは {scopes} が許可されていません。取り込みは動作しますが、各スコープは次の機能に必要です — commands: スラッシュコマンド / app_mentions:read: @メンションへの応答 / groups:read: チャンネル選択での private チャンネル一覧。Slack アプリがこれらを要求するよう設定し、もう一度 Slack を接続してください。",
+    "missingScopesDesc": "取り込みは動作しますが、このインストールでは一部の Slack スコープが許可されていません。再接続するまで次の機能は使えません:",
+    "missingScopeFeatures": {
+      "commands": "commands — スラッシュコマンド",
+      "appMentionsRead": "app_mentions:read — @メンションへの応答",
+      "groupsRead": "groups:read — チャンネル選択での private チャンネル一覧",
+      "other": "{scope}"
+    },
+    "missingScopesAction": "Slack アプリが上記のスコープを要求するよう設定し、もう一度 Slack を接続してください。",
     "teamConflict": {
       "subjectNamed": "Slack ワークスペース「{name}」",
       "subjectUnnamed": "この Slack ワークスペース",
-      "here": "{subject}は、このワークスペースのコネクタ『{connector}』で接続済みです。今回のサインインで Slack の権限は更新され、チャンネル一覧には 1 分以内に反映されます。設定を変えるときは既存のコネクタを編集してください。",
+      "here": "{subject}は、このワークスペースのコネクタ『{connector}』で接続済みです。設定を変えるときは既存のコネクタを編集してください。",
+      "hereUnnamed": "{subject}は、このワークスペースの既存のコネクタで接続済みです。設定を変えるときはそのコネクタを編集してください。",
+      "hereOAuth": "{subject}は、このワークスペースのコネクタ『{connector}』で接続済みです。今回のサインインで Slack の権限は更新され、チャンネル一覧には 1 分以内に反映されます。設定を変えるときは既存のコネクタを編集してください。",
+      "hereOAuthUnnamed": "{subject}は、このワークスペースの既存のコネクタで接続済みです。今回のサインインで Slack の権限は更新され、チャンネル一覧には 1 分以内に反映されます。設定を変えるときはそのコネクタを編集してください。",
+      "hereManual": "{subject}は、このワークスペースのコネクタ『{connector}』で接続済みです。入力した Bot トークンは保存されていません。設定を変えるときは既存のコネクタを編集してください。",
+      "hereManualUnnamed": "{subject}は、このワークスペースの既存のコネクタで接続済みです。入力した Bot トークンは保存されていません。設定を変えるときはそのコネクタを編集してください。",
       "elsewhere": "{subject}は、別の Kagura ワークスペースで接続されています。1 つの Slack ワークスペースに接続できる Kagura ワークスペースは 1 つだけです。移す場合は元のワークスペースでコネクタを削除してください。共有する場合は、元のワークスペースのメンバーに招待してもらってください。",
       "editExisting": "既存のコネクタを編集"
     },
@@ -4434,7 +4453,7 @@
     },
     "reset": {
       "title": "新しいパスワードを設定",
-      "description": "パスワードをリセットすると、すべてのブラウザセッションからサインアウトされます。",
+      "description": "パスワードをリセットすると、すべてのブラウザセッションからサインアウトされ、接続中のアプリと MCP クライアントもすべて切断されます。",
       "submit": "パスワードをリセット",
       "submitting": "保存中…",
       "successTitle": "パスワードを更新しました",

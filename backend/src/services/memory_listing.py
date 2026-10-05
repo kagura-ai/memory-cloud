@@ -3,7 +3,8 @@
 ``recall`` ranks and caps; these two lanes do neither. ``list`` returns every
 live memory of one context that matches exact filters, ordered and paged;
 ``changes_since`` returns the context's memory-level change log — created,
-updated, superseded, forgotten — in time order with a keyset cursor. Plain SQL:
+updated, superseded, forgotten — in time order with a keyset cursor; every
+event of a forgotten memory is listed without its summary (#1876). Plain SQL:
 no embedding, no Hebbian write, so both are cheap enough for a session start.
 
 Scoping is the REST list's: the caller must read the context; in a private
@@ -14,13 +15,14 @@ the agent-binding predicate applies as everywhere else.
 from __future__ import annotations
 
 import base64
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import String, and_, cast, func, literal, or_, select, tuple_, union_all
+from sqlalchemy import String, and_, case, cast, func, literal, or_, select, tuple_, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql import ColumnElement
@@ -110,6 +112,27 @@ def _trusted_predicate() -> ColumnElement[bool]:
     )
 
 
+def _details_equals(sub: str, value: bool | int | float | str) -> ColumnElement[bool]:
+    """``details.<sub>`` equals the scalar ``value``: same JSON type, same text.
+
+    The stored value must have the filter value's JSON type, so the string
+    ``"true"`` does not match the boolean ``true`` and the string ``"2"`` does
+    not match the number ``2``. A string is compared unescaped. A number is
+    compared as it is written in the stored JSON (``details`` is a ``json``
+    column, which keeps the text): ``2`` matches ``2`` but not ``2.0``, and
+    ``2.0`` matches ``2.0`` but not ``2``. A missing key, ``null``, an object
+    or an array never matches.
+    """
+    stored = Memory.details[sub]
+    if isinstance(value, bool):  # before int: bool is an int subclass
+        json_type, text = "boolean", "true" if value else "false"
+    elif isinstance(value, str):
+        json_type, text = "string", value
+    else:
+        json_type, text = "number", json.dumps(value)  # the spelling the column was written with
+    return and_(func.json_typeof(stored) == json_type, stored.as_string() == text)
+
+
 def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement[bool]]:
     """Translate recall's filter vocabulary into SQL predicates on ``Memory``.
 
@@ -118,10 +141,9 @@ def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement
     space insensitive — the plural tolerance recall has is not applied here);
     importance {gte, lte, gt, lt}; created_/updated_ after/before (ISO 8601,
     after inclusive, before exclusive); source_uri_prefix; trust_tier='trusted';
-    ``details.<key>`` equality for a scalar value, compared as the JSON text of
-    the stored value (``2`` matches ``2`` but not ``2.0``; ``true`` matches the
-    boolean, not the string "true"). ``near`` / ``within`` are recall_nearby's
-    job and are refused by name. ``updated_after`` / ``updated_before`` read the
+    ``details.<key>`` equality for a scalar value (see ``_details_equals``: same
+    JSON type, and for a number the same spelling). ``near`` / ``within`` are
+    recall_nearby's job and are refused by name. ``updated_after`` / ``updated_before`` read the
     ``updated_at`` column and therefore never match a never-edited memory, while
     ``order_by="updated_at"`` falls back to ``created_at`` for those rows.
 
@@ -145,12 +167,9 @@ def compile_memory_filters(filters: dict[str, Any] | None) -> list[ColumnElement
             sub = key[len("details.") :]
             if not _DETAILS_KEY.match(sub):
                 raise ValueError("details.<key> must match ^[A-Za-z0-9_]{1,64}$")
-            if isinstance(value, bool):
-                out.append(Memory.details[sub].as_string() == ("true" if value else "false"))
-            elif isinstance(value, (int, float)) or isinstance(value, str):
-                out.append(Memory.details[sub].as_string() == str(value))
-            else:
+            if not isinstance(value, (bool, int, float, str)):
                 raise ValueError(f"{key} must be a string, number or boolean")
+            out.append(_details_equals(sub, value))
             continue
         if key not in _KNOWN_FILTERS:
             raise ValueError(f"unknown filter {key!r}")
@@ -274,7 +293,7 @@ class Change:
     memory_id: UUID
     kind: str
     at: datetime
-    summary: str
+    summary: str | None  # None: the memory is forgotten (soft-deleted)
     superseded_by: UUID | None
 
 
@@ -285,12 +304,17 @@ class ChangePage:
 
 
 def change_item(c: Change) -> dict[str, Any]:
-    """One change as every envelope renders it (``changes_since`` and ``bootstrap``)."""
+    """One change as every envelope renders it (``changes_since`` and ``bootstrap``).
+
+    ``summary`` is omitted for an event of a forgotten memory, ``superseded_by``
+    for every kind but ``superseded`` (the omit-empty response convention); a
+    superseded event of a forgotten memory therefore keeps ``superseded_by``.
+    """
     return {
         "memory_id": str(c.memory_id),
         "kind": c.kind,
         "at": to_utc_iso(c.at),
-        "summary": c.summary,
+        **({"summary": c.summary} if c.summary is not None else {}),
         **({"superseded_by": str(c.superseded_by)} if c.superseded_by else {}),
     }
 
@@ -328,16 +352,22 @@ async def changes_since(
     """The context's memory-level change log in ``[since, until)``, oldest first.
 
     created: ``created_at`` in the window. updated: ``updated_at`` in the window
-    and later than ``created_at`` — an edit (``update_memory``) or a scope
-    promotion, never the write itself: the embedding pipeline keeps its own
-    clock (``embedding_attempted_at``) and does not stamp ``updated_at``.
+    and later than ``created_at`` — an edit, a scope promotion or a Sleep
+    maintenance change (importance re-evaluation, dedup tag merge, rollback);
+    never the initial write or an embedding retry: the embedding pipeline keeps
+    its own clock (``embedding_attempted_at``) and does not stamp ``updated_at``.
     superseded: a ``supersedes`` edge in the window whose live source is the
     newer memory — ``at`` is the edge's ``created_at``, which the upsert
     re-dates when an existing edge of another type becomes ``supersedes``, so
     a supersession declared over an older semantic link is dated when it was
     declared; ``superseded_by`` is the source id.
     forgotten: ``deleted_at`` in the window, listed while the tombstone exists;
-    a forgotten row's earlier created / updated events stay in the log too.
+    a forgotten row's earlier created / updated / superseded events stay in the
+    log too. Every event of a forgotten memory, whatever its kind, carries
+    ``memory_id`` / ``kind`` / ``at`` only, plus ``superseded_by`` (the live
+    newer memory's id) on a superseded event: ``summary`` is ``None`` (#1876),
+    so ``forget`` retracts the text from this lane as it does from the others
+    while the log keeps its shape.
     Keyset cursor over ``(at, kind, id)``, so a page is never shifted by rows
     written after it was read.
     """
@@ -363,6 +393,11 @@ async def changes_since(
 
     parts = []
     none_uuid = literal(None).cast(Memory.id.type)
+    # NULL for a soft-deleted row, cast so every part of the union has one type.
+    live_summary = case(
+        (Memory.deleted_at.is_not(None), literal(None).cast(Memory.summary.type)),
+        else_=Memory.summary,
+    )
 
     def event(kind: str, at: Any, superseded_by: Any) -> Any:
         # Every part labels its columns: the union takes its names from the
@@ -371,7 +406,7 @@ async def changes_since(
             Memory.id.label("memory_id"),
             literal(kind).label("kind"),
             at.label("at"),
-            Memory.summary.label("summary"),
+            live_summary.label("summary"),
             superseded_by.label("superseded_by"),
         )
 

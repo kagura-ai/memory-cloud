@@ -48,6 +48,13 @@ from utils.exceptions import (
     ValidationError,
 )
 from utils.logger import get_logger
+from utils.response_budget import (
+    DEFAULT_MAX_CHARS,
+    MAX_CHARS_LIMIT,
+    fit_items,
+    json_chars,
+    text_preview,
+)
 
 logger = get_logger(__name__)
 
@@ -277,8 +284,6 @@ def _serialize_run_list_item(row: Any) -> dict[str, Any]:
     ``error_truncated`` is present only on items that were cut (the #1743
     ``list_agents`` ``description_truncated`` convention).
     """
-    from utils.response_budget import text_preview
-
     item = _serialize_run_row(row)
     item["error"], cut = text_preview(item["error"], _LIST_ANALYSES_ERROR_PREVIEW)
     if cut:
@@ -633,8 +638,6 @@ async def handle_list_analyses(
             )
             # #1750: the page stops where the shared response budget runs
             # out; the cursor then resumes after the last run returned.
-            from utils.response_budget import DEFAULT_MAX_CHARS, fit_items
-
             items = [_serialize_run_list_item(row) for row in rows]
             placed = fit_items(items, DEFAULT_MAX_CHARS - _LIST_ANALYSES_ENVELOPE_RESERVE)
             if items and placed == 0:
@@ -759,8 +762,6 @@ def _bound_cluster_page(cluster: dict[str, Any], *, explicit_limit: bool) -> dic
     keyset continuation picks up the rest. A page always returns at least one
     member.
     """
-    from utils.response_budget import DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT, fit_items, json_chars
-
     members = cluster.get("memories") or []
     budget = (MAX_CHARS_LIMIT if explicit_limit else DEFAULT_MAX_CHARS) - json_chars(
         {"status": "success", **cluster, "memories": []}

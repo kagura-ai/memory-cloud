@@ -14,6 +14,8 @@ import pytest
 from models.auth import Context, IdentityLink, User, Workspace
 from models.memory import EDGE_TYPE_SUPERSEDES, Memory, NeuralMemoryEdge
 from services.memory_listing import (
+    Change,
+    change_item,
     changes_since,
     compile_memory_filters,
     decode_change_cursor,
@@ -153,6 +155,8 @@ async def test_list_returns_every_live_row_newest_update_first(db_session, seede
         ({"tags": ["project x"], "tags_normalize": True}, {"task_open", "task_done"}),
         ({"details.status": "open"}, {"task_open"}),
         ({"details.prio": 2}, {"task_open"}),
+        ({"details.prio": "2"}, set()),  # a string filter never matches a stored number
+        ({"details.status": True}, set()),
         ({"source_type": "vault", "source_uri_prefix": "vault://v/"}, {"note"}),
         ({"source_uri_prefix": "vault://v/n.m"}, {"note"}),
         ({"source_uri_prefix": "vault://v\\"}, set()),  # a backslash is literal, not an escape
@@ -288,9 +292,9 @@ async def test_changes_since_lists_every_kind_in_time_order(db_session, seeded):
         ("created", "open task"),
         ("created", "done task"),
         ("created", "a note"),
-        ("created", "forgotten"),
+        ("created", None),  # the forgotten row: the event stays, its summary does not
         ("updated", "done task"),
-        ("forgotten", "forgotten"),
+        ("forgotten", None),
         ("created", "newer fact"),
         ("superseded", "a note"),
     ]
@@ -488,3 +492,165 @@ async def test_changes_since_works_when_created_is_not_the_first_kind(db_session
     )
     assert all(c.kind in kinds for c in page.changes)
     assert any(c.kind == "updated" for c in page.changes) is ("updated" in kinds)
+
+
+# ------------------------------------------------------------------ #1876
+
+
+@pytest.mark.asyncio
+async def test_a_forgotten_memory_keeps_its_events_but_not_its_summary(db_session, seeded):
+    """Edited, superseded, then forgotten: all four events stay in the log with
+    their kind, time and cursor position; none of them carries the summary."""
+    owner, ws, ctx, rows, t0 = seeded
+    secret = await _row(
+        db_session,
+        owner,
+        ws,
+        ctx,
+        summary="stored by mistake",
+        created_at=t0 + timedelta(hours=4),
+        updated_at=t0 + timedelta(hours=5),
+        deleted_at=t0 + timedelta(hours=7),
+    )
+    newer = await _row(
+        db_session, owner, ws, ctx, summary="the correction", created_at=t0 + timedelta(hours=6)
+    )
+    db_session.add(
+        NeuralMemoryEdge(
+            user_id=owner,
+            src_id=newer.id,
+            dst_id=secret.id,
+            workspace_id=ws,
+            context_id=ctx,
+            edge_type=EDGE_TYPE_SUPERSEDES,
+            weight=1.0,
+            confidence=1.0,
+            origin="declared",
+            created_at=t0 + timedelta(hours=6, minutes=30),
+        )
+    )
+    await db_session.flush()
+    window = {
+        "context_id": ctx,
+        "owner_user_id": None,
+        "since": t0 + timedelta(hours=4),
+        "until": t0 + timedelta(hours=8),
+    }
+    page = await changes_since(db_session, **window)
+    assert [(c.kind, c.memory_id, c.summary, c.at) for c in page.changes] == [
+        ("created", secret.id, None, t0 + timedelta(hours=4)),
+        ("updated", secret.id, None, t0 + timedelta(hours=5)),
+        ("created", newer.id, "the correction", t0 + timedelta(hours=6)),
+        ("superseded", secret.id, None, t0 + timedelta(hours=6, minutes=30)),
+        ("forgotten", secret.id, None, t0 + timedelta(hours=7)),
+    ]
+    assert page.changes[3].superseded_by == newer.id
+    # The keyset cursor walks the same sequence one event at a time.
+    walked = []
+    cursor = None
+    while True:
+        one = await changes_since(db_session, **window, cursor=cursor, limit=1)
+        walked += one.changes
+        if one.next_cursor is None:
+            break
+        cursor = one.next_cursor
+    assert walked == page.changes
+    for kind in ("created", "updated", "superseded", "forgotten"):  # each part of the union
+        only = await changes_since(db_session, **window, kinds=(kind,))
+        assert [c.summary for c in only.changes if c.memory_id == secret.id] == [None]
+
+
+def test_change_item_omits_the_summary_of_a_forgotten_memory():
+    at = utcnow()
+    live = Change(memory_id=uuid4(), kind="created", at=at, summary="kept", superseded_by=None)
+    gone = Change(memory_id=uuid4(), kind="forgotten", at=at, summary=None, superseded_by=None)
+    assert change_item(live)["summary"] == "kept"
+    assert set(change_item(gone)) == {"memory_id", "kind", "at"}
+    newer = uuid4()
+    replaced = Change(
+        memory_id=uuid4(), kind="superseded", at=at, summary=None, superseded_by=newer
+    )
+    assert set(change_item(replaced)) == {"memory_id", "kind", "at", "superseded_by"}
+    assert change_item(replaced)["superseded_by"] == str(newer)
+
+
+@pytest.mark.asyncio
+async def test_the_handler_renders_a_forgotten_memory_without_a_summary_key(db_session, seeded):
+    """``handle_changes_since`` end to end on the seeded rows: the forgotten row's
+    ``created`` and ``forgotten`` items have no ``summary`` key; live rows keep it."""
+    import json
+    from unittest.mock import AsyncMock, patch
+
+    from mcp_server.tools.listing import handle_changes_since
+
+    owner, ws, ctx, rows, t0 = seeded
+    context = await db_session.get(Context, ctx)
+
+    async def one_session():
+        yield db_session
+
+    with (
+        patch("db.base.get_db", new=one_session),
+        patch(
+            "mcp_server.tools.listing._resolve_context_for_read", AsyncMock(return_value=context)
+        ),
+        patch("mcp_server.tools.listing._log_tool_usage", AsyncMock()),
+    ):
+        (block,) = await handle_changes_since(
+            {"context_id": str(ctx), "since": (t0 - timedelta(seconds=1)).isoformat()}, owner, ws
+        )
+    payload = json.loads(block.text)
+    assert payload["status"] == "success" and payload["count"] == 6
+    gone = [c for c in payload["changes"] if c["memory_id"] == str(rows["gone"].id)]
+    assert [c["kind"] for c in gone] == ["created", "forgotten"]
+    assert all(set(c) == {"memory_id", "kind", "at"} for c in gone)
+    assert "forgotten" not in block.text.replace('"kind":"forgotten"', "")  # the seeded summary
+    live = [c for c in payload["changes"] if c["memory_id"] != str(rows["gone"].id)]
+    assert [c["summary"] for c in live] == ["open task", "done task", "a note", "done task"]
+
+
+@pytest.fixture
+async def typed_details(db_session):
+    owner = f"o-{uuid4().hex[:6]}"
+    ws, ctx = await _scope(db_session, owner, private=False)
+    for name, details in (
+        ("flag string", {"flag": "true"}),
+        ("flag boolean", {"flag": True}),
+        ("n int", {"n": 2}),
+        ("n float", {"n": 2.0}),
+        ("n string", {"n": "2"}),
+        ("n null", {"n": None}),
+        ("n object", {"n": {"v": 2}}),
+        ("text", {"note": 'say "hé" \\ ok'}),
+        ("no details", None),
+    ):
+        await _row(db_session, owner, ws, ctx, summary=name, details=details)
+    return ctx
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filters", "expected"),
+    [
+        ({"details.flag": True}, {"flag boolean"}),
+        ({"details.flag": "true"}, {"flag string"}),
+        ({"details.flag": False}, set()),
+        ({"details.n": 2}, {"n int"}),
+        ({"details.n": 2.0}, {"n float"}),
+        ({"details.n": "2"}, {"n string"}),
+        ({"details.n": "2.0"}, set()),
+        ({"details.n": 1}, set()),
+        ({"details.n": "null"}, set()),
+        ({"details.note": 'say "hé" \\ ok'}, {"text"}),  # strings compare unescaped
+        ({"details.absent": "x"}, set()),
+    ],
+)
+async def test_details_filter_matches_json_type_and_spelling(
+    db_session, typed_details, filters, expected
+):
+    """A string matches a stored string only, a boolean a stored boolean only, and a
+    number a stored number written the same way (``2`` is not ``2.0``)."""
+    page = await list_memories(
+        db_session, context_id=typed_details, owner_user_id=None, filters=filters
+    )
+    assert {m.summary for m in page.rows} == expected

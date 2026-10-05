@@ -118,7 +118,8 @@ async def handle_describe_tools(
     Static registry data: no database, nothing caller-specific beyond the
     request URL's own selection. ``names`` → the complete definitions (title,
     annotations, inputSchema) for up to ``MAX_NAMES`` tools, ``unknown`` for
-    the rest; otherwise ``tools`` → one line per hidden tool, optionally
+    the rest; otherwise (no ``names``, or none that is not blank) ``tools`` →
+    one line per hidden tool, optionally
     narrowed by ``query`` (case-insensitive substring on name, title, summary).
     Either way ``url`` says how to list more, and ``url_error`` carries the
     message ``tools/list`` fails with when the URL's selection is broken.
@@ -127,24 +128,24 @@ async def handle_describe_tools(
     query = args.get("query")
     if query is not None and not isinstance(query, str):
         return _error_response("validation_error", "query must be a string.")
-    if names is not None and not isinstance(names, list):
-        return _error_response(
-            "validation_error", 'names must be a list of tool names, e.g. ["get_usage"].'
-        )
-    if names is not None and not all(isinstance(n, str) for n in names):
-        return _error_response(
-            "validation_error", 'names must be a list of tool names, e.g. ["get_usage"].'
-        )
-    if names is not None and len(names) > MAX_NAMES:
-        return _error_response(
-            "validation_error", f"names holds at most {MAX_NAMES} tools (got {len(names)})."
-        )
+    if names is not None:
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            return _error_response(
+                "validation_error", 'names must be a list of tool names, e.g. ["get_usage"].'
+            )
+        if len(names) > MAX_NAMES:
+            return _error_response(
+                "validation_error", f"names holds at most {MAX_NAMES} tools (got {len(names)})."
+            )
+        # Blank entries name nothing: a list holding only those is the empty
+        # list, not a lookup that finds nothing and reports nothing (#1883).
+        names = [n for n in names if n.strip()]
     registry = get_tool_definitions()  # built once per call
     view, url_error = current_view()
     extra: dict[str, Any] = {"url": URL_HINT}
     if url_error:
         extra["url_error"] = url_error
-    if names:  # an empty list means "list the hidden tools"
+    if names:  # an empty (or all-blank) list means "list the hidden tools"
         found, unknown = full_definitions(registry, names)
         payload: dict[str, Any] = {"definitions": found, **extra}
         if unknown:

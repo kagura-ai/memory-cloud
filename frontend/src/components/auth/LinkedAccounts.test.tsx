@@ -465,6 +465,17 @@ describe("LinkedAccounts — link-proof result", () => {
     expect(mockReplace).toHaveBeenCalledWith("/profile");
   });
 
+  it("says a just-added sign-in method cannot confirm the account yet (#1875)", async () => {
+    paramsHolder.current = new URLSearchParams("link_proof=recent_provider");
+    mockApiGet.mockResolvedValueOnce(stale);
+
+    render(<LinkedAccounts />);
+
+    expect(await screen.findByText("linkProofRecentProvider")).toBeTruthy();
+    expect(screen.queryByText("linkProofStale")).toBeNull();
+    expect(mockReplace).toHaveBeenCalledWith("/profile");
+  });
+
   it("ignores any other value and leaves the URL alone", async () => {
     paramsHolder.current = new URLSearchParams("link_proof=whatever");
     mockApiGet.mockResolvedValueOnce(stale);
@@ -639,7 +650,8 @@ describe("LinkedAccounts — leave", () => {
     linked_at: "2026-01-02T00:00:00Z",
   };
 
-  it("is offered only once two or more accounts are linked", async () => {
+  // `linked` lists the OTHER accounts, so two entries are a set of three.
+  it("is offered only with two or more other linked accounts (a set of three or more)", async () => {
     mockApiGet.mockResolvedValueOnce({ linked: [ADMIN], linkable: [] });
 
     render(<LinkedAccounts />);
@@ -748,6 +760,7 @@ describe("LinkedAccounts — i18n key coverage", () => {
     "signInAgainHint",
     "linkProofUnproved",
     "linkProofStale",
+    "linkProofRecentProvider",
     "linkLimitError",
     "unlinkError",
     "unlinkNotLinkedError",

@@ -428,16 +428,6 @@ async def list_providers(
 # ---------------------------------------------------------------------------
 
 
-# How recently both accounts must have signed in on this browser session to be
-# linked (#1803). An account stays in a session for as long as the session
-# lives (7 rolling days), so holding it proves only that it signed in at some
-# point; the link asks for a sign-in now, as the provider link does with its
-# OAuth round trip (5 minutes there). Ten minutes leaves room for two sign-ins,
-# MFA included. What counts is the time the credential was proved (#1818): a
-# password sign-in, or Google's ``auth_time`` — not an OAuth round trip that a
-# live provider session completes without asking (see ``SessionManager.proven_at``).
-
-
 class IdentityLinkTarget(BaseModel):
     """Body for linking or unlinking an account."""
 
@@ -540,9 +530,10 @@ async def list_identity_links(
 ) -> IdentityLinksResponse:
     """List the identity links of the session user, and the linkable accounts.
 
-    Identity-linked accounts (separate accounts, not sign-in providers) own the same private contexts and the memories in them
-    (roles and workspace membership stay per account). Linkable accounts are
-    the other accounts signed in on this browser session.
+    Identity-linked accounts (separate accounts, not sign-in providers) own
+    the same private contexts and the memories in them (roles and workspace
+    membership stay per account). Linkable accounts are the other accounts
+    signed in on this browser session.
     """
     user_id = user["user_id"]
     linked = await IdentityLinkService(db).list_linked(user_id)
@@ -609,7 +600,11 @@ async def link_identity(
     match (#481). An id that is not in the session answers 404 whether or not
     such an account exists; freshness is checked only after that.
 
-    Raises (via the global handler): 400 for the caller's own id, 404 for an
+    Either account may already be in a link set; the sets then merge, and
+    every account of both is audited and sent the ``ACCOUNT_LINKED`` notice
+    (#1875), not only the two named here.
+
+    Raises (via the global handler): 422 for the caller's own id, 404 for an
     account not signed in here, 403 (``AUTH-305``) when either account has not
     signed in within the window, 409 when the set would exceed its size cap.
     """
@@ -624,14 +619,17 @@ async def link_identity(
             for account in (user_id, body.user_id)
         ):
             raise IdentityLinkSignInRequiredError()
-    created = await IdentityLinkService(db).link(
+    affected = await IdentityLinkService(db).link(
         user_id,
         body.user_id,
         ip_address=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    # A repeat of an existing link changed nothing: no second notice.
-    for account in (user_id, body.user_id) if created else ():
+    # A repeat of an existing link changed nothing (empty): no second notice.
+    # Otherwise the two named accounts first, then the rest of both sets —
+    # they gained co-owners of their private contexts too (#1875).
+    named = [account for account in (user_id, body.user_id) if account in affected]
+    for account in (*named, *sorted(affected - set(named))):
         schedule_security_notification(
             background_tasks,
             user_id=account,

@@ -5,6 +5,7 @@ HMAC-keyed audit log, IntegrityError → ConflictError.
 """
 
 from contextlib import suppress
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,6 +13,7 @@ import structlog
 from sqlalchemy.exc import IntegrityError
 
 from auth.roles import _OAUTH_CALLBACK_ACTOR, Role, RoleManager, _is_email_unique_violation
+from utils.datetime import utcnow
 from utils.exceptions import ConflictError
 from utils.hashing import hmac_sha256_hex
 
@@ -298,6 +300,146 @@ class TestLinkedProviderSkipsSync:
 
         assert race_existing.email == "alice@old.com"
         assert race_existing.name == "Alice"
+
+
+class TestAdoptsAPrimaryProvider:
+    """#1875: an OAuth account with no ``auth_provider`` gets the signing-in
+    provider, so its email and name sync again — but only from an established
+    link: a provider row older than the identity-link window, or the identity
+    the account was created with."""
+
+    OLD = timedelta(days=365)
+
+    @staticmethod
+    def _account(*, user_id="u1", created=OLD):
+        user = _user_row(user_id=user_id, email="alice@old.com", name="Alice", auth_provider=None)
+        user.auth_method = "oauth"
+        user.created_at = utcnow() - created
+        return user
+
+    @staticmethod
+    def _link(*, user_id="u1", oauth_sub="gh-1", linked: timedelta):
+        link = _oauth_link_row(user_id=user_id)
+        link.oauth_sub = oauth_sub
+        link.linked_at = utcnow() - linked
+        return link
+
+    @staticmethod
+    async def _sign_in(role_manager, db, *, sub="gh-1", provider="github"):
+        with (
+            _patch_get_db(db),
+            patch("services.security_notification_service.spawn_email_change_notification"),
+        ):
+            await role_manager.ensure_user(
+                email="alice@new.com",
+                user_id=sub,
+                name="Alice New",
+                auth_provider=provider,
+                email_verified=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_link_older_than_the_window_is_adopted_and_syncs(self, role_manager):
+        existing = self._account()
+        link = self._link(linked=timedelta(minutes=11))
+        db = _make_db_mock(_execute_returns(link, existing))
+
+        await self._sign_in(role_manager, db)
+
+        assert existing.auth_provider == "github"
+        assert existing.email == "alice@new.com"
+        assert existing.name == "Alice New"
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_freshly_linked_provider_is_not_adopted(self, role_manager):
+        existing = self._account()
+        link = self._link(linked=timedelta(minutes=3))
+        db = _make_db_mock(_execute_returns(link, existing))
+
+        await self._sign_in(role_manager, db)
+
+        # The sign-in itself goes through; nothing of the profile moves.
+        assert existing.auth_provider is None
+        assert existing.email == "alice@old.com"
+        assert existing.name == "Alice"
+        db.add.assert_not_called()
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_the_original_identity_is_adopted_at_once(self, role_manager):
+        """Its sub is the ``user_id`` and its row was written with the account."""
+        created = timedelta(minutes=2)
+        existing = self._account(user_id="g-1", created=created)
+        link = self._link(user_id="g-1", oauth_sub="g-1", linked=created)
+        db = _make_db_mock(_execute_returns(link, existing))
+
+        await self._sign_in(role_manager, db, sub="g-1", provider="google")
+
+        assert existing.auth_provider == "google"
+        assert existing.email == "alice@new.com"
+
+    @pytest.mark.asyncio
+    async def test_the_same_sub_linked_again_later_is_not_the_original(self, role_manager):
+        existing = self._account(user_id="g-1")
+        link = self._link(user_id="g-1", oauth_sub="g-1", linked=timedelta(minutes=3))
+        db = _make_db_mock(_execute_returns(link, existing))
+
+        await self._sign_in(role_manager, db, sub="g-1", provider="google")
+
+        assert existing.auth_provider is None
+        assert existing.email == "alice@old.com"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("linked", "adopted"), [(timedelta(minutes=11), True), (timedelta(minutes=3), False)]
+    )
+    async def test_race_retry_follows_the_same_rule(self, role_manager, linked, adopted):
+        """The racing request wrote this identity's link row for the account."""
+        race_existing = self._account()
+        link = self._link(oauth_sub="u1-sub", linked=linked)
+        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing, link))
+        db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
+
+        await self._sign_in(role_manager, db, sub="u1", provider="google")
+
+        assert race_existing.auth_provider == ("google" if adopted else None)
+        assert race_existing.email == ("alice@new.com" if adopted else "alice@old.com")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("link", [None, "someone-else"])
+    async def test_race_retry_leaves_a_row_that_only_shares_the_id(self, role_manager, link):
+        """Found by ``user_id`` alone: without a link row of its own for this
+        identity, the row must not start syncing from this provider."""
+        race_existing = self._account()
+        link_row = None if link is None else self._link(user_id=link, linked=timedelta(days=30))
+        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing, link_row))
+        db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
+
+        await self._sign_in(role_manager, db, sub="u1", provider="google")
+
+        assert race_existing.auth_provider is None
+        assert race_existing.email == "alice@old.com"
+        assert race_existing.name == "Alice"
+
+    @pytest.mark.parametrize(
+        ("auth_method", "pointer", "signing_in"),
+        [
+            ("password", None, "github"),  # a password account keeps its own profile
+            ("oauth", "google", "github"),  # a primary provider is never replaced
+            ("oauth", None, "okta"),  # not a provider an account can link
+        ],
+    )
+    def test_anything_else_is_left_alone(self, auth_method, pointer, signing_in):
+        from auth.roles import _adopt_primary_provider
+
+        user = self._account()
+        user.auth_provider = pointer
+        user.auth_method = auth_method
+
+        _adopt_primary_provider(user, signing_in, self._link(linked=timedelta(days=30)))
+
+        assert user.auth_provider == pointer
 
 
 class TestSyncName:

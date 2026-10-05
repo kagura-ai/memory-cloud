@@ -140,7 +140,9 @@ async def test_provider_sign_in_is_recorded_for_the_owning_account(
 
     monkeypatch.setattr(auth_routes, "get_db", _fake_db)
     monkeypatch.setattr(
-        auth_routes, "_owning_user", AsyncMock(return_value=("owner-1", "o@example.test"))
+        auth_routes,
+        "_owning_user",
+        AsyncMock(return_value=auth_routes.SessionOwner("owner-1", "o@example.test")),
     )
     note = AsyncMock()
     monkeypatch.setattr(auth_routes, "note_browser_sign_in", note)

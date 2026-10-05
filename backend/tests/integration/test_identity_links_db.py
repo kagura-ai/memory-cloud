@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.settings import get_settings
 from models.auth import (
     AuditLog,
     Context,
@@ -34,6 +35,7 @@ from services.identity_link_service import (
 from services.permission_service import PermissionService
 from utils.datetime import utcnow
 from utils.exceptions import AuthorizationError, ConflictError, NotFoundException, ValidationError
+from utils.hashing import hmac_sha256_hex
 
 
 async def _user(db: AsyncSession, prefix: str = "u") -> User:
@@ -97,11 +99,11 @@ class TestLinkSets:
         admin, oauth = await _user(db_session, "local"), await _user(db_session, "google")
         service = IdentityLinkService(db_session)
 
-        assert await service.link(admin.user_id, oauth.user_id) is True
-        # A repeat changes nothing and says so.
-        assert await service.link(oauth.user_id, admin.user_id) is False
-
         both = {admin.user_id, oauth.user_id}
+        assert await service.link(admin.user_id, oauth.user_id) == both
+        # A repeat changes nothing and says so.
+        assert await service.link(oauth.user_id, admin.user_id) == frozenset()
+
         assert await linked_user_ids(db_session, admin.user_id) == both
         assert await linked_user_ids(db_session, oauth.user_id) == both
         assert await is_same_owner(db_session, admin.user_id, oauth.user_id)
@@ -244,6 +246,70 @@ class TestLinkSets:
             (a.user_id, "identity_unlinked"),
             (b.user_id, "identity_unlinked"),
         }
+
+    @staticmethod
+    async def _linked_audit(db_session, users: list[User]) -> set[tuple[str, str]]:
+        """``(trail, hashed other account)`` of every ``identity_linked`` row."""
+        rows = await db_session.execute(
+            select(AuditLog.user_id, AuditLog.new_value_hash).where(
+                AuditLog.user_id.in_([u.user_id for u in users]),
+                AuditLog.action == "identity_linked",
+            )
+        )
+        return {(r.user_id, r.new_value_hash) for r in rows}
+
+    @staticmethod
+    def _pairs(left: list[User], right: list[User]) -> set[tuple[str, str]]:
+        """Both directions of every pair across ``left`` and ``right``."""
+        key = get_settings().audit_hmac_key
+        return {
+            (actor.user_id, hmac_sha256_hex(target.user_id, key))
+            for one in left
+            for other in right
+            for actor, target in ((one, other), (other, one))
+        }
+
+    @pytest.mark.asyncio
+    async def test_merging_two_sets_is_audited_on_every_cross_pair(self, db_session):
+        """#1875: X and Y gain co-owners too, so their trails say so."""
+        a, x, b, y = [await _user(db_session) for _ in range(4)]
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, x.user_id)
+        await service.link(b.user_id, y.user_id)
+        before = await self._linked_audit(db_session, [a, x, b, y])
+
+        affected = await service.link(a.user_id, b.user_id)
+
+        assert affected == {a.user_id, x.user_id, b.user_id, y.user_id}
+        added = await self._linked_audit(db_session, [a, x, b, y]) - before
+        assert added == self._pairs([a, x], [b, y])
+
+    @pytest.mark.asyncio
+    async def test_linking_a_set_to_a_single_account_is_audited_for_every_member(self, db_session):
+        a, x, b = [await _user(db_session) for _ in range(3)]
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, x.user_id)
+        before = await self._linked_audit(db_session, [a, x, b])
+
+        affected = await service.link(a.user_id, b.user_id)
+
+        assert affected == {a.user_id, x.user_id, b.user_id}
+        added = await self._linked_audit(db_session, [a, x, b]) - before
+        assert added == self._pairs([a, x], [b])
+
+    @pytest.mark.asyncio
+    async def test_the_single_account_may_be_the_one_naming_the_set(self, db_session):
+        """Same result whichever side the caller is on."""
+        a, x, b = [await _user(db_session) for _ in range(3)]
+        service = IdentityLinkService(db_session)
+        await service.link(a.user_id, x.user_id)
+        before = await self._linked_audit(db_session, [a, x, b])
+
+        affected = await service.link(b.user_id, a.user_id)
+
+        assert affected == {a.user_id, x.user_id, b.user_id}
+        added = await self._linked_audit(db_session, [a, x, b]) - before
+        assert added == self._pairs([b], [a, x])
 
     @pytest.mark.asyncio
     async def test_deleting_an_account_removes_it_from_its_set(self, db_session):

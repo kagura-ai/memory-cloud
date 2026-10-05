@@ -466,6 +466,12 @@ jobs:
       - name: Run integration tests
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://kagura:kagura_dev_password@localhost:5432/kagura_test
+          # Hard-fail rather than let every db_session test silently skip: the
+          # async_engine fixture (tests/conftest.py) turns a failed create_all
+          # into a skip, which is right for the unit job but would leave this
+          # job green with nothing run when Postgres is up and rejects the
+          # schema (#1885).
+          REQUIRE_TEST_DATABASE: "1"
           REDIS_URL: redis://localhost:6379
           QDRANT_URL: http://localhost:6333
           MINIO_TEST_ENDPOINT: http://localhost:9000
@@ -481,6 +487,8 @@ jobs:
           tests/services/test_orphan_vector_sweep.py
           tests/services/test_context_delete_removes_points.py
           tests/api/test_account_linking.py
+          tests/services/test_remember_write_options.py
+          tests/mcp_server/test_remember_batch_tool.py
           -v --timeout=120 --maxfail=3
 
   # Authenticated a11y (color-contrast) lane (#840). Unlike the hermetic

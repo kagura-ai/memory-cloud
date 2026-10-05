@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from utils.url_redact import redact_db_url, redact_generic_url
+import pytest
+
+from utils.url_redact import redact_db_url, redact_generic_url, redis_location
 
 
 class TestRedactDbUrl:
@@ -184,3 +186,47 @@ class TestRedactGenericUrl:
         result = redact_generic_url(url)
         assert "MYSUPERSECRET" not in result
         assert result == "<redacted-url>"
+
+
+class TestRedisLocation:
+    """Test redis_location: host and port only, for log lines (#1898)."""
+
+    def test_password_in_userinfo(self):
+        assert redis_location("redis://:pw@host:6379/0") == "host:6379"
+
+    def test_password_in_query(self):
+        """redis-py accepts ``?password=``; the query must never be returned."""
+        result = redis_location("redis://host:6379/0?password=pw")
+        assert result == "host:6379"
+        assert "pw" not in result
+        assert "password" not in result
+
+    def test_rediss_user_and_password_no_port(self):
+        assert redis_location("rediss://user:pw@host") == "host"
+
+    def test_ipv6_host_keeps_brackets(self):
+        assert redis_location("redis://:pw@[::1]:6379/0") == "[::1]:6379"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "unix:///var/run/redis.sock?password=pw",  # no host
+            "redis:///0?password=pw",  # no host
+            "user:pw@host:6379",  # scheme-less: no netloc
+            "",
+        ],
+    )
+    def test_no_host_returns_placeholder(self, url):
+        assert redis_location(url) == "the configured REDIS_URL"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "redis://:pw@host:notaport/0",  # port does not parse
+            "redis://:pw@[::1/0",  # unbalanced IPv6 bracket: urlsplit raises
+        ],
+    )
+    def test_unparsable_returns_placeholder(self, url):
+        result = redis_location(url)
+        assert result == "the configured REDIS_URL"
+        assert "pw" not in result

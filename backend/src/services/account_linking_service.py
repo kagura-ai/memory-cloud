@@ -13,6 +13,8 @@ Security edge cases enforced here:
 - Unlink never strips a user of their last sign-in method (password counts).
 - Unlinking the legacy "primary" provider repoints ``User.auth_provider`` to a
   surviving linked provider, or ``None`` when none remain (edge case 7).
+  Linking never sets the pointer: an OAuth account left with ``None`` gets it
+  back on a sign-in through an established link (``RoleManager``, #1875).
 """
 
 from __future__ import annotations
@@ -95,13 +97,19 @@ class AccountLinkingService:
             logger.warning("oauth_provider_link_conflict", user_id=user_id, provider=provider)
             raise ConflictError("This provider is already linked to a different account")
 
-        # arm 1 (unbound): INSERT the link + audit success.
+        # arm 1 (unbound): INSERT the link + audit success. ``linked_at`` is
+        # written here rather than left to the column default: the OAuth
+        # callbacks compare it with ``utcnow()`` to keep a provider attached
+        # minutes ago from proving its account (#1875), so it must not depend
+        # on the database session's time zone.
+        now = utcnow()
         self.db.add(
             UserOAuthProvider(
                 user_id=user_id,
                 provider=provider,
                 oauth_sub=oauth_sub,
-                last_used_at=utcnow(),
+                linked_at=now,
+                last_used_at=now,
             )
         )
         self._audit(user_id, email, "oauth_provider_linked", provider, ip_address, user_agent)

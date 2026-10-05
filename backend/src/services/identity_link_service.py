@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, delete, func, or_, select, text, update
+from sqlalchemy import ColumnElement, delete, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -168,15 +168,22 @@ class IdentityLinkService:
         *,
         ip_address: str | None = None,
         user_agent: str | None = None,
-    ) -> bool:
+    ) -> frozenset[str]:
         """Put ``user_id`` and ``other_user_id`` in one link set.
 
         The caller has already proved both accounts (same browser session,
         both signed in recently).
         Idempotent for a pair that is already linked.
 
+        Either account may already be in a set, and then the whole sets merge:
+        every account of one side becomes a co-owner with every account of the
+        other. Each such cross pair is audited on both trails (#1875), as
+        unlink and leave audit every account they separate (#1807) — at most
+        ``MAX_LINKED_IDENTITIES`` accounts, so a handful of rows.
+
         Returns:
-            True when the link was created, False when the pair was already
+            Every account that gained a co-owner: the members of both sides,
+            the two named accounts among them. Empty when the pair was already
             linked (nothing written, nothing to audit or notify).
 
         Raises:
@@ -207,29 +214,27 @@ class IdentityLinkService:
             raise NotFoundException("Account")
         await lock_identity_links(self.db)
 
-        groups = {
-            row.user_id: row.group_id
-            for row in await self.db.execute(
-                select(IdentityLink.user_id, IdentityLink.group_id).where(
-                    IdentityLink.user_id.in_([user_id, other_user_id])
+        # Every member of either side's set, read under the link lock.
+        named = [user_id, other_user_id]
+        members: dict[uuid.UUID, set[str]] = {}
+        groups: dict[str, uuid.UUID] = {}
+        for row in await self.db.execute(
+            select(IdentityLink.user_id, IdentityLink.group_id).where(
+                IdentityLink.group_id.in_(
+                    select(IdentityLink.group_id).where(IdentityLink.user_id.in_(named))
                 )
             )
-        }
+        ):
+            members.setdefault(row.group_id, set()).add(row.user_id)
+            if row.user_id in named:
+                groups[row.user_id] = row.group_id
         mine, theirs = groups.get(user_id), groups.get(other_user_id)
         if mine is not None and mine == theirs:
-            return False
+            return frozenset()
 
-        async def size(group_id: uuid.UUID | None) -> int:
-            if group_id is None:
-                return 1
-            count = await self.db.execute(
-                select(func.count())
-                .select_from(IdentityLink)
-                .where(IdentityLink.group_id == group_id)
-            )
-            return int(count.scalar_one())
-
-        if await size(mine) + await size(theirs) > MAX_LINKED_IDENTITIES:
+        my_side = members[mine] if mine is not None else {user_id}
+        their_side = members[theirs] if theirs is not None else {other_user_id}
+        if len(my_side) + len(their_side) > MAX_LINKED_IDENTITIES:
             raise ConflictError(f"At most {MAX_LINKED_IDENTITIES} accounts can be linked together")
 
         group_id = mine or theirs or uuid.uuid4()
@@ -240,15 +245,36 @@ class IdentityLinkService:
                 .where(IdentityLink.group_id == theirs)
                 .values(group_id=group_id)
             )
-        for member in (user_id, other_user_id):
+        for member in named:
             if member not in groups:
                 self.db.add(IdentityLink(group_id=group_id, user_id=member, linked_by=user_id))
 
-        self._audit(users[user_id], "identity_linked", other_user_id, ip_address, user_agent)
-        self._audit(users[other_user_id], "identity_linked", user_id, ip_address, user_agent)
+        # The other members' rows are read after the link lock and not locked,
+        # as in ``_take_out``: taking a ``users`` row lock here would reverse
+        # the order erasure and admin delete take them in. One that is gone by
+        # now simply has no trail to write to.
+        affected = frozenset(my_side | their_side)
+        others = affected - users.keys()
+        if others:
+            users.update(
+                (u.user_id, u)
+                for u in (
+                    await self.db.execute(select(User).where(User.user_id.in_(others)))
+                ).scalars()
+            )
+        for a in sorted(my_side):
+            for b in sorted(their_side):
+                for actor, target in ((a, b), (b, a)):
+                    if actor in users:
+                        self._audit(users[actor], "identity_linked", target, ip_address, user_agent)
         await self.db.commit()
-        logger.info("identity_linked", user_id=user_id, linked_user_id=other_user_id)
-        return True
+        logger.info(
+            "identity_linked",
+            user_id=user_id,
+            linked_user_id=other_user_id,
+            affected_accounts=len(affected),
+        )
+        return affected
 
     async def unlink(
         self,

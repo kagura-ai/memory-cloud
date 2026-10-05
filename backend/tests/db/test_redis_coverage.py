@@ -190,6 +190,36 @@ class TestGetRedisClient:
         finally:
             monkeypatch.setattr(redis_mod, "_redis_client", None)
 
+    @pytest.mark.parametrize("reserved", ["/", "#", "?", "[x/"])
+    def test_unparseable_url_raises_fixed_message_without_the_password(self, monkeypatch, reserved):
+        """#1881: the URL parser quotes the text before the reserved character.
+
+        Unpatched redis-py, no network I/O: ``from_url`` fails while parsing.
+        Neither the message nor anything chained to it may carry the password.
+        """
+        import traceback
+
+        from config.database import INVALID_REDIS_URL_MESSAGE
+
+        head, tail = "k1881Po0lHead", "k1881Po0lTail"
+        monkeypatch.setattr(redis_mod, "_redis_client", None)
+        monkeypatch.setattr(redis_mod, "get_settings", _PoolSettings)
+        monkeypatch.setattr(redis_mod, "REDIS_URL", f"redis://:{head}{reserved}{tail}@redis:6379")
+        try:
+            with pytest.raises(RedisError) as excinfo:
+                get_redis_client()
+        finally:
+            monkeypatch.setattr(redis_mod, "_redis_client", None)
+
+        err = excinfo.value
+        assert INVALID_REDIS_URL_MESSAGE in str(err)
+        assert err.__cause__ is None
+        assert err.__context__ is None
+        rendered = "".join(traceback.format_exception(err))
+        for text in (str(err), repr(err), str(getattr(err, "details", "")), rendered):
+            assert head not in text
+            assert tail not in text
+
 
 class TestCloseRedis:
     """Deprecated close_redis path."""
