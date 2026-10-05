@@ -615,7 +615,7 @@ class MemoryService:
         *,
         tags_normalize: bool = False,
         dedupe: str = DEDUPE_SUGGEST,
-        tag_canonical: dict[str, tuple[str, int]] | None = None,
+        tag_canonical: dict[str, list[tuple[str, int]]] | None = None,
     ) -> RememberResponse:
         """Store new memory.
 
@@ -690,7 +690,7 @@ class MemoryService:
         tags_normalize: bool,
         dedupe: str,
         isolation: tuple[Any, str | None, str | None] | None = None,
-        tag_canonical: dict[str, tuple[str, int]] | None = None,
+        tag_canonical: dict[str, list[tuple[str, int]]] | None = None,
     ) -> _PreparedRemember:
         """Everything ``remember`` does before the row is committed (#1853).
 
@@ -835,8 +835,8 @@ class MemoryService:
         self._reject_context_location(request.context)
 
         # #1853: tags_normalize maps each tag onto the established spelling
-        # that differs only mechanically (case / separators / simple plural —
-        # recall's tags_normalize rule) and reports the mapping in lint.
+        # that differs only mechanically (case / separators / simple plural,
+        # never the numbers — #1871) and reports the mapping in lint.
         tag_hints: list[WriteLintHint] = []
         if tags_normalize and request.tags:
             request.tags, tag_hints = await self._normalize_tags_for_write(
@@ -1116,22 +1116,31 @@ class MemoryService:
 
     async def tag_canonical_map(
         self, *, workspace_id: UUID, context_id: UUID, user_id: str
-    ) -> dict[str, tuple[str, int]]:
-        """``normalize_tag`` fold → (most frequent stored spelling, count) for the
-        caller's view of the context (the #1512 vocabulary cache). Built once per
-        write call; ``_normalize_tags_for_write`` adds the spellings it stores so
-        later tags of the same request or batch fold onto them."""
+    ) -> dict[str, list[tuple[str, int]]]:
+        """``normalize_tag`` fold → every stored spelling with that fold, as
+        (spelling, count), most frequent first, for the caller's view of the
+        context (the #1512 vocabulary cache).
+
+        Every spelling is kept, not only the most frequent (#1871): the fold is
+        not injective on tags that carry numbers (``v0.1.10`` and ``v0.11.0``
+        share one), and a single slot per fold would make the rarer of two such
+        tags unreachable. Built once per write call;
+        ``_normalize_tags_for_write`` appends the spellings it stores so later
+        tags of the same request or batch fold onto them."""
         from services.tag_resolution import fetch_vocabulary_cached
         from utils.tag_normalize import normalize_tag
 
         vocabulary = await fetch_vocabulary_cached(
             self.db, workspace_id=workspace_id, context_id=context_id, user_id=user_id
         )
-        canonical: dict[str, tuple[str, int]] = {}
+        canonical: dict[str, list[tuple[str, int]]] = {}
         for stored, count in vocabulary.items():
             fold = normalize_tag(stored)
-            if fold and (fold not in canonical or count > canonical[fold][1]):
-                canonical[fold] = (stored, count)
+            if fold:
+                canonical.setdefault(fold, []).append((stored, count))
+        for spellings in canonical.values():
+            # Stable: equally frequent spellings keep the vocabulary's order.
+            spellings.sort(key=lambda pair: -pair[1])
         return canonical
 
     async def _normalize_tags_for_write(
@@ -1141,18 +1150,23 @@ class MemoryService:
         workspace_id: UUID,
         context_id: UUID,
         user_id: str,
-        canonical: dict[str, tuple[str, int]] | None = None,
+        canonical: dict[str, list[tuple[str, int]]] | None = None,
     ) -> tuple[list[str], list[WriteLintHint]]:
         """Map each tag onto the context's established spelling of it (#1853).
 
-        Two tags are the same tag written differently when ``normalize_tag``
-        folds them to one form (NFKC, case, separators, a conservative plural
-        strip) — the rule recall's ``tags_normalize`` filter matches on.
-        Abbreviations and edit-distance variants are NOT mapped; they stay
-        ``tag_near_duplicate`` hints. Among several stored spellings with one
-        fold the most frequent wins. The vocabulary is the #1512 cache.
+        Two tags are the same tag written differently when
+        ``is_mechanical_variant`` holds: ``normalize_tag`` folds them to one
+        form (NFKC, case, separators, a conservative plural strip) AND their
+        numbers are the same (#1871). The fold alone is the rule recall's
+        ``tags_normalize`` filter widens by, but it is not injective on
+        numbered tags — ``v0.11.0`` / ``v0.1.10``, ``pr-123`` / ``pr-1-23`` —
+        and a write, unlike a filter, would file the memory under the other
+        identifier. Such a tag is stored as written, with no hint.
+        Abbreviations and edit-distance variants are NOT mapped either; they
+        stay ``tag_near_duplicate`` hints. Among several stored variants the
+        most frequent wins. The vocabulary is the #1512 cache.
         """
-        from utils.tag_normalize import normalize_tag
+        from utils.tag_normalize import is_mechanical_variant, normalize_tag
 
         if canonical is None:
             canonical = await self.tag_canonical_map(
@@ -1162,7 +1176,13 @@ class MemoryService:
         hints: list[WriteLintHint] = []
         for tag in tags:
             fold = normalize_tag(tag)
-            match = canonical.get(fold) if fold else None
+            spellings = canonical.setdefault(fold, []) if fold else []
+            # Most frequent first; spellings stored earlier in this request or
+            # batch follow with count 0.
+            match = next(
+                (pair for pair in spellings if is_mechanical_variant(tag, pair[0])),
+                None,
+            )
             if match is None or match[0] == tag:
                 stored = tag
             else:
@@ -1183,8 +1203,10 @@ class MemoryService:
                 )
             if stored not in out:
                 out.append(stored)
-            # Within one request the first spelling wins too ('Foo' then 'foo').
-            canonical.setdefault(fold, (stored, 0))
+            # Within one request the first spelling wins too ('Foo' then 'foo');
+            # a tag with other numbers joins the fold as a spelling of its own.
+            if fold and match is None:
+                spellings.append((stored, 0))
         return out, hints
 
     async def _find_duplicate_candidate(
