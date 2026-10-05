@@ -727,7 +727,11 @@ class FailedMemoryInfo(BaseModel):
     summary: str
     embedding_error: str | None
     created_at: str
+    # Last edit; null for a memory that was never edited. Not the failure time.
     updated_at: str | None
+    # #1868: when the embedding last failed. Null only for a row that failed
+    # before the pipeline kept its own clock (#1852).
+    embedding_attempted_at: str | None = None
 
 
 class EmbeddingStatusResponse(BaseModel):
@@ -747,7 +751,8 @@ async def get_embedding_status(
     """Get embedding processing queue status.
 
     Issue #93: Visibility into embedding pipeline status.
-    Returns counts by status and details of any failed memories.
+    Returns counts by status and details of the 50 most recently failed
+    memories, latest failure first; ``embedding_attempted_at`` is the failure time.
     """
     from uuid import UUID as PyUUID
 
@@ -817,7 +822,16 @@ async def get_embedding_status(
                 *conditions,
                 Memory.embedding_status == "failed",
             )
-            .order_by(Memory.updated_at.desc())
+            # #1868: order by the failure clock. A failure stamps
+            # ``embedding_attempted_at`` and leaves ``updated_at`` NULL on a
+            # never-edited row (#1852); the older clocks cover rows that failed
+            # before that column existed, and ``id`` makes the cap deterministic.
+            .order_by(
+                func.coalesce(
+                    Memory.embedding_attempted_at, Memory.updated_at, Memory.created_at
+                ).desc(),
+                Memory.id.desc(),
+            )
             .limit(50)
         )
         failed_result = await db.execute(failed_stmt)
@@ -829,6 +843,7 @@ async def get_embedding_status(
                     embedding_error=mem.embedding_error,
                     created_at=to_utc_iso(mem.created_at) or "",
                     updated_at=to_utc_iso(mem.updated_at),
+                    embedding_attempted_at=to_utc_iso(mem.embedding_attempted_at),
                 )
             )
 

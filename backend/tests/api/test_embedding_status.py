@@ -1,6 +1,6 @@
 """Tests for embedding queue status endpoints (Issue #93)."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -8,6 +8,9 @@ import pytest
 from fastapi import HTTPException
 
 from api.routes.workspace import get_embedding_status
+from models.auth import Workspace
+from models.memory import Memory
+from utils.datetime import to_utc_iso, utcnow
 
 
 class TestGetEmbeddingStatus:
@@ -87,6 +90,7 @@ class TestGetEmbeddingStatus:
         mock_mem.embedding_error = "Model not available"
         mock_mem.created_at = datetime(2026, 4, 1, 10, 0, 0)
         mock_mem.updated_at = datetime(2026, 4, 1, 12, 0, 0)
+        mock_mem.embedding_attempted_at = datetime(2026, 4, 1, 13, 0, 0)
 
         # First call: GROUP BY status counts
         mock_status_result = MagicMock()
@@ -110,6 +114,9 @@ class TestGetEmbeddingStatus:
         assert len(response.failed_memories) == 1
         assert response.failed_memories[0].id == str(mem_id)
         assert response.failed_memories[0].embedding_error == "Model not available"
+        # #1868: the failure clock and the edit clock are separate fields.
+        assert response.failed_memories[0].updated_at == "2026-04-01T12:00:00Z"
+        assert response.failed_memories[0].embedding_attempted_at == "2026-04-01T13:00:00Z"
 
 
 class TestPrivateContextsAreNotLeaked:
@@ -177,3 +184,103 @@ class TestPrivateContextsAreNotLeaked:
         """Order matters: the narrowing decision needs the answer first."""
         sql = await self._run(mock_db, caller="member_1", owner="someone_else")
         assert "workspaces" in sql[0].lower()
+
+
+class TestFailedMemoriesOrderByFailureClock:
+    """#1868: a failed embedding stamps ``embedding_attempted_at``, not
+    ``updated_at`` (#1852), so a never-edited failed row has ``updated_at``
+    NULL. Ordering the capped list on the bare column returned an arbitrary 50
+    and no failure time. Real ``db_session``: the ordering is the contract."""
+
+    @staticmethod
+    async def _workspace(db_session, owner):
+        ws_id = uuid4()
+        db_session.add(Workspace(id=ws_id, name="ws", owner_user_id=owner))
+        await db_session.flush()
+        return ws_id
+
+    @staticmethod
+    def _failed(ws_id, owner, **stamps):
+        return Memory(
+            id=uuid4(),
+            user_id=owner,
+            workspace_id=ws_id,
+            summary="failed row",
+            content="full content",
+            type="note",
+            importance=0.5,
+            client="pytest",
+            scope="working",
+            embedding_status="failed",
+            embedding_error="Model not available",
+            **stamps,
+        )
+
+    async def test_never_edited_failures_come_back_latest_first(self, db_session):
+        owner = f"u-{uuid4()}"
+        ws_id = await self._workspace(db_session, owner)
+        now = utcnow()
+        # 51 never-edited failures, one minute apart; the oldest is over the cap.
+        never_edited = [
+            self._failed(
+                ws_id,
+                owner,
+                created_at=now - timedelta(days=1),
+                embedding_attempted_at=now - timedelta(minutes=minutes),
+            )
+            for minutes in range(1, 52)
+        ]
+        # Edited a moment ago, but its embedding failed long before: the edit
+        # clock must not lift it over the more recent failures.
+        edited_old_failure = self._failed(
+            ws_id,
+            owner,
+            created_at=now - timedelta(days=2),
+            updated_at=now,
+            embedding_attempted_at=now - timedelta(hours=5),
+        )
+        db_session.add_all([edited_old_failure, *reversed(never_edited)])
+        await db_session.flush()
+
+        user = {"user_id": owner, "current_workspace_id": str(ws_id)}
+        response = await get_embedding_status(user=user, db=db_session, context_id=None)
+
+        assert response.by_status == {"failed": 52}
+        assert [m.id for m in response.failed_memories] == [str(m.id) for m in never_edited[:50]]
+        for info, mem in zip(response.failed_memories, never_edited[:50], strict=True):
+            assert info.updated_at is None
+            assert info.embedding_attempted_at == to_utc_iso(mem.embedding_attempted_at)
+
+    async def test_falls_back_to_edit_then_creation_clock(self, db_session):
+        """Rows failed before the attempt clock existed have no
+        ``embedding_attempted_at``; they sort by ``updated_at``, else ``created_at``."""
+        owner = f"u-{uuid4()}"
+        ws_id = await self._workspace(db_session, owner)
+        now = utcnow()
+        attempted = self._failed(
+            ws_id,
+            owner,
+            created_at=now - timedelta(days=9),
+            embedding_attempted_at=now - timedelta(hours=1),
+        )
+        legacy_edited = self._failed(
+            ws_id,
+            owner,
+            created_at=now - timedelta(days=9),
+            updated_at=now - timedelta(hours=2),
+        )
+        legacy_never_edited = self._failed(ws_id, owner, created_at=now - timedelta(hours=3))
+        db_session.add_all([legacy_never_edited, legacy_edited, attempted])
+        await db_session.flush()
+
+        user = {"user_id": owner, "current_workspace_id": str(ws_id)}
+        response = await get_embedding_status(user=user, db=db_session, context_id=None)
+
+        assert [m.id for m in response.failed_memories] == [
+            str(attempted.id),
+            str(legacy_edited.id),
+            str(legacy_never_edited.id),
+        ]
+        assert response.failed_memories[1].embedding_attempted_at is None
+        assert response.failed_memories[2].embedding_attempted_at is None
+        assert response.failed_memories[2].updated_at is None
