@@ -14,7 +14,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import WorkspaceOwner
@@ -236,15 +236,28 @@ async def _check_workspace_quota_ceiling(
     # Quota used by the workspace's OTHER regular tokens. The anti-join drops
     # connector-owned ones (UNIQUE resource_pk, so no row inflation); a token
     # with a NULL resource_pk never matches the join and is still counted.
+    #
+    # "The workspace's" is judged like ``_token_in_workspace``: by the
+    # ``resources`` row a token's ``resource_pk`` points at — such a token
+    # authenticates ingest even when its shadow ``workspace_id`` column was
+    # never backfilled, so it must count — and by the token's own
+    # ``workspace_id`` only for a legacy row without ``resource_pk``.
     other_tokens_result = await db.execute(
         select(sql_func.sum(ResourceToken.quota_events_per_hour))
+        .outerjoin(Resource, Resource.id == ResourceToken.resource_pk)
         .outerjoin(
             WorkspaceConnector,
             WorkspaceConnector.resource_pk == ResourceToken.resource_pk,
         )
         .where(
             and_(
-                ResourceToken.workspace_id == workspace_id,
+                or_(
+                    Resource.workspace_id == workspace_id,
+                    and_(
+                        ResourceToken.resource_pk.is_(None),
+                        ResourceToken.workspace_id == workspace_id,
+                    ),
+                ),
                 ResourceToken.is_active == True,  # noqa: E712
                 ResourceToken.id != token.id,
                 WorkspaceConnector.id.is_(None),

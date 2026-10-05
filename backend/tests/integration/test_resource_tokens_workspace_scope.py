@@ -469,6 +469,58 @@ async def test_quota_ceiling_is_the_workspaces_not_the_callers(scenario, db_sess
 
 
 @pytest.mark.asyncio
+async def test_quota_sum_counts_a_token_without_the_shadow_workspace_id(scenario, db_session):
+    """A token whose ``workspace_id`` was never backfilled still authenticates
+    through ``resource_pk``, so its quota is part of the workspace's sum; a
+    legacy row without ``resource_pk`` counts through its ``workspace_id``."""
+    ceiling = get_plan_tier(PLAN).max_resource_tokens * 10000
+    legacy_pk = uuid4()
+    legacy_slug = f"legacy_{scenario['tag']}"
+    db_session.add(
+        Resource(
+            id=legacy_pk,
+            workspace_id=scenario["ws_b_id"],
+            resource_id=legacy_slug,
+            created_by=scenario["owner_b_id"],
+        )
+    )
+    await db_session.flush()
+    _, legacy_token = await ResourceTokenManager(db_session).create_token(
+        legacy_slug,
+        resource_pk=legacy_pk,
+        workspace_id=scenario["ws_b_id"],
+        quota_events_per_hour=1000,
+        created_by=scenario["owner_b_id"],
+    )
+    await db_session.flush()
+    # token_b: resource_pk only (no shadow workspace_id); legacy_token:
+    # workspace_id only (no resource_pk). Together all but 1500 of the ceiling.
+    await db_session.execute(
+        ResourceToken.__table__.update()
+        .where(ResourceToken.id == scenario["token_b_id"])
+        .values(workspace_id=None, quota_events_per_hour=ceiling - 2500)
+    )
+    await db_session.execute(
+        ResourceToken.__table__.update()
+        .where(ResourceToken.id == legacy_token.id)
+        .values(resource_pk=None)
+    )
+    await db_session.commit()
+    scenario["act_as"](scenario["owner_b_id"], scenario["ws_b_id"])
+    member_token = scenario["token_b_member_public_id"]
+
+    with TestClient(app) as client:
+        fits = client.patch(
+            f"/api/v1/resource-tokens/{member_token}", json={"quota_events_per_hour": 1500}
+        )
+        assert fits.status_code == 200, fits.text
+        over = client.patch(
+            f"/api/v1/resource-tokens/{member_token}", json={"quota_events_per_hour": 1501}
+        )
+        assert over.status_code == 400, over.text
+
+
+@pytest.mark.asyncio
 async def test_lowering_a_quota_is_never_refused(scenario, db_session):
     """Already over the ceiling (a plan downgrade, say): lowering must work —
     it is the way back under."""
