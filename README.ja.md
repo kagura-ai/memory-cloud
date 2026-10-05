@@ -284,7 +284,7 @@ MCP ツールに加えてフル REST API を提供:
 | `/kagura-memory:guide` | 使い方ガイド・接続確認・セットアップ |
 | `/kagura-memory:setup` | MCP 接続とツールガードレール Hook の設定・検証 (`--check` は変更なしの診断のみ) |
 | `/kagura-memory:login` | MCP 接続の再認証 (`invalid_token`・`insufficient_scope`・別マシン) と接続確認 |
-| `/kagura-memory:smoke-test` | 全 MCP ツールの動作確認 |
+| `/kagura-memory:smoke-test` | 全 MCP ツールの動作確認 (全ツール一覧が必要: MCP URL に `?profile=full`、`kagura-mcp` は `--tool-profile full`。ワークスペースオーナーで実行) |
 
 **推奨ワークフロー:**
 
