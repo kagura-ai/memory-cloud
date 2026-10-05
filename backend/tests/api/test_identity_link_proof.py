@@ -493,13 +493,14 @@ class TestARecentlyAttachedProvider:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("provider", "sub"), [("google", GOOGLE_SUB), ("github", GITHUB_SUB)])
-    async def test_the_accounts_own_identity_proves_it_at_once(
+    async def test_a_first_sign_in_proves_the_new_account_at_once(
         self, manager, signed_in_path, request, opted_out, provider, sub
     ) -> None:
-        """A first sign-in creates the provider row seconds before the proof."""
+        """A first sign-in creates the account and its provider row together,
+        seconds before the proof."""
         request.getfixturevalue(f"{provider}_idp")
         signed_in_path.owning.return_value = auth_routes.SessionOwner(
-            sub, "own@example.test", "Own", None, utcnow()
+            sub, "own@example.test", "Own", None, utcnow(), utcnow()
         )
         before = utcnow()
 
@@ -507,8 +508,20 @@ class TestARecentlyAttachedProvider:
 
         assert before <= _proof(manager) <= utcnow()
 
+    @staticmethod
+    def _owner(user_id: str, *, linked: timedelta | None, created: timedelta | None):
+        now = utcnow()
+        return auth_routes.SessionOwner(
+            user_id,
+            "o@example.test",
+            None,
+            None,
+            None if linked is None else now - linked,
+            None if created is None else now - created,
+        )
+
     @pytest.mark.parametrize(
-        ("linked_at", "expected"),
+        ("linked", "expected"),
         [
             (timedelta(minutes=9, seconds=59), False),
             (timedelta(minutes=10, seconds=1), True),
@@ -516,16 +529,39 @@ class TestARecentlyAttachedProvider:
             (None, False),  # a linked row with no readable time
         ],
     )
-    def test_the_boundary_is_the_link_window(self, linked_at, expected) -> None:
-        owner = auth_routes.SessionOwner(
-            OWNER_ID,
-            "o@example.test",
-            None,
-            None,
-            None if linked_at is None else utcnow() - linked_at,
-        )
+    def test_a_linked_provider_counts_once_the_window_has_passed(self, linked, expected) -> None:
+        owner = self._owner(OWNER_ID, linked=linked, created=timedelta(days=365))
 
         assert auth_routes._identity_can_prove(owner, GOOGLE_SUB) is expected
+
+    @pytest.mark.parametrize(
+        ("linked", "created", "expected"),
+        [
+            # Created together a moment ago: the first sign-in.
+            (timedelta(seconds=2), timedelta(seconds=2), True),
+            (timedelta(minutes=9), timedelta(minutes=9), True),
+            # The same sub attached again to an old account (it unlinked its
+            # original identity), or another provider's sub that equals the id.
+            (timedelta(minutes=3), timedelta(days=365), False),
+            (timedelta(minutes=3), timedelta(minutes=11), False),
+            (timedelta(minutes=3), None, False),
+            # Old either way.
+            (timedelta(days=30), timedelta(days=365), True),
+        ],
+    )
+    def test_the_sub_alone_does_not_exempt_a_recent_row(self, linked, created, expected) -> None:
+        owner = self._owner(GOOGLE_SUB, linked=linked, created=created)
+
+        assert auth_routes._identity_can_prove(owner, GOOGLE_SUB) is expected
+
+    def test_an_identity_with_no_link_row_was_never_attached(self) -> None:
+        """Found by the ``users`` row keyed by the sub, or not found at all."""
+        assert auth_routes._identity_can_prove(
+            self._owner(GOOGLE_SUB, linked=None, created=timedelta(days=365)), GOOGLE_SUB
+        )
+        assert auth_routes._identity_can_prove(
+            auth_routes.SessionOwner(GOOGLE_SUB, "idp@example.test"), GOOGLE_SUB
+        )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(("attached", "linked"), [(RECENT, False), (timedelta(days=1), True)])
@@ -563,18 +599,21 @@ class TestARecentlyAttachedProvider:
             patch.object(me_account, "IdentityLinkService", return_value=service),
             patch.object(me_account, "schedule_security_notification"),
         ):
-            call = me_account.link_identity(
-                me_account.IdentityLinkTarget(user_id=OWNER_ID),
-                request,
-                MagicMock(),
-                {"user_id": "local:admin"},
-                AsyncMock(),
-            )
+
+            async def link():
+                return await me_account.link_identity(
+                    me_account.IdentityLinkTarget(user_id=OWNER_ID),
+                    request,
+                    MagicMock(),
+                    {"user_id": "local:admin"},
+                    AsyncMock(),
+                )
+
             if linked:
-                assert (await call).status == "ok"
+                assert (await link()).status == "ok"
             else:
                 with pytest.raises(IdentityLinkSignInRequiredError) as refused:
-                    await call
+                    await link()
                 assert refused.value.status_code == 403
                 service.link.assert_not_awaited()
 

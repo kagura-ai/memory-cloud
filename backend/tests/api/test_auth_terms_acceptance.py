@@ -795,8 +795,9 @@ class TestLinkedIdentityOwner:
     ) -> None:
         from sqlalchemy.dialects import postgresql
 
-        # The row ``_owning_user`` selects: id, email, name, picture, linked_at.
-        db = self._db(("google-owner-1", "owner@example.test", "Owner", None, utcnow()))
+        # The row ``_owning_user`` selects: id, email, name, picture, the
+        # provider's linked_at, the account's created_at.
+        db = self._db(("google-owner-1", "owner@example.test", "Owner", None, utcnow(), utcnow()))
         self._use_db(monkeypatch, db)
 
         await auth_routes._record_terms_acceptance(
@@ -823,7 +824,7 @@ class TestLinkedIdentityOwner:
     async def test_falls_back_to_the_sub_without_a_link_row(
         self, terms_on, record, monkeypatch
     ) -> None:
-        self._use_db(monkeypatch, self._db(None, ("108", "n@example.test", None, None)))
+        self._use_db(monkeypatch, self._db(None, ("108", "n@example.test", None, None, utcnow())))
 
         await auth_routes._record_terms_acceptance(
             oauth_identity=("google", "108"),

@@ -530,9 +530,10 @@ What counts as a proof (#1818):
   a GitHub sign-in**: GitHub reports no authentication time.
 - **Not a sign-in through a provider attached to the account less than
   10 minutes ago** (#1875). Attaching a sign-in provider needs only a live
-  session, so a proof through it would be a proof by that session. The
-  account's original provider is not affected; the page says to retry once
-  the 10 minutes have passed, and the backend logs
+  session, so a proof through it would be a proof by that session. A new
+  account's first sign-in is not affected (the provider was not attached to
+  it afterwards); the page says to retry once the 10 minutes have passed,
+  and the backend logs
   `link_proof_provider_recently_attached`. This holds with
   `IDENTITY_LINK_ALLOW_OAUTH_SIGNIN_PROOF=true` too.
 

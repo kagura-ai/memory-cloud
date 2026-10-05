@@ -109,7 +109,14 @@ def signed_in_path(monkeypatch) -> SimpleNamespace:
 
 def linked_owner(*, attached: timedelta = timedelta(days=30)) -> SessionOwner:
     """The owner of a linked identity that was attached ``attached`` ago."""
-    return SessionOwner(OWNER_ID, OWNER_EMAIL, OWNER_NAME, OWNER_PICTURE, utcnow() - attached)
+    return SessionOwner(
+        OWNER_ID,
+        OWNER_EMAIL,
+        OWNER_NAME,
+        OWNER_PICTURE,
+        provider_linked_at=utcnow() - attached,
+        account_created_at=utcnow() - timedelta(days=365),
+    )
 
 
 @pytest.fixture

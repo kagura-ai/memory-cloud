@@ -1631,7 +1631,8 @@ class SessionOwner(NamedTuple):
     session opened through a linked provider shows the account, not whichever
     provider was used (#1875). ``provider_linked_at`` is when the identity was
     attached (naive UTC) — None when the owner was found by the ``users`` row
-    keyed by the sub, or not found at all.
+    keyed by the sub, or not found at all. ``account_created_at`` is when the
+    account itself was created (naive UTC), None when no row was found.
     """
 
     user_id: str
@@ -1639,6 +1640,7 @@ class SessionOwner(NamedTuple):
     name: str | None = None
     picture: str | None = None
     provider_linked_at: datetime | None = None
+    account_created_at: datetime | None = None
 
 
 async def _owning_user(db: AsyncSession, provider: str, idp_sub: str) -> SessionOwner | None:
@@ -1653,22 +1655,31 @@ async def _owning_user(db: AsyncSession, provider: str, idp_sub: str) -> Session
 
     row = (
         await db.execute(
-            select(User.user_id, User.email, User.name, User.picture, UserOAuthProvider.linked_at)
+            select(
+                User.user_id,
+                User.email,
+                User.name,
+                User.picture,
+                UserOAuthProvider.linked_at,
+                User.created_at,
+            )
             .join(UserOAuthProvider, UserOAuthProvider.user_id == User.user_id)
             .where(UserOAuthProvider.provider == provider, UserOAuthProvider.oauth_sub == idp_sub)
             .limit(1)
         )
     ).first()
     if row is not None:
-        return SessionOwner(row[0], row[1], row[2], row[3], row[4])
+        return SessionOwner(row[0], row[1], row[2], row[3], row[4], row[5])
     row = (
         await db.execute(
-            select(User.user_id, User.email, User.name, User.picture)
+            select(User.user_id, User.email, User.name, User.picture, User.created_at)
             .where(User.user_id == idp_sub)
             .limit(1)
         )
     ).first()
-    return SessionOwner(row[0], row[1], row[2], row[3]) if row is not None else None
+    if row is None:
+        return None
+    return SessionOwner(row[0], row[1], row[2], row[3], None, row[4])
 
 
 async def _session_owner(provider: str, idp_sub: str, idp_email: str) -> SessionOwner:
@@ -1721,15 +1732,30 @@ def _identity_can_prove(owner: SessionOwner, idp_sub: str) -> bool:
 
     Decision (#1875): the gate is here, on the proof, not on attaching — an
     OAuth-only account has no other credential to prove before it attaches a
-    second provider. The account's own identity (its ``user_id`` is the sub)
-    always counts; a provider linked to it counts once its link row is older
-    than ``IDENTITY_LINK_SIGN_IN_WINDOW``. A linked row with no readable time
-    proves nothing.
+    second provider. A provider link row older than
+    ``IDENTITY_LINK_SIGN_IN_WINDOW`` counts. A younger one counts only when it
+    is the identity the account was created with: its sub is the account's
+    ``user_id`` AND the account itself is younger than the window (a first
+    sign-in creates both together). Matching the sub alone is not enough — an
+    account can unlink its original identity and have it attached again, and
+    subs are scoped by provider, so another provider's could equal the id.
+    A linked row with no readable time proves nothing.
+
+    An identity with no link row at all (the owner was found by the ``users``
+    row keyed by the sub, or not found) was never attached, so it counts.
     """
-    if owner.user_id == idp_sub:
-        return True
     linked_at = owner.provider_linked_at
-    return linked_at is not None and utcnow() - linked_at > IDENTITY_LINK_SIGN_IN_WINDOW
+    if linked_at is None:
+        return owner.user_id == idp_sub
+    now = utcnow()
+    if now - linked_at > IDENTITY_LINK_SIGN_IN_WINDOW:
+        return True
+    created_at = owner.account_created_at
+    return (
+        owner.user_id == idp_sub
+        and created_at is not None
+        and now - created_at <= IDENTITY_LINK_SIGN_IN_WINDOW
+    )
 
 
 async def _account_exists(user_id: str) -> bool:
