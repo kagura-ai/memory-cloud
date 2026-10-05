@@ -1394,8 +1394,11 @@ class PointRef:
     # has not committed yet is never taken for an orphan. Read from the payload
     # ``indexed_at`` (#1869); a point written by an older release has only
     # ``updated_at`` — the event time, which can be long before the write —
-    # and falls back to it, which is safe because no batch that old is still
-    # in flight.
+    # and falls back to it, so a row-less point such a release left behind is
+    # still swept. A missing ``indexed_at`` cannot tell a historical point
+    # from one an older release is writing right now: while a rollout still
+    # has such a process indexing a backlog, its in-flight points get the
+    # pre-#1869 behaviour (no worse than before), and only for that overlap.
     written_at: datetime | None = None
 
 
