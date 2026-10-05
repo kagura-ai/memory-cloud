@@ -5,7 +5,15 @@
  * and terminal states (success, denied, error, expired).
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  onTestFinished,
+  vi,
+} from "vitest";
 import {
   cleanup,
   fireEvent,
@@ -437,7 +445,18 @@ describe("DevicePage", () => {
       );
     });
 
-    it("sends the user to login with return_to when the session is gone (401)", async () => {
+    it("reloads into login with return_to when the session is gone (401)", async () => {
+      // A full document navigation: AuthProvider still holds the stale user,
+      // and /login forwards a signed-in visitor back to return_to (#1594).
+      const assign = vi.fn();
+      const realLocation = Object.getOwnPropertyDescriptor(window, "location")!;
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: { ...window.location, assign },
+      });
+      onTestFinished(() => {
+        Object.defineProperty(window, "location", realLocation);
+      });
       mockConfirmDevice.mockRejectedValue(
         new ApiError({ message: "Authentication required", status: 401 }),
       );
@@ -454,10 +473,11 @@ describe("DevicePage", () => {
       fireEvent.click(screen.getByText("device.approve"));
 
       await waitFor(() => {
-        expect(mockRouterReplace).toHaveBeenCalledWith(
+        expect(assign).toHaveBeenCalledWith(
           "/login?return_to=%2Fdevice%3Fuser_code%3DABCD1234",
         );
       });
+      expect(mockRouterReplace).not.toHaveBeenCalled();
       expect(screen.queryByText("Authentication required")).toBeNull();
     });
   });

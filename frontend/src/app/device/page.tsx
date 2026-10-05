@@ -196,10 +196,13 @@ function DevicePageInner() {
     } catch (err) {
       const status = err instanceof ApiError ? err.status : undefined;
       // The session ended while the consent screen was open (#1878): sign in
-      // again and come back to this code. The submitting state stays up, as
-      // the page shows nothing else while it navigates away.
+      // again and come back to this code. A full document load, not
+      // router.replace: AuthProvider reads the session once on mount, so a
+      // client-side navigation would carry the stale user to /login, which
+      // forwards a signed-in visitor straight back here (#1594). The
+      // submitting state stays up while the page navigates away.
       if (status === 401) {
-        router.replace(loginRedirectUrl(deviceInfo.user_code));
+        window.location.assign(loginRedirectUrl(deviceInfo.user_code));
         return;
       }
       // The account row was locked for too long (a password reset or an
