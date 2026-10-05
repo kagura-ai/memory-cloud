@@ -13,8 +13,13 @@ import pytest
 from mcp_server.tools import _TOOLS_WITHOUT_CONTEXT_ID, get_tool_definitions
 from mcp_server.tools._annotations import TOOL_ANNOTATIONS
 from mcp_server.tools._profiles import CORE_TOOLS
-from mcp_server.tools.bootstrap import handle_bootstrap, parse_include, parse_since
-from mcp_server.tools.guide import GUIDE_INDEX
+from mcp_server.tools.bootstrap import (
+    MAX_SINCE_DAYS,
+    handle_bootstrap,
+    parse_include,
+    parse_since,
+)
+from mcp_server.tools.guide import GUIDE_INDEX, GUIDE_TOPICS
 from services.session_bootstrap_service import COMPONENTS, _fit, window_start_cursor
 from utils.datetime import utcnow
 from utils.response_budget import json_chars
@@ -63,6 +68,48 @@ def test_since_error_names_the_relative_form():
         parse_since("1w")
 
 
+def test_since_accepts_the_whole_relative_range():
+    now = utcnow()
+    assert MAX_SINCE_DAYS == 999
+    assert abs((now - parse_since("999d")) - timedelta(days=999)) < timedelta(seconds=5)
+    assert abs((now - parse_since(" 7d ")) - timedelta(days=7)) < timedelta(seconds=5)
+
+
+@pytest.mark.parametrize("raw", ["1000d", "1000D", " 12345d ", "0001d"])
+def test_since_past_the_relative_range_names_the_range(raw):
+    """Four digits used to fall through to the ISO 8601 parser, whose message
+    does not say what the limit is (#1883)."""
+    with pytest.raises(ValueError, match="'0d' to '999d'") as excinfo:
+        parse_since(raw)
+    assert "ISO 8601" in str(excinfo.value)  # the way to reach further back
+
+
+def test_every_since_error_names_the_range():
+    with pytest.raises(ValueError, match="'0d' to '999d'"):
+        parse_since("1w")
+    with pytest.raises(ValueError, match="'0d' to '999d'"):
+        parse_since(7)
+
+
+def test_the_since_schema_states_the_accepted_range():
+    tool = next(t for t in get_tool_definitions() if t["name"] == "bootstrap")
+    assert "'0d' to '999d'" in tool["inputSchema"]["properties"]["since"]["description"]
+
+
+def test_the_guide_topic_names_every_input_property():
+    """``guide(["bootstrap"])`` documented ``since`` only; ``include`` and
+    ``max_chars`` were in the schema alone (#1883)."""
+    tool = next(t for t in get_tool_definitions() if t["name"] == "bootstrap")
+    topic = GUIDE_TOPICS["bootstrap.usage"]
+    properties = tool["inputSchema"]["properties"]
+    assert [name for name in properties if name not in topic] == []
+    assert "bootstrap(context_id, since?, include?, max_chars?)" in topic
+    assert "include narrows" in topic
+    for component in COMPONENTS:
+        assert component in topic
+    assert "max_chars defaults to 20,000" in topic
+
+
 def test_include_defaults_to_all_components_and_dedupes():
     assert parse_include(None) == COMPONENTS
     assert parse_include(["changes", "pinned", "changes"]) == ("changes", "pinned")
@@ -80,6 +127,7 @@ def test_include_rejects_unknown_components(raw):
     [
         ({}, "missing_fields", "context_id"),
         ({"context_id": CTX, "since": "tomorrow"}, "validation_error", "since"),
+        ({"context_id": CTX, "since": "1000d"}, "validation_error", "'0d' to '999d'"),
         ({"context_id": CTX, "include": ["recall"]}, "validation_error", "include"),
         ({"context_id": CTX, "max_chars": "lots"}, "validation_error", "max_chars"),
     ],

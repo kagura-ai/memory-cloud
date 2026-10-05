@@ -126,8 +126,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "explore(memory_id) walks the graph to its neighbours; load_pinned() returns "
         "the pinned set, unranked; recall_upcoming() / recall_nearby() are "
         "deterministic time / place queries. Typical flow: recall → reference → "
-        "explore. Searches may also strengthen associations and promote returned "
-        "memories."
+        "explore. Searches may also strengthen associations (not keyword-only or "
+        "degraded recalls) and promote returned memories."
     ),
     "recall.query-tips": (
         "A question often matches better as a hypothetical answer — search 'JWT "
@@ -436,13 +436,17 @@ GUIDE_TOPICS: dict[str, str] = {
     ),
     # ----------------------------------------------------------- bootstrap
     "bootstrap.usage": (
-        "bootstrap(context_id, since?) is the interactive session's one-call start. "
+        "bootstrap(context_id, since?, include?, max_chars?) is the interactive "
+        "session's one-call start. "
         "It returns the context block, the context's guardrails (guardrails.items), the "
         "pinned memories (trusted, cap 20), upcoming Time Memories (from now, k 20) and "
-        "the change log since `since` (default 7 days back; ISO 8601 or '<N>d'; "
-        "changes_since semantics, first 50 with a keyset next_cursor). Each component "
+        "the change log since `since` (default 7 days back; ISO 8601 or '<N>d', '0d' to "
+        "'999d'; changes_since semantics, first 50 with a keyset next_cursor). include "
+        "narrows the components to a subset of pinned, upcoming, changes (default all "
+        "three); the context block and guardrails are not affected. Each component "
         "reports status ok | error; one failing lane sets degraded: true and the rest "
-        "still return. Over max_chars, context_summary leaves the pinned items first, "
+        "still return. max_chars defaults to 20,000 (characters, not tokens). Over "
+        "max_chars, context_summary leaves the pinned items first, "
         "then pinned → upcoming → changes keep the prefix that fits (truncated: true). "
         "It replaces the three probabilistic session-start recalls: recall by topic "
         "afterwards only when the change list does not answer the question. Render "

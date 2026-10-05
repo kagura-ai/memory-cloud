@@ -33,11 +33,18 @@ from utils.datetime import parse_iso8601_to_aware, utcnow
 from utils.response_budget import BudgetArgumentError, parse_max_chars
 
 DEFAULT_SINCE_DAYS = 7
+MAX_SINCE_DAYS = 999
 _RELATIVE = re.compile(r"^(\d{1,3})d$", re.IGNORECASE)
+# The relative form with more digits than the range holds: reported as out of
+# range instead of being handed to the ISO 8601 parser.
+_RELATIVE_TOO_LONG = re.compile(r"^\d{4,}d$", re.IGNORECASE)
+# Every ``since`` error ends with this; the schema description states the same
+# range (#1883).
+SINCE_FORMS = f"ISO 8601 or '<N>d' (days back, '0d' to '{MAX_SINCE_DAYS}d', e.g. '7d')"
 
 
 def parse_since(raw: Any) -> datetime:
-    """``since``: ISO 8601 (naive = UTC), ``"<N>d"`` (days back), or absent → 7 days back.
+    """``since``: ISO 8601 (naive = UTC), ``"<N>d"`` (0-999 days back), or absent → 7 days back.
 
     Returns naive UTC, the convention of the ``memories`` timestamps, through
     the same conversion ``changes_since`` applies to its ``since``.
@@ -46,14 +53,20 @@ def parse_since(raw: Any) -> datetime:
     if raw is None or raw == "":
         return now - timedelta(days=DEFAULT_SINCE_DAYS)
     if not isinstance(raw, str):
-        raise ValueError("since must be an ISO 8601 string or '<N>d'")
-    m = _RELATIVE.match(raw.strip())
+        raise ValueError(f"since must be a string: {SINCE_FORMS}")
+    text = raw.strip()
+    m = _RELATIVE.match(text)
     if m:
         return now - timedelta(days=int(m.group(1)))
+    if _RELATIVE_TOO_LONG.match(text):
+        raise ValueError(
+            f"since '{text}' is not accepted — pass {SINCE_FORMS}; "
+            "an ISO 8601 timestamp reaches further back"
+        )
     try:
         return to_naive_utc(parse_iso8601_to_aware(raw, "since"))
     except ValueError as e:
-        raise ValueError(f"{e} — pass ISO 8601 or '<N>d' (days back, e.g. '7d')") from e
+        raise ValueError(f"{e} — pass {SINCE_FORMS}") from e
 
 
 def parse_include(raw: Any) -> tuple[str, ...]:

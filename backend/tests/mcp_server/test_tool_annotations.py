@@ -10,6 +10,7 @@ paths — is in ``test_transport_tool_profiles``.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,6 +20,15 @@ from mcp_server.tools._annotations import TOOL_ANNOTATIONS, annotate_tool_defini
 from mcp_server.tools._profiles import CORE_TOOLS, select_tool_definitions
 
 HINTS = ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
+
+# The one sentence that says what a recall changes. A keyword-only or degraded
+# recall runs no Hebbian learning (#1760), so the description, the guide topic
+# and the docs all carry the qualifier (#1883).
+RECALL_SIDE_EFFECT = (
+    "Searches may also strengthen associations (not keyword-only or degraded recalls) "
+    "and promote returned memories"
+)
+MCP_TOOLS_DOC = Path(__file__).resolve().parents[3] / "docs" / "mcp-tools.md"
 
 
 def _by_name() -> dict[str, dict]:
@@ -242,7 +252,7 @@ def test_recall_is_destructive_because_it_learns(name):
 @pytest.mark.parametrize(
     ("name", "param", "phrase"),
     [
-        ("recall", None, "may also strengthen associations and promote returned memories"),
+        ("recall", None, RECALL_SIDE_EFFECT),
         ("secret_put", None, "not listed in grant_pubkey_ids are revoked"),
         (
             "update_context",
@@ -258,6 +268,22 @@ def test_destructive_descriptions_name_their_side_effect(name, param, phrase):
     assert tool["annotations"]["destructiveHint"] is True
     text = tool["inputSchema"]["properties"][param]["description"] if param else tool["description"]
     assert phrase in text
+
+
+def test_recall_side_effect_wording_is_the_same_in_the_guide():
+    from mcp_server.tools.guide import GUIDE_TOPICS
+
+    assert RECALL_SIDE_EFFECT in GUIDE_TOPICS["recall.which-tool"]
+
+
+@pytest.mark.skipif(not MCP_TOOLS_DOC.exists(), reason="docs/ is not shipped in the image")
+def test_recall_side_effect_wording_is_the_same_in_the_docs():
+    row = next(
+        line
+        for line in MCP_TOOLS_DOC.read_text(encoding="utf-8").splitlines()
+        if line.startswith("| `recall` |")
+    )
+    assert RECALL_SIDE_EFFECT in row
 
 
 def test_an_audited_read_stays_read_only():
