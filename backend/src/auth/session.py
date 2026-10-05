@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from utils.datetime import utcnow
+from utils.url_redact import redis_location
 
 logger = logging.getLogger(__name__)
 
@@ -338,8 +339,10 @@ class SessionManager:
         # Get or create shared Redis client (singleton pattern)
         self._redis = self._get_or_create_redis_client(redis_url)
 
+        # Host and port only: the URL can hold a password in its userinfo or
+        # in its query (#1898).
         logger.info(
-            f"Initialized SessionManager (ttl={session_ttl}s, redis={redis_url.split('@')[-1]})"
+            f"Initialized SessionManager (ttl={session_ttl}s, redis={redis_location(redis_url)})"
         )
 
     @staticmethod
@@ -365,7 +368,7 @@ class SessionManager:
             try:
                 from redis import Redis
 
-                logger.info(f"Creating new Redis client for sessions: {redis_url.split('@')[-1]}")
+                logger.info(f"Creating new Redis client for sessions: {redis_location(redis_url)}")
 
                 client = Redis.from_url(
                     redis_url,
@@ -386,7 +389,7 @@ class SessionManager:
             except Exception as e:
                 raise ConnectionError(f"Failed to connect to Redis: {e}") from e
         else:
-            logger.debug(f"Reusing cached Redis client for {redis_url.split('@')[-1]}")
+            logger.debug(f"Reusing cached Redis client for {redis_location(redis_url)}")
 
         return _redis_client_cache[redis_url]
 

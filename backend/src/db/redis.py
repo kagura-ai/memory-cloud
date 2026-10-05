@@ -11,7 +11,7 @@ from config.database import REDIS_URL
 from config.settings import get_settings
 from utils.exceptions import RedisError
 from utils.logger import get_logger
-from utils.url_redact import redact_generic_url
+from utils.url_redact import redis_location
 
 logger = get_logger(__name__)
 
@@ -52,7 +52,9 @@ def get_redis_client() -> aioredis.Redis:
             _redis_client = aioredis.Redis.from_pool(pool)
             logger.info(
                 "redis_client_initialized",
-                url=redact_generic_url(REDIS_URL),
+                # Host and port only: ``redact_generic_url`` keeps the query,
+                # where a Redis URL can hold ``?password=`` (#1898).
+                url=redis_location(REDIS_URL),
                 max_connections=settings.redis_max_connections,
                 pool_timeout_seconds=settings.redis_pool_timeout_seconds,
             )
