@@ -9,6 +9,7 @@
 > Re-frozen after #1008: the sequential integer PKs that #991 froze are replaced by prefixed opaque public ids (`<prefix>_` + 22 base62 characters): `APIKeyResponse.id` → `akey_…`, `ShareKeyResponse.id` → `skey_…` (the `share_keys.py` models were missing from this enumeration and are added below), `ResourceTokenResponse.id` and `WorkspaceConnectorCreateResponse.token_id` → `rtok_…`; `ExternalKeyResponse.id` is dropped (external keys are addressed by `key_name`). The routes that address these resources take the public id as the path id; an integer path id is a 422 (hard cut, no dual-accept period). Outside this enumeration's scope (`models/schemas.py`): `WorkspaceInvitationResponse.id` / `PendingInvitationItem.id` → `winv_…`, `MemberAPIKeyResponse.id` and `RegenerateAPIKeyResponse.key_id` → `akey_…`.
 > Re-frozen after #1813: the remaining integer user / OAuth-client PKs are dropped outright, since each resource already carries the string id clients address it by: `OAuth2ClientResponse.id` (and `OAuth2ClientWithSecretResponse`, which inherits it — including the DCR `/register` response) → use `client_id`. Outside this enumeration's scope (`models/schemas.py`): `UserProfileResponse.id` (`/users/profile`, which gains the string `user_id` it lacked) and `UserWithAdminFlag.id` (`/admin/system-admins`) → use `user_id`; `SystemAdminListResponse.initial_admin_id` is dropped (each entry's `is_initial_admin` marks the protected initial admin).
 > Changed by #1678: new `password.py` models (email + password recovery and settings); `PasswordLoginRequest.login_id` now also accepts a verified email address (field name unchanged); `/auth/me` gains `has_password` (defined in `models/schemas.py`, outside this enumeration's scope).
+> Changed by #1868: `FailedMemoryInfo` gains the optional `embedding_attempted_at` (the time the embedding last failed); `updated_at` there is the last edit and is null for a never-edited memory. `failed_memories` is ordered latest failure first.
 
 Notes:
 
@@ -1513,6 +1514,7 @@ Notes:
 - `embedding_error: str | None` — required
 - `created_at: str` — required
 - `updated_at: str | None` — required
+- `embedding_attempted_at: str | None` — optional (default `None`)
 
 ### EmbeddingStatusResponse (BaseModel, L691)
 > Embedding queue status response.
