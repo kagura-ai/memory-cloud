@@ -150,7 +150,7 @@ With the hooks on, the hooks are the guardrail lane for this client: put `?guard
 | `guide` | This guide |
 | `setup` | Configure and verify the MCP connection and the guardrail hooks (`--check` for a read-only doctor run) |
 | `login` | Sign the MCP connection in again after `invalid_token`, `insufficient_scope` or a new machine, and verify it |
-| `smoke-test` | Verify all MCP tools work |
+| `smoke-test` | Verify all MCP tools work (connect with `?profile=full`, as a workspace owner) |
 
 ### 7. Install in another project / machine
 

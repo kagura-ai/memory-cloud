@@ -999,7 +999,6 @@
     "signInMethodDesc": "How you authenticate to your account",
     "signInMethodGoogle": "Google",
     "signInMethodGitHub": "GitHub",
-    "signInMethodPassword": "Email + Password",
     "signInMethodOther": "Other",
     "signInMethodEmailPassword": "Email and password",
     "signInMethodSeparator": ", ",
@@ -1644,6 +1643,7 @@
       "mine": "Created by me",
       "shared": "Shared with me",
       "empty": "No contexts match this filter.",
+      "emptyDescription": "Choose another owner filter, or show all contexts.",
       "showAll": "Show all"
     },
     "admin": "Admin",
@@ -1876,7 +1876,13 @@
       "howItWorks": "Register your app → Users authorize via the OAuth flow → The app receives access tokens → Tokens are used for MCP or REST API calls."
     },
     "dcrNote": "Claude.ai, Claude Desktop, ChatGPT, Cursor and Claude Code register themselves when they connect (Dynamic Client Registration) — there is nothing to create here for them. Create a custom app only for an OAuth2 client you build yourself.",
-    "legacyPresetsTitle": "Earlier preset apps",
+    "legacyPresetsTitle": "Earlier connector apps",
+    "legacyProvider": {
+      "claude": "Claude",
+      "chatgpt": "ChatGPT",
+      "cursor": "Cursor",
+      "other": "Other"
+    },
     "legacyPresetNote": "This app is no longer needed: reconnecting the connector registers it automatically. Delete it when you no longer use it.",
     "clientId": "Client ID",
     "redirectUri": "Redirect URI",
@@ -2851,7 +2857,7 @@
         "merge_backlog_old": "The oldest merge loser is {oldest_days}d old (over {threshold_days}d) — consider a retention window.",
         "edge_weight_violations": "{count} edge(s) outside the weight bounds [{min}, {max}] — an unclamped-accumulation bug.",
         "cold_graph": "{active_memories} active memories but zero edges — the graph never warmed. Check edge-formation gates and the sleep mode.",
-        "write_only_store": "No recall calls in the last {window_days}d despite {active_memories} active memories — the store is write-only right now.",
+        "write_only_store": "No successful recall calls in the last {window_days}d while memories were written ({active_memories} active memories) — the store is write-only right now.",
         "idle_store": "No successful MCP recall or memory-write calls in the last {window_days}d across {active_memories} active memories — the context looks idle, not write-only. Writes made through the web UI, REST API or connectors are not counted here.",
         "unknown": "Unrecognized health note (code: {code})."
       }
@@ -4061,11 +4067,23 @@
     "createTitle": "Create Slack connector",
     "createDesc": "Connecting {team}. A private context will be created to hold ingested conversations.",
     "missingScopesTitle": "Reconnect Slack to enable all features",
-    "missingScopesDesc": "This install did not grant {scopes}. Ingestion works, but each of these scopes enables one feature — commands: the slash command; app_mentions:read: @mention replies; groups:read: private channels in the channel picker. Make sure the Slack app requests them, then connect Slack again.",
+    "missingScopesDesc": "Ingestion works, but this install did not grant every Slack scope. Unavailable until you reconnect:",
+    "missingScopeFeatures": {
+      "commands": "commands — the slash command",
+      "appMentionsRead": "app_mentions:read — @mention replies",
+      "groupsRead": "groups:read — private channels in the channel picker",
+      "other": "{scope}"
+    },
+    "missingScopesAction": "Make sure the Slack app requests {count, plural, one {this scope} other {these scopes}}, then connect Slack again.",
     "teamConflict": {
       "subjectNamed": "The Slack workspace “{name}”",
       "subjectUnnamed": "This Slack workspace",
-      "here": "{subject} is already connected in this workspace by the connector “{connector}”. Its Slack permissions were refreshed by this sign-in; the channel list picks that up within a minute. To change its settings, edit the existing connector.",
+      "here": "{subject} is already connected in this workspace by the connector “{connector}”. To change its settings, edit the existing connector.",
+      "hereUnnamed": "{subject} is already connected in this workspace by an existing connector. To change its settings, edit that connector.",
+      "hereOAuth": "{subject} is already connected in this workspace by the connector “{connector}”. Its Slack permissions were refreshed by this sign-in; the channel list picks that up within a minute. To change its settings, edit the existing connector.",
+      "hereOAuthUnnamed": "{subject} is already connected in this workspace by an existing connector. Its Slack permissions were refreshed by this sign-in; the channel list picks that up within a minute. To change its settings, edit that connector.",
+      "hereManual": "{subject} is already connected in this workspace by the connector “{connector}”. The bot token you entered was not saved. To change its settings, edit the existing connector.",
+      "hereManualUnnamed": "{subject} is already connected in this workspace by an existing connector. The bot token you entered was not saved. To change its settings, edit that connector.",
       "elsewhere": "{subject} is already connected to another Kagura workspace. A Slack workspace can be connected to only one Kagura workspace. To move it, delete the connector in the original workspace. To share it, ask a member of the original workspace to invite you.",
       "editExisting": "Edit the existing connector"
     },
@@ -4434,7 +4452,7 @@
     },
     "reset": {
       "title": "Choose a new password",
-      "description": "Resetting your password signs you out of every browser session.",
+      "description": "Resetting your password signs you out of every browser session and disconnects every connected app and MCP client.",
       "submit": "Reset password",
       "submitting": "Saving…",
       "successTitle": "Password updated",

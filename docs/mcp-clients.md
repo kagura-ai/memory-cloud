@@ -140,7 +140,7 @@ The **kagura-memory** plugin adds session management and memory workflow skills 
 | `/kagura-memory:guide` | Usage guide, connection status, and setup help |
 | `/kagura-memory:setup` | Configure and verify the MCP connection and the guardrail hooks (`--check` = read-only doctor) |
 | `/kagura-memory:login` | Sign the MCP connection in again (`invalid_token`, `insufficient_scope`, a new machine) and verify it — [Sign in again](#sign-in-again) |
-| `/kagura-memory:smoke-test` | Verify all MCP tools work |
+| `/kagura-memory:smoke-test` | Verify all MCP tools work — needs the full tool list (`?profile=full` on the MCP URL, or `--tool-profile full` for `kagura-mcp`) and a workspace owner |
 
 **Recommended workflow:**
 

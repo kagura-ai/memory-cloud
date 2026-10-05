@@ -6,8 +6,11 @@
  * Each visible badge names the workspace and nests a `PlanBadge`, so the tier
  * color carries only the plan: the workspace part is an outline badge, which
  * also keeps the gray `free` chip visible against it. The badge's `title`
- * adds the role; it is not a tab stop (a list page would otherwise gain a
- * few hundred focusable badges that do nothing on Enter).
+ * adds the role for pointer users, and a visually hidden span between the
+ * name and the plan carries it for assistive tech (`title` alone reaches
+ * neither keyboard, touch nor most screen-reader users, #1884). The badge is
+ * not a tab stop (a list page would otherwise gain a few hundred focusable
+ * badges that do nothing on Enter).
  *
  * The third and later workspaces collapse into a "+N" button whose tooltip
  * lists them with their plans. It is a button so the list is reachable from
@@ -72,12 +75,13 @@ export function WorkspacePlanBadges({
     openAtPointerDown.current = false;
   };
 
+  const roleLabel = (workspace: WorkspaceMembership) =>
+    tRoles.has(workspace.role) ? tRoles(workspace.role) : workspace.role;
+
   const describe = (workspace: WorkspaceMembership) =>
     t("workspaceTooltip", {
       name: workspace.workspace_name,
-      role: tRoles.has(workspace.role)
-        ? tRoles(workspace.role)
-        : workspace.role,
+      role: roleLabel(workspace),
       plan: planLabelForTier(workspace.plan_name, undefined, locale),
     });
 
@@ -96,6 +100,8 @@ export function WorkspacePlanBadges({
         >
           <Building2 className="h-3 w-3" />
           {workspace.workspace_name}
+          {/* Spaces keep "name role plan" as separate words when read. */}
+          <span className="sr-only">{` ${roleLabel(workspace)} `}</span>
           <PlanBadge
             planName={workspace.plan_name}
             size="sm"
