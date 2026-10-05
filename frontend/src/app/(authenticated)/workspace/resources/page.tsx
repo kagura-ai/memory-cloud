@@ -197,7 +197,11 @@ export default function ResourcesListPage() {
                       </Link>
                     </TableCell>
                     <TableCell>
-                      {r.context_display_name || r.context_name}
+                      {r.context_display_name || r.context_name || (
+                        <span className="text-muted-foreground italic">
+                          {t("list.contextDeleted")}
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell className="text-right">
                       {numberFormatter.format(r.token_count)}

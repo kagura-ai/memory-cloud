@@ -13,8 +13,9 @@ Complements the existing per-resource endpoints in ``resource_schema.py``
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -45,8 +46,15 @@ class ResourceListItem(BaseModel):
     """Single resource entry in the workspace resource list."""
 
     resource_id: str = Field(..., description="Resource identifier")
-    context_id: str = Field(..., description="UUID of the context bound to this resource")
-    context_name: str = Field(..., description="Context name (URL-safe identifier)")
+    context_id: str | None = Field(
+        None,
+        description=(
+            "UUID of the context bound to this resource. Null when every context "
+            "of the resource has been deleted (#1863): such a row is listed only "
+            "while the resource still has active tokens, so they stay reachable."
+        ),
+    )
+    context_name: str | None = Field(None, description="Context name (URL-safe identifier)")
     context_display_name: str | None = Field(None, description="Human-readable context name")
     token_count: int = Field(..., description="Number of active resource tokens")
     memory_count: int = Field(..., description="Number of non-deleted memories")
@@ -86,6 +94,11 @@ async def list_resources(
     non-null ``resource_id``, with aggregated counts joined from the
     resource_tokens, memories, resource_schemas, and resource_events tables.
 
+    #1863: a resource whose contexts were all deleted is still listed, with
+    the context fields null, while it has active tokens. Those tokens keep
+    authenticating ingest, so the owner needs a way to reach and revoke them;
+    once the last one is revoked the row disappears.
+
     Owner-only (#389): ``WorkspaceOwner`` rejects non-owners with 403.
     ``get_accessible_contexts`` below is a no-op for owners and retained
     as defense-in-depth against a role-gate regression.
@@ -101,14 +114,6 @@ async def list_resources(
     # leak stats for private / allowed_context_ids-restricted contexts.
     accessible = await PermissionService(db).get_accessible_contexts(user_id, current_workspace_id)
     accessible_ids = [c.id for c in accessible]
-    if not accessible_ids:
-        logger.info(
-            "list_resources_success",
-            user_id=user_id,
-            workspace_id=str(current_workspace_id),
-            count=0,
-        )
-        return ResourceListResponse(resources=[], total=0)
 
     # Issue #390 Phase 2: satellite stats are scoped by ``resource_pk``
     # (authoritative FK to ``resources.id``) instead of by slug. The outer
@@ -161,79 +166,147 @@ async def list_resources(
     # LEFT OUTER JOIN: Contexts with a resource_id but no Resource row yet
     # (pre-a97 migration gap) still appear in the list with zero stats,
     # preserving backward visibility during the Phase 1 → Phase 2 transition.
-    result = await db.execute(
+    rows: Sequence[Any] = []
+    if accessible_ids:
+        result = await db.execute(
+            select(
+                Context.id.label("context_id"),
+                Context.name.label("context_name"),
+                Context.display_name.label("context_display_name"),
+                Context.resource_id.label("resource_id"),
+                Context.created_at.label("created_at"),
+                Context.updated_at.label("context_updated_at"),
+                token_count_subq.label("token_count"),
+                memory_count_subq.label("memory_count"),
+                schema_version_subq.label("schema_version"),
+                last_event_subq.label("last_event_at"),
+            )
+            .select_from(Context)
+            .outerjoin(
+                Resource,
+                and_(
+                    Resource.workspace_id == Context.workspace_id,
+                    Resource.resource_id == Context.resource_id,
+                ),
+            )
+            .where(
+                and_(
+                    Context.workspace_id == current_workspace_id,
+                    Context.resource_id.is_not(None),
+                    Context.deleted_at.is_(None),
+                    # Scope to the subset the caller can actually see, per RBAC.
+                    Context.id.in_(accessible_ids),
+                )
+            )
+            # "Most recent activity" = max across the three signals. PostgreSQL's
+            # GREATEST ignores NULLs, so a missing last_event_at still picks up
+            # context.updated_at (or created_at as the final fallback).
+            # Note: SELECT aliases are not visible inside function calls in ORDER BY
+            # per PG's scoping rules, so we reference the scalar_subquery object
+            # directly here. This does cause the subquery to be emitted twice, but
+            # with < 50 resources/workspace the duplication is negligible, and PG's
+            # query planner can often hoist the correlated subquery to a join.
+            .order_by(
+                func.greatest(
+                    last_event_subq,
+                    Context.updated_at,
+                    Context.created_at,
+                ).desc(),
+            )
+        )
+        rows = result.all()
+
+    # #1863: resources whose contexts were all deleted but that still hold
+    # active tokens. ``verify_token`` authenticates ingest through
+    # ``resource_pk`` alone, so these tokens keep working; without a row here
+    # the tokens tab is unreachable and the owner cannot revoke them. The
+    # row carries null context fields and goes away once the last token is
+    # revoked — a resource the owner deliberately retired does not linger.
+    live_context_exists = (
+        select(Context.id)
+        .where(
+            Context.workspace_id == Resource.workspace_id,
+            Context.resource_id == Resource.resource_id,
+            Context.deleted_at.is_(None),
+        )
+        .correlate(Resource)
+        .exists()
+    )
+    orphan_memory_count_subq = (
+        select(func.count(Memory.id))
+        .where(
+            Memory.resource_id == Resource.resource_id,
+            Memory.workspace_id == Resource.workspace_id,
+            Memory.deleted_at.is_(None),
+        )
+        .correlate(Resource)
+        .scalar_subquery()
+    )
+    orphan_result = await db.execute(
         select(
-            Context.id.label("context_id"),
-            Context.name.label("context_name"),
-            Context.display_name.label("context_display_name"),
-            Context.resource_id.label("resource_id"),
-            Context.created_at.label("created_at"),
-            Context.updated_at.label("context_updated_at"),
+            Resource.resource_id.label("resource_id"),
+            Resource.created_at.label("created_at"),
             token_count_subq.label("token_count"),
-            memory_count_subq.label("memory_count"),
+            orphan_memory_count_subq.label("memory_count"),
             schema_version_subq.label("schema_version"),
             last_event_subq.label("last_event_at"),
         )
-        .select_from(Context)
-        .outerjoin(
-            Resource,
-            and_(
-                Resource.workspace_id == Context.workspace_id,
-                Resource.resource_id == Context.resource_id,
-            ),
-        )
+        .select_from(Resource)
         .where(
-            and_(
-                Context.workspace_id == current_workspace_id,
-                Context.resource_id.is_not(None),
-                Context.deleted_at.is_(None),
-                # Scope to the subset the caller can actually see, per RBAC.
-                Context.id.in_(accessible_ids),
-            )
-        )
-        # "Most recent activity" = max across the three signals. PostgreSQL's
-        # GREATEST ignores NULLs, so a missing last_event_at still picks up
-        # context.updated_at (or created_at as the final fallback).
-        # Note: SELECT aliases are not visible inside function calls in ORDER BY
-        # per PG's scoping rules, so we reference the scalar_subquery object
-        # directly here. This does cause the subquery to be emitted twice, but
-        # with < 50 resources/workspace the duplication is negligible, and PG's
-        # query planner can often hoist the correlated subquery to a join.
-        .order_by(
-            func.greatest(
-                last_event_subq,
-                Context.updated_at,
-                Context.created_at,
-            ).desc(),
+            Resource.workspace_id == current_workspace_id,
+            ~live_context_exists,
+            token_count_subq > 0,
         )
     )
-    rows = result.all()
+    orphan_rows = orphan_result.all()
 
-    resources = [
-        ResourceListItem(
-            resource_id=row.resource_id,
-            context_id=str(row.context_id),
-            context_name=row.context_name,
-            context_display_name=row.context_display_name,
-            token_count=row.token_count or 0,
-            memory_count=row.memory_count or 0,
-            current_schema_version=row.schema_version,
-            created_at=to_utc_iso(row.created_at),
-            # Pick the most recent signal across the three timestamps, ignoring
-            # None — matches the ORDER BY greatest() above so the sort order
-            # agrees with the rendered value. to_utc_iso() handles None + adds
-            # the explicit Z suffix that JS clients need.
-            updated_at=to_utc_iso(
-                max(
-                    filter(
-                        None,
-                        (row.last_event_at, row.context_updated_at, row.created_at),
-                    )
-                )
+    def _latest(*candidates: datetime | None) -> datetime | None:
+        present = [c for c in candidates if c is not None]
+        return max(present) if present else None
+
+    # Pick the most recent signal across the timestamps, ignoring None —
+    # matches the ORDER BY greatest() above so the sort order agrees with
+    # the rendered value. to_utc_iso() handles None + adds the explicit Z
+    # suffix that JS clients need.
+    items: list[tuple[datetime | None, ResourceListItem]] = [
+        (
+            _latest(row.last_event_at, row.context_updated_at, row.created_at),
+            ResourceListItem(
+                resource_id=row.resource_id,
+                context_id=str(row.context_id),
+                context_name=row.context_name,
+                context_display_name=row.context_display_name,
+                token_count=row.token_count or 0,
+                memory_count=row.memory_count or 0,
+                current_schema_version=row.schema_version,
+                created_at=to_utc_iso(row.created_at),
+                updated_at=to_utc_iso(
+                    _latest(row.last_event_at, row.context_updated_at, row.created_at)
+                ),
             ),
         )
         for row in rows
+    ] + [
+        (
+            _latest(row.last_event_at, row.created_at),
+            ResourceListItem(
+                resource_id=row.resource_id,
+                context_id=None,
+                context_name=None,
+                context_display_name=None,
+                token_count=row.token_count or 0,
+                memory_count=row.memory_count or 0,
+                current_schema_version=row.schema_version,
+                created_at=to_utc_iso(row.created_at),
+                updated_at=to_utc_iso(_latest(row.last_event_at, row.created_at)),
+            ),
+        )
+        for row in orphan_rows
     ]
+    # Both lists are already small (< 50 resources/workspace); merge them by
+    # most recent activity so the orphan rows take their natural place.
+    items.sort(key=lambda it: (it[0] is not None, it[0]), reverse=True)
+    resources = [item for _, item in items]
 
     logger.info(
         "list_resources_success",

@@ -3612,7 +3612,8 @@
         "schema": "Schema",
         "lastActivity": "Last activity",
         "open": "Open detail"
-      }
+      },
+      "contextDeleted": "Context deleted"
     },
     "detail": {
       "title": "Resource",

@@ -13,8 +13,13 @@ import { apiClient } from "./base";
 /** Single row in the workspace resource list. */
 export interface ResourceListItem {
   resource_id: string;
-  context_id: string;
-  context_name: string;
+  /**
+   * Null when every context of this resource has been deleted (#1863). Such
+   * a row is listed only while the resource still has active tokens, so the
+   * owner can reach the tokens tab and revoke them.
+   */
+  context_id: string | null;
+  context_name: string | null;
   context_display_name: string | null;
   token_count: number;
   memory_count: number;

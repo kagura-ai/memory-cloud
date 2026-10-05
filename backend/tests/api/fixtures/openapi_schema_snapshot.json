@@ -8273,10 +8273,24 @@
             ]
           },
           "context_id": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "context_name": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "created_at": {
             "type": "string"
@@ -8305,8 +8319,6 @@
           }
         },
         "required": [
-          "context_id",
-          "context_name",
           "created_at",
           "memory_count",
           "resource_id",

@@ -172,6 +172,35 @@ describe("ResourcesListPage", () => {
     expect(screen.getByText("v5")).toBeInTheDocument();
   });
 
+  it("marks a resource whose contexts were all deleted but still has tokens (#1863)", async () => {
+    mockListResources.mockResolvedValue({
+      resources: [
+        item({
+          resource_id: "orphaned",
+          context_id: null,
+          context_name: null,
+          context_display_name: null,
+          token_count: 1,
+          memory_count: 0,
+        }),
+      ],
+      total: 1,
+    });
+
+    render(<ResourcesListPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("orphaned")).toBeInTheDocument();
+    });
+    // The context cell falls back to the "deleted" marker and the row still
+    // links to the detail page, where the tokens tab lets the owner revoke.
+    expect(screen.getByText("list.contextDeleted")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "orphaned" })).toHaveAttribute(
+      "href",
+      "/workspace/resources/orphaned",
+    );
+  });
+
   it("renders empty state when the list is empty", async () => {
     mockListResources.mockResolvedValue({ resources: [], total: 0 });
 

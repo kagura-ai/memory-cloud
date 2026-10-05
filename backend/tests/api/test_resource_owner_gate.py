@@ -19,7 +19,7 @@ The mocked user role in ``non_owner_client`` is arbitrary (set to
 (identical rationale as ``test_rbac_issue59.py`` lines 53-56).
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -88,10 +88,12 @@ def owner_client():
         return (user["user_id"], WORKSPACE_ID)
 
     async def mock_db():
-        # MagicMock (not AsyncMock) is safe here because no awaited method
-        # is ever invoked on this stub — the PermissionService methods are
-        # patched at the class level upstream of the session.
-        yield MagicMock()
+        # #1863: the list route always runs one query for context-less
+        # resources that still hold active tokens, even when the caller can
+        # see no context — so the stub must be awaitable and answer "none".
+        empty = MagicMock()
+        empty.all.return_value = []
+        yield AsyncMock(execute=AsyncMock(return_value=empty))
 
     app.dependency_overrides[get_user_from_api_key_or_session] = mock_auth
     app.dependency_overrides[require_workspace_owner] = mock_owner

@@ -3612,7 +3612,8 @@
         "schema": "スキーマ",
         "lastActivity": "最終アクティビティ",
         "open": "詳細を開く"
-      }
+      },
+      "contextDeleted": "コンテキスト削除済み"
     },
     "detail": {
       "title": "リソース",
