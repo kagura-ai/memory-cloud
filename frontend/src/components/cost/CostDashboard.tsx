@@ -172,7 +172,9 @@ export interface CostDashboardProps {
   /**
    * Where a user cell links to (#1861). The admin page points at
    * ``/admin/users/<user_id>``; the workspace-scoped page passes nothing and
-   * the cell stays plain text — it has no admin pages to link to.
+   * the cell stays plain text — it has no admin pages to link to. A row whose
+   * ``user_email`` did not resolve (a connector / service identity with no
+   * users row, hence no admin page) stays plain text too.
    */
   userHref?: (userId: string) => string;
   /**
@@ -486,7 +488,7 @@ export function CostDashboard({
                       </TableCell>
                     )}
                     <TableCell className="text-sm whitespace-nowrap">
-                      {userHref ? (
+                      {userHref && row.user_email ? (
                         <Link
                           href={userHref(row.user_id)}
                           className="text-blue-600 hover:underline dark:text-blue-400"

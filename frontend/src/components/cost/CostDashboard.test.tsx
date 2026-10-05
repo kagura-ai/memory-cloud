@@ -91,10 +91,9 @@ describe("CostDashboard rows", () => {
     expect(screen.getByText("61b5cf6f")).toBeInTheDocument(); // name unresolved → short id
     const link = screen.getByRole("link", { name: "admin@example.com" });
     expect(link).toHaveAttribute("href", "/admin/users/local%3Aadmin");
-    expect(screen.getByRole("link", { name: "uid:10471144" })).toHaveAttribute(
-      "href",
-      "/admin/users/10471144829432093253",
-    );
+    // No users row → no admin page to land on → plain text, not a dead link.
+    expect(screen.getByText("uid:10471144")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "uid:10471144" })).toBeNull();
   });
 
   it("keeps the user cell plain text on the workspace page", async () => {

@@ -506,3 +506,35 @@ class TestRowLabels:
         assert emails == {"user_1": "alice@example.com"}
         assert db.execute.await_count == 1
         users.assert_awaited_once_with({"user_1", "user_2"})
+
+    @pytest.mark.asyncio
+    async def test_resolver_skips_the_workspace_query_when_no_row_has_one(self):
+        import api.routes.cost_aggregation as route_module
+
+        row = _make_canned_row()
+        row.workspace_id = None
+        db = AsyncMock()
+        with patch(
+            "services.sleep_reporter_service.SleepReporterService.resolve_user_labels",
+            new=AsyncMock(return_value={}),
+        ):
+            names, emails = await route_module._resolve_row_labels(db, [row])
+        assert (names, emails) == ({}, {})
+        db.execute.assert_not_awaited()
+
+    def test_workspace_route_attaches_the_labels_too(self, client):
+        import api.routes.cost_aggregation as route_module
+
+        _install_workspace_overrides(client, [_make_canned_row()], user=_regular_user())
+
+        async def fake_labels(db, rows_in):
+            return {_WORKSPACE_ID: "Team Alpha"}, {"user_1": "alice@example.com"}
+
+        client.monkeypatch.setattr(route_module, "_resolve_row_labels", fake_labels)
+        response = client.get(
+            f"/api/v1/workspaces/{_WORKSPACE_ID}/cost-aggregation"
+            "?period=day&from=2026-04-01&to=2026-04-07"
+        )
+        assert response.status_code == 200, response.text
+        row = response.json()["rows"][0]
+        assert (row["workspace_name"], row["user_email"]) == ("Team Alpha", "alice@example.com")
