@@ -14,13 +14,21 @@ Vectors are derived data. Every memory's `summary` is in Postgres, and the norma
 |---|---|---|
 | `--plan` | Resolve source (config row or legacy fallback) and target (registry + `EMBEDDING_MODEL_ALLOWLIST`), derive both collection names, count memories | untouched |
 | `--reembed` | Create the target collection if needed; embed every live memory with the target model; upsert with the **same point id, payload and BM25 sparse vector** the write path produces | untouched |
-| `--verify` | Every live memory id must have a point in the target collection; missing ids are listed. Target points whose memory was forgotten while the re-embed ran are deleted (`forget` only touches the collection the context routes to, so nothing else would) | untouched |
+| `--verify` | Every live memory must have a point in the target collection; missing ids are listed. Target points whose memory was forgotten while the re-embed ran are deleted (`forget` only touches the collection the context routes to, so nothing else would) | untouched |
 | `--switch` | One transaction: update `context_search_configs.embedding_model/embedding_dimensions` **and** re-queue (`embedding_status='pending'`) memories written since the re-embed started, so the regular 30 s sweep embeds that delta under the new routing. After the commit, points of memories forgotten since the re-embed started are dropped from the new collection, which closes the window between the last `--verify` and the flip | flipped |
 | `--purge` | Delete the context's points from the source collection, in the same invocation as `--switch`. Refused while the context still routes to the source | — |
 | `--purge-source MODEL` | The same deletion as a later, standalone run. Once routing has moved on, the plan can no longer name the old source by itself, so you name it. Refused while `MODEL` is what the context routes to | — |
 | `--rollback-to MODEL` | Route back to `MODEL` **and** re-queue everything created or updated since the switch (the `context_search_configs.updated_at` the switch stamped; `--requeue-since` overrides it), and drop points of memories forgotten since. Refused if `MODEL`'s collection no longer exists, i.e. after a purge | flipped back |
 
 Idempotent by construction: re-running `--reembed` overwrites points by id; `--switch` is a plain update. Each page of the re-embed is its own short read transaction, so a large context never holds a Postgres transaction open across the embedding calls.
+
+**Resource-ingested memories** (documents a resource or a connector ingested, #1896). Their `summary` is only the label `[resource] doc vN`, and their point is not stored under the memory id but under the document's own point id (`memories.summary_embedding_id`, derived from resource / document / version). The migration treats them the way the indexer and the embedding sweep do:
+
+- `--reembed` rebuilds each one from the stored document: the document is projected through the resource's latest schema, its text is embedded with the target model (one embedding request per document; these rows are not batched), and the point is written under the document's point id with its facets and sortable fields. A schema published since the document was ingested applies, as it would to a re-index.
+- `--verify` looks for that point id, keeps it, and still removes target points no live memory names. `--switch` and `--rollback-to` drop a forgotten document's point under the same id; `--purge` / `--purge-source` delete by context, so they cover resource points as well.
+- A document that **cannot be rebuilt** — the resource has no schema left, or the memory's content was edited into something that is not a JSON document — is skipped, not given a vector of its label. `--reembed` and `--verify` list those memories on an `UNREBUILDABLE` line (the log event is `context_embedding_resource_unrebuildable`, with the reason). They do not count as missing, so they do not hold back the switch and the exit code stays `0`; after the switch they have no vector in the new collection, so semantic recall does not find them. Ingest the document again as a newer version (the same version is refused as a duplicate) to make it searchable.
+
+A context migrated before v0.96.0 has label-only vectors for its resource-ingested memories, stored under the memory ids. Ingesting the documents again as newer versions repairs them.
 
 **What the reconciliation does not cover.** Forgotten memories are found by their tombstone (`deleted_at`). A row that was hard-deleted with no tombstone while the migration ran (the 30-day cleanup of old tombstones, or a manual `DELETE`) leaves its target point behind; a later `--verify` against that context removes it, since verify reconciles every target point that has no live row.
 
@@ -60,7 +68,7 @@ docker exec -it <API_CONTAINER> python -m src.cli.migrate_context_embedding \
   --to qwen3-embedding:4b --all --run --yes
 ```
 
-Exit code `2` means verification found memories without a target point; the routing was **not** switched for that context. Re-run `--reembed` (idempotent) and look at the listed ids if it persists.
+Exit code `2` means verification found memories without a target point; the routing was **not** switched for that context. Re-run `--reembed` (idempotent) and look at the listed ids if it persists. Resource-ingested memories on the `UNREBUILDABLE` line are not part of that count (see above).
 
 After every context is switched:
 
@@ -77,4 +85,4 @@ After every context is switched:
 
 ## Cost and duration
 
-The re-embed is one embedding request per batch (`--batch-size`, default 64) over every live memory of the context. Nothing is re-summarised or re-read through an LLM; only `summary` is embedded, exactly as on write.
+The re-embed is one embedding request per batch (`--batch-size`, default 64) over every live memory of the context. Nothing is re-summarised or re-read through an LLM; only `summary` is embedded, exactly as on write. Resource-ingested memories are the exception: each is one embedding request of its document text.

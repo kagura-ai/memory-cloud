@@ -1130,6 +1130,35 @@ from surviving vector-store points, for a context whose rows are gone. It finds
 no points for a context deleted on v0.88.0 or later, and says to use the
 restore above when the context's row is still there.
 
+## Embedding model migration — Issue #1525
+
+`python -m src.cli.migrate_context_embedding` moves a context to another
+embedding model without a window in which it has no vectors: it fills a second
+collection (`--reembed`), checks it (`--verify`), then flips the routing
+(`--switch`). The runbook is
+[operations/embedding-model-migration.md](operations/embedding-model-migration.md).
+
+**Resource-ingested memories** (documents a resource or a connector ingested)
+are migrated as the indexer wrote them, not from the memory's summary, which
+is only the label `[resource] doc vN`: the stored document is projected again
+through the resource's latest schema, its text is embedded with the target
+model, and the point is written under the document's own point id with its
+facets and sortable fields. `--verify` looks for that point id and keeps it.
+After the switch, recall, `forget` and the next version of the document treat
+those memories as before, and nothing has to be ingested again.
+
+A document that cannot be rebuilt from its row — the resource has no schema
+left, or the memory's content was edited into something that is not a JSON
+document — is skipped: it gets no vector in the new collection rather than a
+vector of its label. `--reembed` and `--verify` list those memories on an
+`UNREBUILDABLE` line; they do not fail the verification or stop the switch.
+Ingest the document again as a newer version (the same version is refused as a
+duplicate) to make it searchable.
+
+A context migrated before v0.96.0 has label-only vectors for its
+resource-ingested memories; ingesting the documents again as newer versions
+repairs them.
+
 ## Reranking — Issue #1572
 
 Recall is hybrid (semantic + BM25); a **cross-encoder reranker** can re-score
