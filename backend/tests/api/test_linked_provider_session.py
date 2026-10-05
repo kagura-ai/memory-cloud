@@ -12,15 +12,23 @@ Driven through the whole callback with the IdP exchange stubbed, the same way
 
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from api.routes import auth as auth_routes
+from api.routes.auth import SessionOwner
+from auth.session import SessionManager
+from utils.datetime import utcnow
 
 OWNER_ID = "owner-account-1"
 OWNER_EMAIL = "owner@example.test"
+OWNER_NAME = "Owner Name"
+OWNER_PICTURE = "https://img.example.test/owner.png"
+IDP_NAME = "Provider Profile Name"
+IDP_PICTURE = "https://img.example.test/provider.png"
 GOOGLE_SUB = "108"
 GITHUB_SUB = "583231"
 IDP_EMAIL = "linked@example.test"
@@ -85,11 +93,23 @@ def signed_in_path(monkeypatch) -> SimpleNamespace:
     workspaces.return_value.ensure_personal_workspace = AsyncMock()
     monkeypatch.setattr(auth_routes, "WorkspaceService", workspaces)
 
-    owning = AsyncMock(return_value=(OWNER_ID, OWNER_EMAIL))
+    # The identity is linked to another account, long enough ago to prove it
+    # (#1875: a provider attached inside the link window proves nothing).
+    owning = AsyncMock(return_value=linked_owner())
     monkeypatch.setattr(auth_routes, "_owning_user", owning)
+    # #1875: no separate account is keyed by the sub unless a test says so.
+    account_exists = AsyncMock(return_value=False)
+    monkeypatch.setattr(auth_routes, "_account_exists", account_exists)
     return SimpleNamespace(
-        ensure_workspace=workspaces.return_value.ensure_personal_workspace, owning=owning
+        ensure_workspace=workspaces.return_value.ensure_personal_workspace,
+        owning=owning,
+        account_exists=account_exists,
     )
+
+
+def linked_owner(*, attached: timedelta = timedelta(days=30)) -> SessionOwner:
+    """The owner of a linked identity that was attached ``attached`` ago."""
+    return SessionOwner(OWNER_ID, OWNER_EMAIL, OWNER_NAME, OWNER_PICTURE, utcnow() - attached)
 
 
 @pytest.fixture
@@ -99,6 +119,8 @@ def google_idp(monkeypatch) -> None:
         "sub": GOOGLE_SUB,
         "email": IDP_EMAIL,
         "email_verified": True,
+        "name": IDP_NAME,
+        "picture": IDP_PICTURE,
     }
     monkeypatch.setattr(auth_routes, "_oauth2_manager", m)
     monkeypatch.setenv("GOOGLE_REDIRECT_URI", "http://localhost:8080/cb")
@@ -117,6 +139,8 @@ def github_idp(monkeypatch) -> None:
                 "email": IDP_EMAIL,
                 "email_verified": True,
                 "login": "octo",
+                "name": IDP_NAME,
+                "picture": IDP_PICTURE,
             }
         ),
     )
@@ -295,14 +319,10 @@ class TestSessionOwnerHelper:
             yield MagicMock()
 
         monkeypatch.setattr(auth_routes, "get_db", _fake_db)
-        monkeypatch.setattr(
-            auth_routes, "_owning_user", AsyncMock(return_value=(OWNER_ID, OWNER_EMAIL))
-        )
+        owner = linked_owner()
+        monkeypatch.setattr(auth_routes, "_owning_user", AsyncMock(return_value=owner))
 
-        assert await auth_routes._session_owner("google", GOOGLE_SUB, IDP_EMAIL) == (
-            OWNER_ID,
-            OWNER_EMAIL,
-        )
+        assert await auth_routes._session_owner("google", GOOGLE_SUB, IDP_EMAIL) == owner
 
     @pytest.mark.asyncio
     async def test_no_owner_row_keeps_the_sub(self, monkeypatch) -> None:
@@ -311,10 +331,15 @@ class TestSessionOwnerHelper:
 
         monkeypatch.setattr(auth_routes, "get_db", _fake_db)
         monkeypatch.setattr(auth_routes, "_owning_user", AsyncMock(return_value=None))
+        warning = MagicMock()
+        monkeypatch.setattr(auth_routes.logger, "warning", warning)
 
-        assert await auth_routes._session_owner("github", GITHUB_SUB, IDP_EMAIL) == (
-            GITHUB_SUB,
-            IDP_EMAIL,
+        assert await auth_routes._session_owner("github", GITHUB_SUB, IDP_EMAIL) == SessionOwner(
+            GITHUB_SUB, IDP_EMAIL
+        )
+        # #1875: the sub, so the identity that owns nothing can be found.
+        warning.assert_called_once_with(
+            "session_owner_not_found", provider="github", idp_sub=GITHUB_SUB
         )
 
     @pytest.mark.asyncio
@@ -327,9 +352,8 @@ class TestSessionOwnerHelper:
         owning = AsyncMock()
         monkeypatch.setattr(auth_routes, "_owning_user", owning)
 
-        assert await auth_routes._session_owner("google", GOOGLE_SUB, IDP_EMAIL) == (
-            GOOGLE_SUB,
-            IDP_EMAIL,
+        assert await auth_routes._session_owner("google", GOOGLE_SUB, IDP_EMAIL) == SessionOwner(
+            GOOGLE_SUB, IDP_EMAIL
         )
         owning.assert_not_awaited()
 
@@ -351,8 +375,156 @@ async def test_sessions_keyed_by_the_sub_before_the_fix_are_invalidated_too(
 
 @pytest.mark.asyncio
 async def test_primary_provider_sign_in_invalidates_once(manager, signed_in_path, google_idp):
-    signed_in_path.owning.return_value = (GOOGLE_SUB, IDP_EMAIL)
+    signed_in_path.owning.return_value = SessionOwner(GOOGLE_SUB, IDP_EMAIL)
 
     await _callback("google")
 
     assert [c.args[0] for c in manager.delete_user_sessions.call_args_list] == [GOOGLE_SUB]
+
+
+# --- #1875: the legacy sub sweep must not reach a live account ----------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider", "sub", "idp"), PROVIDERS)
+async def test_the_sub_sweep_is_skipped_when_an_account_has_that_id(
+    manager, signed_in_path, request, provider, sub, idp
+) -> None:
+    request.getfixturevalue(idp)
+    signed_in_path.account_exists.return_value = True
+
+    await _callback(provider)
+
+    signed_in_path.account_exists.assert_awaited_once_with(sub)
+    assert [c.args[0] for c in manager.delete_user_sessions.call_args_list] == [OWNER_ID]
+
+
+@pytest.fixture
+def real_manager(monkeypatch) -> SessionManager:
+    """A real ``SessionManager`` over the fake Redis, so what the callback
+    deletes and writes is what a later request reads."""
+    from tests.auth.test_session_container import FakeRedis as SessionFakeRedis
+
+    fake = SessionFakeRedis()
+    monkeypatch.setattr(
+        SessionManager, "_get_or_create_redis_client", staticmethod(lambda _url: fake)
+    )
+    m = SessionManager(redis_url="redis://fake:6379")
+    fake.setex("oauth2_state:st1", 300, "pending")
+    monkeypatch.setattr(auth_routes, "_session_manager", m)
+    return m
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider", "sub", "idp"), PROVIDERS)
+async def test_a_password_session_of_the_account_keyed_by_the_sub_survives(
+    real_manager, signed_in_path, request, provider, sub, idp
+) -> None:
+    """The account whose ``user_id`` is this sub set a password and unlinked
+    the provider, which was then linked to OWNER. Its own session — and the
+    other account signed in beside it — must outlive OWNER's sign-ins."""
+    request.getfixturevalue(idp)
+    signed_in_path.account_exists.return_value = True
+    theirs = real_manager.create_session(
+        {"sub": sub, "user_id": sub, "email": "former@example.test"}, proven_at=utcnow()
+    )
+    real_manager.add_account(
+        theirs, {"sub": "local:x", "user_id": "local:x", "email": "x@example.test"}
+    )
+
+    response = await _callback(provider)
+
+    assert response.status_code == 303
+    assert real_manager.session_holds_user(theirs, sub)
+    assert {a["user_id"] for a in real_manager.list_accounts(theirs)} == {sub, "local:x"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider", "sub", "idp"), PROVIDERS)
+async def test_a_session_keyed_by_a_sub_that_is_no_account_is_still_swept(
+    real_manager, signed_in_path, request, provider, sub, idp
+) -> None:
+    request.getfixturevalue(idp)
+    legacy = real_manager.create_session({"sub": sub, "user_id": sub, "email": IDP_EMAIL})
+
+    await _callback(provider)
+
+    assert not real_manager.session_holds_user(legacy, sub)
+
+
+class TestAccountExists:
+    @staticmethod
+    def _db(monkeypatch, row) -> MagicMock:
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=MagicMock(first=lambda: row))
+
+        async def _fake_db():
+            yield db
+
+        monkeypatch.setattr(auth_routes, "get_db", _fake_db)
+        return db
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("row", "expected"), [((GITHUB_SUB,), True), (None, False)])
+    async def test_follows_the_users_row(self, monkeypatch, row, expected) -> None:
+        db = self._db(monkeypatch, row)
+
+        assert await auth_routes._account_exists(GITHUB_SUB) is expected
+        assert GITHUB_SUB in str(db.execute.await_args.args[0].compile().params.values())
+
+    @pytest.mark.asyncio
+    async def test_no_database_means_no_account(self, monkeypatch) -> None:
+        async def _empty_db():
+            return
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(auth_routes, "get_db", _empty_db)
+
+        assert await auth_routes._account_exists(GITHUB_SUB) is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("provider", "sub", "idp"), PROVIDERS)
+    async def test_a_lookup_failure_fails_the_sign_in(
+        self, manager, signed_in_path, request, provider, sub, idp
+    ) -> None:
+        from sqlalchemy.exc import OperationalError
+
+        request.getfixturevalue(idp)
+        signed_in_path.account_exists.side_effect = OperationalError("select", {}, Exception("x"))
+
+        response = await _callback(provider)
+
+        assert "error=oauth_failed" in response.headers["location"]
+        manager.create_session.assert_not_called()
+
+
+# --- #1875: the session shows the owning account, not the provider used -------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider", "sub", "idp"), PROVIDERS)
+async def test_a_linked_sign_in_carries_the_owners_name_and_picture(
+    manager, signed_in_path, request, provider, sub, idp
+) -> None:
+    request.getfixturevalue(idp)
+
+    await _callback(provider)
+
+    session_data = manager.create_session.call_args.args[0]
+    assert session_data["name"] == OWNER_NAME
+    assert session_data["picture"] == OWNER_PICTURE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider", "sub", "idp"), PROVIDERS)
+async def test_the_accounts_own_identity_keeps_the_provider_profile(
+    manager, signed_in_path, request, provider, sub, idp
+) -> None:
+    request.getfixturevalue(idp)
+    signed_in_path.owning.return_value = SessionOwner(sub, IDP_EMAIL, "Stored Name", None)
+
+    await _callback(provider)
+
+    session_data = manager.create_session.call_args.args[0]
+    assert session_data["name"] == IDP_NAME
+    assert session_data["picture"] == IDP_PICTURE

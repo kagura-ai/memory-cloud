@@ -27,6 +27,7 @@ from fastapi.responses import RedirectResponse
 
 from api.routes import auth as auth_routes
 from config.settings import get_settings
+from utils.datetime import utcnow
 from utils.hashing import sha256_hex
 
 VERSION = "2026-09"
@@ -794,7 +795,8 @@ class TestLinkedIdentityOwner:
     ) -> None:
         from sqlalchemy.dialects import postgresql
 
-        db = self._db(("google-owner-1", "owner@example.test"))
+        # The row ``_owning_user`` selects: id, email, name, picture, linked_at.
+        db = self._db(("google-owner-1", "owner@example.test", "Owner", None, utcnow()))
         self._use_db(monkeypatch, db)
 
         await auth_routes._record_terms_acceptance(
@@ -821,7 +823,7 @@ class TestLinkedIdentityOwner:
     async def test_falls_back_to_the_sub_without_a_link_row(
         self, terms_on, record, monkeypatch
     ) -> None:
-        self._use_db(monkeypatch, self._db(None, ("108", "n@example.test")))
+        self._use_db(monkeypatch, self._db(None, ("108", "n@example.test", None, None)))
 
         await auth_routes._record_terms_acceptance(
             oauth_identity=("google", "108"),

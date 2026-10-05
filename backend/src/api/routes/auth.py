@@ -24,7 +24,7 @@ import os
 import re
 import secrets
 from datetime import datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response
@@ -898,7 +898,8 @@ async def google_callback(
         # synced email/name; we now skip session creation/workspace creation
         # so the user keeps their current session, then redirect to return_to.
         # #1805: a provider linked to another account signs in to that account.
-        owner_id, owner_email = await _session_owner("google", user_info["sub"], user_info["email"])
+        owner = await _session_owner("google", user_info["sub"], user_info["email"])
+        owner_id, owner_email = owner.user_id, owner.email
 
         refresh_redirect = await _maybe_refresh_redirect(state=state, user_id=owner_id)
         if refresh_redirect is not None:
@@ -949,20 +950,24 @@ async def google_callback(
         deleted_count = _session_manager.delete_user_sessions(
             owner_id, exclude_session_id=add_to_session
         )
-        if user_info["sub"] != owner_id:
+        if user_info["sub"] != owner_id and not await _account_exists(user_info["sub"]):
             # #1805: sessions opened before the fix were keyed by the sub.
+            # #1875: not when that sub is a live account's own ``user_id``.
             deleted_count += _session_manager.delete_user_sessions(
                 user_info["sub"], exclude_session_id=add_to_session
             )
         if deleted_count > 0:
             logger.info(f"Invalidated {deleted_count} old session(s) for {owner_email}")
 
+        # #1875: the owning account's name and picture when the identity is
+        # linked to another account, the provider's otherwise.
+        session_name, session_picture = _session_profile(owner, user_info)
         session_data = {
             "sub": owner_id,  # OAuth2 standard: user identifier
             "user_id": owner_id,  # Internal API: same value for compatibility
             "email": owner_email,
-            "name": user_info.get("name"),
-            "picture": user_info.get("picture"),
+            "name": session_name,
+            "picture": session_picture,
             "role": role.value,
         }
 
@@ -976,10 +981,18 @@ async def google_callback(
             )
             if auth_time is None:
                 logger.warning("link_proof_auth_time_missing", provider="google")
-        proven_at = _oauth_proven_at(auth_time)
+        # #1875: a provider attached inside the link window proves nothing yet.
+        can_prove = _identity_can_prove(owner, user_info["sub"])
+        if not can_prove:
+            logger.info("link_proof_provider_recently_attached", provider="google")
+        proven_at = _oauth_proven_at(auth_time) if can_prove else None
         # #1833: what to tell the Linked accounts page when this sign-in proved
         # nothing (None when it did, or when the operator counts sign-ins).
-        link_proof_result = _link_proof_result(auth_time) if link_proof else None
+        link_proof_result = None
+        if link_proof:
+            link_proof_result = (
+                _link_proof_result(auth_time) if can_prove else _LINK_PROOF_RECENT_PROVIDER
+            )
 
         if intent == "add" and add_to_session:
             if not _session_manager.add_account(add_to_session, session_data, proven_at=proven_at):
@@ -1302,6 +1315,12 @@ def _take_link_proof_intent(state: str) -> bool:
 _LINK_PROOF_HEADROOM = timedelta(minutes=1)
 
 
+# #1875: the proof was refused because the provider that signed in was attached
+# to the account inside the link window (see ``_identity_can_prove``). Reported
+# whatever the operator's setting: the sign-in proved nothing either way.
+_LINK_PROOF_RECENT_PROVIDER = "recent_provider"
+
+
 def _link_proof_result(auth_time: datetime | None) -> str | None:
     """Why a link-proof sign-in proved nothing, for the page that asked (#1833).
 
@@ -1605,8 +1624,25 @@ async def _terms_refusal(
     return _terms_required_redirect(provider, return_to)
 
 
-async def _owning_user(db: AsyncSession, provider: str, idp_sub: str) -> tuple[str, str] | None:
-    """``(user_id, email)`` of the account that owns this IdP identity (#1665).
+class SessionOwner(NamedTuple):
+    """The account an IdP identity signs in to, as :func:`_owning_user` resolves it.
+
+    ``name`` and ``picture`` are the account's own (``users`` columns), so a
+    session opened through a linked provider shows the account, not whichever
+    provider was used (#1875). ``provider_linked_at`` is when the identity was
+    attached (naive UTC) — None when the owner was found by the ``users`` row
+    keyed by the sub, or not found at all.
+    """
+
+    user_id: str
+    email: str
+    name: str | None = None
+    picture: str | None = None
+    provider_linked_at: datetime | None = None
+
+
+async def _owning_user(db: AsyncSession, provider: str, idp_sub: str) -> SessionOwner | None:
+    """The account that owns this IdP identity (#1665), with its profile (#1875).
 
     Resolved the way ``RoleManager.ensure_user`` resolves it: through the
     ``(provider, oauth_sub)`` link row — a provider linked to another account
@@ -1617,23 +1653,26 @@ async def _owning_user(db: AsyncSession, provider: str, idp_sub: str) -> tuple[s
 
     row = (
         await db.execute(
-            select(User.user_id, User.email)
+            select(User.user_id, User.email, User.name, User.picture, UserOAuthProvider.linked_at)
             .join(UserOAuthProvider, UserOAuthProvider.user_id == User.user_id)
             .where(UserOAuthProvider.provider == provider, UserOAuthProvider.oauth_sub == idp_sub)
             .limit(1)
         )
     ).first()
-    if row is None:
-        row = (
-            await db.execute(
-                select(User.user_id, User.email).where(User.user_id == idp_sub).limit(1)
-            )
-        ).first()
-    return (row[0], row[1]) if row is not None else None
+    if row is not None:
+        return SessionOwner(row[0], row[1], row[2], row[3], row[4])
+    row = (
+        await db.execute(
+            select(User.user_id, User.email, User.name, User.picture)
+            .where(User.user_id == idp_sub)
+            .limit(1)
+        )
+    ).first()
+    return SessionOwner(row[0], row[1], row[2], row[3]) if row is not None else None
 
 
-async def _session_owner(provider: str, idp_sub: str, idp_email: str) -> tuple[str, str]:
-    """``(user_id, email)`` an OAuth sign-in opens its session for (#1805).
+async def _session_owner(provider: str, idp_sub: str, idp_email: str) -> SessionOwner:
+    """The account an OAuth sign-in opens its session for (#1805).
 
     A provider linked to another account (#517) signs in to that account, so
     the session, the #114 invalidation, the personal-workspace step and the
@@ -1653,8 +1692,63 @@ async def _session_owner(provider: str, idp_sub: str, idp_email: str) -> tuple[s
         if owner is not None:
             return owner
         break
-    logger.warning("session_owner_not_found", provider=provider)
-    return idp_sub, idp_email
+    logger.warning("session_owner_not_found", provider=provider, idp_sub=idp_sub)
+    return SessionOwner(idp_sub, idp_email)
+
+
+def _session_profile(owner: SessionOwner, user_info: dict[str, Any]) -> tuple[str | None, Any]:
+    """``(name, picture)`` for the session of an OAuth sign-in (#1875).
+
+    A sign-in through a provider linked to another account (#517) opens that
+    account's session, so it shows that account's name and picture — with the
+    provider's, ``GET /auth/me`` and the account switcher showed the owner's
+    id and email beside whichever provider profile was used last. The
+    account's own identity keeps the provider's values: ``ensure_user`` has
+    just synced the name from it, and the picture is only ever the provider's.
+    """
+    if owner.user_id != user_info["sub"]:
+        return owner.name, owner.picture
+    return user_info.get("name"), user_info.get("picture")
+
+
+def _identity_can_prove(owner: SessionOwner, idp_sub: str) -> bool:
+    """Whether a sign-in through this identity may prove ``owner`` (#1875).
+
+    Attaching a sign-in provider (``POST /me/account/link-provider``) needs
+    only a live session. A sign-in through a provider attached minutes ago
+    would therefore prove the account on the strength of that session, which
+    is what the identity-link window exists to rule out (#1803, #1818).
+
+    Decision (#1875): the gate is here, on the proof, not on attaching — an
+    OAuth-only account has no other credential to prove before it attaches a
+    second provider. The account's own identity (its ``user_id`` is the sub)
+    always counts; a provider linked to it counts once its link row is older
+    than ``IDENTITY_LINK_SIGN_IN_WINDOW``. A linked row with no readable time
+    proves nothing.
+    """
+    if owner.user_id == idp_sub:
+        return True
+    linked_at = owner.provider_linked_at
+    return linked_at is not None and utcnow() - linked_at > IDENTITY_LINK_SIGN_IN_WINDOW
+
+
+async def _account_exists(user_id: str) -> bool:
+    """Whether a ``users`` row has this ``user_id`` (#1875).
+
+    Asked before the #1805 sweep of sessions keyed by a linked identity's sub.
+    Sessions opened before that fix carried the sub as ``user_id``, so a
+    linked sign-in drops them — unless the sub is itself the ``user_id`` of a
+    live account (it set a password and unlinked the provider, which was then
+    linked elsewhere). Those sessions are that account's own, and
+    ``delete_user_sessions`` removes whole multi-account containers.
+
+    A database error propagates: the callback fails the sign-in, as for
+    :func:`_session_owner`, rather than guess either way.
+    """
+    async for db in get_db():
+        row = await db.execute(select(User.user_id).where(User.user_id == user_id).limit(1))
+        return row.first() is not None
+    return False
 
 
 async def _note_provider_sign_in(
@@ -1672,7 +1766,7 @@ async def _note_provider_sign_in(
         async for db in get_db():
             owner = await _owning_user(db, provider, idp_sub)
             if owner is not None:
-                owner_id = owner[0]
+                owner_id = owner.user_id
             break
     except Exception as exc:
         logger.error(
@@ -1711,7 +1805,7 @@ async def _record_terms_acceptance(
                 if owner is None:
                     logger.warning("terms_acceptance_owner_missing", provider=oauth_identity[0])
                     break
-                user_id, email = owner
+                user_id, email = owner.user_id, owner.email
             if user_id is None:
                 break
             await TermsService(db).record(
@@ -2199,7 +2293,8 @@ async def github_callback(
         # full rationale). The branch must precede session swap so the user
         # keeps their current cookie when refresh ends.
         # #1805: a provider linked to another account signs in to that account.
-        db_user_id, db_email = await _session_owner("github", user_info["sub"], user_info["email"])
+        owner = await _session_owner("github", user_info["sub"], user_info["email"])
+        db_user_id, db_email = owner.user_id, owner.email
 
         refresh_redirect = await _maybe_refresh_redirect(state=state, user_id=db_user_id)
         if refresh_redirect is not None:
@@ -2217,25 +2312,32 @@ async def github_callback(
         deleted_count = _session_manager.delete_user_sessions(
             db_user_id, exclude_session_id=add_to_session
         )
-        if user_info["sub"] != db_user_id:
+        if user_info["sub"] != db_user_id and not await _account_exists(user_info["sub"]):
             # #1805: sessions opened before the fix were keyed by the sub.
+            # #1875: not when that sub is a live account's own ``user_id``.
             deleted_count += _session_manager.delete_user_sessions(
                 user_info["sub"], exclude_session_id=add_to_session
             )
         if deleted_count > 0:
             logger.info(f"Invalidated {deleted_count} old session(s) for {db_email}")
 
+        # #1875: the owning account's name and picture when the identity is
+        # linked to another account, the provider's otherwise.
+        session_name, session_picture = _session_profile(owner, user_info)
         session_data = {
             "sub": db_user_id,
             "user_id": db_user_id,
             "email": db_email,
-            "name": user_info.get("name"),
-            "picture": user_info.get("picture"),
+            "name": session_name,
+            "picture": session_picture,
             "role": role.value,
         }
         # #1818: GitHub reports no authentication time, so its sign-in proves
-        # nothing for an identity link unless the operator allows it.
-        proven_at = _oauth_proven_at(None)
+        # nothing for an identity link unless the operator allows it — and
+        # then not through a provider attached inside the link window (#1875).
+        proven_at = None
+        if _identity_can_prove(owner, user_info["sub"]):
+            proven_at = _oauth_proven_at(None)
         if intent == "add" and add_to_session:
             if not _session_manager.add_account(add_to_session, session_data, proven_at=proven_at):
                 logger.warning("add_account_write_failed")

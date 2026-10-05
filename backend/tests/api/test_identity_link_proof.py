@@ -29,11 +29,15 @@ from api.routes import auth as auth_routes
 from auth.oauth2 import OAuth2Manager
 from config.settings import get_settings
 from tests.api.test_linked_provider_session import (  # noqa: F401
+    GITHUB_SUB,
     GOOGLE_SUB,
+    OWNER_ID,
     FakeRequest,
     github_idp,
     google_idp,
+    linked_owner,
     manager,
+    real_manager,
     signed_in_path,
 )
 from utils.datetime import utcnow
@@ -412,6 +416,167 @@ class TestGitHubCallback:
         await _callback("github")
 
         assert before <= _proof(manager) <= utcnow()
+
+
+class TestARecentlyAttachedProvider:
+    """#1875: attaching a sign-in provider needs only a live session, so a
+    sign-in through one attached inside the link window proves nothing."""
+
+    RECENT = timedelta(minutes=3)
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_google_auth_time_through_it_proves_nothing(
+        self, manager, signed_in_path, google_idp, strict
+    ) -> None:
+        signed_in_path.owning.return_value = linked_owner(attached=self.RECENT)
+        auth_routes._oauth2_manager.verified_auth_time.return_value = utcnow() - timedelta(
+            minutes=1
+        )
+        manager._redis.store[PROOF_KEY.format(state="st1")] = "1"
+        manager._redis.store["oauth2_return_to:st1"] = "http://localhost:3000/profile"
+
+        response = await _callback("google")
+
+        assert response.status_code == 303  # the sign-in itself still succeeds
+        assert _proof(manager) is None
+        query = parse_qs(urlparse(response.headers["location"]).query)
+        assert query["link_proof"] == ["recent_provider"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", ["google", "github"])
+    async def test_the_opt_out_does_not_count_it_either(
+        self, manager, signed_in_path, request, opted_out, provider
+    ) -> None:
+        request.getfixturevalue(f"{provider}_idp")
+        signed_in_path.owning.return_value = linked_owner(attached=self.RECENT)
+
+        await _callback(provider)
+
+        assert _proof(manager) is None
+
+    @pytest.mark.asyncio
+    async def test_the_opt_out_still_tells_the_page(
+        self, manager, signed_in_path, google_idp, opted_out
+    ) -> None:
+        signed_in_path.owning.return_value = linked_owner(attached=self.RECENT)
+        manager._redis.store[PROOF_KEY.format(state="st1")] = "1"
+        manager._redis.store["oauth2_return_to:st1"] = "http://localhost:3000/profile"
+
+        response = await _callback("google")
+
+        query = parse_qs(urlparse(response.headers["location"]).query)
+        assert query["link_proof"] == ["recent_provider"]
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_sign_in_through_it_reports_nothing(
+        self, manager, signed_in_path, google_idp, strict
+    ) -> None:
+        signed_in_path.owning.return_value = linked_owner(attached=self.RECENT)
+        manager._redis.store["oauth2_return_to:st1"] = "http://localhost:3000/profile"
+
+        response = await _callback("google")
+
+        assert "link_proof" not in response.headers["location"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("provider", ["google", "github"])
+    async def test_once_the_window_has_passed_it_proves_the_account(
+        self, manager, signed_in_path, request, opted_out, provider
+    ) -> None:
+        request.getfixturevalue(f"{provider}_idp")
+        signed_in_path.owning.return_value = linked_owner(attached=timedelta(minutes=11))
+        before = utcnow()
+
+        await _callback(provider)
+
+        assert before <= _proof(manager) <= utcnow()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("provider", "sub"), [("google", GOOGLE_SUB), ("github", GITHUB_SUB)])
+    async def test_the_accounts_own_identity_proves_it_at_once(
+        self, manager, signed_in_path, request, opted_out, provider, sub
+    ) -> None:
+        """A first sign-in creates the provider row seconds before the proof."""
+        request.getfixturevalue(f"{provider}_idp")
+        signed_in_path.owning.return_value = auth_routes.SessionOwner(
+            sub, "own@example.test", "Own", None, utcnow()
+        )
+        before = utcnow()
+
+        await _callback(provider)
+
+        assert before <= _proof(manager) <= utcnow()
+
+    @pytest.mark.parametrize(
+        ("linked_at", "expected"),
+        [
+            (timedelta(minutes=9, seconds=59), False),
+            (timedelta(minutes=10, seconds=1), True),
+            (timedelta(minutes=-5), False),  # a time in the future
+            (None, False),  # a linked row with no readable time
+        ],
+    )
+    def test_the_boundary_is_the_link_window(self, linked_at, expected) -> None:
+        owner = auth_routes.SessionOwner(
+            OWNER_ID,
+            "o@example.test",
+            None,
+            None,
+            None if linked_at is None else utcnow() - linked_at,
+        )
+
+        assert auth_routes._identity_can_prove(owner, GOOGLE_SUB) is expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("attached", "linked"), [(RECENT, False), (timedelta(days=1), True)])
+    async def test_the_link_route_refuses_the_account_it_was_attached_to(
+        self, real_manager, signed_in_path, google_idp, strict, monkeypatch, attached, linked
+    ) -> None:
+        """The regression, end to end over a real session: OWNER attaches a
+        Google identity from a session that proved nothing, signs in through
+        it with a fresh ``auth_time``, and asks to be linked to an account
+        that did prove its password. 403 — unless the provider is an old one."""
+        from api.routes import me_account
+        from utils.exceptions import IdentityLinkSignInRequiredError
+
+        signed_in_path.owning.return_value = linked_owner(attached=attached)
+        auth_routes._oauth2_manager.verified_auth_time.return_value = utcnow() - timedelta(
+            minutes=1
+        )
+        real_manager._redis.setex(PROOF_KEY.format(state="st1"), 300, "1")
+        victim = {"sub": "local:admin", "user_id": "local:admin", "email": "admin@local"}
+        sid = real_manager.create_session(victim, proven_at=utcnow())
+        monkeypatch.setattr(auth_routes, "_take_add_account_intent", lambda _s, _r: ("add", sid))
+
+        await _callback("google")
+
+        window = me_account.IDENTITY_LINK_SIGN_IN_WINDOW
+        assert real_manager.session_holds_user(sid, OWNER_ID)
+        assert real_manager.proven_within(sid, OWNER_ID, window) is linked
+        request = MagicMock()
+        request.cookies = {me_account.auth_module.SESSION_COOKIE_NAME: sid}
+        request.client = None
+        request.headers = {}
+        service = MagicMock()
+        service.link = AsyncMock(return_value=frozenset({OWNER_ID, "local:admin"}))
+        with (
+            patch.object(me_account, "IdentityLinkService", return_value=service),
+            patch.object(me_account, "schedule_security_notification"),
+        ):
+            call = me_account.link_identity(
+                me_account.IdentityLinkTarget(user_id=OWNER_ID),
+                request,
+                MagicMock(),
+                {"user_id": "local:admin"},
+                AsyncMock(),
+            )
+            if linked:
+                assert (await call).status == "ok"
+            else:
+                with pytest.raises(IdentityLinkSignInRequiredError) as refused:
+                    await call
+                assert refused.value.status_code == 403
+                service.link.assert_not_awaited()
 
 
 @pytest.mark.asyncio

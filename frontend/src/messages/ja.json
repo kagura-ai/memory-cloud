@@ -105,6 +105,7 @@
     "confirmWithGoogle": "Google で確認",
     "linkProofUnproved": "この環境では Google アカウントを確認できません。Google が最終サインイン時刻を返していないためです。運用者に設定（確認済みの OAuth アプリと Session age claims）を依頼するか、パスワードでサインインしてアカウントを確認してください。",
     "linkProofStale": "Google が確認したサインインは {minutes} 分より前のもので、リンクには古すぎます。Google からサインアウトしてサインインし直し、もう一度「Google で確認」を押してください。",
+    "linkProofRecentProvider": "この Google はこのアカウントに追加されてから {minutes} 分経っていないサインイン方法のため、まだアカウントの確認には使えません。{minutes} 分経ってからもう一度「Google で確認」を押すか、パスワードでサインインしてアカウントを確認してください。",
     "confirmWithGoogleHint": "「Google で確認」で確認できるのは、そこで選んだ Google アカウントだけです。直近数分以内に Google 自体にサインインしていて、かつ運用者が設定している場合にのみ有効です。確認済みにならない場合は、Google からサインアウトしてサインインし直し、もう一度お試しください。",
     "linkLimitError": "これ以上アカウントをリンクできません。先にいずれかのリンクを解除してください。",
     "unlinkError": "{account} のリンクを解除できませんでした。もう一度お試しください。",

@@ -91,7 +91,9 @@ interface IdentityLinksResponse {
 // #1833: what the Google callback reports when a link-proof sign-in proved
 // nothing. "unproved": Google sent no authentication time (the operator's
 // OAuth app setup). "stale": it did, but older than the link window.
-type LinkProofResult = "unproved" | "stale";
+// "recent_provider" (#1875): the Google sign-in went through a provider that
+// was attached to the account within the link window, which proves nothing yet.
+type LinkProofResult = "unproved" | "stale" | "recent_provider";
 
 /**
  * Whether a Google sign-in could prove this account. Unknown counts as yes:
@@ -132,7 +134,9 @@ export default function LinkedAccounts() {
   const [unlinkTarget, setUnlinkTarget] = useState<IdentityAccount | null>(
     null,
   );
-  // #1807: leaving the whole set, offered once two or more are linked.
+  // #1807: leaving the whole set, offered once two or more OTHER accounts are
+  // linked to this one (a set of three or more). In a pair, unlinking the one
+  // other account is the same thing.
   const [leaveOpen, setLeaveOpen] = useState(false);
   const [isLeaving, setIsLeaving] = useState(false);
   const [dialogError, setDialogError] = useState<string | null>(null);
@@ -149,7 +153,12 @@ export default function LinkedAccounts() {
   useConsumeSearchParams(
     (params) => {
       const result = params.get("link_proof");
-      if (result !== "unproved" && result !== "stale") return false;
+      if (
+        result !== "unproved" &&
+        result !== "stale" &&
+        result !== "recent_provider"
+      )
+        return false;
       setProofResult(result);
       return true;
     },
@@ -383,7 +392,11 @@ export default function LinkedAccounts() {
                   <AlertDescription>
                     {proofResult === "unproved"
                       ? t("linkProofUnproved")
-                      : t("linkProofStale", { minutes: windowMinutes })}
+                      : proofResult === "recent_provider"
+                        ? t("linkProofRecentProvider", {
+                            minutes: windowMinutes,
+                          })
+                        : t("linkProofStale", { minutes: windowMinutes })}
                   </AlertDescription>
                 </Alert>
               )}

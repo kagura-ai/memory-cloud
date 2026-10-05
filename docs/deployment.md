@@ -528,6 +528,13 @@ What counts as a proof (#1818):
   `auth_time` does not count either (fail closed).
 - **Not** an ordinary OAuth sign-in or **Add another account**, and **never
   a GitHub sign-in**: GitHub reports no authentication time.
+- **Not a sign-in through a provider attached to the account less than
+  10 minutes ago** (#1875). Attaching a sign-in provider needs only a live
+  session, so a proof through it would be a proof by that session. The
+  account's original provider is not affected; the page says to retry once
+  the 10 minutes have passed, and the backend logs
+  `link_proof_provider_recently_attached`. This holds with
+  `IDENTITY_LINK_ALLOW_OAUTH_SIGNIN_PROOF=true` too.
 
 Google returns `auth_time` only to an OAuth app that is **published (In
 production) and Verified**, with **Session age claims** turned on (Google
