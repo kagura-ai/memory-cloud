@@ -165,6 +165,29 @@ class TestResourceIndexerNamedVectorUpsert:
         assert mock_db.add.call_count == 0
 
     @pytest.mark.asyncio
+    async def test_apply_upsert_payload_carries_the_write_time_next_to_the_event_time(
+        self, indexer
+    ):
+        """#1869: ``updated_at`` stays the event time (the updated_after /
+        updated_before recall filters read it); ``indexed_at`` is when the point
+        was written, which is what the orphan sweep's grace period needs."""
+        before = utcnow()
+
+        await indexer._apply_upsert(
+            _make_event(),
+            _make_schema(),
+            _make_context(),
+            "kagura_memories",
+            indexer.embedding_service,
+        )
+
+        payload = indexer.qdrant_client.upsert.await_args.kwargs["points"][0].payload
+        assert payload["updated_at"] == "2026-04-15T00:00:00Z"
+        assert payload["indexed_at"].endswith("Z")
+        indexed_at = datetime.fromisoformat(payload["indexed_at"].replace("Z", "+00:00"))
+        assert before <= indexed_at.replace(tzinfo=None) <= utcnow()
+
+    @pytest.mark.asyncio
     async def test_apply_upsert_attaches_bm25_sparse_vector(self, indexer):
         """Issue #335: PointStruct.vector must include `bm25` SparseVector
         derived from the same fulltext_content as the dense embedding, so

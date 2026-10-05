@@ -262,8 +262,8 @@ async def _classify_resource_rows(
                 orphans[ref.point_id] = REASON_RESOURCE_TOMBSTONED
         elif (
             ref.resource_key is not None
-            and ref.updated_at is not None
-            and ref.updated_at < cutoff
+            and ref.written_at is not None
+            and ref.written_at < cutoff
             and _as_uuid(ref.context_id) is not None
         ):
             unmatched.append(ref)

@@ -6,6 +6,7 @@ Pure unit tests — the Qdrant client and the LanceDB table are faked.
 from __future__ import annotations
 
 import threading
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -113,8 +114,59 @@ class TestScrollPointRefs:
             "doc_id",
             "version",
             "updated_at",
+            "indexed_at",
         ]
         assert second.kwargs["offset"] == "next"
+
+    async def test_resource_point_write_time_is_indexed_at(self, mock_client):
+        """#1869: ``updated_at`` is the event time (recall filters read it);
+        the sweep's grace period needs when the point was actually written."""
+        point = SimpleNamespace(
+            id="r1",
+            payload={
+                "context_id": CTX,
+                "resource_id": "docs",
+                "doc_id": "d1",
+                "version": 2,
+                "updated_at": "2026-01-01T00:00:00Z",
+                "indexed_at": "2026-03-01T12:30:00Z",
+            },
+        )
+        mock_client.scroll.return_value = ([point], None)
+
+        pages = [page async for page in scroll_point_refs(KAGURA_MEMORIES_COLLECTION)]
+
+        assert pages == [
+            [
+                PointRef(
+                    point_id="r1",
+                    context_id=CTX,
+                    is_resource=True,
+                    resource_key=("docs", "d1", 2),
+                    written_at=datetime(2026, 3, 1, 12, 30),
+                )
+            ]
+        ]
+
+    @pytest.mark.parametrize("indexed_at", [None, "not a timestamp", 7])
+    async def test_point_without_indexed_at_falls_back_to_updated_at(self, mock_client, indexed_at):
+        """A point written before #1869 has no ``indexed_at`` and no in-flight
+        row, so its ``updated_at`` still decides — it is swept once that is
+        past the grace period."""
+        payload = {
+            "context_id": CTX,
+            "resource_id": "docs",
+            "doc_id": "d1",
+            "version": 2,
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+        if indexed_at is not None:
+            payload["indexed_at"] = indexed_at
+        mock_client.scroll.return_value = ([SimpleNamespace(id="r1", payload=payload)], None)
+
+        pages = [page async for page in scroll_point_refs(KAGURA_MEMORIES_COLLECTION)]
+
+        assert pages[0][0].written_at == datetime(2026, 1, 1)
 
     async def test_empty_collection_yields_nothing(self, mock_client):
         mock_client.scroll.return_value = ([], None)
