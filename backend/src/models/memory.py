@@ -182,7 +182,9 @@ class Memory(Base):
     # and the #979 retry backoff read it. It used to be ``updated_at``, which
     # made every freshly embedded memory look edited to anyone reading
     # ``updated_at`` as "a person changed this" (``list`` / ``changes_since``,
-    # #1852); ``updated_at`` is now written by edits and promotions only.
+    # #1852); ``updated_at`` is now written by an edit, a scope promotion or a
+    # Sleep maintenance change (importance re-evaluation, dedup tag merge,
+    # rollback); never by the initial write or an embedding retry.
     embedding_attempted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Layer 2: 文脈説明

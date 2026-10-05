@@ -69,14 +69,15 @@ _STRONGEST_FIRST = (
 )
 
 
-def _edges_matching(
+def one_row_per_pair(
     user_id: OwnerFilter, conditions: list[ColumnElement[bool]]
-) -> Select[NeuralMemoryEdge]:
-    """Edges matching ``conditions``, with one row per (src, dst) for a
-    link-set read (#1867): the row ``_STRONGEST_FIRST`` ranks first among the
-    rows that pass the filters. Otherwise the plain filtered select."""
+) -> ColumnElement[bool]:
+    """``conditions`` as one predicate that, for a link-set read, also keeps a
+    single row per (src, dst) (#1867): the row ``_STRONGEST_FIRST`` ranks
+    first among the rows that pass the filters. Otherwise the plain
+    conjunction. Aggregates built on it count pairs, not rows (#1895)."""
     if not reads_parallel_rows(user_id):
-        return select(NeuralMemoryEdge).where(and_(*conditions))
+        return and_(*conditions)
     ranked = (
         select(
             NeuralMemoryEdge.id,
@@ -90,9 +91,15 @@ def _edges_matching(
         .where(and_(*conditions))
         .subquery()
     )
-    return select(NeuralMemoryEdge).where(
-        NeuralMemoryEdge.id.in_(select(ranked.c.id).where(ranked.c.rank == 1))
-    )
+    return NeuralMemoryEdge.id.in_(select(ranked.c.id).where(ranked.c.rank == 1))
+
+
+def _edges_matching(
+    user_id: OwnerFilter, conditions: list[ColumnElement[bool]]
+) -> Select[NeuralMemoryEdge]:
+    """Edges matching ``conditions``, with one row per (src, dst) for a
+    link-set read (see ``one_row_per_pair``)."""
+    return select(NeuralMemoryEdge).where(one_row_per_pair(user_id, conditions))
 
 
 class NeuralEdgeRepository:
@@ -1002,7 +1009,8 @@ class NeuralEdgeRepository:
 
         Returns:
             Dictionary with graph metrics:
-                - total_edges: Total edge count
+                - total_edges: Total edge count (pairs, for an identity-link
+                  set whose accounts each own a row for one pair — #1895)
                 - avg_weight: Average edge weight
                 - max_weight: Maximum edge weight
                 - min_weight: Minimum edge weight
@@ -1024,8 +1032,13 @@ class NeuralEdgeRepository:
         if context_id:
             conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
 
+        # #1895: a link-set read aggregates over one row per pair (the
+        # strongest), so the numbers agree with the edge list; one account and
+        # the unfiltered shared-context read keep the plain conjunction.
+        matching = one_row_per_pair(user_id, conditions)
+
         # Count edges
-        count_stmt = select(func.count(NeuralMemoryEdge.id)).where(and_(*conditions))
+        count_stmt = select(func.count(NeuralMemoryEdge.id)).where(matching)
         count_result = await self.db.execute(count_stmt)
         total_edges = count_result.scalar() or 0
 
@@ -1042,7 +1055,7 @@ class NeuralEdgeRepository:
             func.avg(NeuralMemoryEdge.weight).label("avg_weight"),
             func.max(NeuralMemoryEdge.weight).label("max_weight"),
             func.min(NeuralMemoryEdge.weight).label("min_weight"),
-        ).where(and_(*conditions))
+        ).where(matching)
 
         stats_result = await self.db.execute(stats_stmt)
         stats_row = stats_result.one()
@@ -1116,7 +1129,9 @@ class NeuralEdgeRepository:
             context_id: Context ID (for isolation)
 
         Returns:
-            List of (node_id, total_degree) tuples sorted by degree descending
+            List of (node_id, total_degree) tuples sorted by degree descending.
+            For an identity-link set the degree counts distinct neighbours, so
+            a pair both accounts own a row for counts once (#1895).
 
         Raises:
             ValueError: If workspace_id or context_id is None (Issue #273 H-2).
@@ -1140,17 +1155,26 @@ class NeuralEdgeRepository:
 
         # Union of src_id and dst_id with counts, as an explicit subquery: the
         # implicit ``CompoundSelect.c`` shortcut is gone in SQLAlchemy 2.1 (#1695).
+        # #1895: for a link set, two accounts' rows for one pair are one edge —
+        # count the distinct neighbours instead of the rows, as
+        # ``get_node_degree`` does.
+        if reads_parallel_rows(user_id):
+            out_count = func.count(func.distinct(NeuralMemoryEdge.dst_id))
+            in_count = func.count(func.distinct(NeuralMemoryEdge.src_id))
+        else:
+            out_count = in_count = func.count()
+
         degrees = (
             select(
                 NeuralMemoryEdge.src_id.label("node_id"),
-                func.count().label("degree"),
+                out_count.label("degree"),
             )
             .where(and_(*conditions))
             .group_by(NeuralMemoryEdge.src_id)
             .union_all(
                 select(
                     NeuralMemoryEdge.dst_id.label("node_id"),
-                    func.count().label("degree"),
+                    in_count.label("degree"),
                 )
                 .where(and_(*conditions))
                 .group_by(NeuralMemoryEdge.dst_id)

@@ -424,9 +424,9 @@ rows are deleted by an hourly job once they are
 **New-device sign-in alerts.** A browser sign-in from a device the account has
 not used before emails the owner (same pipeline and mandatory like the other
 security notices). The device is a long-lived `kagura_device` cookie whose
-keyed HMAC is stored in `user_known_devices`; no IP address is stored there (the
-IP and user agent go into the email and, while a notice is coalesced or retried,
-into the notice queue in Redis). A daily
+keyed HMAC is stored in `user_known_devices`; no IP address or user agent is
+stored there (the IP and user agent go into the email and, while a notice is
+coalesced or retried, into the notice queue in Redis). A daily
 job forgets devices not seen for `KNOWN_DEVICE_RETENTION_DAYS` (default `180`),
 and at most `KNOWN_DEVICE_MAX_PER_USER` (default `20`) devices are kept per
 account. After the upgrade every account's next sign-in registers its browser
@@ -446,9 +446,10 @@ first authorization, a broader scope, or a client changed since the last grant
 (connector write keys included), an OAuth client is registered or its secret
 regenerated, or a provider sign-in changes the account's email address (the
 previous address is told), the account owner is
-emailed a notice (UTC time, IP address, user agent, key or client name, and the
-acting admin for admin actions — never a secret, token or link other than the
-plain `FRONTEND_URL/profile` page). The notices cannot be turned off. They go
+emailed a notice (UTC time, IP address, user agent, key or client name; for an
+admin action the acting admin, without the admin's IP address and user agent —
+never a secret, token or link other than the plain `FRONTEND_URL/profile`
+page). The notices cannot be turned off. They go
 only to a verified address (`users.email_verified_at`: set by an emailed
 password link, or by an OAuth sign-in whose provider attests the address as
 verified; migration `e88_1752_verified_backfill` marks the OAuth accounts
@@ -1101,10 +1102,22 @@ would to a re-index.
   resource has no schema left, or the memory's content was edited into
   something that is not a JSON document. The memory is live but ends `failed`,
   with an `embedding_error` that names the document, instead of being given a
-  vector of its label; ingest the document again as a newer version (the same
-  version is refused as a duplicate) to make it searchable. The rebuild reads
-  the row, not the ingest history: a memory whose content was edited into
-  another JSON document is rebuilt from what it holds now.
+  vector of its label. It is final after the first attempt (retrying cannot
+  help until one of the two steps below is taken) and is logged once as
+  `embedding_resource_unrebuildable`, a warning, not as
+  `embedding_budget_exhausted`. The dry run and the restore both warn with the
+  number of memories whose resource has no schema. Two ways to make such a
+  memory searchable again:
+  - publish the resource's schema again, then reset the failed memories with
+    `POST /api/v1/admin/embedding/retry-failed?context_id=<context-id>` (system
+    admin); the sweep rebuilds their vectors from the rows, and nothing has to
+    be ingested again. This does not help a memory whose content is no longer
+    a JSON document;
+  - ingest the document again as a newer version (the same version is refused
+    as a duplicate).
+
+  The rebuild reads the row, not the ingest history: a memory whose content
+  was edited into another JSON document is rebuilt from what it holds now.
 
 **Refusals.** A context that is not deleted; a context of a deleted workspace
 (deleting a workspace is final); a context whose name a live context of the

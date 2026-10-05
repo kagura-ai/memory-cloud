@@ -234,10 +234,13 @@ describe("ContextBreakdownTable", () => {
     // dev was created by user-1 (Alice) — shared with the viewer.
     expect(rowOf("dev")).toHaveTextContent("sharedBy");
     expect(rowOf("dev")).toHaveTextContent("Alice");
-    // prod is the viewer's own: no marker, and no visibility text either.
+    // prod is the viewer's own: no marker.
     expect(rowOf("prod")).not.toHaveTextContent("sharedBy");
-    expect(rowOf("prod")).not.toHaveTextContent("privateContext");
-    expect(rowOf("dev")).not.toHaveTextContent("sharedContext");
+    // The name cell holds the name and the marker, nothing else: any visible
+    // "private" / "shared" label text coming back beside the icon fails here,
+    // whatever message key it uses.
+    expect(rowOf("prod").cells[0].textContent).toBe("prod");
+    expect(rowOf("dev").cells[0].textContent).toBe("devsharedBy:Alice");
   });
 
   it("falls back to the unnamed stand-in when a shared context's creator has no name", () => {
@@ -365,6 +368,31 @@ describe("ContextBreakdownTable", () => {
       expect(lines[2]).toBe(
         '"prod","200","2026-04-09T00:00:00Z","5","Bob","Private"',
       );
+    });
+  });
+
+  it("exports an empty Owner cell for a creator without a name, and empty Owner and Visibility for a context missing from the dashboard rows", () => {
+    const exported = captureCsvExport();
+
+    render(
+      <ContextBreakdownTable
+        // dev's creator has no display name; prod is in the stats response
+        // but not in the dashboard rows.
+        contexts={[{ ...mockContexts[0], created_by_name: null }]}
+        totalMemories={100}
+        contextStats={mockContextStats}
+        currentUserId="user-2"
+      />,
+    );
+    fireEvent.click(screen.getByText(/Export CSV/));
+
+    return exported().then((csv) => {
+      const lines = csv.split("\n");
+      // No "ownerUnnamed" stand-in in the locale-neutral file.
+      expect(lines[1]).toBe(
+        '"dev","100","2026-04-10T00:00:00Z","2","","Shared"',
+      );
+      expect(lines[2]).toBe('"prod","200","2026-04-09T00:00:00Z","5","",""');
     });
   });
 

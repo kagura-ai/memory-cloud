@@ -6882,6 +6882,31 @@ def is_configuration_failure(exc: BaseException) -> bool:
     )
 
 
+def is_unrebuildable_resource_failure(exc: BaseException) -> bool:
+    """Is this a resource-ingested row whose point cannot be rebuilt? (#1897)
+
+    ``ResourceIndexer.rebuild_point`` raises ``ResourceRebuildError`` when the
+    row's resource has no schema any more, or the row no longer holds a JSON
+    document. Both are permanent until an operator acts — publishes the schema
+    again, or ingests the document as a newer version — so a retry changes
+    nothing: the row is final on the first attempt instead of waiting out the
+    backoff ``MAX_EMBEDDING_RETRIES`` times.
+
+    The opposite of ``is_configuration_failure`` in what it does to the
+    budget. A missing credential is re-probed without bound because adding the
+    key is all it takes and the probe is free. Here the sweep cannot tell that
+    the schema is back, and every probe reads the context, the resource and
+    its schema, so the row stops and the admin retry
+    (``POST /admin/embedding/retry-failed``) starts it again.
+
+    The type arrives intact: ``rebuild_point`` raises it before it calls the
+    embedding service, and nothing between it and the failure handler wraps it.
+    """
+    from services.resource_indexer import ResourceRebuildError
+
+    return isinstance(exc, ResourceRebuildError)
+
+
 def embedding_failure_values(exc: BaseException, now: datetime) -> dict[str, Any]:
     """Column values to stamp on a memory whose embedding failed (#1496).
 
@@ -6896,7 +6921,15 @@ def embedding_failure_values(exc: BaseException, now: datetime) -> dict[str, Any
     pre-UPDATE status, so `-1` would over-decrement a re-claimed stale
     `processing` row. It also matches the doctrine the success path already
     states — the budget is per failure-episode, not a lifetime tally.
+
+    A row that cannot be rebuilt (#1897, ``is_unrebuildable_resource_failure``)
+    is put at the ceiling instead: ``embedding_retry_eligible_clause`` claims a
+    ``failed`` row only below it, so no retry is scheduled, and the counts of
+    rows nothing will retry (``embedding_retry_count >= MAX_EMBEDDING_RETRIES``)
+    include it. The admin retry resets the counter along with the status.
     """
+    from config.constants import MAX_EMBEDDING_RETRIES
+
     values: dict[str, Any] = {
         "embedding_status": "failed",
         "embedding_error": str(exc)[:500],
@@ -6907,6 +6940,8 @@ def embedding_failure_values(exc: BaseException, now: datetime) -> dict[str, Any
     }
     if is_configuration_failure(exc):
         values["embedding_retry_count"] = 0
+    elif is_unrebuildable_resource_failure(exc):
+        values["embedding_retry_count"] = MAX_EMBEDDING_RETRIES
     return values
 
 
@@ -7217,7 +7252,9 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             # tested without a live session and a Qdrant client; see its
             # docstring for why a configuration failure must not spend the
             # budget, and `is_configuration_failure` for which failures those
-            # are (and the one known gap).
+            # are (and the one known gap). #1897: it also makes a resource row
+            # that cannot be rebuilt final on this attempt
+            # (`is_unrebuildable_resource_failure`).
             from config.constants import MAX_EMBEDDING_RETRIES
 
             values = embedding_failure_values(e, utcnow())
@@ -7256,7 +7293,13 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 "error_code": getattr(e, "error_code", None),
                 "retry_count": final_count,
             }
-            if final_count is not None and final_count >= MAX_EMBEDDING_RETRIES:
+            if is_unrebuildable_resource_failure(e):
+                # #1897: final too, but no budget was spent and no provider
+                # failed. Expected after restoring a context whose resource
+                # lost its schema, so a warning under its own name; the row
+                # carries the reason and waits for the admin retry.
+                logger.warning("embedding_resource_unrebuildable", **common)
+            elif final_count is not None and final_count >= MAX_EMBEDDING_RETRIES:
                 logger.error("embedding_budget_exhausted", **common)
             else:
                 logger.warning("embedding_failed", **common)

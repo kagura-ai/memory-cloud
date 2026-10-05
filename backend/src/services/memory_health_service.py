@@ -49,6 +49,7 @@ from models.auth import Context, ContextReadAttribution, UsageStats
 from models.config import ContextSearchConfig
 from models.memory import DELETED_BY_SLEEP_MERGE, Memory, NeuralMemoryEdge
 from models.sleep import SleepReport
+from repositories.neural_edge import one_row_per_pair
 from services.identity_link_service import linked_user_ids
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
@@ -477,7 +478,17 @@ class MemoryHealthService:
         owners: frozenset[str] | None = None,
     ) -> dict[uuid.UUID | None, dict[str, Any]]:
         """Edge composition, weight-invariant violations and density, per
-        context. Edges always carry a context; active memories may not."""
+        context. Edges always carry a context; active memories may not.
+
+        #1895: when ``owners`` holds more than one account, each of them may
+        own a row for the same (src, dst) inside a covered context. The edge
+        counts then stand on pairs, not rows: a pair counts once, under the
+        origin of the row a link-set graph read stands for (the strongest,
+        then the most recently updated — ``one_row_per_pair``), so the totals
+        agree with the graph stats and the edge list. ``weight_violations``
+        stays a count of rows: a violation is a fact about a stored row, and
+        the weaker row of a pair must not hide behind the stronger one.
+        """
         edge_conditions = [
             self._rows_of(
                 NeuralMemoryEdge.user_id, NeuralMemoryEdge.context_id, user_id, owners, owned_ids
@@ -497,7 +508,7 @@ class MemoryHealthService:
                 NeuralMemoryEdge.origin,
                 func.count(NeuralMemoryEdge.id),
             )
-            .where(*edge_conditions)
+            .where(one_row_per_pair(owners, edge_conditions))
             .group_by(NeuralMemoryEdge.context_id, NeuralMemoryEdge.origin)
         )
         edges_by_scope: dict[uuid.UUID | None, dict[str, int]] = defaultdict(dict)

@@ -818,7 +818,7 @@ Since v0.48.0, the REST batch endpoint and MCP `ingest_events` delegate to the s
 
 | Status | `error` | `details.reason` | When |
 |---|---|---|---|
-| `409` | `RES-002` | `connector_team_connected_here` | This workspace already has a connector for the team under the same worker app. `details.connector_id` and `details.display_name` name it — edit that connector instead of creating another |
+| `409` | `RES-002` | `connector_team_connected_here` | This workspace already has a connector for the team under the same worker app. `details.connector_id` and `details.display_name` name it — edit that connector instead of creating another. When the request carried a `slack_install_handle`, that install's bot token is stored on the existing connector and the body adds `details.token_refreshed: true` ([#1880](https://github.com/kagura-ai/memory-cloud/issues/1880)); the key is absent otherwise (manual bind, or the token could not be stored) |
 | `409` | `RES-002` | `connector_team_connected_elsewhere` | Another workspace has a connector for the team, under any worker app. The body carries nothing about that workspace (no id, name or owner) and does not echo the team id. To move the team, delete the connector in the original workspace; to share it, join that workspace |
 | `409` | `RES-002` | — | `resource_id` already exists (not connector-owned, or already bound to a connector) |
 | `403` | `FEAT-001` / `CONNECTOR-001` | — | Plan without the `connectors` feature / connector seat cap reached |

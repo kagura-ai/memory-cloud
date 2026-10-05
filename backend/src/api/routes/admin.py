@@ -114,10 +114,23 @@ class UserInfo(TZAwareBaseModel):
     # current_context_display_name: str | None = None
 
 
+class UserStatsUser(BaseModel):
+    """The account a ``UserStats`` response describes.
+
+    Issue #1882: typed so the OpenAPI public-id guard covers it, and carries
+    the string ``user_id`` instead of the integer ``users`` PK (#1813).
+    """
+
+    user_id: str
+    email: str
+    name: str | None
+    role: str
+
+
 class UserStats(BaseModel):
     """Detailed statistics for a specific user."""
 
-    user: dict
+    user: UserStatsUser
     memories: dict
     api_usage: dict
 
@@ -496,12 +509,12 @@ async def get_user_stats(
         logger.info("admin_get_user_stats", user_id=user_id, total=total_count)
 
         return UserStats(
-            user={
-                "id": target_user.id,
-                "email": target_user.email,
-                "name": target_user.name,
-                "role": target_user.role or "user",
-            },
+            user=UserStatsUser(
+                user_id=target_user.user_id,
+                email=target_user.email,
+                name=target_user.name,
+                role=target_user.role or "user",
+            ),
             memories={
                 "total": total_count,
                 "working": working_count,

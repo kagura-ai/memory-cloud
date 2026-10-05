@@ -52,6 +52,18 @@ import {
 // Auto-refresh interval: 5 minutes (refresh before 10-minute visibility expiry)
 const OAUTH_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
+/**
+ * Badge labels for the non-custom `provider` values the backend accepts.
+ * Brand names go through next-intl like the rest of the UI; a value this
+ * client does not know reads "Other" instead of leaking the raw string.
+ */
+const LEGACY_PROVIDERS: readonly string[] = ["claude", "chatgpt", "cursor"];
+
+/** The `legacyProvider.*` message key for an app's `provider` value. */
+function legacyProviderKey(provider: string): string {
+  return LEGACY_PROVIDERS.includes(provider) ? provider : "other";
+}
+
 export function OAuthAppsTabPanel() {
   const t = useTranslations("customApps");
   const tCommon = useTranslations("common");
@@ -239,10 +251,13 @@ export function OAuthAppsTabPanel() {
   }
 
   const customApps = oauthClients.filter((c) => c.provider === "custom");
-  // Apps created through the former Claude / ChatGPT presets. Connectors
-  // never used them (they self-register), so they are listed only to be
-  // cleaned up.
-  const legacyPresetApps = oauthClients.filter((c) => c.provider !== "custom");
+  // Every app that is not a custom one: created through the former Claude /
+  // ChatGPT presets, or through the API for another connector (the backend
+  // also accepts `cursor`). Connectors never used them (they self-register),
+  // so they are listed only to be cleaned up. All of them stay listed —
+  // narrowing to the two presets would leave the rest with no place to be
+  // deleted from (#1884).
+  const legacyApps = oauthClients.filter((c) => c.provider !== "custom");
 
   const cardProps = {
     onCopy: handleCopy,
@@ -321,14 +336,14 @@ export function OAuthAppsTabPanel() {
             )}
           </div>
 
-          {/* Apps created through the former Claude / ChatGPT presets */}
-          {legacyPresetApps.length > 0 && (
+          {/* Non-custom apps, kept only so they can be cleaned up */}
+          {legacyApps.length > 0 && (
             <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
               <h3 className="font-semibold text-gray-900 dark:text-gray-100 mb-3">
                 {t("legacyPresetsTitle")}
               </h3>
               <div className="space-y-4">
-                {legacyPresetApps.map((app) => (
+                {legacyApps.map((app) => (
                   <div
                     key={app.client_id}
                     className="border-t border-gray-200 dark:border-gray-700 pt-4 first:border-t-0 first:pt-0"
@@ -337,8 +352,8 @@ export function OAuthAppsTabPanel() {
                       <h4 className="font-semibold text-gray-900 dark:text-gray-100">
                         {app.client_name}
                       </h4>
-                      <span className="text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 font-mono">
-                        {app.provider}
+                      <span className="text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">
+                        {t(`legacyProvider.${legacyProviderKey(app.provider)}`)}
                       </span>
                     </div>
                     <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
