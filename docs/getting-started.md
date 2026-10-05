@@ -100,7 +100,9 @@ All commands run from the `backend/` directory:
 # Create admin (first time setup)
 python -m src.cli.create_admin
 
-# Reset password or disable/re-enable MFA
+# Reset password or disable/re-enable MFA.
+# A password reset also signs out every browser session and revokes the
+# account's OAuth / MCP tokens, so Redis (REDIS_URL) must be reachable.
 python -m src.cli.reset_password
 
 # Delete admin (for re-creation)
