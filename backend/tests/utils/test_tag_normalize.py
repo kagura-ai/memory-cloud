@@ -8,7 +8,12 @@ forms of two tags an author meant differently must NOT collide.
 
 import pytest
 
-from utils.tag_normalize import is_near_duplicate, is_specialisation, normalize_tag
+from utils.tag_normalize import (
+    is_mechanical_variant,
+    is_near_duplicate,
+    is_specialisation,
+    normalize_tag,
+)
 
 
 class TestNormalizeTag:
@@ -348,3 +353,69 @@ class TestIsSpecialisation:
         from the other, the read path keeps the near-duplicate as is."""
         assert is_near_duplicate("session-cookie", "session")
         assert is_specialisation("session-cookie", "session")
+
+
+class TestIsMechanicalVariant:
+    """The WRITE-side relation (#1871): one fold AND the same numbers.
+
+    ``normalize_tag`` deletes separators, so it is not injective on tags that
+    carry numbers (``v0.11.0`` and ``v0.1.10`` both fold to ``v0110``). Widening
+    a read filter by it is recoverable; storing a memory under the other tag is
+    not, so the write path also requires the digit runs to be the same.
+    """
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            ("Dev_Environment", "dev-environment"),
+            ("dev environment", "dev.environment"),
+            ("V0.94.0", "v0.94.0"),
+            ("v0_94_0", "v0.94.0"),
+            ("PR-123", "pr_123"),
+            ("pr123", "pr-123"),  # a separator between letters and a number changes no number
+            ("issues", "issue"),
+            ("release-2-notes", "release-2-note"),
+            ("ｖ０．９４．０", "v0.94.0"),  # full-width digits are the same digits after NFKC
+            ("python", "python"),
+        ],
+    )
+    def test_same_fold_and_same_numbers_is_a_variant(self, a, b):
+        assert is_mechanical_variant(a, b)
+        assert is_mechanical_variant(b, a)
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            # The four pairs from the issue: one fold, different identifiers.
+            ("v0.11.0", "v0.1.10"),
+            ("v0.94", "v0.9.4"),
+            ("pr-123", "pr-1-23"),
+            ("2026-11-2", "2026-1-12"),
+            # Same digits, same number of fields, split at a different place.
+            ("v0.01", "v00.1"),
+            ("1-23-4", "12-3-4"),
+            ("ｖ０．１１．０", "v0.1.10"),
+        ],
+    )
+    def test_same_fold_with_different_numbers_is_not_a_variant(self, a, b):
+        assert normalize_tag(a) == normalize_tag(b)  # the collision this guards
+        assert not is_mechanical_variant(a, b)
+        assert not is_mechanical_variant(b, a)
+
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            ("dev-env", "dev-environment"),  # abbreviation
+            ("troubleshoot", "troubleshooting"),
+            ("sprint-07", "sprint-7"),  # zero padding is not folded
+            ("v0.73.0", "v0.69.0"),
+            ("python", "javascript"),
+        ],
+    )
+    def test_different_folds_are_not_variants(self, a, b):
+        assert not is_mechanical_variant(a, b)
+        assert not is_mechanical_variant(b, a)
+
+    def test_a_tag_with_no_folding_signal_is_a_variant_of_nothing(self):
+        assert not is_mechanical_variant("---", "...")
+        assert not is_mechanical_variant("---", "---")

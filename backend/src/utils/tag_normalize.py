@@ -17,7 +17,11 @@ no edit-distance-2 threshold will ever unify (they differ by 7 edits). Silently
 matching it would mean guessing at authorial intent. So abbreviations surface as
 a suggestion, and only mechanical variants actually widen the filter.
 
-A third predicate, :func:`is_specialisation`, is used by the WRITE lint only
+The WRITE path (``tags_normalize`` on ``remember``, #1853) replaces a tag
+instead of widening a filter, so it uses the stricter
+:func:`is_mechanical_variant`: the same fold AND the same numbers (#1871).
+
+A further predicate, :func:`is_specialisation`, is used by the WRITE lint only
 (#1617). ``session-cookie`` is a near-duplicate of ``session`` by the prefix
 rule, and on the read path that is useful — for a zero-result filter on
 ``session`` the stored sub-topic is the actionable answer. On the write path
@@ -162,13 +166,61 @@ def _digit_skeleton(tag: str) -> str:
     return normalize_tag(_DIGIT_RUN.sub("0", unicodedata.normalize("NFKC", tag)))
 
 
+def _raw_digit_runs(tag: str) -> list[str]:
+    """The tag's maximal digit runs as written, in order.
+
+    Taken after NFKC (so full-width, superscript and circled digits count as
+    the ASCII digit they fold to) and BEFORE separator removal, which is what
+    keeps ``0.11.0`` (``0``, ``11``, ``0``) apart from ``0.1.10``.
+    """
+    return _DIGIT_RUN.findall(unicodedata.normalize("NFKC", tag))
+
+
 def _digit_runs(tag: str) -> list[str]:
     """The tag's numbers with zero padding dropped, so ``07`` and ``7`` compare equal.
 
     Compared as strings rather than ``int``: a tag is caller-controlled and
     ``int()`` refuses a run longer than the interpreter's digit limit.
     """
-    return [run.lstrip("0") for run in _DIGIT_RUN.findall(unicodedata.normalize("NFKC", tag))]
+    return [run.lstrip("0") for run in _raw_digit_runs(tag)]
+
+
+def is_mechanical_variant(a: str, b: str) -> bool:
+    """Whether two tags are ONE tag written two ways, safely enough to store one as the other.
+
+    The write-side relation (#1871). :func:`normalize_tag` removes separators,
+    so on tags that carry numbers it is not injective: ``v0.11.0`` and
+    ``v0.1.10`` both fold to ``v0110``, ``pr-123`` and ``pr-1-23`` to ``pr123``.
+    Widening a read filter by that fold only returns more; replacing a tag on
+    write files the memory under another release, PR or date. So this
+    predicate asks for the same fold AND the same digit runs, in order, as
+    written (:func:`_raw_digit_runs`): a separator may be added, dropped or
+    swapped anywhere except where it would split or join a number.
+
+    The runs are compared raw, not zero-stripped like :func:`_digit_runs`:
+    ``v0.01`` and ``v00.1`` share a fold and their stripped runs, and are still
+    two identifiers. (``sprint-07`` / ``sprint-7`` never get here — their folds
+    differ.)
+
+    Args:
+        a: One tag, as written.
+        b: The other tag, as written.
+
+    Returns:
+        True if the tags share a non-empty fold and the same numbers. Symmetric.
+
+    Example:
+        >>> is_mechanical_variant("Dev_Environment", "dev-environment")
+        True
+        >>> is_mechanical_variant("V0.94.0", "v0.94.0")
+        True
+        >>> is_mechanical_variant("v0.11.0", "v0.1.10")
+        False
+    """
+    folded = normalize_tag(a)
+    if not folded or folded != normalize_tag(b):
+        return False
+    return _raw_digit_runs(a) == _raw_digit_runs(b)
 
 
 def is_near_duplicate(requested: str, candidate: str) -> bool:
