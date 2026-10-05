@@ -4060,11 +4060,23 @@
     "createTitle": "Create Slack connector",
     "createDesc": "Connecting {team}. A private context will be created to hold ingested conversations.",
     "missingScopesTitle": "Reconnect Slack to enable all features",
-    "missingScopesDesc": "This install did not grant {scopes}. Ingestion works, but each of these scopes enables one feature — commands: the slash command; app_mentions:read: @mention replies; groups:read: private channels in the channel picker. Make sure the Slack app requests them, then connect Slack again.",
+    "missingScopesDesc": "Ingestion works, but this install did not grant every Slack scope. Unavailable until you reconnect:",
+    "missingScopeFeatures": {
+      "commands": "commands — the slash command",
+      "appMentionsRead": "app_mentions:read — @mention replies",
+      "groupsRead": "groups:read — private channels in the channel picker",
+      "other": "{scope}"
+    },
+    "missingScopesAction": "Make sure the Slack app requests {count, plural, one {this scope} other {these scopes}}, then connect Slack again.",
     "teamConflict": {
       "subjectNamed": "The Slack workspace “{name}”",
       "subjectUnnamed": "This Slack workspace",
-      "here": "{subject} is already connected in this workspace by the connector “{connector}”. Its Slack permissions were refreshed by this sign-in; the channel list picks that up within a minute. To change its settings, edit the existing connector.",
+      "here": "{subject} is already connected in this workspace by the connector “{connector}”. To change its settings, edit the existing connector.",
+      "hereUnnamed": "{subject} is already connected in this workspace by an existing connector. To change its settings, edit that connector.",
+      "hereOAuth": "{subject} is already connected in this workspace by the connector “{connector}”. Its Slack permissions were refreshed by this sign-in; the channel list picks that up within a minute. To change its settings, edit the existing connector.",
+      "hereOAuthUnnamed": "{subject} is already connected in this workspace by an existing connector. Its Slack permissions were refreshed by this sign-in; the channel list picks that up within a minute. To change its settings, edit that connector.",
+      "hereManual": "{subject} is already connected in this workspace by the connector “{connector}”. The bot token you entered was not saved. To change its settings, edit the existing connector.",
+      "hereManualUnnamed": "{subject} is already connected in this workspace by an existing connector. The bot token you entered was not saved. To change its settings, edit that connector.",
       "elsewhere": "{subject} is already connected to another Kagura workspace. A Slack workspace can be connected to only one Kagura workspace. To move it, delete the connector in the original workspace. To share it, ask a member of the original workspace to invite you.",
       "editExisting": "Edit the existing connector"
     },

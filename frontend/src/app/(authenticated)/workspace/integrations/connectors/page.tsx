@@ -44,7 +44,7 @@ import {
 } from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Select,
   SelectContent,
@@ -83,6 +83,7 @@ import { useErrorGate } from "@/hooks/useErrorGate";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { usePlanTierMatrix } from "@/hooks/usePlanFeatures";
 import { ChannelPicker, parseChannelIds } from "./ChannelPicker";
+import { MissingScopesNotice } from "./MissingScopesNotice";
 import {
   TeamConflictAlert,
   teamConflictOf,
@@ -950,7 +951,9 @@ export default function ConnectorsPage() {
           toast(toastArgs);
         } else if (conflict) {
           // #1753: only the team id is known here, so no Slack name.
-          setManualError(teamConflictMessage(conflict));
+          // #1880: no sign-in happened and the 409 dropped the pasted
+          // token, so the copy says that instead of claiming a refresh.
+          setManualError(teamConflictMessage(conflict, null, "manual"));
         } else {
           setManualError(err instanceof Error ? err.message : String(err));
         }
@@ -1777,23 +1780,18 @@ export default function ConnectorsPage() {
                 <AlertDescription>{createError}</AlertDescription>
               </Alert>
             )}
-            {/* #1758: the grant lacks scopes the slash command / @mention
-                features need. Ingestion still works, so this warns rather
-                than blocks; the fix is to reconnect Slack. */}
-            {pending?.missing_scopes && pending.missing_scopes.length > 0 && (
-              <Alert variant="warning">
-                <AlertTitle>{t("missingScopesTitle")}</AlertTitle>
-                <AlertDescription>
-                  {t("missingScopesDesc", {
-                    scopes: pending.missing_scopes.join(", "),
-                  })}
-                </AlertDescription>
-              </Alert>
-            )}
+            {/* #1758 / #1778: the grant lacks scopes the slash command,
+                @mention replies or the private-channel picker need.
+                Ingestion still works, so this warns rather than blocks and
+                names only the affected features (#1880); the fix is to
+                reconnect Slack. */}
+            <MissingScopesNotice scopes={pending?.missing_scopes ?? []} />
             {createConflict && (
               <TeamConflictAlert
                 conflict={createConflict}
                 teamName={pending?.team_name}
+                // This dialog only follows an OAuth sign-in (#1880).
+                source="oauth"
                 onEditExisting={editConflictingConnector}
               />
             )}

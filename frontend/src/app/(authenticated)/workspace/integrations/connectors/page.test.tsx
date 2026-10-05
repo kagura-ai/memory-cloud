@@ -1699,6 +1699,14 @@ describe("ConnectorsPage RBAC gate", () => {
 
     expect(await screen.findByText("missingScopesTitle")).toBeInTheDocument();
     expect(screen.getByText("missingScopesDesc")).toBeInTheDocument();
+    // #1880: one line per missing scope — nothing about the scopes granted.
+    expect(
+      screen.getByText("missingScopeFeatures.commands"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("missingScopeFeatures.appMentionsRead"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("missingScopeFeatures.groupsRead")).toBeNull();
   });
 
   it("shows no scope notice when the grant is complete (#1758)", async () => {
@@ -1944,7 +1952,8 @@ describe("ConnectorsPage RBAC gate", () => {
     );
     await submitCreate();
 
-    expect(await screen.findByText("here")).toBeInTheDocument();
+    // #1880: an OAuth sign-in, so the variant with the refresh sentence.
+    expect(await screen.findByText("hereOAuth")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "editExisting" }));
 
     expect(await screen.findByText("settingsTitle")).toBeInTheDocument();
@@ -2097,6 +2106,35 @@ describe("ConnectorsPage RBAC gate", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "manualBind" }));
   }
+
+  it.each([
+    ["Acme", "hereManual"],
+    [null, "hereManualUnnamed"],
+  ])(
+    "manual bind: a team connected here (name %s) never claims a refresh (#1880)",
+    async (displayName, key) => {
+      mockCreateConnector.mockRejectedValue(
+        new ApiError({
+          error: "RES-002",
+          message: "server text",
+          status: 409,
+          details: {
+            reason: "connector_team_connected_here",
+            connector_id: "11111111-1111-1111-1111-111111111111",
+            display_name: displayName,
+          },
+        }),
+      );
+
+      await submitManualBind();
+
+      // No sign-in happened and the pasted token was dropped by the 409.
+      expect(await screen.findByText(key)).toBeInTheDocument();
+      expect(screen.queryByText(/^hereOAuth/)).toBeNull();
+      expect(screen.queryByText(/11111111/)).toBeNull();
+      expect(screen.queryByText("server text")).toBeNull();
+    },
+  );
 
   it("manual bind: the connector seat cap is a gate toast, not the server's English (#1646)", async () => {
     const serverText =
