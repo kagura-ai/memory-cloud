@@ -222,18 +222,13 @@ def _assert_uniform_404(client: TestClient, method: str, other: str, unknown: st
     assert _stable(r_other.json()) == _stable(r_unknown.json())
 
 
-async def _reload(db: AsyncSession, row: Any) -> Any:
-    await db.refresh(row)
-    return row
-
-
 # ---------------------------------------------------------------------------
 # API keys (/api/v1/config/api-keys)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_api_keys_use_public_ids(owners, client: TestClient, db_session) -> None:
+async def test_api_keys_use_public_ids(owners, client: TestClient) -> None:
     a, b = owners["a"], owners["b"]
     mine = a["api_key"].public_id
     unknown = new_public_id(PublicIdPrefix.API_KEY)
