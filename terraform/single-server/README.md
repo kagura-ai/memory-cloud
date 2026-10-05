@@ -495,6 +495,21 @@ they are rotated out or the container is recreated. Sibling vhosts dropped into
 lines pass through the same default logger. See
 [`docs/deployment.md` → Closed-beta invite links](../../docs/deployment.md#closed-beta-invite-links-issue-1581).
 
+**Resource tokens.** Both `log` blocks also drop the `X-Resource-Api-Key`
+request header — the resource token an ingester authenticates
+`POST /api/v1/resources/<slug>/events` with. Caddy redacts only `Cookie` and
+`Authorization`-style headers by itself, so without the delete every ingest
+request (and the `http.log.error` line of one that hit a restarting API) would
+record the token in plaintext; resource tokens do not expire. The delete is
+spelled in Go's canonical form because the filter lookup is case-sensitive. If
+your Caddy ran a template without this delete, re-issue the token of every
+resource that ingested through it while those log lines were kept
+(`POST /api/v1/resource-tokens`, switch the ingester, then
+`DELETE /api/v1/resource-tokens/{id}`), recreate the `caddy` container to
+discard the old log file (`up -d --no-deps --force-recreate caddy`, as in the
+rotation step above) and delete any exported copies. Commands:
+[`docs/deployment.md` → Credential headers in the proxy log](../../docs/deployment.md#credential-headers-in-the-proxy-log).
+
 ### Manual snapshot
 
 ```bash
