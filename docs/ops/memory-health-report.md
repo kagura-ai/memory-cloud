@@ -18,6 +18,12 @@ warning always names the context it came from.
 - `GET /api/v1/admin/memory-health?context_id=<uuid>` — the 3-section
   detailed document for that single context. Ownership is validated
   (`created_by` = caller, not deleted); anything else is a uniform 404.
+  A private context created by a **linked account** is covered too, but
+  only where the caller can open it as itself — the rule of the context
+  read path: a member of the context's (live) workspace as owner/admin, as
+  a viewer with no whitelist, or with a whitelist that names the context.
+  A member with no whitelist is suspended and stays excluded. The link
+  widens ownership, not membership (#1874).
 - `GET /api/v1/admin/memory-health?context_id=unattributed` — the detail
   document for signals that do not belong to an owned, live context:
   recorded **without** a `context_id` (account-wide sleep runs, legacy
@@ -85,18 +91,24 @@ Metrics: `edges_by_origin` (hebbian / semantic / declared), `total_edges`,
 ### retrieval
 
 Window: 7 days of `mcp:recall` / `mcp:recall_upcoming` / `mcp:recall_nearby` /
-`mcp:remember` / `mcp:update_memory` / `mcp:explore` usage,
-attributed per context.
+`mcp:remember` / `mcp:remember_batch` / `mcp:update_memory` / `mcp:explore`
+usage, attributed per context. The watched endpoints are derived from the
+read and write tool sets below (plus `explore`), so the two cannot drift.
 
 | Condition | Grade | Note code | Rationale |
 |---|---|---|---|
-| Zero successful read calls (`recall` / `recall_upcoming` / `recall_nearby`), > 0 successful write calls (`remember` / `update_memory`), > 0 active memories | warn | `write_only_store` | The store is write-only — agents write but nothing reads it back. Skipped for the unattributed entry. |
+| Zero successful read calls (`recall` / `recall_upcoming` / `recall_nearby`), > 0 successful write calls (`remember` / `remember_batch` / `update_memory`), > 0 active memories | warn | `write_only_store` | The store is write-only — agents write but nothing reads it back. Skipped for the unattributed entry. |
 | Zero successful read calls and zero successful write calls with > 0 active memories | ok | `idle_store` | No MCP read or write activity in the window — the context is idle, not write-only, so it stays OK with an informational note. A failed call (quota, permission, validation, crash) read or wrote nothing and does not count. Writes via the web UI, REST API or connectors are not MCP calls and are not counted. Skipped for the unattributed entry. |
 
 Metrics: `recall_calls`, `recall_upcoming_calls`, `recall_nearby_calls`,
-`remember_calls` (per-endpoint counts include failed calls), `successful_read_calls`, `successful_write_calls`,
+`remember_calls`, `remember_batch_calls` (per-endpoint counts include failed
+calls), `successful_read_calls`, `successful_write_calls`,
 `explore_calls`, `window_days`, plus config posture (`has_config`,
 `reinforce_enabled`, `use_rerank` — booleans per context).
+
+`remember_batch` logs one usage row per call whatever the number of items, so
+`remember_batch_calls` counts calls, not memories, and is kept apart from
+`remember_calls`. A successful batch call is one successful write.
 
 Attribution (#1228): a cross-context `recall(context_ids=[...])` bills one
 quota unit — the `usage_stats` row under the **first** listed context —
