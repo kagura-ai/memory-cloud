@@ -4,6 +4,20 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.94.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.94.0) — 2026-10-05
+
+Two admin tables now agree on how a row is labelled, and a resource token can always be found and revoked by a workspace owner — including after the resource's contexts were deleted.
+
+### Added
+- **Cost aggregation rows name the workspace and the user** ([#1861](https://github.com/kagura-ai/memory-cloud/issues/1861)): `GET /api/v1/admin/cost-aggregation` and `GET /api/v1/workspaces/{id}/cost-aggregation` add `workspace_name` and `user_email` to every row, batch-resolved per response the way the sleep-reports routes resolve their labels (two queries, no N+1; a deleted workspace or a connector identity leaves the field null). `/admin/cost` renders the workspace name and the user's email (fallback `uid:<8>`, the short id in the tooltip) and links the user to the admin user page; `/workspace/cost` shows the same labels as plain text and resolves emails for current workspace members only.
+
+### Fixed
+- **Resource tokens stay reachable after their context is deleted** ([#1863](https://github.com/kagura-ai/memory-cloud/issues/1863)): token list, update and revoke used to require a live context, so soft-deleting a resource's last context left its tokens active for ingest yet invisible and unrevocable (403). The routes now judge the workspace boundary by the token's own workspace and its `resources` row (`resource_pk`), and token management is workspace-scoped: an owner lists and revokes every token in the workspace, whoever minted it. `GET /api/v1/resources` keeps listing a resource whose contexts were all deleted while it holds active tokens (context fields null); the resources page marks such a row "Context deleted" and its detail page skips the indexer and points at the Tokens tab, where the tokens can be revoked. Once the last token is revoked the row disappears. Minting a token still requires a live context, and the 403 now says so.
+
+### Notes
+- **API notes**: cost-aggregation rows gain two nullable string fields. `ResourceListItem.context_id` / `context_name` are nullable (null only for a context-less resource with active tokens). `GET /api/v1/resource-tokens` returns the workspace's tokens rather than the caller's own, and its `resource_id` filter is pinned to the resource in the caller's workspace. `PATCH` / `DELETE /api/v1/resource-tokens/{id}` on a token of another workspace return 404 (previously 403).
+- No migration, no new environment variables, no operator action.
+
 ## [v0.93.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.93.0) — 2026-10-05
 
 The MCP surface gets cheaper to carry and quicker to start: the bare `/mcp` URL lists the core tools by default, every core description is a few lines with a `guide` tool for the manual, a session starts with one `bootstrap` call, writes acknowledge compactly, and `list` / `changes_since` / `remember_batch` take the round trips out of inventories, catch-up and end-of-session saves.
