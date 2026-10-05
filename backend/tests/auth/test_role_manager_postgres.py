@@ -329,9 +329,12 @@ class TestAdoptsAPrimaryProvider:
 
     @pytest.mark.asyncio
     async def test_race_retry_adopts_too(self, role_manager):
+        """The racing request wrote this identity's link row for the account."""
         race_existing = _user_row(email="alice@old.com", name="Alice", auth_provider=None)
         race_existing.auth_method = "oauth"
-        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing))
+        db = _make_db_mock(
+            _execute_returns(None, {"scalar": 0}, race_existing, _oauth_link_row(user_id="u1"))
+        )
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
         with (
@@ -348,6 +351,30 @@ class TestAdoptsAPrimaryProvider:
 
         assert race_existing.auth_provider == "google"
         assert race_existing.email == "alice@new.com"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("link", [None, "someone-else"])
+    async def test_race_retry_leaves_a_row_that_only_shares_the_id(self, role_manager, link):
+        """Found by ``user_id`` alone: without a link row of its own for this
+        identity, the row must not start syncing from this provider."""
+        race_existing = _user_row(email="alice@old.com", name="Alice", auth_provider=None)
+        race_existing.auth_method = "oauth"
+        link_row = None if link is None else _oauth_link_row(user_id=link)
+        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing, link_row))
+        db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
+
+        with _patch_get_db(db):
+            await role_manager.ensure_user(
+                email="alice@new.com",
+                user_id="u1",
+                name="Alice New",
+                auth_provider="google",
+                email_verified=True,
+            )
+
+        assert race_existing.auth_provider is None
+        assert race_existing.email == "alice@old.com"
+        assert race_existing.name == "Alice"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

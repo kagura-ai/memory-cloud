@@ -105,9 +105,9 @@ def _adopt_primary_provider(user: _UserModel, auth_provider: str | None) -> None
     ``users.auth_provider`` decides whether a sign-in may sync email and name
     (#1811). It is NULL on a legacy row, and after ``AccountLinkingService``
     removed the account's last provider; nothing else repopulated it, so such
-    an account never synced again whichever provider it signed in with. The
-    caller resolved ``user`` from this identity, so the provider is one of its
-    own. Staged only: ``_sync_existing_user`` commits it.
+    an account never synced again whichever provider it signed in with. Call
+    it only for a ``user`` resolved from this identity's own link row, so the
+    provider is one of its own. Staged only: ``_sync_existing_user`` commits it.
 
     A password account (``auth_method == "password"``) that links a provider
     keeps its NULL pointer — its email and name are its own, not a provider's.
@@ -418,7 +418,24 @@ class RoleManager:
                 retry = await db.execute(select(User).filter_by(user_id=user_id))
                 existing = retry.scalar_one_or_none()
                 if existing is not None:
-                    _adopt_primary_provider(existing, auth_provider)
+                    # ``existing`` was found by ``user_id`` alone. Adopt only
+                    # when this identity is one of its own (race (a): the
+                    # other request wrote the link row) — a row that merely
+                    # shares the id must not start syncing from this provider.
+                    if (
+                        known_provider
+                        and existing.auth_provider is None
+                        and existing.auth_method == "oauth"
+                    ):
+                        own_link = (
+                            await db.execute(
+                                select(UserOAuthProvider).filter_by(
+                                    provider=auth_provider, oauth_sub=user_id
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if own_link is not None and own_link.user_id == existing.user_id:
+                            _adopt_primary_provider(existing, auth_provider)
                     return await self._sync_existing_user(
                         db=db,
                         user=existing,
