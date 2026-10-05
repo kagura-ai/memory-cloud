@@ -1046,6 +1046,16 @@ rebuilds their vectors — about 2,400 memories an hour. Until a memory is
 re-embedded, recall does not find it. The context's search settings were never
 deleted and still apply.
 
+Documents a resource or a connector ingested come back too, and the sweep
+rebuilds each one's vector as the indexer wrote it, not from the memory's
+summary (which is only the label `[resource] doc vN`): the stored document is
+projected again through the resource's latest schema, its text is embedded, and
+the point is written under the document's own point id with its facets and
+sortable fields. Recall, `forget` and the next version of the document treat it
+as they did before the deletion, and nothing has to be ingested again. A schema
+published while the context was deleted applies to the rebuilt vectors, as it
+would to a re-index.
+
 **What does not come back.**
 
 - Memories the purge already removed. After the retention window the context
@@ -1056,6 +1066,12 @@ deleted and still apply.
 - The context's neural edges (deleted outright; Sleep rebuilds them where it runs),
   its entries in members' context restrictions (`allowed_context_ids` — grant
   them again), and the resource tokens revoked with it.
+- The vector of an ingested document the sweep cannot rebuild from its row: the
+  resource has no schema left, or the memory's content was edited and is no
+  longer the ingested document. The memory is live but ends `failed`, with an
+  `embedding_error` that names the document, instead of being given a vector of
+  its label; ingest the document again as a newer version (the same version is
+  refused as a duplicate) to make it searchable.
 
 **Refusals.** A context that is not deleted; a context of a deleted workspace
 (deleting a workspace is final); a context whose name a live context of the
