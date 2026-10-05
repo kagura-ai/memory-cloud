@@ -262,7 +262,7 @@ _DEF = re.compile(r"^\s*(?:async\s+)?def\s+(\w+)\s*\(")
 CREATE_PATH_GATES = {
     # MemoryService.remember — the single memory-write gate; recall / update /
     # forget in the same file never call it.
-    "services/memory_service.py": {"remember"},
+    "services/memory_service.py": {"_prepare_remember"},  # remember prepares its row here (#1853)
     # POST /contexts
     "api/routes/contexts.py": {"create_context"},
     # MCP create_context tool

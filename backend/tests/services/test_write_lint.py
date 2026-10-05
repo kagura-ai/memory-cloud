@@ -426,27 +426,32 @@ class TestWiring:
     def test_lint_runs_after_the_commit(self):
         """Ordering is the safety property: the write must already be durable."""
         tree = self._service_ast()
-        remember = next(
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.AsyncFunctionDef) and node.name == "remember"
-        )
-        commits = [
-            node.lineno
-            for node in ast.walk(remember)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "commit"
-        ]
-        lints = [
-            node.lineno
-            for node in ast.walk(remember)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "_lint_write"
-        ]
-        assert commits and lints
-        assert min(lints) > min(commits), "lint must run after the memory is committed"
+
+        def method(name):
+            return next(
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.AsyncFunctionDef) and node.name == name
+            )
+
+        def calls(fn, attr):
+            return [
+                node.lineno
+                for node in ast.walk(fn)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == attr
+            ]
+
+        # #1853: remember = prepare → create → commit → finish; lint lives in
+        # the finish step, which remember calls only after its commit.
+        remember = method("remember")
+        commits = calls(remember, "commit")
+        finishes = calls(remember, "_finish_remember")
+        assert commits and finishes
+        assert min(finishes) > min(commits), "finish (and its lint) must follow the commit"
+        assert calls(method("_finish_remember"), "_lint_write"), "lint runs in the finish step"
+        assert not calls(method("_prepare_remember"), "_lint_write"), "never before the commit"
 
     @pytest.mark.asyncio
     async def test_mcp_helper_omits_the_key_on_a_clean_write(self):
