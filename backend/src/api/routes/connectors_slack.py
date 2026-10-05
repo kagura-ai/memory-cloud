@@ -377,6 +377,7 @@ async def slack_pending(handle: str, admin: WorkspaceAdmin) -> dict[str, Any]:
         "installing_admin_user_id": install.get("installing_admin_user_id"),
         "app_key": install.get("app_key") or "default",
         # Non-empty → the grant lacks scopes the Slack worker's slash command
-        # / @mention features need; the UI suggests reconnecting (#1758).
+        # / @mention features (#1758) or the private-channel picker (#1778)
+        # need; the UI names the affected features and suggests reconnecting.
         "missing_scopes": _missing_feature_scopes(install.get("granted_scopes")),
     }

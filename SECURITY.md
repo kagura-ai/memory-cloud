@@ -89,18 +89,22 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
     covered.
 
   Each email lists the UTC time, IP address, user agent and the key or client
-  name. It never carries a secret, token, key value or action link; the
-  "Wasn't you?" paragraph points to the pages that list sign-in methods, API
-  keys and OAuth apps and to "Forgot password?". Untrusted names and user
-  agents are normalized and defanged so no link survives. The first three
-  occurrences of one event within 10 minutes are each sent at once; later
-  ones are sent as one follow-up digest. A notice whose send fails is retried
+  name. A notice about a change a workspace administrator made to a member's
+  credentials names the administrator instead and leaves out the IP address
+  and user agent, which are the administrator's. It never carries a secret,
+  token, key value or action link; the "Wasn't you?" paragraph points to the
+  pages that list sign-in methods, API keys and OAuth apps and to "Forgot
+  password?". Untrusted names and user agents are normalized and defanged so
+  no link survives. The first three occurrences of one event within the
+  coalescing window (10 minutes by default) are each sent at once; later ones
+  are sent as one follow-up digest. A notice whose send fails is retried
   twice. Emails go only to a verified address — one proven through an emailed
   password link, or one an OAuth provider attested as verified at sign-in (a
-  linked provider alone is not enough) — never to `@local` accounts. Operator
-  CLI actions (`reset_password`, `create_admin`, ...) run outside the API and
-  send no notice. Share keys (read-only, bound to one
-  context) and connector resource tokens do not send notices either.
+  linked provider alone is not enough) — never to `@local` accounts.
+
+  Operator CLI actions (`reset_password`, `create_admin`, ...) run outside the
+  API and send no notice. Share keys (read-only, bound to one context) and
+  connector resource tokens do not send notices either.
 
 ### Authorization (RBAC)
 

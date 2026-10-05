@@ -460,3 +460,46 @@ class TestGetSleepReportDetail:
         data = response.json()
         assert data["action_count"] == 0
         assert data["actions"] == []
+
+
+class TestAdminSleepReportsStayUnscoped:
+    """#1882: only the workspace routes narrow emails to current members.
+    The system-admin routes keep resolving every ``users`` row."""
+
+    def _label_sql(self, mock_db) -> str:
+        return str(mock_db.execute.await_args_list[-1].args[0])
+
+    def test_list_label_query_has_no_membership_filter(self, client):
+        mock_db = AsyncMock()
+        count_result = MagicMock()
+        count_result.scalar.return_value = 1
+        list_result = MagicMock()
+        list_result.scalars.return_value.all.return_value = [_make_mock_report(context_id=None)]
+        mock_db.execute.side_effect = [count_result, list_result, _user_result()]
+        _install_overrides(mock_db)
+
+        response = client.get("/api/v1/admin/sleep-reports")
+
+        assert response.status_code == 200
+        assert response.json()["reports"][0]["user_email"] == "admin@test.com"
+        sql = self._label_sql(mock_db)
+        assert "users" in sql
+        assert "workspace_members" not in sql
+
+    def test_detail_label_query_has_no_membership_filter(self, client):
+        report = _make_mock_report(context_id=None)
+        mock_db = AsyncMock()
+        report_result = MagicMock()
+        report_result.scalar_one_or_none.return_value = report
+        actions_result = MagicMock()
+        actions_result.scalars.return_value.all.return_value = []
+        mock_db.execute.side_effect = [report_result, actions_result, _user_result()]
+        _install_overrides(mock_db)
+
+        response = client.get(f"/api/v1/admin/sleep-reports/{report.id}")
+
+        assert response.status_code == 200
+        assert response.json()["report"]["user_email"] == "admin@test.com"
+        sql = self._label_sql(mock_db)
+        assert "users" in sql
+        assert "workspace_members" not in sql

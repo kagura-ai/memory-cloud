@@ -139,6 +139,27 @@ describe("WorkspacePlanBadges", () => {
     expect(badge).not.toHaveAttribute("tabindex");
   });
 
+  it("puts the role of a visible badge in its text, between the name and the plan (#1884)", () => {
+    render(
+      <WorkspacePlanBadges
+        workspaces={[
+          ws("w1", "Personal", "pro", "owner"),
+          ws("w2", "Lab", "free", "viewer"),
+        ]}
+      />,
+    );
+    const [personal, lab] = screen.getAllByTestId(
+      WORKSPACE_BADGE_TEST_IDS.badge,
+    );
+    // Visually hidden, not hidden from assistive tech.
+    const role = within(personal).getByText("Owner");
+    expect(role).toHaveClass("sr-only");
+    expect(role).not.toHaveAttribute("aria-hidden");
+    expect(personal).toHaveTextContent(/^Personal Owner L$/);
+    // A role with no translation falls back to the raw string here too.
+    expect(lab).toHaveTextContent(/^Lab viewer S$/);
+  });
+
   it("shows a role with no translation as the raw string", () => {
     render(
       <WorkspacePlanBadges workspaces={[ws("w1", "Lab", "free", "viewer")]} />,

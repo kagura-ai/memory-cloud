@@ -392,8 +392,9 @@ class SecurityOccurrence:
 
     Attributes:
         occurred_at: UTC time, ``YYYY-MM-DDTHH:MM:SS UTC``.
-        ip: Client IP address of the request that made the change.
-        user_agent: Client user agent (sanitized, capped).
+        ip: Client IP address of the request that made the change. None
+            when someone else made it (``actor``): the connection is theirs.
+        user_agent: Client user agent (sanitized, capped). None with ``actor``.
         client_name: Name the OAuth client registered itself with.
         key_name: Name of the API key.
         sign_in_method: The removed sign-in method (``Password``, ``Google``...).
@@ -516,8 +517,13 @@ def render_security_notification(
     for occurrence in listed:
         lines.append(f"  - {description}")
         lines.append(f"    When:        {occurrence.occurred_at}")
-        lines.append(f"    IP address:  {occurrence.ip or 'unknown'}")
-        lines.append(f"    Device:      {occurrence.user_agent or 'unknown'}")
+        if not occurrence.actor:
+            # #1879: with an actor the connection is the administrator's, not
+            # a device on the recipient's account — never shown, not even as
+            # "unknown" (an occurrence buffered by an older release may still
+            # carry it).
+            lines.append(f"    IP address:  {occurrence.ip or 'unknown'}")
+            lines.append(f"    Device:      {occurrence.user_agent or 'unknown'}")
         if occurrence.client_name:
             lines.append(f'    App:         "{occurrence.client_name}"')
             lines.append("                 (the name the app registered itself with)")
@@ -757,7 +763,8 @@ def schedule_security_notification(
         client_name: OAuth client name, when the caller already has it.
         sign_in_method: The added or removed sign-in method.
         actor_user_id: The acting user when it is not the owner (an admin
-            acting on the owner's credentials).
+            acting on the owner's credentials). The notice then names them
+            and leaves out the IP address and user agent, which are theirs.
     """
     try:
         background_tasks.add_task(
@@ -982,8 +989,17 @@ def _notice_kwargs(
     sign_in_method: str | None,
     actor_user_id: str | None,
 ) -> dict[str, Any]:
-    """Keyword arguments of :func:`notify_security_event` for one occurrence."""
-    if request is not None:
+    """Keyword arguments of :func:`notify_security_event` for one occurrence.
+
+    The IP address and user agent describe the caller's connection. When the
+    caller is not the recipient (``actor_user_id`` names someone else: an
+    administrator acting on a member's credentials) they are dropped, taken
+    from the request or passed explicitly alike (#1879): the member must not
+    be shown another person's IP address and browser.
+    """
+    if actor_user_id is not None and actor_user_id != user_id:
+        ip = user_agent = None
+    elif request is not None:
         client = getattr(request, "client", None)
         headers = getattr(request, "headers", None) or {}
         ip = ip or (getattr(client, "host", None) if client else None)
@@ -1712,7 +1728,15 @@ async def flush_due_security_notifications(
         try:
             user_id, event_value, window_id = _parse_member(member)
         except ValueError:
-            await client.zrem(_DUE_KEY, member)
+            # Best effort: an entry that stays is read (and dropped) again by
+            # the next run, and by the stale sweep after the retention.
+            try:
+                await client.zrem(_DUE_KEY, member)
+            except Exception as exc:
+                logger.warning(
+                    "security_notification_due_entry_discard_failed",
+                    error_type=type(exc).__name__,
+                )
             continue
         try:
             if not await _claim_window(client, user_id, event_value, window_id, now=now):

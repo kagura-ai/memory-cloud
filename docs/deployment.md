@@ -424,9 +424,9 @@ rows are deleted by an hourly job once they are
 **New-device sign-in alerts.** A browser sign-in from a device the account has
 not used before emails the owner (same pipeline and mandatory like the other
 security notices). The device is a long-lived `kagura_device` cookie whose
-keyed HMAC is stored in `user_known_devices`; no IP address is stored there (the
-IP and user agent go into the email and, while a notice is coalesced or retried,
-into the notice queue in Redis). A daily
+keyed HMAC is stored in `user_known_devices`; no IP address or user agent is
+stored there (the IP and user agent go into the email and, while a notice is
+coalesced or retried, into the notice queue in Redis). A daily
 job forgets devices not seen for `KNOWN_DEVICE_RETENTION_DAYS` (default `180`),
 and at most `KNOWN_DEVICE_MAX_PER_USER` (default `20`) devices are kept per
 account. After the upgrade every account's next sign-in registers its browser
@@ -446,9 +446,10 @@ first authorization, a broader scope, or a client changed since the last grant
 (connector write keys included), an OAuth client is registered or its secret
 regenerated, or a provider sign-in changes the account's email address (the
 previous address is told), the account owner is
-emailed a notice (UTC time, IP address, user agent, key or client name, and the
-acting admin for admin actions — never a secret, token or link other than the
-plain `FRONTEND_URL/profile` page). The notices cannot be turned off. They go
+emailed a notice (UTC time, IP address, user agent, key or client name; for an
+admin action the acting admin, without the admin's IP address and user agent —
+never a secret, token or link other than the plain `FRONTEND_URL/profile`
+page). The notices cannot be turned off. They go
 only to a verified address (`users.email_verified_at`: set by an emailed
 password link, or by an OAuth sign-in whose provider attests the address as
 verified; migration `e88_1752_verified_backfill` marks the OAuth accounts
@@ -1101,10 +1102,22 @@ would to a re-index.
   resource has no schema left, or the memory's content was edited into
   something that is not a JSON document. The memory is live but ends `failed`,
   with an `embedding_error` that names the document, instead of being given a
-  vector of its label; ingest the document again as a newer version (the same
-  version is refused as a duplicate) to make it searchable. The rebuild reads
-  the row, not the ingest history: a memory whose content was edited into
-  another JSON document is rebuilt from what it holds now.
+  vector of its label. It is final after the first attempt (retrying cannot
+  help until one of the two steps below is taken) and is logged once as
+  `embedding_resource_unrebuildable`, a warning, not as
+  `embedding_budget_exhausted`. The dry run and the restore both warn with the
+  number of memories whose resource has no schema. Two ways to make such a
+  memory searchable again:
+  - publish the resource's schema again, then reset the failed memories with
+    `POST /api/v1/admin/embedding/retry-failed?context_id=<context-id>` (system
+    admin); the sweep rebuilds their vectors from the rows, and nothing has to
+    be ingested again. This does not help a memory whose content is no longer
+    a JSON document;
+  - ingest the document again as a newer version (the same version is refused
+    as a duplicate).
+
+  The rebuild reads the row, not the ingest history: a memory whose content
+  was edited into another JSON document is rebuilt from what it holds now.
 
 **Refusals.** A context that is not deleted; a context of a deleted workspace
 (deleting a workspace is final); a context whose name a live context of the
@@ -1638,11 +1651,18 @@ REDIS_PASSWORD=<output of: openssl rand -hex 32>
 - **Use a hex password.** It needs no quoting in `.env.prod` and no encoding in
   a URL. Any other value has to be single-quoted in `.env.prod` — unquoted, the
   env-file parser expands `$` and cuts the value at ` #`; double-quoted, it
-  still expands `$` — and needs an explicit `REDIS_URL` (below).
+  still expands `$`. With `/ # ? [ ]` or `%` in it, it also needs an explicit
+  `REDIS_URL` (below).
 - **`REDIS_URL` in `.env.prod` overrides the built URL**, whole: scheme,
-  password, host and port. Set it when the password has characters a URL
-  reserves (`@ : / # %` and the like — percent-encode them) or when Redis is
-  somewhere else. To encode without the password landing in your shell history:
+  password, host and port. Set it when Redis is somewhere else, or when the
+  password has a character that breaks the built URL — the compose file pastes
+  the password in as it is and cannot encode it. `/`, `#`, `?`, `[` and `]`
+  make the URL unparseable: the API refuses to start and, being
+  `restart: always`, keeps restarting. A `%` followed by two hex digits is
+  decoded into another character, so the API sends the wrong password. Other
+  characters (`@ : + =` among them) work unencoded. Step 1 of
+  [Turning it on](#turning-it-on) catches both cases before Redis is restarted.
+  To percent-encode the password without it landing in your shell history:
   `read -rs P && printf '%s' "$P" | python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.stdin.read(), safe=""))'`,
   then `REDIS_URL='redis://:<encoded>@redis:6379'`.
 - **Split host:** the data VM's `.env.prod` needs `REDIS_PASSWORD` (Redis
@@ -1684,10 +1704,25 @@ two commands of step 2 back to back.
 ```bash
 cd /opt/kagura-memory/src/terraform/single-server
 # 1. Add REDIS_PASSWORD to .env.prod (above), then check the render without
-#    printing the secret. It should print "True True":
+#    printing the secret. It prints two words and should print "True True":
+#    Redis gets a password, and the API's REDIS_URL parses to a host, a port
+#    and that same password. Do not go on to step 2 unless it does.
 docker compose -f docker-compose.prod.yml --env-file .env.prod config --format json | python3 -c '
-import json, sys; s = json.load(sys.stdin)["services"]
-print(s["redis"]["command"][-1] != "", s["api-blue"]["environment"]["REDIS_URL"].startswith("redis://:"))'
+import json, sys, urllib.parse
+s = json.load(sys.stdin)["services"]
+# The render writes a literal $ as $$.
+password = s["redis"]["command"][-1].replace("$$", "$")
+try:
+    u = urllib.parse.urlsplit(s["api-blue"]["environment"]["REDIS_URL"].replace("$$", "$"))
+    url_ok = (
+        u.scheme in ("redis", "rediss")
+        and bool(u.hostname)
+        and u.port is not None
+        and urllib.parse.unquote(u.password or "") == password
+    )
+except ValueError:
+    url_ok = False
+print(password != "", url_ok)'
 
 # 2. Restart Redis with the password, then recreate the running API colors so
 #    they reconnect (xargs -r: with no color running, recreate nothing rather
@@ -1702,6 +1737,15 @@ docker inspect -f '{{.State.Health.Status}}' kagura-redis      # healthy
 docker exec kagura-redis redis-cli ping                        # NOAUTH Authentication required.
 ./scripts/deploy.sh --status
 ```
+
+If step 1 prints `False` first, `REDIS_PASSWORD` did not reach Redis (not in
+`.env.prod`, or emptied by a variable exported in your shell). If it prints
+`False` second, the API would not reach Redis with that password: either the
+password has a character that breaks the built URL (`/ # ? [ ]`, or `%`), or
+an explicit `REDIS_URL` carries a different password. Switch to a hex password
+or set an explicit, percent-encoded `REDIS_URL` (above), then run step 1
+again. An API started with a URL that does not parse exits at start-up, and
+its log says `REDIS_URL is not a valid URL` without quoting the value.
 
 On a split host, step 2 runs in two places: Redis on the data VM
 (`DATA_BIND_ADDR=… docker compose -f docker-compose.data.yml -f docker-compose.data-expose.yml --env-file .env.prod up -d --no-deps redis`),

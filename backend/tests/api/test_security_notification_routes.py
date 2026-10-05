@@ -233,6 +233,8 @@ class TestMemberCredentialRoutes:
         assert args == ("member-1", "api_key_regenerated")  # the OWNER is told
         assert kwargs["actor_user_id"] == "admin-1"
         assert kwargs["key_name"] == "ws-key"
+        # #1879: the request is the admin's; its IP / user agent stay out.
+        assert kwargs["ip"] is None and kwargs["user_agent"] is None
 
     @pytest.mark.asyncio
     async def test_self_regenerate_has_no_actor(self, monkeypatch) -> None:
@@ -253,6 +255,7 @@ class TestMemberCredentialRoutes:
 
         ((_, kwargs),) = _notices(tasks)
         assert kwargs["actor_user_id"] is None
+        assert kwargs["ip"] == "203.0.113.9"
 
     @pytest.mark.asyncio
     async def test_session_self_mint_schedules(self, monkeypatch) -> None:
@@ -306,6 +309,7 @@ class TestMemberCredentialRoutes:
         ((args, kwargs),) = _notices(tasks)
         assert args == ("member-1", "api_key_created")
         assert kwargs["actor_user_id"] == "owner-9"
+        assert kwargs["ip"] is None and kwargs["user_agent"] is None
 
     @pytest.mark.asyncio
     async def test_admin_oauth_secret_regenerate(self, monkeypatch, encryptor) -> None:
@@ -328,6 +332,7 @@ class TestMemberCredentialRoutes:
         assert args == ("member-1", "oauth_secret_regenerated")
         assert kwargs["client_name"] == "Team Bot"
         assert kwargs["actor_user_id"] == "admin-1"
+        assert kwargs["ip"] is None and kwargs["user_agent"] is None
         assert result.client_secret not in repr(kwargs)
 
 
@@ -827,6 +832,8 @@ class TestConnectorKeys:
         assert args == (owner, "api_key_regenerated")
         assert kwargs["key_name"] == "connector:c1"
         assert kwargs["actor_user_id"] == actor
+        # #1879: only the owner's own rotation carries the caller's IP.
+        assert kwargs["ip"] == (None if actor else "203.0.113.9")
         assert PLAINTEXT_KEY not in repr(kwargs)
 
     @pytest.mark.asyncio

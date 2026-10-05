@@ -317,6 +317,7 @@ export function ContextBreakdownTable({
                     const contextDetail = contextDetailMap.get(
                       context.context_id,
                     );
+                    const marker = creatorMarker(context);
                     return (
                       <TableRow key={context.context_id}>
                         <TableCell className="font-medium">
@@ -342,9 +343,9 @@ export function ContextBreakdownTable({
                             </Link>
                             {/* #1777: who this context came from, when it
                                 is not the viewer's own */}
-                            {creatorMarker(context) && (
+                            {marker && (
                               <span className="text-xs text-gray-500 dark:text-gray-400">
-                                {creatorMarker(context)}
+                                {marker}
                               </span>
                             )}
                           </div>

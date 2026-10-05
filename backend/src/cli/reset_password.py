@@ -53,7 +53,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -79,6 +78,7 @@ from services.oauth_grant_revocation import (  # noqa: E402
     RevokedGrants,
     revoke_oauth_grants_sync,
 )
+from utils.url_redact import redis_location  # noqa: E402
 
 _project_root = Path(__file__).parent.parent.parent.parent
 
@@ -97,23 +97,6 @@ def _get_env_from_docker(key: str) -> str | None:
         return value if result.returncode == 0 and value else None
     except Exception:
         return None  # Docker not running or not accessible
-
-
-def _redis_location(redis_url: str) -> str:
-    """``host:port`` of the store, for operator messages.
-
-    Built from the parsed host and port only: a URL can carry a password in
-    its userinfo (``redis://:pw@host``) or its query (``?password=pw``), and
-    neither may reach the terminal.
-    """
-    try:
-        parts = urlsplit(redis_url)
-        host, port = parts.hostname, parts.port
-    except ValueError:
-        return "the configured REDIS_URL"
-    if not host:
-        return "the configured REDIS_URL"
-    return f"{host}:{port}" if port else host
 
 
 def _refusal(*lines: str) -> SystemExit:
@@ -151,7 +134,7 @@ def _session_store_or_exit() -> SessionManager:
         # store — whatever the redis client raised — as the builtin
         # ``ConnectionError`` (an ``OSError``).
         raise _refusal(
-            f"Cannot reach the session store at {_redis_location(redis_url)}"
+            f"Cannot reach the session store at {redis_location(redis_url)}"
             f" ({type(exc).__name__}).",
             "Start Redis, or set REDIS_URL to the Redis the API runs on, and run",
             "this command again.",

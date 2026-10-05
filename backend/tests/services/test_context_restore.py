@@ -9,13 +9,14 @@ rebuild too, against a mocked vector store client.
 from __future__ import annotations
 
 from datetime import timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select
 
+from config.constants import MAX_EMBEDDING_RETRIES
 from models.auth import AuditLog, Context, Workspace, WorkspaceMember, WorkspaceRole
 from models.memory import DELETED_BY_SLEEP_MERGE, Memory
 from models.resource import Resource, ResourceEvent, ResourceSchema
@@ -28,7 +29,7 @@ from services.context_service import ContextService
 from services.memory_service import MemoryService, process_pending_embedding
 from services.resource_indexer import ResourceIndexer, ResourceRebuildError
 from utils.datetime import utcnow
-from utils.exceptions import ConflictError, NotFoundException, ValidationError
+from utils.exceptions import ConflictError, NotFoundException, OpenAIError, ValidationError
 
 _USER = "restore_user"
 
@@ -430,11 +431,14 @@ async def _index_resource(db_session, seed) -> tuple[Context, dict[str, object]]
     return context, indexed
 
 
-async def _run_pending_embedding(db_session, memory_id: UUID) -> tuple[AsyncMock, AsyncMock]:
+async def _run_pending_embedding(
+    db_session, memory_id: UUID, *, embed: AsyncMock | None = None
+) -> tuple[AsyncMock, AsyncMock]:
     """Run the embedding sweep's worker on one row.
 
     Returns the resource indexer's vector store client and the generic
-    ``add_memory_to_qdrant`` writer, both mocked.
+    ``add_memory_to_qdrant`` writer, both mocked. ``embed`` replaces the
+    embedding call (default: ``_embed``).
     """
 
     async def _session():
@@ -446,7 +450,10 @@ async def _run_pending_embedding(db_session, memory_id: UUID) -> tuple[AsyncMock
         patch("db.base.get_db", return_value=_session()),
         patch("services.resource_indexer.get_qdrant_client", return_value=client),
         patch("services.memory_service.add_memory_to_qdrant", generic_writer),
-        patch("services.embedding_service.EmbeddingService.embed", AsyncMock(side_effect=_embed)),
+        patch(
+            "services.embedding_service.EmbeddingService.embed",
+            embed or AsyncMock(side_effect=_embed),
+        ),
         patch("services.memory_service._create_knn_seed_edges", AsyncMock()),
         patch("services.memory_service._create_tag_cooccurrence_seed_edges", AsyncMock()),
     ):
@@ -629,3 +636,182 @@ async def test_counts_cover_the_rows_the_update_touches(db_session, seed):
         await db_session.execute(delete(Memory).where(Memory.id == stray_id))
         await db_session.execute(delete(Workspace).where(Workspace.id == other_workspace_id))
         await db_session.commit()
+
+
+# ---------------------------------------------------------------------------
+# #1897: a row that cannot be rebuilt is final at once, and the restore says so
+# ---------------------------------------------------------------------------
+
+
+def _events(logger: MagicMock, level: str) -> list[str]:
+    return [call.args[0] for call in getattr(logger, level).call_args_list]
+
+
+async def _restore_without_schema(db_session, seed) -> tuple[UUID, str, dict[str, UUID]]:
+    """A restored resource context whose resource lost its schema meanwhile.
+
+    Returns the context id, the resource slug and the memory ids by ``doc_id``.
+    """
+    context, _ = await _index_resource(db_session, seed)
+    context_id, slug = context.id, context.resource_id
+    await _delete(db_session, context_id)
+    await db_session.execute(delete(ResourceSchema).where(ResourceSchema.resource_id == slug))
+    await db_session.commit()
+    await restore_deleted_context(db_session, context_id, dry_run=False)
+    rows = await _memories(db_session, context_id)
+    return context_id, slug, {m.resource_doc_id: m.id for m in rows.values()}
+
+
+@pytest.mark.asyncio
+async def test_unrebuildable_resource_row_is_final_after_one_attempt(db_session, seed):
+    context_id, _, by_doc = await _restore_without_schema(db_session, seed)
+    memory_id = by_doc["doc_1"]
+
+    with patch("services.memory_service.logger") as log:
+        await _run_pending_embedding(db_session, memory_id)
+
+    row = (await _memories(db_session, context_id))[memory_id]
+    assert row.embedding_status == "failed"
+    assert "has no schema" in (row.embedding_error or "")
+    # Out of the sweep's reach (it claims `failed` rows below the ceiling).
+    assert row.embedding_retry_count == MAX_EMBEDDING_RETRIES
+    attempted_at = row.embedding_attempted_at
+    # Its own event, at warning level; not the provider-kept-failing one.
+    assert "embedding_resource_unrebuildable" in _events(log, "warning")
+    assert "embedding_failed" not in _events(log, "warning")
+    assert "embedding_budget_exhausted" not in _events(log, "error")
+    unrebuildable = next(
+        call
+        for call in log.warning.call_args_list
+        if call.args[0] == "embedding_resource_unrebuildable"
+    )
+    assert unrebuildable.kwargs["memory_id"] == str(memory_id)
+    assert unrebuildable.kwargs["error_class"] == "ResourceRebuildError"
+
+    # No second attempt: the claim does not take the row again.
+    embed = AsyncMock(side_effect=_embed)
+    with patch("services.memory_service.logger") as log:
+        await _run_pending_embedding(db_session, memory_id, embed=embed)
+    embed.assert_not_awaited()
+    assert _events(log, "warning") == [] and _events(log, "error") == []
+    row = (await _memories(db_session, context_id))[memory_id]
+    assert row.embedding_status == "failed"
+    assert row.embedding_attempted_at == attempted_at
+
+
+@pytest.mark.asyncio
+async def test_row_whose_content_is_no_document_is_final_after_one_attempt(db_session, seed):
+    context, _ = await _index_resource(db_session, seed)
+    context_id = context.id
+    rows = await _memories(db_session, context_id)
+    not_json = next(m for m in rows.values() if m.resource_doc_id == "doc_2")
+    not_json_id = not_json.id
+    not_json.content = "free text, no longer a document"
+    not_json.embedding_status = "pending"
+    await db_session.commit()
+
+    with patch("services.memory_service.logger") as log:
+        await _run_pending_embedding(db_session, not_json_id)
+
+    row = (await _memories(db_session, context_id))[not_json_id]
+    assert row.embedding_status == "failed"
+    assert row.embedding_retry_count == MAX_EMBEDDING_RETRIES
+    assert "embedding_resource_unrebuildable" in _events(log, "warning")
+    assert _events(log, "error") == []
+
+
+@pytest.mark.asyncio
+async def test_admin_retry_rebuilds_the_row_once_the_schema_is_back(db_session, seed):
+    from api.routes.admin import retry_failed_embeddings
+
+    context_id, slug, by_doc = await _restore_without_schema(db_session, seed)
+    memory_id = by_doc["doc_1"]
+    await _run_pending_embedding(db_session, memory_id)
+    assert (await _memories(db_session, context_id))[memory_id].embedding_status == "failed"
+
+    # The operator publishes the schema again and retries the failed rows.
+    resource_pk = (
+        await db_session.execute(select(Resource.id).where(Resource.resource_id == slug))
+    ).scalar_one()
+    db_session.add(
+        ResourceSchema(
+            resource_pk=resource_pk,
+            resource_id=slug,
+            schema_version=2,
+            field_definitions=_SCHEMA_FIELDS,
+        )
+    )
+    await db_session.commit()
+    response = await retry_failed_embeddings(
+        user={"user_id": _USER}, db=db_session, context_id=str(context_id), workspace_id=None
+    )
+    assert response["reset_count"] == 1
+    row = (await _memories(db_session, context_id))[memory_id]
+    assert row.embedding_status == "pending"
+    assert row.embedding_retry_count == 0
+    assert row.embedding_error is None
+
+    client, generic_writer = await _run_pending_embedding(db_session, memory_id)
+
+    generic_writer.assert_not_awaited()
+    assert client.upsert.await_count == 1
+    rebuilt = client.upsert.await_args.kwargs["points"][0]
+    row = (await _memories(db_session, context_id))[memory_id]
+    assert rebuilt.id == str(row.point_id)
+    assert rebuilt.payload["content"] == f"Title: {_DOCS['doc_1']['title']}"
+    assert row.embedding_status == "success"
+    assert row.embedding_retry_count == 0
+    assert row.embedding_error is None
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_of_a_resource_row_keeps_its_retry_budget(db_session, seed):
+    context, _ = await _index_resource(db_session, seed)
+    context_id = context.id
+    await _delete(db_session, context_id)
+    await restore_deleted_context(db_session, context_id, dry_run=False)
+    memory_id = next(iter(await _memories(db_session, context_id)))
+
+    provider_down = AsyncMock(side_effect=OpenAIError("connection reset"))
+    with patch("services.memory_service.logger") as log:
+        await _run_pending_embedding(db_session, memory_id, embed=provider_down)
+
+    row = (await _memories(db_session, context_id))[memory_id]
+    assert row.embedding_status == "failed"
+    # The first attempt of a pending row spends nothing; the sweep retries it.
+    assert row.embedding_retry_count == 0
+    assert _events(log, "warning") == ["embedding_failed"]
+    assert _events(log, "error") == []
+
+
+@pytest.mark.asyncio
+async def test_restore_warns_of_resource_rows_whose_resource_has_no_schema(db_session, seed):
+    context, _ = await _index_resource(db_session, seed)
+    context_id, slug = context.id, context.resource_id
+    # A memory the API wrote is embedded from its summary and needs no schema,
+    # also when ``remember(external_id=...)`` put a resource_id in its details.
+    db_session.add_all(
+        [
+            seed.memory(context, summary="a note the API wrote"),
+            seed.memory(context, details={"resource_id": slug, "doc_id": "doc_9", "version": 1}),
+        ]
+    )
+    await db_session.commit()
+    await _delete(db_session, context_id)
+    await db_session.execute(delete(ResourceSchema).where(ResourceSchema.resource_id == slug))
+    await db_session.commit()
+
+    plan = await restore_deleted_context(db_session, context_id)
+
+    assert plan.dry_run is True
+    assert plan.memories_restored == 4
+    assert len(plan.warnings) == 1
+    warning = plan.warnings[0]
+    assert warning.startswith("2 resource-ingested memories")
+    assert slug in warning
+    # The two ways out.
+    assert "retry" in warning
+    assert "newer version" in warning
+
+    result = await restore_deleted_context(db_session, context_id, dry_run=False)
+    assert result.warnings == plan.warnings

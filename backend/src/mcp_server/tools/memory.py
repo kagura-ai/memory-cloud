@@ -258,12 +258,17 @@ async def handle_remember(
                 )
             ]
         except DedupeUnavailableError as e:
+            # #1684: the envelope carries no exception text (#1873 removed
+            # ``detail``); the cause is logged here.
             await db.rollback()
+            logger.warning("remember_dedupe_unavailable: %s", e, exc_info=e.__cause__ or e)
+            await _log_tool_usage(
+                db, user_id, "remember", start_time, 503, args.get("context_id"), workspace_id
+            )
             return _error_response(
                 "dedupe_unavailable",
                 "The duplicate check could not run (embedding unavailable); nothing was "
                 "written. Retry with dedupe='suggest' or 'off'.",
-                detail=str(e)[:200],
             )
         except _ContextNotFoundError as e:
             await db.rollback()
