@@ -2797,8 +2797,10 @@
           "tokens_cached_in": {},
           "tokens_in": {},
           "tokens_out": {},
+          "user_email": {},
           "user_id": {},
-          "workspace_id": {}
+          "workspace_id": {},
+          "workspace_name": {}
         },
         "required": [
           "calls",

@@ -11,13 +11,20 @@
 import { describe, expect, it } from "vitest";
 
 import type { CostAggregationRow } from "@/lib/api";
-import { buildChartData, formatCost, MAX_LOOKBACK_DAYS } from "./CostDashboard";
+import {
+  buildChartData,
+  formatCost,
+  MAX_LOOKBACK_DAYS,
+  workspaceLabel,
+} from "./CostDashboard";
 
 function row(overrides: Partial<CostAggregationRow>): CostAggregationRow {
   return {
     period_start: "2026-04-01",
     workspace_id: "11111111-1111-1111-1111-111111111111",
+    workspace_name: null,
     user_id: "user-1",
+    user_email: null,
     calls: 0,
     tokens_in: 0,
     tokens_out: 0,
@@ -145,5 +152,31 @@ describe("buildChartData", () => {
     const byDate = Object.fromEntries(result.map((p) => [p.date, p.cost_usd]));
     expect(byDate["2026-04-01"]).toBeNull();
     expect(byDate["2026-04-02"]).toBe(3.5);
+  });
+});
+
+describe("workspaceLabel", () => {
+  it("prefers the resolved workspace name", () => {
+    expect(
+      workspaceLabel({
+        workspace_id: "61b5cf6f-0000-4000-8000-000000000000",
+        workspace_name: "Team Alpha",
+      }),
+    ).toBe("Team Alpha");
+  });
+
+  it("falls back to the shortened id when the name did not resolve", () => {
+    expect(
+      workspaceLabel({
+        workspace_id: "61b5cf6f-0000-4000-8000-000000000000",
+        workspace_name: null,
+      }),
+    ).toBe("61b5cf6f");
+  });
+
+  it("renders an em-dash for a row with no workspace", () => {
+    expect(workspaceLabel({ workspace_id: null, workspace_name: null })).toBe(
+      "—",
+    );
   });
 });

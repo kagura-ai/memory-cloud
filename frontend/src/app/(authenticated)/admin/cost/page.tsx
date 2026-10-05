@@ -23,6 +23,11 @@ import { useAuth } from "@/contexts/AuthContext";
 import { isAdmin } from "@/lib/auth/rbac";
 import { fetchAdminCostAggregation } from "@/lib/api";
 
+/** The admin user page for a cost row's user (#1861); ids may carry ``:``. */
+function adminUserHref(userId: string): string {
+  return `/admin/users/${encodeURIComponent(userId)}`;
+}
+
 export default function AdminCostPage() {
   const t = useTranslations("admin.cost");
   const { user, isLoading: authLoading } = useAuth();
@@ -56,6 +61,7 @@ export default function AdminCostPage() {
       description={t("description")}
       fetchData={fetchAdminCostAggregation}
       showWorkspaceColumn
+      userHref={adminUserHref}
     />
   );
 }

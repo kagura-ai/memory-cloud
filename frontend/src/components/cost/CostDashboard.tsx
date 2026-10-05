@@ -19,6 +19,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useTranslations } from "next-intl";
 import {
   CartesianGrid,
@@ -30,6 +31,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { formatUserPartitionLabel } from "@/lib/sleep-report";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PageContainer } from "@/components/common/PageContainer";
 import { Section } from "@/components/common/Section";
@@ -81,6 +83,18 @@ function defaultDateRange(): { from: string; to: string } {
  *
  * Exported for unit testing; not re-exported from the package barrel.
  */
+/**
+ * The workspace cell's text (#1861): the name when the API resolved it, else
+ * the shortened id (the sleep reports' fallback shape), else an em-dash for a
+ * row with no workspace.
+ */
+export function workspaceLabel(
+  row: Pick<CostAggregationRow, "workspace_id" | "workspace_name">,
+): string {
+  if (row.workspace_name) return row.workspace_name;
+  return row.workspace_id ? row.workspace_id.slice(0, 8) : "—";
+}
+
 export function formatCost(value: number | null): string {
   if (value === null) return "—";
   return `$${value.toFixed(4)}`;
@@ -156,6 +170,12 @@ export interface CostDashboardProps {
    */
   showWorkspaceColumn?: boolean;
   /**
+   * Where a user cell links to (#1861). The admin page points at
+   * ``/admin/users/<user_id>``; the workspace-scoped page passes nothing and
+   * the cell stays plain text — it has no admin pages to link to.
+   */
+  userHref?: (userId: string) => string;
+  /**
    * Disable initial fetch — useful when the parent is still resolving
    * a prerequisite (e.g. ``currentWorkspaceId`` not yet available).
    * The dashboard renders an empty state until ``true``.
@@ -168,6 +188,7 @@ export function CostDashboard({
   description,
   fetchData,
   showWorkspaceColumn = false,
+  userHref,
   ready = true,
 }: CostDashboardProps) {
   const t = useTranslations("admin.cost");
@@ -453,11 +474,38 @@ export function CostDashboard({
                       {row.period_start}
                     </TableCell>
                     {showWorkspaceColumn && (
-                      <TableCell className="font-mono text-xs text-gray-500 dark:text-gray-400">
-                        {row.workspace_id ? row.workspace_id.slice(0, 8) : "—"}
+                      <TableCell
+                        className={
+                          row.workspace_name
+                            ? "text-sm whitespace-nowrap"
+                            : "font-mono text-xs text-gray-500 dark:text-gray-400"
+                        }
+                        title={row.workspace_id ?? undefined}
+                      >
+                        {workspaceLabel(row)}
                       </TableCell>
                     )}
-                    <TableCell className="text-sm">{row.user_id}</TableCell>
+                    <TableCell className="text-sm whitespace-nowrap">
+                      {userHref ? (
+                        <Link
+                          href={userHref(row.user_id)}
+                          className="text-blue-600 hover:underline dark:text-blue-400"
+                          title={row.user_id}
+                        >
+                          {formatUserPartitionLabel(
+                            row.user_email,
+                            row.user_id,
+                          )}
+                        </Link>
+                      ) : (
+                        <span title={row.user_id}>
+                          {formatUserPartitionLabel(
+                            row.user_email,
+                            row.user_id,
+                          )}
+                        </span>
+                      )}
+                    </TableCell>
                     <TableCell className="text-right font-mono text-sm">
                       {row.calls.toLocaleString()}
                     </TableCell>

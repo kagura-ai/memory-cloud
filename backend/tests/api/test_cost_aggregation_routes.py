@@ -18,7 +18,7 @@ service so the route layer can be unit-tested without Docker/Postgres.
 from __future__ import annotations
 
 from datetime import date
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -44,6 +44,14 @@ def _admin_user() -> dict:
 
 def _regular_user() -> dict:
     return {"user_id": "user_1", "email": "user@test.com", "role": "user"}
+
+
+def _mock_session() -> AsyncMock:
+    """A session whose queries return no rows: the aggregate is mocked and the
+    #1861 label lookups (workspace names, user emails) resolve nothing."""
+    result = MagicMock()
+    result.all.return_value = []
+    return AsyncMock(execute=AsyncMock(return_value=result))
 
 
 def _make_canned_row() -> CostAggregationRow:
@@ -106,7 +114,7 @@ def _install_admin_overrides(client, canned_rows: list[CostAggregationRow]) -> A
         return _admin_user()
 
     async def mock_db():
-        yield AsyncMock()
+        yield _mock_session()
 
     app.dependency_overrides[require_admin] = mock_admin
     app.dependency_overrides[get_db] = mock_db
@@ -131,7 +139,7 @@ def _install_workspace_overrides(
         return user
 
     async def mock_db():
-        yield AsyncMock()
+        yield _mock_session()
 
     app.dependency_overrides[get_current_user] = mock_user
     app.dependency_overrides[get_db] = mock_db
@@ -211,7 +219,7 @@ class TestAdminRoute:
             return _regular_user()
 
         async def mock_db():
-            yield AsyncMock()
+            yield _mock_session()
 
         app.dependency_overrides[get_current_user] = mock_user
         app.dependency_overrides[get_db] = mock_db
@@ -435,3 +443,66 @@ class TestAnonymousAccess:
             "?period=day&from=2026-04-01&to=2026-04-07"
         )
         assert response.status_code == 401
+
+
+# ============================================================================
+# #1861: workspace / user labels
+# ============================================================================
+
+
+class TestRowLabels:
+    def test_rows_carry_label_fields_even_when_nothing_resolves(self, client):
+        _install_admin_overrides(client, [_make_canned_row()])
+        response = client.get(
+            "/api/v1/admin/cost-aggregation?period=day&from=2026-04-01&to=2026-04-07"
+        )
+        assert response.status_code == 200, response.text
+        row = response.json()["rows"][0]
+        assert row["workspace_name"] is None  # the mock session resolves nothing
+        assert row["user_email"] is None
+
+    def test_labels_are_resolved_once_per_response_and_attached(self, client):
+        import api.routes.cost_aggregation as route_module
+
+        rows = [_make_canned_row(), _make_canned_row()]
+        rows[1].user_id = "svc:connector"  # no users row → stays unlabelled
+        _install_admin_overrides(client, rows)
+        calls: list[int] = []
+
+        async def fake_labels(db, rows_in):
+            calls.append(len(rows_in))
+            return {_WORKSPACE_ID: "Team Alpha"}, {"user_1": "alice@example.com"}
+
+        client.monkeypatch.setattr(route_module, "_resolve_row_labels", fake_labels)
+        response = client.get(
+            "/api/v1/admin/cost-aggregation?period=day&from=2026-04-01&to=2026-04-07"
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()["rows"]
+        assert calls == [2]  # one batch for the whole response, not per row
+        assert (data[0]["workspace_name"], data[0]["user_email"]) == (
+            "Team Alpha",
+            "alice@example.com",
+        )
+        assert (data[1]["workspace_name"], data[1]["user_email"]) == ("Team Alpha", None)
+
+    @pytest.mark.asyncio
+    async def test_resolver_batches_workspaces_and_users(self):
+        """Two queries for any number of rows; unknown ids are simply absent."""
+        import api.routes.cost_aggregation as route_module
+
+        rows = [_make_canned_row(), _make_canned_row()]
+        rows[1].user_id = "user_2"
+        ws_result = MagicMock()
+        ws_result.all.return_value = [(_WORKSPACE_ID, "Team Alpha")]
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=ws_result)
+        with patch(
+            "services.sleep_reporter_service.SleepReporterService.resolve_user_labels",
+            new=AsyncMock(return_value={"user_1": "alice@example.com"}),
+        ) as users:
+            names, emails = await route_module._resolve_row_labels(db, rows)
+        assert names == {_WORKSPACE_ID: "Team Alpha"}
+        assert emails == {"user_1": "alice@example.com"}
+        assert db.execute.await_count == 1
+        users.assert_awaited_once_with({"user_1", "user_2"})
