@@ -23,34 +23,58 @@ _REDIS_LOCATION_UNKNOWN = "the configured REDIS_URL"
 
 # #1581: closed-beta invite tokens travel in URLs by API contract — the public
 # preview's PATH, the OAuth login's QUERY, and the frontend landing URL itself.
+# Workspace invitation tokens (``secrets.token_urlsafe(32)``) travel the same
+# way: the public preview ``GET /api/v1/invitations/<token>``, the landing URL
+# ``{FRONTEND_URL}/invite/<token>``, and that URL percent-encoded inside the
+# OAuth login's ``return_to`` (and so in the callback's ``Location``).
 # Each (pattern, replacement) keeps the route shape and drops only the token.
 _INVITE_TOKEN_PLACEHOLDER = "{token}"
+# Both token kinds are URL-safe base64 (43 chars for 32 bytes); the slot has
+# to look like one, so an unrelated short slug in the same route family —
+# ".../join/<slug>", "/invitations/accept", "/invitations/pending" — is left
+# alone. A pasted link with a trailing "%20" still loses its token.
+_TOKEN_SHAPE = r"[A-Za-z0-9_-]{20,128}(?![A-Za-z0-9_-])"
 _INVITE_TOKEN_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # GET /api/v1/beta-invites/<token>/preview — any segment in that slot.
     (re.compile(r"(/beta-invites/)[^/?#\s\"']+(?=/preview)"), r"\1" + _INVITE_TOKEN_PLACEHOLDER),
     # GET /api/v1/auth/<provider>/login?...&invite=<token>
     (re.compile(r"([?&]invite=)[^&#\s\"']+"), r"\1" + _INVITE_TOKEN_PLACEHOLDER),
-    # {FRONTEND_URL}/join/<token> — token-shaped segments only, so an unrelated
-    # ".../join/<short-slug>" path is left alone.
-    (
-        re.compile(r"(/join/)[A-Za-z0-9_-]{20,128}(?![A-Za-z0-9_-])"),
-        r"\1" + _INVITE_TOKEN_PLACEHOLDER,
-    ),
+    # {FRONTEND_URL}/join/<token>
+    (re.compile(r"(/join/)" + _TOKEN_SHAPE), r"\1" + _INVITE_TOKEN_PLACEHOLDER),
+    # GET /api/v1/invitations/<token> — the workspace invitation preview. Anchored
+    # on "/v1/" so "/workspaces/<id>/invitations/<invitation-id>" keeps its id.
+    (re.compile(r"(/v1/invitations/)" + _TOKEN_SHAPE), r"\1" + _INVITE_TOKEN_PLACEHOLDER),
+    # {FRONTEND_URL}/invite/<token>
+    (re.compile(r"(/invite/)" + _TOKEN_SHAPE), r"\1" + _INVITE_TOKEN_PLACEHOLDER),
+    # ...&return_to=https%3A%2F%2Fapp%2Finvite%2F<token> — the token alphabet is
+    # unreserved, so it is the one part of the URL that encoding leaves as is.
+    (re.compile(r"(%2[Ff]invite%2[Ff])" + _TOKEN_SHAPE), r"\1" + _INVITE_TOKEN_PLACEHOLDER),
 )
 # Cheap substring gate so the hot logging path pays for a regex only when one
-# of these shapes can actually be present.
-_INVITE_TOKEN_MARKERS = ("/beta-invites/", "invite=", "/join/")
+# of these shapes can actually be present. "invite%2" covers both cases of the
+# percent-encoded slash.
+_INVITE_TOKEN_MARKERS = (
+    "/beta-invites/",
+    "invite=",
+    "/join/",
+    "/v1/invitations/",
+    "/invite/",
+    "invite%2",
+)
 
 
 def redact_invite_tokens(text: str) -> str:
-    """Replace closed-beta invite tokens in a path / URL / log line with ``{token}``.
+    """Replace invite tokens in a path / URL / log line with ``{token}``.
 
     The invite URL is a credential that grants account creation (#1581) and only
     its hash may be stored. But the API contract carries the plaintext in URLs,
     and URLs are what request logging records — so every sink that can see one
     (the structlog pipeline, the stdlib/uvicorn formatters, the ``usage_stats``
-    writer) runs its text through here. Everything that is not one of the three
-    invite URL shapes is returned unchanged.
+    writer) runs its text through here. A workspace invitation token
+    (``/api/v1/invitations/<token>``, ``/invite/<token>``) is a single-use
+    join credential that lives up to a year, or has no expiry, and is handled
+    the same way. Everything that is not one of the invite URL shapes is
+    returned unchanged.
 
     Args:
         text: A request path, a full URL, or an already-rendered log line.
