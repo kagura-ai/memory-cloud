@@ -271,4 +271,17 @@ QUOTA_TYPES: frozenset[str] = frozenset(
 # How recently each account of an identity link must have proved its credential
 # on this browser (#1803, #1818). Read by the identity-links routes and by the
 # OAuth callback that reports a stale Google ``auth_time`` (#1833).
+#
+# An account stays in a session for as long as the session lives (7 rolling
+# days), so holding it proves only that it signed in at some point; the link
+# asks for a sign-in now, as the provider link does with its OAuth round trip
+# (5 minutes there). Ten minutes leaves room for two sign-ins, MFA included.
+# What counts is the time the credential was proved (#1818): a password
+# sign-in, or Google's ``auth_time`` — not an OAuth round trip that a live
+# provider session completes without asking (see ``SessionManager.proven_at``).
+#
+# The same window is how long a newly attached sign-in provider must wait
+# before a sign-in through it proves its account (#1875): attaching one needs
+# only a live session, so a proof through it inside the window would be a proof
+# by that session.
 IDENTITY_LINK_SIGN_IN_WINDOW = timedelta(minutes=10)

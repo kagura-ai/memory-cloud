@@ -138,33 +138,6 @@ class TestSignedInAt:
         assert manager.signed_in_at("missing", "google_1") is None
 
 
-class TestSignedInWithin:
-    def test_a_recent_sign_in_counts(self, manager):
-        sid = manager.create_session(USER)
-
-        assert manager.signed_in_within(sid, "google_1", timedelta(minutes=10))
-
-    def test_an_old_sign_in_does_not(self, manager):
-        sid = manager.create_session(USER)
-        old = (utcnow() - timedelta(minutes=11)).isoformat()
-        _set_signed_in_at(manager, sid, "google_1", old)
-
-        assert not manager.signed_in_within(sid, "google_1", timedelta(minutes=10))
-
-    def test_a_time_in_the_future_does_not(self, manager):
-        sid = manager.create_session(USER)
-        future = (utcnow() + timedelta(minutes=5)).isoformat()
-        _set_signed_in_at(manager, sid, "google_1", future)
-
-        assert not manager.signed_in_within(sid, "google_1", timedelta(minutes=10))
-
-    def test_no_time_does_not(self, manager):
-        sid = manager.create_session(USER)
-        _set_signed_in_at(manager, sid, "google_1", None)
-
-        assert not manager.signed_in_within(sid, "google_1", timedelta(minutes=10))
-
-
 class TestLinkRouteWithARealSession:
     """The link route against a real SessionManager: the time ``add_account``
     writes is the one the route reads, for the session the cookie names."""
@@ -180,7 +153,7 @@ class TestLinkRouteWithARealSession:
         request.client = None
         request.headers = {}
         service = MagicMock()
-        service.link = AsyncMock(return_value=True)
+        service.link = AsyncMock(return_value=frozenset({"google_1", "local:admin"}))
         with (
             patch.object(me_account.auth_module, "_session_manager", manager),
             patch.object(me_account, "IdentityLinkService", return_value=service),
@@ -229,7 +202,7 @@ class TestLinkRouteWithARealSession:
         proofs[unproven] = None
         sid = manager.create_session(USER, proven_at=proofs["google_1"])
         manager.add_account(sid, OTHER, proven_at=proofs["local:admin"])
-        assert manager.signed_in_within(sid, unproven, timedelta(minutes=10))
+        assert utcnow() - manager.signed_in_at(sid, unproven) < timedelta(minutes=10)
 
         with pytest.raises(IdentityLinkSignInRequiredError):
             await self._link(manager, sid)

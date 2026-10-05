@@ -54,7 +54,7 @@ def notices():
 @pytest.fixture
 def service():
     instance = MagicMock()
-    instance.link = AsyncMock(return_value=True)
+    instance.link = AsyncMock(return_value=frozenset({ME, OTHER}))
     instance.unlink = AsyncMock(return_value=frozenset({ME}))
     instance.leave = AsyncMock(return_value=frozenset())
     instance.list_linked = AsyncMock(return_value=[])
@@ -82,6 +82,29 @@ class TestLinkIdentity:
         assert [
             (call.kwargs["user_id"], call.kwargs["event"]) for call in notices.call_args_list
         ] == [(ME, SecurityEvent.ACCOUNT_LINKED), (OTHER, SecurityEvent.ACCOUNT_LINKED)]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "others",
+        [
+            ("github|x", "github|y"),  # {ME, X} linked to {OTHER, Y}
+            ("github|x",),  # {ME, X} linked to OTHER alone
+        ],
+    )
+    async def test_every_account_of_both_sets_is_told(
+        self, session_manager, service, notices, others
+    ):
+        """#1875: the members that were not named gain co-owners too."""
+        session_manager.session_holds_user.return_value = True
+        service.link.return_value = frozenset({ME, OTHER, *others})
+
+        await link_identity(
+            IdentityLinkTarget(user_id=OTHER), _request(), MagicMock(), {"user_id": ME}, AsyncMock()
+        )
+
+        assert [
+            (call.kwargs["user_id"], call.kwargs["event"]) for call in notices.call_args_list
+        ] == [(account, SecurityEvent.ACCOUNT_LINKED) for account in (ME, OTHER, *others)]
 
     @pytest.mark.asyncio
     async def test_an_account_not_in_the_session_is_not_found(
@@ -124,7 +147,7 @@ class TestLinkIdentity:
         self, session_manager, service, notices
     ):
         session_manager.session_holds_user.return_value = True
-        service.link.return_value = False
+        service.link.return_value = frozenset()
 
         result = await link_identity(
             IdentityLinkTarget(user_id=OTHER),
