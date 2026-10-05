@@ -424,9 +424,9 @@ rows are deleted by an hourly job once they are
 **New-device sign-in alerts.** A browser sign-in from a device the account has
 not used before emails the owner (same pipeline and mandatory like the other
 security notices). The device is a long-lived `kagura_device` cookie whose
-keyed HMAC is stored in `user_known_devices`; no IP address is stored there (the
-IP and user agent go into the email and, while a notice is coalesced or retried,
-into the notice queue in Redis). A daily
+keyed HMAC is stored in `user_known_devices`; no IP address or user agent is
+stored there (the IP and user agent go into the email and, while a notice is
+coalesced or retried, into the notice queue in Redis). A daily
 job forgets devices not seen for `KNOWN_DEVICE_RETENTION_DAYS` (default `180`),
 and at most `KNOWN_DEVICE_MAX_PER_USER` (default `20`) devices are kept per
 account. After the upgrade every account's next sign-in registers its browser
@@ -446,9 +446,10 @@ first authorization, a broader scope, or a client changed since the last grant
 (connector write keys included), an OAuth client is registered or its secret
 regenerated, or a provider sign-in changes the account's email address (the
 previous address is told), the account owner is
-emailed a notice (UTC time, IP address, user agent, key or client name, and the
-acting admin for admin actions — never a secret, token or link other than the
-plain `FRONTEND_URL/profile` page). The notices cannot be turned off. They go
+emailed a notice (UTC time, IP address, user agent, key or client name; for an
+admin action the acting admin, without the admin's IP address and user agent —
+never a secret, token or link other than the plain `FRONTEND_URL/profile`
+page). The notices cannot be turned off. They go
 only to a verified address (`users.email_verified_at`: set by an emailed
 password link, or by an OAuth sign-in whose provider attests the address as
 verified; migration `e88_1752_verified_backfill` marks the OAuth accounts
