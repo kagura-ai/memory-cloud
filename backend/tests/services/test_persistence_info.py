@@ -310,6 +310,11 @@ def test_dedup_merge_still_has_no_age_or_adoption_gate():
         "user_id",
         "deleted_at",
         "updated_at",
+        # #1868: ``created_at`` and ``id`` appear in the ORDER BY only — the
+        # fallback clock for a never-edited row and the tie-break. They decide
+        # which rows fit under the cap, newest first; neither is an age gate.
+        "created_at",
+        "id",
         "workspace_id",
         "context_id",
         # #1524: time memories (type='time') are the recall_upcoming lane and are
