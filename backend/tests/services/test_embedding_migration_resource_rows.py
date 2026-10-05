@@ -350,6 +350,34 @@ async def test_resource_row_that_no_longer_holds_a_document_is_skipped(db_sessio
 
 
 @pytest.mark.asyncio
+async def test_a_point_from_an_earlier_migration_does_not_hide_an_unrebuildable_row(
+    db_session, seed, store
+):
+    # A -> B, back to A, A -> B again: the target already holds the points.
+    context_id, _slug, note_id, by_doc = await _mixed_context(db_session, seed, store)
+    plan = await svc.plan_context_migration(db_session, context_id, _TARGET_MODEL)
+    await svc.reembed_context(db_session, plan, embedding_service=_Embedder())
+    target = store.collections[plan.target_collection]
+    rows = await _live_rows(db_session, context_id)
+    edited_id = by_doc["doc_2"]
+    edited_point = str(rows[edited_id].point_id)
+    kept_point = str(rows[by_doc["doc_1"]].point_id)
+    assert edited_point in target
+
+    rows[edited_id].content = "free text, no longer a document"
+    await db_session.commit()
+    result = await svc.reembed_context(db_session, plan, embedding_service=_Embedder())
+
+    # The old point was not built from what the row holds now: it goes, and
+    # verify reports the row instead of counting that point as present.
+    assert result.unrebuildable == [edited_id]
+    assert set(target) == {str(note_id), kept_point}
+    verified = await svc.verify_context_migration(db_session, plan)
+    assert verified.unrebuildable == [edited_id]
+    assert verified.ok and (verified.expected, verified.present) == (3, 2)
+
+
+@pytest.mark.asyncio
 async def test_resource_rows_of_a_resource_without_a_schema_are_skipped(db_session, seed, store):
     context_id, slug, note_id, by_doc = await _mixed_context(db_session, seed, store)
     await db_session.execute(delete(ResourceSchema).where(ResourceSchema.resource_id == slug))

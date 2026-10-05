@@ -42,7 +42,7 @@ routing — the dual-collection shape::
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, cast
@@ -248,6 +248,44 @@ _POINT_ID_COLUMNS = (
 without loading its content."""
 
 
+async def _points_live_rows_name(
+    db: AsyncSession,
+    point_ids: Iterable[UUID],
+    *,
+    other_than: UUID | None = None,
+    batch_size: int = 500,
+) -> set[UUID]:
+    """Those of ``point_ids`` a live row names as its point.
+
+    A resource point's id is derived from the document, not the row (#1829):
+    the same document version indexed into two contexts that share a
+    collection is ONE point for TWO rows, and a tombstone and a live row of
+    one document name the same point. A point is only the migration's to
+    delete when no live row names it — the rule ``forget`` follows
+    (``MemoryService._delete_memory_point``), and like it not scoped by
+    context: the row to find may be in another one. ``other_than`` leaves one
+    row out (the row whose point is being removed).
+    """
+    wanted = list(point_ids)
+    named: set[UUID] = set()
+    for i in range(0, len(wanted), batch_size):
+        stmt = select(Memory.summary_embedding_id).where(
+            Memory.summary_embedding_id.in_(wanted[i : i + batch_size]),
+            Memory.deleted_at.is_(None),
+        )
+        if other_than is not None:
+            stmt = stmt.where(Memory.id != other_than)
+        named.update((await db.execute(stmt)).scalars().all())
+    return named
+
+
+def _as_uuid(point_id: str) -> UUID | None:
+    try:
+        return UUID(point_id)
+    except ValueError:
+        return None
+
+
 class _Rebuildable(Exception):
     """Raised by :class:`_RebuildProbe`: the rebuild got as far as embedding."""
 
@@ -318,7 +356,11 @@ async def reembed_context(
     from the stored document, under ``Memory.point_id``, with the resource
     payload (``ResourceIndexer.rebuild_point``, one embedding request per
     document). One that cannot be rebuilt is skipped and listed in
-    ``ReembedResult.unrebuildable``; the run goes on.
+    ``ReembedResult.unrebuildable``; the run goes on. A point an earlier
+    migration left for such a row in the target collection is removed (unless
+    another live row names it), so the outcome does not depend on what the
+    collection held before: the row has no target vector, and
+    :func:`verify_context_migration` reports it.
 
     Idempotent: points are upserted by point id, so a rerun after a failure
     overwrites instead of duplicating.
@@ -405,6 +447,12 @@ async def reembed_context(
                     context_id=str(plan.context_id),
                     error=str(exc),
                 )
+                # The target may hold this row's point from an earlier
+                # migration to the same model (A -> B, back to A, A -> B
+                # again). It was not built from what the row holds now and
+                # verify would count it as present; remove it.
+                if not await _points_live_rows_name(db, [memory.point_id], other_than=memory.id):
+                    await delete_points_from_qdrant([str(memory.point_id)], plan.target_collection)
             # rebuild_point reads the context, the schema and the event time;
             # end that read transaction before the next row's embedding call,
             # as the page loop does.
@@ -448,7 +496,8 @@ async def verify_context_migration(
     re-embed copied it has a target point with no live row. ``forget`` only
     deletes from the collection the context routes to, so nothing else would
     ever remove that point; it is deleted here and counted in
-    ``stale_removed``. Deletes that land after this check are covered by
+    ``stale_removed`` — unless a live row of another context names it (a
+    document two contexts ingested is one point in a shared collection). Deletes that land after this check are covered by
     :func:`switch_context_embedding`.
     """
     result = await db.execute(
@@ -509,6 +558,14 @@ async def verify_context_migration(
     )
     stale = [point_id for point_id in stored if point_id not in live]
     if stale:
+        # ... and no live row of another context either: contexts that share
+        # the collection share the point of a document both ingested.
+        candidates = {parsed for point_id in stale if (parsed := _as_uuid(point_id)) is not None}
+        named_elsewhere = {
+            str(point_id) for point_id in await _points_live_rows_name(db, candidates)
+        }
+        stale = [point_id for point_id in stale if point_id not in named_elsewhere]
+    if stale:
         await delete_points_from_qdrant(stale, plan.target_collection)
         logger.info(
             "context_embedding_stale_points_removed",
@@ -545,8 +602,8 @@ async def switch_context_embedding(
     routing. Rows *forgotten* since then are removed from the new collection
     after the flip, closing the window between the last verify and the
     routing change — each under the point id the migration wrote it with
-    (:func:`_migrated_point_id`, #1896), and never a point a live row still
-    names. With ``None`` this is a pure routing flip.
+    (:func:`_migrated_point_id`, #1896), and never a point a live row of any
+    context still names. With ``None`` this is a pure routing flip.
 
     A worker that claimed a row before the flip resolved the old routing;
     ``process_pending_embedding`` only marks ``success`` while it still owns
@@ -615,17 +672,9 @@ async def switch_context_embedding(
         )
         forgotten_points = {_migrated_point_id(memory) for memory in forgotten.scalars().all()}
         if forgotten_points:
-            # A resource point's id is derived from the document, not the row:
-            # a tombstone and a live row of the same document version name the
-            # same point (#1829). The live row keeps it.
-            still_named = await db.execute(
-                select(Memory.summary_embedding_id).where(
-                    Memory.context_id == context_id,
-                    Memory.deleted_at.is_(None),
-                    Memory.summary_embedding_id.in_(forgotten_points),
-                )
-            )
-            forgotten_points -= set(still_named.scalars().all())
+            # A live row — of this context or of another one sharing the
+            # collection — that names the same point keeps it.
+            forgotten_points -= await _points_live_rows_name(db, forgotten_points)
         if forgotten_points:
             await delete_points_from_qdrant(
                 sorted(str(point_id) for point_id in forgotten_points),

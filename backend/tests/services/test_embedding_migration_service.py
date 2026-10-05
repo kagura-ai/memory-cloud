@@ -349,7 +349,8 @@ class TestReembed:
     async def test_an_unrebuildable_resource_row_is_skipped_and_reported(self):
         plan = _plan(memory_count=3)
         gone, doc, note = _resource_memory("doc_1"), _resource_memory("doc_2"), _memory()
-        db = _db([_result(scalars=[gone, doc, note]), _result(scalars=[])])
+        # page -> "does another live row name the skipped row's point?" -> end
+        db = _db([_result(scalars=[gone, doc, note]), _result(scalars=[]), _result(scalars=[])])
         service = MagicMock()
         service.embed_batch = AsyncMock(side_effect=lambda texts, *a, **k: [[0.1] for _ in texts])
 
@@ -365,10 +366,19 @@ class TestReembed:
             patch.object(svc, "add_memory_to_qdrant", AsyncMock()) as add,
             patch.object(svc, "build_memory_point", return_value=({}, [], [])),
             patch.object(svc, "ResourceIndexer", return_value=indexer),
+            patch.object(svc, "delete_points_from_qdrant", AsyncMock()) as delete,
         ):
             result = await svc.reembed_context(
                 db, plan, embedding_service=service, progress=lambda d, t: seen.append((d, t))
             )
+
+        # A point an earlier migration left for it in the target goes, so
+        # verify cannot count a vector that was not built from the row.
+        delete.assert_awaited_once_with([str(gone.point_id)], plan.target_collection)
+        named_stmt = db.execute.await_args_list[1].args[0]
+        compiled = str(named_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "context_id" not in compiled.split("WHERE")[1]  # any context
+        assert "memories.id !=" in compiled  # ... but another row
 
         # The run went on past the row that cannot be rebuilt ...
         assert indexer.rebuild_point.await_count == 2
@@ -379,6 +389,22 @@ class TestReembed:
         assert result.embedded == 2
         assert result.unrebuildable == [gone.id]
         assert seen == [(3, 3)]
+
+    @pytest.mark.asyncio
+    async def test_an_unrebuildable_rows_point_stays_while_another_live_row_names_it(self):
+        # The same document indexed into another context that shares the
+        # target collection: one point, two rows. It is the other row's too.
+        gone = _resource_memory()
+        db = _db([_result(scalars=[gone]), _result(scalars=[gone.point_id]), _result(scalars=[])])
+        indexer = _indexer(AsyncMock(side_effect=ResourceRebuildError("no schema")))
+        with (
+            patch.object(svc, "ensure_kagura_memories_collection", AsyncMock()),
+            patch.object(svc, "ResourceIndexer", return_value=indexer),
+            patch.object(svc, "delete_points_from_qdrant", AsyncMock()) as delete,
+        ):
+            result = await svc.reembed_context(db, _plan(), embedding_service=MagicMock())
+        assert result.unrebuildable == [gone.id]
+        delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_a_failing_rebuild_that_is_not_a_refusal_stops_the_run(self):
@@ -442,7 +468,7 @@ class TestVerify:
         plan = _plan()
         live = [uuid4(), uuid4()]
         forgotten = uuid4()
-        db = _db([_result(scalars=[_memory(memory_id=i) for i in live])])
+        db = _db([_result(scalars=[_memory(memory_id=i) for i in live]), _result(scalars=[])])
         client = MagicMock()
         client.retrieve = AsyncMock(return_value=[MagicMock(id=str(i)) for i in live])
 
@@ -483,7 +509,7 @@ class TestVerify:
         plan = _plan()
         note, doc = _memory(), _resource_memory()
         forgotten_point = uuid4()
-        db = _db([_result(scalars=[note, doc])])
+        db = _db([_result(scalars=[note, doc]), _result(scalars=[])])
         client = MagicMock()
         client.retrieve = AsyncMock(
             return_value=[MagicMock(id=str(note.id)), MagicMock(id=str(doc.point_id))]
@@ -514,7 +540,7 @@ class TestVerify:
         # and the row is reported until a re-embed writes the real one.
         plan = _plan()
         doc = _resource_memory()
-        db = _db([_result(scalars=[doc]), _result(scalars=[doc])])
+        db = _db([_result(scalars=[doc]), _result(scalars=[doc]), _result(scalars=[])])
         client = MagicMock()
         client.retrieve = AsyncMock(return_value=[])
 
@@ -532,6 +558,33 @@ class TestVerify:
 
         assert result.missing == [doc.id] and result.ok is False
         delete.assert_awaited_once_with([str(doc.id)], plan.target_collection)
+
+    @pytest.mark.asyncio
+    async def test_a_point_a_live_row_of_another_context_names_is_not_stale(self):
+        # Stored under this context's payload, named by no live row of it,
+        # but by one of another context sharing the collection.
+        plan = _plan()
+        note = _memory()
+        shared, orphan = uuid4(), uuid4()
+        db = _db([_result(scalars=[note]), _result(scalars=[shared])])
+        client = MagicMock()
+        client.retrieve = AsyncMock(return_value=[MagicMock(id=str(note.id))])
+        with (
+            patch.object(svc, "get_qdrant_client", return_value=client),
+            patch.object(
+                svc,
+                "list_context_point_ids",
+                AsyncMock(return_value=[str(note.id), str(shared), str(orphan)]),
+            ),
+            patch.object(svc, "delete_points_from_qdrant", AsyncMock()) as delete,
+        ):
+            result = await svc.verify_context_migration(db, plan)
+
+        delete.assert_awaited_once_with([str(orphan)], plan.target_collection)
+        assert result.stale_removed == 1
+        named_stmt = db.execute.await_args_list[1].args[0]
+        compiled = str(named_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "context_id" not in compiled.split("WHERE")[1]
 
     @pytest.mark.asyncio
     async def test_an_unrebuildable_resource_row_is_reported_but_does_not_fail_verify(self):
@@ -727,6 +780,12 @@ class TestSwitch:
             [str(forgotten_note.id)], "kagura_memories_qwen3_embedding_4b_2560"
         )
         assert result.stale_removed == 1
+        # The live row may be in ANOTHER context that shares the collection,
+        # as for forget: the lookup is not scoped to the context switched.
+        named_stmt = db.execute.await_args_list[4].args[0]
+        compiled = str(named_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "context_id" not in compiled.split("WHERE")[1]
+        assert "deleted_at IS NULL" in compiled
 
     @pytest.mark.asyncio
     async def test_existing_row_is_updated_in_place_without_requeue(self):
