@@ -17,6 +17,7 @@ import pytest
 
 from services import embedding_migration_service as svc
 from services.embedding_migration_service import MigrationPlan
+from services.resource_indexer import ResourceRebuildError, resource_point_id
 from utils.exceptions import NotFoundException, ValidationError
 
 SMALL = "text-embedding-3-small"
@@ -64,7 +65,36 @@ def _memory(user_id: str = "u1", memory_id: UUID | None = None, summary: str = "
     memory.summary = summary
     memory.workspace_id = uuid4()
     memory.context_id = uuid4()
+    # A memory the API wrote: no resource key, its point is its own id.
+    memory.resource_id = None
+    memory.resource_doc_id = None
+    memory.resource_version = None
+    memory.summary_embedding_id = memory.id
+    memory.point_id = memory.id
     return memory
+
+
+def _resource_memory(doc_id: str = "doc_1", version: int = 2, resource_id: str = "res"):
+    """A row the resource indexer wrote: it owns the document's uuid5 point."""
+    memory = _memory(summary=f"[{resource_id}] {doc_id} v{version}")
+    memory.resource_id = resource_id
+    memory.resource_doc_id = doc_id
+    memory.resource_version = version
+    memory.summary_embedding_id = resource_point_id(resource_id, doc_id, version)
+    memory.point_id = memory.summary_embedding_id
+    return memory
+
+
+def _indexer(rebuild: AsyncMock | None = None):
+    """A stand-in for ``ResourceIndexer(db)`` with a recorded ``rebuild_point``."""
+    indexer = MagicMock()
+    indexer.rebuild_point = rebuild or AsyncMock()
+    return indexer
+
+
+async def _probe_reaches_embedding(memory, *, collection_name, embedding_service):
+    """``rebuild_point`` of a rebuildable row: it gets as far as embedding."""
+    await embedding_service.embed(text="document text", user_id="u1")
 
 
 def _plan(**overrides) -> MigrationPlan:
@@ -281,6 +311,99 @@ class TestReembed:
         with pytest.raises(ValueError):
             await svc.reembed_context(_db([]), _plan(), batch_size=0)
 
+    @pytest.mark.asyncio
+    async def test_resource_rows_go_through_the_indexer_not_the_batch(self):
+        # #1896: a resource row's summary is only the label "[res] doc vN".
+        plan = _plan()
+        note, doc, other_note = _memory("u1"), _resource_memory(), _memory("u1")
+        db = _db([_result(scalars=[note, doc, other_note]), _result(scalars=[])])
+        service = MagicMock()
+        service.embed_batch = AsyncMock(side_effect=lambda texts, *a, **k: [[0.1] for _ in texts])
+        indexer = _indexer()
+
+        with (
+            patch.object(svc, "ensure_kagura_memories_collection", AsyncMock()),
+            patch.object(svc, "add_memory_to_qdrant", AsyncMock()) as add,
+            patch.object(svc, "build_memory_point", return_value=({}, [], [])),
+            patch.object(svc, "ResourceIndexer", return_value=indexer) as indexer_cls,
+        ):
+            result = await svc.reembed_context(db, plan, embedding_service=service)
+
+        # The API-written rows are still one batch, without the label.
+        service.embed_batch.assert_awaited_once()
+        assert service.embed_batch.await_args.args[0] == [note.summary, other_note.summary]
+        assert {call.kwargs["memory_id"] for call in add.await_args_list} == {
+            note.id,
+            other_note.id,
+        }
+        # The resource row is rebuilt by the indexer, into the TARGET
+        # collection, with the TARGET model's service.
+        indexer_cls.assert_called_once_with(db)
+        indexer.rebuild_point.assert_awaited_once_with(
+            doc, collection_name=plan.target_collection, embedding_service=service
+        )
+        assert result.embedded == 3
+        assert result.unrebuildable == []
+
+    @pytest.mark.asyncio
+    async def test_an_unrebuildable_resource_row_is_skipped_and_reported(self):
+        plan = _plan(memory_count=3)
+        gone, doc, note = _resource_memory("doc_1"), _resource_memory("doc_2"), _memory()
+        db = _db([_result(scalars=[gone, doc, note]), _result(scalars=[])])
+        service = MagicMock()
+        service.embed_batch = AsyncMock(side_effect=lambda texts, *a, **k: [[0.1] for _ in texts])
+
+        async def _rebuild(memory, **_kwargs):
+            if memory is gone:
+                raise ResourceRebuildError("Resource 'res' has no schema")
+
+        indexer = _indexer(AsyncMock(side_effect=_rebuild))
+        seen: list[tuple[int, int]] = []
+
+        with (
+            patch.object(svc, "ensure_kagura_memories_collection", AsyncMock()),
+            patch.object(svc, "add_memory_to_qdrant", AsyncMock()) as add,
+            patch.object(svc, "build_memory_point", return_value=({}, [], [])),
+            patch.object(svc, "ResourceIndexer", return_value=indexer),
+        ):
+            result = await svc.reembed_context(
+                db, plan, embedding_service=service, progress=lambda d, t: seen.append((d, t))
+            )
+
+        # The run went on past the row that cannot be rebuilt ...
+        assert indexer.rebuild_point.await_count == 2
+        assert add.await_count == 1
+        # ... which got no point at all (no label vector under the row id),
+        assert gone.id not in {call.kwargs["memory_id"] for call in add.await_args_list}
+        # and is reported instead of counted as embedded.
+        assert result.embedded == 2
+        assert result.unrebuildable == [gone.id]
+        assert seen == [(3, 3)]
+
+    @pytest.mark.asyncio
+    async def test_a_failing_rebuild_that_is_not_a_refusal_stops_the_run(self):
+        # An embedding or vector store failure is not "unrebuildable": the
+        # run fails, as it does for an API-written row, and can be re-run.
+        db = _db([_result(scalars=[_resource_memory()]), _result(scalars=[])])
+        indexer = _indexer(AsyncMock(side_effect=RuntimeError("provider down")))
+        with (
+            patch.object(svc, "ensure_kagura_memories_collection", AsyncMock()),
+            patch.object(svc, "ResourceIndexer", return_value=indexer),
+            pytest.raises(RuntimeError, match="provider down"),
+        ):
+            await svc.reembed_context(db, _plan(), embedding_service=MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_each_resource_rebuild_ends_its_read_transaction(self):
+        db = _db([_result(scalars=[_resource_memory("a"), _resource_memory("b")]), _result()])
+        with (
+            patch.object(svc, "ensure_kagura_memories_collection", AsyncMock()),
+            patch.object(svc, "ResourceIndexer", return_value=_indexer()),
+        ):
+            await svc.reembed_context(db, _plan(), embedding_service=MagicMock())
+        # Two pages (one of them the empty terminator) + one per rebuilt row.
+        assert db.commit.await_count == 4
+
 
 # ------------------------------------------------------------------------- verify
 
@@ -290,7 +413,7 @@ class TestVerify:
     async def test_reports_the_missing_ids_not_just_a_count(self):
         plan = _plan()
         ids = [uuid4() for _ in range(3)]
-        db = _db([_result(scalars=ids)])
+        db = _db([_result(scalars=[_memory(memory_id=i) for i in ids])])
         client = MagicMock()
         client.retrieve = AsyncMock(
             return_value=[MagicMock(id=str(ids[0])), MagicMock(id=str(ids[2]))]
@@ -319,7 +442,7 @@ class TestVerify:
         plan = _plan()
         live = [uuid4(), uuid4()]
         forgotten = uuid4()
-        db = _db([_result(scalars=live)])
+        db = _db([_result(scalars=[_memory(memory_id=i) for i in live])])
         client = MagicMock()
         client.retrieve = AsyncMock(return_value=[MagicMock(id=str(i)) for i in live])
 
@@ -352,6 +475,116 @@ class TestVerify:
             result = await svc.verify_context_migration(_db([_result(scalars=[])]), _plan())
         assert result.ok and result.expected == 0
         client.retrieve.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_resource_row_is_present_under_its_own_point_id(self):
+        # #1896: the row's point is the document's uuid5, not the row id.
+        # Looking it up by row id reported it missing and removed it as stale.
+        plan = _plan()
+        note, doc = _memory(), _resource_memory()
+        forgotten_point = uuid4()
+        db = _db([_result(scalars=[note, doc])])
+        client = MagicMock()
+        client.retrieve = AsyncMock(
+            return_value=[MagicMock(id=str(note.id)), MagicMock(id=str(doc.point_id))]
+        )
+
+        with (
+            patch.object(svc, "get_qdrant_client", return_value=client),
+            patch.object(
+                svc,
+                "list_context_point_ids",
+                AsyncMock(return_value=[str(note.id), str(doc.point_id), str(forgotten_point)]),
+            ),
+            patch.object(svc, "delete_points_from_qdrant", AsyncMock()) as delete,
+        ):
+            result = await svc.verify_context_migration(db, plan)
+
+        assert client.retrieve.await_args.kwargs["ids"] == [str(note.id), str(doc.point_id)]
+        assert (result.expected, result.present) == (2, 2)
+        assert result.ok and result.missing == [] and result.unrebuildable == []
+        # The resource point stays; a point with no live row still goes.
+        delete.assert_awaited_once_with([str(forgotten_point)], plan.target_collection)
+        assert result.stale_removed == 1
+
+    @pytest.mark.asyncio
+    async def test_a_label_point_under_a_resource_rows_id_does_not_count(self):
+        # What the migration wrote before #1896: a point under the ROW id.
+        # It is neither the row's point nor any live row's, so it is removed
+        # and the row is reported until a re-embed writes the real one.
+        plan = _plan()
+        doc = _resource_memory()
+        db = _db([_result(scalars=[doc]), _result(scalars=[doc])])
+        client = MagicMock()
+        client.retrieve = AsyncMock(return_value=[])
+
+        with (
+            patch.object(svc, "get_qdrant_client", return_value=client),
+            patch.object(svc, "list_context_point_ids", AsyncMock(return_value=[str(doc.id)])),
+            patch.object(svc, "delete_points_from_qdrant", AsyncMock()) as delete,
+            patch.object(
+                svc,
+                "ResourceIndexer",
+                return_value=_indexer(AsyncMock(side_effect=_probe_reaches_embedding)),
+            ),
+        ):
+            result = await svc.verify_context_migration(db, plan)
+
+        assert result.missing == [doc.id] and result.ok is False
+        delete.assert_awaited_once_with([str(doc.id)], plan.target_collection)
+
+    @pytest.mark.asyncio
+    async def test_an_unrebuildable_resource_row_is_reported_but_does_not_fail_verify(self):
+        plan = _plan()
+        note, gone, late = _memory(), _resource_memory("doc_1"), _resource_memory("doc_2")
+        # live rows -> the two resource rows without a point, loaded in full
+        db = _db([_result(scalars=[note, gone, late]), _result(scalars=[gone, late])])
+        client = MagicMock()
+        client.retrieve = AsyncMock(return_value=[MagicMock(id=str(note.id))])
+        embedded: list[str] = []
+
+        async def _rebuild(memory, *, collection_name, embedding_service):
+            if memory is gone:
+                raise ResourceRebuildError("Resource 'res' has no schema")
+            # A row the indexer can rebuild gets as far as embedding.
+            embedded.append(await embedding_service.embed(text="doc", user_id="u1"))
+
+        indexer = _indexer(AsyncMock(side_effect=_rebuild))
+        with (
+            patch.object(svc, "get_qdrant_client", return_value=client),
+            patch.object(svc, "list_context_point_ids", AsyncMock(return_value=[str(note.id)])),
+            patch.object(svc, "delete_points_from_qdrant", AsyncMock()) as delete,
+            patch.object(svc, "ResourceIndexer", return_value=indexer),
+        ):
+            result = await svc.verify_context_migration(db, plan)
+
+        assert (result.expected, result.present) == (3, 1)
+        # Re-embedding cannot give ``gone`` a point: reported, not missing.
+        assert result.unrebuildable == [gone.id]
+        # ``late`` could be rebuilt (written after the re-embed passed it):
+        # missing like any other row, so the switch waits for a re-run.
+        assert result.missing == [late.id]
+        assert result.ok is False
+        # The check embedded nothing and wrote nothing.
+        assert embedded == []
+        delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_only_unrebuildable_rows_left_is_ok(self):
+        gone = _resource_memory()
+        db = _db([_result(scalars=[gone]), _result(scalars=[gone])])
+        client = MagicMock()
+        client.retrieve = AsyncMock(return_value=[])
+        indexer = _indexer(AsyncMock(side_effect=ResourceRebuildError("not a JSON document")))
+        with (
+            patch.object(svc, "get_qdrant_client", return_value=client),
+            patch.object(svc, "list_context_point_ids", AsyncMock(return_value=[])),
+            patch.object(svc, "ResourceIndexer", return_value=indexer),
+        ):
+            result = await svc.verify_context_migration(db, _plan())
+        assert result.ok
+        assert (result.expected, result.present) == (1, 0)
+        assert result.unrebuildable == [gone.id]
 
 
 # ------------------------------------------------------------------------- switch
@@ -421,13 +654,14 @@ class TestSwitch:
     ):
         config = _config(SMALL, 512)
         since = datetime(2026, 9, 10, 12, 0, 0)
-        forgotten = [uuid4(), uuid4()]
+        forgotten = sorted([uuid4(), uuid4()], key=str)
         db = _db(
             [
                 _result(scalar=config),
                 _result(scalar=config),
                 _result(rowcount=1),
-                _result(scalars=forgotten),
+                _result(scalars=[_memory(memory_id=i) for i in forgotten]),
+                _result(scalars=[]),  # no live row names those points
             ]
         )
 
@@ -443,6 +677,56 @@ class TestSwitch:
         forgotten_stmt = db.execute.await_args_list[3].args[0]
         compiled = str(forgotten_stmt.compile(compile_kwargs={"literal_binds": True}))
         assert "deleted_at >=" in compiled
+
+    @pytest.mark.asyncio
+    async def test_a_forgotten_resource_row_is_dropped_under_its_point_id(self):
+        # #1896: the new collection holds the document's point, not one under
+        # the row id; deleting by row id left it behind.
+        config = _config(SMALL, 512)
+        doc = _resource_memory()
+        db = _db(
+            [
+                _result(scalar=config),
+                _result(scalar=config),
+                _result(rowcount=0),
+                _result(scalars=[doc]),
+                _result(scalars=[]),
+            ]
+        )
+        with patch.object(svc, "delete_points_from_qdrant", AsyncMock()) as delete:
+            result = await svc.switch_context_embedding(
+                db, uuid4(), QWEN, 2560, requeue_since=datetime(2026, 9, 10, 12, 0, 0)
+            )
+        delete.assert_awaited_once_with(
+            [str(doc.point_id)], "kagura_memories_qwen3_embedding_4b_2560"
+        )
+        assert doc.point_id != doc.id
+        assert result.stale_removed == 1
+
+    @pytest.mark.asyncio
+    async def test_a_point_a_live_row_still_names_is_not_dropped(self):
+        # A tombstone and a live row of the same document version share the
+        # uuid5 point; the live row keeps it.
+        config = _config(SMALL, 512)
+        tombstone = _resource_memory("doc_1")
+        forgotten_note = _memory()
+        db = _db(
+            [
+                _result(scalar=config),
+                _result(scalar=config),
+                _result(rowcount=0),
+                _result(scalars=[tombstone, forgotten_note]),
+                _result(scalars=[tombstone.point_id]),
+            ]
+        )
+        with patch.object(svc, "delete_points_from_qdrant", AsyncMock()) as delete:
+            result = await svc.switch_context_embedding(
+                db, uuid4(), QWEN, 2560, requeue_since=datetime(2026, 9, 10, 12, 0, 0)
+            )
+        delete.assert_awaited_once_with(
+            [str(forgotten_note.id)], "kagura_memories_qwen3_embedding_4b_2560"
+        )
+        assert result.stale_removed == 1
 
     @pytest.mark.asyncio
     async def test_existing_row_is_updated_in_place_without_requeue(self):

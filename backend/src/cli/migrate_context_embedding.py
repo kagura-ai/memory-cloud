@@ -9,9 +9,13 @@ EMBEDDING_MODEL_ALLOWLIST), e.g. inside the API container::
 Steps (each is a flag; ``--run`` chains the first three):
 
     --plan        resolve source/target, count memories        (default, read-only)
-    --reembed     fill the target collection; routing untouched (idempotent, re-runnable)
+    --reembed     fill the target collection; routing untouched (idempotent, re-runnable).
+                  Resource-ingested memories are rebuilt from their document, under
+                  the document's point id; one that cannot be rebuilt is skipped
+                  and listed
     --verify      every live memory has a point in the target; drops target points
-                  whose memory was forgotten meanwhile
+                  whose memory was forgotten meanwhile. Resource-ingested memories
+                  that cannot be rebuilt are listed, and do not fail the step
     --switch      flip routing + re-queue the delta since the re-embed started
     --purge       delete the source points, in the same invocation as --switch
     --purge-source MODEL  delete MODEL's points for the context in a later run,
@@ -55,6 +59,20 @@ def _print_plan(plan: MigrationPlan) -> None:
     print(f"  source  {plan.source_model} / {plan.source_dimensions}d  -> {plan.source_collection}")
     print(f"  target  {plan.target_model} / {plan.target_dimensions}d  -> {plan.target_collection}")
     print(f"  memories {plan.memory_count}")
+
+
+def _print_unrebuildable(memory_ids: list[UUID]) -> None:
+    """Resource-ingested memories the migration cannot give a vector (#1896)."""
+    if not memory_ids:
+        return
+    shown = ", ".join(str(memory_id) for memory_id in memory_ids[:20])
+    more = f" (+{len(memory_ids) - 20} more)" if len(memory_ids) > 20 else ""
+    print(
+        f"  UNREBUILDABLE {len(memory_ids)} resource-ingested memory(ies) have no vector "
+        "in the target collection: the resource has no schema left, or the memory no "
+        "longer holds a JSON document. Ingest the documents again as a newer version "
+        f"to make them searchable: {shown}{more}"
+    )
 
 
 def _confirm(prompt: str, assume_yes: bool) -> bool:
@@ -117,6 +135,9 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
         result = await reembed_context(db, plan, batch_size=args.batch_size, progress=_progress)
         requeue_since = result.started_at
         print(f"  re-embed done: {result.embedded} points in {result.batches} batches")
+        if result.unrebuildable and not (args.verify or args.run):
+            # --verify prints the same list; say it once.
+            _print_unrebuildable(result.unrebuildable)
 
     if args.verify or args.run:
         verified = await verify_context_migration(db, plan)
@@ -124,6 +145,7 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
             f"  verify: {verified.present}/{verified.expected} present, "
             f"{verified.stale_removed} stale target point(s) removed"
         )
+        _print_unrebuildable(verified.unrebuildable)
         if not verified.ok:
             print(
                 f"  MISSING {len(verified.missing)}: {', '.join(str(m) for m in verified.missing[:20])}"

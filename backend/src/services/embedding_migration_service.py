@@ -28,6 +28,16 @@ routing — the dual-collection shape::
   created with ``ensure_kagura_memories_collection`` like any other.
 * Qdrant only: :func:`verify_context_migration` retrieves by id, which the
   LanceDB preview store does not support (same limit as ``copy_context_points``).
+* A row the resource indexer wrote is not rebuilt from its ``summary`` (only
+  the label ``[resource] doc vN``) but the way the indexer built it (#1896):
+  ``ResourceIndexer.rebuild_point`` writes the document's point under
+  ``Memory.point_id`` with the resource payload, as the embedding sweep does
+  (#1870). Every step therefore addresses a row's point through
+  :func:`_migrated_point_id`, never through ``Memory.id`` alone. A resource
+  row that cannot be rebuilt (schema gone, content no longer a JSON document)
+  is skipped and reported, not given a label vector and not a reason to stop:
+  it has no usable vector under any model until its document is ingested
+  again.
 """
 
 from __future__ import annotations
@@ -35,10 +45,12 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from config.constants import EMBEDDING_MODEL_REGISTRY
 from config.embedding_policy import is_embedding_model_allowed
@@ -59,6 +71,7 @@ from repositories.config_repository import search_config_defaults
 from services.context_routing import resolve_context_embedding
 from services.embedding_service import EmbeddingService
 from services.memory_service import build_memory_point
+from services.resource_indexer import ResourceIndexer, ResourceRebuildError, owns_resource_point
 from utils.datetime import utcnow
 from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -90,6 +103,9 @@ class ReembedResult:
     batches: int
     started_at: datetime
     """Pass to :func:`switch_context_embedding` as ``requeue_since``."""
+    unrebuildable: list[UUID] = field(default_factory=list)
+    """Resource-ingested memories skipped because their point cannot be
+    rebuilt from the row (#1896); not counted in ``embedded``."""
 
 
 @dataclass
@@ -99,6 +115,9 @@ class VerifyResult:
     missing: list[UUID] = field(default_factory=list)
     stale_removed: int = 0
     """Target points deleted because their memory is no longer live."""
+    unrebuildable: list[UUID] = field(default_factory=list)
+    """Resource-ingested memories without a target point that no re-embed can
+    give one (#1896). Reported, but not ``missing``: they do not fail ``ok``."""
 
     @property
     def ok(self) -> bool:
@@ -206,6 +225,66 @@ async def plan_context_migration(
     )
 
 
+def _migrated_point_id(memory: Memory) -> UUID:
+    """The id of the point the migration writes — and expects — for ``memory``.
+
+    ``Memory.point_id`` for a row that owns a resource point (the uuid5 of its
+    document, what ``rebuild_point`` writes), the row id for every other row
+    (what ``add_memory_to_qdrant`` writes). The two differ from a plain
+    ``Memory.point_id`` only for a row that names a resource point it does not
+    own; the embedding sweep writes that one under its row id as well.
+    """
+    return memory.point_id if owns_resource_point(memory) else memory.id
+
+
+_POINT_ID_COLUMNS = (
+    Memory.id,
+    Memory.summary_embedding_id,
+    Memory.resource_id,
+    Memory.resource_doc_id,
+    Memory.resource_version,
+)
+"""What :func:`_migrated_point_id` reads; enough to address a row's point
+without loading its content."""
+
+
+class _Rebuildable(Exception):
+    """Raised by :class:`_RebuildProbe`: the rebuild got as far as embedding."""
+
+
+class _RebuildProbe:
+    """An embedding service that embeds nothing.
+
+    ``rebuild_point`` refuses a row it cannot rebuild before it embeds the
+    document. Handing it this probe asks exactly that question — would the
+    indexer rebuild this row? — without an embedding request or a write, and
+    without a second copy of the indexer's conditions here.
+    """
+
+    async def embed(self, *args: Any, **kwargs: Any) -> list[float]:
+        raise _Rebuildable
+
+
+async def _can_rebuild(indexer: ResourceIndexer, memory: Memory, collection_name: str) -> bool:
+    try:
+        await indexer.rebuild_point(
+            memory,
+            collection_name=collection_name,
+            embedding_service=cast(EmbeddingService, _RebuildProbe()),
+        )
+    except _Rebuildable:
+        return True
+    except ResourceRebuildError as exc:
+        logger.warning(
+            "context_embedding_resource_unrebuildable",
+            memory_id=str(memory.id),
+            context_id=str(memory.context_id),
+            error=str(exc),
+        )
+        return False
+    return True
+
+
 def _group_by_user(rows: list[Memory]) -> Iterator[tuple[str, list[Memory]]]:
     """Consecutive runs of the same ``user_id``.
 
@@ -234,7 +313,14 @@ async def reembed_context(
     target collection. Routing is not touched; the context keeps serving from
     the source collection throughout.
 
-    Idempotent: points are upserted by memory id, so a rerun after a failure
+    A memory the resource indexer wrote goes through the indexer instead of
+    the batch (#1896): its summary is only a label, so its point is rebuilt
+    from the stored document, under ``Memory.point_id``, with the resource
+    payload (``ResourceIndexer.rebuild_point``, one embedding request per
+    document). One that cannot be rebuilt is skipped and listed in
+    ``ReembedResult.unrebuildable``; the run goes on.
+
+    Idempotent: points are upserted by point id, so a rerun after a failure
     overwrites instead of duplicating.
     """
     if batch_size < 1:
@@ -248,6 +334,8 @@ async def reembed_context(
 
     embedded = 0
     batches = 0
+    unrebuildable: list[UUID] = []
+    indexer: ResourceIndexer | None = None
     last_id: UUID | None = None
     while True:
         stmt = select(Memory).where(
@@ -268,7 +356,11 @@ async def reembed_context(
         if not rows:
             break
 
-        for user_id, group in _group_by_user(rows):
+        resource_rows = [memory for memory in rows if owns_resource_point(memory)]
+        resource_row_ids = {memory.id for memory in resource_rows}
+        plain_rows = [memory for memory in rows if memory.id not in resource_row_ids]
+
+        for user_id, group in _group_by_user(plain_rows):
             vectors = await service.embed_batch(
                 [memory.summary for memory in group],
                 user_id,
@@ -294,10 +386,34 @@ async def reembed_context(
                 )
                 embedded += 1
 
+        for memory in resource_rows:
+            if indexer is None:
+                indexer = ResourceIndexer(db)
+            try:
+                await indexer.rebuild_point(
+                    memory, collection_name=plan.target_collection, embedding_service=service
+                )
+                embedded += 1
+            except ResourceRebuildError as exc:
+                # Not a reason to stop the migration: the row has no usable
+                # vector under the source model either once its point is
+                # gone, and a label vector would be worse than none.
+                unrebuildable.append(memory.id)
+                logger.warning(
+                    "context_embedding_resource_unrebuildable",
+                    memory_id=str(memory.id),
+                    context_id=str(plan.context_id),
+                    error=str(exc),
+                )
+            # rebuild_point reads the context, the schema and the event time;
+            # end that read transaction before the next row's embedding call,
+            # as the page loop does.
+            await db.commit()
+
         batches += 1
         last_id = rows[-1].id
         if progress is not None:
-            progress(embedded, plan.memory_count)
+            progress(embedded + len(unrebuildable), plan.memory_count)
 
     logger.info(
         "context_embedding_reembedded",
@@ -306,8 +422,11 @@ async def reembed_context(
         target_collection=plan.target_collection,
         embedded=embedded,
         batches=batches,
+        unrebuildable=len(unrebuildable),
     )
-    return ReembedResult(embedded=embedded, batches=batches, started_at=started_at)
+    return ReembedResult(
+        embedded=embedded, batches=batches, started_at=started_at, unrebuildable=unrebuildable
+    )
 
 
 async def verify_context_migration(
@@ -317,6 +436,14 @@ async def verify_context_migration(
     collection. Reports the missing ids rather than a bare count, so a caller
     can decide whether to re-run :func:`reembed_context` or investigate.
 
+    A memory's point is looked up under :func:`_migrated_point_id` — the
+    document's point id for a resource-ingested row (#1896), the row id
+    otherwise. A resource-ingested row without a point that the indexer could
+    not rebuild either is listed in ``unrebuildable`` instead of ``missing``:
+    re-running the re-embed cannot fix it, so it does not hold the switch
+    back. One that could be rebuilt (written after the re-embed passed it) is
+    ``missing`` like any other row.
+
     Also reconciles the other direction: a memory forgotten *after* the
     re-embed copied it has a target point with no live row. ``forget`` only
     deletes from the collection the context routes to, so nothing else would
@@ -325,31 +452,58 @@ async def verify_context_migration(
     :func:`switch_context_embedding`.
     """
     result = await db.execute(
-        select(Memory.id)
+        select(Memory)
+        .options(load_only(*_POINT_ID_COLUMNS))
         .where(Memory.context_id == plan.context_id, Memory.deleted_at.is_(None))
         .order_by(Memory.id)
     )
-    ids = list(result.scalars().all())
+    # (memory id, point id, owns a resource point), then let go of the rows:
+    # they are partially loaded, and the unrebuildable check below loads the
+    # few it needs in full.
+    expected = [
+        (memory.id, str(_migrated_point_id(memory)), owns_resource_point(memory))
+        for memory in result.scalars().all()
+    ]
+    db.expunge_all()
 
     client = get_qdrant_client()
     present = 0
     missing: list[UUID] = []
-    for i in range(0, len(ids), batch_size):
-        batch = ids[i : i + batch_size]
+    missing_resource_rows: list[UUID] = []
+    for i in range(0, len(expected), batch_size):
+        batch = expected[i : i + batch_size]
         points = await client.retrieve(
             collection_name=plan.target_collection,
-            ids=[str(memory_id) for memory_id in batch],
+            ids=[point_id for _, point_id, _ in batch],
             with_payload=False,
             with_vectors=False,
         )
         found = {str(point.id) for point in points}
-        for memory_id in batch:
-            if str(memory_id) in found:
+        for memory_id, point_id, is_resource_row in batch:
+            if point_id in found:
                 present += 1
+            elif is_resource_row:
+                missing_resource_rows.append(memory_id)
             else:
                 missing.append(memory_id)
 
-    live = {str(memory_id) for memory_id in ids}
+    unrebuildable: list[UUID] = []
+    if missing_resource_rows:
+        indexer = ResourceIndexer(db)
+        for i in range(0, len(missing_resource_rows), batch_size):
+            rows = await db.execute(
+                select(Memory)
+                .where(Memory.id.in_(missing_resource_rows[i : i + batch_size]))
+                .order_by(Memory.id)
+            )
+            for memory in rows.scalars().all():
+                if await _can_rebuild(indexer, memory, plan.target_collection):
+                    missing.append(memory.id)
+                else:
+                    unrebuildable.append(memory.id)
+        missing.sort()
+
+    live = {point_id for _, point_id, _ in expected}
     stored = await list_context_point_ids(
         str(plan.workspace_id), str(plan.context_id), plan.target_collection
     )
@@ -364,7 +518,11 @@ async def verify_context_migration(
         )
 
     return VerifyResult(
-        expected=len(ids), present=present, missing=missing, stale_removed=len(stale)
+        expected=len(expected),
+        present=present,
+        missing=missing,
+        stale_removed=len(stale),
+        unrebuildable=unrebuildable,
     )
 
 
@@ -386,7 +544,9 @@ async def switch_context_embedding(
     back to ``pending`` so the regular sweep embeds them under the new
     routing. Rows *forgotten* since then are removed from the new collection
     after the flip, closing the window between the last verify and the
-    routing change. With ``None`` this is a pure routing flip.
+    routing change — each under the point id the migration wrote it with
+    (:func:`_migrated_point_id`, #1896), and never a point a live row still
+    names. With ``None`` this is a pure routing flip.
 
     A worker that claimed a row before the flip resolved the old routing;
     ``process_pending_embedding`` only marks ``success`` while it still owns
@@ -449,14 +609,29 @@ async def switch_context_embedding(
         # from the new one. Hard-deleted rows (no tombstone) cannot be found
         # this way; only the soft-delete path (``deleted_at``) is covered.
         forgotten = await db.execute(
-            select(Memory.id).where(
-                Memory.context_id == context_id, Memory.deleted_at >= requeue_since
-            )
+            select(Memory)
+            .options(load_only(*_POINT_ID_COLUMNS))
+            .where(Memory.context_id == context_id, Memory.deleted_at >= requeue_since)
         )
-        forgotten_ids = [str(memory_id) for memory_id in forgotten.scalars().all()]
-        if forgotten_ids:
-            await delete_points_from_qdrant(forgotten_ids, get_collection_name(model, dimensions))
-            stale_removed = len(forgotten_ids)
+        forgotten_points = {_migrated_point_id(memory) for memory in forgotten.scalars().all()}
+        if forgotten_points:
+            # A resource point's id is derived from the document, not the row:
+            # a tombstone and a live row of the same document version name the
+            # same point (#1829). The live row keeps it.
+            still_named = await db.execute(
+                select(Memory.summary_embedding_id).where(
+                    Memory.context_id == context_id,
+                    Memory.deleted_at.is_(None),
+                    Memory.summary_embedding_id.in_(forgotten_points),
+                )
+            )
+            forgotten_points -= set(still_named.scalars().all())
+        if forgotten_points:
+            await delete_points_from_qdrant(
+                sorted(str(point_id) for point_id in forgotten_points),
+                get_collection_name(model, dimensions),
+            )
+            stale_removed = len(forgotten_points)
 
     logger.info(
         "context_embedding_switched",
@@ -493,6 +668,11 @@ async def rollback_context_embedding(
     the delta since the switch — by default the ``updated_at`` of the
     ``ContextSearchConfig`` row, which the switch stamped — and refuses when
     ``model``'s collection does not exist (nothing to serve from).
+
+    The re-queue and the removal of forgotten points are
+    :func:`switch_context_embedding`'s, so resource-ingested rows are handled
+    as they are there: re-queued rows are rebuilt by the sweep under
+    ``Memory.point_id`` (#1870), forgotten ones removed under it (#1896).
 
     Raises:
         ValidationError: unknown model, the model the context already routes
@@ -538,6 +718,10 @@ async def purge_source_points(db: AsyncSession, plan: MigrationPlan) -> int:
     Refuses while the context still routes to the source model — that would
     delete the vectors it is serving from. Returns the number of points
     removed (counted before deletion, per ``delete_context_points``).
+
+    Deletes by the ``workspace_id`` + ``context_id`` payload every point of
+    the context carries, not by id, so resource points (stored under the
+    document's point id, #1896) go with the rest.
     """
     current_model, _ = await resolve_context_embedding(db, plan.context_id)
     if current_model == plan.source_model:
