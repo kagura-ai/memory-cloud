@@ -113,7 +113,40 @@ class TestApplyThatDeletedLessThanAsked:
 
         captured = capsys.readouterr()
         assert "still writing points" in captured.err
+        # Nothing was deleted: the error alone, no report.
         assert "deleted 0" not in captured.out
+        assert "point(s) left" not in captured.out
+
+    def test_a_refusal_after_some_deletes_reports_what_was_deleted(self, capsys):
+        """#1869: the delete pass can be refused after earlier batches went
+        through; the operator has to see that points were deleted."""
+        stopped = _result(dry_run=False, deleted=2)
+        stopped.collections[0].error = "collection dropped"
+        stopped.refused = (
+            "a merge or a Sleep rollback was still writing points after 30s; "
+            "stopped after deleting 2"
+        )
+        sweep = AsyncMock(side_effect=[_result(dry_run=True), stopped])
+
+        assert _run(["--apply", "--yes"], sweep) == 1
+
+        captured = capsys.readouterr()
+        assert "deleted 2 orphaned point(s)" in captured.out
+        assert "kagura_memories: skipped: collection dropped" in captured.out
+        assert "8 point(s) left; 7 live embedded memories" in captured.out
+        assert "error: a merge or a Sleep rollback was still writing points" in captured.err
+
+    def test_a_plan_time_refusal_prints_only_the_error(self, capsys):
+        """The ratio guard refuses before anything is deleted: no report."""
+        refused = _result(dry_run=True)
+        refused.refused = "3 of 10 points look orphaned, over 20%; nothing deleted"
+        sweep = AsyncMock(return_value=refused)
+
+        assert _run(["--apply", "--yes"], sweep) == 1
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "error: 3 of 10 points look orphaned" in captured.err
 
     def test_a_collection_skipped_during_apply_is_named(self, capsys):
         applied = _result(dry_run=False, deleted=3)

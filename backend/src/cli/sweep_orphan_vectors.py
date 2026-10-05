@@ -75,8 +75,15 @@ async def _main(args: argparse.Namespace) -> int:
     async def run(db: AsyncSession, dry_run: bool) -> SweepResult:
         result = await sweep_orphan_points(db, dry_run=dry_run, grace=grace)
         if result.refused:
-            # Not a result to report as "deleted 0": the operator has to run
-            # it again.
+            # The delete pass can be refused after earlier batches went
+            # through (#1869): say what was deleted and what is left before
+            # the error. A refusal with nothing deleted — the plan-time ratio
+            # guard, or writers busy before the first batch — is not a result
+            # to report as "deleted 0". Either way the operator has to run it
+            # again, so the command exits non-zero.
+            if result.deleted:
+                print(f"deleted {result.deleted} orphaned point(s)")
+                _print_applied(result)
             raise RuntimeError(result.refused)
         return result
 
