@@ -135,6 +135,26 @@ class TestRevokeBoundary:
         assert response.status_code == 404
 
 
+class TestUpdateBoundary:
+    def test_403_when_the_resources_row_is_in_another_workspace(self, owner_client):
+        # Same boundary as revoke: token lookup, then the resources row — no
+        # contexts query. (The success path continues into plan/quota lookups
+        # that the integration test exercises against a real database.)
+        owner_client.state_["db"] = _db_returning(_token(resource_pk=uuid4()), None)
+        response = owner_client.patch(
+            f"/api/v1/resource-tokens/{PUBLIC_ID}", json={"description": "renamed"}
+        )
+        assert response.status_code == 403
+        assert owner_client.state_["db"].execute.await_count == 2
+
+    def test_403_for_a_legacy_token_without_resource_pk(self, owner_client):
+        owner_client.state_["db"] = _db_returning(_token(resource_pk=None))
+        response = owner_client.patch(
+            f"/api/v1/resource-tokens/{PUBLIC_ID}", json={"description": "renamed"}
+        )
+        assert response.status_code == 403
+
+
 class TestListFilterBoundary:
     def test_filter_resolves_through_the_resources_row(self, owner_client):
         with patch.object(
