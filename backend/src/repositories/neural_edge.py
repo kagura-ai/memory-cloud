@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import and_, case, delete, desc, func, or_, select
+from sqlalchemy import Select, and_, case, delete, desc, func, or_, select
 from sqlalchemy import cast as sa_cast
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.engine import CursorResult
@@ -48,6 +48,51 @@ def owner_condition(user_id: str | frozenset[str]) -> ColumnElement[bool]:
     if isinstance(user_id, str):
         return NeuralMemoryEdge.user_id == user_id
     return NeuralMemoryEdge.user_id.in_(user_id)
+
+
+def reads_parallel_rows(user_id: OwnerFilter) -> bool:
+    """Whether a read for ``user_id`` can match two rows for one (src, dst).
+
+    ``unique_edge`` is per account, so each account of an identity-link set
+    may own a row for the same pair (#1867). One account never does, and the
+    unfiltered shared-context read (None) keeps listing every creator's row.
+    """
+    return isinstance(user_id, frozenset) and len(user_id) > 1
+
+
+# #1867: which of a pair's parallel rows a link-set read stands for — the
+# strongest, then the most recently updated; ``id`` makes the pick total.
+_STRONGEST_FIRST = (
+    desc(NeuralMemoryEdge.weight),
+    desc(NeuralMemoryEdge.last_updated),
+    NeuralMemoryEdge.id,
+)
+
+
+def _edges_matching(
+    user_id: OwnerFilter, conditions: list[ColumnElement[bool]]
+) -> Select[NeuralMemoryEdge]:
+    """Edges matching ``conditions``, with one row per (src, dst) for a
+    link-set read (#1867): the row ``_STRONGEST_FIRST`` ranks first among the
+    rows that pass the filters. Otherwise the plain filtered select."""
+    if not reads_parallel_rows(user_id):
+        return select(NeuralMemoryEdge).where(and_(*conditions))
+    ranked = (
+        select(
+            NeuralMemoryEdge.id,
+            func.row_number()
+            .over(
+                partition_by=(NeuralMemoryEdge.src_id, NeuralMemoryEdge.dst_id),
+                order_by=_STRONGEST_FIRST,
+            )
+            .label("rank"),
+        )
+        .where(and_(*conditions))
+        .subquery()
+    )
+    return select(NeuralMemoryEdge).where(
+        NeuralMemoryEdge.id.in_(select(ranked.c.id).where(ranked.c.rank == 1))
+    )
 
 
 class NeuralEdgeRepository:
@@ -481,8 +526,13 @@ class NeuralEdgeRepository:
     ) -> NeuralMemoryEdge | None:
         """Get single edge with optional 3-level isolation.
 
+        One account owns at most one row per pair (``unique_edge``). An
+        identity-link set can own one per account (#1867); the read then
+        returns the strongest, most recently updated row instead of raising
+        ``MultipleResultsFound``.
+
         Args:
-            user_id: User identifier
+            user_id: User identifier, or the identity-link set of a read
             src_id: Source node ID
             dst_id: Destination node ID
             workspace_id: Workspace ID (for isolation)
@@ -503,6 +553,9 @@ class NeuralEdgeRepository:
             conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
 
         stmt = select(NeuralMemoryEdge).where(and_(*conditions))
+        if reads_parallel_rows(user_id):
+            result = await self.db.execute(stmt.order_by(*_STRONGEST_FIRST).limit(1))
+            return result.scalars().first()
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -587,14 +640,11 @@ class NeuralEdgeRepository:
                 sa_cast(NeuralMemoryEdge.edge_metadata, JSONB)["source"].astext == metadata_source
             )
 
-        stmt = (
-            select(NeuralMemoryEdge)
-            .where(and_(*conditions))
-            .order_by(desc(NeuralMemoryEdge.weight))
-        )
-
         if edge_types:
-            stmt = stmt.where(NeuralMemoryEdge.edge_type.in_(edge_types))
+            conditions.append(NeuralMemoryEdge.edge_type.in_(edge_types))
+
+        # #1867: a link-set read gets one row per pair, so ``limit`` counts pairs.
+        stmt = _edges_matching(user_id, conditions).order_by(desc(NeuralMemoryEdge.weight))
 
         if limit:
             stmt = stmt.limit(limit)
@@ -673,14 +723,11 @@ class NeuralEdgeRepository:
                 sa_cast(NeuralMemoryEdge.edge_metadata, JSONB)["source"].astext == metadata_source
             )
 
-        stmt = (
-            select(NeuralMemoryEdge)
-            .where(and_(*conditions))
-            .order_by(desc(NeuralMemoryEdge.weight))
-        )
-
         if edge_types:
-            stmt = stmt.where(NeuralMemoryEdge.edge_type.in_(edge_types))
+            conditions.append(NeuralMemoryEdge.edge_type.in_(edge_types))
+
+        # #1867: a link-set read gets one row per pair, so ``limit`` counts pairs.
+        stmt = _edges_matching(user_id, conditions).order_by(desc(NeuralMemoryEdge.weight))
 
         if limit:
             stmt = stmt.limit(limit)
@@ -730,7 +777,8 @@ class NeuralEdgeRepository:
         if context_id:
             conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
 
-        stmt = select(NeuralMemoryEdge).where(and_(*conditions))
+        # #1867: one row per pair for a link-set read.
+        stmt = _edges_matching(user_id, conditions)
 
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
@@ -1012,14 +1060,22 @@ class NeuralEdgeRepository:
         """Get node degree (in-degree, out-degree).
 
         Args:
-            user_id: User identifier
+            user_id: User identifier, or the identity-link set of a read
             node_id: Memory node ID
 
         Returns:
             Tuple of (in_degree, out_degree)
         """
+        # #1867: for a link set, two accounts' rows for one pair are one edge —
+        # count the distinct neighbours instead of the rows.
+        if reads_parallel_rows(user_id):
+            in_count = func.count(func.distinct(NeuralMemoryEdge.src_id))
+            out_count = func.count(func.distinct(NeuralMemoryEdge.dst_id))
+        else:
+            in_count = out_count = func.count(NeuralMemoryEdge.id)
+
         # Count incoming edges
-        in_stmt = select(func.count(NeuralMemoryEdge.id)).where(
+        in_stmt = select(in_count).where(
             and_(
                 owner_condition(user_id),
                 NeuralMemoryEdge.dst_id == node_id,
@@ -1029,7 +1085,7 @@ class NeuralEdgeRepository:
         in_degree = in_result.scalar() or 0
 
         # Count outgoing edges
-        out_stmt = select(func.count(NeuralMemoryEdge.id)).where(
+        out_stmt = select(out_count).where(
             and_(
                 owner_condition(user_id),
                 NeuralMemoryEdge.src_id == node_id,
