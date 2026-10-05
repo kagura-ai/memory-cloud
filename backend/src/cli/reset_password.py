@@ -114,7 +114,9 @@ def _session_store_or_exit() -> SessionManager:
         print("  A password reset must sign out every browser session of the account.")
         print("  Nothing was changed. Start Redis, or set REDIS_URL to the Redis the API")
         print("  uses, and run this command again.")
-        sys.exit(1)
+        # ``raise`` rather than ``sys.exit``: every path of this function
+        # visibly returns the store or raises.
+        raise SystemExit(1) from exc
 
 
 def reset_password():
