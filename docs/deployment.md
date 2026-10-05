@@ -656,10 +656,12 @@ context** (`neural_memory_edges.origin != 'hebbian'`: declared links,
 `supersedes` / `contradicts`, sleep-discovered edges; Issue #1872), so the
 new owner can list, update and delete them — a `supersedes` edge keeps
 hiding a memory from default recall whoever holds it. Where `--to` already
-has an edge on the same pair of memories, the edge upsert's precedence
-decides: a Hebbian row of `--to`, or a semantic one when `--from`'s edge is
-declared, is replaced by the moved edge; otherwise `--to`'s row is kept and
-`--from`'s duplicate is dropped (the plan prints both counts). One
+has an edge on the same pair of memories, one of the two rows goes, chosen
+so that recall does not change: `--to`'s row is replaced by the moved edge
+when it is Hebbian, when it is semantic and `--from`'s edge is declared, or
+when `--from`'s edge is a `supersedes` / `contradicts` and `--to`'s row has
+another edge type; otherwise `--to`'s row is kept and `--from`'s duplicate is
+dropped (the plan prints both counts). One
 `audit_logs` row (`context_creator_transferred`) is written per moved
 context with the memory and edge counts, and re-running after `--apply`
 changes 0 rows.
@@ -669,7 +671,9 @@ exits 1 and lists the memory ids — the memory list is already right, recall
 may miss those memories until their payload is repaired. A memory that is
 not embedded yet (`embedding_status` other than `success`) has no vector
 point to update: it is listed as skipped and does not change the exit code,
-because the later embed writes the new `user_id`. Re-run with
+because the later embed writes the new `user_id`. (During a vector-store
+outage those memories are listed as skipped too; the embedded ones are then
+reported as failures and the command exits 1.) Re-run with
 `--apply --yes --repair-payloads`: in every context an earlier run moved to
 `--to` (found by its audit row) it moves any memory still authored by
 `--from` and any non-Hebbian edge `--from` still holds — including the edges

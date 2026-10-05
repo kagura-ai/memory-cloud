@@ -31,27 +31,38 @@ What moves, per live context in the workspace whose ``created_by`` is ``--from``
   existed is Hebbian and stays.
 
 ``unique_edge`` is ``(user_id, src_id, dst_id)``, so an edge cannot simply
-move onto a pair ``--to`` already holds a row for. The rule follows the edge
-upsert's own precedence (``NeuralEdgeRepository.create_or_update_edge``):
+move onto a pair ``--to`` already holds a row for. One of the two rows has
+to go, and the rule is chosen so that the transfer does not change what
+recall returns:
 
-* ``--to``'s row is outranked — it is Hebbian (a co-activation weight, which
-  any declared or semantic write overwrites), or it is semantic and
-  ``--from``'s edge is declared (a user assertion beats a machine guess,
-  #1406): it is deleted and ``--from``'s edge takes its place, otherwise a
-  declared ``supersedes`` would be lost to a retrieval counter or to a
-  sleep-discovered link;
-* otherwise (``--to``'s row is declared, or both are semantic) the new owner's
-  row is kept as it is and ``--from``'s row is dropped. Skipping it instead
-  would leave a row that still shadows recall and that nobody can manage, and
-  the command would never reach "nothing left to move".
+* ``--to``'s row is outranked — deleted, ``--from``'s edge takes its place —
+  when any of these holds:
+
+  - it is Hebbian (a co-activation weight, which any declared or semantic
+    write overwrites in ``NeuralEdgeRepository.create_or_update_edge``);
+  - it is semantic and ``--from``'s edge is declared (a user assertion beats
+    a machine guess, #1406);
+  - ``--from``'s edge is a ``supersedes`` or a ``contradicts`` and ``--to``'s
+    row has another ``edge_type``, whatever its origin. Supersede shadowing
+    and contradiction annotations in recall are keyed by ``edge_type`` and
+    not by who holds the edge, so dropping ``--from``'s row for, say, a
+    declared ``related_to`` of ``--to`` would silently un-hide a superseded
+    memory. This arm goes beyond the upsert's origin precedence on purpose.
+
+* otherwise the new owner's row is kept as it is and ``--from``'s row is
+  dropped: both rows have the same ``edge_type``, or ``--from``'s edge is an
+  ordinary link and ``--to``'s row is declared or both are semantic. Skipping
+  it instead would leave a row that nobody can manage, and the command would
+  never reach "nothing left to move".
 
 ``--to`` must be the workspace owner or an ``admin`` member — anyone else
 could end up owning a private context they cannot list. One ``audit_logs``
 row is written per transferred context, with the memory and edge counts.
-Running again after ``--apply`` changes 0 rows. Vector-store updates run after the database commit and are
-reported if any fail (exit 1): the memory list is already right, recall may
-miss those memories until the payload is repaired — re-run with
-``--repair-payloads``, which converges: in every context an earlier run
+Running again after ``--apply`` changes 0 rows. Vector-store updates run
+after the database commit and are reported if any fail (exit 1): the memory
+list is already right, recall may miss those memories until the payload is
+repaired — re-run with ``--repair-payloads``, which converges: in every
+context an earlier run
 moved to ``--to`` (found by its audit row) it moves any memory still
 authored by ``--from``, any non-Hebbian edge ``--from`` still holds (also
 the ones a transfer made before #1872 left behind) and re-points the vector
@@ -66,7 +77,10 @@ store returns silently), so only a failed update of a memory with
 ``embedding_status == 'success'`` counts as a payload failure; the others
 are listed as "skipped, not embedded yet" and do not affect the exit code —
 the later embed writes the payload from the row, which already carries the
-new ``user_id``.
+new ``user_id``. An unreachable vector store makes every update fail, so the
+not-yet-embedded memories land in that list during an outage too; the
+embedded ones are then reported as failures, which is what tells the two
+situations apart.
 
 The command is not fenced against concurrent writes: a ``remember`` by the
 ``--from`` identity that was authorized before the flip, or an embedding
@@ -123,6 +137,8 @@ from models.memory import (  # noqa: E402
     EDGE_ORIGIN_DECLARED,
     EDGE_ORIGIN_HEBBIAN,
     EDGE_ORIGIN_SEMANTIC,
+    EDGE_TYPE_CONTRADICTS,
+    EDGE_TYPE_SUPERSEDES,
     Memory,
     NeuralMemoryEdge,
 )
@@ -142,9 +158,8 @@ class EdgeCounts:
     """What happens to ``--from``'s non-Hebbian edges in a set of contexts.
 
     ``moved`` change hands; ``dropped`` are deleted because ``--to`` already
-    holds an edge of equal or higher rank on the pair; ``replaced`` are
-    outranked rows of ``--to`` deleted to make room for a moved edge (see the
-    module docstring).
+    holds an edge on the pair that is kept; ``replaced`` are outranked rows of
+    ``--to`` deleted to make room for a moved edge (see the module docstring).
     """
 
     moved: int = 0
@@ -207,9 +222,9 @@ class TransferResult:
         return sum(line.edges.moved for line in self.lines)
 
     @property
-    def edges_touched(self) -> int:
-        """Edges of ``from`` the transfer moves or drops (sweep excluded)."""
-        return sum(line.edges.total for line in self.lines)
+    def edges_dropped(self) -> int:
+        """Duplicate edges of ``from`` the transfer deletes (sweep excluded)."""
+        return sum(line.edges.dropped for line in self.lines)
 
     @property
     def planned(self) -> int:
@@ -221,11 +236,15 @@ class TransferResult:
         parts = [
             (self.transferred, "context(s)"),
             (self.memories + self.repair_moved, "memory row(s)"),
-            # Dropped duplicates are rows the run deletes: they count as changed.
-            (self.edges_touched + self.repair_edges.total, "edge(s)"),
+            (self.edges_moved + self.repair_edges.moved, "edge(s)"),
             (self.repair_memories, "vector payload repair(s)"),
         ]
-        return ", ".join(f"{count} {label}" for count, label in parts if count) or "nothing"
+        named = [f"{count} {label}" for count, label in parts if count]
+        # Same wording as the plan lines: duplicates are deleted, not moved.
+        dropped = self.edges_dropped + self.repair_edges.dropped
+        if dropped:
+            named.append(f"{dropped} duplicate edge(s) dropped")
+        return ", ".join(named) or "nothing"
 
 
 async def _require_owner_or_admin(db: AsyncSession, *, workspace_id: UUID, user_id: str) -> None:
@@ -299,7 +318,7 @@ async def _repoint_payloads(
     return failed, skipped
 
 
-def _edges_to_move(context_ids: list[UUID], from_user_id: str) -> list:
+def _edges_to_move(context_ids: list[UUID], from_user_id: str) -> list[ColumnElement[bool]]:
     """WHERE clauses selecting ``from``'s non-Hebbian edges in the contexts.
 
     ``origin`` is NOT NULL (server default ``'hebbian'``), so ``!=`` needs no
@@ -315,13 +334,19 @@ def _edges_to_move(context_ids: list[UUID], from_user_id: str) -> list:
 def _outranked(theirs: type[NeuralMemoryEdge], mine: type[NeuralMemoryEdge]) -> ColumnElement[bool]:
     """``theirs`` (a row of ``to``) gives way to ``mine`` (the edge that moves).
 
-    The edge upsert's precedence: anything non-Hebbian overwrites a Hebbian
-    row, and a declared edge overwrites a semantic one. ``mine`` is never
-    Hebbian here.
+    Anything non-Hebbian overwrites a Hebbian row and a declared edge
+    overwrites a semantic one (the edge upsert's precedence); on top of that
+    a ``supersedes`` / ``contradicts`` that moves is never given up for a row
+    of another type, because recall acts on those two types. ``mine`` is
+    never Hebbian here.
     """
     return or_(
         theirs.origin == EDGE_ORIGIN_HEBBIAN,
         and_(mine.origin == EDGE_ORIGIN_DECLARED, theirs.origin == EDGE_ORIGIN_SEMANTIC),
+        and_(
+            mine.edge_type.in_((EDGE_TYPE_SUPERSEDES, EDGE_TYPE_CONTRADICTS)),
+            theirs.edge_type != mine.edge_type,
+        ),
     )
 
 
@@ -659,7 +684,7 @@ def _edge_note(edges: EdgeCounts) -> str:
     note = f"{edges.moved} edge(s)"
     extras = []
     if edges.dropped:
-        extras.append(f"{edges.dropped} duplicate(s) dropped")
+        extras.append(f"{edges.dropped} duplicate edge(s) dropped")
     if edges.replaced:
         extras.append(f"{edges.replaced} outranked row(s) of --to replaced")
     return f"{note} [{', '.join(extras)}]" if extras else note
@@ -681,6 +706,7 @@ def _print_plan(result: TransferResult) -> None:
     print(
         f"{verb} {result.transferred} context(s), {result.memories} memory row(s) "
         f"(tombstones included), {result.edges_moved} non-Hebbian edge(s)"
+        + (f", {result.edges_dropped} duplicate edge(s) dropped" if result.edges_dropped else "")
     )
     if result.repair_moved:
         verb = "would move" if result.dry_run else "moved"
@@ -703,7 +729,8 @@ def _print_plan(result: TransferResult) -> None:
     if result.payload_skipped:
         print(
             f"skipped {len(result.payload_skipped)} memor(ies) not embedded yet — no vector "
-            "point to update; the embed writes the new user_id:"
+            "point to update; the embed writes the new user_id (a vector store that cannot "
+            "be reached ends up here too: check for failures below):"
         )
         for memory_id in result.payload_skipped:
             print(f"  {memory_id}")

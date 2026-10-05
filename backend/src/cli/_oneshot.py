@@ -105,6 +105,8 @@ async def run_plan_apply(
         print_plan: Renders a result to stdout.
         changes: How many rows the result would change / changed.
         noun: What is being changed, for the prompt ("context").
+        apply: ``--apply`` was given.
+        assume_yes: ``--yes`` was given.
         verb: What happens to it, for the prompt and the report ("change",
             "delete").
         print_applied: Renders the applied result after the one-line report,
@@ -113,8 +115,6 @@ async def run_plan_apply(
             more than one kind of row ("2 context(s), 5 memory row(s)"). It
             replaces "<changes> <noun>(s)" in the prompt and the report;
             ``changes`` still decides whether there is anything to do.
-        apply: ``--apply`` was given.
-        assume_yes: ``--yes`` was given.
 
     Returns:
         Process exit code: 0 ok, 1 error.

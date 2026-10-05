@@ -26,6 +26,8 @@ from models.memory import (
     EDGE_ORIGIN_DECLARED,
     EDGE_ORIGIN_HEBBIAN,
     EDGE_ORIGIN_SEMANTIC,
+    EDGE_TYPE_CONTRADICTS,
+    EDGE_TYPE_DEPENDS_ON,
     EDGE_TYPE_NEURAL_ASSOCIATION,
     EDGE_TYPE_RELATED_TO,
     EDGE_TYPE_SUPERSEDES,
@@ -510,10 +512,18 @@ async def test_non_hebbian_edges_follow_the_context(db_session, scenario, vector
             _edge(b, a, frm),  # declared related_to
             _edge(a, o, frm, origin=EDGE_ORIGIN_SEMANTIC),
             _edge(a, t, frm, edge_type=EDGE_TYPE_NEURAL_ASSOCIATION, origin=EDGE_ORIGIN_HEBBIAN),
-            # --to already declared its own edge on a pair --from also holds:
-            # the old account's duplicate is dropped, --to's row is kept.
+            # --to declared a related_to on a pair --from superseded: recall
+            # acts on the supersedes, so it is the one that survives.
             _edge(b, o, frm, edge_type=EDGE_TYPE_SUPERSEDES),
             _edge(b, o, to, weight=0.5),
+            # Both superseded the pair: --to's row is kept, --from's is dropped.
+            _edge(t, b, frm, edge_type=EDGE_TYPE_SUPERSEDES, weight=0.9),
+            _edge(t, b, to, edge_type=EDGE_TYPE_SUPERSEDES, weight=0.3),
+            # An ordinary declared link does not displace --to's declared one.
+            _edge(t, o, frm),
+            _edge(t, o, to, edge_type=EDGE_TYPE_DEPENDS_ON, weight=0.2),
+            # A third user's edge in the same context is nobody's to move.
+            _edge(b, t, s["other"].user_id, edge_type=EDGE_TYPE_SUPERSEDES),
             # --to only has a co-activation weight on the pair: the declared
             # edge replaces it, as a declared write through the API would.
             _edge(o, a, frm, edge_type=EDGE_TYPE_SUPERSEDES),
@@ -535,19 +545,21 @@ async def test_non_hebbian_edges_follow_the_context(db_session, scenario, vector
         db_session, from_user_id=frm, to_user_id=to, workspace_id=s["ws"].id, dry_run=True
     )
     by_ctx = {line.context_id: line.edges for line in plan.lines}
-    assert (by_ctx[s["private_ctx"].id].moved, by_ctx[s["private_ctx"].id].dropped) == (5, 2)
-    assert by_ctx[s["private_ctx"].id].replaced == 2
+    assert (by_ctx[s["private_ctx"].id].moved, by_ctx[s["private_ctx"].id].dropped) == (6, 3)
+    assert by_ctx[s["private_ctx"].id].replaced == 3
     assert by_ctx[s["shared_ctx"].id].moved == 0
-    assert plan.edges_moved == 5
-    # The prompt counts every edge row the run touches, dropped duplicates included.
-    assert plan.summary() == "2 context(s), 4 memory row(s), 7 edge(s)"
+    assert (plan.edges_moved, plan.edges_dropped) == (6, 3)
+    # The prompt names moved and dropped edges the way the plan lines do.
+    assert plan.summary() == (
+        "2 context(s), 4 memory row(s), 6 edge(s), 3 duplicate edge(s) dropped"
+    )
     # Dry run wrote nothing.
     assert (frm, a.id, b.id) in await _edges(db_session, s["private_ctx"].id)
 
     result = await transfer_context_creator(
         db_session, from_user_id=frm, to_user_id=to, workspace_id=s["ws"].id, dry_run=False
     )
-    assert result.edges_moved == 5
+    assert result.edges_moved == 6
 
     edges = await _edges(db_session, s["private_ctx"].id)
     assert set(edges) == {
@@ -559,14 +571,22 @@ async def test_non_hebbian_edges_follow_the_context(db_session, scenario, vector
         (to, o.id, a.id),
         (to, o.id, b.id),
         (to, t.id, a.id),
+        (to, t.id, b.id),
+        (to, t.id, o.id),
+        (s["other"].user_id, b.id, t.id),
     }
     assert edges[(to, a.id, b.id)].edge_type == EDGE_TYPE_SUPERSEDES
     assert edges[(to, b.id, a.id)].edge_type == EDGE_TYPE_RELATED_TO
     assert edges[(to, a.id, o.id)].origin == EDGE_ORIGIN_SEMANTIC
     assert edges[(frm, a.id, t.id)].origin == EDGE_ORIGIN_HEBBIAN
-    # --to's own declared row survived untouched; --from's duplicate is gone.
-    assert edges[(to, b.id, o.id)].edge_type == EDGE_TYPE_RELATED_TO
-    assert edges[(to, b.id, o.id)].weight == 0.5
+    # The supersedes replaced --to's related_to on the pair.
+    assert edges[(to, b.id, o.id)].edge_type == EDGE_TYPE_SUPERSEDES
+    assert edges[(to, b.id, o.id)].weight == 1.0
+    # Same type on both sides, or an ordinary link: --to's own row survived
+    # untouched and --from's duplicate is gone.
+    assert edges[(to, t.id, b.id)].weight == 0.3
+    assert edges[(to, t.id, o.id)].edge_type == EDGE_TYPE_DEPENDS_ON
+    assert edges[(s["other"].user_id, b.id, t.id)].edge_type == EDGE_TYPE_SUPERSEDES
     # The declared edge took the place of --to's Hebbian row.
     assert edges[(to, o.id, a.id)].edge_type == EDGE_TYPE_SUPERSEDES
     assert edges[(to, o.id, a.id)].origin == EDGE_ORIGIN_DECLARED
@@ -580,9 +600,9 @@ async def test_non_hebbian_edges_follow_the_context(db_session, scenario, vector
     audit = await db_session.scalar(
         select(AuditLog).where(AuditLog.resource == f"context:{s['private_ctx'].id}")
     )
-    assert audit.user_metadata["edges"] == 5
-    assert audit.user_metadata["edges_dropped"] == 2
-    assert audit.user_metadata["edges_replaced"] == 2
+    assert audit.user_metadata["edges"] == 6
+    assert audit.user_metadata["edges_dropped"] == 3
+    assert audit.user_metadata["edges_replaced"] == 3
 
     # A second run, with and without the sweep, changes nothing.
     for repair in (False, True):
@@ -596,6 +616,54 @@ async def test_non_hebbian_edges_follow_the_context(db_session, scenario, vector
         )
         assert (again.transferred, again.edges_moved, again.repair_edges.total) == (0, 0, 0)
     assert set(await _edges(db_session, s["private_ctx"].id)) == set(edges)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("from_type", "to_type", "to_origin", "survivor"),
+    [
+        # Recall acts on supersedes / contradicts: never given up for another type.
+        (EDGE_TYPE_SUPERSEDES, EDGE_TYPE_RELATED_TO, EDGE_ORIGIN_DECLARED, "from"),
+        (EDGE_TYPE_CONTRADICTS, EDGE_TYPE_RELATED_TO, EDGE_ORIGIN_DECLARED, "from"),
+        (EDGE_TYPE_SUPERSEDES, EDGE_TYPE_CONTRADICTS, EDGE_ORIGIN_DECLARED, "from"),
+        # Same type on both sides: the new owner's row is the one that stays.
+        (EDGE_TYPE_SUPERSEDES, EDGE_TYPE_SUPERSEDES, EDGE_ORIGIN_DECLARED, "to"),
+        (EDGE_TYPE_CONTRADICTS, EDGE_TYPE_CONTRADICTS, EDGE_ORIGIN_SEMANTIC, "from"),
+        # An ordinary link does not displace --to's supersedes.
+        (EDGE_TYPE_RELATED_TO, EDGE_TYPE_SUPERSEDES, EDGE_ORIGIN_DECLARED, "to"),
+    ],
+)
+async def test_edge_type_decides_a_collision_recall_depends_on(
+    db_session, scenario, vector_store, from_type, to_type, to_origin, survivor
+):
+    """``--from`` holds a declared edge on a pair ``--to`` also holds one on.
+    Shadowing and contradiction annotations follow ``edge_type``, so the
+    transfer must not trade a ``supersedes`` / ``contradicts`` for another
+    type; with the same type on both sides nothing is lost either way."""
+    s, m = scenario, scenario["memories"]
+    frm, to = s["cli_admin"].user_id, s["web_user"].user_id
+    a, b = m["private_a"], m["private_b"]
+    db_session.add_all(
+        [
+            _edge(a, b, frm, edge_type=from_type, weight=0.9),
+            _edge(a, b, to, edge_type=to_type, origin=to_origin, weight=0.3),
+        ]
+    )
+    await db_session.flush()
+
+    result = await transfer_context_creator(
+        db_session, from_user_id=frm, to_user_id=to, workspace_id=s["ws"].id, dry_run=False
+    )
+
+    edges = await _edges(db_session, s["private_ctx"].id)
+    assert set(edges) == {(to, a.id, b.id)}
+    row = edges[(to, a.id, b.id)]
+    if survivor == "from":
+        assert (row.edge_type, row.origin, row.weight) == (from_type, EDGE_ORIGIN_DECLARED, 0.9)
+        assert (result.edges_moved, result.edges_dropped) == (1, 0)
+    else:
+        assert (row.edge_type, row.origin, row.weight) == (to_type, to_origin, 0.3)
+        assert (result.edges_moved, result.edges_dropped) == (0, 1)
 
 
 @pytest.mark.asyncio
@@ -662,7 +730,8 @@ async def test_repair_runs_after_the_from_user_row_is_gone(
     ctx = _context(s["ws"], retired.user_id, private=True)
     db_session.add(ctx)
     await db_session.flush()
-    db_session.add(_memory(ctx, retired.user_id))
+    first_memory = _memory(ctx, retired.user_id)
+    db_session.add(first_memory)
     await db_session.flush()
     frm, to = retired.user_id, s["web_user"].user_id
 
@@ -675,6 +744,9 @@ async def test_repair_runs_after_the_from_user_row_is_gone(
     late = _memory(ctx, frm)
     db_session.add(late)
     await db_session.flush()
+    # ...and an edge it declared after the flip: swept with the memory.
+    db_session.add(_edge(late, first_memory, frm, edge_type=EDGE_TYPE_SUPERSEDES))
+    await db_session.flush()
 
     argv = ["--from", frm, "--to", to, "--workspace", str(s["ws"].id), "--apply", "--yes"]
     # Without the sweep the --from row is still required: a typo must not
@@ -682,6 +754,7 @@ async def test_repair_runs_after_the_from_user_row_is_gone(
     assert await _main(_parse(argv)) == 1
     assert await _main(_parse([*argv, "--repair-payloads"])) == 0
     assert await _author(db_session, late.id) == to
+    assert set(await _edges(db_session, ctx.id)) == {(to, late.id, first_memory.id)}
 
     with pytest.raises(ValueError, match="nobody_here"):
         await transfer_context_creator(
