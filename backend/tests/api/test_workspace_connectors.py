@@ -210,7 +210,12 @@ async def test_create_same_workspace_conflict_stores_the_new_install_bot_token(_
     )
 
     assert conflict.status_code == 409
-    assert conflict.details["reason"] == "connector_team_connected_here"
+    assert conflict.details == {
+        "reason": "connector_team_connected_here",
+        "connector_id": str(connector.id),
+        "display_name": "Acme",
+        "token_refreshed": True,  # confirmed, so the UI may say so
+    }
     # The rest of the bundle is the existing connector's, not the install's.
     assert connector.get_oauth_tokens() == {
         "bot_token": "xoxb-new",
@@ -239,10 +244,11 @@ async def test_create_same_workspace_conflict_same_token_keeps_config_version(_f
     db = _db_returning(connector)
     redis = _ScanRedis({f"slack_channels_types:{connector.id}": "public_channel"})
 
-    _, discard = await _create_into_same_workspace_conflict(
+    conflict, discard = await _create_into_same_workspace_conflict(
         db=db, workspace_id=workspace_id, connector=connector, redis=redis
     )
 
+    assert conflict.details["token_refreshed"] is True
     assert connector.get_oauth_tokens()["bot_token"] == "xoxb-new"
     assert connector.config_version == 3
     discard.assert_awaited_once_with("handle-1")
@@ -258,7 +264,7 @@ async def test_create_same_workspace_conflict_without_install_handle_stores_noth
     db = _db_returning(connector)
     redis = _ScanRedis({f"slack_channels_types:{connector.id}": "public_channel"})
 
-    _, discard = await _create_into_same_workspace_conflict(
+    conflict, discard = await _create_into_same_workspace_conflict(
         db=db,
         workspace_id=workspace_id,
         connector=connector,
@@ -271,6 +277,7 @@ async def test_create_same_workspace_conflict_without_install_handle_stores_noth
         ),
     )
 
+    assert "token_refreshed" not in conflict.details
     assert connector.get_oauth_tokens()["bot_token"] == "xoxb-old"
     assert connector.config_version == 3
     db.execute.assert_not_awaited()
@@ -282,7 +289,8 @@ async def test_create_same_workspace_conflict_without_install_handle_stores_noth
 @pytest.mark.asyncio
 async def test_create_same_workspace_conflict_refresh_failure_still_answers_409(_fernet_env):
     """#1880: the refresh is best-effort — a failure while storing the token
-    keeps the 409 (not a 500) and leaves the install handle for a retry."""
+    keeps the 409 (not a 500) and leaves the install handle for a retry. The
+    body does not claim a refresh, so the UI falls back to the neutral copy."""
     workspace_id = uuid4()
     connector = _existing_slack_connector(workspace_id)
     db = _db_returning(connector)
@@ -294,6 +302,7 @@ async def test_create_same_workspace_conflict_refresh_failure_still_answers_409(
     )
 
     assert conflict.details["reason"] == "connector_team_connected_here"
+    assert "token_refreshed" not in conflict.details
     assert db.rollback.await_count == 2
     discard.assert_not_awaited()
     assert redis.store == {f"slack_channels_types:{connector.id}": "public_channel"}

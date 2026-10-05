@@ -70,6 +70,7 @@ const HERE: TeamConflict = {
   kind: "here",
   connectorId: "11111111-1111-1111-1111-111111111111",
   displayName: "Acme Slack",
+  tokenRefreshed: true,
 };
 
 describe("teamConflictOf", () => {
@@ -82,7 +83,21 @@ describe("teamConflictOf", () => {
           display_name: "Acme Slack",
         }),
       ),
+    ).toEqual({ ...HERE, tokenRefreshed: false });
+  });
+
+  it("reads the server's refresh confirmation, and only a literal true (#1880)", () => {
+    const details = {
+      reason: "connector_team_connected_here",
+      connector_id: "11111111-1111-1111-1111-111111111111",
+      display_name: "Acme Slack",
+    };
+    expect(
+      teamConflictOf(conflict409({ ...details, token_refreshed: true })),
     ).toEqual(HERE);
+    expect(
+      teamConflictOf(conflict409({ ...details, token_refreshed: "true" })),
+    ).toEqual({ ...HERE, tokenRefreshed: false });
   });
 
   it("reads the elsewhere reason", () => {
@@ -129,6 +144,7 @@ const HERE_NO_NAME: TeamConflict = {
   kind: "here",
   connectorId: "11111111-1111-1111-1111-111111111111",
   displayName: null,
+  tokenRefreshed: true,
 };
 
 const REFRESHED = { en: /refreshed by this sign-in/, ja: /今回のサインインで/ };
@@ -184,6 +200,23 @@ describe("useTeamConflictMessage (#1880)", () => {
     renderIn("ja", <Message conflict={HERE} source="oauth" />);
     expect(screen.getByText(REFRESHED.ja)).toBeInTheDocument();
   });
+
+  it.each(["en", "ja"] as const)(
+    "%s: an OAuth conflict the server did not confirm claims no refresh",
+    (locale) => {
+      const { container } = renderIn(
+        locale,
+        <Message
+          conflict={{ ...HERE, tokenRefreshed: false }}
+          source="oauth"
+        />,
+      );
+
+      const text = container.textContent ?? "";
+      expect(REFRESHED[locale].test(text)).toBe(false);
+      expect(text).toContain("Acme Slack");
+    },
+  );
 
   it.each([
     ["en", undefined],

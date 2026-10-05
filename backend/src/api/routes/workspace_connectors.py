@@ -104,7 +104,7 @@ async def _refresh_connected_slack_install(
     connector_id: str,
     bot_token: str,
     install_handle: str,
-) -> None:
+) -> bool:
     """Hand a refused Slack install's bot token to the existing connector (#1880).
 
     Runs after the create was refused because this workspace already has a
@@ -117,6 +117,11 @@ async def _refresh_connected_slack_install(
     success the connector's cached channel listing is dropped and the
     one-time handle is spent; on failure the handle is kept so the admin can
     retry within its TTL.
+
+    Returns:
+        ``True`` only when the existing connector is confirmed to hold the
+        install's token (committed); the caller reports that on the 409 so
+        the UI never claims a refresh that did not happen.
     """
     from api.routes.connectors_slack import discard_slack_install
 
@@ -126,7 +131,7 @@ async def _refresh_connected_slack_install(
         )
         if not stored:
             await db.rollback()
-            return
+            return False
         await db.commit()
     except Exception as exc:
         await db.rollback()
@@ -136,10 +141,11 @@ async def _refresh_connected_slack_install(
             workspace_id=str(workspace_id),
             error_type=type(exc).__name__,
         )
-        return
+        return False
 
     await _invalidate_channels_cache(connector_id)
     await discard_slack_install(install_handle)
+    return True
 
 
 class WorkspaceConnectorCreateRequest(BaseModel):
@@ -403,7 +409,10 @@ _CREATE_CONFLICT_RESPONSE: dict[int | str, dict[str, Any]] = {
             "`RES-002`. For a platform team that is already connected, "
             "`details.reason` says where (#1753): `connector_team_connected_here` "
             "(this workspace; `details.connector_id` and `details.display_name` "
-            "name the existing connector — edit it instead) or "
+            "name the existing connector — edit it instead; "
+            "`details.token_refreshed: true` is added when the request carried a "
+            "Slack install handle and that install's bot token was stored on the "
+            "existing connector, #1880) or "
             "`connector_team_connected_elsewhere` (another workspace; no other "
             "details). A `resource_id` clash is a 409 without `reason`."
         ),
@@ -529,14 +538,17 @@ async def create_workspace_connector(
             and request.connector_type == "slack"
             and oauth_tokens
             and oauth_tokens.get("bot_token")
-        ):
-            await _refresh_connected_slack_install(
+            and await _refresh_connected_slack_install(
                 db,
                 workspace_id=workspace_id,
                 connector_id=str(conflict.details.get("connector_id") or ""),
                 bot_token=str(oauth_tokens["bot_token"]),
                 install_handle=request.slack_install_handle,
             )
+        ):
+            # Present only when confirmed: the UI says "permissions were
+            # refreshed" on this flag, not on having come through OAuth.
+            conflict.details["token_refreshed"] = True
         raise
     except MemoryCloudException:
         await db.rollback()

@@ -10,11 +10,13 @@
  * other workspace. This module reads that reason — never the server's English
  * message — and renders the matching copy.
  *
- * #1880: what the "here" copy may say depends on where the request came from.
- * An OAuth sign-in refreshes the existing connector's Slack permissions (the
- * server stores the new install's bot token on it), so only that variant says
- * so. The manual bind made no sign-in and its pasted token is dropped by the
- * 409, which its variant states. Without a source the copy is neutral.
+ * #1880: what the "here" copy may say depends on where the request came from
+ * and on what the server confirms. An OAuth sign-in refreshes the existing
+ * connector's Slack permissions (the server stores the new install's bot token
+ * on it and answers `details.token_refreshed: true`); only then does the copy
+ * say so — an OAuth conflict without that flag gets the neutral copy. The
+ * manual bind made no sign-in and its pasted token is dropped by the 409,
+ * which its variant states. Without a source the copy is neutral.
  */
 
 import { useCallback } from "react";
@@ -25,7 +27,13 @@ import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api/base";
 
 export type TeamConflict =
-  | { kind: "here"; connectorId: string; displayName: string | null }
+  | {
+      kind: "here";
+      connectorId: string;
+      displayName: string | null;
+      /** The server stored this sign-in's bot token on that connector. */
+      tokenRefreshed: boolean;
+    }
   | { kind: "elsewhere" };
 
 /** Where the refused create came from; picks the "here" copy (#1880). */
@@ -58,6 +66,7 @@ export function teamConflictOf(err: unknown): TeamConflict | null {
         typeof details.display_name === "string" && details.display_name
           ? details.display_name
           : null,
+      tokenRefreshed: details.token_refreshed === true,
     };
   }
   return null;
@@ -85,7 +94,11 @@ export function useTeamConflictMessage(): (
         ? t("subjectNamed", { name: teamName })
         : t("subjectUnnamed");
       if (conflict.kind === "elsewhere") return t("elsewhere", { subject });
-      const keys = HERE_KEYS[source ?? "neutral"];
+      // The refresh sentence needs the server's confirmation, not just an
+      // OAuth origin: storing the token is best-effort on the server.
+      const variant =
+        source === "oauth" && !conflict.tokenRefreshed ? undefined : source;
+      const keys = HERE_KEYS[variant ?? "neutral"];
       return conflict.displayName
         ? t(keys.named, { subject, connector: conflict.displayName })
         : t(keys.unnamed, { subject });

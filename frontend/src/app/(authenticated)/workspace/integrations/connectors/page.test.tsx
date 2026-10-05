@@ -1947,12 +1947,14 @@ describe("ConnectorsPage RBAC gate", () => {
           reason: "connector_team_connected_here",
           connector_id: "connector-1",
           display_name: "Acme",
+          token_refreshed: true,
         },
       }),
     );
     await submitCreate();
 
-    // #1880: an OAuth sign-in, so the variant with the refresh sentence.
+    // #1880: an OAuth sign-in the server confirmed, so the variant with the
+    // refresh sentence.
     expect(await screen.findByText("hereOAuth")).toBeInTheDocument();
     // …and the list was re-read: the refresh may have bumped the existing
     // connector's config_version, which its editor sends back on save.
@@ -1961,6 +1963,25 @@ describe("ConnectorsPage RBAC gate", () => {
 
     expect(await screen.findByText("settingsTitle")).toBeInTheDocument();
     expect(screen.queryByText("createTitle")).toBeNull();
+  });
+
+  it("a team connected here without the server's confirmation claims no refresh (#1880)", async () => {
+    mockCreateConnector.mockRejectedValue(
+      new ApiError({
+        error: "RES-002",
+        message: "server text",
+        status: 409,
+        details: {
+          reason: "connector_team_connected_here",
+          connector_id: "connector-1",
+          display_name: "Acme",
+        },
+      }),
+    );
+    await submitCreate();
+
+    expect(await screen.findByText("here")).toBeInTheDocument();
+    expect(screen.queryByText("hereOAuth")).toBeNull();
   });
 
   it("renders the plan refusal with the required tier's label (#1644)", async () => {

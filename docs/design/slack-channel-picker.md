@@ -60,7 +60,9 @@ and a page that comes back mixed deletes the marker, so a grant widened by a
 reconnect is visible once the cached first page expires however often later
 pages re-arm the marker. An OAuth install that lands on an already-connected
 Slack workspace stores its bot token on the existing connector and drops that
-connector's cached pages and marker, so the listing is fresh immediately.
+connector's cached pages and marker, so the listing is fresh immediately; the
+409 then carries `details.token_refreshed: true`, and the UI only says the
+permissions were refreshed when it does.
 
 Behavior when the token lacks the scope (legacy installs, manual binds of
 older apps): Slack returns `missing_scope`. The endpoint maps this to a
