@@ -300,6 +300,77 @@ class TestLinkedProviderSkipsSync:
         assert race_existing.name == "Alice"
 
 
+class TestAdoptsAPrimaryProvider:
+    """#1875: an OAuth account with no ``auth_provider`` gets the signing-in
+    provider, so its email and name sync again."""
+
+    @pytest.mark.asyncio
+    async def test_null_pointer_is_set_and_a_verified_email_change_syncs(self, role_manager):
+        existing = _user_row(email="alice@old.com", name="Alice", auth_provider=None)
+        existing.auth_method = "oauth"
+        db = _make_db_mock(_execute_returns(_oauth_link_row(), existing))
+
+        with (
+            _patch_get_db(db),
+            patch("services.security_notification_service.spawn_email_change_notification"),
+        ):
+            await role_manager.ensure_user(
+                email="alice@new.com",
+                user_id="gh-1",
+                name="Alice New",
+                auth_provider="github",
+                email_verified=True,
+            )
+
+        assert existing.auth_provider == "github"
+        assert existing.email == "alice@new.com"
+        assert existing.name == "Alice New"
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_race_retry_adopts_too(self, role_manager):
+        race_existing = _user_row(email="alice@old.com", name="Alice", auth_provider=None)
+        race_existing.auth_method = "oauth"
+        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing))
+        db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
+
+        with (
+            _patch_get_db(db),
+            patch("services.security_notification_service.spawn_email_change_notification"),
+        ):
+            await role_manager.ensure_user(
+                email="alice@new.com",
+                user_id="u1",
+                name="Alice New",
+                auth_provider="google",
+                email_verified=True,
+            )
+
+        assert race_existing.auth_provider == "google"
+        assert race_existing.email == "alice@new.com"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("auth_method", "pointer", "signing_in"),
+        [
+            ("password", None, "github"),  # a password account keeps its own profile
+            ("oauth", "google", "github"),  # a primary provider is never replaced
+            ("oauth", None, "okta"),  # not a provider an account can link
+        ],
+    )
+    async def test_anything_else_is_left_alone(
+        self, role_manager, auth_method, pointer, signing_in
+    ):
+        from auth.roles import _adopt_primary_provider
+
+        user = _user_row(auth_provider=pointer)
+        user.auth_method = auth_method
+
+        _adopt_primary_provider(user, signing_in)
+
+        assert user.auth_provider == pointer
+
+
 class TestSyncName:
     @pytest.mark.asyncio
     async def test_syncs_name_independently_of_email(self, role_manager):
