@@ -926,6 +926,57 @@ class ConnectorProvisioningService:
         )
         return result.scalar_one_or_none()
 
+    async def refresh_slack_bot_token(
+        self, workspace_id: UUID, connector_id: UUID, bot_token: str
+    ) -> bool:
+        """Store a fresh Slack install's bot token on an existing connector (#1880).
+
+        Called when an OAuth install lands on a Slack workspace this workspace
+        already has a connector for: creating a second connector is refused,
+        but the install may carry a new bot token (app removed and
+        reinstalled, token revoked), and keeping the old one would leave the
+        connector dead with delete-and-recreate as the only repair.
+
+        Only ``bot_token`` is replaced; the rest of the encrypted bundle is
+        the connector's own. ``config_version`` is bumped when the token
+        changed so the worker refetches its config; an unchanged token (a
+        re-consent that only widened the grant) writes nothing.
+
+        The lookup carries the workspace predicate and is Slack-only, so a
+        connector of another workspace or platform is never written. The
+        caller owns the commit.
+
+        Returns:
+            ``True`` when the connector now holds ``bot_token``; ``False``
+            when there is no such Slack connector in this workspace.
+        """
+        result = await self.db.execute(
+            select(WorkspaceConnector)
+            .where(
+                WorkspaceConnector.id == connector_id,
+                WorkspaceConnector.workspace_id == workspace_id,
+                WorkspaceConnector.connector_type == "slack",
+            )
+            .with_for_update()
+        )
+        connector = result.scalar_one_or_none()
+        if connector is None:
+            return False
+        tokens = dict(connector.get_oauth_tokens() or {})
+        if tokens.get("bot_token") == bot_token:
+            return True
+        tokens["bot_token"] = bot_token
+        connector.set_oauth_tokens(tokens)
+        connector.config_version += 1
+        await self.db.flush()
+        logger.info(
+            "workspace_connector_slack_bot_token_refreshed",
+            connector_id=str(connector.id),
+            workspace_id=str(workspace_id),
+            config_version=connector.config_version,
+        )
+        return True
+
     async def get_connector_for_dispatch(
         self, connector_type: str, external_team_id: str, app_key: str = "default"
     ) -> WorkspaceConnector | None:

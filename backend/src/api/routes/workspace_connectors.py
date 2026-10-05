@@ -46,6 +46,7 @@ from utils.exceptions import (
     BadRequestError,
     ConflictError,
     ConnectorScopeError,
+    ConnectorTeamConnectedHereError,
     InternalError,
     MemoryCloudException,
     NotFoundException,
@@ -68,6 +69,77 @@ _CHANNELS_CACHE_TTL_SECONDS = 60
 # base64; the picker search box is short).
 _CHANNELS_CURSOR_MAX_LEN = 1024
 _CHANNELS_QUERY_MAX_LEN = 100
+
+
+def _channels_cache_prefix(connector_id: UUID | str) -> str:
+    """Key prefix of a connector's cached channel pages (the cursor follows)."""
+    return f"slack_channels:{connector_id}:"
+
+
+def _channels_types_key(connector_id: UUID | str) -> str:
+    """Key of a connector's public-only listing marker (#1778)."""
+    return f"slack_channels_types:{connector_id}"
+
+
+async def _invalidate_channels_cache(connector_id: str) -> None:
+    """Drop a connector's cached channel pages and public-only marker (best-effort).
+
+    The pages are keyed by an opaque Slack cursor, hence the SCAN. The prefix
+    ends with ``:`` so it cannot match another connector's keys or the marker.
+    """
+    try:
+        client = get_redis_client()
+        keys = [_channels_types_key(connector_id)]
+        async for key in client.scan_iter(match=f"{_channels_cache_prefix(connector_id)}*"):
+            keys.append(key)
+        await client.delete(*keys)
+    except Exception:
+        logger.warning("slack_channels_cache_invalidate_failed", connector_id=connector_id)
+
+
+async def _refresh_connected_slack_install(
+    db: AsyncSession,
+    *,
+    workspace_id: UUID,
+    connector_id: str,
+    bot_token: str,
+    install_handle: str,
+) -> None:
+    """Hand a refused Slack install's bot token to the existing connector (#1880).
+
+    Runs after the create was refused because this workspace already has a
+    connector for the Slack workspace. The caller has validated the install
+    handle against ``workspace_id`` and the request's ``app_key``, and the
+    conflict was found by the install's own team id, so the token belongs to
+    the same Slack app and workspace as ``connector_id``.
+
+    Best-effort: the caller re-raises the 409 whatever happens here. On
+    success the connector's cached channel listing is dropped and the
+    one-time handle is spent; on failure the handle is kept so the admin can
+    retry within its TTL.
+    """
+    from api.routes.connectors_slack import discard_slack_install
+
+    try:
+        stored = await ConnectorProvisioningService(db).refresh_slack_bot_token(
+            workspace_id, UUID(connector_id), bot_token
+        )
+        if not stored:
+            await db.rollback()
+            return
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.warning(
+            "workspace_connector_slack_token_refresh_failed",
+            connector_id=connector_id,
+            workspace_id=str(workspace_id),
+            error_type=type(exc).__name__,
+        )
+        return
+
+    await _invalidate_channels_cache(connector_id)
+    await discard_slack_install(install_handle)
 
 
 class WorkspaceConnectorCreateRequest(BaseModel):
@@ -446,6 +518,26 @@ async def create_workspace_connector(
         await db.commit()
         await db.refresh(result.connector)
         await db.refresh(result.token)
+    except ConnectorTeamConnectedHereError as conflict:
+        await db.rollback()
+        # #1880: still a 409 — but an OAuth install that landed on a Slack
+        # workspace this workspace already holds may carry a NEW bot token
+        # (app removed and reinstalled, token revoked). Keep it, or the
+        # existing connector stays on a dead token.
+        if (
+            request.slack_install_handle
+            and request.connector_type == "slack"
+            and oauth_tokens
+            and oauth_tokens.get("bot_token")
+        ):
+            await _refresh_connected_slack_install(
+                db,
+                workspace_id=workspace_id,
+                connector_id=str(conflict.details.get("connector_id") or ""),
+                bot_token=str(oauth_tokens["bot_token"]),
+                install_handle=request.slack_install_handle,
+            )
+        raise
     except MemoryCloudException:
         await db.rollback()
         raise
@@ -743,7 +835,7 @@ async def list_connector_channels(
             "This connector has no Slack bot token; enter channel IDs manually."
         )
 
-    cache_key = f"slack_channels:{connector_id}:{cursor or ''}"
+    cache_key = f"{_channels_cache_prefix(connector_id)}{cursor or ''}"
     page: SlackChannelsPage | None = None
     cached = await get_cache(cache_key)
     if cached is not None:
@@ -762,12 +854,18 @@ async def list_connector_channels(
 
     if page is None:
         # #1778: a connector whose last page came from the public-only retry
-        # is marked for the cache TTL, so its next pages ask for public
+        # is marked for the cache TTL, so its later pages ask for public
         # channels straight away — one Tier-2 call per page, and a public-only
-        # cursor is never replayed into a mixed request. Same TTL as the pages
-        # so a reconnect that just widened the grant is picked up within it.
-        types_key = f"slack_channels_types:{connector_id}"
-        public_only = (await get_cache(types_key)) == SLACK_CHANNEL_TYPES_PUBLIC
+        # cursor is never replayed into a mixed request.
+        # #1880: the marker applies to cursor pages only. Every public-only
+        # page re-arms it, so on its own it could outlive the TTL for as long
+        # as pages keep loading; the first page therefore always probes the
+        # mixed listing, and a reconnect that widened the grant is picked up
+        # as soon as the cached first page expires.
+        types_key = _channels_types_key(connector_id)
+        public_only = (
+            cursor is not None and (await get_cache(types_key)) == SLACK_CHANNEL_TYPES_PUBLIC
+        )
         try:
             page = await fetch_slack_channels(
                 bot_token=bot_token, cursor=cursor, public_only=public_only
@@ -810,7 +908,11 @@ async def list_connector_channels(
                     }
                 ),
             )
-            if not page.private_listing:
+            if page.private_listing:
+                # #1880: the grant covers private channels (again) — stop
+                # steering the remaining pages to the public-only listing.
+                await get_redis_client().delete(types_key)
+            else:
                 await get_redis_client().setex(
                     types_key, _CHANNELS_CACHE_TTL_SECONDS, SLACK_CHANNEL_TYPES_PUBLIC
                 )

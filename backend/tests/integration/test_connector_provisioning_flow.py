@@ -527,6 +527,56 @@ async def test_team_conflict_here_vs_elsewhere(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
+async def test_refresh_slack_bot_token_is_workspace_and_slack_scoped(db_session: AsyncSession):
+    """#1880: a refused re-install's bot token replaces the stored one on the
+    caller's own Slack connector only, and bumps ``config_version`` when (and
+    only when) the token changed."""
+    owner_a, workspace_a = await _seed_workspace(db_session)
+    _owner_b, workspace_b = await _seed_workspace(db_session)
+    svc = ConnectorProvisioningService(db_session)
+    slack = await svc.provision_connector(
+        workspace_id=workspace_a.id,
+        user_id=owner_a,
+        connector_type="slack",
+        resource_id=f"slack_{uuid4().hex[:8]}",
+        oauth_tokens={"bot_token": "xoxb-old", "installing_admin_user_id": "U1"},
+        external_team_id=f"T{uuid4().hex[:10].upper()}",
+    )
+    discord = await svc.provision_connector(
+        workspace_id=workspace_a.id,
+        user_id=owner_a,
+        connector_type="discord",
+        resource_id=f"discord_{uuid4().hex[:8]}",
+        oauth_tokens={"bot_token": "discord-old"},
+    )
+    await db_session.flush()
+    version = slack.connector.config_version
+
+    # Another workspace, and another platform's connector: nothing is written.
+    assert not await svc.refresh_slack_bot_token(workspace_b.id, slack.connector.id, "xoxb-x")
+    assert not await svc.refresh_slack_bot_token(workspace_a.id, discord.connector.id, "xoxb-x")
+    await db_session.refresh(slack.connector)
+    await db_session.refresh(discord.connector)
+    assert slack.connector.get_oauth_tokens()["bot_token"] == "xoxb-old"
+    assert discord.connector.get_oauth_tokens()["bot_token"] == "discord-old"
+    assert slack.connector.config_version == version
+
+    assert await svc.refresh_slack_bot_token(workspace_a.id, slack.connector.id, "xoxb-new")
+    await db_session.flush()
+    await db_session.refresh(slack.connector)
+    assert slack.connector.get_oauth_tokens() == {
+        "bot_token": "xoxb-new",
+        "installing_admin_user_id": "U1",
+    }
+    assert slack.connector.config_version == version + 1
+
+    # The same token again (a re-consent that only widened the grant).
+    assert await svc.refresh_slack_bot_token(workspace_a.id, slack.connector.id, "xoxb-new")
+    await db_session.refresh(slack.connector)
+    assert slack.connector.config_version == version + 1
+
+
+@pytest.mark.asyncio
 async def test_same_team_id_is_allowed_under_two_app_identities(db_session: AsyncSession):
     """The dispatch uniqueness boundary is (platform, app_key, team_id)."""
     from models.worker_app import WorkerAppIdentity

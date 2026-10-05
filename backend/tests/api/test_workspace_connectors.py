@@ -86,6 +86,219 @@ async def test_create_team_conflict_wire_bodies_carry_reason():
     assert body["details"] == {"reason": "connector_team_connected_elsewhere"}
 
 
+@pytest.fixture
+def _fernet_env(monkeypatch):
+    """Set a Fernet key and reset the ``get_encryptor`` singleton around a test."""
+    from cryptography.fernet import Fernet
+
+    import utils.encryption as enc_module
+
+    monkeypatch.setenv("API_KEY_SECRET", Fernet.generate_key().decode())
+    enc_module._encryptor = None
+    yield
+    enc_module._encryptor = None
+
+
+class _ScanRedis:
+    """Async Redis stub for the cache invalidation: scan_iter / delete over a dict."""
+
+    def __init__(self, initial=None):
+        self.store = dict(initial or {})
+
+    async def scan_iter(self, match=None, count=None):
+        prefix = match[:-1]
+        assert match.endswith("*") and "*" not in prefix
+        for key in list(self.store):
+            if key.startswith(prefix):
+                yield key
+
+    async def delete(self, *keys):
+        return sum(1 for key in keys if self.store.pop(key, None) is not None)
+
+
+def _existing_slack_connector(workspace_id, *, bot_token="xoxb-old"):
+    """A real (unpersisted) connector row, so the encrypted bundle round-trips."""
+    from models.resource import WorkspaceConnector
+
+    connector = WorkspaceConnector(
+        id=uuid4(),
+        resource_pk=uuid4(),
+        workspace_id=workspace_id,
+        connector_type="slack",
+        app_key="default",
+        external_team_id="T01",
+        config_version=3,
+    )
+    connector.set_oauth_tokens({"bot_token": bot_token, "installing_admin_user_id": "U-old"})
+    return connector
+
+
+def _db_returning(connector):
+    """AsyncSession stub whose one SELECT answers with ``connector``."""
+    db = MagicMock()
+    db.rollback = AsyncMock()
+    db.commit = AsyncMock()
+    db.flush = AsyncMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = connector
+    db.execute = AsyncMock(return_value=result)
+    return db
+
+
+async def _create_into_same_workspace_conflict(
+    *, db, workspace_id, connector, redis, request=None, install=None
+):
+    """Run the create route against a same-workspace team conflict (#1880)."""
+    from services.connector_provisioning import ConnectorProvisioningService
+    from utils.exceptions import ConnectorTeamConnectedHereError
+
+    admin = {"user_id": "user-1", "current_workspace_id": workspace_id}
+    request = request or WorkspaceConnectorCreateRequest(
+        connector_type="slack", resource_id="slack_acme", slack_install_handle="handle-1"
+    )
+    if install is None:
+        install = {
+            "workspace_id": str(workspace_id),
+            "team_id": "T01",
+            "bot_token": "xoxb-new",
+            "installing_admin_user_id": "U-new",
+            "app_key": "default",
+        }
+    discard = AsyncMock()
+    with (
+        patch.object(
+            ConnectorProvisioningService,
+            "provision_connector",
+            AsyncMock(
+                side_effect=ConnectorTeamConnectedHereError(
+                    connector_type="slack", connector_id=connector.id, display_name="Acme"
+                )
+            ),
+        ),
+        patch("api.routes.connectors_slack.peek_slack_install", AsyncMock(return_value=install)),
+        patch("api.routes.connectors_slack.discard_slack_install", discard),
+        patch("api.routes.workspace_connectors.get_redis_client", return_value=redis),
+        pytest.raises(ConnectorTeamConnectedHereError) as excinfo,
+    ):
+        await create_workspace_connector(request, _HTTP, BackgroundTasks(), admin, db)
+    return excinfo.value, discard
+
+
+@pytest.mark.asyncio
+async def test_create_same_workspace_conflict_stores_the_new_install_bot_token(_fernet_env):
+    """#1880: reconnecting a Slack workspace this workspace already holds is
+    still a 409, but the new install's bot token replaces the stored one — an
+    app that was removed and reinstalled leaves the old token dead. The cached
+    channel pages and the public-only marker go with it, the worker is told to
+    refetch (``config_version``), and the one-time handle is spent."""
+    workspace_id = uuid4()
+    connector = _existing_slack_connector(workspace_id)
+    db = _db_returning(connector)
+    other_id = uuid4()
+    redis = _ScanRedis(
+        {
+            f"slack_channels:{connector.id}:": "page-1",
+            f"slack_channels:{connector.id}:CUR": "page-2",
+            f"slack_channels_types:{connector.id}": "public_channel",
+            f"slack_channels:{other_id}:": "other-connector-page",
+            f"slack_channels_types:{other_id}": "public_channel",
+        }
+    )
+
+    conflict, discard = await _create_into_same_workspace_conflict(
+        db=db, workspace_id=workspace_id, connector=connector, redis=redis
+    )
+
+    assert conflict.status_code == 409
+    assert conflict.details["reason"] == "connector_team_connected_here"
+    # The rest of the bundle is the existing connector's, not the install's.
+    assert connector.get_oauth_tokens() == {
+        "bot_token": "xoxb-new",
+        "installing_admin_user_id": "U-old",
+    }
+    assert connector.config_version == 4
+    db.rollback.assert_awaited_once()  # the failed create
+    db.commit.assert_awaited_once()  # the token refresh
+    # The lookup is predicated on the caller's workspace.
+    where = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+    assert workspace_id.hex in where.replace("-", "")
+    discard.assert_awaited_once_with("handle-1")
+    assert set(redis.store) == {
+        f"slack_channels:{other_id}:",
+        f"slack_channels_types:{other_id}",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_same_workspace_conflict_same_token_keeps_config_version(_fernet_env):
+    """#1880: a re-consent that returns the same bot token (widened grant)
+    writes nothing, but the cached listing is still dropped so the new scopes
+    show on the next dialog open."""
+    workspace_id = uuid4()
+    connector = _existing_slack_connector(workspace_id, bot_token="xoxb-new")
+    db = _db_returning(connector)
+    redis = _ScanRedis({f"slack_channels_types:{connector.id}": "public_channel"})
+
+    _, discard = await _create_into_same_workspace_conflict(
+        db=db, workspace_id=workspace_id, connector=connector, redis=redis
+    )
+
+    assert connector.get_oauth_tokens()["bot_token"] == "xoxb-new"
+    assert connector.config_version == 3
+    discard.assert_awaited_once_with("handle-1")
+    assert redis.store == {}
+
+
+@pytest.mark.asyncio
+async def test_create_same_workspace_conflict_without_install_handle_stores_nothing(_fernet_env):
+    """#1880: the manual bind (pasted token, no OAuth install) is refused
+    without touching the existing connector."""
+    workspace_id = uuid4()
+    connector = _existing_slack_connector(workspace_id)
+    db = _db_returning(connector)
+    redis = _ScanRedis({f"slack_channels_types:{connector.id}": "public_channel"})
+
+    _, discard = await _create_into_same_workspace_conflict(
+        db=db,
+        workspace_id=workspace_id,
+        connector=connector,
+        redis=redis,
+        request=WorkspaceConnectorCreateRequest(
+            connector_type="slack",
+            resource_id="slack_acme",
+            external_team_id="T01",
+            oauth_tokens={"bot_token": "xoxb-pasted"},
+        ),
+    )
+
+    assert connector.get_oauth_tokens()["bot_token"] == "xoxb-old"
+    assert connector.config_version == 3
+    db.execute.assert_not_awaited()
+    db.commit.assert_not_awaited()
+    discard.assert_not_awaited()
+    assert redis.store == {f"slack_channels_types:{connector.id}": "public_channel"}
+
+
+@pytest.mark.asyncio
+async def test_create_same_workspace_conflict_refresh_failure_still_answers_409(_fernet_env):
+    """#1880: the refresh is best-effort — a failure while storing the token
+    keeps the 409 (not a 500) and leaves the install handle for a retry."""
+    workspace_id = uuid4()
+    connector = _existing_slack_connector(workspace_id)
+    db = _db_returning(connector)
+    db.commit = AsyncMock(side_effect=RuntimeError("db down"))
+    redis = _ScanRedis({f"slack_channels_types:{connector.id}": "public_channel"})
+
+    conflict, discard = await _create_into_same_workspace_conflict(
+        db=db, workspace_id=workspace_id, connector=connector, redis=redis
+    )
+
+    assert conflict.details["reason"] == "connector_team_connected_here"
+    assert db.rollback.await_count == 2
+    discard.assert_not_awaited()
+    assert redis.store == {f"slack_channels_types:{connector.id}": "public_channel"}
+
+
 @pytest.mark.asyncio
 async def test_create_rejects_invalid_pii_guardrail_config_before_calling_service():
     # #866: a malformed pii_guardrail_config (typo'd key) must be rejected at the
