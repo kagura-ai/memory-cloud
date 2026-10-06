@@ -52,9 +52,11 @@ your-domain.example.com {
 - Caddy automatically provisions TLS certificates via Let's Encrypt
 - Caddy writes **no access log** unless the site has a `log` directive. If you add
   one, bound the container's log file ([Container log rotation](#container-log-rotation))
-  and keep invite tokens out of it (see
-  [Closed-beta invite links](#closed-beta-invite-links-issue-1581)) — the
-  single-server template's `Caddyfile.tpl` does both
+  and keep credentials out of it — invite tokens (see
+  [Closed-beta invite links](#closed-beta-invite-links-issue-1581)) and the
+  `X-Resource-API-Key` header (see
+  [Credential headers in the proxy log](#credential-headers-in-the-proxy-log)) —
+  the single-server template's `Caddyfile.tpl` does all of this
 
 ### Docker Compose Integration
 
@@ -162,6 +164,80 @@ the compose option, it only applies to containers created afterwards):
   "log-opts": { "max-size": "50m", "max-file": "3" }
 }
 ```
+
+### Credential headers in the proxy log
+
+Caddy's JSON access log writes **every request header** by value, and Caddy
+redacts only `Cookie`, `Set-Cookie`, `Authorization` and `Proxy-Authorization`
+on its own. Any other header that carries a credential has to be removed by the
+site's log configuration — and removed a second time in the global `log default`
+block, because a request whose upstream failed (a `502` while the API is being
+restarted or deployed) is written again as an `http.log.error` line through
+Caddy's default logger, request headers included.
+
+The single-server `Caddyfile.tpl` drops these request headers in both blocks:
+
+| Header | Why |
+|---|---|
+| `Cookie` | session material |
+| `Referer`, `Next-Router-State-Tree`, `Next-Url` | may repeat an invite URL ([Closed-beta invite links](#closed-beta-invite-links-issue-1581)) |
+| `X-Resource-Api-Key` | the **resource token** an ingester authenticates `POST /api/v1/resources/{resource_id}/events` with ([Resource Tokens Guide](resource-tokens-guide.md)). Resource tokens do not expire, so a logged value stays usable until the token is revoked. |
+
+Two details matter if you run a different proxy or edit the template:
+
+- **Header-name spelling.** Caddy logs header names in Go's canonical form and the
+  `filter` encoder looks the field up case-sensitively. The delete line has to
+  read `request>headers>X-Resource-Api-Key delete`; a line spelled the way the
+  API documents the header (`X-Resource-API-Key`) validates and matches nothing.
+  `terraform/single-server/scripts/tests/caddy_log_scrub_live.bats` proves the
+  exact line against the real image.
+- **Both loggers.** Turning the access log off is not enough: the error line
+  still carries the headers. The `log default` block must carry the same deletes.
+
+**Applying a template change** needs no container recreate: re-render and
+restart Caddy, or run a normal `deploy.sh`:
+
+```bash
+cd /opt/kagura-memory/src/terraform/single-server
+./scripts/deploy.sh --generate-caddyfile \
+  && docker compose -f docker-compose.prod.yml --env-file .env.prod restart caddy
+```
+
+**If the proxy logged the header before the delete was in place**, treat every
+resource token that ingested through that proxy while those log lines were kept
+as exposed:
+
+1. Create a replacement token for each affected resource — creating a new token
+   does **not** invalidate the old one — and switch the ingester to it:
+
+   ```bash
+   curl -X POST https://<your-domain>/api/v1/resource-tokens \
+     -H "Authorization: Bearer kagura_{your_api_key}" \
+     -H "Content-Type: application/json" \
+     -d '{"resource_id": "<resource_id>", "context_id": "<context-uuid>", "description": "rotated"}'
+   ```
+
+2. Revoke the old token once the ingester uses the new one:
+
+   ```bash
+   curl -X DELETE https://<your-domain>/api/v1/resource-tokens/<rtok_old_id> \
+     -H "Authorization: Bearer kagura_{your_api_key}"
+   ```
+
+   Both steps are also available in the Web UI under **Integrations → Resource
+   Tokens**.
+
+3. Discard the Caddy container's existing log file by recreating the container
+   (`:80`/`:443` drop for a few seconds; add `--no-build` on a registry-mode
+   host), and delete any copies that were exported or shipped elsewhere:
+
+   ```bash
+   docker compose -f docker-compose.prod.yml --env-file .env.prod \
+     up -d --no-deps --force-recreate caddy
+   ```
+
+Until then, restrict who can read the container logs (root and the `docker`
+group on the host).
 
 ## Frontend Environment Variables
 

@@ -256,7 +256,7 @@ PYEOF
 
 @test "scrub: the headers that carry the token (or session material) are dropped from both logs" {
     for block in "$(log_block "$TPL")" "$(default_log_block "$TPL")"; do
-        for header in Referer Cookie Next-Router-State-Tree Next-Url; do
+        for header in Referer Cookie Next-Router-State-Tree Next-Url X-Resource-Api-Key; do
             grep -qE "^[[:space:]]*request>headers>${header} delete[[:space:]]*\$" <<< "$block" \
                 || { echo "no 'request>headers>${header} delete' in: ${block%%$'\n'*}"; return 1; }
         done
@@ -265,6 +265,21 @@ PYEOF
     # leave it in the other logger's lines.
     diff <(log_block "$TPL" | grep -E ' delete[[:space:]]*$' | sed -E 's/^[[:space:]]+//' | sort) \
          <(default_log_block "$TPL" | grep -E ' delete[[:space:]]*$' | sed -E 's/^[[:space:]]+//' | sort)
+}
+
+@test "scrub: the resource-token header is deleted under Go's canonical name in both logs" {
+    # Resource ingestion authenticates with a bearer-equivalent secret in the
+    # X-Resource-API-Key request header. Go canonicalises header names, so the
+    # key Caddy writes is X-Resource-Api-Key, and the filter looks keys up
+    # case-sensitively: a delete spelled X-Resource-API-Key (the API's own
+    # spelling) validates fine and matches nothing. Pin the exact spelling in
+    # both blocks; caddy_log_scrub_live.bats proves it against the real image.
+    for block in "$(log_block "$TPL")" "$(default_log_block "$TPL")"; do
+        run grep -ciE '^[[:space:]]*request>headers>X-Resource-API-Key delete[[:space:]]*$' <<< "$block"
+        [ "$output" -eq 1 ] || { echo "want exactly one resource-token delete, got $output in: ${block%%$'\n'*}"; return 1; }
+        run grep -cE '^[[:space:]]*request>headers>X-Resource-Api-Key delete[[:space:]]*$' <<< "$block"
+        [ "$output" -eq 1 ] || { echo "resource-token delete is not spelled X-Resource-Api-Key in: ${block%%$'\n'*}"; return 1; }
+    done
 }
 
 @test "scrub: every copy of the regexp is the SAME — redirect headers and the default logger (no drift)" {

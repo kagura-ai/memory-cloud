@@ -38,7 +38,7 @@
 	# so the same container log file, with the full request URI and headers. An
 	# invitee who opens a /join/<token> link while the frontend is being
 	# recreated (`deploy.sh --web`) is all it takes. So the default logger gets
-	# the same scrub: the request>uri rewrite and the four header deletes, kept
+	# the same scrub: the request>uri rewrite and the five header deletes, kept
 	# identical to the site block — the full explanation is there. Error lines
 	# carry no response headers, hence no Location / Refresh rule here.
 	#
@@ -58,6 +58,7 @@
 				request>headers>Cookie delete
 				request>headers>Next-Router-State-Tree delete
 				request>headers>Next-Url delete
+				request>headers>X-Resource-Api-Key delete
 			}
 		}
 	}
@@ -162,12 +163,20 @@ memory.kagura-ai.com {
 	# well-formed token: a pasted link with a trailing %20 is still a link.
 	# Every other request — /api/v1/memories?..., /mcp, / — is logged in full.
 	#
-	# Four request headers are dropped outright:
+	# Five request headers are dropped outright:
 	#   Referer                 a browser on the /join page may attach the URL to
 	#                           every sub-request (#1588 asks it not to)
 	#   Next-Router-State-Tree  the Next.js client sends the current route, dynamic
 	#   Next-Url                segment included, on its data/prefetch requests
 	#   Cookie                  session material has no business in an access log
+	#   X-Resource-Api-Key      the resource token an ingester authenticates
+	#                           POST /api/v1/resources/<slug>/events with. Caddy
+	#                           redacts only Authorization / Proxy-Authorization /
+	#                           Cookie by itself, so this credential header needs
+	#                           its own delete. Written in Go's canonical form
+	#                           (X-Resource-Api-Key): that is the key Caddy logs,
+	#                           the lookup is case-sensitive, and the API's own
+	#                           spelling X-Resource-API-Key would match nothing.
 	#
 	# Syntax notes — each is pinned by scripts/tests/log_hygiene_static.bats and
 	# proven against the real image by scripts/tests/caddy_log_scrub_live.bats:
@@ -212,6 +221,7 @@ memory.kagura-ai.com {
 				request>headers>Cookie delete
 				request>headers>Next-Router-State-Tree delete
 				request>headers>Next-Url delete
+				request>headers>X-Resource-Api-Key delete
 			}
 		}
 	}
