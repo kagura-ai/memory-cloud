@@ -1072,6 +1072,8 @@ async def handle_setup_resource(
             # 11. Validate and create resource token
             quota_error, quota_events_per_hour = _resolve_event_quota(args)
             if quota_error:
+                # Release the cap lock now rather than when the session closes.
+                await db.rollback()
                 return quota_error
 
             from auth.resource_tokens import ResourceTokenManager
