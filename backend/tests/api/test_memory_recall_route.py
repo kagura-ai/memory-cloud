@@ -134,6 +134,51 @@ async def test_recall_route_rejects_a_non_uuid_context_id_before_any_lookup():
 
 
 @pytest.mark.asyncio
+async def test_recall_route_falls_back_to_the_contexts_workspace_without_a_current_one():
+    """A caller with no current workspace (cleared by a member removal or a
+    workspace deletion) still recalls a context it can open: the resolved
+    context's workspace stands in, as the MCP handler derives it — not a 422
+    until the next sign-in."""
+    svc = AsyncMock()
+    svc.recall = AsyncMock(return_value=RecallResponse(results=[]))
+    ctx = uuid4()
+    context = SimpleNamespace(id=ctx, workspace_id=uuid4(), is_private=True)
+    req = RecallRequest(query="q", k=3, filters={"context_id": str(ctx)})
+    patcher, _ = _resolver(context)
+
+    with patcher:
+        await recall(
+            request=req,
+            user={"user_id": "u1", "current_workspace_id": None},
+            memory_service=svc,
+            db=MagicMock(),
+        )
+
+    kwargs = svc.recall.await_args.kwargs
+    assert kwargs["current_workspace_id"] == context.workspace_id
+    assert kwargs["context_workspace_id"] == context.workspace_id
+
+
+@pytest.mark.asyncio
+async def test_recall_route_without_a_current_workspace_still_404s_a_denied_context():
+    svc = AsyncMock()
+    svc.recall = AsyncMock(return_value=RecallResponse(results=[]))
+    ctx = uuid4()
+    req = RecallRequest(query="q", k=3, filters={"context_id": str(ctx)})
+    patcher, _ = _resolver(error=NotFoundException("Context", str(ctx)))
+
+    with patcher, pytest.raises(NotFoundException):
+        await recall(
+            request=req,
+            user={"user_id": "u1", "current_workspace_id": None},
+            memory_service=svc,
+            db=MagicMock(),
+        )
+
+    svc.recall.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_recall_route_denied_context_is_the_uniform_404_and_never_searches():
     """Unknown, other-workspace, private non-creator, suspended or whitelist-
     excluded: the resolver's NotFoundException propagates unchanged (the global

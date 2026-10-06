@@ -823,6 +823,33 @@ class TestRestRecallChecksTheLinkedAccountAsItself:
 
         service.recall.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_a_caller_with_no_current_workspace_recalls_a_context_it_can_open(
+        self, db_session
+    ):
+        """After a member removal or a workspace deletion cleared the account's
+        current workspace, a context it can open elsewhere is still searched —
+        in that context's workspace — rather than refused until the next
+        sign-in."""
+        oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+            db_session, WorkspaceRole.MEMBER, allowed_self=True
+        )
+
+        _, service = await self._recall(db_session, oauth, context, workspace_id=None)
+
+        kwargs = service.recall.await_args.kwargs
+        assert kwargs["current_workspace_id"] == context.workspace_id
+        assert kwargs["context_workspace_id"] == context.workspace_id
+
+    @pytest.mark.asyncio
+    async def test_a_caller_with_no_current_workspace_is_still_refused_elsewhere(self, db_session):
+        oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+            db_session, WorkspaceRole.MEMBER, allowed_self=False
+        )
+
+        with pytest.raises(NotFoundException):
+            await self._recall(db_session, oauth, context, workspace_id=None)
+
 
 class TestTheReadPathsWidenToTheLinkSetOnlyAsAMember:
     """Defence in depth behind the route / handler gate: ``SearchService`` and

@@ -278,12 +278,18 @@ async def recall(
         )
         context_workspace_id = context.workspace_id
 
+    # A caller with no current workspace (cleared when it was removed from a
+    # workspace or that workspace was deleted) still reaches a context it can
+    # open elsewhere: the resolved context's workspace stands in, as the MCP
+    # handler derives the workspace from the context. Without a resolved
+    # context both stay None and the service guard answers 422 as before.
+    current_workspace_id = user.get("current_workspace_id") or context_workspace_id
     try:
         result = await memory_service.recall(
             request,
             user_id=user["user_id"],
             current_context_id=context_uuid,
-            current_workspace_id=user.get("current_workspace_id"),  # NEW: Issue #146
+            current_workspace_id=current_workspace_id,  # Issue #146
             context_workspace_id=context_workspace_id,
         )
     except ValueError as e:
