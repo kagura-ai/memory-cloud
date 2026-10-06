@@ -421,7 +421,7 @@ class TestAdoptsAPrimaryProvider:
 
         with (
             pytest.raises(UnlinkedProviderSignInError),
-            structlog.testing.capture_logs() as logs,
+            patch("auth.roles.logger.warning") as warning,
         ):
             await self._sign_in(role_manager, db, sub="u1", provider="google")
 
@@ -429,9 +429,12 @@ class TestAdoptsAPrimaryProvider:
         assert race_existing.email == "alice@old.com"
         assert race_existing.name == "Alice"
         db.commit.assert_awaited_once()  # only the insert that collided
-        refused = [e for e in logs if e.get("event") == "oauth_unlinked_identity_sign_in_refused"]
-        assert len(refused) == 1
-        assert refused[0]["link_row_present"] is (link is not None)
+        warning.assert_called_once_with(
+            "oauth_unlinked_identity_sign_in_refused",
+            auth_provider="google",
+            user_id="u1",
+            link_row_present=link is not None,
+        )
 
     @pytest.mark.parametrize(
         ("auth_method", "pointer", "signing_in"),
