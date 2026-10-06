@@ -468,7 +468,16 @@ async def handle_get_resource_schema(
 async def handle_list_resource_tokens(
     args: dict[str, Any], user_id: str, workspace_id: UUID | None
 ) -> list[TextContent]:
-    """List resource tokens for a workspace."""
+    """List resource tokens for a workspace.
+
+    Lists the tokens that can authenticate ingest — those with a ``resources``
+    row (inner join on ``resource_pk``). A legacy row without ``resource_pk``
+    is deliberately NOT listed here (#1919): it cannot authenticate
+    (``verify_token`` joins through ``resource_pk``), so it is not a live
+    credential for this audit view. The REST list
+    (``GET /api/v1/resource-tokens``) does include such rows so an owner can
+    still revoke or relabel them; documented in ``docs/api-reference.md``.
+    """
     if not workspace_id:
         return _error_response("workspace_required", "No active workspace.")
 

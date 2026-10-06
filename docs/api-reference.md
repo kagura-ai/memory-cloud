@@ -816,6 +816,25 @@ Memory Analysis clusters a context with UMAP + KMeans and labels clusters with t
 
 Since v0.48.0, the REST batch endpoint and MCP `ingest_events` delegate to the same `ResourceIngestService`. Authentication and wire envelopes remain surface-specific, while quota, authoritative Resource resolution, UTF-8 byte-size validation, per-event SAVEPOINT handling, constraint mapping, commit behavior, and post-commit indexer scheduling share one implementation.
 
+### Resource token management
+
+Workspace owner only. Full usage in the [Resource Tokens Guide](resource-tokens-guide.md).
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/resource-tokens` | List the workspace's tokens (metadata only; `?resource_id=` narrows to one resource) |
+| `POST /api/v1/resource-tokens` | Mint a token for a resource with a live context; the plaintext is returned once |
+| `PATCH /api/v1/resource-tokens/{token_id}` | Change `description` and/or `quota_events_per_hour` |
+| `DELETE /api/v1/resource-tokens/{token_id}` | Revoke (soft delete; the row stays listed as `revoked`) |
+
+**The population is the workspace's** ([#1919](https://github.com/kagura-ai/memory-cloud/issues/1919)). Every limit and every lookup on these routes is taken over the same set of tokens: the workspace's active tokens, whoever minted them, excluding connector-owned ones (a connector's token is gated by `max_connectors` seats, not by this cap). A token belongs to the workspace when the `resources` row its `resource_pk` points at does; a legacy row without `resource_pk` belongs through its own `workspace_id` column.
+
+- **Count cap** (`POST`): the number of tokens in that set must be under the plan's `max_resource_tokens` (M 3, L 30, XL 150; only XL may mint, [#1551](https://github.com/kagura-ai/memory-cloud/issues/1551)). Refused with `403` `QUOTA-001` carrying `current` and `limit`. Before #1919 the count was per creator, so two owners could each mint a full set.
+- **Quota ceiling** (`PATCH` raising `quota_events_per_hour`): the sum of `quota_events_per_hour` over that set, including the new value, must not exceed `max_resource_tokens × 10,000` events/hour. Refused with `400`. Lowering a quota is never refused. Because each token is at most 10,000 events/hour, a workspace within its count cap is always within its ceiling, so creation does not check the sum.
+- **Lookup** (`PATCH`, `DELETE`): the token is resolved with the same predicate, so any token that counts can be updated and revoked. A token of another workspace, or a row whose `resource_pk` points at another workspace's resource, answers the same `404` as an unknown id.
+
+MCP `list_resource_tokens` lists the tokens that can authenticate — those with a `resources` row — and leaves out legacy rows without `resource_pk` (they cannot authenticate ingest, since `verify_token` joins through `resource_pk`). The REST list includes them so an owner can still revoke or relabel them.
+
 ### Connector create errors
 
 `POST /api/v1/workspace-connectors` (workspace admin; MCP `setup_connector` raises the same errors). One platform team (for example a Slack workspace) can be connected to one Kagura workspace only; one workspace may connect it under several worker apps. A team that is already connected answers `409` `RES-002` with a stable `details.reason` ([#1753](https://github.com/kagura-ai/memory-cloud/issues/1753)):
