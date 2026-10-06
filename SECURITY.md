@@ -94,7 +94,11 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
     known devices: it already signs the other browsers out, and forgetting
     them would report every one of the owner's own browsers again. CLI / MCP
     sign-ins (device flow, token endpoint) carry no cookie and are not
-    covered.
+    covered;
+  - a password sign-in with MFA fails the second factor until the account's
+    sign-in budget (5 failures per 5 minutes, shared by the password and the
+    TOTP step) is spent: whoever sent the codes had the password. Wrong
+    passwords alone send nothing — anyone who knows a login ID can send them.
 
   Each email lists the UTC time, IP address, user agent and the key or client
   name. A notice about a change a workspace administrator made to a member's

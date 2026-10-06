@@ -532,6 +532,16 @@ resets it; an identifier that names no account is counted on its own
 (normalized). There is no per-client-address lockout: behind a reverse proxy
 that does not forward the client address it would lock everyone out.
 
+With MFA on, the second factor draws on the same budget: a wrong TOTP code at
+`POST /api/v1/auth/mfa/verify` counts like a wrong password, a correct password
+does not reset the counter, and the budget spent both endpoints answer `429` —
+only the completed sign-in clears it. A code that signed the account in is not
+accepted again, and the wrong code that spends the budget emails the account
+owner (a wrong password does not: anyone who knows a login ID can send one).
+Deployments that also rate-limit `/api/v1/auth/login` and
+`/api/v1/auth/mfa/verify` per client address at the reverse proxy may keep
+doing so; the API's counter is per account and ignores the client address.
+
 **Links and endpoints.**
 
 | Endpoint | Auth | What it does |
@@ -589,8 +599,9 @@ OAuth / MCP client is authorized (by consent when it grants something new — a
 first authorization, a broader scope, or a client changed since the last grant
 — and by device-flow approval every time), an API key is created or regenerated
 (connector write keys included), an OAuth client is registered or its secret
-regenerated, or a provider sign-in changes the account's email address (the
-previous address is told), the account owner is
+regenerated, a provider sign-in changes the account's email address (the
+previous address is told), or a password sign-in with MFA fails the second
+factor until the account's sign-in budget is spent, the account owner is
 emailed a notice (UTC time, IP address, user agent, key or client name; for an
 admin action the acting admin, without the admin's IP address and user agent —
 never a secret, token or link other than the plain `FRONTEND_URL/profile`

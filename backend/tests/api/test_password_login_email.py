@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.routes import auth as auth_routes
 from auth.password import hash_password
 from models.auth import User
+from tests.redis_fake_ops import SessionFakeOps
 from utils.datetime import utcnow
 from utils.exceptions import InvalidCredentialsError
 
@@ -170,7 +171,7 @@ class TestResolvePasswordLoginUser:
 # ---------------------------------------------------------------------------
 
 
-class FakeRedis:
+class FakeRedis(SessionFakeOps):
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
 
@@ -183,15 +184,9 @@ class FakeRedis:
     def setex(self, key: str, ttl: int, value) -> None:
         self.store[key] = value
 
-    def pipeline(self):
-        redis = self
-        pipe = MagicMock()
-        pipe.incr = MagicMock(
-            side_effect=lambda key: redis.store.__setitem__(key, int(redis.store.get(key, 0)) + 1)
-        )
-        pipe.expire = MagicMock()
-        pipe.execute = MagicMock()
-        return pipe
+    def incr(self, key: str) -> int:
+        self.store[key] = int(self.store.get(key, 0)) + 1  # type: ignore[arg-type]
+        return self.store[key]  # type: ignore[return-value]
 
 
 def _request(ip: str = "198.51.100.9") -> SimpleNamespace:

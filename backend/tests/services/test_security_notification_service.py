@@ -753,6 +753,35 @@ class TestRender:
         )
         assert "the same sign-in happened 2 more times" in digest
 
+    def test_second_factor_lockout_reads_as_an_attempt_not_a_change(self) -> None:
+        # Nothing changed on the account: repeated failures spent the sign-in
+        # budget, at least one of them a wrong code after a correct password
+        # (the budget is shared with wrong passwords, so the wording does not
+        # claim every failure was a code). The advice is to change the password.
+        subject, text = render_security_notification(
+            SecurityEvent.SECOND_FACTOR_LOCKED,
+            [self._occurrence()],
+            digest=False,
+            window_minutes=10,
+            profile_page_url="https://app.example/profile",
+        )
+        assert "paused after repeated failures" in subject
+        assert "failed repeatedly" in text and "At least one of the failures" in text
+        assert "password had been entered correctly" in text
+        assert "security-sensitive change was made" not in text
+        assert "signed in to from a device" not in text
+        assert "someone else may know your password" in text
+        assert "192.0.2.1" in text and "UA/1" in text
+
+        _, digest = render_security_notification(
+            SecurityEvent.SECOND_FACTOR_LOCKED,
+            [self._occurrence(), self._occurrence()],
+            digest=True,
+            window_minutes=10,
+            profile_page_url="https://app.example/profile",
+        )
+        assert "the same lockout happened 2 more times" in digest
+
     def test_long_digest_is_capped(self) -> None:
         _, text = render_security_notification(
             SecurityEvent.API_KEY_CREATED,
