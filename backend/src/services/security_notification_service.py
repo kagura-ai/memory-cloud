@@ -220,8 +220,9 @@ _SIGN_IN_METHOD_LABELS: dict[SecurityEvent, str] = {
 _SIGN_IN_EVENTS = frozenset({SecurityEvent.NEW_DEVICE_SIGN_IN})
 
 # Events that are a refused sign-in attempt: nothing on the account changed,
-# but someone had the password and failed the second factor until the sign-in
-# budget was spent. The opening line and the advice say so.
+# but sign-in failures — at least one of them a wrong second-factor code after
+# a correct password — spent the sign-in budget. The opening line and the
+# advice say so.
 _LOCKOUT_EVENTS = frozenset({SecurityEvent.SECOND_FACTOR_LOCKED})
 
 # How a linked / unlinked sign-in provider is named in a notice.
@@ -292,11 +293,14 @@ _EVENT_TEXT: dict[SecurityEvent, tuple[str, str]] = {
         "New sign-in to your Kagura account from an unrecognized device",
         "Your account was signed in to from a browser it had not been used on before.",
     ),
-    # Sign-in to the account is paused after repeated wrong second-factor codes.
+    # Sign-in to the account is paused after repeated failures, the last of
+    # them a wrong second-factor code (the budget is shared with wrong
+    # passwords, so the earlier failures may have been either).
     SecurityEvent.SECOND_FACTOR_LOCKED: (
-        "Sign-in to your Kagura account was paused after failed verification codes",
-        "Your password was entered correctly, but the two-factor verification code "
-        "was wrong repeatedly. Sign-in to your account is paused for a few minutes.",
+        "Sign-in to your Kagura account was paused after repeated failures",
+        "Repeated sign-in failures, at least one of them a wrong two-factor "
+        "verification code after a correct password, paused sign-in to your account "
+        "for a few minutes.",
     ),
 }
 
@@ -527,10 +531,12 @@ def render_security_notification(
         ]
     elif event in _LOCKOUT_EVENTS:
         lines += [
-            "Someone entered your Kagura Memory Cloud password correctly and then failed",
-            "the two-factor verification code repeatedly, so sign-in to your account is",
-            "paused for a few minutes. If this was you — a wrong authenticator app, or a",
-            "clock that is off — simply try again later.",
+            "Sign-in to your Kagura Memory Cloud account failed repeatedly — wrong",
+            "passwords or wrong two-factor verification codes — and is paused for a few",
+            "minutes. At least one of the failures was a wrong verification code, which",
+            "means the password had been entered correctly. If this was you — a mistyped",
+            "password, a wrong authenticator app, or a clock that is off — simply try",
+            "again later.",
         ]
     else:
         lines += [
@@ -588,7 +594,7 @@ def render_security_notification(
     lines.append("Wasn't you?")
     if event in _LOCKOUT_EVENTS:
         lines += [
-            "Then someone else knows your password. Change it from your profile page",
+            "Then someone else may know your password. Change it from your profile page",
             'once you can sign in, or use "Forgot password?" on the sign-in page (a',
             "reset also signs every browser out and revokes the account's connected",
             "apps). Then review your sign-in methods on your profile page, and your keys",
