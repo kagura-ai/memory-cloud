@@ -4,17 +4,28 @@ Issue #242: Resource Token Management UI - Backend API endpoints.
 
 Provides CRUD operations for resource tokens with owner-only access control.
 Pattern: Based on api_keys.py with resource-specific adaptations.
+
+Population (#1919): every limit and every lookup here is the WORKSPACE's.
+``max_resource_tokens`` is a field of the workspace's plan, #1863 made the
+list / update / revoke routes workspace-scoped (an owner manages every token
+of the workspace, whoever minted it), and the downgrade-eligibility read
+counts per workspace — so the create-time count cap and the quota-raise
+ceiling (``max_resource_tokens * 10000`` events/hour) are summed over the
+same set: the workspace's active, non-connector tokens, attributed by
+:func:`_workspace_tokens`. Because every token is at most 10000 events/hour
+(the request model's bound), a workspace within its count cap is within
+its ceiling, so creation never checks the sum.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, or_, select
+from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.dependencies import WorkspaceOwner
@@ -169,27 +180,79 @@ def _format_token_response(token: ResourceToken) -> ResourceTokenResponse:
 # ============================================================================
 
 
-async def _token_in_workspace(db: AsyncSession, token: ResourceToken, workspace_id: UUID) -> bool:
-    """Does ``token`` belong to ``workspace_id``? (#268, #1863)
+def _workspace_tokens(workspace_id: UUID, *columns: Any) -> Select[*tuple[Any, ...]]:
+    """``SELECT columns`` over the resource tokens of ``workspace_id`` (#268, #1863, #1919).
 
-    The boundary is the ``resources`` row the token's ``resource_pk`` points
-    at — not a live ``contexts`` row. Resolving through contexts (the pre-#1863
-    check) made a token unreachable the moment its last context was
-    soft-deleted: the token kept authenticating ingest (``verify_token`` joins
-    ``Resource`` by ``resource_pk`` and never looks at contexts) while the
-    owner's revoke got 403. A legacy token with ``resource_pk IS NULL`` (it
-    cannot authenticate — ``verify_token`` rejects it — but may still be
-    listed) falls back to the token's own ``workspace_id`` so the owner can
-    still revoke or relabel it.
+    "The workspace's" is judged by the ``resources`` row a token's
+    ``resource_pk`` points at — not by a live ``contexts`` row (a token keeps
+    authenticating ingest after its last context is soft-deleted, since
+    ``verify_token`` joins ``Resource`` by ``resource_pk`` and never looks at
+    contexts) and not by the token's shadow ``workspace_id`` column, which was
+    never backfilled on some rows. A legacy token with ``resource_pk IS NULL``
+    (it cannot authenticate — ``verify_token`` rejects it — but is listed so
+    the owner can revoke it) falls back to its own ``workspace_id``. This is
+    the single-token form of :func:`auth.resource_tokens.resource_token_scope`.
+
+    Every lookup, count and sum in this module goes through this builder, so
+    a token that one of them sees is a token all of them see: a token that
+    counts toward the cap or the ceiling can always be fetched, updated and
+    revoked (#1919), and a token of another workspace is a uniform miss.
     """
-    if token.resource_pk is None:
-        return token.workspace_id is not None and token.workspace_id == workspace_id
-    result = await db.execute(
-        select(Resource.id).where(
-            and_(Resource.id == token.resource_pk, Resource.workspace_id == workspace_id)
+    return (
+        select(*columns)
+        .outerjoin(Resource, Resource.id == ResourceToken.resource_pk)
+        .where(
+            or_(
+                Resource.workspace_id == workspace_id,
+                and_(
+                    ResourceToken.resource_pk.is_(None),
+                    ResourceToken.workspace_id == workspace_id,
+                ),
+            )
         )
     )
-    return result.scalar_one_or_none() is not None
+
+
+def _workspace_regular_active_tokens(workspace_id: UUID, *columns: Any) -> Select[*tuple[Any, ...]]:
+    """The population of the token cap and the quota ceiling (#858, #1919).
+
+    :func:`_workspace_tokens` minus revoked tokens and minus connector-owned
+    ones: the connector setup flow mints a resource token that bypasses the
+    ``max_resource_tokens`` gate on purpose (connectors are gated by
+    ``max_connectors`` seats), so counting it here would let it eat a regular
+    slot post-mint and prematurely refuse a legitimate creation. The anti-join
+    against ``workspace_connectors`` (UNIQUE ``resource_pk``, so no row
+    inflation) drops exactly the connector-owned tokens; a regular token with
+    a NULL ``resource_pk`` never matches the join and is still counted.
+    """
+    return (
+        _workspace_tokens(workspace_id, *columns)
+        .outerjoin(
+            WorkspaceConnector,
+            WorkspaceConnector.resource_pk == ResourceToken.resource_pk,
+        )
+        .where(
+            ResourceToken.is_active == True,  # noqa: E712
+            WorkspaceConnector.id.is_(None),
+        )
+    )
+
+
+async def _resolve_workspace_token(
+    db: AsyncSession, token_id: str, workspace_id: UUID
+) -> ResourceToken | None:
+    """The token ``token_id`` names, if it belongs to ``workspace_id`` (#1863, #1919).
+
+    Same predicate as the cap and the ceiling (:func:`_workspace_tokens`), so
+    a token with ``resource_pk`` set but a NULL shadow ``workspace_id`` — one
+    the ceiling counts — is addressable. ``None`` for an unknown id and for
+    another workspace's token alike: the route answers a uniform 404 so the
+    token's existence is not disclosed.
+    """
+    result = await db.execute(
+        _workspace_tokens(workspace_id, ResourceToken).where(ResourceToken.public_id == token_id)
+    )
+    return result.scalar_one_or_none()
 
 
 async def _check_workspace_quota_ceiling(
@@ -199,9 +262,10 @@ async def _check_workspace_quota_ceiling(
 
     The ceiling is ``max_resource_tokens * 10000`` events/hour and the budget
     is the WORKSPACE's: every other active token in it counts, whoever minted
-    it. (The sum used to be over ``created_by == caller``, which says nothing
-    about a token minted by another member — the route resolves any token of
-    the workspace since #1863.)
+    it — the same population the create-time count cap is taken over
+    (:func:`_workspace_regular_active_tokens`, #1919). The sum used to be over
+    ``created_by == caller``, and the cap per creator, so two owners could
+    mint their way over the ceiling and then no raise fitted.
 
     Connector-owned tokens are outside this budget, consistent with the
     create-time cap (#858): a connector is gated by ``max_connectors`` seats
@@ -212,8 +276,6 @@ async def _check_workspace_quota_ceiling(
     Raises:
         HTTPException: 400 when the raise does not fit.
     """
-    from sqlalchemy import func as sql_func
-
     from config.plan_tiers import get_plan_tier
     from models.auth import Workspace
 
@@ -233,36 +295,11 @@ async def _check_workspace_quota_ceiling(
 
     max_total_quota = get_plan_tier(plan_name).max_resource_tokens * 10000
 
-    # Quota used by the workspace's OTHER regular tokens. The anti-join drops
-    # connector-owned ones (UNIQUE resource_pk, so no row inflation); a token
-    # with a NULL resource_pk never matches the join and is still counted.
-    #
-    # "The workspace's" is judged like ``_token_in_workspace``: by the
-    # ``resources`` row a token's ``resource_pk`` points at — such a token
-    # authenticates ingest even when its shadow ``workspace_id`` column was
-    # never backfilled, so it must count — and by the token's own
-    # ``workspace_id`` only for a legacy row without ``resource_pk``.
+    # Quota used by the workspace's OTHER regular tokens.
     other_tokens_result = await db.execute(
-        select(sql_func.sum(ResourceToken.quota_events_per_hour))
-        .outerjoin(Resource, Resource.id == ResourceToken.resource_pk)
-        .outerjoin(
-            WorkspaceConnector,
-            WorkspaceConnector.resource_pk == ResourceToken.resource_pk,
-        )
-        .where(
-            and_(
-                or_(
-                    Resource.workspace_id == workspace_id,
-                    and_(
-                        ResourceToken.resource_pk.is_(None),
-                        ResourceToken.workspace_id == workspace_id,
-                    ),
-                ),
-                ResourceToken.is_active == True,  # noqa: E712
-                ResourceToken.id != token.id,
-                WorkspaceConnector.id.is_(None),
-            )
-        )
+        _workspace_regular_active_tokens(
+            workspace_id, func.sum(ResourceToken.quota_events_per_hour)
+        ).where(ResourceToken.id != token.id)
     )
     used_by_others = other_tokens_result.scalar() or 0
 
@@ -370,6 +407,16 @@ async def create_resource_token(
     Issue #242: Owner-only access. Returns plaintext token ONLY once.
     Issue #276: Uses WorkspaceOwner dependency for DRY principle.
 
+    The token cap is the WORKSPACE's (#1919): the count of active,
+    non-connector tokens of the workspace — whoever minted them — must be
+    under the plan's ``max_resource_tokens``. It used to be counted per
+    creator, while the quota ceiling on PATCH was summed per workspace, so
+    two owners could each mint a full set and leave the workspace with no
+    quota raise that fitted. The population is the ceiling's
+    (:func:`_workspace_regular_active_tokens`); the sum itself is not checked
+    here because count <= cap and quota <= 10000 per token already keep it
+    at or under ``max_resource_tokens * 10000``.
+
     Args:
         data: Token creation request
         owner: Workspace owner (user_id, workspace_id) from dependency
@@ -381,7 +428,8 @@ async def create_resource_token(
 
     Raises:
         400: Invalid resource_id
-        403: Not workspace owner
+        403: Not workspace owner, plan without the feature, or the workspace
+            is at its token cap (``QUOTA-001``)
         500: Failed to create token
     """
     try:
@@ -394,8 +442,6 @@ async def create_resource_token(
         )
 
         # Check plan limits and active token count
-        from sqlalchemy import func, select
-
         from config.plan_tiers import (
             get_plan_tier,
             has_feature,
@@ -452,33 +498,13 @@ async def create_resource_token(
             raise FeatureNotAvailableError.for_feature(plan_name, "resources")
         plan = get_plan_tier(plan_name)
 
-        # Check active token count limit
+        # Check the workspace's active token count against the cap (#858
+        # excludes connector-owned tokens, #1919 counts the workspace, not the
+        # caller — see ``_workspace_regular_active_tokens``).
         # Note: Race condition possible but low impact (concurrent creation rare)
         # Alternative: Use database constraint on token count (future improvement)
-        #
-        # Issue #858: exclude connector-owned tokens from this count.
-        # The connector setup flow mints a resource token that bypasses
-        # the max_resource_tokens gate on purpose (connectors are gated
-        # by max_connectors seats instead). Counting it here would let it
-        # eat a regular slot post-mint — an asymmetry that can prematurely
-        # 403 a legitimate regular-token creation. The anti-join against
-        # workspace_connectors (UNIQUE resource_pk, so no count inflation)
-        # drops exactly the connector-owned tokens. A regular token with a
-        # NULL resource_pk never matches the join condition, so it is
-        # correctly still counted.
         active_count_result = await db.execute(
-            select(func.count(ResourceToken.id))
-            .outerjoin(
-                WorkspaceConnector,
-                WorkspaceConnector.resource_pk == ResourceToken.resource_pk,
-            )
-            .where(
-                and_(
-                    ResourceToken.created_by == user_id,
-                    ResourceToken.is_active == True,  # noqa: E712
-                    WorkspaceConnector.id.is_(None),
-                )
-            )
+            _workspace_regular_active_tokens(workspace_id, func.count(ResourceToken.id))
         )
         active_count = active_count_result.scalar() or 0
 
@@ -564,6 +590,17 @@ async def update_resource_token(
     Issue #242: Allow updating token metadata without regenerating.
     Issue #276: Uses WorkspaceOwner dependency for DRY principle.
 
+    The token is the WORKSPACE's to update (#1863): any owner may relabel any
+    token of the workspace, whoever minted it. It is resolved with the same
+    predicate the quota ceiling sums over (#1919, :func:`_workspace_tokens` —
+    the ``resources`` row its ``resource_pk`` points at, or its own
+    ``workspace_id`` for a legacy row without one), so a token the ceiling
+    counts is always addressable; it used to be matched on the shadow
+    ``workspace_id`` column alone and was a 404 when that was never
+    backfilled. A quota raise is checked against the workspace's ceiling,
+    ``max_resource_tokens * 10000`` events/hour over the workspace's active
+    non-connector tokens; a lowering is never refused.
+
     Args:
         token_id: Public id of the token (``rtok_...``)
         request: Update request
@@ -574,38 +611,23 @@ async def update_resource_token(
         Updated token metadata
 
     Raises:
+        400: The quota raise does not fit the workspace's ceiling
         403: Not workspace owner
-        404: Token not found
+        404: Token not found (or not this workspace's — the same answer)
     """
     try:
         user_id, current_workspace_id = owner
 
-        # SECURITY: the token must belong to the caller's workspace (#1863:
-        # any owner of the workspace may relabel any of its tokens; a token of
-        # another workspace is a uniform 404 so its existence is not disclosed)
-        result = await db.execute(
-            select(ResourceToken).where(
-                and_(
-                    ResourceToken.public_id == token_id,
-                    ResourceToken.workspace_id == current_workspace_id,
-                )
-            )
-        )
-        token = result.scalar_one_or_none()
+        # SECURITY: the token must belong to the caller's workspace (#268,
+        # #1863, #1919: judged by the ``resources`` row, not a live context
+        # and not the shadow column; a token of another workspace is a
+        # uniform 404 so its existence is not disclosed)
+        token = await _resolve_workspace_token(db, token_id, current_workspace_id)
 
         if not token:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Resource token not found",
-            )
-
-        # SECURITY: Verify the token's resource belongs to current workspace
-        # Issue #268: Prevent updating tokens for resources in other workspaces
-        # #1863: judged by the ``resources`` row, not a live context
-        if not await _token_in_workspace(db, token, current_workspace_id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Resource token belongs to a different workspace.",
             )
 
         # Validate new quota doesn't exceed plan limits (Code review M-10)
@@ -661,6 +683,14 @@ async def revoke_resource_token(
     Issue #242: Owner-only access. Sets is_active=False (preserves audit trail).
     Issue #276: Uses WorkspaceOwner dependency for DRY principle.
 
+    The token is the WORKSPACE's to revoke (#1863): any owner may revoke any
+    token of the workspace, including one minted by a departed member or a
+    connector. It is resolved like the update route and the quota ceiling
+    (#1919, :func:`_workspace_tokens`): by the ``resources`` row its
+    ``resource_pk`` points at — so a token whose contexts were deleted, or
+    whose shadow ``workspace_id`` was never backfilled, can still be revoked
+    while it still authenticates ingest.
+
     Args:
         token_id: Public id of the token to revoke (``rtok_...``)
         owner: Workspace owner (user_id, workspace_id) from dependency
@@ -669,41 +699,23 @@ async def revoke_resource_token(
 
     Raises:
         403: Not workspace owner
-        404: Token not found
+        404: Token not found (or not this workspace's — the same answer)
         500: Failed to revoke token
     """
     try:
         user_id, current_workspace_id = owner
         logger.info("revoke_resource_token_request", user_id=user_id, public_id=token_id)
 
-        # SECURITY: the token must belong to the caller's workspace (#1863:
-        # any owner of the workspace may revoke any of its tokens, including
-        # ones minted by a departed member or a connector; a token of another
-        # workspace is a uniform 404 so its existence is not disclosed)
-        result = await db.execute(
-            select(ResourceToken).where(
-                and_(
-                    ResourceToken.public_id == token_id,
-                    ResourceToken.workspace_id == current_workspace_id,
-                )
-            )
-        )
-        target_token = result.scalar_one_or_none()
+        # SECURITY: the token must belong to the caller's workspace (#268,
+        # #1863, #1919: judged by the ``resources`` row, not a live context
+        # and not the shadow column; a token of another workspace is a
+        # uniform 404 so its existence is not disclosed)
+        target_token = await _resolve_workspace_token(db, token_id, current_workspace_id)
 
         if not target_token:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Resource token not found",
-            )
-
-        # SECURITY: Verify the token's resource belongs to current workspace
-        # Issue #268: Prevent revoking tokens for resources in other workspaces
-        # #1863: judged by the ``resources`` row so a token whose contexts were
-        # deleted can still be revoked (it still authenticates ingest).
-        if not await _token_in_workspace(db, target_token, current_workspace_id):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Resource token belongs to a different workspace.",
             )
 
         # Revoke token (soft delete)

@@ -1,10 +1,14 @@
-"""Route-level tests for the resource-token workspace boundary (#268, #1863).
+"""Route-level tests for the resource-token workspace boundary (#268, #1863, #1919).
 
 The boundary is the ``resources`` row a token's ``resource_pk`` points at —
-not a live ``contexts`` row — so a token whose contexts were deleted stays
-listable, updatable and revocable. ``dependency_overrides`` stand in for
-auth and the DB; the real-DB walk-through lives in
-``tests/integration/test_resource_tokens_after_context_delete.py``.
+not a live ``contexts`` row and not the token's shadow ``workspace_id``
+column — so a token whose contexts were deleted, or whose shadow column was
+never backfilled, stays listable, updatable and revocable. Since #1919 the
+lookup, the count cap and the quota ceiling share that predicate
+(``_workspace_tokens``). ``dependency_overrides`` stand in for auth and the
+DB; the real-DB walk-throughs live in
+``tests/integration/test_resource_tokens_after_context_delete.py`` and
+``tests/integration/test_resource_tokens_workspace_scope.py``.
 """
 
 from __future__ import annotations
@@ -14,18 +18,36 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import func
+from sqlalchemy.dialects import postgresql
 
 import api.routes.resource_tokens as route_module
 from api.main import app
-from api.routes.resource_tokens import _token_in_workspace, get_resource_token_manager
+from api.routes.resource_tokens import (
+    _workspace_regular_active_tokens,
+    _workspace_tokens,
+    get_resource_token_manager,
+)
 from auth.dependencies import get_user_from_api_key_or_session, require_workspace_owner
 from auth.resource_tokens import ResourceTokenManager
 from db.base import get_db
 from models.resource import ResourceToken
+from utils.datetime import utcnow
 
 WORKSPACE_ID = uuid4()
 USER_ID = "owner_1"
 PUBLIC_ID = "rtok_" + "7" * 22
+
+# The attribution clause every lookup, count and sum of the module carries.
+_MEMBERSHIP = (
+    "resources.workspace_id = %(workspace_id_1)s::UUID "
+    "OR resource_tokens.resource_pk IS NULL "
+    "AND resource_tokens.workspace_id = %(workspace_id_2)s::UUID"
+)
+
+
+def _sql(statement) -> str:
+    return str(statement.compile(dialect=postgresql.dialect()))
 
 
 def _token(resource_pk=None) -> ResourceToken:
@@ -95,52 +117,60 @@ def owner_client():
     app.dependency_overrides.clear()
 
 
-class TestTokenInWorkspace:
-    @pytest.mark.asyncio
-    async def test_true_when_the_resources_row_is_in_the_workspace(self):
-        pk = uuid4()
-        db = _db_returning(pk)
-        assert await _token_in_workspace(db, _token(resource_pk=pk), WORKSPACE_ID) is True
+class TestWorkspaceTokensPredicate:
+    """#1919: one attribution clause for the lookup, the cap and the ceiling.
 
-    @pytest.mark.asyncio
-    async def test_false_when_no_resources_row_matches(self):
-        db = _db_returning(None)
-        assert await _token_in_workspace(db, _token(resource_pk=uuid4()), WORKSPACE_ID) is False
+    Membership is the ``resources`` row (through ``resource_pk``), with the
+    shadow ``workspace_id`` column only for a legacy row that has no
+    ``resource_pk`` — the single-token form of ``resource_token_scope``. The
+    SQL is pinned here; what it selects on real rows is the integration test.
+    """
 
-    @pytest.mark.asyncio
-    async def test_legacy_token_without_resource_pk_falls_back_to_its_workspace_id(self):
-        db = AsyncMock()
-        assert await _token_in_workspace(db, _token(resource_pk=None), WORKSPACE_ID) is True
-        assert await _token_in_workspace(db, _token(resource_pk=None), uuid4()) is False
-        db.execute.assert_not_awaited()
+    def test_lookup_joins_resources_and_never_the_shadow_column_alone(self):
+        sql = _sql(_workspace_tokens(WORKSPACE_ID, ResourceToken))
+        assert "LEFT OUTER JOIN resources ON resources.id = resource_tokens.resource_pk" in sql
+        assert f"WHERE {_MEMBERSHIP}" in sql
+        assert "contexts" not in sql
+
+    def test_cap_population_is_the_predicate_minus_revoked_and_connector_tokens(self):
+        sql = _sql(_workspace_regular_active_tokens(WORKSPACE_ID, func.count(ResourceToken.id)))
+        assert f"WHERE ({_MEMBERSHIP})" in sql
+        assert "resource_tokens.is_active = true" in sql
+        assert (
+            "LEFT OUTER JOIN workspace_connectors "
+            "ON workspace_connectors.resource_pk = resource_tokens.resource_pk" in sql
+        )
+        assert "workspace_connectors.id IS NULL" in sql
+        # The cap is the workspace's, not the caller's (#1919).
+        assert "created_by" not in sql
+
+
+def _lookup_sql(db: AsyncMock) -> str:
+    """The first statement the route executed — the token lookup."""
+    return _sql(db.execute.await_args_list[0].args[0])
 
 
 class TestRevokeBoundary:
     def test_revokes_when_the_resources_row_matches_without_any_live_context(self, owner_client):
         pk = uuid4()
         token = _token(resource_pk=pk)
-        # token lookup (scoped by workspace), then the resources row — and no
-        # contexts query anywhere on the path.
-        owner_client.state_["db"] = _db_returning(token, pk)
+        # One lookup carrying the resources join — and no contexts query
+        # anywhere on the path.
+        owner_client.state_["db"] = _db_returning(token)
         response = owner_client.delete(f"/api/v1/resource-tokens/{PUBLIC_ID}")
         assert response.status_code == 204, response.text
         owner_client.manager_.revoke_token.assert_awaited_once_with(token.id)
         assert _no_contexts_query(owner_client.state_["db"])
+        lookup = _lookup_sql(owner_client.state_["db"])
+        assert f"WHERE ({_MEMBERSHIP}) AND resource_tokens.public_id = " in lookup
 
     def test_404_when_the_token_is_in_another_workspace(self, owner_client):
-        # The lookup is scoped to the caller's workspace, so a foreign token
-        # is a uniform 404 — its existence is not disclosed (#268 posture).
+        # The lookup is scoped to the caller's workspace through the resources
+        # row, so a foreign token — or a row whose resource_pk points at
+        # another workspace's resource — is a uniform 404 (#268 posture).
         owner_client.state_["db"] = _db_returning(None)
         response = owner_client.delete(f"/api/v1/resource-tokens/{PUBLIC_ID}")
         assert response.status_code == 404
-        owner_client.manager_.revoke_token.assert_not_awaited()
-
-    def test_403_when_the_resources_row_points_outside_the_workspace(self, owner_client):
-        # Defense in depth: the token row says this workspace but its
-        # resource_pk resolves to a resources row elsewhere.
-        owner_client.state_["db"] = _db_returning(_token(resource_pk=uuid4()), None)
-        response = owner_client.delete(f"/api/v1/resource-tokens/{PUBLIC_ID}")
-        assert response.status_code == 403
         owner_client.manager_.revoke_token.assert_not_awaited()
 
     def test_legacy_token_without_resource_pk_is_revocable_in_its_workspace(self, owner_client):
@@ -156,7 +186,7 @@ class TestRevokeBoundary:
         pk = uuid4()
         token = _token(resource_pk=pk)
         token.created_by = "someone_else"
-        owner_client.state_["db"] = _db_returning(token, pk)
+        owner_client.state_["db"] = _db_returning(token)
         response = owner_client.delete(f"/api/v1/resource-tokens/{PUBLIC_ID}")
         assert response.status_code == 204, response.text
 
@@ -169,16 +199,22 @@ class TestUpdateBoundary:
         )
         assert response.status_code == 404
 
-    def test_403_when_the_resources_row_points_outside_the_workspace(self, owner_client):
-        # Same boundary as revoke: token lookup, then the resources row, no
-        # contexts query. (The success path continues into plan/quota lookups
-        # that the integration test exercises against a real database.)
-        owner_client.state_["db"] = _db_returning(_token(resource_pk=uuid4()), None)
+    def test_lookup_is_the_ceilings_predicate(self, owner_client):
+        # Same boundary as revoke: one lookup through the resources row, no
+        # contexts query, no shadow-column-only match (#1919: a token the
+        # ceiling counts must be addressable). The quota path continues into
+        # plan lookups that the integration test exercises on a real database.
+        token = _token(resource_pk=uuid4())
+        token.created_at = utcnow()
+        owner_client.state_["db"] = _db_returning(token)
         response = owner_client.patch(
             f"/api/v1/resource-tokens/{PUBLIC_ID}", json={"description": "renamed"}
         )
-        assert response.status_code == 403
+        assert response.status_code == 200, response.text
         assert _no_contexts_query(owner_client.state_["db"])
+        lookup = _lookup_sql(owner_client.state_["db"])
+        assert f"WHERE ({_MEMBERSHIP}) AND resource_tokens.public_id = " in lookup
+        assert owner_client.state_["db"].execute.await_count == 1
 
 
 class TestListFilterBoundary:

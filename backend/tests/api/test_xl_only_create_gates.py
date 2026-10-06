@@ -178,13 +178,13 @@ class TestResourceTokenQuotaUpdateKeepsServing:
         db = MagicMock()
         db.commit = AsyncMock()
         db.refresh = AsyncMock()
-        # 1) token by id+workspace, 2) resources row in workspace, 3) connector
-        # owning the resource (#1877: none — a regular token), 4) plan_name,
-        # 5) sum(other tokens of the workspace)
+        # 1) token by id, attributed to the workspace through its resources
+        # row in the same query (#1919), 2) connector owning the resource
+        # (#1877: none — a regular token), 3) plan_name, 4) sum(other tokens
+        # of the workspace)
         db.execute = AsyncMock(
             side_effect=[
                 _result(one=token),
-                _result(one=uuid.uuid4()),
                 _result(one=None),
                 _result(one=plan_name),
                 _result(scalar=used_by_others),

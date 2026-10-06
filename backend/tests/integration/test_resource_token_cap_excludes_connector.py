@@ -11,56 +11,45 @@ asymmetric, and able to prematurely 403 a legitimate regular-token creation.
 seeds a mix of regular and connector-owned tokens against a real Postgres and
 asserts the exclusion. It is an **integration** test on purpose: the fix is a
 SQL ``LEFT JOIN ... WHERE wc.id IS NULL``, which a mocked ``db.execute`` (a bare
-scalar return) cannot validate. The query under test mirrors the production
-cap-count query verbatim; the naive control proves the connector token would
-otherwise be counted.
+scalar return) cannot validate. The query under test is the production
+cap-count builder itself (``_workspace_regular_active_tokens``, which #1919
+made the workspace's rather than the creator's); the naive control proves the
+connector token would otherwise be counted.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.routes.resource_tokens import _workspace_regular_active_tokens
 from models.auth import User, Workspace
 from models.resource import Resource, ResourceToken, WorkspaceConnector
 from utils.public_id import PublicIdPrefix, new_public_id
 
 
-def _regular_count_query(user_id: str):
-    """The #858 production cap-count query (mirrors resource_tokens.py:329)."""
-    return (
-        select(func.count(ResourceToken.id))
-        .outerjoin(
-            WorkspaceConnector,
-            WorkspaceConnector.resource_pk == ResourceToken.resource_pk,
-        )
-        .where(
-            and_(
-                ResourceToken.created_by == user_id,
-                ResourceToken.is_active == True,  # noqa: E712
-                WorkspaceConnector.id.is_(None),
-            )
-        )
-    )
+def _regular_count_query(workspace_id: UUID):
+    """The #858 / #1919 production cap-count query."""
+    return _workspace_regular_active_tokens(workspace_id, func.count(ResourceToken.id))
 
 
-def _naive_count_query(user_id: str):
+def _naive_count_query(workspace_id: UUID):
     """The pre-#858 count (no connector exclusion) — negative control."""
     return select(func.count(ResourceToken.id)).where(
         and_(
-            ResourceToken.created_by == user_id,
+            ResourceToken.workspace_id == workspace_id,
             ResourceToken.is_active == True,  # noqa: E712
         )
     )
 
 
 @pytest_asyncio.fixture(loop_scope="session")
-async def seeded_tokens(db_session: AsyncSession) -> AsyncIterator[str]:
+async def seeded_tokens(db_session: AsyncSession) -> AsyncIterator[UUID]:
     """Seed a user with 2 regular tokens + 1 NULL-resource_pk regular token +
     1 connector-owned token, plus a revoked connector token that must not count.
 
@@ -176,7 +165,7 @@ async def seeded_tokens(db_session: AsyncSession) -> AsyncIterator[str]:
 
     await db_session.commit()
 
-    yield user_id
+    yield workspace_id
 
     # Teardown — FK order: tokens → connectors → resources → workspace → user.
     await db_session.execute(
@@ -198,10 +187,10 @@ class TestResourceTokenCapExcludesConnectorTokens:
     async def test_anti_join_excludes_connector_owned_tokens(
         self, db_session: AsyncSession, seeded_tokens
     ):
-        user_id = seeded_tokens
+        workspace_id = seeded_tokens
 
-        regular = int((await db_session.execute(_regular_count_query(user_id))).scalar() or 0)
-        naive = int((await db_session.execute(_naive_count_query(user_id))).scalar() or 0)
+        regular = int((await db_session.execute(_regular_count_query(workspace_id))).scalar() or 0)
+        naive = int((await db_session.execute(_naive_count_query(workspace_id))).scalar() or 0)
 
         # The #858 count sees only the 3 regular tokens (2 with a resource +
         # 1 with NULL resource_pk). The active connector token is excluded; the

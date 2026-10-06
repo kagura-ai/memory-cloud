@@ -16,6 +16,7 @@ property of the SQL, which a mocked session cannot prove.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
@@ -23,9 +24,10 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import config.plan_tiers as plan_tiers_module
 from api.main import app
 from auth.dependencies import (
     get_user_from_api_key_or_session,
@@ -181,6 +183,7 @@ async def scenario(async_engine, db_session):
         "ws_b_id": ws_b_id,
         "owner_a_id": owner_a_id,
         "owner_b_id": owner_b_id,
+        "member_b_id": member_b_id,
         "resource_a_id": resource_a_id,
         "resource_b_id": resource_b_id,
         "ctx_b_id": ctx_b_id,
@@ -615,6 +618,225 @@ async def test_connector_owned_tokens_are_outside_the_budget(scenario, db_sessio
             json={"quota_events_per_hour": 10000},
         )
         assert connector_up.status_code == 200, connector_up.text
+
+
+# ============================================================================
+# Token cap and quota ceiling share one population (#1919)
+# ============================================================================
+
+
+async def _set_quota(db_session, token_id: int, quota: int) -> None:
+    await db_session.execute(
+        ResourceToken.__table__.update()
+        .where(ResourceToken.id == token_id)
+        .values(quota_events_per_hour=quota)
+    )
+
+
+@pytest.fixture
+def xl_with_cap(monkeypatch):
+    """Make workspace B an XL workspace (the only tier that may mint) whose
+    ``max_resource_tokens`` is ``cap`` — the registry value (150) would need
+    150 tokens to reach."""
+
+    def _apply(cap: int) -> int:
+        tier = dataclasses.replace(plan_tiers_module.PLAN_TIERS["promax"], max_resource_tokens=cap)
+        monkeypatch.setitem(plan_tiers_module.PLAN_TIERS, "promax", tier)
+        return cap * 10000
+
+    return _apply
+
+
+async def _make_xl(db_session, workspace_id) -> None:
+    await db_session.execute(
+        Workspace.__table__.update().where(Workspace.id == workspace_id).values(plan_name="promax")
+    )
+
+
+def _mint(client, slug: str, quota: int):
+    return client.post(
+        "/api/v1/resource-tokens",
+        json={"resource_id": slug, "quota_events_per_hour": quota},
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_owners_cannot_outrun_the_ceiling_through_creation(
+    scenario, db_session, xl_with_cap
+):
+    """Two owners each hold one token near the per-token maximum, and the
+    workspace is at its token cap. The cap used to be counted per creator, so
+    the second owner could mint a third token and push the workspace's sum
+    over ``max_resource_tokens * 10000`` — after which every quota raise, by
+    anyone, answered 400. The cap is the workspace's: the third mint is
+    refused by whoever asks, and a raise that fits the ceiling still works."""
+    ceiling = xl_with_cap(2)
+    await _make_xl(db_session, scenario["ws_b_id"])
+    # The second minter is an owner too (membership is what makes them one;
+    # the REST gate is overridden below like every other test here).
+    db_session.add(
+        WorkspaceMember(
+            workspace_id=scenario["ws_b_id"],
+            user_id=scenario["member_b_id"],
+            role=WorkspaceRole.OWNER,
+        )
+    )
+    await _set_quota(db_session, scenario["token_b_id"], 9000)
+    await _set_quota(db_session, scenario["token_b_member_id"], 9000)
+    await db_session.commit()
+
+    for minter in (scenario["member_b_id"], scenario["owner_b_id"]):
+        scenario["act_as"](minter, scenario["ws_b_id"])
+        with TestClient(app) as client:
+            refused = _mint(client, scenario["slug"], 10000)
+        assert refused.status_code == 403, refused.text
+        body = refused.json()
+        assert body["error"] == "QUOTA-001"
+        assert (body["details"]["current"], body["details"]["limit"]) == (2, 2)
+
+    # Creation alone can never exceed the ceiling: count <= cap and every
+    # token <= 10000 keep the sum at or under cap * 10000, so every token can
+    # still be raised to the per-token maximum (the sum lands exactly on the
+    # ceiling, which fits).
+    scenario["act_as"](scenario["owner_b_id"], scenario["ws_b_id"])
+    with TestClient(app) as client:
+        for public_id in (scenario["token_b_member_public_id"], scenario["token_b_public_id"]):
+            raised = client.patch(
+                f"/api/v1/resource-tokens/{public_id}", json={"quota_events_per_hour": 10000}
+            )
+            assert raised.status_code == 200, raised.text
+    db_session.expire_all()
+    total = await db_session.scalar(
+        select(func.sum(ResourceToken.quota_events_per_hour)).where(
+            ResourceToken.workspace_id == scenario["ws_b_id"], ResourceToken.is_active.is_(True)
+        )
+    )
+    assert total == ceiling
+
+
+@pytest.mark.asyncio
+async def test_cap_still_bites_at_max_for_a_single_owner(scenario, db_session, xl_with_cap):
+    """Unchanged behaviour for the common shape: one owner, ``cap`` tokens."""
+    xl_with_cap(3)
+    await _make_xl(db_session, scenario["ws_b_id"])
+    await db_session.execute(
+        ResourceToken.__table__.update()
+        .where(ResourceToken.id == scenario["token_b_member_id"])
+        .values(created_by=scenario["owner_b_id"])
+    )
+    await db_session.commit()
+    scenario["act_as"](scenario["owner_b_id"], scenario["ws_b_id"])
+
+    with TestClient(app) as client:
+        third = _mint(client, scenario["slug"], 1000)
+        assert third.status_code == 201, third.text
+        fourth = _mint(client, scenario["slug"], 1000)
+    assert fourth.status_code == 403, fourth.text
+    assert (fourth.json()["details"]["current"], fourth.json()["details"]["limit"]) == (3, 3)
+
+
+@pytest.mark.asyncio
+async def test_cap_counts_like_the_ceiling_and_not_across_workspaces(
+    scenario, db_session, xl_with_cap
+):
+    """The count's population is the ceiling's: a token reached only through
+    its ``resource_pk`` (no shadow ``workspace_id``) and a legacy row reached
+    only through its ``workspace_id`` both count; the same slug's token in
+    workspace A, minted by the same user, does not."""
+    xl_with_cap(2)
+    await _make_xl(db_session, scenario["ws_b_id"])
+    await db_session.execute(
+        ResourceToken.__table__.update()
+        .where(ResourceToken.id == scenario["token_b_id"])
+        .values(workspace_id=None)
+    )
+    await db_session.execute(
+        ResourceToken.__table__.update()
+        .where(ResourceToken.id == scenario["token_b_member_id"])
+        .values(resource_pk=None)
+    )
+    await db_session.execute(
+        ResourceToken.__table__.update()
+        .where(ResourceToken.id == scenario["token_a_id"])
+        .values(created_by=scenario["owner_b_id"])
+    )
+    await db_session.commit()
+    scenario["act_as"](scenario["owner_b_id"], scenario["ws_b_id"])
+
+    with TestClient(app) as client:
+        refused = _mint(client, scenario["slug"], 1000)
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["details"]["current"] == 2
+
+    # Revoke the legacy row: one slot frees up, workspace A's token is not
+    # what fills it.
+    await db_session.execute(
+        ResourceToken.__table__.update()
+        .where(ResourceToken.id == scenario["token_b_member_id"])
+        .values(is_active=False)
+    )
+    await db_session.commit()
+    with TestClient(app) as client:
+        minted = _mint(client, scenario["slug"], 1000)
+    assert minted.status_code == 201, minted.text
+
+
+@pytest.mark.asyncio
+async def test_a_token_counted_by_the_ceiling_is_addressable(scenario, db_session):
+    """A token whose shadow ``workspace_id`` was never backfilled is part of
+    the workspace's sum (through its ``resource_pk``) — so the owner must be
+    able to update and revoke it through the same route. It used to be a
+    404 on both."""
+    await db_session.execute(
+        ResourceToken.__table__.update()
+        .where(ResourceToken.id == scenario["token_b_id"])
+        .values(workspace_id=None)
+    )
+    await db_session.commit()
+    scenario["act_as"](scenario["owner_b_id"], scenario["ws_b_id"])
+    public_id = scenario["token_b_public_id"]
+
+    with TestClient(app) as client:
+        renamed = client.patch(
+            f"/api/v1/resource-tokens/{public_id}", json={"description": "reached"}
+        )
+        assert renamed.status_code == 200, renamed.text
+        assert renamed.json()["description"] == "reached"
+        raised = client.patch(
+            f"/api/v1/resource-tokens/{public_id}", json={"quota_events_per_hour": 1500}
+        )
+        assert raised.status_code == 200, raised.text
+        revoked = client.delete(f"/api/v1/resource-tokens/{public_id}")
+    assert revoked.status_code == 204, revoked.text
+    assert await _is_active(db_session, scenario["token_b_id"]) is False
+
+
+@pytest.mark.asyncio
+async def test_update_and_revoke_follow_the_resources_row_not_the_shadow_column(
+    scenario, db_session
+):
+    """The ``resources`` row decides, as it does for the sum: a token row that
+    claims workspace B but points at workspace A's resource is not B's (uniform
+    404, nothing disclosed), and workspace A's own token is not reachable from
+    B either way."""
+    await db_session.execute(
+        ResourceToken.__table__.update()
+        .where(ResourceToken.id == scenario["token_b_member_id"])
+        .values(resource_pk=scenario["resource_a_id"])
+    )
+    await db_session.commit()
+    scenario["act_as"](scenario["owner_b_id"], scenario["ws_b_id"])
+
+    with TestClient(app) as client:
+        for public_id in (scenario["token_b_member_public_id"], scenario["token_a_public_id"]):
+            patched = client.patch(
+                f"/api/v1/resource-tokens/{public_id}", json={"description": "x"}
+            )
+            assert patched.status_code == 404, patched.text
+            deleted = client.delete(f"/api/v1/resource-tokens/{public_id}")
+            assert deleted.status_code == 404, deleted.text
+    assert await _is_active(db_session, scenario["token_b_member_id"]) is True
+    assert await _is_active(db_session, scenario["token_a_id"]) is True
 
 
 # ============================================================================
