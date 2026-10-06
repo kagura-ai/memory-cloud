@@ -184,15 +184,9 @@ class FakeRedis(SessionFakeOps):
     def setex(self, key: str, ttl: int, value) -> None:
         self.store[key] = value
 
-    def pipeline(self):
-        redis = self
-        pipe = MagicMock()
-        pipe.incr = MagicMock(
-            side_effect=lambda key: redis.store.__setitem__(key, int(redis.store.get(key, 0)) + 1)
-        )
-        pipe.expire = MagicMock()
-        pipe.execute = MagicMock()
-        return pipe
+    def incr(self, key: str) -> int:
+        self.store[key] = int(self.store.get(key, 0)) + 1  # type: ignore[arg-type]
+        return self.store[key]  # type: ignore[return-value]
 
 
 def _request(ip: str = "198.51.100.9") -> SimpleNamespace:

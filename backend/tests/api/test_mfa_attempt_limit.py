@@ -5,7 +5,9 @@ in ``_LOGIN_LOCKOUT_SECONDS``). These tests pin that the TOTP step of an
 MFA-enabled account shares that budget:
 
 - a wrong code counts; the budget spent, ``/mfa/verify`` answers 429 even on
-  a pending token issued earlier;
+  a pending token issued earlier. The attempt is taken with one ``INCR``
+  before the code is checked, so requests racing at the limit on several
+  workers do not each get a guess;
 - a correct password does not clear the counter of an MFA-enabled account and
   issues no pending token while the account is locked;
 - only the completed sign-in (second factor passed) clears it;
@@ -16,6 +18,7 @@ MFA-enabled account shares that budget:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -246,6 +249,45 @@ async def test_spending_the_budget_with_a_code_notifies_the_owner(redis, account
     assert kwargs["user_id"] == USER_ID
     assert kwargs["event"] == SecurityEvent.SECOND_FACTOR_LOCKED
     assert kwargs["request"].client.host == "198.51.100.9"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_failures_at_the_limit_get_one_guess_and_one_notice(
+    redis, account
+) -> None:
+    # Two pending tokens minted in advance, one attempt left in the budget,
+    # both verify calls in flight at once (as on two uvicorn workers). The
+    # attempt is reserved with one INCR before the code is checked: the first
+    # call gets the last guess (401, and it is the one that notifies), the
+    # second is refused (429) without a check and consumes nothing.
+    first, second = await _password_step(), await _password_step()
+    redis.store[COUNTER] = MAX - 1
+
+    results = await asyncio.gather(
+        _code_step(first, _wrong_code()), _code_step(second, _wrong_code()), return_exceptions=True
+    )
+
+    guessed, refused = results
+    assert isinstance(guessed, AuthenticationError)
+    assert isinstance(refused, HTTPException) and refused.status_code == 429
+    assert f"mfa_pending:{first}" not in redis.store
+    assert f"mfa_pending:{second}" in redis.store
+    assert f"mfa_pending_cred:{second}" in redis.store
+    assert redis.store[COUNTER] == MAX + 1
+    account.notice.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_attempt_past_the_limit_never_notifies_again(redis, account) -> None:
+    # Only the INCR that lands exactly on the limit notifies.
+    tokens = [await _password_step() for _ in range(3)]
+    redis.store[COUNTER] = MAX
+    for token in tokens:
+        with pytest.raises(HTTPException) as exc_info:
+            await _code_step(token, _wrong_code())
+        assert exc_info.value.status_code == 429
+    account.notice.assert_not_called()
+    assert redis.store[COUNTER] == MAX + 3
 
 
 @pytest.mark.asyncio
