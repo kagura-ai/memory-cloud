@@ -76,6 +76,50 @@ def _user_index_key(user_id: str) -> str:
     return f"{_USER_INDEX_PREFIX}{user_id}"
 
 
+class SweepLeaseLostError(RuntimeError):
+    """A fenced sweep found the lock it runs under expired or taken (#1918).
+
+    Nothing was deleted: the sweep's candidates were read under a lease that
+    is over, so a newer holder may have written — and answered for — a
+    session among them.
+    """
+
+    def __init__(self, lock_key: str) -> None:
+        super().__init__(f"sweep lease lost: {lock_key}")
+        self.lock_key = lock_key
+
+
+def _arm_sweep_fence(pipe: Any, lock_key: str, token: str) -> None:
+    """WATCH ``lock_key`` and open the transaction only if it holds ``token``.
+
+    Raises:
+        SweepLeaseLostError: The lock is gone or another holder's.
+    """
+    pipe.watch(lock_key)
+    held = pipe.get(lock_key)
+    if isinstance(held, bytes):
+        held = held.decode()
+    if held != token:
+        pipe.reset()
+        raise SweepLeaseLostError(lock_key)
+    pipe.multi()
+
+
+def _execute_fenced(pipe: Any, lock_key: str) -> list[Any]:
+    """EXEC a transaction armed by :func:`_arm_sweep_fence`.
+
+    Raises:
+        SweepLeaseLostError: The lock changed hands (or expired) after the
+            fence read it; Redis aborted the transaction.
+    """
+    from redis.exceptions import WatchError
+
+    try:
+        return pipe.execute()
+    except WatchError:
+        raise SweepLeaseLostError(lock_key) from None
+
+
 def browser_cookie_attrs() -> dict[str, Any]:
     """Attributes shared by every cookie the API sets on the browser.
 
@@ -1021,6 +1065,7 @@ class SessionManager:
         exclude_session_id: str | None = None,
         *,
         strict: bool = False,
+        fence: tuple[str, str] | None = None,
     ) -> int:
         """Delete all sessions for a specific user.
 
@@ -1039,11 +1084,22 @@ class SessionManager:
             strict: Re-raise a Redis failure instead of reporting 0 deleted.
                 The password flows (#1678) must not report success — or
                 commit the new password — when the old sessions survived.
+            fence: ``(lock_key, token)`` of the Redis lock the caller holds
+                over this sweep (#1918). The deletes then run as one
+                WATCH/MULTI transaction on that key and land only if it
+                still holds ``token`` at EXEC: a sweep that outlived its
+                lease cannot delete a session created under a newer lock
+                and already answered for. Otherwise nothing is deleted and
+                ``SweepLeaseLostError`` is raised, ``strict`` or not. A
+                sweep with nothing to delete has nothing to fence and
+                returns 0 without reading the lock.
 
         Returns:
             Number of sessions deleted
 
         Raises:
+            SweepLeaseLostError: With ``fence``: the lock expired or is
+                another holder's. Nothing was deleted.
             Exception: Only with ``strict=True``: whatever Redis raised.
 
         Example:
@@ -1103,6 +1159,8 @@ class SessionManager:
             deleted_count = 0
             if keys_to_delete or stale_ids:
                 pipe = self._redis.pipeline()
+                if fence is not None:
+                    _arm_sweep_fence(pipe, *fence)
                 for key in keys_to_delete:
                     pipe.delete(key)
                 for sid in stale_ids + [k.removeprefix("session:") for k in keys_to_delete]:
@@ -1110,7 +1168,10 @@ class SessionManager:
                 for key, index_ids in other_sets.items():
                     for index_id in index_ids:
                         pipe.srem(_user_index_key(index_id), key.removeprefix("session:"))
-                results = pipe.execute()
+                if fence is not None:
+                    results = _execute_fenced(pipe, fence[0])
+                else:
+                    results = pipe.execute()
                 deleted_count = sum(1 for r in results[: len(keys_to_delete)] if r)
 
             if deleted_count:
@@ -1118,6 +1179,9 @@ class SessionManager:
 
             return deleted_count
 
+        except SweepLeaseLostError:
+            logger.warning(f"Session sweep for user {user_id} outlived its lock; nothing deleted")
+            raise
         except Exception as e:
             logger.error(f"Failed to delete user sessions: {e}")
             if strict:

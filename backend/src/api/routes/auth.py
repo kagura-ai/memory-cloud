@@ -2579,10 +2579,27 @@ async def _create_password_session(
 # per-account Redis lock, so the first to get there keeps its session and the
 # other finds its own gone. The lock frees itself if its holder died, and is
 # released by token so an expired holder cannot free its successor's.
+#
+# The lease (#1918): the sweep is one SMEMBERS, a GET per candidate and one
+# transaction of DELs, milliseconds in all; the TTL only bounds how long a
+# lock whose holder died (or whose release failed) stays. It is kept at 10 s
+# rather than cut to a few, because the session store's sync client waits
+# 5 s on a slow Redis call and retries once, and because the #1809 legacy
+# SCAN (one session lifetime after the index first appeared) re-reads every
+# session key: a shorter lease would end those sweeps, not a stale lock. A
+# waiter outlives the lease — the wait is derived from the TTL — so a lock
+# nobody will release costs one lease of waiting, never a 503 while it lives.
+# The sweep's deletes are fenced by the lock token (``fence=`` below), so a
+# sweep that does outlive its lease deletes nothing and the sign-in is
+# refused instead of racing the next holder.
 _SIGN_IN_SWEEP_LOCK_KEY = "signin_sweep_lock:{user_id}"
 _SIGN_IN_SWEEP_LOCK_TTL_SECONDS = 10
-_SIGN_IN_SWEEP_LOCK_WAIT_SECONDS = 2.0
 _SIGN_IN_SWEEP_LOCK_POLL_SECONDS = 0.05
+# The lease plus one poll: the last attempt is made at or after the deadline
+# (see the loop), so a key set just before the wait began has expired by then.
+_SIGN_IN_SWEEP_LOCK_WAIT_SECONDS = (
+    _SIGN_IN_SWEEP_LOCK_TTL_SECONDS + _SIGN_IN_SWEEP_LOCK_POLL_SECONDS
+)
 
 
 async def _complete_password_sign_in(user_id: str, email: str, session_id: str) -> bool:
@@ -2597,7 +2614,17 @@ async def _complete_password_sign_in(user_id: str, email: str, session_id: str) 
     password write swept the sessions after the re-check. Also False when a
     password write swept ``session_id`` while this sweep ran. The caller must
     refuse the sign-in. Raises when the sweep lock cannot be taken or Redis
-    fails, the sweep included.
+    fails, the sweep included, and when the sweep outlived its lease
+    (``SweepLeaseLostError``: its deletes did not land, see #1918).
+
+    The lock (#1918): a waiter polls for the whole lease plus one poll, so a
+    key left by a holder that died delays the sign-in by the TTL at most. A
+    release that finds the lock no longer ours is only logged: its WATCH /
+    MULTI fails only when the key changed under it, which means it expired
+    or a successor took it, so nothing of ours is left to DEL — an
+    unconditional DEL after a re-read would reintroduce the check-then-act
+    race the token exists to prevent. A release that fails outright (Redis
+    error) leaves the key to its TTL, which the next waiter sits out.
     """
     if not _session_manager:
         raise RuntimeError("Session manager not initialized")
@@ -2609,15 +2636,19 @@ async def _complete_password_sign_in(user_id: str, email: str, session_id: str) 
         lock_token = acquire_lock_sync(redis, lock_key, _SIGN_IN_SWEEP_LOCK_TTL_SECONDS)
         if lock_token is not None:
             break
-        if time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             raise TimeoutError("sign-in sweep lock is held")
-        await asyncio.sleep(_SIGN_IN_SWEEP_LOCK_POLL_SECONDS)
+        # Never overshoot the deadline by a poll: the last attempt is made
+        # at or after it, when a lease that began before the wait is over.
+        await asyncio.sleep(min(_SIGN_IN_SWEEP_LOCK_POLL_SECONDS, remaining))
     try:
         if not _session_manager.session_holds_user(session_id, user_id):
             return False
         # strict: a sweep that failed must not read as "nothing to sweep".
+        # fence: the deletes land only while the lock is still ours.
         deleted_count = _session_manager.delete_user_sessions(
-            user_id, exclude_session_id=session_id, strict=True
+            user_id, exclude_session_id=session_id, strict=True, fence=(lock_key, lock_token)
         )
         # A password write sweeps without this lock (it holds the ``users``
         # row instead). If it deleted the new session between the check and
@@ -2628,13 +2659,18 @@ async def _complete_password_sign_in(user_id: str, email: str, session_id: str) 
             return False
     finally:
         try:
-            release_lock_sync(redis, lock_key, lock_token)
+            released = release_lock_sync(redis, lock_key, lock_token)
         except Exception as exc:
             logger.warning(
                 "password_login_sweep_lock_release_failed",
                 user_id=user_id,
                 error_type=type(exc).__name__,
             )
+        else:
+            if not released:
+                # The lease ran out under us (or a successor holds the key):
+                # the sweep took longer than the TTL. Nothing to free.
+                logger.warning("password_login_sweep_lock_expired", user_id=user_id)
     if deleted_count > 0:
         logger.info(f"Invalidated {deleted_count} old session(s) for {email}")
 
