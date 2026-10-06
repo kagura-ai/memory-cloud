@@ -471,6 +471,41 @@ CLI actions (`reset_password`, `create_admin`) send no notice. A send failure is
 change. Under `EMAIL_PROVIDER=logging` each notice is one
 `security_notification_email` log line (event and a keyed recipient hash only).
 
+**Removed sign-in providers.** A Google / GitHub identity signs in to an
+account only through its `user_oauth_providers` row. Once the owner removes
+that provider from **Settings** (`POST /api/v1/me/account/unlink-provider`),
+the identity has no row and owns nothing — including the account it created,
+whose `users.user_id` still equals the provider's subject. A sign-in through
+it is refused: the callback redirects to `/login?error=provider_unlinked`,
+opens no session, and the backend logs
+`oauth_unlinked_identity_sign_in_refused` (or `session_owner_not_found`).
+Earlier releases let such an identity back in by the `users` row alone. After
+upgrading, list the accounts in that state and review their recent activity —
+`users.last_login_at`, the browsers in `user_known_devices`, and their
+`audit_logs` rows (`oauth_provider_unlinked`, `password_set`, and anything
+that follows the unlink: `oauth_provider_linked`, `api_key_created`,
+`password_changed`, role changes):
+
+```sql
+-- OAuth-created accounts whose original identity has no provider row
+SELECT u.user_id, u.email, u.auth_provider, u.last_login_at
+FROM users u
+WHERE u.auth_method = 'oauth'
+  AND NOT EXISTS (
+    SELECT 1 FROM user_oauth_providers p WHERE p.oauth_sub = u.user_id
+  )
+ORDER BY u.last_login_at DESC NULLS LAST;
+
+-- One account's recent sign-in devices and audit trail
+SELECT first_seen, last_seen FROM user_known_devices WHERE user_id = '<user_id>' ORDER BY last_seen DESC;
+SELECT created_at, action, resource, ip_address FROM audit_logs WHERE user_id = '<user_id>' ORDER BY created_at DESC LIMIT 50;
+```
+
+A sign-in dated after the `oauth_provider_unlinked` row that was not the
+owner's is a reason to reset the account's password (which signs it out
+everywhere and revokes its OAuth / MCP grants, see above) and to review its
+API keys and OAuth clients in Settings.
+
 ## One person, two accounts — identity links (Issue #1784)
 
 Two different things are called "linking" in Kagura, and they do not overlap:
