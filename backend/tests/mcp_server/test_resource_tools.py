@@ -909,7 +909,8 @@ class TestSetupResourceHappyPath:
         # 2) resource_id duplicate check → none
         # 3) workspace plan_name lookup → "promax" (#1551: resources are XL-only)
         # 4) upsert_resource: resolve_resource_pk → existing uuid (Issue #390 Phase 2)
-        # 5) active token count → 0
+        # 5) the workspace's mint lock (#1927)
+        # 6) active token count → 0
         role_result = MagicMock()
         owner = MagicMock()
         owner.role = "owner"
@@ -932,6 +933,7 @@ class TestSetupResourceHappyPath:
             resource_dup_result,
             plan_result,
             resource_pk_result,
+            MagicMock(),
             token_count_result,
         ]
 
@@ -1014,8 +1016,12 @@ class TestSetupResourceHappyPath:
         # #1919: the cap is counted over the same population as the REST cap
         # and the quota ceiling — the workspace's active non-connector tokens
         # attributed by the resources row — not per live context by slug.
+        # #1927: counted under the REST path's per-workspace mint lock.
+        lock_stmt = mock_db.execute.call_args_list[4].args[0]
+        assert "pg_advisory_xact_lock(hashtextextended(:key, 0))" in str(lock_stmt)
+        assert lock_stmt.compile().params == {"key": f"resource_token_cap:{workspace_id}"}
         cap_sql = str(
-            mock_db.execute.call_args_list[4].args[0].compile(dialect=postgresql.dialect())
+            mock_db.execute.call_args_list[5].args[0].compile(dialect=postgresql.dialect())
         )
         assert "LEFT OUTER JOIN resources ON resources.id = resource_tokens.resource_pk" in cap_sql
         assert "workspace_connectors.id IS NULL" in cap_sql

@@ -988,8 +988,6 @@ async def handle_setup_resource(
             actual_embedding_model = preflight.embedding_model
             actual_dimensions = preflight.embedding_dimensions
 
-            from sqlalchemy import func
-
             from models.auth import Context
 
             # 7a. Upsert Resource entity (Issue #390 Phase 2). Every satellite
@@ -1052,14 +1050,13 @@ async def handle_setup_resource(
             # once per live context, counted connector tokens, and skipped a
             # token whose resource has no live context (which still counts
             # toward the ceiling), so this mint path could still push the
-            # workspace past max_resource_tokens * 10000.
-            from auth.resource_tokens import workspace_regular_active_tokens
-            from models.resource import ResourceToken
+            # workspace past max_resource_tokens * 10000. Counted under the
+            # workspace's mint lock (#1927), the REST path's lock: it is held
+            # until the commit (or rollback) below, so a concurrent mint for
+            # the same workspace on either path counts this token.
+            from auth.resource_tokens import count_regular_active_tokens_for_mint
 
-            active_count_result = await db.execute(
-                workspace_regular_active_tokens(workspace_id, func.count(ResourceToken.id))
-            )
-            active_count = active_count_result.scalar() or 0
+            active_count = await count_regular_active_tokens_for_mint(db, workspace_id)
             if active_count >= plan.max_resource_tokens:
                 await db.rollback()
                 await _log_tool_usage(

@@ -12,7 +12,7 @@ import secrets
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Select, and_, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.resource import Resource, ResourceToken, WorkspaceConnector
@@ -127,6 +127,37 @@ def workspace_regular_active_tokens(workspace_id: UUID, *columns: Any) -> Select
             WorkspaceConnector.id.is_(None),
         )
     )
+
+
+# Namespaced like the other per-workspace advisory locks
+# (``connector_seat:``, ``memory_analysis_quota:``) so the same workspace's
+# keys hash apart; 64-bit ``hashtextextended`` rather than 32-bit ``hashtext``,
+# which would collide across ~65k workspaces (PR #686).
+_TOKEN_CAP_LOCK_SQL = text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))")
+
+
+async def count_regular_active_tokens_for_mint(db: AsyncSession, workspace_id: UUID) -> int:
+    """Count the cap population of ``workspace_id`` under its mint lock (#1927).
+
+    Every path that mints a regular token — REST ``create_resource_token``
+    and MCP ``setup_resource`` — calls this immediately before the cap check,
+    then inserts the token and commits on the same session. The
+    ``pg_advisory_xact_lock`` taken first is held until that transaction ends,
+    so a second mint for the same workspace waits here until the first one
+    has committed (or rolled back) and its COUNT then includes the new token:
+    two owners minting at ``cap - 1`` can no longer both pass and leave the
+    workspace one over ``max_resource_tokens``.
+
+    Load-bearing: nothing between this call and the token INSERT may commit
+    the session — a commit releases an xact lock. The connector setup flow
+    is not a caller; its tokens are outside this population and its seats
+    have their own lock (``connector_seat:``).
+    """
+    await db.execute(_TOKEN_CAP_LOCK_SQL.bindparams(key=f"resource_token_cap:{workspace_id}"))
+    result = await db.execute(
+        workspace_regular_active_tokens(workspace_id, func.count(ResourceToken.id))
+    )
+    return int(result.scalar() or 0)
 
 
 class ResourceTokenManager:

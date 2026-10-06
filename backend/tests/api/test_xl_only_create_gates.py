@@ -63,9 +63,15 @@ class TestResourceTokenCreate:
         db = MagicMock()
         db.commit = AsyncMock()
         db.refresh = AsyncMock()
-        # 1) context exists in workspace → id, 2) plan_name, 3) active count
+        # 1) context exists in workspace → id, 2) plan_name, 3) mint lock
+        # (#1927), 4) active count
         db.execute = AsyncMock(
-            side_effect=[_result(one=uuid.uuid4()), _result(one=plan_name), _result(scalar=0)]
+            side_effect=[
+                _result(one=uuid.uuid4()),
+                _result(one=plan_name),
+                _result(),
+                _result(scalar=0),
+            ]
         )
         manager = MagicMock()
         manager.create_token = AsyncMock(return_value=("kagura_resource_plain", _token()))
@@ -98,8 +104,14 @@ class TestResourceTokenCreate:
         response, manager, db = await self._create("promax")
         assert response.token == "kagura_resource_plain"
         manager.create_token.assert_awaited_once()
-        # The tier's numeric cap stays the second gate: the count query ran.
-        assert db.execute.await_count == 3
+        # The tier's numeric cap stays the second gate: the count query ran,
+        # right after the workspace's mint lock (#1927).
+        assert db.execute.await_count == 4
+        lock_sql = str(db.execute.await_args_list[2].args[0])
+        assert "pg_advisory_xact_lock(hashtextextended(:key, 0))" in lock_sql
+        assert db.execute.await_args_list[2].args[0].compile().params == {
+            "key": f"resource_token_cap:{_WS}"
+        }
 
     @pytest.mark.asyncio
     async def test_missing_plan_row_fails_closed(self) -> None:
@@ -117,7 +129,12 @@ class TestResourceTokenCreate:
         db.commit = AsyncMock()
         db.refresh = AsyncMock()
         db.execute = AsyncMock(
-            side_effect=[_result(one=uuid.uuid4()), _result(one="promax"), _result(scalar=cap)]
+            side_effect=[
+                _result(one=uuid.uuid4()),
+                _result(one="promax"),
+                _result(),
+                _result(scalar=cap),
+            ]
         )
         manager = MagicMock()
         manager.create_token = AsyncMock()

@@ -16,6 +16,7 @@ property of the SQL, which a mocked session cannot prove.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 from unittest.mock import AsyncMock, patch
@@ -34,16 +35,17 @@ from auth.dependencies import (
     require_session_auth,
     require_workspace_owner,
 )
-from auth.resource_tokens import ResourceTokenManager
+from auth.resource_tokens import ResourceTokenManager, workspace_regular_active_tokens
 from auth.workspace_roles import WorkspaceRole
 from config.plan_tiers import get_plan_tier
 from db.base import get_db
 from mcp_server.tools.context import handle_update_context
-from mcp_server.tools.resource import handle_list_resource_tokens
+from mcp_server.tools.resource import handle_list_resource_tokens, handle_setup_resource
 from models.auth import Context, Workspace, WorkspaceMember
 from models.resource import Resource, ResourceSchema, ResourceToken, WorkspaceConnector
 from services.context_service import ContextService
 from utils.datetime import utcnow
+from utils.exceptions import QuotaExceededError
 
 PLAN = "basic"
 
@@ -899,3 +901,112 @@ async def test_create_schema_still_works_with_a_live_context(scenario, db_sessio
     assert response.json()["schema_version"] == 1
     assert await _schema_versions(db_session, scenario["resource_b_id"]) == [1]
     assert await _schema_versions(db_session, scenario["resource_a_id"]) == []
+
+
+# ============================================================================
+# Concurrent mints at cap - 1 (#1927)
+# ============================================================================
+
+
+@pytest.fixture
+def slow_mint(monkeypatch):
+    """Hold every mint between its cap count and its INSERT for a moment.
+
+    Without the per-workspace lock both concurrent requests read the count in
+    that window and both insert; with it the second request waits on the lock
+    until the first one commits, then counts its token. The delay is what
+    makes the interleaving deterministic instead of a matter of scheduling.
+    """
+    original = ResourceTokenManager.create_token
+
+    async def delayed(self, *args, **kwargs):
+        await asyncio.sleep(0.3)
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ResourceTokenManager, "create_token", delayed)
+
+
+async def _rest_mint(engine, user_id: str, workspace_id, slug: str):
+    """POST /resource-tokens on its own session (= its own connection)."""
+    from api.routes.resource_tokens import ResourceTokenCreate, create_resource_token
+
+    async with _session_maker(engine)() as session:
+        try:
+            return await create_resource_token(
+                ResourceTokenCreate(resource_id=slug, quota_events_per_hour=1000),
+                (user_id, workspace_id),
+                ResourceTokenManager(session),
+                session,
+            )
+        except QuotaExceededError as exc:
+            return exc
+        finally:
+            await session.rollback()
+
+
+async def _active_regular_tokens(db_session, workspace_id) -> int:
+    db_session.expire_all()
+    return await db_session.scalar(
+        workspace_regular_active_tokens(workspace_id, func.count(ResourceToken.id))
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_rest_mints_at_cap_minus_one_admit_exactly_one(
+    scenario, db_session, xl_with_cap, slow_mint
+):
+    """Two owners of one workspace mint at the same moment with one slot
+    left. Both used to pass the COUNT before either INSERT landed and the
+    workspace ended one token over ``max_resource_tokens``."""
+    xl_with_cap(3)
+    await _make_xl(db_session, scenario["ws_b_id"])
+    await db_session.commit()
+    assert await _active_regular_tokens(db_session, scenario["ws_b_id"]) == 2
+
+    results = await asyncio.gather(
+        *(
+            _rest_mint(scenario["engine"], minter, scenario["ws_b_id"], scenario["slug"])
+            for minter in (scenario["owner_b_id"], scenario["member_b_id"])
+        )
+    )
+
+    refused = [r for r in results if isinstance(r, QuotaExceededError)]
+    minted = [r for r in results if not isinstance(r, QuotaExceededError)]
+    assert len(minted) == 1, results
+    assert len(refused) == 1, results
+    assert refused[0].status_code == 403
+    assert refused[0].error_code == "QUOTA-001"
+    assert (refused[0].details["current"], refused[0].details["limit"]) == (3, 3)
+    assert await _active_regular_tokens(db_session, scenario["ws_b_id"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_concurrent_rest_and_mcp_mints_share_the_lock(
+    scenario, db_session, xl_with_cap, slow_mint
+):
+    """REST ``create_resource_token`` and MCP ``setup_resource`` take the same
+    per-workspace lock: one of them racing the other for the last slot is
+    refused too."""
+    xl_with_cap(3)
+    await _make_xl(db_session, scenario["ws_b_id"])
+    await db_session.commit()
+
+    with patch("db.base.get_db", new=_mcp_db(scenario["engine"])):
+        rest_result, mcp_result = await asyncio.gather(
+            _rest_mint(
+                scenario["engine"], scenario["owner_b_id"], scenario["ws_b_id"], scenario["slug"]
+            ),
+            handle_setup_resource(
+                {"name": f"ctx-new-{scenario['tag']}", "resource_id": f"new_{scenario['tag']}"},
+                scenario["owner_b_id"],
+                scenario["ws_b_id"],
+            ),
+        )
+
+    mcp_body = _json_of(mcp_result)
+    rest_refused = isinstance(rest_result, QuotaExceededError)
+    mcp_refused = mcp_body.get("error") == "quota_exceeded"
+    assert rest_refused != mcp_refused, (rest_result, mcp_body)
+    if not mcp_refused:
+        assert mcp_body["status"] == "success", mcp_body
+    assert await _active_regular_tokens(db_session, scenario["ws_b_id"]) == 3

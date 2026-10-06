@@ -52,9 +52,15 @@ async def _create(plan_name: str):
     db = MagicMock()
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
-    # 1) context exists in workspace → id, 2) plan_name, 3) active count
+    # 1) context exists in workspace → id, 2) plan_name, 3) mint lock (#1927),
+    # 4) active count
     db.execute = AsyncMock(
-        side_effect=[_result(one=uuid.uuid4()), _result(one=plan_name), _result(scalar=0)]
+        side_effect=[
+            _result(one=uuid.uuid4()),
+            _result(one=plan_name),
+            _result(),
+            _result(scalar=0),
+        ]
     )
     manager = MagicMock()
     manager.create_token = AsyncMock(return_value=("kagura_resource_plain", _token()))

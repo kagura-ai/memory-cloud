@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import WorkspaceOwner
 from auth.resource_tokens import (
     ResourceTokenManager,
+    count_regular_active_tokens_for_mint,
     workspace_regular_active_tokens,
     workspace_tokens,
 )
@@ -450,13 +451,10 @@ async def create_resource_token(
 
         # Check the workspace's active token count against the cap (#858
         # excludes connector-owned tokens, #1919 counts the workspace, not the
-        # caller — see ``workspace_regular_active_tokens``).
-        # Note: Race condition possible but low impact (concurrent creation rare)
-        # Alternative: Use database constraint on token count (future improvement)
-        active_count_result = await db.execute(
-            workspace_regular_active_tokens(workspace_id, func.count(ResourceToken.id))
-        )
-        active_count = active_count_result.scalar() or 0
+        # caller — see ``workspace_regular_active_tokens``). The count runs
+        # under the workspace's mint lock (#1927), held until the commit below,
+        # so a concurrent mint for the same workspace counts this token.
+        active_count = await count_regular_active_tokens_for_mint(db, workspace_id)
 
         if active_count >= plan.max_resource_tokens:
             # #1644 S5: the cap keeps its 403 — the status is what existing
