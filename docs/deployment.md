@@ -488,12 +488,17 @@ provider attached later through **Connected accounts** never becomes primary,
 however long ago it was attached: attaching needs only a live session, so a
 session alone can never choose whose email and name the account takes. Such
 a sign-in logs `oauth_primary_provider_not_adopted_attached_identity` and
-goes through as a linked sign-in.
+goes through as a linked sign-in. Unlinking the primary provider follows the
+same rule: the pointer moves to the identity the account was created with
+when that one is still attached, and is cleared otherwise — never to a
+provider attached later. (A password account's pointer still moves to any
+surviving provider, as before.)
 
 **After upgrading**, review the accounts whose primary provider is a later
-attached identity. The pointer legitimately lands there when an account
-unlinks its original provider (it moves to a surviving one), so this is a
-list to check with the owners, not a list of mistakes. On the database host:
+attached identity. From this version on the pointer gets there only by hand;
+before it, it could land there when the original provider was unlinked, which
+owners did legitimately, so this is a list to check with the owners, not a
+list of mistakes. On the database host:
 
 ```bash
 docker exec kagura-postgres psql -U kagura -d kagura -c "
@@ -516,7 +521,8 @@ docker exec kagura-postgres psql -U kagura -d kagura -c \
 ```
 
 Setting the pointer by hand is also the way to make a later attached
-provider primary for an owner who asks for it; the sign-in path never does.
+provider primary for an owner who asks for it; neither a sign-in nor an
+unlink does.
 
 ## One person, two accounts — identity links (Issue #1784)
 
