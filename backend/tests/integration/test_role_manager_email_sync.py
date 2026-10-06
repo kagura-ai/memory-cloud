@@ -32,7 +32,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from auth.roles import Role, RoleManager
-from models.auth import AuditLog, User
+from models.auth import AuditLog, User, UserOAuthProvider
 
 
 @pytest_asyncio.fixture
@@ -57,6 +57,13 @@ async def two_users(db_session: AsyncSession):
     )
     db_session.add(alice)
     db_session.add(bob)
+    # A Google / GitHub sign-in is accepted only through the identity's own
+    # link row (an unlinked identity is refused), so seed the rows a real
+    # first sign-in writes together with the user.
+    db_session.add(
+        UserOAuthProvider(user_id=alice.user_id, provider="google", oauth_sub=alice.user_id)
+    )
+    db_session.add(UserOAuthProvider(user_id=bob.user_id, provider="github", oauth_sub=bob.user_id))
     await db_session.commit()
     yield {"alice": alice, "bob": bob, "suffix": suffix}
     # Per-test rows use uuid-suffixed identifiers so they cannot collide with
