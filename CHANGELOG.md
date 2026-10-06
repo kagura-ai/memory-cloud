@@ -4,6 +4,22 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.97.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.97.0) — 2026-10-06
+
+Follow-ups to the v0.96.0 sign-in and resource-token work: a password sign-in no longer waits behind a dead lock longer than the lock lives, the resource-token cap and quota ceiling count the same per-workspace population and cannot be overshot by concurrent mints, and the MCP smoke-test runbook was run live against v0.96.1.
+
+### Changed
+- **The resource-token cap counts per workspace** ([#1919](https://github.com/kagura-ai/memory-cloud/issues/1919)): the active-token cap (`max_resource_tokens`) and the quota ceiling (`max_resource_tokens` × 10,000 events/hour) now count the same set — the workspace's active, non-connector tokens, attributed through their resource — in REST create, MCP `setup_resource`, the token list and the downgrade-eligibility read. Before, the cap counted per creator, so two owners could each mint a full set and then have every quota raise refused. `PATCH` / `DELETE /api/v1/resource-tokens/{id}` find the token with the same predicate, so every counted token is addressable; a token whose resource belongs to another workspace is a uniform 404 (was 403). The MCP token list keeps omitting legacy tokens with no resource (they cannot authenticate); the REST list shows them.
+- **The smoke-test runbook matches a live run** ([#1920](https://github.com/kagura-ai/memory-cloud/issues/1920)): `/kagura-memory:smoke-test` passed 77/77 main rows, 10/10 Agent Control Plane rows and 7/7 resource rows against v0.96.1 with the full tool profile; two expected shapes were corrected (a refused atomic `remember_batch` reports `failed=1, skipped=1`; every event of a forgotten memory omits `summary`).
+
+### Fixed
+- **A dead sign-in lock delays a password sign-in by at most its lifetime** ([#1918](https://github.com/kagura-ai/memory-cloud/issues/1918)): the per-account session-sweep lock lives 5 s (was 10 s) and a waiting sign-in waits it out (was: gave up after 2 s and answered 503 while the lock still lived). A per-account fence makes a sweep that a later sign-in overtook delete nothing, so it can no longer remove the later sign-in's session. A Redis connection failure during the lock's release or the fenced sweep is reported as a Redis failure, not as a lost lease.
+- **Concurrent mints cannot exceed the resource-token cap** ([#1927](https://github.com/kagura-ai/memory-cloud/issues/1927)): REST create and MCP `setup_resource` take a per-workspace transaction lock before counting, so two owners minting at the same moment can no longer each pass the count.
+
+### Notes
+- No migration, no new environment variables, no operator action.
+- Behaviour changes: a workspace whose owners together hold `max_resource_tokens` active tokens can mint no more, whoever minted them; workspaces already over the cap from per-creator minting keep their tokens (nothing is revoked) and must revoke or lower before raising a quota. A sign-in whose session sweep is overtaken by a later sign-in of the same account answers 503 (try again).
+
 ## [v0.96.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.96.1) — 2026-10-06
 
 Hardening of sign-in, account linking, context access and log hygiene (PR #1921). Every new check fails closed. No database migration and no new environment variables; operators should read the new `docs/deployment.md` sections listed under Notes.
