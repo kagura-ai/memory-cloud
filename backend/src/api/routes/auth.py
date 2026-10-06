@@ -78,7 +78,12 @@ from services.terms_service import TermsService, current_terms_version
 from services.workspace_service import WorkspaceService
 from utils.datetime import utcnow
 from utils.encryption import get_encryptor
-from utils.exceptions import AuthenticationError, ConflictError, InvalidCredentialsError
+from utils.exceptions import (
+    AuthenticationError,
+    ConflictError,
+    InvalidCredentialsError,
+    UnlinkedProviderSignInError,
+)
 from utils.hashing import SHA256_HEX_PATTERN, sha256_hex
 from utils.logger import get_logger
 from utils.redis_lock import acquire_lock_sync, release_lock_sync
@@ -645,7 +650,9 @@ def _state_hash(state: str | None) -> str | None:
 
 # Internal reason tokens for the non-cancel failure redirect (#1381). These are
 # literals chosen by call sites — IdP-supplied text never reaches the URL.
-_OAUTH_ERROR_REASONS = frozenset({"oauth_failed", "oauth_expired"})
+# ``provider_unlinked``: the identity has no link row any more (its account
+# removed this sign-in method), so no session is opened for it.
+_OAUTH_ERROR_REASONS = frozenset({"oauth_failed", "oauth_expired", "provider_unlinked"})
 
 
 def _oauth_error_redirect(provider: str, reason: str) -> RedirectResponse:
@@ -654,8 +661,8 @@ def _oauth_error_redirect(provider: str, reason: str) -> RedirectResponse:
     Counterpart to ``_oauth_cancel_redirect`` for real failures: missing
     params, expired/replayed state, exchange failure, DB trouble. The login
     page maps the well-known ``error`` tokens (``oauth_failed`` /
-    ``oauth_expired``) to i18n'd banners — the same channel already used by
-    ``registration_disabled`` / ``email_in_use``.
+    ``oauth_expired`` / ``provider_unlinked``) to i18n'd banners — the same
+    channel already used by ``registration_disabled`` / ``email_in_use``.
 
     ``reason`` is an internal literal (never IdP-derived); an unknown value
     collapses to ``oauth_failed`` so the URL vocabulary cannot widen by
@@ -1082,6 +1089,10 @@ async def google_callback(
 
         return redirect
 
+    except UnlinkedProviderSignInError:
+        # The identity has no link row (its account removed this sign-in
+        # method): no session, a banner that says so.
+        return _oauth_error_redirect("google", "provider_unlinked")
     except ConflictError:
         return _email_in_use_redirect()
     except SQLAlchemyError:
@@ -1502,8 +1513,11 @@ async def _identity_exists(provider: str, idp_sub: str, email: str) -> bool:
     insert:
 
     - the ``(provider, oauth_sub)`` link row — a returning user;
-    - a ``users`` row whose ``user_id`` is the sub — the identity that somehow
-      lacks a link row (ensure_user's IntegrityError retry lands on it);
+    - a ``users`` row whose ``user_id`` is the sub — an identity with no link
+      row, whose account removed this sign-in method: ensure_user's
+      IntegrityError retry refuses it (``/login?error=provider_unlinked``)
+      rather than creating anything, and that answer must not be masked by
+      ``terms_required`` either;
     - a ``users`` row holding ``email`` — ensure_user's insert trips the
       ``users.email`` UNIQUE constraint and raises ``ConflictError``
       (``/login?error=email_in_use``). Plain equality, like that constraint,
@@ -1627,15 +1641,20 @@ async def _terms_refusal(
     return _terms_required_redirect(provider, return_to)
 
 
+# The providers whose identities live in ``user_oauth_providers`` (#517): for
+# them a link row is the only thing that binds an identity to an account.
+_LINK_ROW_PROVIDERS = frozenset({"google", "github"})
+
+
 class SessionOwner(NamedTuple):
     """The account an IdP identity signs in to, as :func:`_owning_user` resolves it.
 
     ``name`` and ``picture`` are the account's own (``users`` columns), so a
     session opened through a linked provider shows the account, not whichever
     provider was used (#1875). ``provider_linked_at`` is when the identity was
-    attached (naive UTC) — None when the owner was found by the ``users`` row
-    keyed by the sub, or not found at all. ``account_created_at`` is when the
-    account itself was created (naive UTC), None when no row was found.
+    attached (naive UTC) — None when no link row was found. ``account_created_at``
+    is when the account itself was created (naive UTC), None when no row was
+    found.
     """
 
     user_id: str
@@ -1651,8 +1670,11 @@ async def _owning_user(db: AsyncSession, provider: str, idp_sub: str) -> Session
 
     Resolved the way ``RoleManager.ensure_user`` resolves it: through the
     ``(provider, oauth_sub)`` link row — a provider linked to another account
-    (#517) belongs to that account's ``user_id``, not to the sub — falling back
-    to a ``users`` row whose ``user_id`` is the sub.
+    (#517) belongs to that account's ``user_id``, not to the sub. For google
+    and github the link row is the only answer: a ``users`` row whose
+    ``user_id`` is the sub but has no link row is the account that removed
+    this sign-in method, and the identity owns nothing (None). Other providers
+    keep the ``users.user_id == sub`` fallback.
     """
     from models.auth import UserOAuthProvider
 
@@ -1673,6 +1695,8 @@ async def _owning_user(db: AsyncSession, provider: str, idp_sub: str) -> Session
     ).first()
     if row is not None:
         return SessionOwner(row[0], row[1], row[2], row[3], row[4], row[5])
+    if provider in _LINK_ROW_PROVIDERS:
+        return None
     row = (
         await db.execute(
             select(User.user_id, User.email, User.name, User.picture, User.created_at)
@@ -1697,9 +1721,12 @@ async def _session_owner(provider: str, idp_sub: str, idp_email: str) -> Session
 
     Unlike those advisory steps this one fails closed: a database error
     propagates, and the callback turns it into ``oauth_failed`` rather than
-    opening a session for an id that may own nothing. Only an identity with
-    no owning row at all (a role manager without Postgres) keeps the IdP
-    ``sub`` and email, which is what every sign-in used before.
+    opening a session for an id that may own nothing. A google or github
+    identity with no owning row raises ``UnlinkedProviderSignInError``
+    (``provider_unlinked``, no session): after ``ensure_user`` such an identity
+    has a link row, so none means it owns nothing. Only another provider with
+    no owning row keeps the IdP ``sub`` and email, which is what every sign-in
+    used before.
     """
     async for db in get_db():
         owner = await _owning_user(db, provider, idp_sub)
@@ -1707,6 +1734,8 @@ async def _session_owner(provider: str, idp_sub: str, idp_email: str) -> Session
             return owner
         break
     logger.warning("session_owner_not_found", provider=provider, idp_sub=idp_sub)
+    if provider in _LINK_ROW_PROVIDERS:
+        raise UnlinkedProviderSignInError()
     return SessionOwner(idp_sub, idp_email)
 
 
@@ -2408,6 +2437,9 @@ async def github_callback(
         logger.info(f"GitHub OAuth2 login successful: {db_email} (role={role})")
         return redirect
 
+    except UnlinkedProviderSignInError:
+        # No link row for this identity (see google_callback): no session.
+        return _oauth_error_redirect("github", "provider_unlinked")
     except ConflictError:
         return _email_in_use_redirect()
     except SQLAlchemyError:

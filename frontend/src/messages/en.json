@@ -294,6 +294,7 @@
     "linkHint": "An account with this email already exists. Sign in with your original provider, then link this one from your settings.",
     "oauthFailed": "Sign-in failed. Please try again.",
     "oauthExpired": "The sign-in link has expired. Please try again.",
+    "providerUnlinked": "This sign-in method was removed from its account. Sign in with another method of that account.",
     "termsRequired": "No account was created: please agree to the Terms of Service and Privacy Policy below, then sign in again.",
     "loginId": "Login ID or email",
     "password": "Password",

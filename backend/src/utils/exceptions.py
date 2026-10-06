@@ -1091,6 +1091,20 @@ class IdentityLinkSignInRequiredError(MemoryCloudException):
         super().__init__(message, status_code=403, error_code="AUTH-305")
 
 
+class UnlinkedProviderSignInError(AuthenticationError):
+    """A Google / GitHub identity with no link row may not sign in (401).
+
+    Raised when the identity's ``(provider, oauth_sub)`` has no
+    ``user_oauth_providers`` row although a ``users`` row carries its subject
+    as ``user_id`` — the account it created, whose owner removed this sign-in
+    method. The OAuth callbacks turn it into ``/login?error=provider_unlinked``
+    and open no session.
+    """
+
+    def __init__(self, message: str = "This sign-in method was removed from its account") -> None:
+        super().__init__(message, error_code="AUTH-306")
+
+
 class PasswordSetupNotAllowedError(MemoryCloudException):
     """This account cannot receive a set-a-password link (400).
 

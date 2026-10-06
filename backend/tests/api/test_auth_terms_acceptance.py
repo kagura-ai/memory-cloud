@@ -822,10 +822,14 @@ class TestLinkedIdentityOwner:
         assert "user_oauth_providers.oauth_sub = '583231'" in sql
 
     @pytest.mark.asyncio
-    async def test_falls_back_to_the_sub_without_a_link_row(
+    async def test_a_users_row_keyed_by_the_sub_is_not_the_owner_without_a_link_row(
         self, terms_on, record, monkeypatch
     ) -> None:
-        self._use_db(monkeypatch, self._db(None, ("108", "n@example.test", None, None, utcnow())))
+        # The row keyed by the sub is the account that removed this sign-in
+        # method; a Google / GitHub identity is bound by its link row only, so
+        # ``_owning_user`` does not even look for it.
+        db = self._db(None, ("108", "n@example.test", None, None, utcnow()))
+        self._use_db(monkeypatch, db)
 
         await auth_routes._record_terms_acceptance(
             oauth_identity=("google", "108"),
@@ -835,7 +839,8 @@ class TestLinkedIdentityOwner:
             request=None,
         )
 
-        assert record.await_args.kwargs["user_id"] == "108"
+        record.assert_not_awaited()
+        assert db.execute.await_count == 1
 
     @pytest.mark.asyncio
     async def test_no_owner_records_nothing(self, terms_on, record, monkeypatch) -> None:

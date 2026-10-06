@@ -614,7 +614,8 @@ async def test_sign_in_owner_is_the_linked_account_not_a_stale_same_sub_row(
     assert resolved.provider_linked_at is not None
     assert abs(utcnow() - resolved.provider_linked_at) < timedelta(minutes=1)
     assert resolved.account_created_at is not None
-    # An identity with no link row still resolves to the row keyed by its sub.
+    # An identity with no link row owns nothing — the row keyed by its sub is
+    # the account that removed this sign-in method, not this identity's.
     unlinked = User(
         email=f"unlinked-{suffix}@example.com",
         user_id=f"gh2-{suffix}",
@@ -625,9 +626,7 @@ async def test_sign_in_owner_is_the_linked_account_not_a_stale_same_sub_row(
     )
     db_session.add(unlinked)
     await db_session.commit()
-    resolved = await _owning_user(db_session, "github", unlinked.user_id)
-    assert resolved[:5] == (unlinked.user_id, unlinked.email, "Unlinked", None, None)
-    assert resolved.account_created_at is not None
+    assert await _owning_user(db_session, "github", unlinked.user_id) is None
 
 
 # --- #1811: a linked provider's sign-in never rewrites the owner's profile ---
