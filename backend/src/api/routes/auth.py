@@ -2633,15 +2633,36 @@ def _name_latest_sweep_holder(redis: Any, lock_key: str, lock_token: str, fence_
     there and must not overwrite the successor's name.
 
     Raises:
-        SweepLeaseLostError: The lock is no longer this sign-in's.
+        SweepLeaseLostError: A later sign-in holds the lock.
+        TimeoutError: The lock expired and nobody holds it: the lease was
+            lost before the sweep began, which is not an overtaking.
         Exception: A Redis connection or timeout failure, as it is.
     """
     with redis.pipeline(transaction=True) as pipe:
         if not watch_token_sync(pipe, lock_key, lock_token):
+            if redis.get(lock_key) is None:
+                raise TimeoutError("sign-in sweep lock expired before the sweep")
             raise SweepLeaseLostError(fence_key)
         pipe.set(fence_key, lock_token, ex=_SIGN_IN_SWEEP_FENCE_TTL_SECONDS)
         if execute_watched_sync(pipe) is None:
             raise SweepLeaseLostError(fence_key)
+
+
+def _release_sweep_lock(redis: Any, lock_key: str, lock_token: str, user_id: str) -> None:
+    """Release the sweep lock; a release that cannot or need not is logged, not raised."""
+    try:
+        released = release_lock_sync(redis, lock_key, lock_token)
+    except Exception as exc:
+        logger.warning(
+            "password_login_sweep_lock_release_failed",
+            user_id=user_id,
+            error_type=type(exc).__name__,
+        )
+        return
+    if not released:
+        # The lease ran out under us: the sweep took longer than the TTL,
+        # with no later sign-in. Nothing to free.
+        logger.warning("password_login_sweep_lock_expired", user_id=user_id)
 
 
 async def _complete_password_sign_in(user_id: str, email: str, session_id: str) -> bool:
@@ -2687,9 +2708,11 @@ async def _complete_password_sign_in(user_id: str, email: str, session_id: str) 
         await asyncio.sleep(min(_SIGN_IN_SWEEP_LOCK_POLL_SECONDS, remaining))
     overtaken = False
     try:
-        _name_latest_sweep_holder(redis, lock_key, lock_token, fence_key)
         if not _session_manager.session_holds_user(session_id, user_id):
             return False
+        # Named after the liveness check: a sign-in that is already refused
+        # does not overtake — and so abort — an older sweep for nothing.
+        _name_latest_sweep_holder(redis, lock_key, lock_token, fence_key)
         # strict: a sweep that failed must not read as "nothing to sweep".
         # fence: the deletes land only while no later sign-in has the lock.
         deleted_count = _session_manager.delete_user_sessions(
@@ -2706,19 +2729,9 @@ async def _complete_password_sign_in(user_id: str, email: str, session_id: str) 
         overtaken = True  # The caller logs it; the lock is the successor's.
         raise
     finally:
-        try:
-            released = release_lock_sync(redis, lock_key, lock_token)
-        except Exception as exc:
-            logger.warning(
-                "password_login_sweep_lock_release_failed",
-                user_id=user_id,
-                error_type=type(exc).__name__,
-            )
-        else:
-            if not released and not overtaken:
-                # The lease ran out under us: the sweep took longer than the
-                # TTL, with no later sign-in. Nothing to free.
-                logger.warning("password_login_sweep_lock_expired", user_id=user_id)
+        # Overtaken: the lock is the successor's, nothing of ours to release.
+        if not overtaken:
+            _release_sweep_lock(redis, lock_key, lock_token, user_id)
     if deleted_count > 0:
         logger.info(f"Invalidated {deleted_count} old session(s) for {email}")
 
