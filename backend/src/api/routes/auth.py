@@ -354,6 +354,7 @@ async def _maybe_refresh_redirect(
 async def _maybe_link_redirect(
     *,
     state: str,
+    request: Request,
     provider: str,
     idp_sub: str,
     idp_email: str,
@@ -374,12 +375,23 @@ async def _maybe_link_redirect(
     The user stays logged in as themselves; only a ``user_oauth_providers``
     row is added.
 
+    The state alone is not authority. ``POST /me/account/link-provider`` pins
+    the initiating browser session under ``oauth2_state_session:{state}``, and
+    the link is honoured only when ``request`` carries that very session
+    cookie and the session still holds the pinned account — as the add-account
+    flow requires of its callback. Otherwise whoever was handed the
+    authorization URL and completed the provider consent would have THEIR
+    identity attached to the initiator's account, and would sign in to it
+    from then on.
+
     Redirect outcomes (all on the ``/profile`` surface so the page can flash
     the result inline):
 
     - success → ``oauth2_return_to`` value (default ``/profile?linked=1``).
-    - ``error=link_failed``: the initiating session's user_id record expired
-      (TTL) before the IdP round-trip returned — we cannot attribute the link.
+    - ``error=link_failed``: the initiating session's user_id or session
+      record expired (TTL) before the IdP round-trip returned, the callback
+      did not come from the browser session that started the link, or that
+      session no longer holds the account — we cannot attribute the link.
     - ``error=provider_already_linked``: the returned identity is already
       bound to a different account (``AccountLinkingService.link`` raised
       ``ConflictError`` after writing the failed-attempt audit row), or a
@@ -400,6 +412,9 @@ async def _maybe_link_redirect(
     user_id = redis.get(f"oauth2_state_user:{state}")
     if user_id:
         redis.delete(f"oauth2_state_user:{state}")
+    expected_session = redis.get(f"oauth2_state_session:{state}")
+    if expected_session:
+        redis.delete(f"oauth2_state_session:{state}")
     return_to_url = redis.get(f"oauth2_return_to:{state}")
     if return_to_url:
         redis.delete(f"oauth2_return_to:{state}")
@@ -410,6 +425,36 @@ async def _maybe_link_redirect(
         # The initiating session's user_id record expired (TTL ran out between
         # POST /me/account/link-provider and the IdP round-trip). Without it we
         # cannot attribute the new identity to a user — refuse rather than guess.
+        return RedirectResponse(
+            _safe_redirect_url(f"{frontend_url}/profile?error=link_failed"),
+            status_code=303,
+        )
+
+    # The callback must arrive from the browser that started the link: its
+    # session cookie must be the pinned session (constant-time compare), and
+    # that session must still hold the pinned account. A missing pin — expired,
+    # or a state minted before the pin existed — fails closed.
+    cookie_session = request.cookies.get(SESSION_COOKIE_NAME)
+    if (
+        not expected_session
+        or not cookie_session
+        or not secrets.compare_digest(cookie_session.encode(), expected_session.encode())
+    ):
+        logger.warning(
+            "oauth_provider_link_rejected_session_mismatch",
+            user_id=user_id,
+            provider=provider,
+            pinned=bool(expected_session),
+            cookie=bool(cookie_session),
+        )
+        return RedirectResponse(
+            _safe_redirect_url(f"{frontend_url}/profile?error=link_failed"),
+            status_code=303,
+        )
+    if not _session_manager.session_holds_user(expected_session, user_id):
+        logger.warning(
+            "oauth_provider_link_rejected_session_lost_user", user_id=user_id, provider=provider
+        )
         return RedirectResponse(
             _safe_redirect_url(f"{frontend_url}/profile?error=link_failed"),
             status_code=303,
@@ -827,6 +872,7 @@ async def google_callback(
         # session must stay untouched (link ≠ login, same as refresh).
         link_redirect = await _maybe_link_redirect(
             state=state,
+            request=request,
             provider="google",
             idp_sub=user_info["sub"],
             idp_email=user_info["email"],
@@ -1637,6 +1683,7 @@ async def _terms_refusal(
             _LINK_PROOF_KEY.format(state=state),
             f"oauth2_state_intent:{state}",
             f"oauth2_state_user:{state}",
+            f"oauth2_state_session:{state}",
         )
     return _terms_required_redirect(provider, return_to)
 
@@ -2267,6 +2314,7 @@ async def github_callback(
         # identity as its own user nor disturbs the initiating session.
         link_redirect = await _maybe_link_redirect(
             state=state,
+            request=request,
             provider="github",
             idp_sub=user_info["sub"],
             idp_email=user_info["email"],

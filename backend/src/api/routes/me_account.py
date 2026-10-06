@@ -39,6 +39,7 @@ from api.routes import auth as auth_module
 from api.routes.me_oauth import (
     INTENT_KEY,
     RETURN_TO_KEY,
+    SESSION_KEY,
     STATE_TTL,
     USER_KEY,
     _build_authorization_url,
@@ -321,6 +322,7 @@ class ProvidersListResponse(BaseModel):
 @router.post("/link-provider", response_model=LinkProviderResponse, tags=["account-linking"])
 async def link_provider(
     body: LinkProviderRequest,
+    request: Request,
     user: SessionUser,
 ) -> LinkProviderResponse:
     """Attach a sign-in provider to the current account: start a link-mode
@@ -331,13 +333,18 @@ async def link_provider(
     prompt, which is the locked re-auth contract for OAuth-only users
     (edge case 1). The existing ``/auth/{provider}/callback`` reads
     ``oauth2_state_intent:{state}`` == ``"link"`` and binds the returned
-    identity to ``oauth2_state_user:{state}`` via ``AccountLinkingService``.
+    identity to ``oauth2_state_user:{state}`` via ``AccountLinkingService`` —
+    only when the callback arrives with the session cookie pinned under
+    ``oauth2_state_session:{state}`` here, so the ``authorization_url`` is of
+    no use to any other browser.
 
     Returns:
         JSON with ``authorization_url`` (frontend redirects to it) and the
         CSRF ``state`` token.
 
     Raises:
+        HTTPException(401): no session cookie on the request (``SessionUser``
+            is browser-session only, so this is a contradiction).
         HTTPException(500): auth managers not initialised, OAuth2 manager
             missing, or a required env var (GOOGLE_REDIRECT_URI /
             GITHUB_CLIENT_ID) is missing.
@@ -347,9 +354,12 @@ async def link_provider(
 
     user_id = user["user_id"]
     provider = body.provider
+    # The browser session the link belongs to; refused before any state is
+    # written when the request carries none.
+    session_id = _session_id(request)
 
     # Resolve config + compose the URL BEFORE writing any Redis state so a
-    # missing env var 500s without orphaning four state keys for 5 minutes
+    # missing env var 500s without orphaning five state keys for 5 minutes
     # (shares me_oauth._build_authorization_url with refresh_oauth).
     state = secrets.token_urlsafe(32)
     authorization_url = _build_authorization_url(provider, state)
@@ -358,8 +368,11 @@ async def link_provider(
     redis.setex(f"oauth2_state:{state}", STATE_TTL, "pending")
     redis.setex(INTENT_KEY.format(state=state), STATE_TTL, "link")
     # Pin the originating user so the callback binds the returned identity
-    # to THIS account (and rejects state replayed under a different session).
+    # to THIS account, and the originating browser session so the callback
+    # honours the link only from the browser that started it: possession of
+    # the state (or of the authorization URL) is not authority.
     redis.setex(USER_KEY.format(state=state), STATE_TTL, user_id)
+    redis.setex(SESSION_KEY.format(state=state), STATE_TTL, session_id)
     redis.setex(RETURN_TO_KEY.format(state=state), STATE_TTL, "/profile?linked=1")
 
     logger.info("link_provider_initiated", user_id=user_id, provider=provider)

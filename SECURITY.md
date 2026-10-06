@@ -26,6 +26,14 @@ We aim to acknowledge reports within 48 hours and provide a fix within 7 days fo
 - **API Keys** for programmatic access (SHA-256 hashed, Fernet encrypted at rest)
 - **JWT** for session tokens (configurable expiry, HS256)
 - **HttpOnly cookies** for session storage
+- **Linking a sign-in provider** (a Google / GitHub identity added to an
+  account from the profile page) completes only in the browser session that
+  started it: the provider callback must carry that session's cookie, and the
+  session must still hold the account. Otherwise the callback refuses
+  (`/profile?error=link_failed`) and attaches nothing, so the authorization
+  URL the page is sent to is of no use to any other browser. During an
+  upgrade, a link started on a release without this check fails the same way
+  for at most the OAuth state lifetime (5 minutes); starting it again works.
 - **Email + password** for existing accounts. A password reset — by emailed
   link, or by an operator with the `reset_password` CLI (choices 1 and 3) —
   signs out every browser session and revokes every OAuth / MCP token and

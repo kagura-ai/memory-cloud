@@ -25,7 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,6 +40,7 @@ from api.routes.me_account import (
     unlink_provider,
 )
 from auth.roles import Role, RoleManager
+from auth.session import SESSION_COOKIE_NAME
 from models.auth import AuditLog, User, UserOAuthProvider
 from services.account_linking_service import AccountLinkingService
 from services.security_notification_service import notify_security_event
@@ -337,11 +338,16 @@ def _session(*, user_id: str = "u-link-1") -> dict:
     return {"user_id": user_id}
 
 
-def _request() -> SimpleNamespace:
-    """Minimal Request stand-in for ``.client.host`` / ``.headers.get``."""
+LINK_SESSION_ID = "sess-link-initiator"
+
+
+def _request(*, cookie: str | None = LINK_SESSION_ID) -> SimpleNamespace:
+    """Minimal Request stand-in for ``.client.host`` / ``.headers.get`` /
+    ``.cookies`` (``cookie=None`` → no session cookie)."""
     return SimpleNamespace(
         client=SimpleNamespace(host="127.0.0.1"),
         headers={"user-agent": "pytest"},
+        cookies={} if cookie is None else {SESSION_COOKIE_NAME: cookie},
     )
 
 
@@ -384,6 +390,7 @@ class TestLinkProviderEndpoint:
         ):
             result = await link_provider(
                 body=LinkProviderRequest(provider="github"),
+                request=_request(),
                 user=_session(user_id="u-gh"),
             )
 
@@ -414,6 +421,38 @@ class TestLinkProviderEndpoint:
             c for c in redis.setex.call_args_list if c.args[0] == f"oauth2_return_to:{result.state}"
         )
         assert return_call.args[2] == "/profile?linked=1"
+        # The initiating browser session is pinned too: the callback only
+        # honours the link when the same cookie comes back.
+        assert f"oauth2_state_session:{result.state}" in keys_written
+        session_call = next(
+            c
+            for c in redis.setex.call_args_list
+            if c.args[0] == f"oauth2_state_session:{result.state}"
+        )
+        assert session_call.args[2] == LINK_SESSION_ID
+
+    @pytest.mark.asyncio
+    async def test_link_provider_refuses_without_session_cookie(self, monkeypatch):
+        """No session cookie on the request → 401 before any Redis write: a
+        link that cannot be bound to a browser session is never started."""
+        session_manager, oauth2_manager, redis = _mock_managers()
+        monkeypatch.setenv("GITHUB_CLIENT_ID", "test-client")
+        monkeypatch.setenv(
+            "GITHUB_REDIRECT_URI", "http://localhost:8080/api/v1/auth/github/callback"
+        )
+
+        with (
+            patch.object(me_account.auth_module, "_session_manager", session_manager),
+            patch.object(me_account.auth_module, "_oauth2_manager", oauth2_manager),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await link_provider(
+                    body=LinkProviderRequest(provider="github"),
+                    request=_request(cookie=None),
+                    user=_session(user_id="u-gh"),
+                )
+        assert exc_info.value.status_code == 401
+        redis.setex.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_link_provider_google(self, monkeypatch):
@@ -427,6 +466,7 @@ class TestLinkProviderEndpoint:
         ):
             result = await link_provider(
                 body=LinkProviderRequest(provider="google"),
+                request=_request(),
                 user=_session(),
             )
         assert result.authorization_url.startswith("https://accounts.google.com/")
@@ -445,6 +485,7 @@ class TestLinkProviderEndpoint:
             with pytest.raises(Exception) as exc_info:
                 await link_provider(
                     body=LinkProviderRequest(provider="github"),
+                    request=_request(),
                     user=_session(),
                 )
             assert exc_info.value.status_code == 500  # type: ignore[attr-defined]

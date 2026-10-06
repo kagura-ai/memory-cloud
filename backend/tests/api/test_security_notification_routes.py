@@ -859,11 +859,13 @@ class TestProviderLinking:
         values = {
             f"oauth2_state_intent:{suffix}": "link",
             f"oauth2_state_user:{suffix}": "u-link",
+            f"oauth2_state_session:{suffix}": "sess-link",
         }
         redis = MagicMock()
         redis.get.side_effect = lambda key: values.get(key)
         manager = MagicMock()
         manager._redis = redis
+        manager.session_holds_user.return_value = True
         return manager
 
     @pytest.mark.parametrize(("newly_linked", "expected"), [(True, 1), (False, 0)])
@@ -888,8 +890,13 @@ class TestProviderLinking:
         service.link = AsyncMock(return_value=newly_linked)
         monkeypatch.setattr(auth_module, "AccountLinkingService", lambda db: service)
 
+        from auth.session import SESSION_COOKIE_NAME
+
+        request = _request()
+        request.cookies[SESSION_COOKIE_NAME] = "sess-link"
         response = await auth_module._maybe_link_redirect(
             state=suffix,
+            request=request,
             provider="github",
             idp_sub="gh-1",
             idp_email="u@example.test",
