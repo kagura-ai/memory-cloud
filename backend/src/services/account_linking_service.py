@@ -11,10 +11,14 @@ Security edge cases enforced here:
 - An identity already bound to a different user can never be re-pointed
   (3-arm ``link``: unbound INSERT / mine idempotent touch / other -> conflict).
 - Unlink never strips a user of their last sign-in method (password counts).
-- Unlinking the legacy "primary" provider repoints ``User.auth_provider`` to a
-  surviving linked provider, or ``None`` when none remain (edge case 7).
-  Linking never sets the pointer: an OAuth account left with ``None`` gets it
-  back on a sign-in through an established link (``RoleManager``, #1875).
+- Unlinking the legacy "primary" provider repoints ``User.auth_provider``
+  (edge case 7): for an OAuth account to the surviving row of the identity
+  the account was created with (sub == ``user_id``), or ``None`` when that
+  identity is gone; for a password account to any surviving provider, or
+  ``None``. Linking never sets the pointer, and a provider attached here
+  never becomes primary, by unlink or by sign-in: an OAuth account left with
+  ``None`` gets the pointer back only on a sign-in through the identity it
+  was created with, once that link is established (``RoleManager``, #1875).
 """
 
 from __future__ import annotations
@@ -177,9 +181,18 @@ class AccountLinkingService:
             raise ConflictError("Cannot unlink the only remaining sign-in method")
 
         await self.db.delete(target)
-        # Edge case 7: repoint the legacy "primary" pointer off the removed provider.
+        # Edge case 7: repoint the legacy "primary" pointer off the removed
+        # provider. For an OAuth account it follows the sign-in rule
+        # (``RoleManager._adopt_primary_provider``): only the identity the
+        # account was created with (sub == ``user_id``) may become the one
+        # whose email and name are synced; a surviving provider attached
+        # later — which needed only a live session — leaves the pointer NULL.
+        # A password account keeps its pointer semantics (next survivor).
         if user.auth_provider == provider:
-            user.auth_provider = next((r.provider for r in rows if r.provider != provider), None)
+            survivors = [r for r in rows if r.provider != provider]
+            if user.auth_method == "oauth":
+                survivors = [r for r in survivors if r.oauth_sub == user.user_id]
+            user.auth_provider = next((r.provider for r in survivors), None)
         self._audit(
             user_id, user.email, "oauth_provider_unlinked", provider, ip_address, user_agent
         )

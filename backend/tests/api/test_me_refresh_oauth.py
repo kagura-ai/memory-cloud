@@ -89,7 +89,9 @@ class TestRefreshOAuthValidation:
     @pytest.mark.asyncio
     async def test_oauth_user_with_null_provider_rejected_400(self):
         """Pre-#361 OAuth user (auth_method='oauth' but auth_provider IS NULL)
-        → 400 prompting them to log out and back in."""
+        → 400 saying how the pointer comes back: a sign-in through the identity
+        the account was created with — not through a provider attached later,
+        whatever its age."""
         session_manager, oauth2_manager, redis = _mock_managers()
         with (
             patch.object(me_oauth.auth_module, "_session_manager", session_manager),
@@ -104,6 +106,10 @@ class TestRefreshOAuthValidation:
                     db=db,
                 )
             assert exc_info.value.status_code == 400  # type: ignore[attr-defined]
+            detail = exc_info.value.detail  # type: ignore[attr-defined]
+            assert "the Google or GitHub account this account was created with" in detail
+            assert "attached later" in detail
+            assert "few minutes" not in detail
         redis.setex.assert_not_called()
 
     @pytest.mark.asyncio

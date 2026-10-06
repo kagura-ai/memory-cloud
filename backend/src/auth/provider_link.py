@@ -5,7 +5,10 @@ live session. Until the link has stood for ``IDENTITY_LINK_SIGN_IN_WINDOW``, a
 sign-in through it is therefore an ordinary sign-in and nothing more: it does
 not prove the account for an identity link (``api.routes.auth``), and it does
 not become the account's primary provider, whose email and name are synced
-onto the account (``auth.roles``). Both read the one rule here.
+onto the account (``auth.roles``). Both read the one rule here. (Becoming
+primary is further limited to the identity the account was created with —
+``auth.roles._adopt_primary_provider`` — since a provider attached later could
+have been attached by any session, and the window only delays that.)
 """
 
 from __future__ import annotations

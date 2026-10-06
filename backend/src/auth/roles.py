@@ -104,7 +104,8 @@ def _adopt_primary_provider(
     user: _UserModel, auth_provider: str | None, link: _UserOAuthProviderModel
 ) -> None:
     """Make the signing-in provider the primary one of an OAuth account that
-    has none (#1875) — when its link to the account is established.
+    has none (#1875) — when it is the identity the account was created with
+    and its link to the account is established.
 
     ``users.auth_provider`` decides whether a sign-in may sync email and name
     (#1811). It is NULL on a legacy row, and after ``AccountLinkingService``
@@ -112,11 +113,17 @@ def _adopt_primary_provider(
     an account never synced again whichever provider it signed in with.
 
     ``link`` is this identity's own ``user_oauth_providers`` row for ``user``.
-    A provider becomes primary only through a link older than the
-    identity-link window, or the identity the account was created with
-    (:func:`auth.provider_link.provider_link_established`, the rule an
-    identity-link proof follows). A younger link signs in as any linked
-    provider does: no adoption, no profile sync.
+    Only the account's original identity — the one whose sub is the account's
+    ``user_id`` (``ensure_user`` creates the account under the first sub, and
+    the #517 backfill linked that sub) — can become primary, and only through
+    an established link: a row older than the identity-link window, or
+    written with the account (:func:`auth.provider_link.provider_link_established`,
+    the rule an identity-link proof follows). Any other identity was attached
+    later through ``link-provider``, which needs only a live session: it
+    signs in as a linked provider does, however old its link, so a session
+    alone can never make a provider the one whose email and name are synced
+    onto the account. A younger link of the original identity signs in the
+    same way: no adoption, no profile sync.
     Staged only: ``_sync_existing_user`` commits it.
 
     A password account (``auth_method == "password"``) that links a provider
@@ -128,8 +135,15 @@ def _adopt_primary_provider(
         or user.auth_method != "oauth"
     ):
         return
+    if link.oauth_sub != user.user_id:
+        logger.info(
+            "oauth_primary_provider_not_adopted_attached_identity",
+            auth_provider=auth_provider,
+            user_id=user.user_id,
+        )
+        return
     if not provider_link_established(
-        sub_is_user_id=link.oauth_sub == user.user_id,
+        sub_is_user_id=True,
         linked_at=link.linked_at,
         account_created_at=user.created_at,
     ):
