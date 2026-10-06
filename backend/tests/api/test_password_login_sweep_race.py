@@ -584,6 +584,34 @@ class TestARefusedSignInHasNoSideEffects:
         assert redis.get("signin_sweep_fence:u-1") == "newer-sign-in"
 
     @pytest.mark.asyncio
+    async def test_a_holder_overtaken_before_naming_itself_keeps_its_successors_name(
+        self, real, monkeypatch
+    ) -> None:
+        # #1918: the sign-in took the lock, then stalled past its lease
+        # before writing the fence. A later sign-in has the lock and the
+        # fence by now; this one must not overwrite that name, or the later
+        # sweep would abort for nothing. It is refused instead.
+        newer: dict[str, str] = {}
+        real_acquire = auth_routes.acquire_lock_sync
+
+        def _acquire_then_stall_past_the_lease(redis, key: str, ttl: int):
+            token = real_acquire(redis, key, ttl)
+            if token is not None:
+                self._overtake(real, newer)
+            return token
+
+        monkeypatch.setattr(auth_routes, "acquire_lock_sync", _acquire_then_stall_past_the_lease)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await auth_routes.password_login(_login_body(), _request(), return_to=None)
+
+        assert exc_info.value.status_code == 503
+        redis = real.manager._redis
+        assert redis.get("signin_sweep_fence:u-1") == "newer-sign-in"
+        assert redis.get("signin_sweep_lock:u-1") == "newer-sign-in"
+        assert self._sessions(real) == {real.kept, newer["session"]}
+
+    @pytest.mark.asyncio
     async def test_a_sweep_that_outlived_its_lease_unopposed_still_completes(self, real) -> None:
         # #1918: a slow sweep (the #1809 legacy SCAN on a large keyspace, a
         # slow Redis call) past its lease, with no later sign-in of the

@@ -13,6 +13,7 @@ from utils.redis_lock import (
     acquire_lock,
     acquire_lock_sync,
     connection_failure,
+    execute_watched_sync,
     release_lock,
     release_lock_sync,
     watch_token_sync,
@@ -220,3 +221,58 @@ def test_sync_watch_token_opens_the_transaction_only_for_the_holder(sync_redis) 
         assert pipe.watching is False
     with sync_redis.pipeline(transaction=True) as pipe:
         assert watch_token_sync(pipe, "lock:missing", token) is False
+
+
+def test_a_connection_that_dies_under_the_watched_get_raises_the_failure(sync_redis) -> None:
+    # redis-py's own path, not a hand-built context: the connection dies
+    # between WATCH and GET, redis-py's watching handler dresses it as a
+    # WatchError, and watch_token_sync undresses it.
+    token = acquire_lock_sync(sync_redis, "lock:a", 30)
+    assert token is not None
+    real_pipeline = sync_redis.pipeline
+
+    def _pipeline(transaction: bool = True):
+        pipe = real_pipeline(transaction=transaction)
+        real_watch = pipe.watch
+
+        def _watch_then_die(*keys: str):
+            real_watch(*keys)
+            conn = pipe.connection
+            real_send = conn.send_command
+
+            def _dead_once(*args, **kwargs):
+                conn.send_command = real_send  # the pool reuses this connection
+                raise RedisConnectionError("Connection closed by server.")
+
+            conn.send_command = _dead_once
+
+        pipe.watch = _watch_then_die  # type: ignore[method-assign]
+        return pipe
+
+    sync_redis.pipeline = _pipeline  # type: ignore[method-assign]
+
+    with pytest.raises(RedisConnectionError):
+        release_lock_sync(sync_redis, "lock:a", token)
+    # The lock is left to its TTL, not deleted.
+    sync_redis.pipeline = real_pipeline  # type: ignore[method-assign]
+    assert sync_redis.get("lock:a") == token
+
+
+def test_sync_execute_watched_answers_none_only_for_a_changed_key() -> None:
+    server = fakeredis.FakeServer()
+    mine = fakeredis.FakeRedis(server=server, decode_responses=True)
+    other = fakeredis.FakeRedis(server=server, decode_responses=True)
+    token = acquire_lock_sync(mine, "lock:a", 30)
+    assert token is not None
+
+    with mine.pipeline(transaction=True) as pipe:
+        assert watch_token_sync(pipe, "lock:a", token) is True
+        pipe.set("written", "yes")
+        assert execute_watched_sync(pipe) == [True]
+
+    with mine.pipeline(transaction=True) as pipe:
+        assert watch_token_sync(pipe, "lock:a", token) is True
+        other.set("lock:a", "new-holder")
+        pipe.set("written", "no")
+        assert execute_watched_sync(pipe) is None
+    assert mine.get("written") == "yes"

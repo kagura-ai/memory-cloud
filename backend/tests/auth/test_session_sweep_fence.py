@@ -166,6 +166,35 @@ class TestSweepFence:
         # Not strict: a Redis failure reads as 0 swept, as it always has.
         assert manager.delete_user_sessions("u1", fence=(FENCE, "mine")) == 0
 
+    def test_a_failure_after_the_fence_armed_gives_the_connection_back(
+        self, manager, redis
+    ) -> None:
+        # From the fence on the pipeline holds a watching connection; an
+        # error while queueing must not keep it out of the pool.
+        manager.create_session(U1)
+        redis.set(FENCE, "mine", ex=TTL)
+        pipes: list = []
+        real_pipeline = redis.pipeline
+
+        def _pipeline(transaction: bool = True):
+            pipe = real_pipeline(transaction=transaction)
+
+            def _srem_fails(*_a, **_k):
+                raise RuntimeError("queueing failed")
+
+            pipe.srem = _srem_fails  # type: ignore[method-assign]
+            pipes.append(pipe)
+            return pipe
+
+        redis.pipeline = _pipeline  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError):
+            manager.delete_user_sessions("u1", strict=True, fence=(FENCE, "mine"))
+
+        (pipe,) = pipes
+        assert pipe.watching is False
+        assert pipe.connection is None
+
     def test_without_a_fence_the_sweep_is_unchanged(self, manager, redis) -> None:
         keep = manager.create_session(U1)
         drop = manager.create_session(U1)

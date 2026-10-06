@@ -13,11 +13,9 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
-from redis.exceptions import WatchError
-
 from config.database import INVALID_REDIS_URL_MESSAGE
 from utils.datetime import utcnow
-from utils.redis_lock import connection_failure, watch_token_sync
+from utils.redis_lock import execute_watched_sync, watch_token_sync
 from utils.url_redact import redis_location
 
 logger = logging.getLogger(__name__)
@@ -97,9 +95,9 @@ def _arm_sweep_fence(pipe: Any, fence_key: str, token: str) -> None:
 
     Raises:
         SweepLeaseLostError: The key is gone or holds another token.
+        Exception: A Redis connection or timeout failure, as it is.
     """
     if not watch_token_sync(pipe, fence_key, token):
-        pipe.reset()
         raise SweepLeaseLostError(fence_key)
 
 
@@ -112,13 +110,10 @@ def _execute_fenced(pipe: Any, fence_key: str) -> list[Any]:
         Exception: A Redis connection or timeout failure, as it is: whether
             the transaction ran is unknown.
     """
-    try:
-        return pipe.execute()
-    except WatchError as exc:
-        failure = connection_failure(exc)
-        if failure is not None:
-            raise failure from exc
-        raise SweepLeaseLostError(fence_key) from exc
+    results = execute_watched_sync(pipe)
+    if results is None:
+        raise SweepLeaseLostError(fence_key)
+    return results
 
 
 def browser_cookie_attrs() -> dict[str, Any]:
@@ -1160,19 +1155,25 @@ class SessionManager:
             deleted_count = 0
             if keys_to_delete or stale_ids:
                 pipe = self._redis.pipeline()
-                if fence is not None:
-                    _arm_sweep_fence(pipe, *fence)
-                for key in keys_to_delete:
-                    pipe.delete(key)
-                for sid in stale_ids + [k.removeprefix("session:") for k in keys_to_delete]:
-                    pipe.srem(index_key, sid)
-                for key, index_ids in other_sets.items():
-                    for index_id in index_ids:
-                        pipe.srem(_user_index_key(index_id), key.removeprefix("session:"))
-                if fence is not None:
-                    results = _execute_fenced(pipe, fence[0])
-                else:
-                    results = pipe.execute()
+                try:
+                    if fence is not None:
+                        _arm_sweep_fence(pipe, *fence)
+                    for key in keys_to_delete:
+                        pipe.delete(key)
+                    for sid in stale_ids + [k.removeprefix("session:") for k in keys_to_delete]:
+                        pipe.srem(index_key, sid)
+                    for key, index_ids in other_sets.items():
+                        for index_id in index_ids:
+                            pipe.srem(_user_index_key(index_id), key.removeprefix("session:"))
+                    if fence is not None:
+                        results = _execute_fenced(pipe, fence[0])
+                    else:
+                        results = pipe.execute()
+                finally:
+                    if fence is not None:
+                        # A watching pipeline holds a connection from the
+                        # fence on; give it back on every exit (EXEC did).
+                        pipe.reset()
                 deleted_count = sum(1 for r in results[: len(keys_to_delete)] if r)
 
             if deleted_count:
