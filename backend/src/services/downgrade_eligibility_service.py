@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.resource_tokens import workspace_regular_active_tokens
 from config.plan_tiers import PLAN_ORDER, PLAN_TIERS, PlanTier, plan_rank
 from models.auth import Context, Workspace, WorkspaceMember, _zero_floor
 from models.file_objects import FileObject
@@ -166,22 +167,14 @@ class DowngradeEligibilityService:
             )
         )
         # Workspace-scoped active resource tokens, excluding connector-owned
-        # tokens (mirrors the create-time count in resource_tokens.py: connector
-        # tokens are gated by max_connectors, not max_resource_tokens). The
-        # ``workspace_id`` column is a Phase-1 shadow (#323) still nullable, so a
-        # legacy token with NULL workspace_id is not counted here — acceptable
-        # for an advisory eligibility read while the backfill (#324/#325) lands.
+        # tokens — the create-time cap's own builder (#1919), so the
+        # eligibility read counts exactly what the cap and the quota ceiling
+        # will count after the downgrade (connector tokens are gated by
+        # max_connectors, not max_resource_tokens; a token whose shadow
+        # ``workspace_id`` was never backfilled is reached through its
+        # resources row).
         resource_tokens = await self._scalar(
-            select(func.count(ResourceToken.id))
-            .outerjoin(
-                WorkspaceConnector,
-                WorkspaceConnector.resource_pk == ResourceToken.resource_pk,
-            )
-            .where(
-                ResourceToken.workspace_id == workspace_id,
-                ResourceToken.is_active.is_(True),
-                WorkspaceConnector.id.is_(None),
-            )
+            workspace_regular_active_tokens(workspace_id, func.count(ResourceToken.id))
         )
         # Active ai-worker connectors (#850). WorkspaceConnector has no status
         # column — every row is an active seat.

@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from mcp_server.tools.resource import (
     handle_get_resource_impact,
@@ -1010,6 +1011,16 @@ class TestSetupResourceHappyPath:
         assert "Context" in type_names
         assert "ContextSearchConfig" in type_names
         mock_db.commit.assert_awaited()
+        # #1919: the cap is counted over the same population as the REST cap
+        # and the quota ceiling — the workspace's active non-connector tokens
+        # attributed by the resources row — not per live context by slug.
+        cap_sql = str(
+            mock_db.execute.call_args_list[4].args[0].compile(dialect=postgresql.dialect())
+        )
+        assert "LEFT OUTER JOIN resources ON resources.id = resource_tokens.resource_pk" in cap_sql
+        assert "workspace_connectors.id IS NULL" in cap_sql
+        assert "resource_tokens.is_active = true" in cap_sql
+        assert "contexts" not in cap_sql
 
     @pytest.mark.asyncio
     async def test_resource_id_conflict_pre_insert(self):

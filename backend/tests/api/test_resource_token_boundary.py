@@ -5,7 +5,7 @@ not a live ``contexts`` row and not the token's shadow ``workspace_id``
 column — so a token whose contexts were deleted, or whose shadow column was
 never backfilled, stays listable, updatable and revocable. Since #1919 the
 lookup, the count cap and the quota ceiling share that predicate
-(``_workspace_tokens``). ``dependency_overrides`` stand in for auth and the
+(``workspace_tokens``). ``dependency_overrides`` stand in for auth and the
 DB; the real-DB walk-throughs live in
 ``tests/integration/test_resource_tokens_after_context_delete.py`` and
 ``tests/integration/test_resource_tokens_workspace_scope.py``.
@@ -23,13 +23,13 @@ from sqlalchemy.dialects import postgresql
 
 import api.routes.resource_tokens as route_module
 from api.main import app
-from api.routes.resource_tokens import (
-    _workspace_regular_active_tokens,
-    _workspace_tokens,
-    get_resource_token_manager,
-)
+from api.routes.resource_tokens import get_resource_token_manager
 from auth.dependencies import get_user_from_api_key_or_session, require_workspace_owner
-from auth.resource_tokens import ResourceTokenManager
+from auth.resource_tokens import (
+    ResourceTokenManager,
+    workspace_regular_active_tokens,
+    workspace_tokens,
+)
 from db.base import get_db
 from models.resource import ResourceToken
 from utils.datetime import utcnow
@@ -127,13 +127,13 @@ class TestWorkspaceTokensPredicate:
     """
 
     def test_lookup_joins_resources_and_never_the_shadow_column_alone(self):
-        sql = _sql(_workspace_tokens(WORKSPACE_ID, ResourceToken))
+        sql = _sql(workspace_tokens(WORKSPACE_ID, ResourceToken))
         assert "LEFT OUTER JOIN resources ON resources.id = resource_tokens.resource_pk" in sql
         assert f"WHERE {_MEMBERSHIP}" in sql
         assert "contexts" not in sql
 
     def test_cap_population_is_the_predicate_minus_revoked_and_connector_tokens(self):
-        sql = _sql(_workspace_regular_active_tokens(WORKSPACE_ID, func.count(ResourceToken.id)))
+        sql = _sql(workspace_regular_active_tokens(WORKSPACE_ID, func.count(ResourceToken.id)))
         assert f"WHERE ({_MEMBERSHIP})" in sql
         assert "resource_tokens.is_active = true" in sql
         assert (

@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, func, or_, select
+from sqlalchemy import ColumnElement, Select, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.resource import Resource, ResourceToken
+from models.resource import Resource, ResourceToken, WorkspaceConnector
 from services.resource_lookup import resolve_resource_pk
 from utils.logger import get_logger
 
@@ -60,6 +61,72 @@ def resource_token_scope(
     if resource_pk is None:
         return legacy
     return or_(ResourceToken.resource_pk == resource_pk, legacy)
+
+
+def workspace_token_scope(workspace_id: UUID) -> ColumnElement[bool]:
+    """Predicate for "the tokens of this workspace" (#268, #1863, #1919).
+
+    The workspace-wide form of :func:`resource_token_scope`: a token belongs
+    to the workspace whose ``resources`` row its ``resource_pk`` points at —
+    not to a live ``contexts`` row (a token keeps authenticating ingest after
+    its last context is soft-deleted; ``verify_token`` never looks at
+    contexts) and not to its shadow ``workspace_id`` column, which was never
+    backfilled on some rows. A legacy token with ``resource_pk IS NULL`` (it
+    cannot authenticate, but is listed so the owner can revoke it) falls back
+    to its own ``workspace_id``.
+
+    The statement must have ``Resource`` outer-joined on
+    ``ResourceToken.resource_pk`` — :func:`workspace_tokens` does that.
+    """
+    return or_(
+        Resource.workspace_id == workspace_id,
+        and_(
+            ResourceToken.resource_pk.is_(None),
+            ResourceToken.workspace_id == workspace_id,
+        ),
+    )
+
+
+def workspace_tokens(workspace_id: UUID, *columns: Any) -> Select[*tuple[Any, ...]]:
+    """``SELECT columns`` over the resource tokens of ``workspace_id`` (#1919).
+
+    Every list, lookup, count and sum of a workspace's tokens goes through
+    this builder (REST list / PATCH / DELETE, the create-time cap, the quota
+    ceiling, MCP ``setup_resource``, the downgrade-eligibility read), so a
+    token that one of them sees is a token all of them see: a token that
+    counts toward the cap or the ceiling can always be listed, updated and
+    revoked, and a token of another workspace is a uniform miss everywhere.
+    """
+    return (
+        select(*columns)
+        .outerjoin(Resource, Resource.id == ResourceToken.resource_pk)
+        .where(workspace_token_scope(workspace_id))
+    )
+
+
+def workspace_regular_active_tokens(workspace_id: UUID, *columns: Any) -> Select[*tuple[Any, ...]]:
+    """The population of the token cap and the quota ceiling (#858, #1919).
+
+    :func:`workspace_tokens` minus revoked tokens and minus connector-owned
+    ones: the connector setup flow mints a resource token that bypasses the
+    ``max_resource_tokens`` gate on purpose (connectors are gated by
+    ``max_connectors`` seats), so counting it here would let it eat a regular
+    slot post-mint and prematurely refuse a legitimate creation. The anti-join
+    against ``workspace_connectors`` (UNIQUE ``resource_pk``, so no row
+    inflation) drops exactly the connector-owned tokens; a regular token with
+    a NULL ``resource_pk`` never matches the join and is still counted.
+    """
+    return (
+        workspace_tokens(workspace_id, *columns)
+        .outerjoin(
+            WorkspaceConnector,
+            WorkspaceConnector.resource_pk == ResourceToken.resource_pk,
+        )
+        .where(
+            ResourceToken.is_active == True,  # noqa: E712
+            WorkspaceConnector.id.is_(None),
+        )
+    )
 
 
 class ResourceTokenManager:
@@ -307,6 +374,10 @@ class ResourceTokenManager:
         workspace's tokens (and one resource by its ``resources.id``) — a bare
         slug is shared across workspaces, so the slug filter alone would mix
         same-slug tokens of another workspace in. #1877: that call is refused.
+        #1919: ``workspace_id`` is judged by :func:`workspace_token_scope`
+        (the ``resources`` row, shadow column only for a legacy row), the
+        same population the cap and the ceiling count — not by the shadow
+        column alone, which hid a token the cap counted.
 
         Args:
             resource_id: Optional resource_id (slug) filter
@@ -314,7 +385,7 @@ class ResourceTokenManager:
             include_revoked: Include revoked tokens (default: True)
             limit: Maximum number of tokens to return (None = all)
             offset: Starting offset for pagination (default: 0)
-            workspace_id: Optional ``resource_tokens.workspace_id`` filter
+            workspace_id: Optional workspace filter (:func:`workspace_token_scope`)
             resource_pk: Optional ``resource_tokens.resource_pk`` filter
 
         Returns:
@@ -325,16 +396,17 @@ class ResourceTokenManager:
         """
         _require_scope_for_slug(resource_id, workspace_id, resource_pk)
 
-        query = select(ResourceToken).order_by(ResourceToken.created_at.desc())
+        query = (
+            workspace_tokens(workspace_id, ResourceToken)
+            if workspace_id is not None
+            else select(ResourceToken)
+        ).order_by(ResourceToken.created_at.desc())
 
         if resource_id:
             query = query.where(ResourceToken.resource_id == resource_id)
 
         if created_by:
             query = query.where(ResourceToken.created_by == created_by)
-
-        if workspace_id is not None:
-            query = query.where(ResourceToken.workspace_id == workspace_id)
 
         if resource_pk is not None:
             query = query.where(ResourceToken.resource_pk == resource_pk)
@@ -365,7 +437,7 @@ class ResourceTokenManager:
             resource_id: Optional resource_id (slug) filter
             created_by: Optional created_by filter
             include_revoked: Include revoked tokens (default: True)
-            workspace_id: Optional ``resource_tokens.workspace_id`` filter
+            workspace_id: Optional workspace filter (:func:`workspace_token_scope`)
             resource_pk: Optional ``resource_tokens.resource_pk`` filter
 
         Returns:
@@ -376,15 +448,17 @@ class ResourceTokenManager:
         """
         _require_scope_for_slug(resource_id, workspace_id, resource_pk)
 
-        query = select(func.count(ResourceToken.id))
+        query = (
+            workspace_tokens(workspace_id, func.count(ResourceToken.id))
+            if workspace_id is not None
+            else select(func.count(ResourceToken.id))
+        )
 
         conditions = []
         if resource_id:
             conditions.append(ResourceToken.resource_id == resource_id)
         if created_by:
             conditions.append(ResourceToken.created_by == created_by)
-        if workspace_id is not None:
-            conditions.append(ResourceToken.workspace_id == workspace_id)
         if resource_pk is not None:
             conditions.append(ResourceToken.resource_pk == resource_pk)
         if not include_revoked:

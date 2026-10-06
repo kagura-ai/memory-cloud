@@ -12,7 +12,7 @@ seeds a mix of regular and connector-owned tokens against a real Postgres and
 asserts the exclusion. It is an **integration** test on purpose: the fix is a
 SQL ``LEFT JOIN ... WHERE wc.id IS NULL``, which a mocked ``db.execute`` (a bare
 scalar return) cannot validate. The query under test is the production
-cap-count builder itself (``_workspace_regular_active_tokens``, which #1919
+cap-count builder itself (``workspace_regular_active_tokens``, which #1919
 made the workspace's rather than the creator's); the naive control proves the
 connector token would otherwise be counted.
 """
@@ -27,7 +27,7 @@ import pytest_asyncio
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.routes.resource_tokens import _workspace_regular_active_tokens
+from auth.resource_tokens import workspace_regular_active_tokens
 from models.auth import User, Workspace
 from models.resource import Resource, ResourceToken, WorkspaceConnector
 from utils.public_id import PublicIdPrefix, new_public_id
@@ -35,7 +35,7 @@ from utils.public_id import PublicIdPrefix, new_public_id
 
 def _regular_count_query(workspace_id: UUID):
     """The #858 / #1919 production cap-count query."""
-    return _workspace_regular_active_tokens(workspace_id, func.count(ResourceToken.id))
+    return workspace_regular_active_tokens(workspace_id, func.count(ResourceToken.id))
 
 
 def _naive_count_query(workspace_id: UUID):

@@ -785,8 +785,8 @@ async def test_cap_counts_like_the_ceiling_and_not_across_workspaces(
 async def test_a_token_counted_by_the_ceiling_is_addressable(scenario, db_session):
     """A token whose shadow ``workspace_id`` was never backfilled is part of
     the workspace's sum (through its ``resource_pk``) — so the owner must be
-    able to update and revoke it through the same route. It used to be a
-    404 on both."""
+    able to list, update and revoke it through the same routes. It used to be
+    missing from the list and a 404 on both writes."""
     await db_session.execute(
         ResourceToken.__table__.update()
         .where(ResourceToken.id == scenario["token_b_id"])
@@ -797,6 +797,13 @@ async def test_a_token_counted_by_the_ceiling_is_addressable(scenario, db_sessio
     public_id = scenario["token_b_public_id"]
 
     with TestClient(app) as client:
+        for params in ({}, {"resource_id": scenario["slug"]}):
+            listed = client.get("/api/v1/resource-tokens", params=params)
+            assert listed.status_code == 200, listed.text
+            assert listed.json()["total"] == 2
+            assert sorted(t["id"] for t in listed.json()["tokens"]) == sorted(
+                [public_id, scenario["token_b_member_public_id"]]
+            )
         renamed = client.patch(
             f"/api/v1/resource-tokens/{public_id}", json={"description": "reached"}
         )
@@ -816,9 +823,9 @@ async def test_update_and_revoke_follow_the_resources_row_not_the_shadow_column(
     scenario, db_session
 ):
     """The ``resources`` row decides, as it does for the sum: a token row that
-    claims workspace B but points at workspace A's resource is not B's (uniform
-    404, nothing disclosed), and workspace A's own token is not reachable from
-    B either way."""
+    claims workspace B but points at workspace A's resource is not B's (not
+    listed, uniform 404 on writes, nothing disclosed), and workspace A's own
+    token is not reachable from B either way."""
     await db_session.execute(
         ResourceToken.__table__.update()
         .where(ResourceToken.id == scenario["token_b_member_id"])
@@ -828,6 +835,9 @@ async def test_update_and_revoke_follow_the_resources_row_not_the_shadow_column(
     scenario["act_as"](scenario["owner_b_id"], scenario["ws_b_id"])
 
     with TestClient(app) as client:
+        listed = client.get("/api/v1/resource-tokens")
+        assert listed.status_code == 200, listed.text
+        assert [t["id"] for t in listed.json()["tokens"]] == [scenario["token_b_public_id"]]
         for public_id in (scenario["token_b_member_public_id"], scenario["token_a_public_id"]):
             patched = client.patch(
                 f"/api/v1/resource-tokens/{public_id}", json={"description": "x"}
