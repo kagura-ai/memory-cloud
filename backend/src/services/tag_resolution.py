@@ -34,7 +34,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
-from services.identity_link_service import linked_user_ids
+from services.identity_link_service import linked_user_ids, opens_contexts_as_self
 from utils.logger import get_logger
 from utils.tag_normalize import is_near_duplicate, normalize_tag
 
@@ -137,7 +137,7 @@ async def fetch_vocabulary(
     Returns:
         ``{tag: memory_count}``, capped at ``VOCABULARY_LIMIT`` by descending count.
     """
-    owners = await _owners(db, context_id, user_id)
+    owners = await _owners(db, workspace_id=workspace_id, context_id=context_id, user_id=user_id)
     return await _read_vocabulary(
         db, workspace_id=workspace_id, context_id=context_id, owners=owners
     )
@@ -212,7 +212,7 @@ async def _cached_entry(
     user_id: str,
 ) -> tuple[dict[str, int], bool]:
     """``(entry, hit)`` for the caller's scope, loading it single-flight on a miss."""
-    owners = await _owners(db, context_id, user_id)
+    owners = await _owners(db, workspace_id=workspace_id, context_id=context_id, user_id=user_id)
     # The key and the aggregate both come from this one read of the link
     # set, so an entry never holds another set's tags than its key names.
     # A newline cannot occur in a user id, so the join is unambiguous.
@@ -268,12 +268,22 @@ async def _cached_entry(
         _inflight.pop(key, None)
 
 
-async def _owners(db: AsyncSession, context_id: UUID, user_id: str) -> frozenset[str] | None:
+async def _owners(
+    db: AsyncSession, *, workspace_id: UUID, context_id: UUID, user_id: str
+) -> frozenset[str] | None:
     """Whose rows the caller's vocabulary aggregates: None for a shared
-    context (every author), else the caller's link set (#1784)."""
+    context (every author), else the caller's link set (#1784) — narrowed to
+    the caller alone unless its own membership opens the context (the same
+    gate ``SearchService`` applies to the vector filter), so a link never
+    describes rows a restriction on the caller's account keeps from it."""
     if await _is_context_shared(db, context_id):
         return None
-    return await linked_user_ids(db, user_id)
+    linked = await linked_user_ids(db, user_id)
+    if len(linked) > 1 and not await opens_contexts_as_self(
+        db, user_id, workspace_id=workspace_id, context_ids=[context_id]
+    ):
+        return frozenset({user_id})
+    return linked
 
 
 async def _is_context_shared(db: AsyncSession, context_id: UUID) -> bool:

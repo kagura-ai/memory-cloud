@@ -31,12 +31,15 @@ The lookups here are the single place the rule is spelled:
 * SQL filters use :func:`owned_by` — a subquery, no extra round trip;
 * Python checks use :func:`is_same_owner` — one query, and only when the
   plain ``==`` has already failed;
-* the vector filter needs the ids themselves: :func:`linked_user_ids`.
+* the vector filter needs the ids themselves: :func:`linked_user_ids` — and
+  a private READ widens to them only where the caller's own membership opens
+  the context: :func:`opens_contexts_as_self`.
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -106,6 +109,54 @@ async def linked_user_ids(db: AsyncSession, user_id: str) -> frozenset[str]:
         select(IdentityLink.user_id).where(owned_by(IdentityLink.user_id, user_id))
     )
     return frozenset({user_id, *rows.scalars().all()})
+
+
+async def opens_contexts_as_self(
+    db: AsyncSession,
+    user_id: str,
+    *,
+    workspace_id: uuid.UUID,
+    context_ids: Iterable[uuid.UUID],
+) -> bool:
+    """Whether ``user_id``, checked as itself, may open every one of
+    ``context_ids`` in ``workspace_id``: a current member of the live
+    workspace whose role or whitelist admits them — the rule
+    ``PermissionService.resolve_context_for_workspace_read`` applies
+    (Migration 042): owner/admin ignore the whitelist, a viewer with none
+    reads every context, a member with none is suspended, a whitelist (``[]``
+    included) admits exactly what it names.
+
+    The read paths call this before widening a private read to the caller's
+    link set: a link grants ownership, never membership, so an account whose
+    own membership does not open the context reads its own rows only, whatever
+    the gate upstream decided. One indexed lookup; only called for a caller
+    that has a linked account.
+    """
+    from auth.workspace_roles import WorkspaceRole
+    from models.auth import Workspace, WorkspaceMember
+
+    row = (
+        await db.execute(
+            select(WorkspaceMember.role, WorkspaceMember.allowed_context_ids)
+            .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+            .where(
+                WorkspaceMember.workspace_id == workspace_id,
+                WorkspaceMember.user_id == user_id,
+                Workspace.deleted_at.is_(None),
+            )
+        )
+    ).first()
+    if row is None:
+        return False
+    role, allowed = row
+    if role in (WorkspaceRole.OWNER, WorkspaceRole.ADMIN):
+        return True
+    if role == WorkspaceRole.VIEWER and allowed is None:
+        return True
+    if allowed is None:
+        return False
+    admitted = set(allowed)
+    return all(context_id in admitted for context_id in context_ids)
 
 
 async def is_same_owner(db: AsyncSession, user_id: str, other_user_id: str | None) -> bool:

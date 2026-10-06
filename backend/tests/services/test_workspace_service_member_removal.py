@@ -22,6 +22,7 @@ from models.auth import (
     Context,
     ContextMember,
     ExternalAPIKey,
+    User,
     Workspace,
     WorkspaceInvitation,
     WorkspaceMember,
@@ -463,3 +464,67 @@ async def test_cannot_remove_workspace_owner(db_session):
     owner_member_check = result.scalar_one_or_none()
     assert owner_member_check is not None
     assert owner_member_check.role == "owner"
+
+
+@pytest.mark.asyncio
+async def test_remove_member_clears_the_workspace_as_the_users_current_one(db_session):
+    """A removed member must not keep the workspace as its current one: the
+    auth dependency hands ``current_workspace_id`` to every request as the
+    caller's workspace, and a stale value would still name a workspace the
+    account has left. A different current workspace is left alone."""
+    workspace_service = WorkspaceService(db_session)
+
+    owner_id = f"owner_{uuid4().hex[:8]}"
+    leaving_id = f"member_{uuid4().hex[:8]}"
+    elsewhere_id = f"member_{uuid4().hex[:8]}"
+
+    workspace, other_workspace = (
+        Workspace(
+            id=uuid4(),
+            name=f"test-workspace-{uuid4().hex[:8]}",
+            owner_user_id=owner_id,
+            plan_name="free",
+            daily_api_limit=1000,
+            weekly_api_limit=5000,
+        )
+        for _ in range(2)
+    )
+    other_workspace_id = other_workspace.id
+    db_session.add_all([workspace, other_workspace])
+    await db_session.flush()
+    db_session.add(
+        WorkspaceMember(workspace_id=workspace.id, user_id=owner_id, role=WorkspaceRole.OWNER)
+    )
+    for user_id, current in ((leaving_id, workspace.id), (elsewhere_id, other_workspace_id)):
+        db_session.add(
+            User(
+                user_id=user_id,
+                email=f"{user_id}@removal.example",
+                name=user_id,
+                role="user",
+                is_initial_admin=False,
+                auth_method="oauth",
+                current_workspace_id=current,
+            )
+        )
+        db_session.add(
+            WorkspaceMember(
+                workspace_id=workspace.id,
+                user_id=user_id,
+                role=WorkspaceRole.MEMBER,
+                allowed_context_ids=[],
+            )
+        )
+    await db_session.commit()
+
+    await workspace_service.remove_member(workspace.id, leaving_id)
+    await workspace_service.remove_member(workspace.id, elsewhere_id)
+
+    current = {
+        user_id: await db_session.scalar(
+            select(User.current_workspace_id).where(User.user_id == user_id)
+        )
+        for user_id in (leaving_id, elsewhere_id)
+    }
+    assert current[leaving_id] is None
+    assert current[elsewhere_id] == other_workspace_id

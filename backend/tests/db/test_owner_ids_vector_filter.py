@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 from qdrant_client.models import MatchAny, MatchValue
@@ -72,10 +73,13 @@ class TestLanceFilter:
 
 
 class TestRecallPassesTheLinkSet:
-    """``SearchService`` resolves the link set for a private context only."""
+    """``SearchService`` resolves the link set for a private context only, and
+    widens the author filter to it only when the caller, checked as itself,
+    can open the context (a current member of the live workspace whose role
+    or whitelist admits it)."""
 
     @staticmethod
-    async def _recall(*, shared: bool, linked: frozenset[str]):
+    async def _recall(*, shared: bool, linked: frozenset[str], opens: bool = True, context_id=CTX):
         from services.search_service import SearchService
 
         service = SearchService(MagicMock())
@@ -93,10 +97,12 @@ class TestRecallPassesTheLinkSet:
         context_service.is_context_shared = AsyncMock(return_value=shared)
         fulltext = AsyncMock(return_value=[])
         resolve = AsyncMock(return_value=linked)
+        gate = AsyncMock(return_value=opens)
         with (
             patch("services.search_service.search_memories_qdrant", new=AsyncMock(return_value=[])),
             patch("services.search_service.search_memories_fulltext", new=fulltext),
             patch("services.search_service.linked_user_ids", new=resolve),
+            patch("services.search_service.opens_contexts_as_self", new=gate),
             patch("services.context_service.ContextService", return_value=context_service),
             patch.object(SearchService, "_verify_workspace_membership", AsyncMock(), create=True),
         ):
@@ -104,21 +110,49 @@ class TestRecallPassesTheLinkSet:
                 query="anything",
                 user_id=ME,
                 workspace_id=WS,
-                context_id=CTX,
+                context_id=context_id,
                 k=5,
                 search_mode="keyword",
             )
-        return fulltext, resolve
+        return fulltext, resolve, gate
 
     @pytest.mark.asyncio
     async def test_private_context_with_links_passes_owner_ids(self):
-        fulltext, _ = await self._recall(shared=False, linked=frozenset({ME, OTHER}))
+        fulltext, _, gate = await self._recall(shared=False, linked=frozenset({ME, OTHER}))
 
         assert fulltext.await_args.kwargs["owner_ids"] == sorted([ME, OTHER])
+        gate.assert_awaited_once()
+        assert gate.await_args.kwargs["workspace_id"] == UUID(WS)
+        assert list(gate.await_args.kwargs["context_ids"]) == [UUID(CTX)]
 
     @pytest.mark.asyncio
     async def test_no_links_passes_no_owner_ids(self):
-        fulltext, _ = await self._recall(shared=False, linked=frozenset({ME}))
+        fulltext, _, gate = await self._recall(shared=False, linked=frozenset({ME}))
 
         fulltext.assert_awaited_once()
         assert fulltext.await_args.kwargs["owner_ids"] is None
+        # One account: nothing to widen, so the membership is not even read.
+        gate.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_linked_caller_that_cannot_open_the_context_as_itself_reads_only_its_own(
+        self,
+    ):
+        """Defence in depth behind the route / handler gate: a linked account
+        whose whitelist excludes the context, a suspended member or an account
+        no longer in the workspace is not widened to the creator's rows."""
+        fulltext, _, _ = await self._recall(
+            shared=False, linked=frozenset({ME, OTHER}), opens=False
+        )
+
+        fulltext.assert_awaited_once()
+        assert fulltext.await_args.kwargs["owner_ids"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_cross_context_recall_checks_every_context(self):
+        other_ctx = "33333333-3333-4333-8333-333333333333"
+        _, _, gate = await self._recall(
+            shared=False, linked=frozenset({ME, OTHER}), context_id=[CTX, other_ctx]
+        )
+
+        assert list(gate.await_args.kwargs["context_ids"]) == [UUID(CTX), UUID(other_ctx)]

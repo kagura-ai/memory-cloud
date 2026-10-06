@@ -7,12 +7,14 @@ and run in CI's integration job.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.routes.memory import recall
 from config.settings import get_settings
 from models.auth import (
     AuditLog,
@@ -24,15 +26,18 @@ from models.auth import (
     WorkspaceRole,
 )
 from models.memory import Memory
+from models.schemas import RecallRequest, RecallResponse
 from services.context_service import ContextService
 from services.identity_link_service import (
     MAX_LINKED_IDENTITIES,
     IdentityLinkService,
     is_same_owner,
     linked_user_ids,
+    opens_contexts_as_self,
     owned_by,
 )
 from services.permission_service import PermissionService
+from services.tag_resolution import fetch_vocabulary
 from utils.datetime import utcnow
 from utils.exceptions import AuthorizationError, ConflictError, NotFoundException, ValidationError
 from utils.hashing import hmac_sha256_hex
@@ -726,6 +731,255 @@ class TestALinkDoesNotLiftTheCallersOwnLimits:
             await permissions.resolve_context_for_workspace_read(oauth.user_id, context.id)
         with pytest.raises(NotFoundException):
             await ContextService(db_session).get_context(oauth.user_id, context.id)
+
+
+class TestRestRecallChecksTheLinkedAccountAsItself:
+    """``POST /memory/recall`` resolves ``filters.context_id`` for the caller
+    before anything is searched: the linked account reaches the creator's
+    private context only where its own membership admits it. Every refusal is
+    the uniform 404 and the search never runs."""
+
+    @staticmethod
+    def _request(context: Context) -> RecallRequest:
+        return RecallRequest(query="what did I write", k=5, filters={"context_id": str(context.id)})
+
+    @staticmethod
+    async def _recall(db, caller: User, context: Context, *, workspace_id):
+        service = AsyncMock()
+        service.recall = AsyncMock(return_value=RecallResponse(results=[]))
+        response = await recall(
+            request=TestRestRecallChecksTheLinkedAccountAsItself._request(context),
+            user={"user_id": caller.user_id, "current_workspace_id": workspace_id},
+            memory_service=service,
+            db=db,
+        )
+        return response, service
+
+    @pytest.mark.asyncio
+    async def test_a_member_whose_whitelist_names_the_context_recalls_it(self, db_session):
+        oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+            db_session, WorkspaceRole.MEMBER, allowed_self=True
+        )
+
+        _, service = await self._recall(
+            db_session, oauth, context, workspace_id=context.workspace_id
+        )
+
+        kwargs = service.recall.await_args.kwargs
+        assert kwargs["current_context_id"] == context.id
+        assert kwargs["context_workspace_id"] == context.workspace_id
+
+    @pytest.mark.asyncio
+    async def test_a_member_whose_whitelist_excludes_the_context_gets_404(self, db_session):
+        oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+            db_session, WorkspaceRole.MEMBER, allowed_self=False
+        )
+
+        with pytest.raises(NotFoundException):
+            await self._recall(db_session, oauth, context, workspace_id=context.workspace_id)
+
+    @pytest.mark.asyncio
+    async def test_a_suspended_member_gets_404(self, db_session):
+        """MEMBER with a NULL whitelist (Migration 042)."""
+        oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+            db_session, WorkspaceRole.MEMBER, allowed_self=None
+        )
+
+        with pytest.raises(NotFoundException):
+            await self._recall(db_session, oauth, context, workspace_id=context.workspace_id)
+
+    @pytest.mark.asyncio
+    async def test_an_account_removed_from_the_workspace_gets_404(self, db_session):
+        """Even while the workspace is still the account's current one: the
+        route never trusted ``current_workspace_id`` for this."""
+        oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+            db_session, WorkspaceRole.ADMIN, allowed_self=None
+        )
+        await db_session.execute(
+            delete(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == context.workspace_id,
+                WorkspaceMember.user_id == oauth.user_id,
+            )
+        )
+
+        with pytest.raises(NotFoundException):
+            await self._recall(db_session, oauth, context, workspace_id=context.workspace_id)
+
+    @pytest.mark.asyncio
+    async def test_the_search_is_never_run_for_a_refused_caller(self, db_session):
+        oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+            db_session, WorkspaceRole.MEMBER, allowed_self=False
+        )
+        service = AsyncMock()
+        service.recall = AsyncMock(return_value=RecallResponse(results=[]))
+
+        with pytest.raises(NotFoundException):
+            await recall(
+                request=self._request(context),
+                user={"user_id": oauth.user_id, "current_workspace_id": context.workspace_id},
+                memory_service=service,
+                db=db_session,
+            )
+
+        service.recall.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_caller_with_no_current_workspace_recalls_a_context_it_can_open(
+        self, db_session
+    ):
+        """After a member removal or a workspace deletion cleared the account's
+        current workspace, a context it can open elsewhere is still searched —
+        in that context's workspace — rather than refused until the next
+        sign-in."""
+        oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+            db_session, WorkspaceRole.MEMBER, allowed_self=True
+        )
+
+        _, service = await self._recall(db_session, oauth, context, workspace_id=None)
+
+        kwargs = service.recall.await_args.kwargs
+        assert kwargs["current_workspace_id"] == context.workspace_id
+        assert kwargs["context_workspace_id"] == context.workspace_id
+
+    @pytest.mark.asyncio
+    async def test_a_caller_with_no_current_workspace_is_still_refused_elsewhere(self, db_session):
+        oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+            db_session, WorkspaceRole.MEMBER, allowed_self=False
+        )
+
+        with pytest.raises(NotFoundException):
+            await self._recall(db_session, oauth, context, workspace_id=None)
+
+
+class TestTheReadPathsWidenToTheLinkSetOnlyAsAMember:
+    """Defence in depth behind the route / handler gate: ``SearchService`` and
+    the tag vocabulary widen a private read to the link set only when the
+    caller, checked as itself, can open the context — the rule
+    ``resolve_context_for_workspace_read`` applies (#1874 spelled it for
+    memory health). Otherwise the caller reads its own rows only."""
+
+    @staticmethod
+    async def _opens(db, caller: User, context: Context) -> bool:
+        return await opens_contexts_as_self(
+            db, caller.user_id, workspace_id=context.workspace_id, context_ids=[context.id]
+        )
+
+    @pytest.mark.asyncio
+    async def test_owner_admin_and_unrestricted_viewer_open_every_context(self, db_session):
+        for role in (WorkspaceRole.ADMIN, WorkspaceRole.VIEWER):
+            oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+                db_session, role, allowed_self=None
+            )
+            assert await self._opens(db_session, oauth, context), role
+        admin = await _user(db_session)
+        workspace = await _workspace(db_session, admin)
+        context = await _private_context(db_session, workspace, admin)
+        assert await self._opens(db_session, admin, context)
+
+    @pytest.mark.asyncio
+    async def test_a_whitelist_admits_exactly_what_it_names(self, db_session):
+        for role in (WorkspaceRole.MEMBER, WorkspaceRole.VIEWER):
+            oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+                db_session, role, allowed_self=True
+            )
+            assert await self._opens(db_session, oauth, context), role
+            oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+                db_session, role, allowed_self=False
+            )
+            assert not await self._opens(db_session, oauth, context), role
+
+    @pytest.mark.asyncio
+    async def test_every_context_of_a_cross_context_read_must_be_named(self, db_session):
+        admin, oauth = await _user(db_session), await _user(db_session)
+        workspace = await _workspace(db_session, admin)
+        named = await _private_context(db_session, workspace, admin)
+        unnamed = await _private_context(db_session, workspace, admin)
+        await _member(db_session, workspace, oauth, WorkspaceRole.MEMBER, [named.id])
+
+        assert await opens_contexts_as_self(
+            db_session, oauth.user_id, workspace_id=workspace.id, context_ids=[named.id]
+        )
+        assert not await opens_contexts_as_self(
+            db_session,
+            oauth.user_id,
+            workspace_id=workspace.id,
+            context_ids=[named.id, unnamed.id],
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_suspended_member_a_non_member_and_a_deleted_workspace_are_refused(
+        self, db_session
+    ):
+        oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+            db_session, WorkspaceRole.MEMBER, allowed_self=None
+        )
+        assert not await self._opens(db_session, oauth, context)
+
+        oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+            db_session, WorkspaceRole.ADMIN, allowed_self=None
+        )
+        await db_session.execute(
+            delete(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == context.workspace_id,
+                WorkspaceMember.user_id == oauth.user_id,
+            )
+        )
+        assert not await self._opens(db_session, oauth, context)
+
+        oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+            db_session, WorkspaceRole.ADMIN, allowed_self=None
+        )
+        workspace = await db_session.get(Workspace, context.workspace_id)
+        assert workspace is not None
+        workspace.deleted_at = utcnow()
+        await db_session.flush()
+        assert not await self._opens(db_session, oauth, context)
+
+    @pytest.mark.asyncio
+    async def test_the_private_vocabulary_of_a_refused_linked_account_is_its_own(self, db_session):
+        oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+            db_session, WorkspaceRole.MEMBER, allowed_self=False
+        )
+        creator = (
+            await db_session.execute(select(User).where(User.user_id == context.created_by))
+        ).scalar_one()
+        theirs = await _memory(db_session, context, creator)
+        theirs.tags = ["creator-only"]
+        mine = await _memory(db_session, context, oauth)
+        mine.tags = ["mine"]
+        await db_session.flush()
+
+        vocabulary = await fetch_vocabulary(
+            db_session,
+            workspace_id=context.workspace_id,
+            context_id=context.id,
+            user_id=oauth.user_id,
+        )
+
+        assert vocabulary == {"mine": 1}
+
+    @pytest.mark.asyncio
+    async def test_the_private_vocabulary_of_an_admitted_linked_account_covers_the_set(
+        self, db_session
+    ):
+        oauth, context = await TestALinkDoesNotLiftTheCallersOwnLimits._seed(
+            db_session, WorkspaceRole.MEMBER, allowed_self=True
+        )
+        creator = (
+            await db_session.execute(select(User).where(User.user_id == context.created_by))
+        ).scalar_one()
+        theirs = await _memory(db_session, context, creator)
+        theirs.tags = ["creator-only"]
+        await db_session.flush()
+
+        vocabulary = await fetch_vocabulary(
+            db_session,
+            workspace_id=context.workspace_id,
+            context_id=context.id,
+            user_id=oauth.user_id,
+        )
+
+        assert vocabulary == {"creator-only": 1}
 
 
 class TestALinkNeverCrossesWorkspaces:

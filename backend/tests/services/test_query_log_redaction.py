@@ -136,13 +136,22 @@ async def test_rest_recall_route_log_has_no_raw_query():
 
     svc = AsyncMock()
     svc.recall = AsyncMock(return_value=RecallResponse(results=[]))
-    request = RecallRequest(query=SECRET_QUERY, k=4, filters={"context_id": str(uuid4())})
+    context_id = uuid4()
+    request = RecallRequest(query=SECRET_QUERY, k=4, filters={"context_id": str(context_id)})
+    permissions = MagicMock()
+    permissions.resolve_context_for_workspace_read = AsyncMock(
+        return_value=SimpleNamespace(id=context_id, workspace_id=uuid4())
+    )
 
-    with structlog.testing.capture_logs() as logs:
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch("api.routes.memory.PermissionService", return_value=permissions),
+    ):
         await recall(
             request=request,
             user={"user_id": "u1", "current_workspace_id": uuid4()},
             memory_service=svc,
+            db=MagicMock(),
         )
 
     entry = _event(logs, "recall_request")
