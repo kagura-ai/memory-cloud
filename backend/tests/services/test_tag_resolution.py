@@ -54,6 +54,14 @@ def _shared_context():
         yield
 
 
+@contextlib.contextmanager
+def _opens_as_self():
+    """The linked caller is a current member who can open the context as
+    itself, so its private vocabulary covers the whole link set."""
+    with patch("services.tag_resolution.opens_contexts_as_self", AsyncMock(return_value=True)):
+        yield
+
+
 def _db_with_vocabulary(vocabulary: dict[str, int]):
     db = MagicMock()
     result = MagicMock()
@@ -448,6 +456,79 @@ class TestVocabularyIsScopedToTheCaller:
         )
 
 
+class TestALinkedVocabularyIsReadAsTheCaller:
+    """A private vocabulary covers the caller's link set (#1784) only when the
+    caller, checked as itself, can open the context — a current member of the
+    live workspace whose role or whitelist admits it. Otherwise the aggregate
+    (and the cache key) are the caller's own rows, whatever the link says."""
+
+    @staticmethod
+    def _linked():
+        async def linked(_db, _user_id):
+            return frozenset({"alice", "bob"})
+
+        return linked
+
+    @staticmethod
+    def _owners_in(db) -> str:
+        return str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+
+    @pytest.mark.asyncio
+    async def test_a_caller_that_can_open_the_context_aggregates_the_set(self):
+        db = _db_with_vocabulary({"python": 3})
+        gate = AsyncMock(return_value=True)
+        with (
+            patch("services.tag_resolution.linked_user_ids", self._linked()),
+            patch("services.tag_resolution.opens_contexts_as_self", gate),
+        ):
+            await fetch_vocabulary(db, workspace_id=WS, context_id=CTX, user_id="alice")
+
+        sql = self._owners_in(db)
+        assert "'alice'" in sql and "'bob'" in sql
+        gate.assert_awaited_once()
+        assert gate.await_args.kwargs["workspace_id"] == WS
+        assert list(gate.await_args.kwargs["context_ids"]) == [CTX]
+
+    @pytest.mark.asyncio
+    async def test_a_caller_that_cannot_open_the_context_as_itself_reads_only_its_own(self):
+        db = _db_with_vocabulary({"python": 3})
+        with (
+            patch("services.tag_resolution.linked_user_ids", self._linked()),
+            patch("services.tag_resolution.opens_contexts_as_self", AsyncMock(return_value=False)),
+        ):
+            await fetch_vocabulary(db, workspace_id=WS, context_id=CTX, user_id="alice")
+
+        sql = self._owners_in(db)
+        assert "'alice'" in sql and "'bob'" not in sql
+
+    @pytest.mark.asyncio
+    async def test_the_cache_key_follows_the_same_decision(self):
+        """The refused caller's entry is keyed on itself, so it is never the
+        entry a caller who may read the set's rows warmed (and vice versa)."""
+        db = _db_with_vocabulary({"python": 3})
+        with (
+            patch("services.tag_resolution.linked_user_ids", self._linked()),
+            patch("services.tag_resolution.opens_contexts_as_self", AsyncMock(return_value=True)),
+        ):
+            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
+        with (
+            patch("services.tag_resolution.linked_user_ids", self._linked()),
+            patch("services.tag_resolution.opens_contexts_as_self", AsyncMock(return_value=False)),
+        ):
+            await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
+
+        assert db.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_an_unlinked_caller_does_not_read_its_membership(self):
+        db = _db_with_vocabulary({"python": 3})
+        gate = AsyncMock(return_value=False)
+        with patch("services.tag_resolution.opens_contexts_as_self", gate):
+            await fetch_vocabulary(db, workspace_id=WS, context_id=CTX, user_id=USER)
+
+        gate.assert_not_awaited()
+
+
 class TestCrossContextRecallSkipsSingleContextHints:
     """#1503 review: one context's vocabulary cannot describe a multi-context search."""
 
@@ -572,7 +653,7 @@ class TestVocabularyCache:
             return links.get(user_id, frozenset({user_id}))
 
         db = _db_with_vocabulary({"python": 3})
-        with patch("services.tag_resolution.linked_user_ids", linked):
+        with patch("services.tag_resolution.linked_user_ids", linked), _opens_as_self():
             await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
             await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
             assert db.execute.await_count == 1
@@ -589,7 +670,7 @@ class TestVocabularyCache:
             return frozenset({"alice", "bob"})
 
         db = _db_with_vocabulary({"python": 3})
-        with patch("services.tag_resolution.linked_user_ids", linked):
+        with patch("services.tag_resolution.linked_user_ids", linked), _opens_as_self():
             await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
 
         sql = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
@@ -604,7 +685,7 @@ class TestVocabularyCache:
             return both
 
         db = _db_with_vocabulary({"python": 3})
-        with patch("services.tag_resolution.linked_user_ids", linked):
+        with patch("services.tag_resolution.linked_user_ids", linked), _opens_as_self():
             await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="alice")
             await fetch_vocabulary_cached(db, workspace_id=WS, context_id=CTX, user_id="bob")
         assert db.execute.await_count == 1

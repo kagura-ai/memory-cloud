@@ -22,7 +22,7 @@ from models.llm_call_log import (
 from repositories.config_repository import ContextSearchConfigRepository
 from services.context_routing import resolve_routing_from_config
 from services.embedding_service import EmbeddingService
-from services.identity_link_service import linked_user_ids
+from services.identity_link_service import linked_user_ids, opens_contexts_as_self
 from services.llm_call_log_writer import LLMCallLogWriter
 from services.reranker_service import RerankerService
 from utils.exceptions import ExternalServiceError, OpenAIError
@@ -178,11 +178,25 @@ class SearchService:
             is_shared_context = await context_service.is_context_shared(UUID(primary_context_id))
 
         # #1784: in a private context the vector filter matches the author.
-        # The caller's own includes what an account linked to it wrote there.
+        # The caller's own includes what an account linked to it wrote there —
+        # but only where the caller, checked as itself, can open the context:
+        # a current member of the live workspace whose role or whitelist
+        # admits every searched context (the rule of
+        # ``resolve_context_for_workspace_read``). The route / handler gate
+        # upstream is authoritative; this keeps a link from reaching past a
+        # restriction on the caller's own account should a caller skip it.
         owner_ids: list[str] | None = None
         if not is_shared_context:
             linked = await linked_user_ids(self.db, user_id)
-            if len(linked) > 1:
+            if len(linked) > 1 and await opens_contexts_as_self(
+                self.db,
+                user_id,
+                workspace_id=UUID(workspace_id),
+                context_ids=[
+                    UUID(cid)
+                    for cid in (context_id if isinstance(context_id, list) else [context_id])
+                ],
+            ):
                 owner_ids = sorted(linked)
 
         # Redundant workspace-membership probe — only runs for single-context
