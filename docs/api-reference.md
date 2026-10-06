@@ -255,6 +255,7 @@ Search memories using Hybrid Search (60% semantic + 40% BM25) with optional Neur
   "query": "How do I implement authentication in FastAPI?",
   "k": 10,
   "filters": {
+    "context_id": "550e8400-e29b-41d4-a716-446655440000",
     "type": "code",
     "tags": ["python", "auth"],
     "importance": {"gte": 0.7}
@@ -269,8 +270,10 @@ Search memories using Hybrid Search (60% semantic + 40% BM25) with optional Neur
 |-------|------|----------|-------------|
 | `query` | string | Yes | Natural language search query |
 | `k` | integer | No | Number of results (default: 5, max: 100) |
-| `filters` | object | No | Filter by type, tags, importance, date ranges. `tags_match: "all"` for AND logic. Date: `created_after`, `created_before`, `updated_after`, `updated_before` (ISO 8601). **Trust:** `trust_tier: "trusted"` excludes `external`-tier contexts and `connector`-sourced memories — pass it for behaviour-influencing reads (see [Trust tier](concepts.md#agent-memory-substrate)) |
+| `filters` | object | No | `context_id` (UUID) names the context to search — required. Also filter by type, tags, importance, date ranges. `tags_match: "all"` for AND logic. Date: `created_after`, `created_before`, `updated_after`, `updated_before` (ISO 8601). **Trust:** `trust_tier: "trusted"` excludes `external`-tier contexts and `connector`-sourced memories — pass it for behaviour-influencing reads (see [Trust tier](concepts.md#agent-memory-substrate)) |
 | `use_rerank` | boolean | No | Request reranking (default: false). Only effective if reranking is also enabled in the context's search config and a provider (Voyage/Cohere) is configured. |
+
+Errors: `422` for a missing or malformed `filters.context_id`; a context the caller may not read (unknown, other workspace, private non-creator, not a member, suspended, outside the member's context whitelist, or outside a workspace-scoped key's workspace) is the uniform `404` `Context not found` — the same check as `/memory/list`, `/memory/stats` and the MCP `recall` tool.
 
 **Response:**
 
@@ -298,6 +301,7 @@ curl -X POST http://localhost:8080/api/v1/memory/recall \
   -d '{
     "query": "neural memory implementation",
     "k": 5,
+    "filters": {"context_id": "550e8400-e29b-41d4-a716-446655440000"},
     "use_rerank": false
   }'
 ```
