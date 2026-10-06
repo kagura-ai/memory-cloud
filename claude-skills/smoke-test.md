@@ -468,8 +468,9 @@ remember_batch(context_id=..., atomic=true, items=[
   {"summary": "MCP smoke test atomic item — invalid (no content, no type)"}
 ])
 -> Verify: status="error", error="batch_refused"; count=2, succeeded=0, failed=1, skipped=1 — the
-   counters follow the per-item status, so the valid item the refusal rolled back counts as
-   skipped, not as failed
+   counters follow the per-item status, so the valid item the refusal never attempted counts as
+   skipped, not as failed (the batch is refused before any write — this is not the post-write
+   atomic rollback, whose items say "batch rolled back")
 -> Verify: results[0].status="skipped" and results[1] is status="error", error="missing_fields";
    no result carries a memory_id — atomic=true wrote nothing (the list call below confirms it)
 
