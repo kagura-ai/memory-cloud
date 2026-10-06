@@ -90,6 +90,53 @@ async def test_route_reports_blockers_for_each_lower_tier(
 
 
 @pytest.mark.asyncio
+async def test_resource_tokens_count_through_the_resources_row(
+    db_session: AsyncSession, pro_workspace: dict
+):
+    """The eligibility read counts what the cap and the ceiling will count (#1919).
+
+    A token whose shadow ``workspace_id`` was never backfilled is reached through
+    its resources row; a revoked token is not counted.
+    """
+    from uuid import UUID, uuid4
+
+    from sqlalchemy import update
+
+    from auth.resource_tokens import ResourceTokenManager
+    from models.resource import Resource, ResourceToken
+
+    ws_id = UUID(pro_workspace["workspace_id"])
+    resource_id = uuid4()
+    slug = f"dg_{uuid4().hex[:8]}"
+    db_session.add(
+        Resource(
+            id=resource_id,
+            workspace_id=ws_id,
+            resource_id=slug,
+            created_by=pro_workspace["owner_id"],
+        )
+    )
+    await db_session.flush()
+    manager = ResourceTokenManager(db_session)
+    _, legacy = await manager.create_token(
+        slug, resource_pk=resource_id, workspace_id=ws_id, created_by=pro_workspace["owner_id"]
+    )
+    _, revoked = await manager.create_token(
+        slug, resource_pk=resource_id, workspace_id=ws_id, created_by=pro_workspace["owner_id"]
+    )
+    await db_session.execute(
+        update(ResourceToken).where(ResourceToken.id == legacy.id).values(workspace_id=None)
+    )
+    await db_session.execute(
+        update(ResourceToken).where(ResourceToken.id == revoked.id).values(is_active=False)
+    )
+    await db_session.commit()
+
+    usage = await DowngradeEligibilityService(db_session).current_usage(ws_id)
+    assert usage.resource_tokens == 1
+
+
+@pytest.mark.asyncio
 async def test_route_404_for_soft_deleted_workspace(db_session: AsyncSession):
     owner = make_user()
     db_session.add(owner)

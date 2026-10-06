@@ -182,9 +182,9 @@ def sync_products():
 
 - Each token has a `quota_events_per_hour` limit
 - **Creating** a resource token (or a resource via `setup_resource`) requires a plan with the `resources` feature — XL (`promax`) by default (#1551). Lower plans cannot mint new tokens.
-- The per-plan active-token caps are **serve-only** limits for tokens a workspace already holds — existing tokens stay valid, listed and editable (description, active flag) after a downgrade; nothing is revoked: Free 0, Basic 3, Pro 30, XL 150. For plans with the feature the cap is the second gate at creation time.
+- The per-plan active-token caps are **serve-only** limits for tokens a workspace already holds — existing tokens stay valid, listed and editable (description, active flag) after a downgrade; nothing is revoked: S/free 0, M/basic 3, L/pro 30, XL/promax 150. For plans with the feature the cap is the second gate at creation time.
 - The cap counts the **workspace's** active tokens, whoever minted them (#1919) — not the caller's — excluding connector-owned tokens (those take `max_connectors` seats instead). Two owners share one cap.
-- A quota **raise** is checked against the **current** tier's aggregate ceiling (cap × 10,000 events/hour, summed over the same set of tokens the cap counts), so on Free (cap 0) any positive quota edit is refused (400) and on Basic the sum must fit 30,000 — the token itself keeps serving at its stored quota. Lowering is never refused. Because the cap and the ceiling share one population and a token is at most 10,000 events/hour, a workspace within its cap can always raise every token to the maximum.
+- A quota **raise** is checked against the **current** tier's aggregate ceiling (cap × 10,000 events/hour, summed over the same set of tokens the cap counts), so on Free (cap 0) any positive quota edit is refused (400) and on Basic the sum must fit 30,000 — the token itself keeps serving at its stored quota. Lowering is never refused. Because the cap and the ceiling share one population and a token is at most 10,000 events/hour, a workspace whose active-token count is within its cap can always raise every token to the maximum; a workspace holding more tokens than the cap (after a downgrade, or minted before the cap counted per workspace) must lower or revoke first.
 
 ## Resource Tokens vs API Keys
 
