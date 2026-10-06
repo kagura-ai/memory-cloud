@@ -199,9 +199,11 @@ async def refresh_oauth(
     Raises:
         HTTPException(400): user is password-auth, or has no usable
             ``auth_provider`` (a legacy null from before #361, or the last
-            provider was unlinked). The pointer is set again by a sign-in
-            through a provider whose link to the account is established
-            (#1875) — not by linking one, nor by a link made minutes ago.
+            provider was unlinked). The pointer is set again only by a
+            sign-in through the identity the account was created with, once
+            its link is established (#1875, ``auth.roles``) — never by
+            linking a provider, nor by signing in through one attached
+            later, however old its link.
         HTTPException(429): more than 1 request in the current minute
             window. ``Retry-After`` header is set on the response.
         HTTPException(500): OAuth managers not initialised, or required
@@ -228,9 +230,10 @@ async def refresh_oauth(
 
     # Look up the originating IdP. Issue #361 added auth_provider; pre-#361
     # rows have it null, and so does an account whose last provider was
-    # unlinked — those can't be refreshed (we don't know which IdP). Signing
-    # in through a provider whose link to the account is established sets the
-    # column again (#1875, ``auth.provider_link``); linking one, or signing
+    # unlinked — those can't be refreshed (we don't know which IdP). Only a
+    # sign-in through the identity the account was created with, once its
+    # link is established, sets the column again (#1875, ``auth.roles``);
+    # linking a provider, signing in through one attached later, or signing
     # out and in with a password, does not.
     result = await db.execute(select(User).where(User.user_id == user_id))
     db_user = result.scalar_one_or_none()
@@ -249,9 +252,9 @@ async def refresh_oauth(
             status_code=400,
             detail=(
                 "Your account has no recorded OAuth provider. "
-                "Sign in with a Google or GitHub account linked to this "
-                "account, then try again. A newly linked one takes effect "
-                "after a few minutes."
+                "Sign in with the Google or GitHub account this account was "
+                "created with, then try again. A provider attached later "
+                "cannot be used for this."
             ),
         )
 
