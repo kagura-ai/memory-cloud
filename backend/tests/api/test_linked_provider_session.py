@@ -22,6 +22,7 @@ from api.routes import auth as auth_routes
 from api.routes.auth import SessionOwner
 from auth.session import SessionManager
 from utils.datetime import utcnow
+from utils.exceptions import UnlinkedProviderSignInError
 
 OWNER_ID = "owner-account-1"
 OWNER_EMAIL = "owner@example.test"
@@ -238,19 +239,20 @@ async def test_refresh_from_another_account_is_still_refused(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("provider", "sub", "idp"), PROVIDERS)
-async def test_unresolved_owner_falls_back_to_the_sub(
+async def test_unresolved_owner_refuses_the_sign_in(
     manager, signed_in_path, request, provider, sub, idp
 ) -> None:
-    # No link row and no users row keyed by the sub (lookup failed): keep the
-    # former behaviour rather than failing the sign-in.
+    # No link row for a Google / GitHub identity: it owns nothing, so no
+    # session is opened for the sub (it used to fall back to it).
     request.getfixturevalue(idp)
     signed_in_path.owning.return_value = None
 
-    await _callback(provider)
+    response = await _callback(provider)
 
-    session_data = manager.create_session.call_args.args[0]
-    assert session_data["user_id"] == sub
-    assert session_data["email"] == IDP_EMAIL
+    assert f"error=provider_unlinked&provider={provider}" in response.headers["location"]
+    assert "set-cookie" not in response.headers
+    manager.create_session.assert_not_called()
+    manager.delete_user_sessions.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -332,7 +334,8 @@ class TestSessionOwnerHelper:
         assert await auth_routes._session_owner("google", GOOGLE_SUB, IDP_EMAIL) == owner
 
     @pytest.mark.asyncio
-    async def test_no_owner_row_keeps_the_sub(self, monkeypatch) -> None:
+    @pytest.mark.parametrize(("provider", "sub"), [("google", GOOGLE_SUB), ("github", GITHUB_SUB)])
+    async def test_no_owner_row_fails_closed(self, monkeypatch, provider, sub) -> None:
         async def _fake_db():
             yield MagicMock()
 
@@ -341,16 +344,13 @@ class TestSessionOwnerHelper:
         warning = MagicMock()
         monkeypatch.setattr(auth_routes.logger, "warning", warning)
 
-        assert await auth_routes._session_owner("github", GITHUB_SUB, IDP_EMAIL) == SessionOwner(
-            GITHUB_SUB, IDP_EMAIL
-        )
+        with pytest.raises(UnlinkedProviderSignInError):
+            await auth_routes._session_owner(provider, sub, IDP_EMAIL)
         # #1875: the sub, so the identity that owns nothing can be found.
-        warning.assert_called_once_with(
-            "session_owner_not_found", provider="github", idp_sub=GITHUB_SUB
-        )
+        warning.assert_called_once_with("session_owner_not_found", provider=provider, idp_sub=sub)
 
     @pytest.mark.asyncio
-    async def test_no_session_yielded_keeps_the_sub(self, monkeypatch) -> None:
+    async def test_no_session_yielded_fails_closed(self, monkeypatch) -> None:
         async def _empty_db():
             return
             yield  # pragma: no cover
@@ -359,10 +359,23 @@ class TestSessionOwnerHelper:
         owning = AsyncMock()
         monkeypatch.setattr(auth_routes, "_owning_user", owning)
 
-        assert await auth_routes._session_owner("google", GOOGLE_SUB, IDP_EMAIL) == SessionOwner(
-            GOOGLE_SUB, IDP_EMAIL
-        )
+        with pytest.raises(UnlinkedProviderSignInError):
+            await auth_routes._session_owner("google", GOOGLE_SUB, IDP_EMAIL)
         owning.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_another_provider_without_an_owner_row_keeps_the_sub(self, monkeypatch) -> None:
+        """Only google / github identities are bound by a link row."""
+
+        async def _fake_db():
+            yield MagicMock()
+
+        monkeypatch.setattr(auth_routes, "get_db", _fake_db)
+        monkeypatch.setattr(auth_routes, "_owning_user", AsyncMock(return_value=None))
+
+        assert await auth_routes._session_owner("okta", "okta-1", IDP_EMAIL) == SessionOwner(
+            "okta-1", IDP_EMAIL
+        )
 
 
 @pytest.mark.asyncio

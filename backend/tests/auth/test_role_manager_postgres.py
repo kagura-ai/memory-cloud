@@ -5,7 +5,7 @@ HMAC-keyed audit log, IntegrityError → ConflictError.
 """
 
 from contextlib import suppress
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 from auth.roles import _OAUTH_CALLBACK_ACTOR, Role, RoleManager, _is_email_unique_violation
 from utils.datetime import utcnow
-from utils.exceptions import ConflictError
+from utils.exceptions import ConflictError, UnlinkedProviderSignInError
 from utils.hashing import hmac_sha256_hex
 
 
@@ -283,10 +283,12 @@ class TestLinkedProviderSkipsSync:
         """The user_id-race retry path applies the same primary-provider guard.
 
         The re-resolved row's ``auth_provider`` (None here) differs from the
-        provider signing in, so its email and name stay as they are.
+        provider signing in, so its email and name stay as they are. The racing
+        request wrote this identity's link row (execute #4), so the sign-in
+        itself goes through.
         """
         race_existing = _user_row(email="alice@old.com", name="Alice", auth_provider=None)
-        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing))
+        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing, _oauth_link_row()))
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
         with _patch_get_db(db):
@@ -408,19 +410,28 @@ class TestAdoptsAPrimaryProvider:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("link", [None, "someone-else"])
-    async def test_race_retry_leaves_a_row_that_only_shares_the_id(self, role_manager, link):
-        """Found by ``user_id`` alone: without a link row of its own for this
-        identity, the row must not start syncing from this provider."""
+    async def test_race_retry_refuses_a_row_that_only_shares_the_id(self, role_manager, link):
+        """Found by ``user_id`` alone: without a link row of its own pointing at
+        it, the row is the account that removed this sign-in method. No role,
+        no sync, nothing committed."""
         race_existing = self._account()
         link_row = None if link is None else self._link(user_id=link, linked=timedelta(days=30))
         db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing, link_row))
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
-        await self._sign_in(role_manager, db, sub="u1", provider="google")
+        with (
+            pytest.raises(UnlinkedProviderSignInError),
+            structlog.testing.capture_logs() as logs,
+        ):
+            await self._sign_in(role_manager, db, sub="u1", provider="google")
 
         assert race_existing.auth_provider is None
         assert race_existing.email == "alice@old.com"
         assert race_existing.name == "Alice"
+        db.commit.assert_awaited_once()  # only the insert that collided
+        refused = [e for e in logs if e.get("event") == "oauth_unlinked_identity_sign_in_refused"]
+        assert len(refused) == 1
+        assert refused[0]["link_row_present"] is (link is not None)
 
     @pytest.mark.parametrize(
         ("auth_method", "pointer", "signing_in"),
@@ -619,9 +630,12 @@ class TestCreatePath:
         # the email helper) → re-lookup hits → sync_existing_user commits
         # the update
         # #517 NEW path (#938 legacy fallback removed): link lookup MISS → count →
-        # race re-lookup HIT. Known provider also inserts a UserOAuthProvider row in
-        # the create unit of work (rolled back with the user on the race).
-        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing))
+        # race re-lookup HIT → this identity's link row, written by the racing
+        # request together with the user, HIT (without it the retry refuses).
+        # Known provider also inserts a UserOAuthProvider row in the create
+        # unit of work (rolled back with the user on the race).
+        link = _oauth_link_row()
+        db = _make_db_mock(_execute_returns(None, {"scalar": 0}, race_existing, link))
         db.commit = AsyncMock(side_effect=[_user_id_unique_violation(), None])
 
         with _patch_get_db(db):
@@ -635,9 +649,10 @@ class TestCreatePath:
 
         assert role == Role.ADMIN
         db.rollback.assert_awaited_once()
-        # Race-recovered row was synced (email + name)
+        # Race-recovered row was synced (email + name); the link row was used.
         assert race_existing.email == "alice@new.com"
         assert race_existing.name == "Alice New"
+        assert isinstance(link.last_used_at, datetime)
         # Audit row written for the email change
         added = [c.args[0] for c in db.add.call_args_list]
         audits = [a for a in added if getattr(a, "action", None) == "oauth_user_email_synced"]

@@ -5,10 +5,11 @@
 
 #938 removed the legacy ``users.user_id == oauth_sub`` fallback read and its
 self-heal insert, after the e37_517 backfill saturated (a prod probe confirmed
-0 un-migrated google/github users). The second test below now pins the
-post-removal behavior: a user that somehow lacks a provider row still resolves
-to the same account via the new-user path's IntegrityError(user_id) retry —
-without spawning a duplicate User and without a self-heal provider row.
+0 un-migrated google/github users). The second test below pins what the
+new-user path's IntegrityError(user_id) retry does for a user that lacks a
+provider row: it refuses the sign-in (the only way such a row comes about is
+the account removing that sign-in method) — without spawning a duplicate User
+and without a self-heal provider row.
 
 These run against a real PostgreSQL test DB (``conftest.async_engine`` skips
 when unreachable). Each test seeds uuid-suffixed identifiers so parallel /
@@ -28,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from auth.roles import Role, RoleManager
 from models.auth import User, UserOAuthProvider
+from utils.exceptions import UnlinkedProviderSignInError
 
 
 def _patch_get_db_with_fresh_session(async_engine):
@@ -115,16 +117,16 @@ async def test_login_via_linked_secondary_provider_resolves_owner(db_session: As
 
 
 @pytest.mark.asyncio
-async def test_user_without_provider_row_still_resolves_without_selfheal(
+async def test_user_without_provider_row_is_refused_without_selfheal(
     db_session: AsyncSession,
 ):
     """#938: the legacy user_id-as-sub fallback + self-heal are removed.
 
-    A user that lacks a ``user_oauth_providers`` row (post-backfill this should
-    never happen — prod probe = 0 — but the path must degrade safely) still
-    resolves to the SAME account via the new-user path's IntegrityError(user_id)
-    retry: no duplicate User is created. And no self-heal provider row is added
-    (that behavior was intentionally removed)."""
+    A user that lacks a ``user_oauth_providers`` row (post-backfill only an
+    account that unlinked its original provider) is NOT signed in by the
+    new-user path's IntegrityError(user_id) retry: it raises, no duplicate User
+    is created, and no self-heal provider row is added (that behavior was
+    intentionally removed)."""
     suffix = uuid4().hex[:8]
     legacy_sub = f"g-dr-3-{suffix}"
     email = f"dual-read-legacy-{suffix}@example.com"
@@ -152,17 +154,16 @@ async def test_user_without_provider_row_still_resolves_without_selfheal(
 
     rm = RoleManager(use_postgres=True)
     with _patch_get_db_with_fresh_session(db_session.bind):
-        role = await rm.ensure_user(
-            email=email,
-            user_id=legacy_sub,
-            name="Legacy",
-            auth_provider="google",
-            email_verified=True,
-        )
+        with pytest.raises(UnlinkedProviderSignInError):
+            await rm.ensure_user(
+                email=email,
+                user_id=legacy_sub,
+                name="Legacy",
+                auth_provider="google",
+                email_verified=True,
+            )
 
-    assert role == Role.USER
-
-    # Resolved to the SAME user — no duplicate row spawned by the collision retry.
+    # No duplicate row spawned by the collision retry.
     users_after = (await db_session.execute(select(func.count()).select_from(User))).scalar()
     assert users_after == users_before
 
