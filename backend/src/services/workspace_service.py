@@ -8,7 +8,7 @@ Manages workspaces, memberships, and workspace-level operations.
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
@@ -945,6 +945,20 @@ class WorkspaceService:
                 raise ValidationError(
                     "Cannot remove member: Role was changed to owner during operation"
                 )
+
+            from models.auth import User
+
+            # A removed member must not keep this workspace as its current one:
+            # the auth dependency hands ``users.current_workspace_id`` to every
+            # request as the caller's workspace (#146), and a stale value would
+            # still name a workspace the account has left. Same as
+            # ``delete_workspace`` does for every member (#218); a different
+            # current workspace is left alone.
+            await self.db.execute(
+                update(User)
+                .where(User.user_id == user_id, User.current_workspace_id == workspace_id)
+                .values(current_workspace_id=None)
+            )
 
             # Delete member record
             await self.db.delete(member)
