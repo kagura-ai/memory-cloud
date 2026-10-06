@@ -4,6 +4,23 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.96.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.96.1) — 2026-10-06
+
+Hardening of sign-in, account linking, context access and log hygiene (PR #1921). Every new check fails closed. No database migration and no new environment variables; operators should read the new `docs/deployment.md` sections listed under Notes.
+
+### Fixed
+- **A removed sign-in provider stays removed**: a Google or GitHub identity whose link was removed from an account can no longer sign in to it; the login page explains that the method was removed. `docs/deployment.md` has a review query for accounts whose original provider was unlinked.
+- **Provider linking completes only in the browser session that started it**: `link-provider` needs a session, and a callback arriving from another session links nothing and redirects to `/profile?error=link_failed`.
+- **Second-factor attempts count against the sign-in budget**: wrong TOTP codes share the per-account budget with wrong passwords (one atomic reservation per attempt, 429 when spent), a correct password no longer resets it, an accepted code cannot be replayed, and the owner is notified when sign-in is paused.
+- **The primary provider follows the account's original identity**: an OAuth account adopts a primary provider only from the identity it was created with; linking or unlinking never makes a later-attached provider primary, and `refresh-oauth` says which sign-in restores it.
+- **REST `recall` resolves the context for the caller** like every other read path (422 for a malformed `filters.context_id`, uniform 404 when the caller cannot open the context), linked-account widening in search and tag resolution applies only to contexts the caller could open as a member, and leaving a workspace clears it as the member's current workspace.
+- **Credentials stay out of the logs**: the single-server Caddy template drops the `X-Resource-Api-Key` header from both log filters, and workspace invitation tokens are redacted in `/invitations/<token>`, `/invite/<token>` and percent-encoded `return_to` shapes in the proxy filters, the application scrubber and `usage_stats`.
+
+### Notes
+- No database migration, no new environment variables.
+- **Operator action** (self-hosted): regenerate the Caddyfile and restart Caddy to apply the log filters; then follow the new `docs/deployment.md` sections "Credential headers in the proxy log", "Workspace invitation links", "Removed sign-in providers" and "Which sign-in provider syncs the account's email" (re-issue resource tokens that went through the proxy, purge old container logs, review the listed accounts).
+- Behaviour changes: an identity whose link was removed must be linked again from the profile page before it can sign in; a provider attached after account creation never syncs the account email; cross-workspace REST `recall` follows the same path as MCP instead of returning an empty result.
+
 ## [v0.96.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.96.0) — 2026-10-05
 
 Eighteen follow-ups from the review of v0.82.1–v0.94.0: sign-in and account linking hold up under contention and against a freshly attached provider, resource tokens and memory health respect the workspace boundary, the embedding migration and `remember_batch` stop mis-counting and mis-building, and the MCP docs and smoke-test runbook match the 70-tool registry.
