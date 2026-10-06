@@ -1,10 +1,11 @@
-"""A sweep fenced by the lock its caller holds (#1918).
+"""A sweep fenced by a key its caller owns (#1918).
 
-``delete_user_sessions(..., fence=(lock_key, token))`` lands its deletes in
-one WATCH/MULTI transaction on the lock key: only while the key still holds
-``token``. A sweep that outlived its lease — a stalled Redis call past the
-TTL — therefore cannot delete a session that a newer holder of the lock
-created and already answered for.
+``delete_user_sessions(..., fence=(key, token))`` lands its deletes in one
+WATCH/MULTI transaction on ``key``: only while it still holds ``token``. The
+password sign-in writes the token of the latest holder of its sweep lock
+there, so a sweep that outlived its lease — a stalled Redis call past the
+TTL — cannot delete a session that a later sign-in created and already
+answered for.
 
 A real (fake) Redis is used, so WATCH and MULTI are real.
 """
@@ -13,12 +14,13 @@ from __future__ import annotations
 
 import fakeredis
 import pytest
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import WatchError
 
 from auth.session import SessionManager, SweepLeaseLostError
-from utils.redis_lock import acquire_lock_sync
 
 TTL = 3600
-LOCK = "signin_sweep_lock:u1"
+FENCE = "signin_sweep_fence:u1"
 U1 = {"sub": "u1", "user_id": "u1", "email": "u1@example.com", "role": "user"}
 
 
@@ -52,96 +54,122 @@ def _live(redis, *session_ids: str) -> list[bool]:
 
 @pytest.mark.usefixtures("_no_legacy_scan")
 class TestSweepFence:
-    def test_a_held_lease_sweeps_as_usual(self, manager, redis) -> None:
+    def test_a_fence_that_still_holds_the_token_sweeps_as_usual(self, manager, redis) -> None:
         keep = manager.create_session(U1)
         drop = manager.create_session(U1)
-        token = acquire_lock_sync(redis, LOCK, 10)
-        assert token is not None
+        redis.set(FENCE, "mine", ex=TTL)
 
         deleted = manager.delete_user_sessions(
-            "u1", exclude_session_id=keep, strict=True, fence=(LOCK, token)
+            "u1", exclude_session_id=keep, strict=True, fence=(FENCE, "mine")
         )
 
         assert deleted == 1
         assert _live(redis, keep, drop) == [True, False]
         assert set(redis.smembers("user_sessions:u1")) == {keep}
-        # The fence reads the lock, it does not release it.
-        assert redis.get(LOCK) == token
+        # The fence is read, not written.
+        assert redis.get(FENCE) == "mine"
 
-    def test_a_lease_taken_by_a_newer_holder_deletes_nothing(self, manager, redis) -> None:
+    def test_a_fence_taken_by_a_later_holder_deletes_nothing(self, manager, redis) -> None:
         keep = manager.create_session(U1)
         newer = manager.create_session(U1)
-        redis.set(LOCK, "newer-holder", ex=10)
+        redis.set(FENCE, "newer-holder", ex=TTL)
 
         with pytest.raises(SweepLeaseLostError):
             manager.delete_user_sessions(
-                "u1", exclude_session_id=keep, strict=True, fence=(LOCK, "expired-token")
+                "u1", exclude_session_id=keep, strict=True, fence=(FENCE, "mine")
             )
 
         assert _live(redis, keep, newer) == [True, True]
         assert set(redis.smembers("user_sessions:u1")) == {keep, newer}
-        assert redis.get(LOCK) == "newer-holder"
+        assert redis.get(FENCE) == "newer-holder"
 
-    def test_an_expired_lease_nobody_took_deletes_nothing(self, manager, redis) -> None:
-        # The candidates may predate the lease's end; a holder in between
-        # could have come and gone. Without the lock the sweep's reads are
-        # stale, so it does not write.
+    def test_a_missing_fence_deletes_nothing(self, manager, redis) -> None:
+        # The fence outlives any sweep; gone, it says nothing about who has
+        # been through, so the sweep does not write.
         keep = manager.create_session(U1)
         drop = manager.create_session(U1)
 
         with pytest.raises(SweepLeaseLostError):
             manager.delete_user_sessions(
-                "u1", exclude_session_id=keep, strict=True, fence=(LOCK, "expired-token")
+                "u1", exclude_session_id=keep, strict=True, fence=(FENCE, "mine")
             )
 
         assert _live(redis, keep, drop) == [True, True]
 
-    def test_the_lease_is_lost_strict_or_not(self, manager, redis) -> None:
+    def test_the_fence_is_lost_strict_or_not(self, manager, redis) -> None:
         # A caller that fences cares about the answer: it is never "0 swept".
         manager.create_session(U1)
 
         with pytest.raises(SweepLeaseLostError):
-            manager.delete_user_sessions("u1", fence=(LOCK, "expired-token"))
+            manager.delete_user_sessions("u1", fence=(FENCE, "mine"))
 
-    def test_a_lease_lost_between_the_check_and_the_deletes_lands_nothing(
+    def test_a_fence_taken_between_the_check_and_the_deletes_lands_nothing(
         self, manager, redis, server
     ) -> None:
-        # The fence read our token, then the lease expired and a newer
-        # holder took the lock before EXEC: the WATCH aborts the transaction.
+        # The fence read our token, then a later holder wrote its own before
+        # EXEC: the WATCH aborts the transaction.
         other = fakeredis.FakeRedis(server=server, decode_responses=True)
         keep = manager.create_session(U1)
         newer = manager.create_session(U1)
-        token = acquire_lock_sync(redis, LOCK, 10)
-        assert token is not None
+        redis.set(FENCE, "mine", ex=TTL)
         real_pipeline = redis.pipeline
 
         def _pipeline(transaction: bool = True):
             pipe = real_pipeline(transaction=transaction)
             real_get = pipe.get
 
-            def _get_then_lose_the_lock(key: str):
+            def _get_then_lose_the_fence(key: str):
                 held = real_get(key)
-                if key == LOCK:
+                if key == FENCE:
                     other.set(key, "newer-holder")
                 return held
 
-            pipe.get = _get_then_lose_the_lock  # type: ignore[method-assign]
+            pipe.get = _get_then_lose_the_fence  # type: ignore[method-assign]
             return pipe
 
         redis.pipeline = _pipeline  # type: ignore[method-assign]
 
         with pytest.raises(SweepLeaseLostError):
             manager.delete_user_sessions(
-                "u1", exclude_session_id=keep, strict=True, fence=(LOCK, token)
+                "u1", exclude_session_id=keep, strict=True, fence=(FENCE, "mine")
             )
 
         assert _live(redis, keep, newer) == [True, True]
-        assert redis.get(LOCK) == "newer-holder"
+        assert redis.get(FENCE) == "newer-holder"
+
+    def test_a_connection_failure_at_exec_is_not_a_lost_fence(self, manager, redis) -> None:
+        # redis-py reports a connection failure while watching as a
+        # WatchError. The deletes may have run: that is the Redis failure
+        # it is, not "nothing deleted".
+        manager.create_session(U1)
+        redis.set(FENCE, "mine", ex=TTL)
+        real_pipeline = redis.pipeline
+
+        def _pipeline(transaction: bool = True):
+            pipe = real_pipeline(transaction=transaction)
+
+            def _exec_loses_the_connection():
+                pipe.reset()
+                # redis-py raises it from the failure's handler: the failure
+                # is the WatchError's implicit context.
+                exc = WatchError("A ConnectionError occurred while watching one or more keys")
+                exc.__context__ = RedisConnectionError("Connection closed by server.")
+                raise exc
+
+            pipe.execute = _exec_loses_the_connection  # type: ignore[method-assign]
+            return pipe
+
+        redis.pipeline = _pipeline  # type: ignore[method-assign]
+
+        with pytest.raises(RedisConnectionError):
+            manager.delete_user_sessions("u1", strict=True, fence=(FENCE, "mine"))
+        # Not strict: a Redis failure reads as 0 swept, as it always has.
+        assert manager.delete_user_sessions("u1", fence=(FENCE, "mine")) == 0
 
     def test_without_a_fence_the_sweep_is_unchanged(self, manager, redis) -> None:
         keep = manager.create_session(U1)
         drop = manager.create_session(U1)
-        redis.set(LOCK, "someone-else", ex=10)
+        redis.set(FENCE, "someone-else", ex=TTL)
 
         assert manager.delete_user_sessions("u1", exclude_session_id=keep, strict=True) == 1
         assert _live(redis, keep, drop) == [True, False]

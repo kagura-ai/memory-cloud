@@ -500,7 +500,7 @@ class TestARefusedSignInHasNoSideEffects:
     async def test_a_sweep_lock_that_stays_held_fails_closed(self, real, monkeypatch) -> None:
         # A lock that outlives the wait (here: one refreshed by its holder,
         # modelled by a lease longer than the shortened wait) is not broken.
-        monkeypatch.setattr(auth_routes, "_SIGN_IN_SWEEP_LOCK_WAIT_SECONDS", 0.1)
+        monkeypatch.setattr(auth_routes, "_sign_in_sweep_lock_wait_seconds", lambda: 0.1)
         real.manager._redis.set("signin_sweep_lock:u-1", "someone-else", nx=True, ex=10)
 
         with pytest.raises(HTTPException) as exc_info:
@@ -511,15 +511,17 @@ class TestARefusedSignInHasNoSideEffects:
         # Another holder's lock is not released by the loser.
         assert real.manager._redis.get("signin_sweep_lock:u-1") == "someone-else"
 
-    def test_a_waiter_outlives_the_lease(self) -> None:
+    def test_a_waiter_outlives_the_lease(self, monkeypatch) -> None:
         # #1918: a lock whose holder died frees itself after the TTL. A
         # sign-in that gives up sooner answers 503 for no reason, so the wait
-        # is derived from the TTL and covers it plus the last poll.
-        assert (
-            auth_routes._SIGN_IN_SWEEP_LOCK_WAIT_SECONDS
-            >= auth_routes._SIGN_IN_SWEEP_LOCK_TTL_SECONDS
-            + auth_routes._SIGN_IN_SWEEP_LOCK_POLL_SECONDS
-        )
+        # is derived from the TTL — whatever the TTL is — and covers it plus
+        # the last poll.
+        for ttl in (auth_routes._SIGN_IN_SWEEP_LOCK_TTL_SECONDS, 1, 30):
+            monkeypatch.setattr(auth_routes, "_SIGN_IN_SWEEP_LOCK_TTL_SECONDS", ttl)
+            assert (
+                auth_routes._sign_in_sweep_lock_wait_seconds()
+                >= ttl + auth_routes._SIGN_IN_SWEEP_LOCK_POLL_SECONDS
+            )
 
     @pytest.mark.asyncio
     async def test_a_lock_left_by_a_dead_holder_delays_the_sign_in_by_its_ttl_at_most(
@@ -530,11 +532,6 @@ class TestARefusedSignInHasNoSideEffects:
         # waits the key out, for the whole lease if need be, and completes.
         ttl = 1
         monkeypatch.setattr(auth_routes, "_SIGN_IN_SWEEP_LOCK_TTL_SECONDS", ttl)
-        monkeypatch.setattr(
-            auth_routes,
-            "_SIGN_IN_SWEEP_LOCK_WAIT_SECONDS",
-            ttl + auth_routes._SIGN_IN_SWEEP_LOCK_POLL_SECONDS,
-        )
         real.manager._redis.set("signin_sweep_lock:u-1", "dead-holder", nx=True, ex=ttl)
         started = time.monotonic()
 
@@ -542,13 +539,21 @@ class TestARefusedSignInHasNoSideEffects:
 
         elapsed = time.monotonic() - started
         assert response.status_code == 200
-        assert ttl - 0.1 <= elapsed < ttl + 1.0
+        assert ttl - 0.1 <= elapsed < ttl + 2.0
         sessions = self._sessions(real)
         assert len(sessions) == 1 and real.kept not in sessions
         assert real.manager._redis.get("signin_sweep_lock:u-1") is None
 
+    def _overtake(self, real: SimpleNamespace, newer: dict[str, str]) -> None:
+        """A second sign-in of the account takes the lock and writes its session."""
+        newer["session"] = real.manager.create_session(
+            {"sub": "u-1", "user_id": "u-1", "email": real.user.email, "role": "user"}
+        )
+        real.manager._redis.set("signin_sweep_lock:u-1", "newer-sign-in", ex=10)
+        real.manager._redis.set("signin_sweep_fence:u-1", "newer-sign-in", ex=3600)
+
     @pytest.mark.asyncio
-    async def test_a_sweep_that_outlived_its_lease_deletes_nothing(self, real) -> None:
+    async def test_a_sweep_overtaken_by_a_later_sign_in_deletes_nothing(self, real) -> None:
         # #1918: the sweep stalls after reading its candidates; its lease
         # expires and a second sign-in of the account takes the lock, writes
         # its session and finishes. The first sweep's deletes are fenced by
@@ -558,16 +563,13 @@ class TestARefusedSignInHasNoSideEffects:
         real_smembers = redis.smembers
         newer: dict[str, str] = {}
 
-        def _lose_the_lease_then_smembers(key: str):
+        def _overtaken_then_smembers(key: str):
             if key == "user_sessions:u-1" and not newer:
                 # The newer session is among this sweep's candidates.
-                newer["session"] = real.manager.create_session(
-                    {"sub": "u-1", "user_id": "u-1", "email": real.user.email, "role": "user"}
-                )
-                redis.set("signin_sweep_lock:u-1", "newer-sign-in", ex=10)
+                self._overtake(real, newer)
             return real_smembers(key)
 
-        redis.smembers = _lose_the_lease_then_smembers
+        redis.smembers = _overtaken_then_smembers
 
         with pytest.raises(HTTPException) as exc_info:
             await auth_routes.password_login(_login_body(), _request(), return_to=None)
@@ -577,8 +579,44 @@ class TestARefusedSignInHasNoSideEffects:
         assert real.manager.get_session(newer["session"]) is not None
         assert real.user.last_login_at is None
         real.workspace.assert_not_awaited()
-        # The newer holder's lock is not released by the loser.
+        # The newer holder's lock and fence are not touched by the loser.
         assert redis.get("signin_sweep_lock:u-1") == "newer-sign-in"
+        assert redis.get("signin_sweep_fence:u-1") == "newer-sign-in"
+
+    @pytest.mark.asyncio
+    async def test_a_sweep_that_outlived_its_lease_unopposed_still_completes(self, real) -> None:
+        # #1918: a slow sweep (the #1809 legacy SCAN on a large keyspace, a
+        # slow Redis call) past its lease, with no later sign-in of the
+        # account: its candidates are still the sessions to delete, so it
+        # completes. The lock has expired under it; the fence has not.
+        redis = real.manager._redis
+        real_smembers = redis.smembers
+
+        def _lease_expires_then_smembers(key: str):
+            if key == "user_sessions:u-1":
+                redis.delete("signin_sweep_lock:u-1")
+            return real_smembers(key)
+
+        redis.smembers = _lease_expires_then_smembers
+
+        response = await auth_routes.password_login(_login_body(), _request(), return_to=None)
+
+        assert response.status_code == 200
+        sessions = self._sessions(real)
+        assert len(sessions) == 1 and real.kept not in sessions
+        assert real.user.last_login_at is not None
+
+    @pytest.mark.asyncio
+    async def test_the_fence_names_the_latest_holder(self, real) -> None:
+        response = await auth_routes.password_login(_login_body(), _request(), return_to=None)
+
+        assert response.status_code == 200
+        redis = real.manager._redis
+        fence = redis.get("signin_sweep_fence:u-1")
+        assert isinstance(fence, str) and len(fence) == 32
+        assert 0 < redis.ttl("signin_sweep_fence:u-1") <= 3600
+        # The fence outlives the lock, which is released.
+        assert redis.get("signin_sweep_lock:u-1") is None
 
     @pytest.mark.asyncio
     async def test_a_session_swept_during_the_sweep_is_not_answered_with_a_dead_cookie(

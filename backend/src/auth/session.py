@@ -13,8 +13,11 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
+from redis.exceptions import WatchError
+
 from config.database import INVALID_REDIS_URL_MESSAGE
 from utils.datetime import utcnow
+from utils.redis_lock import connection_failure, watch_token_sync
 from utils.url_redact import redis_location
 
 logger = logging.getLogger(__name__)
@@ -77,47 +80,45 @@ def _user_index_key(user_id: str) -> str:
 
 
 class SweepLeaseLostError(RuntimeError):
-    """A fenced sweep found the lock it runs under expired or taken (#1918).
+    """A fenced sweep found its fence key gone or another holder's (#1918).
 
-    Nothing was deleted: the sweep's candidates were read under a lease that
-    is over, so a newer holder may have written — and answered for — a
-    session among them.
+    Nothing was deleted: a newer holder of the caller's lock has been
+    through since the sweep read its candidates, and may have written — and
+    answered for — a session among them.
     """
 
-    def __init__(self, lock_key: str) -> None:
-        super().__init__(f"sweep lease lost: {lock_key}")
-        self.lock_key = lock_key
+    def __init__(self, fence_key: str) -> None:
+        super().__init__(f"sweep lease lost: {fence_key}")
+        self.fence_key = fence_key
 
 
-def _arm_sweep_fence(pipe: Any, lock_key: str, token: str) -> None:
-    """WATCH ``lock_key`` and open the transaction only if it holds ``token``.
+def _arm_sweep_fence(pipe: Any, fence_key: str, token: str) -> None:
+    """WATCH ``fence_key`` and open the transaction only if it holds ``token``.
 
     Raises:
-        SweepLeaseLostError: The lock is gone or another holder's.
+        SweepLeaseLostError: The key is gone or holds another token.
     """
-    pipe.watch(lock_key)
-    held = pipe.get(lock_key)
-    if isinstance(held, bytes):
-        held = held.decode()
-    if held != token:
+    if not watch_token_sync(pipe, fence_key, token):
         pipe.reset()
-        raise SweepLeaseLostError(lock_key)
-    pipe.multi()
+        raise SweepLeaseLostError(fence_key)
 
 
-def _execute_fenced(pipe: Any, lock_key: str) -> list[Any]:
+def _execute_fenced(pipe: Any, fence_key: str) -> list[Any]:
     """EXEC a transaction armed by :func:`_arm_sweep_fence`.
 
     Raises:
-        SweepLeaseLostError: The lock changed hands (or expired) after the
-            fence read it; Redis aborted the transaction.
+        SweepLeaseLostError: The key changed after the fence read it; Redis
+            aborted the transaction.
+        Exception: A Redis connection or timeout failure, as it is: whether
+            the transaction ran is unknown.
     """
-    from redis.exceptions import WatchError
-
     try:
         return pipe.execute()
-    except WatchError:
-        raise SweepLeaseLostError(lock_key) from None
+    except WatchError as exc:
+        failure = connection_failure(exc)
+        if failure is not None:
+            raise failure from exc
+        raise SweepLeaseLostError(fence_key) from exc
 
 
 def browser_cookie_attrs() -> dict[str, Any]:
@@ -1084,22 +1085,22 @@ class SessionManager:
             strict: Re-raise a Redis failure instead of reporting 0 deleted.
                 The password flows (#1678) must not report success — or
                 commit the new password — when the old sessions survived.
-            fence: ``(lock_key, token)`` of the Redis lock the caller holds
-                over this sweep (#1918). The deletes then run as one
-                WATCH/MULTI transaction on that key and land only if it
-                still holds ``token`` at EXEC: a sweep that outlived its
-                lease cannot delete a session created under a newer lock
-                and already answered for. Otherwise nothing is deleted and
-                ``SweepLeaseLostError`` is raised, ``strict`` or not. A
-                sweep with nothing to delete has nothing to fence and
-                returns 0 without reading the lock.
+            fence: ``(key, token)`` (#1918). The deletes then run as one
+                WATCH/MULTI transaction on ``key`` and land only if it
+                still holds ``token`` at EXEC. The password sign-in writes
+                the token of the latest holder of its sweep lock there, so
+                a sweep that outlived its lease cannot delete a session a
+                newer holder created and already answered for. Otherwise
+                nothing is deleted and ``SweepLeaseLostError`` is raised,
+                ``strict`` or not. A sweep with nothing to delete has
+                nothing to fence and returns 0 without reading the key.
 
         Returns:
             Number of sessions deleted
 
         Raises:
-            SweepLeaseLostError: With ``fence``: the lock expired or is
-                another holder's. Nothing was deleted.
+            SweepLeaseLostError: With ``fence``: the key is gone or holds
+                another token. Nothing was deleted.
             Exception: Only with ``strict=True``: whatever Redis raised.
 
         Example:
@@ -1180,8 +1181,7 @@ class SessionManager:
             return deleted_count
 
         except SweepLeaseLostError:
-            logger.warning(f"Session sweep for user {user_id} outlived its lock; nothing deleted")
-            raise
+            raise  # The caller's lock is the story; it logs.
         except Exception as e:
             logger.error(f"Failed to delete user sessions: {e}")
             if strict:
