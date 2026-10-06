@@ -13,6 +13,12 @@ The API contract puts the plaintext token in URLs — the public preview's PATH
 The fix lives at the existing chokepoints (the #1359 pattern): one scrubber,
 applied by the structlog processor, the stdlib formatter wrapper (now also over
 uvicorn's own handlers), and the usage middleware.
+
+Workspace invitation tokens (``secrets.token_urlsafe(32)``, lifetime up to a
+year or unlimited) travel the same way and reach the same sinks: the public
+preview ``GET /api/v1/invitations/{token}``, the landing URL
+``{FRONTEND_URL}/invite/{token}`` and its percent-encoded copy in the OAuth
+login's ``return_to``. The same scrubber covers those three shapes too.
 """
 
 from __future__ import annotations
@@ -58,13 +64,49 @@ class TestRedactInviteTokens:
         assert TOKEN not in out
         assert out.endswith('/preview HTTP/1.1" 200')
 
+    def test_workspace_invitation_preview_path(self) -> None:
+        """GET /api/v1/invitations/{token} — the unauthenticated invite preview."""
+        assert redact_invite_tokens(f"/api/v1/invitations/{TOKEN}") == "/api/v1/invitations/{token}"
+        line = f'203.0.113.7:5123 - "GET /api/v1/invitations/{TOKEN} HTTP/1.1" 200'
+        assert redact_invite_tokens(line) == (
+            '203.0.113.7:5123 - "GET /api/v1/invitations/{token} HTTP/1.1" 200'
+        )
+
+    def test_frontend_invite_url(self) -> None:
+        """{FRONTEND_URL}/invite/{token} is the credential — and the callback's Location."""
+        assert (
+            redact_invite_tokens(f"https://app.example.test/invite/{TOKEN}")
+            == "https://app.example.test/invite/{token}"
+        )
+        assert redact_invite_tokens(f"/invite/{TOKEN}?_rsc=1a2b3") == "/invite/{token}?_rsc=1a2b3"
+
+    @pytest.mark.parametrize("slash", ["%2F", "%2f"])
+    def test_percent_encoded_return_to(self, slash: str) -> None:
+        """The invite page sends its own URL percent-encoded in the login's return_to."""
+        path = (
+            f"/api/v1/auth/google/login?return_to=https%3A{slash}{slash}app.example.test"
+            f"{slash}invite{slash}{TOKEN}&accepted_terms=2026-01"
+        )
+        out = redact_invite_tokens(path)
+        assert TOKEN not in out
+        assert out == (
+            f"/api/v1/auth/google/login?return_to=https%3A{slash}{slash}app.example.test"
+            f"{slash}invite{slash}{{token}}&accepted_terms=2026-01"
+        )
+
     @pytest.mark.parametrize(
         "text",
         [
             "/api/v1/beta-invites/me",
             "/api/v1/beta-invites/0b9f6c1e-5d0a-4a3e-9d57-2f4f3f6f8a11",
-            "/api/v1/invitations/some-workspace-token",
+            # The token-free invitation routes keep their concrete path.
+            "/api/v1/invitations/accept",
+            "/api/v1/invitations/pending",
+            # Managing an invitation goes by its id, under the workspace.
+            "/api/v1/workspaces/0b9f6c1e-5d0a-4a3e-9d57-2f4f3f6f8a11"
+            "/invitations/7c1d2e3f-4a5b-4c6d-8e9f-0a1b2c3d4e5f",
             "/api/v1/contexts/0b9f6c1e-5d0a-4a3e-9d57-2f4f3f6f8a11/join/short",
+            "/invite/short",
             "/api/v1/resources/res-1/events",
             "plain message with no url at all",
         ],
@@ -85,6 +127,19 @@ class TestStructlogProcessor:
         out = redact_pg_detail(None, "error", event)
         assert out["path"] == "/api/v1/beta-invites/{token}/preview"
         assert out["status_code"] == 429
+
+    def test_database_error_path_is_scrubbed(self) -> None:
+        """The ``database_error`` handler logs the path of every request that hit
+        a database outage — the invite preview included."""
+        event = {
+            "event": "database_error",
+            "error_code": "DB-001",
+            "error_type": "OperationalError",
+            "path": f"/api/v1/invitations/{TOKEN}",
+        }
+        out = redact_pg_detail(None, "error", event)
+        assert out["path"] == "/api/v1/invitations/{token}"
+        assert out["error_type"] == "OperationalError"
 
     def test_nested_and_fstring_values_are_scrubbed(self) -> None:
         event = {
@@ -178,6 +233,25 @@ class TestStdlibAndUvicorn:
 
         assert TOKEN not in capsys.readouterr().out
 
+    def test_session_middleware_debug_line_is_scrubbed(
+        self, monkeypatch, capsys, _logging_reset
+    ) -> None:
+        """``SessionMiddleware`` logs ``No session cookie: <path>`` at DEBUG for
+        every anonymous request — the invite preview's path included."""
+        monkeypatch.setenv("LOG_COLORIZE", "false")
+        monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+        root, _access = _logging_reset
+        root.handlers.clear()
+        setup_logger(enable_colors=False)
+
+        logging.getLogger(f"stdlib-invite-{uuid.uuid4().hex}").debug(
+            f"No session cookie: /api/v1/invitations/{TOKEN}"
+        )
+
+        out = capsys.readouterr().out
+        assert "No session cookie: /api/v1/invitations/{token}" in out
+        assert TOKEN not in out
+
 
 class TestUsageStatsNeverStoresTheToken:
     @pytest.mark.asyncio
@@ -204,6 +278,31 @@ class TestUsageStatsNeverStoresTheToken:
 
         endpoint = log_usage.await_args.kwargs["endpoint"]
         assert endpoint == "/api/v1/beta-invites/{token}/preview"
+        assert TOKEN not in repr(log_usage.await_args)
+
+    @pytest.mark.asyncio
+    async def test_signed_in_invitee_opening_the_invite_page(self, monkeypatch) -> None:
+        """The /invite/{token} page calls the preview with whatever session the
+        browser has. An invitee who is already signed in (or an inviter checking
+        their own link) gets a usage row — it must carry the route, not the token."""
+        log_usage = AsyncMock()
+        monkeypatch.setattr("api.middleware.request_logger.log_usage", log_usage)
+
+        async def fake_get_db():
+            yield MagicMock(close=AsyncMock())
+
+        monkeypatch.setattr("api.middleware.request_logger.get_db", fake_get_db)
+
+        request = MagicMock()
+        request.url.path = f"/api/v1/invitations/{TOKEN}"
+        request.method = "GET"
+        request.state = MagicMock(user_id="user_1", workspace_id=None)
+        response = MagicMock(status_code=200)
+
+        middleware = RequestLoggingMiddleware(app=MagicMock())
+        await middleware.dispatch(request, AsyncMock(return_value=response))
+
+        assert log_usage.await_args.kwargs["endpoint"] == "/api/v1/invitations/{token}"
         assert TOKEN not in repr(log_usage.await_args)
 
     @pytest.mark.asyncio

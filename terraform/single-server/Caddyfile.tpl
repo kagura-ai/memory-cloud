@@ -53,7 +53,7 @@
 		format filter {
 			wrap json
 			fields {
-				request>uri regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+` `${1}${2}${4}REDACTED${3}`
+				request>uri regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}REDACTED${3}`
 				request>headers>Referer delete
 				request>headers>Cookie delete
 				request>headers>Next-Router-State-Tree delete
@@ -157,11 +157,18 @@ memory.kagura-ai.com {
 	# still shows THAT an invite route was hit — in the three URL shapes that
 	# carry it:
 	#     /join/<token>    /api/v1/beta-invites/<token>/preview    ?invite=<token>
-	# and in the two response headers that repeat a request path (the frontend
-	# answers /join/<token>/ with a 308 whose Location and Refresh name the
-	# slash-less URL). Whatever sits in the slot is redacted, not only a
-	# well-formed token: a pasted link with a trailing %20 is still a link.
-	# Every other request — /api/v1/memories?..., /mcp, / — is logged in full.
+	# and in the three that carry a workspace invitation token, a join
+	# credential with a lifetime of up to a year (or none):
+	#     /invite/<token>    /api/v1/invitations/<token>    %2Finvite%2F<token>
+	# (the last is the landing URL percent-encoded in the OAuth login's
+	# return_to; the preview slot is matched by token shape so the token-free
+	# /api/v1/invitations/accept and /pending keep their path), and in the two
+	# response headers that repeat a request path (the frontend answers
+	# /join/<token>/ or /invite/<token>/ with a 308 whose Location and Refresh
+	# name the slash-less URL). Whatever sits in a path slot is redacted, not
+	# only a well-formed token: a pasted link with a trailing %20 is still a
+	# link. Every other request — /api/v1/memories?..., /mcp, / — is logged in
+	# full.
 	#
 	# Five request headers are dropped outright:
 	#   Referer                 a browser on the /join page may attach the URL to
@@ -214,9 +221,9 @@ memory.kagura-ai.com {
 		format filter {
 			wrap json
 			fields {
-				request>uri regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+` `${1}${2}${4}REDACTED${3}`
-				resp_headers>Location regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+` `${1}${2}${4}REDACTED${3}`
-				resp_headers>Refresh regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+` `${1}${2}${4}REDACTED${3}`
+				request>uri regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}REDACTED${3}`
+				resp_headers>Location regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}REDACTED${3}`
+				resp_headers>Refresh regexp `(/join/)[^/?#\s]+|(/beta-invites/)[^/?#\s]+(/preview)|([?&]invite=)[^&#\s]+|(/invite/)[^/?#\s]+|(/v1/invitations/)[A-Za-z0-9_-]{20,}|(%2[Ff]invite%2[Ff])[A-Za-z0-9_-]+` `${1}${2}${4}${5}${6}${7}REDACTED${3}`
 				request>headers>Referer delete
 				request>headers>Cookie delete
 				request>headers>Next-Router-State-Tree delete

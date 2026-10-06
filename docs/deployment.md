@@ -53,7 +53,8 @@ your-domain.example.com {
 - Caddy writes **no access log** unless the site has a `log` directive. If you add
   one, bound the container's log file ([Container log rotation](#container-log-rotation))
   and keep credentials out of it — invite tokens (see
-  [Closed-beta invite links](#closed-beta-invite-links-issue-1581)) and the
+  [Closed-beta invite links](#closed-beta-invite-links-issue-1581) and
+  [Workspace invitation links](#workspace-invitation-links)) and the
   `X-Resource-API-Key` header (see
   [Credential headers in the proxy log](#credential-headers-in-the-proxy-log)) —
   the single-server template's `Caddyfile.tpl` does all of this
@@ -370,6 +371,74 @@ The MCP path resumes only when the API and the frontend share an origin. On a
 split-origin deployment `/login` already drops the API-origin `return_to`, with
 or without an invite. The device flow is not affected: its `return_to` is a
 frontend path.
+
+## Workspace invitation links
+
+A workspace invitation (the `/workspace/members` page, or
+`POST /api/v1/workspaces/{workspace_id}/invitations`) is a one-time link,
+`{FRONTEND_URL}/invite/{token}`, bound to the invited e-mail address and valid
+for 7, 30, 90 or 365 days, or until used. Like a closed-beta link, its token
+travels in URLs: the landing page `/invite/{token}`, the unauthenticated preview
+`GET /api/v1/invitations/{token}` the page calls, and — when the invitee has to
+sign in first — the landing URL percent-encoded in the OAuth login's
+`return_to` (`…/login?return_to=https%3A%2F%2F<host>%2Finvite%2F{token}`), which
+the callback then repeats in its `Location` header.
+
+The same scrub as for closed-beta links covers these three shapes: structured
+logs, the uvicorn access log and the `usage_stats.endpoint` column record the
+literal `{token}`, and the single-server `Caddyfile.tpl` writes `REDACTED` into
+the token slot of the request URI (both loggers) and of the `Location` /
+`Refresh` response headers. `/api/v1/invitations/accept`, `/api/v1/invitations/pending`
+and `/api/v1/workspaces/{id}/invitations/{invitation_id}` carry no token and are
+recorded as they are. **A different reverse proxy has to scrub these shapes
+too** — the list of copies to cover is the one given for closed-beta links
+above.
+
+Upgrading from a release that did not scrub these shapes:
+
+1. **Purge or redact the existing log files.** Lines already written are not
+   rewritten. On the single-server template, empty the current log file of the
+   proxy and of both API colours without a restart (Docker's `json-file` driver
+   appends, so the containers keep logging):
+
+   ```bash
+   for c in kagura-caddy kagura-api-blue kagura-api-green; do
+     sudo truncate -s 0 "$(docker inspect --format '{{.LogPath}}' "$c")"
+   done
+   ```
+
+   Rotated files next to it (`<LogPath>.1`, `.2`) hold older lines — remove
+   them the same way, or recreate the containers (`docker compose
+   -f docker-compose.prod.yml --env-file .env.prod up -d --no-deps
+   --force-recreate caddy`; the next `deploy.sh` run recreates the API colours).
+   If the logs are shipped elsewhere, redact the token slot in the aggregator
+   as well: anything after `/invite/`, `/api/v1/invitations/` (other than
+   `accept` and `pending`) or `%2Finvite%2F`.
+
+2. **Redact the `usage_stats` rows** written for the preview call of a
+   signed-in visitor. Rewriting the endpoint to the shape the scrub now writes
+   keeps the usage counts; the two token-free routes are left alone:
+
+   ```bash
+   docker compose -f docker-compose.prod.yml --env-file .env.prod exec postgres \
+     psql -U kagura -d kagura -c "
+       UPDATE usage_stats
+          SET endpoint = '/api/v1/invitations/{token}'
+        WHERE endpoint LIKE '/api/v1/invitations/%'
+          AND endpoint NOT IN ('/api/v1/invitations/accept',
+                               '/api/v1/invitations/pending',
+                               '/api/v1/invitations/{token}');"
+   ```
+
+   The statement is idempotent — run it once per database.
+
+3. **Optionally, revoke and re-issue the pending invitations** whose links were
+   in those logs: the `/workspace/members` page, or
+   `DELETE /api/v1/workspaces/{workspace_id}/invitations/{invitation_id}` for
+   each entry of `GET /api/v1/workspaces/{workspace_id}/invitations`, then
+   invite again. A token on its own does not join the workspace — accepting
+   needs a session signed in as the invited address — so this is a precaution,
+   most relevant for invitations with a long or no expiry.
 
 ## Terms-of-service acceptance (Issue #1665)
 
