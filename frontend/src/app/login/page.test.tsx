@@ -384,6 +384,17 @@ describe("LoginPage OAuth failure banners (#1381)", () => {
     expect(screen.queryByText("oauth_expired")).toBeNull();
   });
 
+  it("shows the removed-method banner for ?error=provider_unlinked", async () => {
+    // The identity is no longer a sign-in method of its account; the backend
+    // opened no session and sent the browser here.
+    mockSearchParams.set("error", "provider_unlinked");
+    mockSearchParams.set("provider", "google");
+    renderLogin();
+
+    expect(await screen.findByText("providerUnlinked")).toBeTruthy();
+    expect(screen.queryByText("provider_unlinked")).toBeNull();
+  });
+
   it("keeps the cancelled notice separate from the failure banner", async () => {
     mockSearchParams.set("cancelled", "1");
     renderLogin();

@@ -186,6 +186,10 @@ function LoginContent() {
     } else if (errorParam === "oauth_expired") {
       // #1381: expired/replayed sign-in link — retryable, so say so.
       setError(t("oauthExpired"));
+    } else if (errorParam === "provider_unlinked") {
+      // The identity used is no longer a sign-in method of its account
+      // (removed from Settings), so no session was opened for it.
+      setError(t("providerUnlinked"));
     } else if (errorParam === "terms_required") {
       // #1665: a sign-up reached the callback without the current terms
       // version (a stale page, or a direct link) — no account was created.
