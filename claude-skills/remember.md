@@ -42,7 +42,7 @@ Split long material (over ~2,000 characters) into one memory per topic — "OAut
 
 Use `remember` with the resolved context_id, parsed summary, content, and appropriate type/importance/tags. Say each thing once — the user waits while it is written:
 
-- `content`: only what the summary leaves out (the why, the evidence, numbers, the rejected option); never restate the summary, and leave it out when the summary already holds the whole fact.
+- `content` (required): only what the summary leaves out (the why, the evidence, numbers, the rejected option); never restate the summary — when the summary holds the whole fact, one short line naming the evidence or source (a PR, a file, a command).
 - `context_summary`: one sentence on when to recall it, not a second summary. Search reads it, so keep it rather than drop it.
 
 ```

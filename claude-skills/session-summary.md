@@ -16,7 +16,7 @@ The user waits while each memory is written, so the mode sets how much is writte
 
 | Mode | Candidates | Fields per item | 4a pin / 4b tool guardrail | 4c keep touched memories current |
 |------|-----------|-----------------|----------------------------|----------------------------------|
-| `light` | up to 3, decisions and traps first | `summary` + tags; `content` only for evidence the summary cannot hold, kept short; no `context_summary` (put the search terms in the summary instead). A `supersedes` the user picked still applies | skipped | only the completed follow-up offer |
+| `light` | up to 3, decisions and traps first | `summary` + tags; `content` one short line (the evidence or source); no `context_summary` (put the search terms in the summary instead). A `supersedes` the user picked still applies | skipped | only the completed follow-up offer |
 | `standard` | up to 7 | the fields in step 4 | proposed when one applies | runs |
 | `deep` | about 15 (one `remember_batch` call holds about 20) | `standard` + `linked_memory_ids` to related memories, and a supersede pair proposed per item — both only from ids already in this session's results, no extra recall — and dated follow-ups as `type="time"` | considered for every item | runs |
 
@@ -67,7 +67,7 @@ Show the candidates (type + one-line summary) and save only the ones the user ch
 For each kept item (a batch item or a single `remember`), set the fields below. Each says a thing once — the wait is the length of what is written:
 
 - **summary**: Searchable conclusion (not process), with the terms a later search would use. 100-250 chars.
-- **content**: Only what the summary leaves out — the why, the evidence, numbers, the rejected option. Never restate the summary; leave it out when the summary already holds the whole fact.
+- **content**: Required. Only what the summary leaves out — the why, the evidence, numbers, the rejected option. Never restate the summary; when the summary holds the whole fact, one short line naming the evidence or source (a PR, a file, a command).
 - **type**: From the table above
 - **importance**: Based on reusability across future sessions
 - **tags**: About 6 at most: `category:{domain}` + entity tags + `issue:#N` for each related issue. Reuse the spellings `list_tags(context_id=...)` returns; `tags_normalize=true` covers drift, so no spelling variants.

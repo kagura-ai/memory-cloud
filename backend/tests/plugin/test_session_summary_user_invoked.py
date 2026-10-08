@@ -178,3 +178,20 @@ def test_save_skills_say_each_thing_once():
     assert "one sentence on when to recall it" in remember
     session = _section(codex, "## Session Summary")
     assert "`light`" in session and "`deep`" in session and "`auto`" in session
+
+
+def test_save_skills_always_send_content():
+    """#1936: remember and every remember_batch item require content (min_length=1)."""
+    texts = {
+        "session-summary": SESSION_SUMMARY.read_text(encoding="utf-8"),
+        "remember": REMEMBER.read_text(encoding="utf-8"),
+        "codex": CODEX_SKILL.read_text(encoding="utf-8"),
+    }
+    for name, text in texts.items():
+        lowered = text.lower()
+        assert "leave it out when the summary" not in lowered, name
+        assert "is left out when the summary" not in lowered, name
+        assert "`content` only for evidence" not in text, name
+        assert "short line naming the evidence or source" in text, name
+    assert "- **content**: Required." in texts["session-summary"]
+    assert "`content` (required)" in texts["remember"] and "`content` (required)" in texts["codex"]
