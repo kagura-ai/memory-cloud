@@ -4,6 +4,29 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.98.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.98.0) — 2026-10-08
+
+Faster, lighter memory saving: the session summary writes as much as the session deserves, earlier sessions can be turned into memories afterwards, and forgetting a memory no longer reads as an edit in the change log.
+
+### Added
+- **`/kagura-memory:digest`** ([#1931](https://github.com/kagura-ai/memory-cloud/issues/1931)): turns this project's earlier Claude Code sessions — the ones that ended without a session summary — into memories the user picks. The user runs it, best in a fresh session. A bundled standard-library script lists the sessions and leaves out every session that is still open. It reduces each transcript to the user's and the assistant's words (no tool calls, tool output or thinking), redacts secret shapes and caps the length. The skill never reads a raw transcript. Kept memories carry `source_uri="claude-session://<session_id>"`. Transcripts stay on the machine, and nothing schedules or launches the command.
+- **Session-summary save modes** ([#1930](https://github.com/kagura-ai/memory-cloud/issues/1930)): `/kagura-memory:session-summary [light|standard|deep|auto]`, default `auto`. The mode sets three things: how many candidates are proposed (3 / 7 / about 15), which fields each one gets, and whether the pin, tool-guardrail and keep-current steps run. `auto` picks the mode by written criteria and announces its pick in one line.
+
+### Changed
+- **Save skills write each thing once** ([#1930](https://github.com/kagura-ai/memory-cloud/issues/1930)): `/kagura-memory:remember`, `/kagura-memory:session-summary` and the Codex skill change how each memory is written:
+  - `content` holds only what the summary leaves out.
+  - `context_summary` is one sentence on when to recall it.
+  - Tags are capped at about 6, with no spelling variants.
+  - Related issues are `issue:#N` tags instead of a `Related issues:` line in `content`.
+  The wait at the end of a session is the model writing these fields, so it shortens.
+
+### Fixed
+- **`forget` no longer reads as an edit in `changes_since`** ([#1924](https://github.com/kagura-ai/memory-cloud/issues/1924)): a soft delete no longer stamps `updated_at`, so the log lists `created` and `forgotten` only. Tombstones written before this release are also filtered: the `updated` lane keeps only edits made before `deleted_at`.
+
+### Notes
+- No migration, no new environment variables, no operator action.
+- A context whose usage guide asks for a `Related issues:` line in `content` can drop that request: the skills now tag issues instead.
+
 ## [v0.97.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.97.0) — 2026-10-06
 
 Follow-ups to the v0.96.0 sign-in and resource-token work: a password sign-in no longer waits behind a dead lock longer than the lock lives, the resource-token cap and quota ceiling count the same per-workspace population and cannot be overshot by concurrent mints, and the MCP smoke-test runbook was run live against v0.96.1.
