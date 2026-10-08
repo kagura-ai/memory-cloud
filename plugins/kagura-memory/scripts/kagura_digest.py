@@ -11,7 +11,8 @@ Subcommands (all print one JSON document on stdout):
 * ``list --project-dir DIR --state FILE [--since last|all|YYYY-MM-DD]
   [--exclude-session ID]`` - this project's sessions, oldest first. ``last``
   (default) keeps sessions not digested yet, or changed since they were.
-  The newest transcript is the running session and is always left out.
+  The newest transcript (the running session) and any written to in the last
+  10 minutes (a session still open elsewhere) are left out as ``skipped_active``.
 * ``extract FILE [--max-chars N]`` - the compact text of one transcript.
 * ``mark --state FILE SESSION_ID...`` - record sessions as digested.
 
@@ -30,20 +31,27 @@ import json
 import os
 import re
 import tempfile
+import time
 from datetime import datetime, timezone
 from typing import Any
 
 STATE_VERSION = 1
 DEFAULT_MAX_CHARS = 40_000
 MESSAGE_MAX_CHARS = 2_000
+TITLE_MAX_CHARS = 120
+# A transcript written to this recently belongs to a session that is still open.
+ACTIVE_SECONDS = 600
+_SESSION_ID = re.compile(r"[0-9A-Za-z_-]{1,128}")
 REDACTED = "[REDACTED]"
 
 # Secret shapes. A match is replaced whole; the key name of an assignment is kept.
 _SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
     re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}"),
-    re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{20,}"),
-    re.compile(r"\bkagura_[A-Za-z0-9_\-]{16,}"),
+    # Provider keys carry digits; "sk-learn-..." prose does not.
+    re.compile(r"\bsk-(?:proj-)?(?=[A-Za-z0-9_\-]*\d)[A-Za-z0-9_\-]{20,}"),
+    # kagura_ + token_urlsafe(32): 43 characters, longer than any identifier.
+    re.compile(r"\bkagura_[A-Za-z0-9_\-]{40,}"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{30,}"),
     re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"),
@@ -51,18 +59,26 @@ _SECRET_PATTERNS = [
     re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}"),
-    re.compile(r"(?i)://[^/\s:@]+:[^/\s@]+@"),
+    re.compile(r"(?i)\bbasic\s+[A-Za-z0-9+/]{16,}={0,2}"),
 ]
+# user:password@ in a URL; the password may hold "@" or "/", so up to the last "@".
+_URL_CREDENTIALS = re.compile(r"(://)[^/\s:@]+:\S*@")
+# KEY=value, KEY: value, "key": "value". The key ends in the keyword (so max_tokens
+# and token_count stay) and the value has a digit or symbol (so "password: required"
+# stays prose).
 _ASSIGNMENT = re.compile(
-    r"(?i)\b([A-Z0-9_]*(?:password|passwd|secret|token|api[_-]?key|private[_-]?key)[A-Z0-9_]*)"
-    r"(\s*[:=]\s*)(['\"]?)[^\s'\"]{6,}\3"
+    r"(?i)\b([A-Z0-9_]*(?:password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key|credentials?))"
+    r"(['\"]?\s*[:=]\s*)(['\"]?)(?=[^\s'\"]*[0-9_\-+/=.!@#$%^&*])[^\s'\"]{6,}\3"
 )
 
 
 def redact(text: str) -> str:
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(REDACTED, text)
-    return _ASSIGNMENT.sub(lambda m: f"{m.group(1)}{m.group(2)}{REDACTED}", text)
+    text = _URL_CREDENTIALS.sub(lambda m: f"{m.group(1)}{REDACTED}@", text)
+    return _ASSIGNMENT.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{REDACTED}{m.group(3)}", text
+    )
 
 
 def project_slug(project_dir: str) -> str:
@@ -118,7 +134,10 @@ def _title(path: str) -> str | None:
     for record in _iter_records(path):
         if record.get("type") == "ai-title" and isinstance(record.get("aiTitle"), str):
             title = record["aiTitle"]
-    return title
+    if title is None:
+        return None
+    # The title is model-written from the conversation: same hygiene as the text.
+    return _clip(" ".join(redact(title).split()), TITLE_MAX_CHARS)
 
 
 def list_sessions(
@@ -127,17 +146,24 @@ def list_sessions(
     since: str = "last",
     exclude: tuple[str, ...] = (),
     root: str | None = None,
+    now: float | None = None,
 ) -> dict[str, Any]:
     folder = os.path.join(root or projects_root(), project_slug(project_dir))
     try:
         names = [n for n in os.listdir(folder) if n.endswith(".jsonl")]
     except OSError:
-        return {"project_folder": folder, "sessions": [], "skipped_running": None}
+        return {"project_folder": folder, "found": False, "sessions": [], "skipped_active": []}
     files = sorted(
         ((os.path.getmtime(os.path.join(folder, n)), n) for n in names),
         key=lambda pair: pair[0],
     )
-    running = files.pop()[1][: -len(".jsonl")] if files else None
+    # The newest transcript is the running session; any other written to in the
+    # last ACTIVE_SECONDS is a session still open elsewhere. Neither is digested.
+    cutoff = (time.time() if now is None else now) - ACTIVE_SECONDS
+    active = [files.pop()] if files else []
+    while files and files[-1][0] >= cutoff:
+        active.append(files.pop())
+    skipped_active = [name[: -len(".jsonl")] for _, name in active]
     digested = load_state(state_path)["sessions"]
     since_ts = None
     if since not in ("last", "all"):
@@ -163,7 +189,12 @@ def list_sessions(
                 "digested_before": seen is not None,
             }
         )
-    return {"project_folder": folder, "sessions": sessions, "skipped_running": running}
+    return {
+        "project_folder": folder,
+        "found": True,
+        "sessions": sessions,
+        "skipped_active": skipped_active,
+    }
 
 
 def _text_blocks(content: Any) -> list[str]:
@@ -195,7 +226,11 @@ def extract(path: str, max_chars: int = DEFAULT_MAX_CHARS) -> dict[str, Any]:
     first = last = None
     for record in _iter_records(path):
         role = record.get("type")
-        if role not in ("user", "assistant") or record.get("isSidechain") or record.get("isMeta"):
+        if role not in ("user", "assistant"):
+            continue
+        # Subagent turns, injected skill bodies and compaction summaries (a copy of
+        # earlier turns) are not the conversation.
+        if record.get("isSidechain") or record.get("isMeta") or record.get("isCompactSummary"):
             continue
         message = record.get("message")
         if not isinstance(message, dict):
@@ -203,12 +238,14 @@ def extract(path: str, max_chars: int = DEFAULT_MAX_CHARS) -> dict[str, Any]:
         text = "\n".join(t.strip() for t in _text_blocks(message.get("content")) if t.strip())
         # Command wrappers and system reminders are harness text, not the conversation.
         text = re.sub(
-            r"<(system-reminder|command-[a-z]+|local-command-stdout)>.*?</\1>",
+            r"<(system-reminder|command-[a-z]+|local-command-[a-z]+|task-notification)>.*?</\1>",
             "",
             text,
             flags=re.S,
         )
-        text = text.strip()
+        text = re.sub(r"\[Request interrupted by user[^\]]*\]", "", text).strip()
+        # A line that looks like a turn marker cannot pose as another turn.
+        text = re.sub(r"(?m)^\[(user|assistant)\]", r" [\1]", text)
         if not text:
             continue
         stamp = record.get("timestamp")
@@ -240,6 +277,8 @@ def mark(
     )
     now = datetime.now(tz=timezone.utc).timestamp()
     for session_id in session_ids:
+        if not _SESSION_ID.fullmatch(session_id):
+            raise ValueError(f"not a session id: {session_id!r}")
         mtime = now
         if folder:
             try:
@@ -252,6 +291,13 @@ def mark(
     return {"marked": session_ids, "state": state_path}
 
 
+def _at_least_1000(value: str) -> int:
+    number = int(value)
+    if number < 1000:
+        raise argparse.ArgumentTypeError("--max-chars must be at least 1000")
+    return number
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="kagura_digest")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -262,22 +308,34 @@ def main(argv: list[str] | None = None) -> int:
     p_list.add_argument("--exclude-session", action="append", default=[])
     p_extract = sub.add_parser("extract")
     p_extract.add_argument("path")
-    p_extract.add_argument("--max-chars", type=int, default=DEFAULT_MAX_CHARS)
+    p_extract.add_argument("--max-chars", type=_at_least_1000, default=DEFAULT_MAX_CHARS)
     p_mark = sub.add_parser("mark")
     p_mark.add_argument("--state", required=True)
     p_mark.add_argument("--project-dir")
     p_mark.add_argument("session_ids", nargs="+")
     args = parser.parse_args(argv)
+    state = getattr(args, "state", None)
+    if state is not None and (
+        not os.path.isabs(state) or os.path.dirname(os.path.abspath(state)) in ("/", "")
+    ):
+        # An unsubstituted ${CLAUDE_PLUGIN_DATA} leaves "/digest-state.json".
+        parser.error("--state must be a file inside the plugin's data folder")
     if args.command == "list":
-        if args.since not in ("last", "all") and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.since):
-            parser.error("--since takes last, all or YYYY-MM-DD")
+        if args.since not in ("last", "all"):
+            try:
+                datetime.strptime(args.since, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except ValueError:
+                parser.error("--since takes last, all or YYYY-MM-DD")
         result = list_sessions(
             args.project_dir, args.state, args.since, tuple(args.exclude_session)
         )
     elif args.command == "extract":
         result = extract(args.path, args.max_chars)
     else:
-        result = mark(args.state, args.session_ids, project_dir=args.project_dir)
+        try:
+            result = mark(args.state, args.session_ids, project_dir=args.project_dir)
+        except ValueError as exc:
+            parser.error(str(exc))
     json.dump(result, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
     return 0

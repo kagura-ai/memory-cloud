@@ -28,7 +28,7 @@ python3 -I -S "${CLAUDE_PLUGIN_ROOT}/plugins/kagura-memory/scripts/kagura_digest
   --project-dir "$PWD" --state "${CLAUDE_PLUGIN_DATA}/digest-state.json" --since last
 ```
 
-Pass the `--since` value from the arguments. The JSON lists `sessions` (oldest first: `session_id`, `modified`, `size_bytes`, `title`, `digested_before`) and `skipped_running`, the running session. No sessions → say so in one line and stop.
+Pass the `--since` value from the arguments. The JSON lists `sessions` (oldest first: `session_id`, `modified`, `size_bytes`, `title`, `digested_before`) and `skipped_active`: this session and any other written to in the last 10 minutes, which are still open. No sessions → say so in one line and stop; with `found: false`, also show `project_folder` (the transcripts were looked for there). The script refusing `--state` means `${CLAUDE_PLUGIN_DATA}` was not substituted: say so and stop.
 
 Show the sessions as a numbered list (date, title or first words, size) and ask which to digest; "all" is a valid answer. More than 10 → suggest the 10 newest first.
 
