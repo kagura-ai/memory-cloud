@@ -136,8 +136,9 @@ def test_every_command_is_listed_where_the_commands_are_listed() -> None:
     assert set(re.findall(r"`/kagura-memory:([a-z-]+)`", dev_line)) == commands
     # The Codex skill maps each command to a request (#1800). `setup` configures the
     # Claude Code plugin; Codex covers it under "Tool Availability" and the hooks section.
+    # `digest` reads Claude Code transcripts; the Codex version is a follow-up (#1931).
     codex = _listed(CODEX_SKILL, r"^- `/kagura-memory:([a-z-]+)` -> ")
-    assert codex == commands - {"setup"}
+    assert codex == commands - {"setup", "digest"}
 
 
 def test_codex_skill_maps_the_login_command_and_triggers_on_it() -> None:

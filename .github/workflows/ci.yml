@@ -47,10 +47,10 @@ jobs:
       - name: Format check
         run: cd backend && ruff format --check src/ tests/
 
-      # The plugin hook scripts live outside backend/ and carry their own
+      # The plugin hook and digest scripts live outside backend/ and carry their own
       # ruff.toml (py39 target); mirrors the `lint` target in the Makefile.
-      - name: Lint plugin hooks
-        run: ruff check plugins/kagura-memory/hooks/ && ruff format --check plugins/kagura-memory/hooks/
+      - name: Lint plugin scripts
+        run: ruff check plugins/kagura-memory/hooks/ plugins/kagura-memory/scripts/ && ruff format --check plugins/kagura-memory/hooks/ plugins/kagura-memory/scripts/
 
       - name: Models no-Column guard
         run: make lint-models-no-column

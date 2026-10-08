@@ -295,7 +295,7 @@ lock-check:
 lint: lint-models-no-column lock-check
 	@echo "Running linter..."
 	cd $(BACKEND_DIR) && ruff check src/ tests/
-	ruff check plugins/kagura-memory/hooks/ && ruff format --check plugins/kagura-memory/hooks/
+	ruff check plugins/kagura-memory/hooks/ plugins/kagura-memory/scripts/ && ruff format --check plugins/kagura-memory/hooks/ plugins/kagura-memory/scripts/
 	@echo "Lint complete."
 
 # Guard against drift back to the legacy SQLAlchemy 1.x Column() pattern in
@@ -338,7 +338,7 @@ format:
 .PHONY: type-check
 type-check:
 	@echo "Type checking..."
-	cd $(BACKEND_DIR) && pyright src/ ../plugins/kagura-memory/hooks/
+	cd $(BACKEND_DIR) && pyright src/ ../plugins/kagura-memory/hooks/ ../plugins/kagura-memory/scripts/
 	@echo "Type check complete."
 
 # ============================================================================

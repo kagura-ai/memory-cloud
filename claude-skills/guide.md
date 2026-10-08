@@ -144,6 +144,7 @@ With the hooks on, the hooks are the guardrail lane for this client: put `?guard
 |-------|-------------|
 | `session-start` | Restore previous session context |
 | `session-summary` | Save session knowledge before ending |
+| `digest` | Turn earlier sessions of this project into memories you pick (`[light\|standard\|deep\|auto] [--since last\|all\|YYYY-MM-DD]`); run it yourself, best in a fresh session |
 | `maintain` | Review one context for memories to update, supersede, unpin or delete (`[context=<name or id>] [topic=<words>] [dry-run]`; `dry-run` lists only) |
 | `recall` | Search past knowledge |
 | `remember` | Save new knowledge |

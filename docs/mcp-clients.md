@@ -134,6 +134,7 @@ The **kagura-memory** plugin adds session management and memory workflow skills 
 |-------|-------------|
 | `/kagura-memory:session-start` | Restore previous session context on start |
 | `/kagura-memory:session-summary` | Save session knowledge before ending |
+| `/kagura-memory:digest` | Turn earlier sessions of this project into memories you pick (sessions that ended without a summary) |
 | `/kagura-memory:maintain` | Review one context for memories to update, supersede, unpin or delete — lists first, changes only what you pick (`dry-run` lists only) |
 | `/kagura-memory:recall` | Search past knowledge |
 | `/kagura-memory:remember` | Save new knowledge |
