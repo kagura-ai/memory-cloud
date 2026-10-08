@@ -4,9 +4,29 @@ description: Save the session knowledge the user chooses to keep to Kagura Memor
 
 Propose the current session's key learnings and save the ones the user chooses to keep to Kagura Memory Cloud.
 
+Arguments: $ARGUMENTS — `[light|standard|deep|auto]`, the save mode. Nothing given (a workflow invoking the command without an argument, too) means `auto`. A word that is not a mode is asked about, not guessed.
+
 ## When to use
 
 When the user asks for it — by running this command, or through a workflow the user started (for example `/gh-issue-driven:ship`, which runs it at the end) — typically at the end of a development session or before switching to a different task. Proposes decisions, patterns, bugs, and plans that would be useful in future sessions; the user decides what is kept.
+
+## Save modes
+
+The user waits while each memory is written, so the mode sets how much is written:
+
+| Mode | Candidates | Fields per item | 4a pin / 4b tool guardrail | 4c keep touched memories current |
+|------|-----------|-----------------|----------------------------|----------------------------------|
+| `light` | up to 3, decisions and traps first | `summary` + tags; `content` only for evidence the summary cannot hold, kept short; no `context_summary` (put the search terms in the summary instead) | skipped | skipped |
+| `standard` | up to 7 | the fields in step 4 | proposed when one applies | runs |
+| `deep` | no fixed cap, about 15 | `standard` + `linked_memory_ids` to related memories from this session's results, a supersede check per item, dated follow-ups as `type="time"` | considered for every item | runs |
+
+`auto` picks one of the three:
+
+- a short session with few or no decisions or traps → `light`
+- one ordinary piece of implementation → `standard`
+- several design decisions, a change of direction, or an existing memory overturned → `deep`
+
+Open the run with one line naming the mode and, for `auto`, why — for example `auto → standard (2 decisions, 1 trap)`. The user can rerun with an explicit mode.
 
 ## Steps
 
@@ -16,7 +36,7 @@ Review the conversation and collect all GitHub issue numbers that were worked on
 
 ### 2. Identify what to remember
 
-Review the conversation and categorize knowledge into one of the canonical types (see `remember` skill for the full vocabulary):
+Review the conversation and categorize knowledge into one of the canonical types (see `remember` skill for the full vocabulary). Keep to the mode's candidate count, the most reusable first:
 
 | Type | What to capture | Importance |
 |------|----------------|------------|
@@ -44,18 +64,20 @@ Show the candidates (type + one-line summary) and save only the ones the user ch
 
 **One call when the server lists `remember_batch`** (v0.93.0 and later): save every kept item with `remember_batch(context_id=..., items=[{...}, ...], tags_normalize=true)` — each item carries the `remember` fields below (no `context_id`). Read the per-item results: `status: "success"` with `memory_id`, or `status: "error"` with `error` / `message` for the item to fix and resend alone; a `lint` entry `tag_normalized {subject, replacement}` says a tag was stored under the context's established spelling. Keep a call to about 20 items; split a longer list. Leave `atomic` off — a session summary is a list of independent facts. For an item the user flagged as a possible duplicate of a memory whose id is not in this session's results, save that item alone with `remember(..., dedupe="check")`: a `duplicate_candidate` reply names the existing memory, then store it with `supersedes=<candidate.memory_id>`, update the existing one, or repeat with `dedupe="off"`. Older servers (no `remember_batch` in the tool list): one `remember` per item.
 
-For each kept item (a batch item or a single `remember`), set:
+For each kept item (a batch item or a single `remember`), set the fields below. Each says a thing once — the wait is the length of what is written:
 
-- **summary**: Searchable conclusion (not process). Include synonyms/related terms. 100-250 chars.
-- **content**: Full details — what, why, how, evidence
+- **summary**: Searchable conclusion (not process), with the terms a later search would use. 100-250 chars.
+- **content**: Only what the summary leaves out — the why, the evidence, numbers, the rejected option. Never restate the summary; leave it out when the summary already holds the whole fact.
 - **type**: From the table above
 - **importance**: Based on reusability across future sessions
-- **tags**: `category:{domain}` + entity tags + writing variations for Japanese + `issue:#N` for each related issue
-- **context_summary**: Why this matters, when to recall it. Include a `Related issues: #N, #M` line at the end of **content** linking to relevant GitHub issues.
+- **tags**: About 6 at most: `category:{domain}` + entity tags + `issue:#N` for each related issue. Reuse the spellings `list_tags(context_id=...)` returns; `tags_normalize=true` covers drift, so no spelling variants.
+- **context_summary**: One sentence — when to recall it. Not a second summary. (`light` leaves it out.)
 - **supersedes** (optional): when the item replaces an earlier memory whose full id is in this session's tool results, show that pair with the candidate. Pass `supersedes=<old_memory_id>` on this `remember` call only when the user picked the replacement — "save everything" is not that pick. The old memory is shadowed out of default recall, not deleted.
 - **linked_source_uris** (optional): If the knowledge relates to a specific file or document already in memory, link it by source_uri (e.g. `["vault://my-vault/related-note.md"]`). Unresolved URIs are silently skipped.
 
 ### 4a. Pinning standing guardrails (`delivery_mode="always"`) — sparingly
+
+`light` skips 4a and 4b.
 
 A pinned memory is loaded **deterministically every session** via `load_pinned` (see `session-start`). That makes it the right home for a true standing invariant — an active prod color, a non-negotiable policy, a release gate — but it also means every pinned memory costs context budget on every future session. Over-pinning degrades the signal of every session that follows.
 
@@ -91,7 +113,7 @@ Full contract: `docs/mcp-tools.md#tool-guardrails`.
 
 ### 4c. Keep touched memories current
 
-Only for memories this session saved or read. No extra recall, no review of the whole context. Show what applies as a numbered list; each change is applied only after the user picks it. The step prints nothing when nothing applies.
+`light` skips this step. Only for memories this session saved or read. No extra recall, no review of the whole context. Show what applies as a numbered list; each change is applied only after the user picks it. The step prints nothing when nothing applies.
 
 - **An item saved in step 4 replaces an earlier memory but was saved without `supersedes`**: link the two with `create_edge(source_id=<the memory just saved>, target_id=<the older memory>, edge_type="supersedes", context_id=...)`. Never save the item a second time.
 - **A `recall` / `reference` result carried `supersede_candidate`**: show the pair. The carrier is the recalled memory that has the field, not the one just saved. Accept with `create_edge(source_id=<memory_id of the result that carries the candidate>, target_id=<supersede_candidate.memory_id>, edge_type="supersedes", context_id=...)`; reject with `update_memory(memory_id=<memory_id of the result that carries the candidate>, dismiss_supersede_candidate=true, context_id=...)`. If the client does not list `create_edge`, say so (it is left out of the default core listing; the client cannot call it until the MCP URL carries `?profile=full` or `?tools=…`).

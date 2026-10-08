@@ -29,7 +29,7 @@ If only one context exists, use it. If multiple, pick the one whose name best ma
   - `learning`: General learnings, benchmark results, tool limitations
   - `note`: Status updates, milestone notes, roadmap changes
 - Set importance based on impact (default: 0.8, design decisions: 0.9, core principles: 1.0)
-- Generate relevant tags (technology, domain, feature area). **Call `list_tags(context_id=...)` first** to discover existing tag spellings so you reuse them instead of inventing drift (e.g. `troubleshoot` vs `troubleshooting`).
+- Generate relevant tags (technology, domain, feature area, `issue:#N`), about 6 at most. **Call `list_tags(context_id=...)` first** to discover existing tag spellings so you reuse them instead of inventing drift (e.g. `troubleshoot` vs `troubleshooting`); no spelling variants of the same tag.
 
 **Write for recall.** The summary is what search matches, so write the reusable conclusion, not the process, with the terms a later search would use — best at 100-250 characters.
 
@@ -40,9 +40,10 @@ Split long material (over ~2,000 characters) into one memory per topic — "OAut
 
 ### 3. Save
 
-Use `remember` with the resolved context_id, parsed summary, content with details, and appropriate type/importance/tags.
+Use `remember` with the resolved context_id, parsed summary, content, and appropriate type/importance/tags. Say each thing once — the user waits while it is written:
 
-Include `context_summary` to explain why this memory matters and how to use it (max 2000 chars). This field helps future recall understand the memory's purpose without reading the full content.
+- `content`: only what the summary leaves out (the why, the evidence, numbers, the rejected option); never restate the summary, and leave it out when the summary already holds the whole fact.
+- `context_summary`: one sentence on when to recall it, not a second summary. Search reads it, so keep it rather than drop it.
 
 ```
 remember(

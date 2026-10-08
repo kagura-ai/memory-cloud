@@ -115,3 +115,44 @@ def test_codex_session_summary_is_user_directed():
     assert "Only when the user asks for a session summary" in section
     assert "never on your own" in section
     assert "save what the user chooses to keep" in section
+
+
+REMEMBER = REPO_ROOT / "claude-skills" / "remember.md"
+
+
+def test_session_summary_takes_a_save_mode_defaulting_to_auto():
+    """#1930: the mode sets how much the model writes while the user waits."""
+    text = SESSION_SUMMARY.read_text(encoding="utf-8")
+    assert "Arguments: $ARGUMENTS — `[light|standard|deep|auto]`" in text
+    assert "without an argument, too) means `auto`" in text
+    modes = _section(text, "## Save modes")
+    for mode in ("`light`", "`standard`", "`deep`"):
+        assert f"\n| {mode} |" in modes
+    # auto's criteria are written down so the pick does not drift, and announced.
+    assert "`auto` picks one of the three" in modes
+    assert "→ `light`" in modes and "→ `standard`" in modes and "→ `deep`" in modes
+    assert "auto → standard (2 decisions, 1 trap)" in modes
+    # light skips the steps that need extra writes or picks.
+    assert "`light` skips 4a and 4b." in text
+    step_4c = text.split("### 4c. Keep touched memories current", 1)[1]
+    assert step_4c.lstrip().startswith("`light` skips this step.")
+
+
+def test_save_skills_say_each_thing_once():
+    """#1930: no restated summary, no spelling-variant tags, issues as tags only."""
+    summary = SESSION_SUMMARY.read_text(encoding="utf-8")
+    remember = REMEMBER.read_text(encoding="utf-8")
+    codex = CODEX_SKILL.read_text(encoding="utf-8")
+    for text in (summary, remember, codex):
+        assert "writing variations for Japanese" not in text
+        assert "Include `Related issues: #N` in `content`" not in text
+        assert "a `Related issues:` line in content where relevant" not in text
+    assert "Include a `Related issues: #N, #M` line at the end of **content**" not in summary
+    assert "(max 2000 chars)" not in remember
+    for text in (summary, remember):
+        assert "never restate the summary" in text.lower()
+        assert "about 6" in text.lower()
+    assert "One sentence — when to recall it" in summary
+    assert "one sentence on when to recall it" in remember
+    session = _section(codex, "## Session Summary")
+    assert "`light`" in session and "`deep`" in session and "`auto`" in session
