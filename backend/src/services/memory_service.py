@@ -5457,7 +5457,10 @@ class MemoryService:
 
                 memory.deleted_at = utcnow()
                 memory.deleted_by = user_id
-                await self.memory_repo.update(memory.id, memory)
+                # touch=False: the delete is dated by deleted_at, not
+                # updated_at — else changes_since lists an "updated" event
+                # after the "forgotten" one (#1924).
+                await self.memory_repo.update(memory.id, memory, touch=False)
 
                 # Hard delete from Qdrant (remove from search index) — by the
                 # row's point id, not its row id (#1829).
@@ -5536,7 +5539,7 @@ class MemoryService:
                         continue
                     memory.deleted_at = utcnow()
                     memory.deleted_by = user_id
-                    await self.memory_repo.update(memory.id, memory)
+                    await self.memory_repo.update(memory.id, memory, touch=False)  # #1924
 
                     # Hard delete from Qdrant — by the row's point id (#1829)
                     await self._delete_memory_point(user_id, memory)

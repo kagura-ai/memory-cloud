@@ -516,6 +516,8 @@ changes_since(context_id=..., since="2020-01-01T00:00:00Z")
 -> Verify: there is a kind="created" change for <memory_id>, batch_id_1, batch_id_2 and batch_id_3
    (a forgotten memory keeps its earlier events), a kind="updated" change for <memory_id> (the
    step 5 edit) and a kind="forgotten" change for batch_id_3
+-> Verify: no kind="updated" change for batch_id_3 — it was never edited, and forget dates the
+   delete by its "forgotten" event only (#1924)
 -> Verify: count >= 11 on a clean run (9 created, at least 1 updated, 1 forgotten)
 
 changes_since(context_id=..., since="2020-01-01T00:00:00Z", kinds=["forgotten"])

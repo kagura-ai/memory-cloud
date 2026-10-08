@@ -121,12 +121,15 @@ class MemoryRepository(BaseRepository[Memory]):
 
         return memory
 
-    async def update(self, id: UUID, memory: Memory) -> Memory:
+    async def update(self, id: UUID, memory: Memory, *, touch: bool = True) -> Memory:
         """Update memory.
 
         Args:
             id: Memory ID
             memory: Updated memory data
+            touch: Stamp ``updated_at``. ``forget`` passes ``False``: a soft
+                delete is dated by ``deleted_at``, and ``updated_at`` means
+                "a person changed this" to ``list`` / ``changes_since`` (#1924)
 
         Returns:
             Updated memory
@@ -149,7 +152,8 @@ class MemoryRepository(BaseRepository[Memory]):
             if not key.startswith("_") and key != "id":
                 setattr(existing, key, value)
 
-        existing.updated_at = utcnow()
+        if touch:
+            existing.updated_at = utcnow()
         await self.db.flush()
         await self.db.refresh(existing)
 

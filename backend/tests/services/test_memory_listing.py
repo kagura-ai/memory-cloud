@@ -7,12 +7,14 @@ in time order with a keyset cursor. Seeds its own workspace / contexts / rows.
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import pytest
 
 from models.auth import Context, IdentityLink, User, Workspace
 from models.memory import EDGE_TYPE_SUPERSEDES, Memory, NeuralMemoryEdge
+from models.schemas import ForgetRequest
 from services.memory_listing import (
     Change,
     change_item,
@@ -21,6 +23,7 @@ from services.memory_listing import (
     decode_change_cursor,
     list_memories,
 )
+from services.memory_service import MemoryService
 from utils.datetime import utcnow
 
 
@@ -654,3 +657,69 @@ async def test_details_filter_matches_json_type_and_spelling(
         db_session, context_id=typed_details, owner_user_id=None, filters=filters
     )
     assert {m.summary for m in page.rows} == expected
+
+
+# ------------------------------------------------------------------ #1924
+
+
+@pytest.mark.asyncio
+async def test_forget_adds_no_updated_event_to_the_log(db_session):
+    """remember -> forget: the log lists exactly created and forgotten. The
+    soft delete is dated by deleted_at; it must not stamp updated_at and so
+    read as an edit made after the memory was forgotten."""
+    owner = f"o-{uuid4().hex[:6]}"
+    ws, ctx = await _scope(db_session, owner, private=False)
+    since = utcnow() - timedelta(seconds=1)
+    mem = await _row(db_session, owner, ws, ctx, summary="to forget")
+    service = MemoryService(db_session)
+    with (
+        patch.object(db_session, "commit", AsyncMock()),
+        patch(
+            "services.permission_service.PermissionService.can_access_memory",
+            AsyncMock(return_value=True),
+        ),
+        patch("services.memory_service.resolve_collection_name", AsyncMock(return_value="c")),
+        patch("services.memory_service.delete_memory_from_qdrant", AsyncMock()),
+        patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()),
+    ):
+        res = await service.forget(ForgetRequest(memory_id=mem.id), owner)
+    assert res.deleted_count == 1
+    await db_session.refresh(mem)
+    assert mem.deleted_at is not None
+    assert mem.updated_at is None
+    page = await changes_since(
+        db_session, context_id=ctx, owner_user_id=None, since=since, until=None
+    )
+    assert [(c.kind, c.memory_id) for c in page.changes] == [
+        ("created", mem.id),
+        ("forgotten", mem.id),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_tombstone_stamped_by_an_older_forget_lists_no_updated_event(db_session, seeded):
+    """Rows forgotten before #1924 carry forget's own updated_at a few ms after
+    deleted_at: that is not an edit. An edit before the delete still is."""
+    owner, ws, ctx, rows, t0 = seeded
+    deleted = t0 + timedelta(hours=10)
+    legacy = await _row(
+        db_session,
+        owner,
+        ws,
+        ctx,
+        summary="legacy tombstone",
+        created_at=t0 + timedelta(hours=9),
+        updated_at=deleted + timedelta(milliseconds=2),
+        deleted_at=deleted,
+    )
+    page = await changes_since(
+        db_session,
+        context_id=ctx,
+        owner_user_id=None,
+        since=t0 + timedelta(hours=9),
+        until=t0 + timedelta(hours=11),
+    )
+    assert [(c.kind, c.memory_id) for c in page.changes] == [
+        ("created", legacy.id),
+        ("forgotten", legacy.id),
+    ]

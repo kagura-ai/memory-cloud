@@ -356,6 +356,8 @@ async def changes_since(
     maintenance change (importance re-evaluation, dedup tag merge, rollback);
     never the initial write or an embedding retry: the embedding pipeline keeps
     its own clock (``embedding_attempted_at``) and does not stamp ``updated_at``.
+    Nor does ``forget``: a forgotten memory has an updated event only for an edit
+    made before its ``deleted_at`` (#1924).
     superseded: a ``supersedes`` edge in the window whose live source is the
     newer memory — ``at`` is the edge's ``created_at``, which the upsert
     re-dates when an existing edge of another type becomes ``supersedes``, so
@@ -422,6 +424,10 @@ async def changes_since(
                 *common,
                 Memory.updated_at.is_not(None),
                 Memory.updated_at > Memory.created_at,
+                # A tombstone written before #1924 has forget's own stamp in
+                # updated_at, just after deleted_at: only an edit made before
+                # the delete is one.
+                or_(Memory.deleted_at.is_(None), Memory.updated_at < Memory.deleted_at),
                 *window(Memory.updated_at),
             )
         )
