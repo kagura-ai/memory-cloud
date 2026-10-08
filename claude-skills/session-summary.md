@@ -16,9 +16,9 @@ The user waits while each memory is written, so the mode sets how much is writte
 
 | Mode | Candidates | Fields per item | 4a pin / 4b tool guardrail | 4c keep touched memories current |
 |------|-----------|-----------------|----------------------------|----------------------------------|
-| `light` | up to 3, decisions and traps first | `summary` + tags; `content` only for evidence the summary cannot hold, kept short; no `context_summary` (put the search terms in the summary instead) | skipped | skipped |
+| `light` | up to 3, decisions and traps first | `summary` + tags; `content` only for evidence the summary cannot hold, kept short; no `context_summary` (put the search terms in the summary instead). A `supersedes` the user picked still applies | skipped | only the completed follow-up offer |
 | `standard` | up to 7 | the fields in step 4 | proposed when one applies | runs |
-| `deep` | no fixed cap, about 15 | `standard` + `linked_memory_ids` to related memories from this session's results, a supersede check per item, dated follow-ups as `type="time"` | considered for every item | runs |
+| `deep` | about 15 (one `remember_batch` call holds about 20) | `standard` + `linked_memory_ids` to related memories, and a supersede pair proposed per item — both only from ids already in this session's results, no extra recall — and dated follow-ups as `type="time"` | considered for every item | runs |
 
 `auto` picks one of the three:
 
@@ -73,6 +73,7 @@ For each kept item (a batch item or a single `remember`), set the fields below. 
 - **tags**: About 6 at most: `category:{domain}` + entity tags + `issue:#N` for each related issue. Reuse the spellings `list_tags(context_id=...)` returns; `tags_normalize=true` covers drift, so no spelling variants.
 - **context_summary**: One sentence — when to recall it. Not a second summary. (`light` leaves it out.)
 - **supersedes** (optional): when the item replaces an earlier memory whose full id is in this session's tool results, show that pair with the candidate. Pass `supersedes=<old_memory_id>` on this `remember` call only when the user picked the replacement — "save everything" is not that pick. The old memory is shadowed out of default recall, not deleted.
+- **linked_memory_ids** (optional, mainly `deep`): ids of related memories, copied verbatim from this session's tool results — never guessed, never fetched by an extra recall.
 - **linked_source_uris** (optional): If the knowledge relates to a specific file or document already in memory, link it by source_uri (e.g. `["vault://my-vault/related-note.md"]`). Unresolved URIs are silently skipped.
 
 ### 4a. Pinning standing guardrails (`delivery_mode="always"`) — sparingly
@@ -113,7 +114,7 @@ Full contract: `docs/mcp-tools.md#tool-guardrails`.
 
 ### 4c. Keep touched memories current
 
-`light` skips this step. Only for memories this session saved or read. No extra recall, no review of the whole context. Show what applies as a numbered list; each change is applied only after the user picks it. The step prints nothing when nothing applies.
+`light`: the follow-up bullet only. Only for memories this session saved or read. No extra recall, no review of the whole context. Show what applies as a numbered list; each change is applied only after the user picks it. The step prints nothing when nothing applies.
 
 - **An item saved in step 4 replaces an earlier memory but was saved without `supersedes`**: link the two with `create_edge(source_id=<the memory just saved>, target_id=<the older memory>, edge_type="supersedes", context_id=...)`. Never save the item a second time.
 - **A `recall` / `reference` result carried `supersede_candidate`**: show the pair. The carrier is the recalled memory that has the field, not the one just saved. Accept with `create_edge(source_id=<memory_id of the result that carries the candidate>, target_id=<supersede_candidate.memory_id>, edge_type="supersedes", context_id=...)`; reject with `update_memory(memory_id=<memory_id of the result that carries the candidate>, dismiss_supersede_candidate=true, context_id=...)`. If the client does not list `create_edge`, say so (it is left out of the default core listing; the client cannot call it until the MCP URL carries `?profile=full` or `?tools=…`).
