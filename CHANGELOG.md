@@ -4,6 +4,16 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.98.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.98.1) — 2026-10-08
+
+Hotfix for the v0.98.0 save skills.
+
+### Fixed
+- **Save skills always send `content`** ([#1936](https://github.com/kagura-ai/memory-cloud/issues/1936)): v0.98.0 let `/kagura-memory:session-summary` (`light`, step 4), `/kagura-memory:remember` and the Codex skill leave `content` out when the summary held the whole fact. `remember` and every `remember_batch` item require it, so such a save failed with `missing_fields`. `content` is now always present: when the summary holds the fact, it is one short line naming the evidence or source.
+
+### Notes
+- No migration, no new environment variables, no operator action.
+
 ## [v0.98.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.98.0) — 2026-10-08
 
 Faster, lighter memory saving: the session summary writes as much as the session deserves, earlier sessions can be turned into memories afterwards, and forgetting a memory no longer reads as an edit in the change log.
