@@ -51,6 +51,10 @@ FULL_PHASES = {
     "consolidation",
 }
 EDGES_ONLY_PHASES = {"edge_discovery"}
+# #1939: the non-LLM housekeeping (retention / privacy purges) of full mode.
+# A workspace whose plan suspends Sleep still runs these — only the paid LLM
+# passes pause.
+RETENTION_PHASES = {"merge_retention", "forget_retention", "measurement_retention"}
 
 
 class SleepOrchestrator:
@@ -107,6 +111,8 @@ class SleepOrchestrator:
         # Determine which phases to run based on sleep_mode
         if sleep_mode == "edges_only":
             allowed_phases = EDGES_ONLY_PHASES
+        elif sleep_mode == "suspended":
+            allowed_phases = RETENTION_PHASES
         else:
             allowed_phases = FULL_PHASES
 
@@ -256,11 +262,14 @@ class SleepOrchestrator:
     async def _get_sleep_mode(self, context_id: str | None) -> str:
         """Get the effective sleep_mode for a context.
 
-        Defaults to 'skip' if the context is not found. Also 'skip' when the
-        context's workspace has Sleep suspended — it fell back to a plan with
-        no Sleep allowance (#1939). The stored ``Context.sleep_mode`` is left
-        as it is, so re-subscribing resumes Sleep with no further action.
-        Every run (nightly sweep, admin trigger) reads its mode here.
+        Defaults to 'skip' if the context is not found. When the context's
+        workspace has Sleep suspended — it fell back to a plan with no Sleep
+        allowance (#1939) — a stored 'full' becomes 'suspended' (only the
+        non-LLM retention phases run, so purges stay on schedule) and a
+        stored 'edges_only' becomes 'skip' (it never ran retention). The
+        stored ``Context.sleep_mode`` is left as it is, so re-subscribing
+        resumes Sleep with no further action. Every run (nightly sweep, admin
+        trigger) reads its mode here.
         """
         if not context_id:
             return "skip"
@@ -277,7 +286,7 @@ class SleepOrchestrator:
                             context_id=context_id,
                             workspace_id=str(context.workspace_id),
                         )
-                        return "skip"
+                        return "suspended" if context.sleep_mode == "full" else "skip"
                 return context.sleep_mode
         except Exception as e:
             logger.warning(
