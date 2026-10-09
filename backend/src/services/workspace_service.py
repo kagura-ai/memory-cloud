@@ -625,6 +625,12 @@ class WorkspaceService:
         # Validate role
         self.validate_role(role)
 
+        # #1939: lock the workspace row first and hold it until the insert
+        # commits, so concurrent direct adds serialize — otherwise two of them
+        # can both read "one seat left" and both take it. Raises
+        # NotFoundException for a missing / soft-deleted workspace.
+        workspace = await lock_workspace_for_update(self.db, workspace_id)
+
         # Check if member already exists
         existing = await self.get_member(workspace_id, user_id, raise_if_not_found=False)
         if existing:
@@ -634,11 +640,6 @@ class WorkspaceService:
         # (api/routes/invitations.py), so a direct add cannot grow a workspace
         # past what its plan allows. Lives here rather than in the route so
         # every caller gets it.
-        workspace = (
-            await self.db.execute(select(Workspace).where(Workspace.id == workspace_id))
-        ).scalar_one_or_none()
-        if workspace is None:
-            raise NotFoundException("Workspace", str(workspace_id))
         if not has_feature(workspace.plan_name, "team_invitations"):
             raise FeatureNotAvailableError.for_feature(workspace.plan_name, "team_invitations")
 

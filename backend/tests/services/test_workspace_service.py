@@ -240,6 +240,41 @@ class TestAddMember:
         assert exc.value.details["quota_type"] == "members"
 
     @pytest.mark.asyncio
+    async def test_workspace_row_is_locked_before_the_seat_check(self) -> None:
+        """#1939: two concurrent direct adds both read "one seat left" unless
+        they serialize — the workspace row lock is taken before the plan and
+        seat checks, and held until the insert commits."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        calls: list[str] = []
+        workspace = Workspace(id=uuid4(), name="W7", owner_user_id="u13", plan_name="pro")
+
+        async def _lock(db, workspace_id):
+            calls.append("lock")
+            return workspace
+
+        async def _seat_check(self, workspace_id, raise_on_exceeded=False):
+            calls.append("seat_check")
+            return True, None
+
+        db = MagicMock()
+        db.commit = AsyncMock()
+        db.refresh = AsyncMock()
+        service = WorkspaceService(db)
+        service.get_member = AsyncMock(return_value=None)
+        with (
+            patch("services.workspace_service.lock_workspace_for_update", side_effect=_lock),
+            patch(
+                "services.workspace_service.QuotaService.check_member_quota",
+                new=_seat_check,
+            ),
+        ):
+            await service.add_member(workspace.id, "u14", role=WorkspaceRole.MEMBER)
+
+        assert calls == ["lock", "seat_check"]
+        db.add.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_add_duplicate_raises(self, db_session) -> None:
         service = WorkspaceService(db_session)
         ws = Workspace(id=uuid4(), name="W4", owner_user_id="u6", plan_name="pro")
