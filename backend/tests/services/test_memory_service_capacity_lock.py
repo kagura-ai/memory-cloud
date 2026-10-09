@@ -98,6 +98,25 @@ class TestBlocked:
         assert locked.by_ws.await_args.args[1] == str(ws)
 
     @pytest.mark.asyncio
+    async def test_remember_many_checks_the_batch_once_after_the_write_gate(self, locked) -> None:
+        service = _service()
+        ws = uuid4()
+        service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
+            return_value=(MagicMock(), str(ws), str(uuid4()))
+        )
+        service._prepare_remember = AsyncMock()  # type: ignore[method-assign]
+        requests = [
+            RememberRequest(summary=f"a summary long enough {i}", content="body", type="note")
+            for i in range(3)
+        ]
+        with pytest.raises(CapacityLockedError):
+            await service.remember_many(requests, user_id="u", current_context_id=uuid4())
+        service._get_context_isolation_params.assert_awaited_once()
+        locked.by_ws.assert_awaited_once()
+        assert locked.by_ws.await_args.args[1] == str(ws)
+        service._prepare_remember.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_update_memory_checks_after_the_access_check(self, locked) -> None:
         service = _service()
         ws = uuid4()

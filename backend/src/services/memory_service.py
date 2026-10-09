@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import ColumnElement, and_, exists, or_, select
+from sqlalchemy import ColumnElement, and_, exists, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.retention import should_promote_to_persistent
@@ -5542,40 +5542,28 @@ class MemoryService:
             conditions.append(Memory.type == memory_type)
         if tags:
             conditions.append(Memory.tags.overlap(tags))
-        rows = (
-            await self.db.execute(
-                select(
-                    Memory.id,
-                    Memory.user_id,
-                    Memory.type,
-                    Memory.source_type,
-                    tool_triggered_predicate().label("is_guardrail"),
-                )
-                .where(*conditions)
-                .order_by(Memory.created_at, Memory.id)
-            )
-        ).all()
-
         perm = PermissionService(self.db)
         allowed_groups: dict[tuple[str, str, str | None], bool] = {}
         guardrail_ok: bool | None = None
-        victims: list[UUID] = []
-        for row in rows:
-            group = (row.user_id, row.type, row.source_type)
+
+        async def permitted(author: str, mtype: str, source: str | None, guard: bool) -> bool:
+            """forget's per-memory decision, which depends only on these four."""
+            nonlocal guardrail_ok
+            group = (author, mtype, source)
             if group not in allowed_groups:
                 allowed_groups[group] = await perm.can_access_memory(
                     user_id=CallerId(user_id),
-                    memory_user_id=MemoryAuthorId(row.user_id),
+                    memory_user_id=MemoryAuthorId(author),
                     workspace_id=UUID(workspace_id_str),
                     context_id=context_id,
                     access="write",
                     operation="forget",
-                    memory_type=row.type,
-                    memory_source_type=row.source_type,
+                    memory_type=mtype,
+                    memory_source_type=source,
                 )
             if not allowed_groups[group]:
-                continue
-            if row.is_guardrail:
+                return False
+            if guard:
                 if guardrail_ok is None:
                     from utils.exceptions import AuthorizationError
 
@@ -5584,12 +5572,60 @@ class MemoryService:
                         guardrail_ok = True
                     except (AuthorizationError, ValueError):
                         guardrail_ok = False
-                if not guardrail_ok:
-                    continue
-            victims.append(row.id)
+                return guardrail_ok
+            return True
 
+        is_guardrail = tool_triggered_predicate().label("is_guardrail")
         if dry_run:
-            return len(victims), False
+            # Counted per permission group in SQL: no row is materialised.
+            groups = (
+                await self.db.execute(
+                    select(
+                        Memory.user_id,
+                        Memory.type,
+                        Memory.source_type,
+                        is_guardrail,
+                        func.count().label("n"),
+                    )
+                    .where(*conditions)
+                    .group_by(Memory.user_id, Memory.type, Memory.source_type, is_guardrail)
+                )
+            ).all()
+            matched = 0
+            for g in groups:
+                if await permitted(g.user_id, g.type, g.source_type, bool(g.is_guardrail)):
+                    matched += int(g.n)
+            return matched, False
+
+        # A real delete reads at most max_rows + 1 permitted candidates, a page
+        # at a time (keyset on created_at, id) so rows the permission check
+        # drops do not shrink the batch.
+        victims: list[UUID] = []
+        after: tuple[Any, UUID] | None = None
+        page = max_rows + 1
+        while len(victims) <= max_rows:
+            stmt = (
+                select(
+                    Memory.id,
+                    Memory.created_at,
+                    Memory.user_id,
+                    Memory.type,
+                    Memory.source_type,
+                    is_guardrail,
+                )
+                .where(*conditions)
+                .order_by(Memory.created_at, Memory.id)
+                .limit(page)
+            )
+            if after is not None:
+                stmt = stmt.where(tuple_(Memory.created_at, Memory.id) > tuple_(*after))
+            rows = (await self.db.execute(stmt)).all()
+            for row in rows:
+                if await permitted(row.user_id, row.type, row.source_type, bool(row.is_guardrail)):
+                    victims.append(row.id)
+            if len(rows) < page:
+                break
+            after = (rows[-1].created_at, rows[-1].id)
 
         from db.qdrant import delete_points_from_qdrant
         from services.memory_access_event_writer import (
@@ -5621,8 +5657,16 @@ class MemoryService:
                 if point is not None:
                     points.append(str(point))
                 deleted.append(memory.id)
-            await delete_points_from_qdrant(points, collection)
-            await self.db.commit()
+            # Points first, then the commit — single forget's order: a failed
+            # point delete raises before this chunk's rows are committed, so
+            # no committed row is left with a live search point. Earlier
+            # chunks stay committed and audited.
+            try:
+                await delete_points_from_qdrant(points, collection)
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
             deleted_total += len(deleted)
             await emit_memory_access_event(
                 operation="forget",

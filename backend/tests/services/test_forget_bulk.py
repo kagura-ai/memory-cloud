@@ -18,9 +18,17 @@ WS = uuid4()
 CTX = uuid4()
 
 
+_CLOCK = iter(range(10**9))
+
+
 def _row(author: str = "u1", type_: str = "note", guardrail: bool = False):
     return SimpleNamespace(
-        id=uuid4(), user_id=author, type=type_, source_type="manual", is_guardrail=guardrail
+        id=uuid4(),
+        created_at=next(_CLOCK),
+        user_id=author,
+        type=type_,
+        source_type="manual",
+        is_guardrail=guardrail,
     )
 
 
@@ -32,15 +40,40 @@ def _result(rows=None, memories=None) -> MagicMock:
 
 
 def _service(rows, *, can_access=True) -> tuple[MemoryService, MagicMock]:
+    """A session that answers forget_bulk's three statement shapes.
+
+    * the dry-run aggregate (GROUP BY) — grouped from ``rows``;
+    * a candidate page (LIMIT) — the next ``limit`` rows (keyset emulated by
+      a cursor; the real predicate is pinned by the SQL test);
+    * a chunk load — one memory stand-in per id in the IN list.
+    """
     db = MagicMock(spec=AsyncSession)
     db.commit = AsyncMock()
-    memories_by_id = {}
+    db.rollback = AsyncMock()
+    memories_by_id: dict = {}
+    cursor = {"pos": 0}
+    db.statements = []
 
     async def execute(stmt):
-        if not hasattr(execute, "first_done"):
-            execute.first_done = True  # type: ignore[attr-defined]
-            return _result(rows=rows)
-        # A chunk load: return one memory stand-in per id in the IN list.
+        db.statements.append(stmt)
+        if stmt._group_by_clauses:
+            groups: dict = {}
+            for r in rows:
+                key = (r.user_id, r.type, r.source_type, r.is_guardrail)
+                groups[key] = groups.get(key, 0) + 1
+            return _result(
+                rows=[
+                    SimpleNamespace(
+                        user_id=k[0], type=k[1], source_type=k[2], is_guardrail=k[3], n=n
+                    )
+                    for k, n in groups.items()
+                ]
+            )
+        if stmt._limit_clause is not None:
+            limit = stmt._limit_clause.value
+            page = rows[cursor["pos"] : cursor["pos"] + limit]
+            cursor["pos"] += len(page)
+            return _result(rows=page)
         ids = stmt.whereclause.clauses[0].right.value
         return _result(memories=[memories_by_id.setdefault(i, SimpleNamespace(id=i)) for i in ids])
 
@@ -237,3 +270,65 @@ class TestForgetByQueryPassesTheWorkspace:
         kwargs = service.recall.await_args.kwargs
         assert kwargs["current_workspace_id"] == WS
         assert kwargs["capacity_gate"] is False
+
+
+class TestBoundedReads:
+    @pytest.mark.asyncio
+    async def test_dry_run_is_one_grouped_count(self) -> None:
+        rows = [_row("u1") for _ in range(40)] + [_row("u2") for _ in range(10)]
+        service, perm = _service(rows, can_access=lambda **kw: kw["memory_user_id"] == "u1")
+        assert await _run(service, perm, dry_run=True) == 40
+        (stmt,) = service.db.statements
+        sql = str(stmt.compile(dialect=postgresql.dialect()))
+        assert "GROUP BY" in sql
+        assert "count(" in sql.lower()
+        assert stmt._limit_clause is None
+        assert perm.can_access_memory.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_delete_reads_at_most_max_rows_plus_one(self) -> None:
+        service, perm = _service([_row() for _ in range(10)])
+        count, remaining = await _run_full(service, perm, dry_run=False, max_rows=3)
+        assert (count, remaining) == (3, True)
+        pages = [st for st in service.db.statements if st._limit_clause is not None]
+        assert len(pages) == 1
+        assert pages[0]._limit_clause.value == 4
+
+    @pytest.mark.asyncio
+    async def test_pages_on_when_permission_drops_rows(self) -> None:
+        rows = [_row("u1" if i % 2 == 0 else "u2") for i in range(12)]
+        service, perm = _service(rows, can_access=lambda **kw: kw["memory_user_id"] == "u1")
+        count, remaining = await _run_full(service, perm, dry_run=False, max_rows=3)
+        assert (count, remaining) == (3, True)
+        pages = [st for st in service.db.statements if st._limit_clause is not None]
+        assert len(pages) == 2
+        # The second page continues after the last row seen (keyset).
+        sql = str(pages[1].compile(dialect=postgresql.dialect()))
+        assert "(memories.created_at, memories.id) >" in sql
+
+    @pytest.mark.asyncio
+    async def test_a_failure_in_chunk_two_keeps_chunk_one(self) -> None:
+        """Points-then-commit per chunk, as single forget: chunk 1 stays
+        committed and audited once; chunk 2 is rolled back and the error raised."""
+        service, perm = _service([_row() for _ in range(4)])
+        AUDIT.reset_mock()
+        POINTS.reset_mock()
+        POINTS.side_effect = [None, RuntimeError("qdrant down")]
+        try:
+            with (
+                patch("services.permission_service.PermissionService", return_value=perm),
+                patch("services.memory_access_event_writer.emit_memory_access_event", AUDIT),
+                patch("db.qdrant.delete_points_from_qdrant", POINTS),
+                patch(
+                    "services.memory_service.resolve_collection_name",
+                    AsyncMock(return_value="kagura_memories"),
+                ),
+                pytest.raises(RuntimeError, match="qdrant down"),
+            ):
+                await service.forget_bulk("u1", context_id=CTX, dry_run=False, chunk_size=2)
+        finally:
+            POINTS.side_effect = None
+        assert service.db.commit.await_count == 1
+        assert AUDIT.await_count == 1
+        assert AUDIT.await_args.kwargs["result_count"] == 2
+        service.db.rollback.assert_awaited_once()
