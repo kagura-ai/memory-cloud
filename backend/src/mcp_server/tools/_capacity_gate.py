@@ -38,7 +38,6 @@ CAPACITY_LOCK_BLOCKED_TOOLS: frozenset[str] = frozenset(
         "reference",
         "explore",
         "load_pinned",
-        "load_guardrails",
         "bootstrap",
         "get_agent_bootstrap",
         "get_state",
@@ -94,6 +93,12 @@ CAPACITY_LOCK_ALLOWED_TOOLS: frozenset[str] = frozenset(
         # download route is not gated either): the owner must be able to keep
         # a copy before deleting it.
         "get_file_download_url",
+        # Guardrails stay available while locked: they are safety rails (what
+        # a client must not do), small and bounded, and the same entries are
+        # already served by get_context_info's guardrails field, REST
+        # /memory/guardrails/digest and the MCP session instructions. Pausing
+        # one door while the others answer would protect nothing.
+        "load_guardrails",
         # ---- usage and manuals --------------------------------------------
         "get_usage",
         "guide",

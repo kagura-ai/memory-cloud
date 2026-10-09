@@ -5278,7 +5278,8 @@ class MemoryService:
         )
         if not workspace_id_str or not context_id_str:
             raise ValueError("load_guardrails() requires current_context_id")
-        await self._ensure_capacity(user_id, workspace_id=workspace_id_str)
+        # #1941: no capacity check — guardrails stay available on a locked
+        # workspace (see mcp_server/tools/_capacity_gate.py).
 
         settings = get_settings()
         pinned_cap = self._clamp_pinned_cap(None, settings.pinned_load_cap)

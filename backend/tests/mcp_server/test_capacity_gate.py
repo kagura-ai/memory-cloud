@@ -42,7 +42,16 @@ class TestTheClassification:
         )
 
     @pytest.mark.parametrize(
-        "tool", ["list", "list_contexts", "forget", "delete_context", "delete_file", "get_usage"]
+        "tool",
+        [
+            "list",
+            "list_contexts",
+            "forget",
+            "delete_context",
+            "delete_file",
+            "get_usage",
+            "load_guardrails",
+        ],
     )
     def test_the_cleanup_surface_stays_allowed(self, tool: str) -> None:
         assert tool in CAPACITY_LOCK_ALLOWED_TOOLS

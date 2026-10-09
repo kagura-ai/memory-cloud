@@ -122,7 +122,7 @@ class TestBlocked:
         assert locked.by_ctx.await_args.args[1] == ctx
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("method", ["load_pinned", "load_guardrails"])
+    @pytest.mark.parametrize("method", ["load_pinned"])
     async def test_the_deterministic_loads(self, locked, method: str) -> None:
         service = _service()
         ws = uuid4()
@@ -202,6 +202,21 @@ class TestBlocked:
 
 
 class TestStillAllowed:
+    @pytest.mark.asyncio
+    async def test_guardrails_stay_available_while_locked(self, locked) -> None:
+        """Safety rails, small and bounded — and served by other doors anyway."""
+        service = _service()
+        service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
+            return_value=(MagicMock(), str(uuid4()), str(uuid4()))
+        )
+        service.memory_repo = MagicMock(
+            list_pinned=AsyncMock(side_effect=RuntimeError("reached the read"))
+        )
+        with pytest.raises(RuntimeError, match="reached the read"):
+            await service.load_guardrails(user_id="u", current_context_id=uuid4())
+        locked.by_ws.assert_not_awaited()
+        locked.by_ctx.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_forget_by_query_finds_candidates_without_the_lock(self) -> None:
         """forget(query=...) goes through recall; it must keep working while locked."""
