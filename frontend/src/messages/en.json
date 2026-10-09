@@ -1093,6 +1093,7 @@
     "failedToLoadWorkspace": "Failed to load workspace",
     "failedToUpdateWorkspace": "Failed to update workspace",
     "failedToDeleteWorkspace": "Failed to delete workspace",
+    "deleteBlockedBySubscription": "This workspace has an active paid subscription. Cancel the subscription first; you can delete the workspace after the contract period ends. If it still cannot be deleted after that, contact support.",
     "workspaceNameRequired": "Workspace name is required",
     "validationFailed": "Validation failed",
     "dangerZone": "Danger Zone",
@@ -4256,6 +4257,7 @@
     "confirmError": "Could not confirm deletion. Check your password and try again.",
     "confirmTokenExpired": "This deletion request has expired or was already used. Please start again from your settings.",
     "workspaceTransferError": "You are the sole owner of a shared workspace. Transfer ownership (or remove the other members) before deleting your account.",
+    "subscriptionActiveError": "You own a workspace with an active paid subscription. Cancel the subscription first; you can delete your account after the contract period ends. If it still cannot be deleted after that, contact support.",
     "alreadyRequested": "You already have an account deletion request in progress.",
     "pendingTitle": "Deletion awaiting confirmation",
     "pendingBody": "You requested account deletion. Confirm it (check your email if you signed in with Google or GitHub) to start the 7-day cooling-off period, or cancel below.",
@@ -4270,6 +4272,7 @@
     "confirmPageSuccessTitle": "Deletion confirmed",
     "confirmPageSuccessBody": "Your account is scheduled for deletion on {date}. You can cancel from your settings until then.",
     "confirmPageInvalidTitle": "Link expired or already used",
+    "confirmPageBlockedTitle": "Account can't be deleted yet",
     "confirmPageInvalidBody": "This confirmation link is no longer valid. If you still want to delete your account, start again from your settings.",
     "goToProfile": "Go to settings",
     "protectedAccount": "This is the protected initial administrator account and cannot be deleted."

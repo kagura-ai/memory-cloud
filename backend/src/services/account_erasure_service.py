@@ -74,12 +74,18 @@ from models.erasure import (
     ErasureRequest,
 )
 from models.memory import Memory
+from services.billing_contract import (
+    ensure_no_billing_contract,
+    owned_workspaces_under_contract,
+    workspaces_under_contract,
+)
 from services.email_service import EmailService, get_email_service
 from services.oauth_grant_revocation import revoke_oauth_grants
 from services.system_admin_service import SystemAdminService
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
+    BillingContractActiveError,
     EmailDispatchError,
     ErasureAlreadyInProgressError,
     ErasureForbiddenError,
@@ -183,6 +189,8 @@ class AccountErasureService:
         Raises:
             NotFoundException: User does not exist.
             InitialAdminCannotBeErasedError: User is the protected initial admin.
+            BillingContractActiveError: User owns a workspace with a running paid
+                subscription (409 ``BILLING-005``, #1940).
             ErasureAlreadyInProgressError: An active (pending/cooling_off) request
                 already exists for this user.
             EmailDispatchError: OAuth user but ``send_erasure_confirmation``
@@ -196,6 +204,10 @@ class AccountErasureService:
         existing = await self._find_active_request(user_id)
         if existing:
             raise ErasureAlreadyInProgressError(existing.status)
+
+        # Issue #1940: no erasure while the user owns a workspace with a running
+        # subscription. Refuse before any row, token or email is created.
+        ensure_no_billing_contract(await owned_workspaces_under_contract(self.db, user_id))
 
         token = secrets.token_urlsafe(32)
         token_hash = _sha256_hex(token)
@@ -403,6 +415,8 @@ class AccountErasureService:
             ErasureTokenInvalidError: Token missing/expired/mismatched.
             ErasureForbiddenError: Password mismatch on the password path.
             ErasureRequestNotFoundError: No pending request exists.
+            BillingContractActiveError: User owns a workspace with a running paid
+                subscription (409 ``BILLING-005``, #1940).
         """
         target = await self._load_user_or_404(user_id)
 
@@ -467,6 +481,27 @@ class AccountErasureService:
         # cooling-off (admin leaves, etc.), so this is best-effort, not
         # a guarantee. The cron's identical check remains the safety net.
         await self._check_no_blocking_workspace_transfers(user_id)
+        # Issue #1940: same best-effort pre-check for a subscription started (or
+        # resumed) since the request; the sweep re-checks before executing.
+        # The request is cancelled (and its token burned) so the user can start
+        # a fresh one once the contract has ended, instead of meeting
+        # "already requested" for the life of a dead pending row.
+        under_contract = await owned_workspaces_under_contract(self.db, user_id)
+        if under_contract:
+            request.status = STATUS_CANCELLED
+            request.cancelled_at = utcnow()
+            await self.db.commit()
+            try:
+                await redis.delete(redis_key)
+            except Exception as exc:
+                # Best-effort: the row is already cancelled, so a leftover token
+                # cannot confirm anything; keep the 409 instead of a 500.
+                logger.warning(
+                    "erasure_confirm_token_delete_failed",
+                    request_id=str(request.id),
+                    error=str(exc),
+                )
+            ensure_no_billing_contract(under_contract)
 
         now = utcnow()
         request.status = STATUS_COOLING_OFF
@@ -723,6 +758,16 @@ class AccountErasureService:
             try:
                 await self._execute(req, target)
                 executed += 1
+            except BillingContractActiveError as exc:
+                # Expected refusal (#1940), not a fault: `_execute` already
+                # marked the row failed with the reason. No stack trace/alert.
+                logger.warning(
+                    "erasure_sweep_blocked_by_billing_contract",
+                    request_id=str(req.id),
+                    user_id=req.user_id,
+                    workspace_ids=exc.details.get("workspace_ids"),
+                )
+                continue
             except Exception as exc:
                 logger.error(
                     "erasure_sweep_execute_failed",
@@ -752,6 +797,18 @@ class AccountErasureService:
         try:
             owned_workspaces = await self._list_owned_workspaces(target.user_id)
 
+            # Issue #1940: the enforcement point for self-service erasure — a
+            # subscription can start during the 7-day cooling-off. Admin
+            # force-erase stays the operator's escape hatch (e.g. a plan that
+            # billing failed to push back to Free); what it overrides is logged
+            # once the erasure has completed. Soft-deleted workspaces are
+            # hard-deleted here too, so the log includes them.
+            if request.is_self_service:
+                ensure_no_billing_contract(owned_workspaces)
+                overridden: list[Workspace] = []
+            else:
+                overridden = workspaces_under_contract(owned_workspaces, include_deleted=True)
+
             # Stripe customer/subscription teardown is no longer this backend's
             # job (#1096): the OSS backend is Stripe-agnostic. memory-cloud erases
             # only its own data below.
@@ -780,6 +837,13 @@ class AccountErasureService:
 
             # Step 7: finalize the erasure_requests row
             await self._finalize(request, summary)
+            if overridden:
+                logger.warning(
+                    "erasure_admin_override_billing_contract",
+                    request_id=str(request.id),
+                    user_id=target.user_id,
+                    workspace_ids=[str(ws.id) for ws in overridden],
+                )
 
             # Step 8: completion notification — outside the success path's
             # transactional integrity guarantees. A future real EmailService
@@ -798,6 +862,26 @@ class AccountErasureService:
                     error=str(exc),
                 )
 
+        except BillingContractActiveError as exc:
+            # Caller-actionable, like the transfer case below: terminal
+            # `failed` with a structured reason; the user creates a new request
+            # once the contract has ended. Nothing was deleted yet.
+            await self.db.rollback()
+            await self.db.execute(
+                update(ErasureRequest)
+                .where(ErasureRequest.id == request.id)
+                .values(
+                    status=STATUS_FAILED,
+                    failure_reason=(
+                        f"billing_contract_active: workspace_ids={','.join(exc.details['workspace_ids'])}. "
+                        "Cancel the subscription and wait for the contract period to end, "
+                        "then create a new erasure request."
+                    )[:1000],
+                    deleted_data_summary=summary or None,
+                )
+            )
+            await self.db.commit()
+            raise
         except WorkspaceTransferRequiredError as exc:
             # Caller-actionable error. Move the row to the terminal `failed`
             # state with a structured reason so the operator can fix

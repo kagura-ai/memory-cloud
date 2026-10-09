@@ -1093,6 +1093,7 @@
     "failedToLoadWorkspace": "ワークスペースの読み込みに失敗しました",
     "failedToUpdateWorkspace": "ワークスペースの更新に失敗しました",
     "failedToDeleteWorkspace": "ワークスペースの削除に失敗しました",
+    "deleteBlockedBySubscription": "このワークスペースには有料のサブスクリプションが残っています。先にサブスクを解約してください。契約期間が終わると削除できます。終わっても削除できない場合はサポートにお問い合わせください。",
     "workspaceNameRequired": "ワークスペース名は必須です",
     "validationFailed": "検証に失敗しました",
     "dangerZone": "危険な操作",
@@ -4256,6 +4257,7 @@
     "confirmError": "削除を確認できませんでした。パスワードを確認して、もう一度お試しください。",
     "confirmTokenExpired": "この削除リクエストは期限切れか、すでに使用済みです。設定からもう一度開始してください。",
     "workspaceTransferError": "共有ワークスペースの唯一のオーナーです。アカウントを削除する前に、オーナー権限を移譲する（または他のメンバーを削除する）必要があります。",
+    "subscriptionActiveError": "有料のサブスクリプションが残っているワークスペースを所有しています。先にサブスクを解約してください。契約期間が終わるとアカウントを削除できます。終わっても削除できない場合はサポートにお問い合わせください。",
     "alreadyRequested": "すでにアカウント削除のリクエストが進行中です。",
     "pendingTitle": "確認待ちの削除リクエスト",
     "pendingBody": "アカウント削除をリクエストしました。7日間の猶予期間を開始するには確認してください（Google / GitHub でサインインした場合はメールをご確認ください）。または下のボタンで取り消せます。",
@@ -4270,6 +4272,7 @@
     "confirmPageSuccessTitle": "削除を確認しました",
     "confirmPageSuccessBody": "{date} にアカウントの削除が予定されています。それまでは設定から取り消せます。",
     "confirmPageInvalidTitle": "リンクの有効期限切れ、または使用済み",
+    "confirmPageBlockedTitle": "まだアカウントを削除できません",
     "confirmPageInvalidBody": "この確認リンクは無効になりました。アカウントを削除したい場合は、設定からもう一度開始してください。",
     "goToProfile": "設定へ",
     "protectedAccount": "これは保護された初期管理者アカウントのため、削除できません。"

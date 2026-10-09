@@ -15,6 +15,7 @@ from auth.workspace_roles import WorkspaceRole
 from config.plan_tiers import has_feature
 from models.auth import Context, ExternalAPIKey, UsageStats, Workspace, WorkspaceMember
 from models.memory import Memory
+from services.billing_contract import ensure_no_billing_contract
 from services.quota_service import QuotaService
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import utcnow
@@ -499,12 +500,24 @@ class WorkspaceService:
         Args:
             workspace_id: Workspace ID
             deleted_by: User ID who deleted the workspace
+
+        Raises:
+            NotFoundException: The workspace is missing or already deleted.
+            BillingContractActiveError: A paid subscription is still running
+                (409 ``BILLING-005``, Issue #1940).
         """
         from sqlalchemy import delete
 
         from models.auth import User
 
-        workspace = await self.get_workspace(workspace_id)
+        # Issue #1940: lock the row and refuse while a paid subscription runs
+        # (including a scheduled cancellation). Checked under the lock so a
+        # billing push that upgrades the plan cannot slip in between the check
+        # and the soft delete. The row changes commit first (releasing the
+        # lock); the slow Qdrant cleanup runs afterwards so billing pushes and
+        # owner mutations do not wait on network I/O.
+        workspace = await lock_workspace_for_update(self.db, workspace_id)
+        ensure_no_billing_contract([workspace])
 
         # Issue #223: Delete external API keys (hard delete to allow re-creation)
         # The unique constraint is (user_id, key_name), so we need to delete them
@@ -520,8 +533,30 @@ class WorkspaceService:
                 delete(ExternalAPIKey).where(ExternalAPIKey.workspace_id == workspace_id)
             )
             logger.info(
-                f"Deleted {external_keys_count} external API keys for workspace {workspace.id}"
+                f"Deleted {external_keys_count} external API keys for workspace {workspace_id}"
             )
+
+        # Soft delete
+        workspace.deleted_at = func.now()
+        workspace.updated_at = func.now()
+
+        # Issue #218: Clear current_workspace_id for all users who had this workspace as current
+        # This ensures they get a new workspace auto-created on next login
+        result = await self.db.execute(
+            select(User).where(User.current_workspace_id == workspace_id)
+        )
+        users = result.scalars().all()
+
+        for user in users:
+            user.current_workspace_id = None
+            # Issue #246: current_context_id removed
+            logger.info(
+                "cleared_user_workspace_and_context",
+                user_id=user.user_id,
+                workspace_id=str(workspace_id),
+            )
+
+        await self.db.commit()
 
         # Delete Qdrant points for ALL contexts (including soft-deleted)
         # Workspace deletion is permanent — clean up everything
@@ -569,29 +604,7 @@ class WorkspaceService:
                     error=str(e),
                 )
 
-        # Soft delete
-        workspace.deleted_at = func.now()
-        workspace.updated_at = func.now()
-
-        # Issue #218: Clear current_workspace_id for all users who had this workspace as current
-        # This ensures they get a new workspace auto-created on next login
-        result = await self.db.execute(
-            select(User).where(User.current_workspace_id == workspace_id)
-        )
-        users = result.scalars().all()
-
-        for user in users:
-            user.current_workspace_id = None
-            # Issue #246: current_context_id removed
-            logger.info(
-                "cleared_user_workspace_and_context",
-                user_id=user.user_id,
-                workspace_id=str(workspace.id),
-            )
-
-        await self.db.commit()
-
-        logger.info(f"Deleted workspace: {workspace.id} (by: {deleted_by})")
+        logger.info(f"Deleted workspace: {workspace_id} (by: {deleted_by})")
 
     # ========================================================================
     # Member Management

@@ -1124,6 +1124,17 @@ async def delete_user(
         # resurrect ghost members for an account that no longer exists.
         await db.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == user_id))
 
+        # Issue #1940: an admin delete is the operator's override of the
+        # running-subscription block. Collect what it overrides (soft-deleted
+        # workspaces included — they are hard-deleted below) and log it once
+        # the delete has committed (same event as admin force-erase).
+        from services.billing_contract import owned_workspaces_under_contract
+
+        overridden_ids = [
+            str(ws.id)
+            for ws in await owned_workspaces_under_contract(db, user_id, include_deleted=True)
+        ]
+
         # Delete workspaces owned by the user
         # #687: operation-on-deleted — hard-delete cascades over soft-deleted
         # workspaces; the user is leaving the system entirely, so any workspace
@@ -1136,6 +1147,14 @@ async def delete_user(
         # Delete user
         await db.delete(target_user)
         await db.commit()
+
+        if overridden_ids:
+            logger.warning(
+                "erasure_admin_override_billing_contract",
+                user_id=user_id,
+                admin_id=admin_id,
+                workspace_ids=overridden_ids,
+            )
 
         # Redis follows the committed DB state (R5): release the purged
         # files' quota for workspaces that survive this erasure. Fail-open

@@ -28,6 +28,7 @@ import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { formatDate } from "@/lib/utils/datetime";
 import { confirmErasure } from "@/lib/api/account-erasure";
+import { ApiError } from "@/lib/api/base";
 import {
   Card,
   CardContent,
@@ -38,7 +39,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { SpinnerLoading } from "@/components/common/LoadingState";
 
-type Phase = "loading" | "success" | "invalid";
+// "blocked": a paid subscription is still running (#1940, BILLING-005) — the
+// link is fine, so "expired" would send the user round in circles.
+type Phase = "loading" | "success" | "invalid" | "blocked";
 
 // sessionStorage key for the one-shot login-bounce guard (see the effect).
 const REDIRECT_FLAG = "erasure_confirm_redirected";
@@ -94,8 +97,10 @@ function ConfirmErasureInner() {
         setScheduledFor(state.scheduled_for);
         setPhase("success");
       })
-      .catch(() => {
-        if (alive) setPhase("invalid");
+      .catch((e: unknown) => {
+        if (!alive) return;
+        const code = e instanceof ApiError ? e.error : undefined;
+        setPhase(code === "BILLING-005" ? "blocked" : "invalid");
       });
     return () => {
       alive = false;
@@ -122,14 +127,18 @@ function ConfirmErasureInner() {
             ) : (
               <>
                 <AlertTriangle className="h-5 w-5 text-red-800 dark:text-red-300" />
-                {t("confirmPageInvalidTitle")}
+                {phase === "blocked"
+                  ? t("confirmPageBlockedTitle")
+                  : t("confirmPageInvalidTitle")}
               </>
             )}
           </CardTitle>
           <CardDescription>
             {phase === "success"
               ? t("confirmPageSuccessBody", { date: scheduledLabel ?? "" })
-              : t("confirmPageInvalidBody")}
+              : phase === "blocked"
+                ? t("subscriptionActiveError")
+                : t("confirmPageInvalidBody")}
           </CardDescription>
         </CardHeader>
         <CardContent>

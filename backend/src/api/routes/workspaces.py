@@ -532,7 +532,9 @@ async def delete_workspace(
 ):
     """Delete workspace (soft delete).
 
-    Requires owner role.
+    Requires owner role. Returns 409 ``BILLING-005`` while a paid subscription
+    is still running for the workspace, including a scheduled cancellation
+    (Issue #1940).
     """
     user = await get_current_user(request)
     workspace_service = WorkspaceService(db)

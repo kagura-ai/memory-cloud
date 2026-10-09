@@ -42,6 +42,7 @@ def _make_ws():
     # #1095: the protective default; a push flips it to external_billing. Set it
     # to a real str (not a MagicMock) so the result/GET echo is JSON-serializable.
     ws.entitlement_source = "admin_grant"
+    ws.deleted_at = None
     return ws
 
 
@@ -149,6 +150,34 @@ def test_workspace_not_found_returns_404(billing):
         _PATH, json={"plan_name": "pro"}, headers={"Authorization": "Bearer secret"}
     )
     assert resp.status_code == 404
+
+
+@pytest.mark.parametrize("plan_name", ["basic", "pro", "promax"])
+def test_paid_push_to_soft_deleted_workspace_returns_404(billing, plan_name):
+    """#1940: billing must not keep charging for a workspace its owner deleted."""
+    from datetime import UTC, datetime
+
+    ws = _make_ws()
+    ws.deleted_at = datetime.now(UTC)
+    resp = billing.client(ws).put(
+        _PATH, json={"plan_name": plan_name}, headers={"Authorization": "Bearer secret"}
+    )
+    assert resp.status_code == 404
+    assert ws.plan_name == "free"
+
+
+def test_free_push_to_soft_deleted_workspace_is_applied(billing):
+    """A cancellation catching up with a deleted workspace is still accepted."""
+    from datetime import UTC, datetime
+
+    ws = _make_ws()
+    ws.plan_name = "pro"
+    ws.deleted_at = datetime.now(UTC)
+    resp = billing.client(ws).put(
+        _PATH, json={"plan_name": "free"}, headers={"Authorization": "Bearer secret"}
+    )
+    assert resp.status_code == 200
+    assert ws.plan_name == "free"
 
 
 @pytest.mark.parametrize("plan_name", ["free", "basic", "pro", "promax"])
