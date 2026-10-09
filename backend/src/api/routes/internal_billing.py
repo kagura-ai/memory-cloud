@@ -348,6 +348,9 @@ async def get_downgrade_eligibility(
 # the period end by this much so a late retry from the billing service is
 # still recognised as a repeat.
 _NOTICE_KEY_GRACE_SECONDS = 7 * 24 * 3600
+# At most one notice per workspace in this window, whatever ``period_end`` the
+# caller sends — a guard against a billing-side loop or a changing period_end.
+_NOTICE_COOLDOWN_SECONDS = 24 * 3600
 
 
 class CapacityLockNoticeRequest(BaseModel):
@@ -363,8 +366,10 @@ class CapacityLockNoticeResult(BaseModel):
 
     ``reason`` (when ``sent`` is false): ``within_capacity`` (the projected
     Free state fits — nothing to warn about), ``already_sent`` (a notice for
-    this ``period_end`` was already sent), ``no_owner_email`` or
-    ``delivery_failed`` (retry later; the idempotency claim is released).
+    this ``period_end`` was already sent), ``cooldown`` (a notice for this
+    workspace was sent in the last 24 hours, for any ``period_end``),
+    ``no_owner_email`` or ``delivery_failed`` (retry later; both claims are
+    released).
     ``sent=true, reason="delivery_uncertain"``: the provider timed out after it
     may have accepted the email; the claim is kept, so it is never resent.
     """
@@ -393,6 +398,13 @@ def _notice_ttl_seconds(period_end: datetime) -> int:
     return max(remaining, 0) + _NOTICE_KEY_GRACE_SECONDS
 
 
+async def _release(redis: object, key: str, workspace_id: str) -> None:
+    try:
+        await redis.delete(key)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 — the TTL still bounds it
+        logger.warning("capacity_lock_notice_release_failed", workspace_id=workspace_id)
+
+
 @router.post(
     "/workspaces/{workspace_id}/capacity-lock-notice",
     response_model=CapacityLockNoticeResult,
@@ -413,8 +425,9 @@ async def send_capacity_lock_notice(
     emails the workspace owner (plain text, no memory content).
 
     Idempotent per ``(workspace, period_end)``: a repeat answers
-    ``sent=false, reason="already_sent"``. A failed delivery releases the
-    claim so a retry can send. 404 for a missing or soft-deleted workspace.
+    ``sent=false, reason="already_sent"``. In addition, at most one notice per
+    workspace per 24 hours (``reason="cooldown"``). A failed delivery releases
+    both claims so a retry can send. 404 for a missing or soft-deleted workspace.
     """
     from db.redis import get_redis_client
     from models.auth import User
@@ -472,6 +485,21 @@ async def send_capacity_lock_notice(
         ) from exc
     if not claimed:
         return result(False, "already_sent")
+    cooldown_key = f"capacity_lock_notice_cooldown:{ws_uuid}"
+    try:
+        cooled = await redis.set(cooldown_key, "1", nx=True, ex=_NOTICE_COOLDOWN_SECONDS)
+    except Exception as exc:  # noqa: BLE001 — fail closed, as for the period claim
+        await _release(redis, key, workspace_id)
+        raise MemoryCloudException(
+            "Notice deduplication is unavailable; retry later",
+            status_code=503,
+            error_code="BILLING-002",
+        ) from exc
+    if not cooled:
+        # Not sent for this period: release its claim so it can be sent once
+        # the cooldown has passed.
+        await _release(redis, key, workspace_id)
+        return result(False, "cooldown")
 
     base_url = get_settings().frontend_url.strip().rstrip("/")
     try:
@@ -497,10 +525,8 @@ async def send_capacity_lock_notice(
         )
         delivered = False
     if not delivered:
-        try:
-            await redis.delete(key)
-        except Exception:  # noqa: BLE001 — the TTL still bounds it
-            logger.warning("capacity_lock_notice_release_failed", workspace_id=workspace_id)
+        await _release(redis, key, workspace_id)
+        await _release(redis, cooldown_key, workspace_id)
         return result(False, "delivery_failed")
 
     logger.info(

@@ -138,16 +138,32 @@ class TestTheNotice:
         )
         assert resp.json()["reason"] == "already_sent"
 
-    def test_a_new_period_sends_again(self, harness) -> None:
+    def test_a_new_period_within_24h_is_cooldown(self, harness) -> None:
         harness.client.post(_PATH, json=_BODY, headers=_AUTH)
+        resp = harness.client.post(
+            _PATH, json={"period_end": "2026-12-01T00:00:00Z"}, headers=_AUTH
+        )
+        assert resp.json()["sent"] is False
+        assert resp.json()["reason"] == "cooldown"
+        assert harness.email.send_capacity_lock_notice.await_count == 1
+        # The refused period's claim was released: it can be sent later.
+        assert not any(k.endswith("2026-12-01T00:00:00") for k in harness.redis.keys)
+
+    def test_a_new_period_sends_again_after_the_cooldown(self, harness) -> None:
+        harness.client.post(_PATH, json=_BODY, headers=_AUTH)
+        harness.redis.keys.pop(f"capacity_lock_notice_cooldown:{_WS_ID}")  # 24h passed
         resp = harness.client.post(
             _PATH, json={"period_end": "2026-12-01T00:00:00Z"}, headers=_AUTH
         )
         assert resp.json()["sent"] is True
 
+    def test_the_cooldown_is_a_day_per_workspace(self, harness) -> None:
+        harness.client.post(_PATH, json=_BODY, headers=_AUTH)
+        assert harness.redis.keys[f"capacity_lock_notice_cooldown:{_WS_ID}"] == 24 * 3600
+
     def test_the_claim_outlives_the_period_end(self, harness) -> None:
         harness.client.post(_PATH, json=_BODY, headers=_AUTH)
-        (ttl,) = harness.redis.keys.values()
+        (ttl,) = [v for k, v in harness.redis.keys.items() if "cooldown" not in k]
         assert ttl >= 7 * 24 * 3600
 
     def test_within_capacity_sends_nothing(self, harness) -> None:
@@ -196,6 +212,6 @@ class TestAtMostOnce:
         resp = harness.client.post(_PATH, json=_BODY, headers=_AUTH)
         assert resp.json()["sent"] is True
         assert resp.json()["reason"] == "delivery_uncertain"
-        assert len(harness.redis.keys) == 1
+        assert len(harness.redis.keys) == 2  # period claim and cooldown both kept
         again = harness.client.post(_PATH, json=_BODY, headers=_AUTH)
         assert again.json()["reason"] == "already_sent"

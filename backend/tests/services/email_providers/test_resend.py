@@ -684,3 +684,28 @@ async def test_send_capacity_lock_notice_raises_when_delivery_is_uncertain() -> 
             cleanup_url="https://app.example.test/workspace/settings/plan",
             contexts_url="https://app.example.test/workspace/contexts",
         )
+
+
+@pytest.mark.asyncio
+async def test_capacity_lock_notice_subject_is_header_safe() -> None:
+    """#1941 CSO: a user-chosen name cannot inject a header line or bloat the subject."""
+    from datetime import UTC, datetime
+
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    evil = "Team\r\nBcc: attacker@example.test " + "x" * 200
+    with patch.object(resend_module.resend.Emails, "send", return_value={"id": "m"}) as mock_send:
+        await svc.send_capacity_lock_notice(
+            to_email="owner@example.test",
+            workspace_name=evil,
+            period_end=datetime(2026, 11, 1, tzinfo=UTC),
+            over_memories=1,
+            over_bytes=0,
+            cleanup_url="https://app.example.test/workspace/settings/plan",
+            contexts_url="https://app.example.test/workspace/contexts",
+        )
+    (params,), _ = mock_send.call_args
+    assert "\r" not in params["subject"] and "\n" not in params["subject"]
+    assert "Team Bcc: attacker@example.test" in params["subject"]
+    name_part = params["subject"].split(": ", 1)[1].split(" is over")[0]
+    assert len(name_part) <= 80
+    assert name_part.endswith("…")

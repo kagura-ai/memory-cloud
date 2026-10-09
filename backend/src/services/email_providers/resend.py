@@ -87,6 +87,15 @@ def _may_have_been_delivered(exc: BaseException) -> bool:
     return False
 
 
+_SUBJECT_NAME_MAX = 80
+
+
+def _header_safe(value: str, limit: int = _SUBJECT_NAME_MAX) -> str:
+    """``value`` on one line (control characters → spaces), at most ``limit`` chars."""
+    flat = " ".join("".join(" " if ch.isspace() or ord(ch) < 32 else ch for ch in value).split())
+    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
+
+
 class ResendEmailService:
     """``EmailService`` backend backed by the Resend HTTPS API.
 
@@ -578,6 +587,8 @@ class ResendEmailService:
             period_end = period_end.astimezone(UTC)
         end_day = period_end.strftime("%Y-%m-%d")
         overage = capacity_overage_text(over_memories, over_bytes)
+        # The name is user-chosen: no CR/LF into a header, and a bounded length.
+        workspace_name = _header_safe(workspace_name)
         subject = (
             f"Action needed before {end_day}: {workspace_name} is over the Free plan's capacity"
         )

@@ -865,11 +865,15 @@ class ForgetBulkRequest(BaseModel):
         None, description="Only memories created at or after this instant (inclusive)"
     )
     type: str | None = Field(None, max_length=50, description="Only memories of this type")
-    tags: list[str] | None = Field(
-        None, max_length=50, description="Only memories carrying ANY of these tags"
-    )
+    tags: list[str] | None = Field(None, description="Only memories carrying ANY of these tags")
     all: bool = Field(False, description="Match every memory in the context (no filter)")
     dry_run: bool = Field(True, description="Count the matches without deleting")
+
+    @field_validator("tags")
+    @classmethod
+    def _cap_tags(cls, v: list[str] | None) -> list[str] | None:
+        """The remember / update_memory caps (#1743): no tag a write could store."""
+        return _check_memory_tags(v)
 
     @field_validator("created_before", "created_after")
     @classmethod

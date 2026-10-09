@@ -29,6 +29,16 @@ class TestTheRequest:
         req = ForgetBulkRequest(context_id=uuid4(), all=True)
         assert req.dry_run is True
 
+    def test_tags_follow_the_write_caps(self) -> None:
+        from models.schemas import MEMORY_TAG_MAX_CHARS, MEMORY_TAGS_MAX_COUNT
+
+        with pytest.raises(ValidationError, match="exceeds"):
+            ForgetBulkRequest(context_id=uuid4(), tags=["x" * (MEMORY_TAG_MAX_CHARS + 1)])
+        with pytest.raises(ValidationError, match="at most"):
+            ForgetBulkRequest(
+                context_id=uuid4(), tags=[f"t{i}" for i in range(MEMORY_TAGS_MAX_COUNT + 1)]
+            )
+
     def test_dry_run_is_the_default(self) -> None:
         assert ForgetBulkRequest(context_id=uuid4(), type="note").dry_run is True
 
