@@ -22,11 +22,12 @@ plan push unlocks on the very next call with nothing to invalidate.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.plan_tiers import PlanName
@@ -194,7 +195,8 @@ async def _measure(
     )
 
 
-async def _is_member(db: AsyncSession, workspace_id: UUID, user_id: str) -> bool:
+async def is_workspace_member(db: AsyncSession, workspace_id: UUID, user_id: str) -> bool:
+    """Whether ``user_id`` holds a membership row in ``workspace_id``."""
     found = await db.scalar(
         select(WorkspaceMember.id).where(
             WorkspaceMember.workspace_id == workspace_id,
@@ -256,9 +258,60 @@ async def _raise_if_locked(
     if outsider:
         raise CapacityLockedError.for_outsider()
     # The membership read runs only for a locked workspace — never on the hot path.
-    if user_id is not None and not await _is_member(db, workspace.id, user_id):
+    if user_id is not None and not await is_workspace_member(db, workspace.id, user_id):
         raise CapacityLockedError.for_outsider()
     raise lock.to_error()
+
+
+def lock_candidate_predicate() -> ColumnElement[bool]:
+    """SQL twin of :func:`is_lock_candidate`.
+
+    Lets a caller that resolves workspaces from ids fetch only the ones that
+    could be locked, so a paid / self-hosted / admin-managed workspace costs
+    no more than the one lookup it needed anyway.
+    """
+    return and_(
+        Workspace.plan_name == PlanName.FREE,
+        Workspace.entitlement_source == ENTITLEMENT_SOURCE_EXTERNAL_BILLING,
+    )
+
+
+def _as_uuid(value: object) -> UUID | None:
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+async def ensure_contexts_not_capacity_locked(
+    db: AsyncSession,
+    context_ids: Iterable[UUID | str | None],
+    *,
+    user_id: str | None = None,
+    outsider: bool = False,
+) -> None:
+    """:func:`ensure_not_capacity_locked` for every workspace owning ``context_ids``.
+
+    One query for the whole set, deduplicated per workspace and filtered to
+    lock candidates in SQL: contexts of paid workspaces add no further read.
+    """
+    ids = {cid for raw in context_ids if raw is not None and (cid := _as_uuid(raw)) is not None}
+    if not ids:
+        return
+    workspaces = (
+        await db.scalars(
+            select(Workspace)
+            .where(
+                Workspace.id.in_(select(Context.workspace_id).where(Context.id.in_(ids))),
+                lock_candidate_predicate(),
+            )
+            .order_by(Workspace.id)
+        )
+    ).all()
+    for workspace in workspaces:
+        await _raise_if_locked(db, workspace, user_id, outsider=outsider)
 
 
 async def ensure_context_not_capacity_locked(
@@ -268,17 +321,5 @@ async def ensure_context_not_capacity_locked(
     user_id: str | None = None,
     outsider: bool = False,
 ) -> None:
-    """:func:`ensure_not_capacity_locked` for the workspace owning ``context_id``."""
-    if context_id is None:
-        return
-    try:
-        cid = context_id if isinstance(context_id, UUID) else UUID(str(context_id))
-    except (ValueError, TypeError, AttributeError):
-        return
-    workspace = await db.scalar(
-        select(Workspace)
-        .join(Context, Context.workspace_id == Workspace.id)
-        .where(Context.id == cid)
-    )
-    if workspace is not None:
-        await _raise_if_locked(db, workspace, user_id, outsider=outsider)
+    """:func:`ensure_contexts_not_capacity_locked` for one context."""
+    await ensure_contexts_not_capacity_locked(db, [context_id], user_id=user_id, outsider=outsider)

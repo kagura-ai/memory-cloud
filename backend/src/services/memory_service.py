@@ -635,14 +635,15 @@ class MemoryService:
         ``forget``, listing, stats and export never call it.
         """
         from services.capacity_lock import (
-            ensure_context_not_capacity_locked,
+            ensure_contexts_not_capacity_locked,
             ensure_not_capacity_locked,
         )
 
         if workspace_id is not None:
             await ensure_not_capacity_locked(self.db, workspace_id, user_id=user_id)
-        for context_id in dict.fromkeys(c for c in context_ids if c is not None):
-            await ensure_context_not_capacity_locked(self.db, context_id, user_id=user_id)
+        if any(c is not None for c in context_ids):
+            # One query for every context, deduplicated per workspace (#1941).
+            await ensure_contexts_not_capacity_locked(self.db, context_ids, user_id=user_id)
 
     async def remember(
         self,
@@ -692,7 +693,6 @@ class MemoryService:
             >>> result.scope
             'working'
         """
-        await self._ensure_capacity(user_id, context_ids=(current_context_id,))
         prepared = await self._prepare_remember(
             request,
             user_id,
@@ -757,6 +757,7 @@ class MemoryService:
         # shared context the caller is also a member of, a different workspace
         # (the wrong counter). A workspace-scoped key or a binding denial is
         # still refused here, before any counter is touched.
+        capacity_checked = isolation is not None  # remember_many checked the batch
         if isolation is None:
             isolation = await self._get_context_isolation_params(
                 user_id,
@@ -770,6 +771,11 @@ class MemoryService:
         # Validate required parameters
         if not workspace_id_str or not context_id_str:
             raise ValueError("remember() requires current_context_id")
+
+        # #1941: after the write gate, so a context the caller cannot write
+        # answers its uniform not-found, never the lock.
+        if not capacity_checked:
+            await self._ensure_capacity(user_id, workspace_id=workspace_id_str)
 
         # #1853: dedupe="check" asks BEFORE the quota is charged and the row
         # exists — a candidate above the suggestion threshold comes back to
@@ -1450,7 +1456,8 @@ class MemoryService:
         Returns:
             UpdateMemoryResponse
         """
-        await self._ensure_capacity(user_id, context_ids=(current_context_id,))
+        # #1941: the capacity check runs after authorization — in
+        # _update_in_place, and in the inner remember() of an upsert.
         if request.external_id:
             return await self._upsert_by_external_id(
                 request, user_id, client, current_context_id, current_workspace_id
@@ -1471,6 +1478,8 @@ class MemoryService:
         from utils.text import normalize_for_search
 
         memory = await self._update_load_authorized(request.memory_id, user_id)
+        # #1941: after the access check, so the lock is no existence oracle.
+        await self._ensure_capacity(user_id, workspace_id=memory.workspace_id)
 
         # Tool guardrails: any edit of a guardrail row, or a details write that
         # adds / changes / removes tool_trigger, needs context EDITOR or above
@@ -4822,12 +4831,6 @@ class MemoryService:
             context_ids=context_ids,
             user_id=user_id,
         )
-        # #1941: ``forget(query=...)`` finds its candidates through recall and
-        # must keep working on a locked workspace — it passes False.
-        if capacity_gate:
-            await self._ensure_capacity(
-                user_id, context_ids=(current_context_id, *(context_ids or ()))
-            )
 
         # Resolve the effective query parameters once (#708 paying workspace,
         # neural flag, #81 search scope, #1220 config prefetch, #1212 search
@@ -4840,6 +4843,13 @@ class MemoryService:
             context_ids=context_ids,
         )
         request = plan.request
+        # #1941: after the binding gate and scope resolution. ``forget(query=...)``
+        # finds its candidates through recall and must keep working on a locked
+        # workspace — it passes False.
+        if capacity_gate:
+            await self._ensure_capacity(
+                user_id, context_ids=(current_context_id, *(context_ids or ()))
+            )
         effective_workspace_id = plan.effective_workspace_id
         is_shared_context_read = plan.is_shared_context_read
         neural_enabled = plan.neural_enabled

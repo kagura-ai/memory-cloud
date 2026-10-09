@@ -24,7 +24,7 @@ from models.schemas import (
     UpdateMemoryRequest,
 )
 from services.memory_service import MemoryService
-from utils.exceptions import CapacityLockedError
+from utils.exceptions import CapacityLockedError, NotFoundException
 
 
 def _locked() -> CapacityLockedError:
@@ -52,7 +52,7 @@ def locked():
             AsyncMock(side_effect=_locked()),
         ) as by_ws,
         patch(
-            "services.capacity_lock.ensure_context_not_capacity_locked",
+            "services.capacity_lock.ensure_contexts_not_capacity_locked",
             AsyncMock(side_effect=_locked()),
         ) as by_ctx,
     ):
@@ -61,15 +61,16 @@ def locked():
 
 class TestEnsureCapacity:
     @pytest.mark.asyncio
-    async def test_each_context_is_checked_once(self) -> None:
+    async def test_all_contexts_go_in_one_batched_check(self) -> None:
         ctx = uuid4()
         other = uuid4()
         with patch(
-            "services.capacity_lock.ensure_context_not_capacity_locked", AsyncMock()
+            "services.capacity_lock.ensure_contexts_not_capacity_locked", AsyncMock()
         ) as by_ctx:
             await _service()._ensure_capacity("u", context_ids=(ctx, None, ctx, other))
-        assert [c.args[1] for c in by_ctx.await_args_list] == [ctx, other]
-        assert all(c.kwargs == {"user_id": "u"} for c in by_ctx.await_args_list)
+        by_ctx.assert_awaited_once()
+        assert list(by_ctx.await_args.args[1]) == [ctx, None, ctx, other]
+        assert by_ctx.await_args.kwargs == {"user_id": "u"}
 
     @pytest.mark.asyncio
     async def test_a_mock_session_skips_the_check(self) -> None:
@@ -81,34 +82,43 @@ class TestEnsureCapacity:
 
 class TestBlocked:
     @pytest.mark.asyncio
-    async def test_remember(self, locked) -> None:
+    async def test_remember_checks_after_the_write_gate(self, locked) -> None:
         service = _service()
-        service._prepare_remember = AsyncMock()  # type: ignore[method-assign]
+        ws = uuid4()
+        service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
+            return_value=(MagicMock(), str(ws), str(uuid4()))
+        )
         with pytest.raises(CapacityLockedError):
             await service.remember(
                 RememberRequest(summary="a summary long enough", content="body", type="note"),
                 user_id="u",
                 current_context_id=uuid4(),
             )
-        service._prepare_remember.assert_not_awaited()
+        service._get_context_isolation_params.assert_awaited_once()
+        assert locked.by_ws.await_args.args[1] == str(ws)
 
     @pytest.mark.asyncio
-    async def test_update_memory(self, locked) -> None:
+    async def test_update_memory_checks_after_the_access_check(self, locked) -> None:
         service = _service()
-        service._update_in_place = AsyncMock()  # type: ignore[method-assign]
+        ws = uuid4()
+        service._update_load_authorized = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(workspace_id=ws)
+        )
         with pytest.raises(CapacityLockedError):
             await service.update_memory(
                 UpdateMemoryRequest(memory_id=uuid4(), summary="new summary text"),
                 user_id="u",
                 current_context_id=uuid4(),
             )
-        service._update_in_place.assert_not_awaited()
+        assert locked.by_ws.await_args.args[1] == ws
 
     @pytest.mark.asyncio
-    async def test_recall_checks_every_context(self, locked) -> None:
+    async def test_recall_checks_every_context_after_scope_resolution(self, locked) -> None:
         service = _service()
         service._recall_check_agent_bindings = AsyncMock()  # type: ignore[method-assign]
-        service._recall_prepare = AsyncMock()  # type: ignore[method-assign]
+        service._recall_prepare = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(request=RecallRequest(query="q"))
+        )
         ctx, extra = uuid4(), uuid4()
         with pytest.raises(CapacityLockedError):
             await service.recall(
@@ -118,9 +128,62 @@ class TestBlocked:
                 current_workspace_id=uuid4(),
                 context_ids=[extra],
             )
-        service._recall_prepare.assert_not_awaited()
-        assert locked.by_ctx.await_args.args[1] == ctx
+        service._recall_prepare.assert_awaited_once()
+        assert list(locked.by_ctx.await_args.args[1]) == [ctx, extra]
 
+
+class TestNonMembersGetNotFoundNotTheLock:
+    """The lock must not answer before authorization: a caller who may not
+    reach the context or memory gets the uniform not-found, never a
+    CAPACITY-001 that would reveal the target exists and is over capacity."""
+
+    @pytest.mark.asyncio
+    async def test_remember(self, locked) -> None:
+        service = _service()
+        service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
+            side_effect=NotFoundException("Context", "x")
+        )
+        with pytest.raises(NotFoundException):
+            await service.remember(
+                RememberRequest(summary="a summary long enough", content="body", type="note"),
+                user_id="outsider",
+                current_context_id=uuid4(),
+            )
+        locked.by_ws.assert_not_awaited()
+        locked.by_ctx.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_update_memory(self, locked) -> None:
+        service = _service()
+        service._update_load_authorized = AsyncMock(  # type: ignore[method-assign]
+            side_effect=NotFoundException("Memory", "x")
+        )
+        with pytest.raises(NotFoundException):
+            await service.update_memory(
+                UpdateMemoryRequest(memory_id=uuid4(), summary="new summary text"),
+                user_id="outsider",
+                current_context_id=uuid4(),
+            )
+        locked.by_ws.assert_not_awaited()
+        locked.by_ctx.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_recall(self, locked) -> None:
+        service = _service()
+        service._recall_check_agent_bindings = AsyncMock(  # type: ignore[method-assign]
+            side_effect=NotFoundException("Context", "x")
+        )
+        with pytest.raises(NotFoundException):
+            await service.recall(
+                RecallRequest(query="q"),
+                "outsider",
+                current_context_id=uuid4(),
+                current_workspace_id=uuid4(),
+            )
+        locked.by_ctx.assert_not_awaited()
+
+
+class TestBlockedReadsAfterAccess:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("method", ["load_pinned"])
     async def test_the_deterministic_loads(self, locked, method: str) -> None:

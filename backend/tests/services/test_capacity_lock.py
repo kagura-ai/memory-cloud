@@ -161,7 +161,7 @@ class TestEnsure:
     async def test_the_context_variant_resolves_the_owning_workspace(self) -> None:
         ws = _ws()
         db = MagicMock()
-        db.scalar = AsyncMock(return_value=ws)
+        db.scalars = AsyncMock(return_value=MagicMock(all=lambda: [ws]))
         with patch.object(cl, "_raise_if_locked", AsyncMock()) as ensure:
             await cl.ensure_context_not_capacity_locked(db, uuid4())
         ensure.assert_awaited_once_with(db, ws, None, outsider=False)
@@ -169,10 +169,31 @@ class TestEnsure:
     @pytest.mark.asyncio
     async def test_the_context_variant_passes_an_unknown_context(self) -> None:
         db = MagicMock()
-        db.scalar = AsyncMock(return_value=None)
+        db.scalars = AsyncMock(return_value=MagicMock(all=lambda: []))
         with patch.object(cl, "_raise_if_locked", AsyncMock()) as ensure:
             await cl.ensure_context_not_capacity_locked(db, uuid4())
         ensure.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_many_contexts_cost_one_query_filtered_to_candidates(self) -> None:
+        """Hot path: paid workspaces are filtered out in SQL, contexts of one
+        workspace collapse to one check."""
+        from sqlalchemy.dialects import postgresql
+
+        db = MagicMock()
+        db.scalars = AsyncMock(return_value=MagicMock(all=lambda: []))
+        await cl.ensure_contexts_not_capacity_locked(db, [uuid4(), uuid4(), None, "bad"])
+        db.scalars.assert_awaited_once()
+        sql = str(db.scalars.await_args.args[0].compile(dialect=postgresql.dialect()))
+        assert "workspaces.plan_name =" in sql
+        assert "workspaces.entitlement_source =" in sql
+
+    @pytest.mark.asyncio
+    async def test_no_valid_context_ids_means_no_query(self) -> None:
+        db = MagicMock()
+        db.scalars = AsyncMock()
+        await cl.ensure_contexts_not_capacity_locked(db, [None, "not-a-uuid"])
+        db.scalars.assert_not_awaited()
 
 
 class TestTheErrorText:
