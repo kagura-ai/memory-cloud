@@ -4,6 +4,7 @@
  */
 
 import { render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { WorkspaceSuspensionNotice } from "./WorkspaceSuspensionNotice";
@@ -69,6 +70,49 @@ describe("WorkspaceSuspensionNotice", () => {
     const { container } = render(<WorkspaceSuspensionNotice />);
     expect(mockGetWorkspacePlan).not.toHaveBeenCalled();
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("re-reads the plan on navigation while shown, so it clears after re-subscribing", async () => {
+    const { rerender } = render(<WorkspaceSuspensionNotice />);
+    expect(
+      await screen.findByText("planPage.suspended.features.sleep"),
+    ).toBeInTheDocument();
+    // No second fetch just because the notice appeared.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockGetWorkspacePlan).toHaveBeenCalledTimes(1);
+
+    mockGetWorkspacePlan.mockResolvedValue({ suspended: [] });
+    mockPathname = "/memories";
+    rerender(<WorkspaceSuspensionNotice />);
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText("planPage.suspended.features.sleep"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(mockGetWorkspacePlan).toHaveBeenCalledTimes(2);
+  });
+
+  it("still shows under StrictMode's double effect", async () => {
+    render(
+      <StrictMode>
+        <WorkspaceSuspensionNotice />
+      </StrictMode>,
+    );
+    expect(
+      await screen.findByText("planPage.suspended.features.sleep"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not re-read on navigation when nothing is paused", async () => {
+    mockGetWorkspacePlan.mockResolvedValue({ suspended: [] });
+    const { rerender } = render(<WorkspaceSuspensionNotice />);
+    await waitFor(() => expect(mockGetWorkspacePlan).toHaveBeenCalledTimes(1));
+
+    mockPathname = "/memories";
+    rerender(<WorkspaceSuspensionNotice />);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockGetWorkspacePlan).toHaveBeenCalledTimes(1);
   });
 
   it("shows nothing when the plan fetch fails", async () => {
