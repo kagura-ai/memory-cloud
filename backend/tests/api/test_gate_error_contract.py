@@ -60,6 +60,7 @@ from config.plan_tiers import (
 )
 from models.schemas import PatchMemoryRequest, RememberRequest, UpdateMemoryRequest
 from services.connector_provisioning import ConnectorProvisioningService
+from services.plan_suspension import paused_details, paused_message
 from utils.exceptions import (
     AuthorizationError,
     EmbeddingSpendCapExceeded,
@@ -211,14 +212,20 @@ REFUSALS: list[Refusal] = [
     Refusal(
         id="plan/connectors-suspended",
         site="services.plan_suspension:ensure_ingest_allowed",
-        exc=FeatureNotAvailableError.for_feature(_FREE, "connectors"),
+        exc=FeatureNotAvailableError(
+            paused_message(_FREE, "connectors", "max_connectors"),
+            **paused_details(_FREE, "connectors", "max_connectors"),
+        ),
         site_literal="connectors",
         carries_counts=False,
     ),
     Refusal(
         id="plan/resources-suspended",
         site="services.plan_suspension:ensure_ingest_allowed",
-        exc=FeatureNotAvailableError.for_feature(_FREE, "resources"),
+        exc=FeatureNotAvailableError(
+            paused_message(_FREE, "resources", "max_resource_tokens"),
+            **paused_details(_FREE, "resources", "max_resource_tokens"),
+        ),
         site_literal="resources",
         carries_counts=False,
     ),

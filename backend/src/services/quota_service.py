@@ -148,6 +148,7 @@ class QuotaService:
         raise_on_exceeded: bool = False,
         *,
         lock_workspace: bool = True,
+        count: int = 1,
     ) -> tuple[bool, str | None]:
         """Check if workspace can create more memories.
 
@@ -159,6 +160,9 @@ class QuotaService:
                 writes on it. A caller that only needs an advisory read and
                 then does long work in the same transaction (the resource
                 indexer, #1939) passes False so it does not hold the lock.
+            count: How many memories the caller is about to create. The check
+                is ``current + count > limit``; the default of 1 is the
+                single-remember case (``current >= limit``).
 
         Returns:
             Tuple of (can_create, error_message)
@@ -196,8 +200,8 @@ class QuotaService:
         )
         current_count = memory_count_result.scalar() or 0
 
-        # If no memories, workspace has no usage
-        if current_count == 0:
+        # If no memories, a single create always fits
+        if current_count == 0 and count <= 1:
             return True, None
 
         # Issue #238: Use effective quotas (base + addons)
@@ -206,7 +210,7 @@ class QuotaService:
         memory_limit = effective_quotas["memory_limit"]
 
         # Check against effective limit
-        if current_count >= memory_limit:
+        if current_count + count > memory_limit:
             error = (
                 f"Memory quota exceeded. "
                 f"Current: {current_count}, Limit: {memory_limit} ({workspace.plan_name} plan + addons)"

@@ -145,7 +145,7 @@ class WorkerActiveColorResponse(BaseModel):
 async def _connectors_suspended_for(db: AsyncSession, workspace_id: UUID) -> bool:
     """Whether the connector's workspace has its connectors suspended (#1939).
 
-    A workspace back on Free keeps its connectors; dispatch stops until it
+    A workspace on a plan without connectors (e.g. back on Free) keeps its connectors; dispatch stops until it
     re-subscribes. A missing workspace row reads as not suspended — the
     connector lookup above already decided the connector exists.
     """

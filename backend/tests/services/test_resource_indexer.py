@@ -811,7 +811,9 @@ class TestProcessIncrementalSuspendedOrFull:
         self.daily_quota.assert_not_awaited()
         # Advisory, unlocked read: the batch embeds for a while and must not
         # hold the workspace row lock the remember path takes.
-        self.memory_quota.assert_awaited_once_with(self.context.workspace_id, lock_workspace=False)
+        self.memory_quota.assert_awaited_once_with(
+            self.context.workspace_id, lock_workspace=False, count=1
+        )
 
     @pytest.mark.asyncio
     async def test_memory_limit_does_not_block_updates_or_deletes(self):

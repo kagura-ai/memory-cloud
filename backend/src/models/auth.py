@@ -1896,13 +1896,12 @@ class Workspace(Base):
     def effective_public_calls_per_day(self) -> int:
         """Public REST API calls/day: plan tier base + addon (Issue #238).
 
-        FREE and BASIC have ``public_calls_per_day == 0``. There is **no
-        runtime tier gate** on the public REST *serve* routes —
-        ``api/routes/public_search.py`` rejects non-public contexts via
-        ``context.is_public`` but does not check the owner's plan tier — so the
-        zero-base guard here is the **primary** protection against a stray
-        ``WorkspaceAddon`` row granting public-API access to a tier that
-        excludes it (#569). The ``public_contexts`` feature flag gates only
+        FREE and BASIC have ``public_calls_per_day == 0``. The public REST
+        *serve* routes pause on exactly this value
+        (``services.plan_suspension.ensure_public_serving_allowed``, #1939),
+        so the zero-base guard here is what keeps a stray ``WorkspaceAddon``
+        row from granting public-API access to a tier that excludes it
+        (#569). The ``public_contexts`` feature flag gates only
         *making* a context public (#1551, XL-only): PRO keeps
         ``public_calls_per_day == 1000`` as a serve-only cap so contexts that
         are already public keep answering.

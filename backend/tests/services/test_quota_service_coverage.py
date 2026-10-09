@@ -186,6 +186,23 @@ class TestCheckMemoryQuota:
         assert can_create is True
         assert error is None
 
+    async def test_batch_count_must_fit_under_the_limit(self, db_session, monkeypatch):
+        """#1939: a batch of N is refused when current + N would pass the limit,
+        so a resource batch cannot land partly over it."""
+        ws = await _make_workspace(db_session, "free")
+        user_id = f"member-{uuid4().hex[:8]}"
+        await _add_member(db_session, ws.id, user_id)
+        await _add_memory(db_session, user_id, ws.id)
+
+        async def _limit_three(self, workspace_id):
+            return {"memory_limit": 3}
+
+        monkeypatch.setattr(qs.EffectiveQuotaService, "get_effective_quotas", _limit_three)
+        service = QuotaService(db_session)
+
+        assert (await service.check_memory_quota(ws.id, count=2))[0] is True
+        assert (await service.check_memory_quota(ws.id, count=3))[0] is False
+
     async def test_at_limit_returns_false(self, db_session, monkeypatch):
         """current_count >= effective limit → (False, message). Limit is
         patched tiny so we don't insert 1000 rows; counting stays real."""

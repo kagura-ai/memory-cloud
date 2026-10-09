@@ -2,7 +2,7 @@
 
 /**
  * #1939: app-wide notice that paid-only features are paused on the current
- * workspace (it is back on Free). The plan endpoint is owner-only, so only
+ * workspace (its plan has no allowance for them, e.g. back on Free). The plan endpoint is owner-only, so only
  * owners — the people who can re-subscribe — fetch it and see the notice.
  * Hidden on the plan page itself, which renders the full banner. A failed
  * fetch shows nothing: this is an informational notice, not a page error.

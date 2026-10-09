@@ -122,9 +122,63 @@ async def ensure_ingest_allowed(
     """
     feature = await _suspended_ingest_feature(db, workspace, resource_pk)
     if feature == SUSPENDED_CONNECTORS:
-        raise FeatureNotAvailableError.for_feature(workspace.plan_name, "connectors")
+        raise FeatureNotAvailableError(
+            paused_message(workspace.plan_name, "connectors", "max_connectors"),
+            **paused_details(workspace.plan_name, "connectors", "max_connectors"),
+        )
     if feature == SUSPENDED_RESOURCES:
-        raise FeatureNotAvailableError.for_feature(workspace.plan_name, "resources")
+        raise FeatureNotAvailableError(
+            paused_message(workspace.plan_name, "resources", "max_resource_tokens"),
+            **paused_details(workspace.plan_name, "resources", "max_resource_tokens"),
+        )
+
+
+def paused_details(plan_name: str | None, feature: str, limit_attr: str) -> dict[str, Any]:
+    """``FEAT-001`` details for a paused feature, naming the tier that RESUMES it.
+
+    ``FeatureNotAvailableError.for_feature`` names the tier that can CREATE
+    the feature (the registry minimum, e.g. XL for connectors), but existing
+    objects resume on any tier whose limit is above zero (#1551 serve-only),
+    which is usually a lower one. The upgrade path therefore comes from the
+    numeric cap, like the other numeric refusals.
+
+    Args:
+        plan_name: The workspace's plan key.
+        feature: Registry feature key (``connectors`` / ``resources``).
+        limit_attr: ``PlanTier`` field whose positive value resumes it.
+
+    Returns:
+        ``gate`` / ``feature`` / ``required_plan`` / ``required_plan_display``
+        / ``current_plan``, ready to splat into the exception.
+    """
+    from config.plan_tiers import PLAN_TIERS, feature_gate_details, lowest_tier_with_limit
+
+    required = lowest_tier_with_limit(limit_attr, 0)
+    tier = PLAN_TIERS.get(required) if required else None
+    details = feature_gate_details(plan_name, feature)
+    details["required_plan"] = required
+    details["required_plan_display"] = tier.display_name if tier else None
+    return details
+
+
+def paused_message(plan_name: str | None, feature: str, limit_attr: str) -> str:
+    """Refusal text for a paused feature; names the tier that resumes it.
+
+    Args:
+        plan_name: The workspace's plan key.
+        feature: Registry feature key.
+        limit_attr: ``PlanTier`` field whose positive value resumes it.
+
+    Returns:
+        The message.
+    """
+    from config.plan_tiers import PLAN_TIERS, lowest_tier_with_limit, plan_display_name
+
+    required = lowest_tier_with_limit(limit_attr, 0)
+    message = f"Feature '{feature}' is paused on {plan_display_name(plan_name)} plan."
+    if required is not None:
+        message += f" Upgrade to {PLAN_TIERS[required].display_name} plan to resume it."
+    return message
 
 
 def ensure_public_serving_allowed(workspace: Workspace) -> None:

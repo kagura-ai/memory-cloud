@@ -1230,22 +1230,22 @@
       "unavailable": "Plan changes are not available on this deployment.",
       "upgradeError": "Could not start the billing session. Please try again.",
       "usageTitle": "Usage & limits",
-      "usageDescription": "Your current entitlements — the limits this workspace runs under today. Resources, connectors and public contexts that already exist keep serving on any plan, so these can exceed the create matrix below.",
+      "usageDescription": "Your current entitlements — the limits this workspace runs under today. Resources, connectors and public contexts that already exist keep serving on any plan that still has an allowance for them, so these can exceed the create matrix below.",
       "memories": "Memories",
       "contexts": "Contexts",
       "mcpPerDay": "MCP calls / day",
       "restPerDay": "REST calls / day",
       "publicPerDay": "Public calls / day",
       "suspended": {
-        "title": "Free plan limits exceeded — some features are paused",
-        "description": "Nothing was deleted. These features stay paused until the workspace re-subscribes:",
+        "title": "Some features are paused on your current plan",
+        "description": "Nothing was deleted. Your current plan has no allowance for these, so they stay paused until the workspace moves to a plan that includes them:",
         "features": {
           "connectors": "Connectors (chat ingestion)",
           "resources": "Resource ingestion",
           "sleep": "Sleep maintenance",
           "public": "Public search"
         },
-        "resume": "Re-subscribe to resume them.",
+        "resume": "Upgrade or re-subscribe to resume them.",
         "viewPlan": "View plan"
       }
     },

@@ -224,3 +224,24 @@ def test_vocabulary_is_stable() -> None:
         "sleep",
         "public",
     )
+
+
+@pytest.mark.parametrize(
+    ("feature", "limit_attr"),
+    [("connectors", "max_connectors"), ("resources", "max_resource_tokens")],
+)
+def test_paused_refusal_names_the_tier_that_resumes_it(feature, limit_attr):
+    """Existing objects resume on any tier with a positive cap (#1551), which
+    is lower than the tier that can create them — the upgrade path must say so."""
+    from config.plan_tiers import PLAN_TIERS, lowest_tier_with_limit
+    from services.plan_suspension import paused_details, paused_message
+
+    exc = FeatureNotAvailableError(
+        paused_message("free", feature, limit_attr), **paused_details("free", feature, limit_attr)
+    )
+    resume = lowest_tier_with_limit(limit_attr, 0)
+    assert exc.details["required_plan"] == resume
+    assert exc.details["required_plan_display"] == PLAN_TIERS[resume].display_name
+    assert exc.details["feature"] == feature
+    assert exc.details["gate"] == "plan"
+    assert PLAN_TIERS[resume].display_name in exc.message

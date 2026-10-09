@@ -1,7 +1,8 @@
 "use client";
 
 /**
- * #1939: paid-only features paused on a workspace that is back on Free.
+ * #1939: paid-only features paused on a plan with no allowance for them
+ * (typically a workspace back on Free).
  *
  * Nothing is deleted on a downgrade — connectors, resource tokens, Sleep
  * settings and public contexts are all kept — but the work they drive stops

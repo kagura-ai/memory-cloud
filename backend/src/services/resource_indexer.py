@@ -532,9 +532,11 @@ class ResourceIndexer:
                 # daily charge so a refused batch burns no daily budget, and
                 # without the workspace row lock: the batch then embeds for a
                 # while, and holding the lock that long would stall every
-                # remember in the workspace. Advisory, like the daily cap.
+                # remember in the workspace. Advisory, like the daily cap, and
+                # all-or-nothing for the batch: one that does not fit waits for
+                # room rather than landing partly over the limit.
                 within_limit, limit_error = await QuotaService(self.db).check_memory_quota(
-                    context.workspace_id, lock_workspace=False
+                    context.workspace_id, lock_workspace=False, count=new_count
                 )
                 if not within_limit:
                     metrics.skipped = True
