@@ -5900,31 +5900,37 @@ class MemoryService:
                     "are healthy.",
                 )
 
-            # Soft delete each found memory
+            # Resolve and validate every match BEFORE any side effect, so a
+            # request either deletes all of its matches or touches nothing: a
+            # legacy row with NULL workspace/context (the by-id path refuses
+            # it too) must not abort the sweep after earlier rows lost their
+            # search points but before the commit.
+            victims: list[Memory] = []
             for memory_response in search_response.results:
                 memory = await self.memory_repo.get(memory_response.memory_id)
-                if memory:
-                    # Tool guardrails: the same author gate as the by-id branch
-                    # — a query sweep must not delete a guardrail a member may
-                    # not delete one by one. Skipped rows are simply not counted.
-                    if not await self._may_delete_guardrail(user_id, memory):
-                        continue
-                    if not memory.workspace_id or not memory.context_id:
-                        raise ValueError(
-                            f"Memory {memory.id} has NULL workspace_id/context_id. "
-                            "This indicates data migration issue. Run Migration 063."
-                        )
-                    # The by-id path's helper: same #1924 stamp, same shared
-                    # point rule, same 3-level edge isolation.
-                    await self._soft_delete_memory(
-                        user_id, memory, str(memory.workspace_id), str(memory.context_id)
+                if not memory:
+                    continue
+                # Tool guardrails: the same author gate as the by-id branch
+                # — a query sweep must not delete a guardrail a member may
+                # not delete one by one. Skipped rows are simply not counted.
+                if not await self._may_delete_guardrail(user_id, memory):
+                    continue
+                if not memory.workspace_id or not memory.context_id:
+                    raise ValueError(
+                        f"Memory {memory.id} has NULL workspace_id/context_id. "
+                        "This indicates data migration issue. Run Migration 063."
                     )
+                victims.append(memory)
 
-                    deleted_ids.append(memory_response.memory_id)
-                    if memory.workspace_id:
-                        deleted_workspace_ids.add(memory.workspace_id)
-                    if memory.context_id:
-                        deleted_context_ids.add(memory.context_id)
+            for memory in victims:
+                # The by-id path's helper: same #1924 stamp, same shared
+                # point rule, same 3-level edge isolation.
+                await self._soft_delete_memory(
+                    user_id, memory, str(memory.workspace_id), str(memory.context_id)
+                )
+                deleted_ids.append(memory.id)
+                deleted_workspace_ids.add(memory.workspace_id)
+                deleted_context_ids.add(memory.context_id)
 
             logger.info(
                 "memories_soft_deleted_by_query",

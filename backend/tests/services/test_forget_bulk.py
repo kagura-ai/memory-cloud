@@ -463,3 +463,33 @@ class TestTheChunkIsAFixedNumberOfStatements:
         service = MemoryService(MagicMock(execute=AsyncMock(side_effect=execute)))
         await service._soft_delete_chunk("u1", own, str(WS), str(CTX))
         assert len(statements) == 2
+
+
+class TestForgetByQueryIsAllOrNothing:
+    @pytest.mark.asyncio
+    async def test_a_legacy_null_context_row_aborts_before_any_side_effect(self) -> None:
+        """A NULL-isolation match after a normal one: nothing is deleted (no
+        search point removed for a row that would then stay live)."""
+        from models.schemas import ForgetRequest
+
+        good = SimpleNamespace(id=uuid4(), workspace_id=WS, context_id=CTX, is_tool_triggered=False)
+        legacy = SimpleNamespace(
+            id=uuid4(), workspace_id=None, context_id=None, is_tool_triggered=False
+        )
+        service = MemoryService(MagicMock(commit=AsyncMock()))
+        service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
+            return_value=(MagicMock(), str(WS), str(CTX))
+        )
+        service.recall = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(
+                degraded=False,
+                results=[SimpleNamespace(memory_id=good.id), SimpleNamespace(memory_id=legacy.id)],
+            )
+        )
+        by_id = {good.id: good, legacy.id: legacy}
+        service.memory_repo = MagicMock(get=AsyncMock(side_effect=lambda mid: by_id[mid]))
+        service._soft_delete_memory = AsyncMock()  # type: ignore[method-assign]
+        with pytest.raises(ValueError, match="NULL workspace_id/context_id"):
+            await service.forget(ForgetRequest(query="old", k=5), "u1", CTX)
+        service._soft_delete_memory.assert_not_awaited()
+        service.db.commit.assert_not_awaited()
