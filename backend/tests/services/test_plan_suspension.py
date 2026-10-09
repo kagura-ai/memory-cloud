@@ -235,6 +235,31 @@ class TestSuspendedFeatures:
         assert await suspended_features(db_session, workspace) == []
 
 
+async def test_presence_checks_are_exists_not_counts() -> None:
+    """The owner's layout asks on every load, so each check stops at the
+    first row (``SELECT EXISTS``) instead of counting them all."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from sqlalchemy.dialects import postgresql
+
+    result = MagicMock()
+    result.scalar.return_value = True
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+
+    assert await suspended_features(db, _ws("free")) == [
+        SUSPENDED_CONNECTORS,
+        SUSPENDED_RESOURCES,
+        SUSPENDED_SLEEP,
+        SUSPENDED_PUBLIC,
+    ]
+    assert db.execute.await_count == 4
+    for call in db.execute.await_args_list:
+        sql = str(call.args[0].compile(dialect=postgresql.dialect())).lower()
+        assert sql.startswith("select exists")
+        assert "count(" not in sql
+
+
 def test_vocabulary_is_stable() -> None:
     """The plan API and the web UI key copy on these strings."""
     assert plan_suspension.SUSPENDABLE_FEATURES == (

@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any, Final
 from uuid import UUID
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.resource_tokens import workspace_regular_active_tokens
@@ -215,8 +215,12 @@ def ensure_public_serving_allowed(workspace: Workspace) -> None:
 
 
 async def _exists(db: AsyncSession, stmt: Select[Any]) -> bool:
-    """True when a ``SELECT count(...)`` statement counts at least one row."""
-    return bool((await db.execute(stmt)).scalar())
+    """True when ``stmt`` matches at least one row.
+
+    Runs ``SELECT EXISTS (stmt)``, which stops at the first row instead of
+    counting them all — the owner's layout asks on every page load.
+    """
+    return bool((await db.execute(select(stmt.exists()))).scalar())
 
 
 async def suspended_features(db: AsyncSession, workspace: Workspace) -> list[str]:
@@ -239,21 +243,19 @@ async def suspended_features(db: AsyncSession, workspace: Workspace) -> list[str
     suspended: list[str] = []
     if connectors_suspended(workspace) and await _exists(
         db,
-        select(func.count(WorkspaceConnector.id)).where(
-            WorkspaceConnector.workspace_id == workspace_id
-        ),
+        select(WorkspaceConnector.id).where(WorkspaceConnector.workspace_id == workspace_id),
     ):
         suspended.append(SUSPENDED_CONNECTORS)
     if resources_suspended(workspace) and await _exists(
-        db, workspace_regular_active_tokens(workspace_id, func.count(ResourceToken.id))
+        db, workspace_regular_active_tokens(workspace_id, ResourceToken.id)
     ):
         suspended.append(SUSPENDED_RESOURCES)
     if sleep_suspended(workspace) and await _exists(
-        db, select(func.count(Context.id)).where(*live_contexts, Context.sleep_mode != "skip")
+        db, select(Context.id).where(*live_contexts, Context.sleep_mode != "skip")
     ):
         suspended.append(SUSPENDED_SLEEP)
     if public_suspended(workspace) and await _exists(
-        db, select(func.count(Context.id)).where(*live_contexts, Context.is_public.is_(True))
+        db, select(Context.id).where(*live_contexts, Context.is_public.is_(True))
     ):
         suspended.append(SUSPENDED_PUBLIC)
     return suspended
