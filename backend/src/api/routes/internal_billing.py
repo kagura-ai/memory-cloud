@@ -13,14 +13,18 @@ Design decisions (documented for the cross-repo contract; see #954):
   (``status``, ``current_period_end``) are billing-owned — they are accepted in
   the contract for audit/forward-compat and echoed back, but NOT persisted here
   (no schema commitment until the billing RFC settles).
-- **No destructive cascade.** Unlike the interactive owner-facing
-  ``PUT /api/v1/workspaces/{id}/plan`` (member removal, memory transfer, token
-  revocation, guarded downgrades), this automated webhook ONLY sets the
-  canonical entitlement. Feature/quota enforcement is gate-time (reads
-  ``plan_name``), so a downgrade takes effect immediately without this endpoint
-  silently destroying members/memories on a billing glitch. Billing-driven
-  membership/context cleanup is handled by the interactive flow or a
-  reconciliation job, not here.
+- **No destructive cascade.** This automated webhook ONLY sets the canonical
+  entitlement; it never removes members, transfers memories or revokes tokens.
+  (The owner-facing ``PUT /api/v1/workspaces/{id}/plan`` that once did that
+  cleanup was removed in #1116; plans now change only through this endpoint
+  or the system-admin ``PUT /api/v1/admin/plans/workspaces/{id}/plan``.)
+  Feature and quota enforcement is gate-time (reads ``plan_name`` and the
+  effective limits), so a downgrade takes effect immediately without this endpoint
+  silently destroying data on a billing glitch: over-limit objects are kept,
+  new ones are refused, and on a return to Free the paid-only work they drive
+  (connector / resource ingest, Sleep, anonymous public serving) is suspended
+  until the workspace re-subscribes (``services/plan_suspension.py``, #1939).
+  Any data cleanup is the owner's own action.
 - **Idempotent, full-replace addons.** PUT sets absolute values; re-delivery
   (reconciliation) yields the same state and 200, never a "already on this plan"
   400. When ``addons`` is provided it is the **complete desired addon state**:
