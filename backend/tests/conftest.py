@@ -73,6 +73,7 @@ _CAPACITY_GATED_ROUTES = (
     ("api.routes.sleep_reports", "ensure_not_capacity_locked"),
     ("api.routes.agents", "ensure_not_capacity_locked"),
     ("api.routes.public_search", "ensure_not_capacity_locked"),
+    ("api.routes.context_search_config", "ensure_context_not_capacity_locked"),
 )
 
 

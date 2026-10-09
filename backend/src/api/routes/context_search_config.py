@@ -13,6 +13,7 @@ from auth.dependencies import APIKeyOrSessionUser
 from db.base import get_db
 from models.schemas import ContextSearchConfigResponse, ContextSearchConfigUpdate
 from repositories.config_repository import ContextSearchConfigRepository
+from services.capacity_lock import ensure_context_not_capacity_locked
 from services.permission_service import PermissionService
 from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
@@ -115,6 +116,9 @@ async def update_context_search_config(
         # Check context write permission (owner/editor only)
         perm_service = PermissionService(db)
         await perm_service.check_context_write(user_id, context_id)
+        # #1941: search settings are writes the MCP twin (update_search_config)
+        # refuses on a capacity-locked workspace; after the write check.
+        await ensure_context_not_capacity_locked(db, context_id, user_id=user_id)
 
         # Pydantic will automatically validate on model creation
         # Update config
@@ -190,6 +194,8 @@ async def reset_context_search_config(
         # Check context write permission (owner/editor only)
         perm_service = PermissionService(db)
         await perm_service.check_context_write(user_id, context_id)
+        # #1941: as for the update (MCP update_search_config is blocked).
+        await ensure_context_not_capacity_locked(db, context_id, user_id=user_id)
 
         repo = ContextSearchConfigRepository(db)
         config = await repo.reset_to_default(context_id)

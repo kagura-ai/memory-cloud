@@ -464,3 +464,57 @@ class TestPublicSearch:
         ensure, _, order = await self._call(user=None, bound_key=SimpleNamespace(id=7))
         assert ensure.await_args.kwargs == {"outsider": True}
         assert order == ["workspace_loaded", "capacity"]
+
+
+# ---------------------------------------------------------------------------
+# Context search settings (MCP update_search_config is blocked)
+# ---------------------------------------------------------------------------
+
+
+class TestContextSearchConfig:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ["update", "reset"])
+    async def test_writes_are_refused_after_the_write_check(self, route: str) -> None:
+        from api.routes import context_search_config as csc
+        from models.schemas import ContextSearchConfigUpdate
+
+        ctx = uuid4()
+        perm = MagicMock(check_context_write=AsyncMock())
+        repo = MagicMock(update=AsyncMock(), reset_to_default=AsyncMock())
+        with (
+            patch.object(csc, "PermissionService", return_value=perm),
+            patch.object(csc, "ContextSearchConfigRepository", return_value=repo),
+            _lock("context_search_config", "ensure_context_not_capacity_locked") as ensure,
+            pytest.raises(CapacityLockedError),
+        ):
+            if route == "update":
+                await csc.update_context_search_config(
+                    context_id=ctx,
+                    update_data=ContextSearchConfigUpdate.model_construct(fetch_factor=3),
+                    user=USER,
+                    db=MagicMock(),
+                )
+            else:
+                await csc.reset_context_search_config(context_id=ctx, user=USER, db=MagicMock())
+        perm.check_context_write.assert_awaited_once()
+        repo.update.assert_not_awaited()
+        repo.reset_to_default.assert_not_awaited()
+        assert ensure.await_args.args[1] == ctx
+        assert ensure.await_args.kwargs == {"user_id": "u1"}
+
+    @pytest.mark.asyncio
+    async def test_reading_the_settings_stays_allowed(self) -> None:
+        from api.routes import context_search_config as csc
+
+        perm = MagicMock(check_context_write=AsyncMock())
+        repo = MagicMock(get_or_create=AsyncMock(side_effect=RuntimeError("reached the read")))
+        with (
+            patch.object(csc, "PermissionService", return_value=perm),
+            patch.object(csc, "ContextSearchConfigRepository", return_value=repo),
+            _lock("context_search_config", "ensure_context_not_capacity_locked") as ensure,
+        ):
+            try:
+                await csc.get_context_search_config(context_id=uuid4(), user=USER, db=MagicMock())
+            except Exception:  # noqa: BLE001 — the route maps the read failure to 500
+                pass
+        ensure.assert_not_awaited()
