@@ -45,6 +45,7 @@ from config.settings import get_settings
 from models.auth import Workspace
 from models.file_objects import FileObject, WorkspaceStorageUsage
 from services import storage_quota_service
+from services.capacity_lock import ensure_not_capacity_locked
 from services.permission_service import PermissionService
 from storage.factory import get_blob_storage
 from storage.protocol import BlobStorageProtocol
@@ -315,6 +316,9 @@ class FileStorageService:
             )
 
         workspace = await self._load_workspace(workspace_id)
+        # #1941: a workspace over its Free capacity cannot add files until it
+        # is cleaned up (deleting files stays allowed).
+        await ensure_not_capacity_locked(self.db, workspace)
 
         # R5/R3: reserve in Redis BEFORE inserting the row so a quota
         # rejection short-circuits without touching the DB.
@@ -501,6 +505,10 @@ class FileStorageService:
                 f"upload reports {sha256[:8]}…"
             )
             raise ValidationError(msg)
+
+        # #1941: a reservation made before the workspace went over its Free
+        # capacity is not finalized while it is locked; the sweeper reclaims it.
+        await ensure_not_capacity_locked(self.db, await self._load_workspace(workspace_id))
 
         # R2 head_object verifies the client actually wrote bytes
         meta = await self._storage.head_object(file.storage_key or "")

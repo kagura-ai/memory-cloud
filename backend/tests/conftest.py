@@ -39,6 +39,29 @@ _setup_logger()
 
 
 @pytest.fixture(autouse=True)
+def _capacity_gate_needs_a_session(monkeypatch):
+    """Run ``MemoryService._ensure_capacity`` only against a session (#1941).
+
+    The capacity-lock check reads the workspace and two counts at the entry of
+    every memory read/write. Hundreds of service tests drive those methods
+    with a bare ``MagicMock`` session whose ``execute`` answers a scripted
+    sequence; the extra reads would consume it. The check therefore runs only
+    when ``self.db`` is an ``AsyncSession`` — a real one (integration tests)
+    or a ``MagicMock(spec=AsyncSession)``, which is how
+    ``tests/services/test_memory_service_capacity_lock.py`` exercises it.
+    """
+    from services.memory_service import MemoryService
+
+    real = MemoryService._ensure_capacity
+
+    async def _gated(self, *args, **kwargs):
+        if isinstance(self.db, AsyncSession):
+            await real(self, *args, **kwargs)
+
+    monkeypatch.setattr(MemoryService, "_ensure_capacity", _gated)
+
+
+@pytest.fixture(autouse=True)
 def _clear_pricing_cache():
     """Reset the process-local ``llm_pricing`` cache around every test (#713).
 

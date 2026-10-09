@@ -615,6 +615,30 @@ class MemoryService:
                 "payload store)"
             )
 
+    async def _ensure_capacity(
+        self,
+        user_id: str,
+        *,
+        workspace_id: UUID | str | None = None,
+        context_ids: list[UUID] | tuple[UUID | None, ...] = (),
+    ) -> None:
+        """Refuse when the target workspace is over its Free capacity (#1941).
+
+        The second line behind the MCP dispatcher: every REST and MCP read or
+        write that reaches this service is checked against the workspace that
+        OWNS the data (the context's, not the caller's session workspace).
+        ``forget``, listing, stats and export never call it.
+        """
+        from services.capacity_lock import (
+            ensure_context_not_capacity_locked,
+            ensure_not_capacity_locked,
+        )
+
+        if workspace_id is not None:
+            await ensure_not_capacity_locked(self.db, workspace_id, user_id=user_id)
+        for context_id in dict.fromkeys(c for c in context_ids if c is not None):
+            await ensure_context_not_capacity_locked(self.db, context_id, user_id=user_id)
+
     async def remember(
         self,
         request: RememberRequest,
@@ -663,6 +687,7 @@ class MemoryService:
             >>> result.scope
             'working'
         """
+        await self._ensure_capacity(user_id, context_ids=(current_context_id,))
         prepared = await self._prepare_remember(
             request,
             user_id,
@@ -1025,6 +1050,7 @@ class MemoryService:
         _context, workspace_id_str, context_id_str = isolation
         if not workspace_id_str or not context_id_str:
             raise ValueError("remember_batch() requires current_context_id")
+        await self._ensure_capacity(user_id, workspace_id=workspace_id_str)
         tag_canonical = (
             await self.tag_canonical_map(
                 workspace_id=UUID(workspace_id_str),
@@ -1419,6 +1445,7 @@ class MemoryService:
         Returns:
             UpdateMemoryResponse
         """
+        await self._ensure_capacity(user_id, context_ids=(current_context_id,))
         if request.external_id:
             return await self._upsert_by_external_id(
                 request, user_id, client, current_context_id, current_workspace_id
@@ -2175,6 +2202,8 @@ class MemoryService:
         from utils.text import normalize_for_search
 
         memory = await self._patch_load_authorized(memory_id, user_id)
+        # #1941: after the access check, so the lock is no existence oracle.
+        await self._ensure_capacity(user_id, workspace_id=memory.workspace_id)
 
         # `model_fields_set` is the set of field names the client EXPLICITLY
         # sent (including those set to None), so `{"details": null}` puts
@@ -2417,6 +2446,9 @@ class MemoryService:
 
         if not can_access:
             raise NotFoundException("Memory", str(memory_id))
+
+        # #1941: after the access check, so the lock is no existence oracle.
+        await self._ensure_capacity(user_id, workspace_id=memory.workspace_id)
 
         # Snapshot ``updated_at`` before bumping access stats. #1317 removed
         # the column's ``onupdate=func.now()``, so ``update_access_stats`` no
@@ -4719,6 +4751,8 @@ class MemoryService:
         | None = None,  # Issue #708: source workspace for shared-context Option A
         context_ids: list[UUID] | None = None,  # Issue #81: cross-context recall
         selection_config: RecallSelectionConfig | None = None,
+        *,
+        capacity_gate: bool = True,
     ) -> RecallResponse:
         """Search memories with Hybrid Search + Neural Memory.
 
@@ -4783,6 +4817,12 @@ class MemoryService:
             context_ids=context_ids,
             user_id=user_id,
         )
+        # #1941: ``forget(query=...)`` finds its candidates through recall and
+        # must keep working on a locked workspace — it passes False.
+        if capacity_gate:
+            await self._ensure_capacity(
+                user_id, context_ids=(current_context_id, *(context_ids or ()))
+            )
 
         # Resolve the effective query parameters once (#708 paying workspace,
         # neural flag, #81 search scope, #1220 config prefetch, #1212 search
@@ -5069,6 +5109,7 @@ class MemoryService:
         )
         if not workspace_id_str or not context_id_str:
             raise ValueError("load_pinned() requires current_context_id")
+        await self._ensure_capacity(user_id, workspace_id=workspace_id_str)
 
         effective_cap = self._clamp_pinned_cap(cap, get_settings().pinned_load_cap)
 
@@ -5232,6 +5273,7 @@ class MemoryService:
         )
         if not workspace_id_str or not context_id_str:
             raise ValueError("load_guardrails() requires current_context_id")
+        await self._ensure_capacity(user_id, workspace_id=workspace_id_str)
 
         settings = get_settings()
         pinned_cap = self._clamp_pinned_cap(None, settings.pinned_load_cap)
@@ -5509,7 +5551,9 @@ class MemoryService:
             )
 
             # Issue #82: Pass project ID to recall
-            search_response = await self.recall(recall_request, user_id, current_context_id)
+            search_response = await self.recall(
+                recall_request, user_id, current_context_id, capacity_gate=False
+            )
 
             # #1515: the pin above says the router must never choose the
             # candidate set of a destructive operation — and degradation would
@@ -5756,6 +5800,9 @@ class MemoryService:
             # above (uniform 404; no existence oracle, and no doubled
             # "not found not found" from the constructor's own suffix).
             raise NotFoundException("Memory", str(request.memory_id))
+
+        # #1941: after the access check, so the lock is no existence oracle.
+        await self._ensure_capacity(user_id, workspace_id=seed_memory.workspace_id)
 
         # Migration 063: Get workspace_id and context_id directly from seed memory
         # CRITICAL: Validate seed memory has workspace_id/context_id (data integrity)

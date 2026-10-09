@@ -173,11 +173,15 @@ async def ensure_not_capacity_locked(
             workspace_id = (
                 workspace_or_id if isinstance(workspace_or_id, UUID) else UUID(workspace_or_id)
             )
-        except ValueError:
+        except (ValueError, TypeError, AttributeError):
             return
         workspace = await db.get(Workspace, workspace_id)
     if workspace is None:
         return
+    await _raise_if_locked(db, workspace, user_id)
+
+
+async def _raise_if_locked(db: AsyncSession, workspace: Workspace, user_id: str | None) -> None:
     lock = await capacity_lock_state(db, workspace)
     if lock is None:
         return
@@ -195,7 +199,7 @@ async def ensure_context_not_capacity_locked(
         return
     try:
         cid = context_id if isinstance(context_id, UUID) else UUID(str(context_id))
-    except ValueError:
+    except (ValueError, TypeError, AttributeError):
         return
     workspace = await db.scalar(
         select(Workspace)
@@ -203,4 +207,4 @@ async def ensure_context_not_capacity_locked(
         .where(Context.id == cid)
     )
     if workspace is not None:
-        await ensure_not_capacity_locked(db, workspace, user_id=user_id)
+        await _raise_if_locked(db, workspace, user_id)

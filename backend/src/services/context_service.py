@@ -185,6 +185,12 @@ class ContextService:
                         "Admins can create shared contexts."
                     )
 
+        # #1941: a workspace over its Free capacity cannot grow until it is
+        # cleaned up. After the role check, so a non-member learns nothing.
+        from services.capacity_lock import ensure_not_capacity_locked
+
+        await ensure_not_capacity_locked(self.db, workspace)
+
         # Plan tier validation for shared contexts (Issue #165)
         if not is_private:
             # Feature-based (#1548): the tier registry decides, so a new tier

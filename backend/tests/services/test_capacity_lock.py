@@ -139,15 +139,15 @@ class TestEnsure:
         ws = _ws()
         db = MagicMock()
         db.scalar = AsyncMock(return_value=ws)
-        with patch.object(cl, "ensure_not_capacity_locked", AsyncMock()) as ensure:
+        with patch.object(cl, "_raise_if_locked", AsyncMock()) as ensure:
             await cl.ensure_context_not_capacity_locked(db, uuid4())
-        ensure.assert_awaited_once_with(db, ws, user_id=None)
+        ensure.assert_awaited_once_with(db, ws, None)
 
     @pytest.mark.asyncio
     async def test_the_context_variant_passes_an_unknown_context(self) -> None:
         db = MagicMock()
         db.scalar = AsyncMock(return_value=None)
-        with patch.object(cl, "ensure_not_capacity_locked", AsyncMock()) as ensure:
+        with patch.object(cl, "_raise_if_locked", AsyncMock()) as ensure:
             await cl.ensure_context_not_capacity_locked(db, uuid4())
         ensure.assert_not_awaited()
 
