@@ -1584,14 +1584,16 @@ runs, so re-subscribing resumes everything with no further action.
 |---|---|---|
 | `max_connectors` | connector ingest (`FEAT-001`), worker dispatch (`GET /workers/config` answers the not-ready 404, so the worker skips the team), indexing | the connector and its token |
 | `max_resource_tokens` | ingest on ordinary resource tokens (REST and MCP `ingest_events`, `FEAT-001`), indexing | the tokens and resources |
-| `sleep_enabled_contexts_limit` | Sleep runs (nightly and admin-triggered) skip the context | each context's `sleep_mode` |
+| `sleep_enabled_contexts_limit` | Sleep's LLM phases (nightly and admin-triggered); a `full` context still runs the non-LLM retention purges | each context's `sleep_mode` |
 | `public_calls_per_day` | anonymous public `search` / `info` answer `429` (`api_public_daily`), as bound keys and signed-in callers already did | `is_public` and bound keys |
 
 Pending resource events are never dropped: a held-back batch stays queued and
 is retried hourly. Resource ingest also honours the workspace `memory_limit`
-for new documents, held back the same way: a batch that would create memories
-past the limit waits as a whole (deletes in the same batch included), while a
-batch of only updates and deletes still applies. `M` keeps
+for new documents, counted against the workspace's own live memories: a batch
+applies its longest prefix, in event order, that stays within the limit (the
+deletes in that prefix free room for the documents after them), and the rest
+waits; a batch whose very first new document does not fit is held back. A
+batch of only updates and deletes is never held back. `M` keeps
 `sleep_enabled_contexts_limit` and `public_calls_per_day` at `0`, so Sleep and
 anonymous public serving are suspended there too — except that a tier whose
 `PLAN_<KEY>_FEATURES` includes `public_contexts` keeps serving its public
