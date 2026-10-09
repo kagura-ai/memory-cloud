@@ -33,6 +33,7 @@ from services.agent_registry_service import (
     add_agent_audit_row,
     add_agent_update_audit_rows,
 )
+from services.capacity_lock import ensure_not_capacity_locked
 from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
 
@@ -587,6 +588,11 @@ async def agent_bootstrap(
             # Uniform 404 (CWE-639) — nonexistent and not-yours are the same.
             raise NotFoundException("Agent" if e.code == "agent_not_found" else "Context") from e
         raise BadRequestError(message=e.message, error_code=e.code.upper()) from e
+
+    # #1941: a bootstrap rehydrates memory content (pinned, recall, state) —
+    # refused on a workspace over its Free capacity, like MCP
+    # get_agent_bootstrap. After context resolution, so no existence leak.
+    await ensure_not_capacity_locked(db, context.workspace_id, user_id=principal.user_id)
 
     # REST recall metering: the recall component runs under the caller's plan
     # limits; a query-carrying bootstrap that trips the limit degrades that

@@ -412,7 +412,7 @@ rest do not.
     "memory_count": 1200,          // live (not soft-deleted) memories in the workspace
     "memory_limit": 1000,          // effective_memory_limit (plan + addons + referral)
     "over_memories": 200,          // 0 when the memory axis is within the limit
-    "used_bytes": 157286400,       // workspace_storage_usage.used_bytes (0 when no row)
+    "used_bytes": 157286400,       // workspace_storage_usage.used_bytes (0 when no row), less files of soft-deleted contexts
     "storage_limit_bytes": 104857600,
     "over_bytes": 52428800,        // 0 when the storage axis is within the limit
     "cleanup_url": "<frontend_url>/workspace/settings/plan"
@@ -427,7 +427,14 @@ stored, so deleting down to the cap unlocks the next call. No `feature` and no `
 the refusal is not one feature or one cap. On MCP the dispatcher refuses every blocked tool
 with `error: "capacity_locked"`, the same keys as top-level fields, and a `help` naming how
 much to remove, what still works (`list`, `forget`, `delete_context`, `delete_file`,
-`get_usage`, export from the web UI) and the `cleanup_url`. `GET /api/v1/workspace/usage/current`
+`get_usage`, export from the web UI) and the `cleanup_url`. On REST the refusal comes from the memory
+service (recall, reference, explore, pinned/guardrail loads, remember, edits), uploads, context
+creation, and the graph, analysis (all but cancel), agent-state (all but delete), feedback, workspace
+sleep-report, agent-bootstrap and share-key routes. A caller who is not a member of the locked
+workspace (a share-key or public-context reader) gets the refusal with every number and
+`cleanup_url` set to `null`. Files of a soft-deleted context stay in the storage counter (the
+context can be restored) but are not counted toward the lock: the owner can no longer see or
+delete them. `GET /api/v1/workspace/usage/current`
 reports the same numbers under `capacity_lock` (`null` when not locked), and MCP `get_usage`
 under `capacity_lock`.
 

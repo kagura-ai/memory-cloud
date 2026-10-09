@@ -31,6 +31,7 @@ from auth.dependencies import get_current_user, require_admin
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import Workspace
+from services.capacity_lock import ensure_not_capacity_locked
 from services.permission_service import PermissionService
 from services.sleep_reporter_service import SleepReporterService
 from utils.logger import get_logger
@@ -294,6 +295,9 @@ async def workspace_list_sleep_reports(
     perm_service = PermissionService(db)
     await perm_service.check_workspace_admin(user["user_id"], workspace_id)
     await _enforce_sleep_plan(db, workspace_id)
+    # #1941: defence in depth — Free has no Sleep today, but a plan override
+    # could grant it; a report describes memory content (MCP blocks it too).
+    await ensure_not_capacity_locked(db, workspace_id)
 
     service = SleepReporterService(db)
     reports, total = await service.list_reports(
@@ -350,6 +354,9 @@ async def workspace_get_sleep_report_detail(
     perm_service = PermissionService(db)
     await perm_service.check_workspace_admin(user["user_id"], workspace_id)
     await _enforce_sleep_plan(db, workspace_id)
+    # #1941: defence in depth — Free has no Sleep today, but a plan override
+    # could grant it; a report describes memory content (MCP blocks it too).
+    await ensure_not_capacity_locked(db, workspace_id)
 
     service = SleepReporterService(db)
     result = await service.get_report_detail(report_id, workspace_id=workspace_id)

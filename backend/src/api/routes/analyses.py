@@ -54,6 +54,7 @@ from services.analysis.preview import (
     assert_run_size_within_cap,
     estimate_cost,
 )
+from services.capacity_lock import ensure_not_capacity_locked
 from tasks.analysis_tasks import cancel_run_task, register_run_task, run_analysis_task
 from utils.exceptions import ConflictError, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -350,8 +351,14 @@ async def _verify_context_in_workspace(
     *,
     workspace_id: UUID,
     context_id: UUID,
+    capacity_gate: bool = True,
 ) -> None:
     """Raise 404 if the context does not belong to the caller's workspace.
+
+    #1941: with ``capacity_gate`` (every route but cancel), a workspace over
+    its Free capacity is then refused with ``CAPACITY-001`` — analyses read
+    and derive from memory content, like the MCP analysis tools, which the
+    dispatcher blocks. Cancelling a run only stops work, so it stays allowed.
 
     Thin wrapper over ``query_service.verify_context_in_workspace`` —
     the SELECT is shared with the MCP-side variant in
@@ -372,6 +379,9 @@ async def _verify_context_in_workspace(
 
     if not await agent_binding_permits(db, context_id, "read"):
         raise NotFoundException("Context", str(context_id))
+
+    if capacity_gate:
+        await ensure_not_capacity_locked(db, workspace_id)
 
 
 def _params_from_body(body: AnalysisPreviewRequest) -> AnalysisParams:
@@ -788,7 +798,9 @@ async def cancel_run(
     partial LLM cost may have been incurred (#496 quota AC).
     """
     _user_id, workspace_id, _tz = access
-    await _verify_context_in_workspace(db, workspace_id=workspace_id, context_id=context_id)
+    await _verify_context_in_workspace(
+        db, workspace_id=workspace_id, context_id=context_id, capacity_gate=False
+    )
 
     row = await query_service.get_analysis(db, workspace_id=workspace_id, run_id=run_id)
     if row is None or row.context_id != context_id:

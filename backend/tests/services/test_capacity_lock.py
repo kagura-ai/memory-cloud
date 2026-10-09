@@ -164,7 +164,7 @@ class TestEnsure:
         db.scalar = AsyncMock(return_value=ws)
         with patch.object(cl, "_raise_if_locked", AsyncMock()) as ensure:
             await cl.ensure_context_not_capacity_locked(db, uuid4())
-        ensure.assert_awaited_once_with(db, ws, None)
+        ensure.assert_awaited_once_with(db, ws, None, outsider=False)
 
     @pytest.mark.asyncio
     async def test_the_context_variant_passes_an_unknown_context(self) -> None:
@@ -254,3 +254,16 @@ def _ws_model():
         addon_storage_bonus_mb=0,
     )
     return ws
+
+
+class TestShareKeyReaders:
+    @pytest.mark.asyncio
+    async def test_an_outsider_is_redacted_without_a_membership_read(self) -> None:
+        """A share-key principal carries the key creator's id, so membership
+        says nothing about who is reading: the flag forces the redacted form."""
+        db = MagicMock()
+        db.scalar = AsyncMock(side_effect=[1200, 0])
+        with pytest.raises(CapacityLockedError) as exc:
+            await cl.ensure_not_capacity_locked(db, _ws_model(), user_id="owner", outsider=True)
+        assert exc.value.details["over_memories"] is None
+        assert db.scalar.await_count == 2

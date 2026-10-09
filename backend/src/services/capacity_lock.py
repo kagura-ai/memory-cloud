@@ -176,6 +176,7 @@ async def ensure_not_capacity_locked(
     workspace_or_id: Workspace | UUID | str | None,
     *,
     user_id: str | None = None,
+    outsider: bool = False,
 ) -> None:
     """Raise :class:`CapacityLockedError` when the workspace is locked.
 
@@ -192,6 +193,9 @@ async def ensure_not_capacity_locked(
             without the counts or the cleanup URL, which describe someone
             else's workspace. ``None`` when the workspace is the caller's own
             authenticated session workspace.
+        outsider: The caller is never a member — a share-key reader, whose
+            principal carries the key creator's user id. Always refused with
+            the redacted form.
     """
     if workspace_or_id is None:
         return
@@ -207,13 +211,17 @@ async def ensure_not_capacity_locked(
         workspace = await db.get(Workspace, workspace_id)
     if workspace is None:
         return
-    await _raise_if_locked(db, workspace, user_id)
+    await _raise_if_locked(db, workspace, user_id, outsider=outsider)
 
 
-async def _raise_if_locked(db: AsyncSession, workspace: Workspace, user_id: str | None) -> None:
+async def _raise_if_locked(
+    db: AsyncSession, workspace: Workspace, user_id: str | None, *, outsider: bool = False
+) -> None:
     lock = await capacity_lock_state(db, workspace)
     if lock is None:
         return
+    if outsider:
+        raise CapacityLockedError.for_outsider()
     # The membership read runs only for a locked workspace — never on the hot path.
     if user_id is not None and not await _is_member(db, workspace.id, user_id):
         raise CapacityLockedError.for_outsider()
@@ -221,7 +229,11 @@ async def _raise_if_locked(db: AsyncSession, workspace: Workspace, user_id: str 
 
 
 async def ensure_context_not_capacity_locked(
-    db: AsyncSession, context_id: UUID | str | None, *, user_id: str | None = None
+    db: AsyncSession,
+    context_id: UUID | str | None,
+    *,
+    user_id: str | None = None,
+    outsider: bool = False,
 ) -> None:
     """:func:`ensure_not_capacity_locked` for the workspace owning ``context_id``."""
     if context_id is None:
@@ -236,4 +248,4 @@ async def ensure_context_not_capacity_locked(
         .where(Context.id == cid)
     )
     if workspace is not None:
-        await _raise_if_locked(db, workspace, user_id)
+        await _raise_if_locked(db, workspace, user_id, outsider=outsider)

@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import APIKeyOrSessionUser
 from db.base import get_db
 from services.agent_state_service import AgentStateService
+from services.capacity_lock import ensure_context_not_capacity_locked
 from services.permission_service import PermissionService
 from utils.exceptions import MemoryCloudException, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -121,6 +122,9 @@ async def set_agent_state(
             user_id, context_id, key_workspace_id=user.get("api_key_workspace_id")
         )
         await perm.check_context_write(user_id, context_id)
+        # #1941: blocked on a workspace over its Free capacity (MCP set_state /
+        # get_state are blocked at the dispatcher too). After the reach check.
+        await ensure_context_not_capacity_locked(perm.db, context_id, user_id=user_id)
         await service.set_state(context_id, key, body.value, ttl_seconds=body.ttl_seconds)
         return AgentStateKeyResponse(key=key)
     except (HTTPException, MemoryCloudException):
@@ -152,6 +156,9 @@ async def get_agent_state(
         await perm.resolve_context_for_workspace_read(
             user_id, context_id, key_workspace_id=user.get("api_key_workspace_id")
         )
+        # #1941: blocked on a workspace over its Free capacity (MCP set_state /
+        # get_state are blocked at the dispatcher too). After the reach check.
+        await ensure_context_not_capacity_locked(perm.db, context_id, user_id=user_id)
         value = await service.get_state(context_id, key)
         if value is None:
             raise NotFoundException("AgentState")
@@ -183,6 +190,9 @@ async def list_agent_state(
         await perm.resolve_context_for_workspace_read(
             user_id, context_id, key_workspace_id=user.get("api_key_workspace_id")
         )
+        # #1941: blocked on a workspace over its Free capacity (MCP set_state /
+        # get_state are blocked at the dispatcher too). After the reach check.
+        await ensure_context_not_capacity_locked(perm.db, context_id, user_id=user_id)
         states = await service.list_state(context_id)
         return AgentStateListResponse(states=states, count=len(states))
     except (HTTPException, MemoryCloudException):

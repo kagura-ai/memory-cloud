@@ -33,6 +33,7 @@ from models.api_base import TZAwareBaseModel
 from models.auth import ShareKey
 from models.schemas import RecallRequest, RecallResponse
 from services.agent_state_service import AgentStateService
+from services.capacity_lock import ensure_context_not_capacity_locked
 from services.memory_service import MemoryService
 from services.permission_service import PermissionService
 from utils.auth_helpers import get_user_id
@@ -264,6 +265,11 @@ async def share_recall(
             )
             raise AuthorizationError("Share key is bound to a different context")
 
+    # #1941: a share-key reader is never a member of the owning workspace
+    # (the principal carries the key creator's id), so a capacity lock is
+    # refused in its redacted form — no counts, no cleanup page.
+    await ensure_context_not_capacity_locked(memory_service.db, bound_context_id, outsider=True)
+
     try:
         result = await memory_service.recall(
             request,
@@ -333,6 +339,11 @@ async def share_sessions(
     on the cockpit/Slack operator path; this surface can only *observe*.
     """
     bound_context_id: UUID = principal["share_key_context_id"]
+    # #1941: agent state is blocked while locked (MCP get_state is too);
+    # redacted, as for share_recall.
+    await ensure_context_not_capacity_locked(
+        agent_state_service.db, bound_context_id, outsider=True
+    )
     entries = await agent_state_service.list_state_detail(bound_context_id)
 
     sessions = []
