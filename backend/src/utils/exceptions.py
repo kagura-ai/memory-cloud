@@ -900,16 +900,16 @@ class CapacityLockedError(MemoryCloudException):
         self,
         message: str | None = None,
         *,
-        memory_count: int,
-        memory_limit: int,
-        over_memories: int,
-        used_bytes: int,
-        storage_limit_bytes: int,
-        over_bytes: int,
-        cleanup_url: str,
+        memory_count: int | None,
+        memory_limit: int | None,
+        over_memories: int | None,
+        used_bytes: int | None,
+        storage_limit_bytes: int | None,
+        over_bytes: int | None,
+        cleanup_url: str | None,
     ) -> None:
         super().__init__(
-            message or capacity_locked_message(over_memories, over_bytes),
+            message or capacity_locked_message(over_memories or 0, over_bytes or 0),
             status_code=403,
             error_code="CAPACITY-001",
             gate=GATE_CAPACITY,
@@ -922,12 +922,37 @@ class CapacityLockedError(MemoryCloudException):
             cleanup_url=cleanup_url,
         )
 
+    @classmethod
+    def for_outsider(cls) -> "CapacityLockedError":
+        """The refusal for a caller who is not a member of the locked workspace.
+
+        A public-context reader reaches another workspace's data; that
+        workspace's counts and cleanup page are not theirs to see, so every
+        number is ``None`` (omitted on MCP, ``null`` on REST).
+        """
+        return cls(
+            "The workspace that owns this context is over its plan's capacity. Search and "
+            "saving are paused until its owner cleans it up or re-subscribes.",
+            memory_count=None,
+            memory_limit=None,
+            over_memories=None,
+            used_bytes=None,
+            storage_limit_bytes=None,
+            over_bytes=None,
+            cleanup_url=None,
+        )
+
     @property
     def help_text(self) -> str:
         """The next step for an MCP caller: what still works, how much to remove."""
         d = self.details
+        if d.get("cleanup_url") is None:
+            return (
+                "This context belongs to a workspace you do not manage; ask its owner, or "
+                "work in your own workspace's contexts."
+            )
         return (
-            f"Remove {capacity_overage_text(d['over_memories'], d['over_bytes'])} or "
+            f"Remove {capacity_overage_text(d['over_memories'] or 0, d['over_bytes'] or 0)} or "
             f"re-subscribe at {d['cleanup_url']}. Until then you can still call list, "
             "list_contexts and get_usage, delete with forget, delete_context or delete_file, "
             "and export a context from the web UI."

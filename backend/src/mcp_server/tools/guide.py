@@ -117,7 +117,9 @@ GUIDE_TOPICS: dict[str, str] = {
         "about this write will hurt recall (code: summary_short | summary_long | "
         "summary_narrative | no_tags | tag_near_duplicate). lint is advisory — the "
         "memory is stored; act on a hint with update_memory(). Errors to branch on: "
-        "quota_exceeded (a daily quota carries resets_at), validation_error."
+        "quota_exceeded (a daily quota carries resets_at), validation_error, "
+        "capacity_locked (the workspace is over its Free capacity: help names what "
+        "to remove and cleanup_url; list, forget and delete_context still work)."
     ),
     # ------------------------------------------------------------------ recall
     "recall.which-tool": (

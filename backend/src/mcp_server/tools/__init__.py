@@ -494,6 +494,15 @@ async def execute_tool_call(
             # Don't block tool execution if rate limit check fails
             logger.warning(f"rate_limit_check_failed: {e}")
 
+    # #1941: a Free workspace over its capacity loses search and saving until
+    # it is cleaned up; listing, deleting and usage stay callable. Every tool
+    # is classified in ``_capacity_gate`` (a coverage test pins the split).
+    from mcp_server.tools._capacity_gate import capacity_lock_refusal
+
+    capacity_refusal = await capacity_lock_refusal(tool_name, args, user_id, workspace_id)
+    if capacity_refusal is not None:
+        return capacity_refusal
+
     # Pre-dispatch: validate context_id for tools that require it
     # Issue #81: Skip context_id check if context_ids is provided (cross-context recall)
     if tool_name not in _TOOLS_WITHOUT_CONTEXT_ID:

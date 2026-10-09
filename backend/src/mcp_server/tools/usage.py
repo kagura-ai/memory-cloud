@@ -24,6 +24,7 @@ async def handle_get_usage(
     from db.base import get_db
     from models.auth import Context, Workspace, WorkspaceMember
     from models.memory import Memory
+    from services.capacity_lock import capacity_lock_state
     from services.effective_quota_service import EffectiveQuotaService
     from services.quota_service import QuotaService
 
@@ -71,6 +72,13 @@ async def handle_get_usage(
 
             mcp_used_today = await QuotaService(db).count_mcp_calls_today(workspace_id)
 
+            # #1941: ``null`` unless the workspace is over its Free capacity;
+            # then the numbers, the cleanup page and what still works.
+            lock = await capacity_lock_state(db, workspace)
+            capacity_lock = None
+            if lock is not None:
+                capacity_lock = {**lock.as_dict(), "help": lock.to_error().help_text}
+
             await _log_tool_usage(db, user_id, "get_usage", start_time, 200, None, workspace_id)
 
             return _success_response(
@@ -92,6 +100,7 @@ async def handle_get_usage(
                     "used": mcp_used_today,
                     "limit": quotas["mcp_calls_per_day"],
                 },
+                capacity_lock=capacity_lock,
             )
 
         except Exception as e:

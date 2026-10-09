@@ -190,3 +190,75 @@ class TestGetUsage:
         assert data["cause"] == "internal_error"
         assert data["correlation_id"]
         assert "connection lost" not in result[0].text
+
+
+class TestGetUsageCapacityLock:
+    """#1941: get_usage says when the workspace is locked and how far over."""
+
+    async def _call(self, lock):
+        workspace_id = uuid4()
+        ws = MagicMock()
+        ws.id = workspace_id
+        ws.plan_name = "free"
+        results = []
+        for value in (ws, 1012, 1, 1):
+            r = MagicMock()
+            r.scalar_one_or_none.return_value = value
+            r.scalar.return_value = value
+            results.append(r)
+        mock_db = AsyncMock()
+        mock_db.execute.side_effect = results
+
+        async def mock_get_db():
+            yield mock_db
+
+        quotas = AsyncMock()
+        quotas.get_effective_quotas.return_value = {
+            "memory_limit": 1000,
+            "mcp_calls_per_day": 100,
+            "max_contexts": 3,
+            "max_members": 1,
+        }
+        with (
+            patch("db.base.get_db", new=mock_get_db),
+            patch("services.effective_quota_service.EffectiveQuotaService", return_value=quotas),
+            patch(
+                "services.quota_service.QuotaService.count_mcp_calls_today",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch(
+                "services.capacity_lock.capacity_lock_state",
+                new_callable=AsyncMock,
+                return_value=lock,
+            ),
+        ):
+            result = await handle_get_usage({}, "u1", workspace_id)
+        import json
+
+        return json.loads(result[0].text)
+
+    @pytest.mark.asyncio
+    async def test_null_when_not_locked(self):
+        data = await self._call(None)
+        assert data["status"] == "success"
+        assert data["capacity_lock"] is None
+
+    @pytest.mark.asyncio
+    async def test_the_numbers_and_the_way_out_when_locked(self):
+        from services.capacity_lock import CapacityLock
+
+        lock = CapacityLock(
+            memory_count=1012,
+            memory_limit=1000,
+            over_memories=12,
+            used_bytes=0,
+            storage_limit_bytes=100,
+            over_bytes=0,
+            cleanup_url="https://app.example.test/workspace/settings/plan",
+        )
+        data = await self._call(lock)
+        block = data["capacity_lock"]
+        assert block["over_memories"] == 12
+        assert block["cleanup_url"].endswith("/workspace/settings/plan")
+        assert "12 memories" in block["help"]

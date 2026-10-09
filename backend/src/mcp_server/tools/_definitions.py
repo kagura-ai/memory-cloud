@@ -1100,7 +1100,7 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
             "readOnly": True,
             "description": """Get the current workspace's usage against its effective limits (plan tier + addons), e.g. to check quota before bulk operations.
 
-Returns: {status, plan, memories: {used, limit, percentage}, contexts: {used, limit}, members: {used, limit}, mcp_calls_per_day: {used, limit}}.""",
+Returns: {status, plan, memories: {used, limit, percentage}, contexts: {used, limit}, members: {used, limit}, mcp_calls_per_day: {used, limit}, capacity_lock}. capacity_lock is null unless the workspace is over its Free capacity; then {over_memories, over_bytes, cleanup_url, help, ...}, and search and saving answer capacity_locked until it is cleaned up.""",
             "inputSchema": {
                 "type": "object",
                 "properties": {},

@@ -141,7 +141,7 @@ class TestEnsure:
         db.scalar = AsyncMock(return_value=ws)
         with patch.object(cl, "ensure_not_capacity_locked", AsyncMock()) as ensure:
             await cl.ensure_context_not_capacity_locked(db, uuid4())
-        ensure.assert_awaited_once_with(db, ws)
+        ensure.assert_awaited_once_with(db, ws, user_id=None)
 
     @pytest.mark.asyncio
     async def test_the_context_variant_passes_an_unknown_context(self) -> None:
@@ -184,3 +184,50 @@ class TestTheErrorText:
         for allowed in ("list", "forget", "delete_context", "delete_file", "export"):
             assert allowed in help_text
         assert "https://app.example.test/workspace/settings/plan" in help_text
+
+
+class TestOutsiders:
+    @pytest.mark.asyncio
+    async def test_a_non_member_is_refused_without_the_numbers(self) -> None:
+        """A public-context reader must not learn another workspace's counts."""
+        db = MagicMock()
+        db.scalar = AsyncMock(side_effect=[1200, 0, None])  # count, bytes, no membership
+        with pytest.raises(CapacityLockedError) as exc:
+            await cl.ensure_not_capacity_locked(db, _ws_model(), user_id="outsider")
+        details = exc.value.details
+        assert details["gate"] == GATE_CAPACITY
+        for key in ("memory_count", "over_memories", "used_bytes", "cleanup_url"):
+            assert details[key] is None
+        assert "1200" not in exc.value.message
+        assert "ask its owner" in exc.value.help_text
+
+    @pytest.mark.asyncio
+    async def test_a_member_gets_the_numbers(self) -> None:
+        db = MagicMock()
+        db.scalar = AsyncMock(side_effect=[1200, 0, 7])  # membership row id
+        with pytest.raises(CapacityLockedError) as exc:
+            await cl.ensure_not_capacity_locked(db, _ws_model(), user_id="member")
+        assert exc.value.details["over_memories"] == 200
+
+    @pytest.mark.asyncio
+    async def test_an_unlocked_workspace_never_reads_membership(self) -> None:
+        db = MagicMock()
+        db.scalar = AsyncMock(side_effect=[10, 0])
+        await cl.ensure_not_capacity_locked(db, _ws_model(), user_id="anyone")
+        assert db.scalar.await_count == 2
+
+
+def _ws_model():
+    """A real ``Workspace`` instance so the isinstance branch is taken."""
+    from models.auth import Workspace
+
+    ws = Workspace(
+        id=uuid4(),
+        name="w",
+        plan_name="free",
+        entitlement_source=ENTITLEMENT_SOURCE_EXTERNAL_BILLING,
+        addon_memory_bonus=0,
+        referral_memory_bonus=0,
+        addon_storage_bonus_mb=0,
+    )
+    return ws

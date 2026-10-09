@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.plan_tiers import PlanName
 from config.settings import get_settings
-from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING, Context, Workspace
+from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING, Context, Workspace, WorkspaceMember
 from models.file_objects import WorkspaceStorageUsage
 from models.memory import Memory
 from utils.exceptions import CapacityLockedError
@@ -132,14 +132,37 @@ async def capacity_lock_state(db: AsyncSession, workspace: Workspace) -> Capacit
     )
 
 
+async def _is_member(db: AsyncSession, workspace_id: UUID, user_id: str) -> bool:
+    found = await db.scalar(
+        select(WorkspaceMember.id).where(
+            WorkspaceMember.workspace_id == workspace_id,
+            WorkspaceMember.user_id == user_id,
+        )
+    )
+    return found is not None
+
+
 async def ensure_not_capacity_locked(
-    db: AsyncSession, workspace_or_id: Workspace | UUID | str | None
+    db: AsyncSession,
+    workspace_or_id: Workspace | UUID | str | None,
+    *,
+    user_id: str | None = None,
 ) -> None:
     """Raise :class:`CapacityLockedError` when the workspace is locked.
 
     ``None`` or an unknown id passes: the caller's own not-found / permission
     handling owns that case, and the lock must never turn into an existence
     oracle.
+
+    Args:
+        db: Session.
+        workspace_or_id: The target workspace (model or id).
+        user_id: The caller, when the workspace came from a client-supplied
+            id (a context, a memory, a file). A caller who is not a member of
+            the locked workspace — a public-context reader — is refused
+            without the counts or the cleanup URL, which describe someone
+            else's workspace. ``None`` when the workspace is the caller's own
+            authenticated session workspace.
     """
     if workspace_or_id is None:
         return
@@ -156,12 +179,16 @@ async def ensure_not_capacity_locked(
     if workspace is None:
         return
     lock = await capacity_lock_state(db, workspace)
-    if lock is not None:
-        raise lock.to_error()
+    if lock is None:
+        return
+    # The membership read runs only for a locked workspace — never on the hot path.
+    if user_id is not None and not await _is_member(db, workspace.id, user_id):
+        raise CapacityLockedError.for_outsider()
+    raise lock.to_error()
 
 
 async def ensure_context_not_capacity_locked(
-    db: AsyncSession, context_id: UUID | str | None
+    db: AsyncSession, context_id: UUID | str | None, *, user_id: str | None = None
 ) -> None:
     """:func:`ensure_not_capacity_locked` for the workspace owning ``context_id``."""
     if context_id is None:
@@ -176,4 +203,4 @@ async def ensure_context_not_capacity_locked(
         .where(Context.id == cid)
     )
     if workspace is not None:
-        await ensure_not_capacity_locked(db, workspace)
+        await ensure_not_capacity_locked(db, workspace, user_id=user_id)
