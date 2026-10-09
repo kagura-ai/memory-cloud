@@ -242,7 +242,15 @@ def test_suspension_gates_are_declared() -> None:
 def test_suspension_never_asks_has_feature() -> None:
     """Feature flags gate creation only; Basic / Pro keep positive serve-only
     limits for objects made on a higher plan (#1551). A suspension decided by
-    ``has_feature`` would stop those, so the module must test limits only."""
+    ``has_feature`` would stop those, so the module tests limits — the one
+    exception is ``public_suspended``, where the flag can only LIFT a pause
+    (a tier allowed to create public contexts keeps serving them)."""
     tree = ast.parse((SRC_ROOT / "services" / "plan_suspension.py").read_text(encoding="utf-8"))
-    callees = {_callee_name(node) for node in ast.walk(tree) if isinstance(node, ast.Call)}
-    assert not callees & GATE_CALLEES
+    offenders = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        callees = {_callee_name(n) for n in ast.walk(fn) if isinstance(n, ast.Call)}
+        if callees & GATE_CALLEES and fn.name != "public_suspended":
+            offenders.append(fn.name)
+    assert not offenders

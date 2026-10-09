@@ -816,8 +816,8 @@ class TestProcessIncrementalSuspendedOrFull:
         )
 
     @pytest.mark.asyncio
-    async def test_memory_limit_does_not_block_updates_or_deletes(self):
-        """Re-indexing known docs and deletes create no row — they still apply."""
+    async def test_memory_limit_does_not_block_a_batch_of_only_updates_or_deletes(self):
+        """A batch that creates no row (re-indexing known docs, deletes) still applies."""
         delete = _make_event()
         delete.op = "delete"
         indexer = self._indexer([delete], suspended=False)
@@ -826,6 +826,20 @@ class TestProcessIncrementalSuspendedOrFull:
         self.memory_quota.assert_not_awaited()
         assert indexer._apply_delete.await_count == 1
         assert metrics.skipped is False
+
+    @pytest.mark.asyncio
+    async def test_a_mixed_batch_over_the_limit_holds_its_deletes_too(self):
+        """All-or-nothing per batch (like the daily cap): a batch carrying a new
+        document waits as a whole, deletes included, keeping the offset."""
+        delete = _make_event()
+        delete.op = "delete"
+        indexer = self._indexer([_upsert("doc_new"), delete], suspended=False)
+        metrics = await self._process(indexer, memory_ok=False)
+
+        assert metrics.reason == "memory_limit_exceeded"
+        indexer._apply_upsert.assert_not_awaited()
+        assert indexer._apply_delete.await_count == 0
+        assert self.state.last_offset == 0
 
     @pytest.mark.asyncio
     async def test_plan_suspended_reads_the_workspace(self):

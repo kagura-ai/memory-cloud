@@ -68,6 +68,25 @@ class TestPredicates:
         assert connectors_suspended(ws)
         assert sleep_suspended(ws)
 
+    def test_basic_pauses_sleep_and_public_serving(self) -> None:
+        """M keeps both allowances at 0, so they pause there too (documented)."""
+        ws = _ws("basic")
+        assert sleep_suspended(ws)
+        assert public_suspended(ws)
+
+    def test_a_tier_that_may_create_public_contexts_keeps_serving(self, monkeypatch) -> None:
+        """Self-hosted ``PLAN_BASIC_FEATURES=...,public_contexts``: the flag can
+        only lift the pause (public_calls_per_day has no env override)."""
+        import config.plan_tiers as plan_tiers
+
+        monkeypatch.setattr(
+            plan_tiers,
+            "has_feature",
+            lambda plan, feature: feature == "public_contexts" and plan == "basic",
+        )
+        assert not public_suspended(_ws("basic"))
+        assert public_suspended(_ws("free"))
+
 
 class TestPublicServing:
     def test_refused_on_free_with_the_public_quota_type(self) -> None:

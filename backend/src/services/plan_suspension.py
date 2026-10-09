@@ -56,8 +56,19 @@ def sleep_suspended(workspace: Workspace) -> bool:
 
 
 def public_suspended(workspace: Workspace) -> bool:
-    """True when the workspace has no public-call allowance (public serving stops)."""
-    return workspace.effective_public_calls_per_day <= 0
+    """True when the workspace has no public-call allowance (public serving stops).
+
+    One exception: a tier whose feature set includes ``public_contexts`` (a
+    self-hosted ``PLAN_<KEY>_FEATURES`` override; ``public_calls_per_day`` has
+    no env override) can create public contexts, so pausing what it may
+    create would be wrong. This is the only feature-flag read in the module,
+    and it can only lift a pause, never cause one (#1551 still holds).
+    """
+    if workspace.effective_public_calls_per_day > 0:
+        return False
+    from config.plan_tiers import has_feature
+
+    return not has_feature(workspace.plan_name, "public_contexts")
 
 
 async def _is_connector_resource(db: AsyncSession, resource_pk: UUID | None) -> bool:

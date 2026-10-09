@@ -49,7 +49,7 @@ def _db(plan: str):
     return db, context
 
 
-async def _search(plan: str):
+async def _search(plan: str, user: dict | None = None):
     db, context = _db(plan)
     search = MagicMock()
     search.return_value.hybrid_search = AsyncMock(side_effect=_Stop())
@@ -61,7 +61,7 @@ async def _search(plan: str):
         return await public_search(
             context_id=context.id,
             request=PublicSearchRequest(query="q", limit=3),
-            user=None,
+            user=user,
             api_key=None,
             db=db,
         )
@@ -97,3 +97,19 @@ async def test_anonymous_info_served_on_pro():
     db, context = _db("pro")
     body = await get_public_context_info(context_id=context.id, api_key=None, db=db)
     assert body["is_public"] is True
+
+
+@pytest.mark.asyncio
+async def test_anonymous_search_refused_on_basic():
+    """M has no public-call allowance either (documented in deployment.md)."""
+    with pytest.raises(QuotaExceededError):
+        await _search("basic")
+
+
+@pytest.mark.asyncio
+async def test_signed_in_member_search_is_not_paused_on_free():
+    """Only anonymous callers meet the pause; a member session reads its own data."""
+    # Whatever the member path answers downstream, it is not the plan pause.
+    with pytest.raises(HTTPException) as exc:
+        await _search("free", user={"user_id": "owner"})
+    assert not isinstance(exc.value, QuotaExceededError)

@@ -1589,9 +1589,13 @@ runs, so re-subscribing resumes everything with no further action.
 
 Pending resource events are never dropped: a held-back batch stays queued and
 is retried hourly. Resource ingest also honours the workspace `memory_limit`
-(new documents only — updates and deletes still apply), held back the same
-way. `M` keeps `sleep_enabled_contexts_limit` and `public_calls_per_day` at
-`0`, so Sleep and anonymous public serving are suspended there too.
+for new documents, held back the same way: a batch that would create memories
+past the limit waits as a whole (deletes in the same batch included), while a
+batch of only updates and deletes still applies. `M` keeps
+`sleep_enabled_contexts_limit` and `public_calls_per_day` at `0`, so Sleep and
+anonymous public serving are suspended there too — except that a tier whose
+`PLAN_<KEY>_FEATURES` includes `public_contexts` keeps serving its public
+contexts anonymously (`public_calls_per_day` itself has no override).
 `GET /api/v1/workspaces/{id}/plan` lists what is suspended in `suspended`
 (only features the workspace still has something for), and the web UI shows
 the owner a banner. Members, contexts beyond the cap and partial overage
