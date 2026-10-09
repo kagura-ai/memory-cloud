@@ -40,6 +40,7 @@ def _ws():
     ws.id = _WS_ID
     ws.name = "Research"
     ws.owner_user_id = "owner-1"
+    ws.entitlement_source = "external_billing"
     return ws
 
 
@@ -215,3 +216,17 @@ class TestAtMostOnce:
         assert len(harness.redis.keys) == 2  # period claim and cooldown both kept
         again = harness.client.post(_PATH, json=_BODY, headers=_AUTH)
         assert again.json()["reason"] == "already_sent"
+
+
+class TestProvenance:
+    def test_an_admin_managed_workspace_is_never_warned(self, harness) -> None:
+        harness.workspace.entitlement_source = "admin_grant"
+        resp = harness.client.post(_PATH, json=_BODY, headers=_AUTH)
+        assert resp.json() == {
+            "sent": False,
+            "reason": "not_billing_managed",
+            "over_memories": 0,
+            "over_bytes": 0,
+        }
+        harness.email.send_capacity_lock_notice.assert_not_awaited()
+        assert harness.redis.keys == {}

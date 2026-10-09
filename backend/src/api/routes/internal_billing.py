@@ -364,7 +364,9 @@ class CapacityLockNoticeRequest(BaseModel):
 class CapacityLockNoticeResult(BaseModel):
     """Outcome of a notice request. Never carries the recipient address.
 
-    ``reason`` (when ``sent`` is false): ``within_capacity`` (the projected
+    ``reason`` (when ``sent`` is false): ``not_billing_managed`` (the
+    workspace's entitlement is admin-managed or self-hosted — it is never
+    locked, so it is never warned), ``within_capacity`` (the projected
     Free state fits — nothing to warn about), ``already_sent`` (a notice for
     this ``period_end`` was already sent), ``cooldown`` (a notice for this
     workspace was sent in the last 24 hours, for any ``period_end``),
@@ -446,6 +448,13 @@ async def send_capacity_lock_notice(
     ).scalar_one_or_none()
     if workspace is None:
         raise NotFoundException("Workspace")
+
+    # The lock only ever applies to a billing-managed workspace (#1941): an
+    # admin-managed or self-hosted one never gets a "will be locked" email.
+    if workspace.entitlement_source != ENTITLEMENT_SOURCE_EXTERNAL_BILLING:
+        return CapacityLockNoticeResult(
+            sent=False, reason="not_billing_managed", over_memories=0, over_bytes=0
+        )
 
     lock = await projected_free_capacity(db, workspace)
     if lock is None:
