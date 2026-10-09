@@ -19,7 +19,6 @@ Issue #149 / #238 / #229.
 """
 
 from datetime import timedelta
-from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -126,20 +125,6 @@ class TestCheckMemoryQuota:
         assert can_create is True
         assert error is None
 
-    @pytest.mark.parametrize("lock", [True, False])
-    async def test_workspace_row_lock_is_optional(self, lock):
-        """#1939: the indexer reads the limit without the remember path's row
-        lock, which it would otherwise hold for the whole embedding batch."""
-        db = MagicMock()
-        result = MagicMock()
-        result.scalar_one_or_none.return_value = None  # workspace missing → early return
-        db.execute = AsyncMock(return_value=result)
-
-        await QuotaService(db).check_memory_quota(uuid4(), lock_workspace=lock)
-
-        stmt = db.execute.await_args.args[0]
-        assert (stmt._for_update_arg is not None) is lock
-
     async def test_under_limit_returns_true(self, db_session):
         """A few memories well under the free 1000 limit → allowed."""
         ws = await _make_workspace(db_session, "free")
@@ -185,23 +170,6 @@ class TestCheckMemoryQuota:
 
         assert can_create is True
         assert error is None
-
-    async def test_batch_count_must_fit_under_the_limit(self, db_session, monkeypatch):
-        """#1939: a batch of N is refused when current + N would pass the limit,
-        so a resource batch cannot land partly over it."""
-        ws = await _make_workspace(db_session, "free")
-        user_id = f"member-{uuid4().hex[:8]}"
-        await _add_member(db_session, ws.id, user_id)
-        await _add_memory(db_session, user_id, ws.id)
-
-        async def _limit_three(self, workspace_id):
-            return {"memory_limit": 3}
-
-        monkeypatch.setattr(qs.EffectiveQuotaService, "get_effective_quotas", _limit_three)
-        service = QuotaService(db_session)
-
-        assert (await service.check_memory_quota(ws.id, count=2))[0] is True
-        assert (await service.check_memory_quota(ws.id, count=3))[0] is False
 
     async def test_at_limit_returns_false(self, db_session, monkeypatch):
         """current_count >= effective limit → (False, message). Limit is

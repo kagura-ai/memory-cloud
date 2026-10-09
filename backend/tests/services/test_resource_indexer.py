@@ -584,13 +584,13 @@ class TestProcessIncrementalResolvesRoutingOncePerBatch:
         indexer._apply_delete = AsyncMock()
         indexer._existing_resource_doc_ids = AsyncMock(return_value=set())
         indexer._plan_suspended = AsyncMock(return_value=False)
+        indexer._workspace_memory_room = AsyncMock(return_value=10_000)
         indexer.db.commit = AsyncMock()
 
         with (
             patch("services.resource_indexer.resolve_context_routing", mock_resolve),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            quota_cls.return_value.check_memory_quota = AsyncMock(return_value=(True, None))
             quota_cls.return_value.check_memories_per_day = AsyncMock(return_value=(True, None))
             await indexer.process_incremental("res_test", uuid4())
 
@@ -635,6 +635,7 @@ class TestProcessIncrementalMemoriesPerDay:
         indexer._apply_upsert = AsyncMock()
         indexer._apply_delete = AsyncMock()
         indexer._plan_suspended = AsyncMock(return_value=False)
+        indexer._workspace_memory_room = AsyncMock(return_value=10_000)
         indexer.db.commit = AsyncMock()
         return indexer
 
@@ -654,7 +655,6 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            quota_cls.return_value.check_memory_quota = AsyncMock(return_value=(True, None))
             quota_cls.return_value.check_memories_per_day = quota
             metrics = await indexer.process_incremental("res_test", uuid4())
 
@@ -679,7 +679,6 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            quota_cls.return_value.check_memory_quota = AsyncMock(return_value=(True, None))
             quota_cls.return_value.check_memories_per_day = quota
             metrics = await indexer.process_incremental("res_test", uuid4())
 
@@ -701,7 +700,6 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            quota_cls.return_value.check_memory_quota = AsyncMock(return_value=(True, None))
             quota_cls.return_value.check_memories_per_day = quota
             await indexer.process_incremental("res_test", uuid4())
 
@@ -717,7 +715,6 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            quota_cls.return_value.check_memory_quota = AsyncMock(return_value=(True, None))
             quota_cls.return_value.check_memories_per_day = quota
             metrics = await indexer.process_incremental("res_test", uuid4())
 
@@ -740,7 +737,6 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            quota_cls.return_value.check_memory_quota = AsyncMock(return_value=(True, None))
             quota_cls.return_value.check_memories_per_day = quota
             await indexer.process_incremental("res_test", uuid4())
 
@@ -749,15 +745,36 @@ class TestProcessIncrementalMemoriesPerDay:
         assert indexer._apply_delete.await_count == 1
 
 
+def _delete(doc_id: str, event_id: int, version: int | None = None) -> MagicMock:
+    event = _make_event()
+    event.op = "delete"
+    event.doc_id = doc_id
+    event.version = version
+    event.id = event_id
+    return event
+
+
+def _numbered(*events: MagicMock) -> list[MagicMock]:
+    """Give each event a distinct, increasing id (the offset the batch advances to)."""
+    for event_id, event in enumerate(events, start=1):
+        event.id = event_id
+        # Naive, like the TIMESTAMP WITHOUT TIME ZONE column the lag is read from.
+        event.created_at = datetime(2026, 4, 15)
+    return list(events)
+
+
 class TestProcessIncrementalSuspendedOrFull:
     """#1939: a Free-again workspace's events are kept, not dropped.
 
     A suspended resource (the plan no longer carries connectors / resources)
-    or a workspace at its memory limit applies nothing and leaves the offset
-    where it was; the job re-queues the row at a sane interval.
+    applies nothing and leaves the offset where it was. Against the workspace
+    memory limit the batch applies its longest prefix (in event order) that
+    fits, so a nearly full workspace still makes progress — and the deletes in
+    that prefix free room for the upserts after them. The job re-queues the
+    row for whatever is left.
     """
 
-    def _indexer(self, events, *, suspended: bool):
+    def _indexer(self, events, *, suspended: bool = False, room: int = 10_000, existing=None):
         with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
             indexer = ResourceIndexer(AsyncMock())
         self.state = MagicMock(last_offset=0, last_run_at=None, metrics=None)
@@ -766,26 +783,26 @@ class TestProcessIncrementalSuspendedOrFull:
         indexer._fetch_events = AsyncMock(return_value=events)
         indexer._get_latest_schema = AsyncMock(return_value=_make_schema())
         indexer._get_context = AsyncMock(return_value=self.context)
-        indexer._existing_resource_doc_ids = AsyncMock(return_value=set())
+        indexer._existing_resource_doc_ids = AsyncMock(return_value=set(existing or ()))
         indexer._apply_upsert = AsyncMock()
         indexer._apply_delete = AsyncMock()
         indexer._plan_suspended = AsyncMock(return_value=suspended)
+        indexer._workspace_memory_room = AsyncMock(return_value=room)
         indexer.db.commit = AsyncMock()
         return indexer
 
-    async def _process(self, indexer, *, memory_ok: bool = True):
+    async def _process(self, indexer):
         routing = AsyncMock(return_value=("kagura_memories", MagicMock()))
         with (
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
-            self.memory_quota = AsyncMock(
-                return_value=(memory_ok, None if memory_ok else "Memory quota exceeded")
-            )
             self.daily_quota = AsyncMock(return_value=(True, None))
-            quota_cls.return_value.check_memory_quota = self.memory_quota
             quota_cls.return_value.check_memories_per_day = self.daily_quota
             return await indexer.process_incremental("res_test", uuid4())
+
+    def _applied_doc_ids(self, indexer) -> list[str]:
+        return [c.args[0].doc_id for c in indexer._apply_upsert.await_args_list]
 
     @pytest.mark.asyncio
     async def test_suspended_resource_applies_nothing_and_keeps_offset(self):
@@ -799,9 +816,9 @@ class TestProcessIncrementalSuspendedOrFull:
         self.daily_quota.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_memory_limit_reached_applies_nothing_and_charges_no_daily_budget(self):
-        indexer = self._indexer([_upsert("doc_1")], suspended=False)
-        metrics = await self._process(indexer, memory_ok=False)
+    async def test_no_room_and_a_new_doc_first_holds_back_without_daily_charge(self):
+        indexer = self._indexer(_numbered(_upsert("doc_1"), _upsert("doc_2")), room=0)
+        metrics = await self._process(indexer)
 
         assert metrics.skipped is True
         assert metrics.reason == "memory_limit_exceeded"
@@ -809,37 +826,75 @@ class TestProcessIncrementalSuspendedOrFull:
         assert self.state.last_offset == 0
         # The memory limit is read first, so a refused batch burns no daily budget.
         self.daily_quota.assert_not_awaited()
-        # Advisory, unlocked read: the batch embeds for a while and must not
-        # hold the workspace row lock the remember path takes.
-        self.memory_quota.assert_awaited_once_with(
-            self.context.workspace_id, lock_workspace=False, count=1
-        )
+        indexer._workspace_memory_room.assert_awaited_once_with(self.context.workspace_id)
 
     @pytest.mark.asyncio
-    async def test_memory_limit_does_not_block_a_batch_of_only_updates_or_deletes(self):
-        """A batch that creates no row (re-indexing known docs, deletes) still applies."""
-        delete = _make_event()
-        delete.op = "delete"
-        indexer = self._indexer([delete], suspended=False)
-        metrics = await self._process(indexer, memory_ok=False)
+    async def test_the_prefix_that_fits_is_applied_and_the_offset_advances(self):
+        events = _numbered(*(_upsert(f"doc_{n}") for n in range(1, 5)))
+        indexer = self._indexer(events, room=2)
+        metrics = await self._process(indexer)
 
-        self.memory_quota.assert_not_awaited()
+        assert self._applied_doc_ids(indexer) == ["doc_1", "doc_2"]
+        assert self.state.last_offset == 2
+        self.daily_quota.assert_awaited_once_with(self.context.workspace_id, count=2)
+        # Progress was made, so not "skipped"; the reason re-queues the rest.
+        assert metrics.skipped is False
+        assert metrics.reason == "memory_limit_exceeded"
+        indexer.db.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_deletes_before_the_first_non_fitting_upsert_apply_and_free_room(self):
+        """At the limit: deleting a known doc frees one slot for the next new doc."""
+        events = _numbered(
+            _delete("doc_old", 0),  # known doc, all versions → frees a slot
+            _upsert("doc_new_1"),  # takes that slot
+            _delete("doc_other", 0, version=3),  # one version only: frees nothing
+            _upsert("doc_new_2"),  # does not fit → batch stops here
+            _delete("doc_after", 0),
+        )
+        indexer = self._indexer(events, room=0, existing={"doc_old", "doc_other"})
+        metrics = await self._process(indexer)
+
+        assert indexer._apply_delete.await_count == 2
+        assert self._applied_doc_ids(indexer) == ["doc_new_1"]
+        assert self.state.last_offset == 3
+        assert metrics.reason == "memory_limit_exceeded"
+        self.daily_quota.assert_awaited_once_with(self.context.workspace_id, count=1)
+
+    @pytest.mark.asyncio
+    async def test_updates_of_known_docs_apply_with_no_room(self):
+        events = _numbered(_upsert("doc_known", 2), _upsert("doc_new"))
+        indexer = self._indexer(events, room=0, existing={"doc_known"})
+        metrics = await self._process(indexer)
+
+        assert self._applied_doc_ids(indexer) == ["doc_known"]
+        assert self.state.last_offset == 1
+        assert metrics.skipped is False
+        # The prefix creates nothing, so there is nothing to charge.
+        self.daily_quota.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_batch_that_fits_is_applied_whole(self):
+        delete = _delete("doc_x", 0)
+        events = _numbered(_upsert("doc_1"), delete, _upsert("doc_2"), _upsert("doc_3"))
+        indexer = self._indexer(events, room=3)
+        metrics = await self._process(indexer)
+
+        assert self._applied_doc_ids(indexer) == ["doc_1", "doc_2", "doc_3"]
+        assert indexer._apply_delete.await_count == 1
+        assert self.state.last_offset == 4
+        assert metrics.skipped is False
+        assert metrics.reason is None
+        self.daily_quota.assert_awaited_once_with(self.context.workspace_id, count=3)
+
+    @pytest.mark.asyncio
+    async def test_a_batch_that_creates_nothing_never_reads_the_limit(self):
+        indexer = self._indexer(_numbered(_delete("doc_1", 0)), room=0)
+        metrics = await self._process(indexer)
+
+        indexer._workspace_memory_room.assert_not_awaited()
         assert indexer._apply_delete.await_count == 1
         assert metrics.skipped is False
-
-    @pytest.mark.asyncio
-    async def test_a_mixed_batch_over_the_limit_holds_its_deletes_too(self):
-        """All-or-nothing per batch (like the daily cap): a batch carrying a new
-        document waits as a whole, deletes included, keeping the offset."""
-        delete = _make_event()
-        delete.op = "delete"
-        indexer = self._indexer([_upsert("doc_new"), delete], suspended=False)
-        metrics = await self._process(indexer, memory_ok=False)
-
-        assert metrics.reason == "memory_limit_exceeded"
-        indexer._apply_upsert.assert_not_awaited()
-        assert indexer._apply_delete.await_count == 0
-        assert self.state.last_offset == 0
 
     @pytest.mark.asyncio
     async def test_plan_suspended_reads_the_workspace(self):
@@ -853,6 +908,59 @@ class TestProcessIncrementalSuspendedOrFull:
         ) as check:
             assert await indexer._plan_suspended(context, "pk") is True
         check.assert_awaited_once_with(indexer.db, workspace, "pk")
+
+
+class TestWorkspaceMemoryRoom:
+    """#1939: the indexer's room is the workspace's OWN live memory count
+    against its effective limit — not the member-join count the remember
+    path uses, which also counts the members' memories in other workspaces."""
+
+    @pytest.mark.asyncio
+    async def test_counts_only_this_workspaces_live_memories(self, db_session):
+        owner = f"owner-{uuid4().hex[:8]}"
+        ws = Workspace(
+            id=uuid4(), name=f"ws-{uuid4().hex[:8]}", plan_name="free", owner_user_id=owner
+        )
+        other = Workspace(
+            id=uuid4(), name=f"ws-{uuid4().hex[:8]}", plan_name="free", owner_user_id=owner
+        )
+        db_session.add_all([ws, other])
+        await db_session.flush()
+
+        def _memory(workspace_id, **kwargs):
+            return Memory(
+                id=uuid4(),
+                user_id=owner,
+                workspace_id=workspace_id,
+                summary="s",
+                content="c",
+                type="code",
+                client="pytest",
+                **kwargs,
+            )
+
+        db_session.add_all(
+            [
+                _memory(ws.id),
+                _memory(ws.id),
+                _memory(ws.id, deleted_at=utcnow()),  # forgotten: frees its slot
+                _memory(other.id),  # the same owner's memory elsewhere
+                _memory(other.id),
+            ]
+        )
+        await db_session.flush()
+
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db_session)
+
+        assert await indexer._workspace_memory_room(ws.id) == ws.effective_memory_limit - 2
+
+    @pytest.mark.asyncio
+    async def test_missing_workspace_has_no_room(self, db_session):
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(db_session)
+
+        assert await indexer._workspace_memory_room(uuid4()) == 0
 
 
 class TestExistingResourceDocIds:

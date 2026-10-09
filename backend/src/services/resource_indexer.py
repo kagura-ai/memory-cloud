@@ -21,7 +21,7 @@ from uuid import NAMESPACE_DNS, UUID, uuid4, uuid5  # Issue #262: uuid5 for dete
 
 # Third-party imports (PEP8)
 from qdrant_client.models import PointStruct, SparseVector
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Local application imports (PEP8)
@@ -394,6 +394,48 @@ def build_resource_point(
     )
 
 
+def _fit_memory_room(
+    events: Sequence[ResourceEvent], known_doc_ids: set[str], room: int | None
+) -> tuple[int, int]:
+    """Longest prefix of ``events`` that fits ``room`` new memories (#1939).
+
+    Walks the batch in event order, tracking which doc_ids have a live row:
+    an upsert of a doc with no live row creates one; a delete of all versions
+    (``version is None``) of a live doc frees one; a delete of one version
+    frees nothing for certain, but the doc then counts as not live, so a later
+    upsert of it is charged as a creation (conservative). Updates of live docs
+    and the other deletes always fit. The prefix ends right before the first
+    creation that would take the running net past ``room``.
+
+    Args:
+        events: The batch, in event order.
+        known_doc_ids: doc_ids with a live row before the batch.
+        room: Free memory slots in the workspace (may be negative when over
+            the limit); ``None`` means unlimited.
+
+    Returns:
+        ``(prefix_len, creations)`` — how many leading events to apply and how
+        many memories that prefix creates (what the daily quota charges).
+    """
+    live = set(known_doc_ids)
+    net = 0
+    creations = 0
+    for index, event in enumerate(events):
+        if event.op == "upsert":
+            if event.doc_id in live:
+                continue
+            if room is not None and net + 1 > room:
+                return index, creations
+            live.add(event.doc_id)
+            net += 1
+            creations += 1
+        elif event.op == "delete" and event.doc_id in live:
+            live.discard(event.doc_id)
+            if event.version is None:
+                net -= 1
+    return len(events), creations
+
+
 class ResourceRebuildError(Exception):
     """A resource-ingested row's point cannot be rebuilt from the row (#1870)."""
 
@@ -518,27 +560,27 @@ class ResourceIndexer:
             # A batch larger than the whole daily limit never fits, so an
             # operator lowering ``PLAN_*_MEMORIES_PER_DAY`` below ``batch_size``
             # must lower the batch size too.
-            upsert_doc_ids = {event.doc_id for event in events if event.op == "upsert"}
-            if upsert_doc_ids:
+            if any(event.op == "upsert" for event in events):
                 known_doc_ids = await self._existing_resource_doc_ids(
-                    resource_id, context, upsert_doc_ids
+                    resource_id, context, {event.doc_id for event in events}
                 )
-                new_count = len(upsert_doc_ids - known_doc_ids)
             else:
-                new_count = 0
+                known_doc_ids = set()
+            batch_len, new_count = _fit_memory_room(events, known_doc_ids, room=None)
             if new_count:
                 # #1939: resource ingest creates memories too, so it honours the
                 # workspace memory limit like remember does. Read BEFORE the
                 # daily charge so a refused batch burns no daily budget, and
                 # without the workspace row lock: the batch then embeds for a
                 # while, and holding the lock that long would stall every
-                # remember in the workspace. Advisory, like the daily cap, and
-                # all-or-nothing for the batch: one that does not fit waits for
-                # room rather than landing partly over the limit.
-                within_limit, limit_error = await QuotaService(self.db).check_memory_quota(
-                    context.workspace_id, lock_workspace=False, count=new_count
-                )
-                if not within_limit:
+                # remember in the workspace (advisory, like the daily cap).
+                # The batch applies its longest prefix, in event order, that
+                # fits: a nearly full workspace still makes progress, and the
+                # deletes in that prefix free room for the upserts after them.
+                # Only when not even the first new doc fits is it held back.
+                room = await self._workspace_memory_room(context.workspace_id)
+                batch_len, new_count = _fit_memory_room(events, known_doc_ids, room=room)
+                if batch_len == 0:
                     metrics.skipped = True
                     metrics.reason = "memory_limit_exceeded"
                     logger.warning(
@@ -546,10 +588,25 @@ class ResourceIndexer:
                         resource_id=resource_id,
                         context_id=context_id,
                         workspace_id=str(context.workspace_id),
-                        new_docs=new_count,
-                        error=limit_error,
+                        room=room,
                     )
                     return metrics
+                if batch_len < len(events):
+                    # Partial progress: the rest waits for room. The reason
+                    # makes the job re-queue the row (not "skipped": the
+                    # prefix did apply).
+                    metrics.reason = "memory_limit_exceeded"
+                    logger.info(
+                        "indexer_memory_limit_partial_batch",
+                        resource_id=resource_id,
+                        context_id=context_id,
+                        workspace_id=str(context.workspace_id),
+                        applied_events=batch_len,
+                        held_events=len(events) - batch_len,
+                        room=room,
+                    )
+                    events = events[:batch_len]
+            if new_count:
                 allowed, quota_error = await QuotaService(self.db).check_memories_per_day(
                     context.workspace_id, count=new_count
                 )
@@ -627,6 +684,33 @@ class ResourceIndexer:
             metrics.errors += 1
             metrics.reason = str(e)
             return metrics
+
+    async def _workspace_memory_room(self, workspace_id: UUID) -> int:
+        """How many more memories the workspace may hold (#1939).
+
+        The workspace's OWN live memories (``Memory.workspace_id`` match,
+        not soft-deleted) against ``Workspace.effective_memory_limit``.
+        Deliberately not ``QuotaService.check_memory_quota``'s member-join
+        count, which also counts the members' memories in other workspaces
+        and so could hold a small workspace's ingest back for good. No row
+        lock: the batch embeds for a while after this read.
+
+        Returns:
+            ``limit - live``; zero or negative when the workspace is full or
+            over (a missing workspace has no room).
+        """
+        workspace = await self.db.get(Workspace, workspace_id)
+        if workspace is None:
+            return 0
+        live = (
+            await self.db.execute(
+                select(func.count(Memory.id)).where(
+                    Memory.workspace_id == workspace_id,
+                    Memory.deleted_at.is_(None),
+                )
+            )
+        ).scalar() or 0
+        return workspace.effective_memory_limit - live
 
     async def _plan_suspended(self, context: Context, resource_pk: UUID) -> bool:
         """Whether ingest into ``resource_pk`` is suspended on the plan (#1939).

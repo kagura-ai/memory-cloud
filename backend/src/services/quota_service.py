@@ -146,23 +146,12 @@ class QuotaService:
         self,
         workspace_id: UUID,
         raise_on_exceeded: bool = False,
-        *,
-        lock_workspace: bool = True,
-        count: int = 1,
     ) -> tuple[bool, str | None]:
         """Check if workspace can create more memories.
 
         Args:
             workspace_id: Workspace ID
             raise_on_exceeded: If True, raise QuotaExceededError instead of returning False
-            lock_workspace: Take the workspace row lock (``FOR UPDATE``) for the
-                rest of the transaction — the remember path serializes its
-                writes on it. A caller that only needs an advisory read and
-                then does long work in the same transaction (the resource
-                indexer, #1939) passes False so it does not hold the lock.
-            count: How many memories the caller is about to create. The check
-                is ``current + count > limit``; the default of 1 is the
-                single-remember case (``current >= limit``).
 
         Returns:
             Tuple of (can_create, error_message)
@@ -172,10 +161,11 @@ class QuotaService:
         """
         # Issue #273 H-5: Add row-level locking to prevent race conditions
         # Get workspace with plan limits (with FOR UPDATE lock)
-        workspace_stmt = select(Workspace).where(Workspace.id == workspace_id)
-        if lock_workspace:
-            workspace_stmt = workspace_stmt.with_for_update()  # Lock row during quota check
-        workspace_result = await self.db.execute(workspace_stmt)
+        workspace_result = await self.db.execute(
+            select(Workspace)
+            .where(Workspace.id == workspace_id)
+            .with_for_update()  # Lock workspace row during quota check
+        )
         workspace = workspace_result.scalar_one_or_none()
 
         if not workspace:
@@ -200,8 +190,8 @@ class QuotaService:
         )
         current_count = memory_count_result.scalar() or 0
 
-        # If no memories, a single create always fits
-        if current_count == 0 and count <= 1:
+        # If no memories, workspace has no usage
+        if current_count == 0:
             return True, None
 
         # Issue #238: Use effective quotas (base + addons)
@@ -210,7 +200,7 @@ class QuotaService:
         memory_limit = effective_quotas["memory_limit"]
 
         # Check against effective limit
-        if current_count + count > memory_limit:
+        if current_count >= memory_limit:
             error = (
                 f"Memory quota exceeded. "
                 f"Current: {current_count}, Limit: {memory_limit} ({workspace.plan_name} plan + addons)"

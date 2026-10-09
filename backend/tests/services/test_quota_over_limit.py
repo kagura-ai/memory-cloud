@@ -275,9 +275,6 @@ CREATE_PATH_GATES = {
     "services/invitation_service.py": {"accept_invitation"},
     # POST /workspaces/{id}/members — a direct add takes a seat (#1939)
     "services/workspace_service.py": {"add_member"},
-    # Resource indexing — checked only for doc_ids that would create a new
-    # memory; updates and deletes never reach it (#1939)
-    "services/resource_indexer.py": {"process_incremental"},
 }
 
 
