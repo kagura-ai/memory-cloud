@@ -421,7 +421,9 @@ FEATURE_ENFORCEMENT: dict[str, FeatureGate] = {
     "public_contexts": FeatureGate(
         FeatureEnforcement.ENFORCED,
         "api/routes/contexts.py, api/routes/member_credentials.py and the set_public "
-        "MCP tool refuse to publish a context or mint a bound public key (#1551).",
+        "MCP tool refuse to publish a context or mint a bound public key (#1551). "
+        "Separately, services/plan_suspension.py pauses anonymous public serving while "
+        "public_calls_per_day is 0 (back on Free); the context stays public (#1939).",
     ),
     "memory_analysis": FeatureGate(
         FeatureEnforcement.ENFORCED,
@@ -442,11 +444,16 @@ FEATURE_ENFORCEMENT: dict[str, FeatureGate] = {
     "resources": FeatureGate(
         FeatureEnforcement.ENFORCED,
         "api/routes/resource_tokens.py and the setup_resource MCP tool refuse "
-        "provisioning (#1551).",
+        "provisioning (#1551). Separately, services/plan_suspension.py suspends ingest "
+        "and indexing on existing tokens while max_resource_tokens is 0 (back on "
+        "Free); the tokens are kept (#1939).",
     ),
     "connectors": FeatureGate(
         FeatureEnforcement.ENFORCED,
-        "services/connector_provisioning.py refuses setup_connector (#1551).",
+        "services/connector_provisioning.py refuses setup_connector (#1551). "
+        "Separately, services/plan_suspension.py suspends ingest, indexing and worker "
+        "dispatch for existing connectors while max_connectors is 0 (back on Free); "
+        "the connectors are kept (#1939).",
     ),
 }
 

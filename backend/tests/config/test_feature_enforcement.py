@@ -225,3 +225,23 @@ def test_modes_serialize_as_plain_sorted_strings() -> None:
     assert set(modes) == set(FEATURE_ENFORCEMENT)
     assert set(modes.values()) <= {"enforced", "conditional", "degrades", "advertised"}
     assert all(isinstance(value, str) and type(value) is str for value in modes.values())
+
+
+def test_suspension_gates_are_declared() -> None:
+    """#1939: the suspension gates are runtime behaviour of these features too.
+
+    They read effective limits rather than calling ``has_feature``, so the
+    scanner above cannot see them; the notes are where a reader learns that a
+    Free-again workspace keeps its objects but their paid-only work pauses.
+    """
+    for feature in ("connectors", "resources", "public_contexts"):
+        assert "services/plan_suspension.py" in FEATURE_ENFORCEMENT[feature].note, feature
+
+
+def test_suspension_never_asks_has_feature() -> None:
+    """Feature flags gate creation only; Basic / Pro keep positive serve-only
+    limits for objects made on a higher plan (#1551). A suspension decided by
+    ``has_feature`` would stop those, so the module must test limits only."""
+    tree = ast.parse((SRC_ROOT / "services" / "plan_suspension.py").read_text(encoding="utf-8"))
+    callees = {_callee_name(node) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    assert not callees & GATE_CALLEES

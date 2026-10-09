@@ -33,6 +33,14 @@ def _next_utc_midnight() -> datetime:
     return datetime.combine(utcnow().date() + timedelta(days=1), datetime.min.time())
 
 
+# #1939: how long a batch held back by a plan suspension or the workspace
+# memory limit waits before the next attempt. Neither has a known reset time
+# (re-subscribing or deleting memories lifts them), so the row is retried on a
+# slow cadence instead of every 5-minute cycle.
+HELD_BACK_RETRY = timedelta(hours=1)
+HELD_BACK_REASONS = frozenset({"plan_suspended", "memory_limit_exceeded"})
+
+
 async def can_run_indexer(resource_id: str, context_id: UUID) -> tuple[bool, str]:
     """Check if indexer can run now (rate limiting).
 
@@ -166,6 +174,10 @@ async def run_queued_indexers() -> None:
                     if metrics.reason == "memories_per_day_exceeded":
                         state.job_status = "queued"
                         state.next_run_at = _next_utc_midnight()
+                    elif metrics.reason in HELD_BACK_REASONS:
+                        # #1939: same "applied nothing, keep the events" shape.
+                        state.job_status = "queued"
+                        state.next_run_at = utcnow() + HELD_BACK_RETRY
                     else:
                         state.job_status = "idle"
                     state.metrics = metrics.to_dict()

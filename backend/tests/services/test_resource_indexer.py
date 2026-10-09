@@ -583,12 +583,14 @@ class TestProcessIncrementalResolvesRoutingOncePerBatch:
         indexer._apply_upsert = AsyncMock()
         indexer._apply_delete = AsyncMock()
         indexer._existing_resource_doc_ids = AsyncMock(return_value=set())
+        indexer._plan_suspended = AsyncMock(return_value=False)
         indexer.db.commit = AsyncMock()
 
         with (
             patch("services.resource_indexer.resolve_context_routing", mock_resolve),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
+            quota_cls.return_value.check_memory_quota = AsyncMock(return_value=(True, None))
             quota_cls.return_value.check_memories_per_day = AsyncMock(return_value=(True, None))
             await indexer.process_incremental("res_test", uuid4())
 
@@ -632,6 +634,7 @@ class TestProcessIncrementalMemoriesPerDay:
         indexer._existing_resource_doc_ids = AsyncMock(return_value=existing or set())
         indexer._apply_upsert = AsyncMock()
         indexer._apply_delete = AsyncMock()
+        indexer._plan_suspended = AsyncMock(return_value=False)
         indexer.db.commit = AsyncMock()
         return indexer
 
@@ -651,6 +654,7 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
+            quota_cls.return_value.check_memory_quota = AsyncMock(return_value=(True, None))
             quota_cls.return_value.check_memories_per_day = quota
             metrics = await indexer.process_incremental("res_test", uuid4())
 
@@ -675,6 +679,7 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
+            quota_cls.return_value.check_memory_quota = AsyncMock(return_value=(True, None))
             quota_cls.return_value.check_memories_per_day = quota
             metrics = await indexer.process_incremental("res_test", uuid4())
 
@@ -696,6 +701,7 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
+            quota_cls.return_value.check_memory_quota = AsyncMock(return_value=(True, None))
             quota_cls.return_value.check_memories_per_day = quota
             await indexer.process_incremental("res_test", uuid4())
 
@@ -711,6 +717,7 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
+            quota_cls.return_value.check_memory_quota = AsyncMock(return_value=(True, None))
             quota_cls.return_value.check_memories_per_day = quota
             metrics = await indexer.process_incremental("res_test", uuid4())
 
@@ -733,12 +740,103 @@ class TestProcessIncrementalMemoriesPerDay:
             patch("services.resource_indexer.resolve_context_routing", routing),
             patch("services.resource_indexer.QuotaService") as quota_cls,
         ):
+            quota_cls.return_value.check_memory_quota = AsyncMock(return_value=(True, None))
             quota_cls.return_value.check_memories_per_day = quota
             await indexer.process_incremental("res_test", uuid4())
 
         quota.assert_not_awaited()
         indexer._existing_resource_doc_ids.assert_not_awaited()
         assert indexer._apply_delete.await_count == 1
+
+
+class TestProcessIncrementalSuspendedOrFull:
+    """#1939: a Free-again workspace's events are kept, not dropped.
+
+    A suspended resource (the plan no longer carries connectors / resources)
+    or a workspace at its memory limit applies nothing and leaves the offset
+    where it was; the job re-queues the row at a sane interval.
+    """
+
+    def _indexer(self, events, *, suspended: bool):
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(AsyncMock())
+        self.state = MagicMock(last_offset=0, last_run_at=None, metrics=None)
+        self.context = _make_context()
+        indexer._get_or_create_state = AsyncMock(return_value=self.state)
+        indexer._fetch_events = AsyncMock(return_value=events)
+        indexer._get_latest_schema = AsyncMock(return_value=_make_schema())
+        indexer._get_context = AsyncMock(return_value=self.context)
+        indexer._existing_resource_doc_ids = AsyncMock(return_value=set())
+        indexer._apply_upsert = AsyncMock()
+        indexer._apply_delete = AsyncMock()
+        indexer._plan_suspended = AsyncMock(return_value=suspended)
+        indexer.db.commit = AsyncMock()
+        return indexer
+
+    async def _process(self, indexer, *, memory_ok: bool = True):
+        routing = AsyncMock(return_value=("kagura_memories", MagicMock()))
+        with (
+            patch("services.resource_indexer.resolve_context_routing", routing),
+            patch("services.resource_indexer.QuotaService") as quota_cls,
+        ):
+            self.memory_quota = AsyncMock(
+                return_value=(memory_ok, None if memory_ok else "Memory quota exceeded")
+            )
+            self.daily_quota = AsyncMock(return_value=(True, None))
+            quota_cls.return_value.check_memory_quota = self.memory_quota
+            quota_cls.return_value.check_memories_per_day = self.daily_quota
+            return await indexer.process_incremental("res_test", uuid4())
+
+    @pytest.mark.asyncio
+    async def test_suspended_resource_applies_nothing_and_keeps_offset(self):
+        indexer = self._indexer([_upsert("doc_1")], suspended=True)
+        metrics = await self._process(indexer)
+
+        assert metrics.skipped is True
+        assert metrics.reason == "plan_suspended"
+        indexer._apply_upsert.assert_not_awaited()
+        assert self.state.last_offset == 0
+        self.daily_quota.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_memory_limit_reached_applies_nothing_and_charges_no_daily_budget(self):
+        indexer = self._indexer([_upsert("doc_1")], suspended=False)
+        metrics = await self._process(indexer, memory_ok=False)
+
+        assert metrics.skipped is True
+        assert metrics.reason == "memory_limit_exceeded"
+        indexer._apply_upsert.assert_not_awaited()
+        assert self.state.last_offset == 0
+        # The memory limit is read first, so a refused batch burns no daily budget.
+        self.daily_quota.assert_not_awaited()
+        # Advisory, unlocked read: the batch embeds for a while and must not
+        # hold the workspace row lock the remember path takes.
+        self.memory_quota.assert_awaited_once_with(self.context.workspace_id, lock_workspace=False)
+
+    @pytest.mark.asyncio
+    async def test_memory_limit_does_not_block_updates_or_deletes(self):
+        """Re-indexing known docs and deletes create no row — they still apply."""
+        delete = _make_event()
+        delete.op = "delete"
+        indexer = self._indexer([delete], suspended=False)
+        metrics = await self._process(indexer, memory_ok=False)
+
+        self.memory_quota.assert_not_awaited()
+        assert indexer._apply_delete.await_count == 1
+        assert metrics.skipped is False
+
+    @pytest.mark.asyncio
+    async def test_plan_suspended_reads_the_workspace(self):
+        with patch("services.resource_indexer.get_qdrant_client", return_value=AsyncMock()):
+            indexer = ResourceIndexer(AsyncMock())
+        workspace = Workspace(id=uuid4(), name="w", plan_name="free", owner_user_id="u")
+        indexer.db.get = AsyncMock(return_value=workspace)
+        context = _make_context()
+        with patch(
+            "services.resource_indexer.ingest_suspended", new=AsyncMock(return_value=True)
+        ) as check:
+            assert await indexer._plan_suspended(context, "pk") is True
+        check.assert_awaited_once_with(indexer.db, workspace, "pk")
 
 
 class TestExistingResourceDocIds:

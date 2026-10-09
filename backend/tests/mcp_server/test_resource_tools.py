@@ -24,6 +24,16 @@ def _json_of(result):
     return json.loads(result[0].text)
 
 
+@pytest.fixture(autouse=True)
+def _ingest_not_suspended():
+    """Paid plan: the #1939 suspension check is covered in test_resource_ingest_quota."""
+    with patch(
+        "mcp_server.tools.resource._ingest_suspension_error",
+        new=AsyncMock(return_value=None),
+    ):
+        yield
+
+
 # ============================================================================
 # workspace_required
 # ============================================================================

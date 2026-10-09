@@ -10,6 +10,7 @@ import pytest
 from cryptography.fernet import InvalidToken
 from fastapi import Response
 
+import api.routes.workers as workers_module
 from api.routes.workers import (
     WorkerConnectorConfig,
     get_worker_apps,
@@ -17,6 +18,17 @@ from api.routes.workers import (
     verify_worker_token,
 )
 from utils.datetime import utcnow
+
+# #1939: the real check, kept before the autouse stub below replaces it.
+_REAL_SUSPENSION_CHECK = getattr(workers_module, "_connectors_suspended_for", None)
+
+
+@pytest.fixture(autouse=True)
+def _connectors_not_suspended():
+    """Paid plan by default; the #1939 suspension tests restore the real check."""
+    with patch("api.routes.workers._connectors_suspended_for", new=AsyncMock(return_value=False)):
+        yield
+
 
 # #1447: the minimum bundle the bridge's ``LLMConfig`` accepts. A connector
 # missing any of these cannot vend, so the readiness gate rejects it.
@@ -868,3 +880,63 @@ async def test_worker_apps_returns_active_and_retiring_secrets_but_not_disabled_
     assert not_modified.status_code == 304
     active.get_active_signing_secret.assert_not_called()
     active.get_retiring_signing_secret.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# #1939: a Free-again workspace's connectors are suspended, not deleted
+# ---------------------------------------------------------------------------
+
+
+async def _vend_on_plan(plan: str, *, if_none_match: str | None = None):
+    from models.auth import Workspace
+
+    conn = _minimal_ready_conn("ja")
+    db = MagicMock()
+    db.get = AsyncMock(
+        return_value=Workspace(id=conn.workspace_id, name="w", plan_name=plan, owner_user_id="u")
+    )
+    with (
+        patch("api.routes.workers._connectors_suspended_for", new=_REAL_SUSPENSION_CHECK),
+        patch("api.routes.workers.get_settings", return_value=_settings()),
+        patch("api.routes.workers.ConnectorProvisioningService") as svc,
+        patch("api.routes.workers.WorkerAppIdentityService") as app_svc,
+    ):
+        app_svc.return_value.get_identity = AsyncMock(return_value=None)
+        svc.return_value.get_connector_for_dispatch = AsyncMock(return_value=conn)
+        return await get_worker_config(
+            response=Response(),
+            platform="slack",
+            team_id="T01",
+            app_key=None,
+            if_none_match=if_none_match,
+            _=None,
+            db=db,
+        )
+
+
+@pytest.mark.asyncio
+async def test_get_worker_config_404_when_connectors_suspended_on_free():
+    """The worker already skips a not-ready team; a suspended one reads the same."""
+    from utils.exceptions import WorkerConnectorNotReadyError
+
+    with pytest.raises(WorkerConnectorNotReadyError) as exc:
+        await _vend_on_plan("free")
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_worker_config_suspension_404_beats_304():
+    """A worker holding a matching ETag from the paid days must not keep its
+    cached config — the suspension is decided before the conditional GET."""
+    from utils.exceptions import WorkerConnectorNotReadyError
+
+    ready = await _vend_on_plan("promax")
+    with pytest.raises(WorkerConnectorNotReadyError):
+        await _vend_on_plan("free", if_none_match=f'"{ready.config_revision}"')
+
+
+@pytest.mark.asyncio
+async def test_get_worker_config_basic_keeps_serving_existing_connector():
+    """#1551: Basic's serve-only connector seats keep dispatch running."""
+    result = await _vend_on_plan("basic")
+    assert result.connector_id is not None

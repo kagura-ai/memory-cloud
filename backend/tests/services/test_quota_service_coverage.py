@@ -19,6 +19,7 @@ Issue #149 / #238 / #229.
 """
 
 from datetime import timedelta
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -124,6 +125,20 @@ class TestCheckMemoryQuota:
 
         assert can_create is True
         assert error is None
+
+    @pytest.mark.parametrize("lock", [True, False])
+    async def test_workspace_row_lock_is_optional(self, lock):
+        """#1939: the indexer reads the limit without the remember path's row
+        lock, which it would otherwise hold for the whole embedding batch."""
+        db = MagicMock()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None  # workspace missing → early return
+        db.execute = AsyncMock(return_value=result)
+
+        await QuotaService(db).check_memory_quota(uuid4(), lock_workspace=lock)
+
+        stmt = db.execute.await_args.args[0]
+        assert (stmt._for_update_arg is not None) is lock
 
     async def test_under_limit_returns_true(self, db_session):
         """A few memories well under the free 1000 limit → allowed."""

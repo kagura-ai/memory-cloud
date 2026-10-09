@@ -128,6 +128,17 @@ def _rate_limit_refusal(path: str) -> QuotaExceededError:
     return exc.value
 
 
+def _public_serving_refusal() -> QuotaExceededError:
+    """The real #1939 anonymous-serving refusal, for a Free workspace."""
+    from models.auth import Workspace
+    from services.plan_suspension import ensure_public_serving_allowed
+
+    workspace = Workspace(id=uuid4(), name="w", plan_name=_FREE, owner_user_id="u")
+    with pytest.raises(QuotaExceededError) as exc:
+        ensure_public_serving_allowed(workspace)
+    return exc.value
+
+
 def _connector_seat_cap() -> MemoryCloudException:
     """The real ``_raise_seat_cap`` — a staticmethod, so no DB is involved."""
     with pytest.raises(MemoryCloudException) as exc:
@@ -187,6 +198,21 @@ REFUSALS: list[Refusal] = [
         ),
         exc=FeatureNotAvailableError.for_feature(_FREE, "connectors"),
         site_literal="connectors",
+        carries_counts=False,
+    ),
+    # #1939: paid-only ingest suspended (not revoked) on a plan without it.
+    Refusal(
+        id="plan/connectors-suspended",
+        site="services.plan_suspension:ensure_ingest_allowed",
+        exc=FeatureNotAvailableError.for_feature(_FREE, "connectors"),
+        site_literal="connectors",
+        carries_counts=False,
+    ),
+    Refusal(
+        id="plan/resources-suspended",
+        site="services.plan_suspension:ensure_ingest_allowed",
+        exc=FeatureNotAvailableError.for_feature(_FREE, "resources"),
+        site_literal="resources",
         carries_counts=False,
     ),
     Refusal(
@@ -482,6 +508,13 @@ REFUSALS: list[Refusal] = [
         id="quota/api_public_daily",
         site="api.middleware.rate_limit:RateLimitMiddleware._check_daily_quota",
         exc=_rate_limit_refusal("/api/v1/public/x"),
+        site_literal="api_public_daily",
+        carries_counts=False,
+    ),
+    Refusal(
+        id="quota/api_public_daily-suspended",
+        site="services.plan_suspension:ensure_public_serving_allowed",
+        exc=_public_serving_refusal(),
         site_literal="api_public_daily",
         carries_counts=False,
     ),
@@ -1146,6 +1179,24 @@ def _db_yielding() -> tuple[object, MagicMock]:
     return get_db, db
 
 
+async def _mcp_ingest_suspended(exc: MemoryCloudException) -> dict:
+    """``ingest_events`` refused because the plan suspended the ingest (#1939)."""
+    from mcp_server.tools.resource import _ingest_suspension_error
+
+    db = MagicMock()
+    db.get = AsyncMock(return_value=SimpleNamespace(plan_name=exc.details["current_plan"]))
+    with (
+        patch(
+            "services.resource_ingest_service.resolve_authoritative_resource_pk",
+            new=AsyncMock(return_value=uuid4()),
+        ),
+        patch("services.plan_suspension.ensure_ingest_allowed", new=AsyncMock(side_effect=exc)),
+    ):
+        error = await _ingest_suspension_error(db, uuid4(), "res")
+    assert error is not None, "the ingest was not refused"
+    return _mcp_payload(error)
+
+
 async def _mcp_create_context(exc: MemoryCloudException) -> dict:
     from mcp_server.tools.context import handle_create_context
 
@@ -1412,6 +1463,12 @@ MCP_ROUTES: dict[str, tuple[McpRoute, ...]] = {
     "plan/connectors": (
         McpRoute(_mcp_setup_connector, _PLAN_REQUIRED, frozenset({"required_plan", "feature"})),
     ),
+    "plan/connectors-suspended": (
+        McpRoute(_mcp_ingest_suspended, _PLAN_REQUIRED, frozenset({"required_plan", "feature"})),
+    ),
+    "plan/resources-suspended": (
+        McpRoute(_mcp_ingest_suspended, _PLAN_REQUIRED, frozenset({"required_plan", "feature"})),
+    ),
     "quota/connectors": (
         McpRoute(
             _mcp_setup_connector,
@@ -1441,6 +1498,7 @@ MCP_ROUTES: dict[str, tuple[McpRoute, ...]] = {
 # in exactly one of the two tables (``test_every_refusal_is_routed_or_excused``).
 NOT_ON_MCP = {
     "plan/team_invitations": "REST route only; no MCP tool invites members",
+    "quota/api_public_daily-suspended": "anonymous public REST routes only",
     "plan/shared_contexts-rest": "the REST route's own pre-check",
     "plan/public_contexts-api-key": "REST route only",
     "plan/any-feature-via-quota-service": "no caller uses the raising form",

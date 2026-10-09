@@ -3662,7 +3662,11 @@
         "no_pending_events": "直近の実行以降、未処理イベントはありません。",
         "schema_not_found": "直近の実行はスキップされました: このリソースにスキーマが登録されていません。",
         "context_not_found": "直近の実行はスキップされました: リソースに紐づくコンテキストを解決できませんでした。",
-        "empty_valid_points": "直近の実行で有効な upsert 対象が 0 件でした (payload / schema の不一致の可能性)。"
+        "empty_valid_points": "直近の実行で有効な upsert 対象が 0 件でした (payload / schema の不一致の可能性)。",
+        "resource_entity_missing": "直近の実行はスキップされました: リソースの実体レコードがありません。",
+        "memories_per_day_exceeded": "直近の実行は延期されました: 本日の記憶作成の上限に達しています。日次リセット（UTC 0時）の後に再開します。",
+        "plan_suspended": "取り込みは一時停止中です: 現在のプランには含まれていません。未処理のイベントは保持され、再契約すると再開します。",
+        "memory_limit_exceeded": "取り込みは一時停止中です: ワークスペースの記憶の上限に達しました。未処理のイベントは保持されます。記憶を削除するか、プランをアップグレードすると再開します。"
       },
       "noRecentEvents": "イベントログはまだありません。",
       "recentEvents": "直近の ingest イベント",

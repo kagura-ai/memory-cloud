@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy  # noqa: F401  isort: skip  # load-bearing: pre-load numpy's C ext before --cov instrumentation (else "cannot load module more than once")
 import pydantic.root_model  # noqa: F401  isort: skip
+import pytest
 import pytest_asyncio
 
 # Importing ``tasks.resource_indexer_job`` triggers ``tasks/__init__`` →
@@ -298,6 +299,39 @@ class TestRunQueuedIndexers:
         assert seeded_state.metrics == {"skipped": True, "reason": "memories_per_day_exceeded"}
         # The attempt still counts toward the hourly token bucket.
         record.assert_awaited_once()
+
+    @pytest.mark.parametrize("reason", ["plan_suspended", "memory_limit_exceeded"])
+    async def test_suspended_or_full_requeues_an_hour_out(self, db_session, seeded_state, reason):
+        """#1939: a batch held back because the plan suspended ingest or the
+        workspace is at its memory limit applied nothing. The row stays queued
+        (the events are kept) and is retried an hour out — no reset time is
+        known for either, and re-polling every cycle would be a busy loop."""
+        client = _fake_redis()
+        client.get = AsyncMock(return_value=None)  # allowed
+
+        metrics = MagicMock()
+        metrics.skipped = True
+        metrics.reason = reason
+        metrics.to_dict.return_value = {"skipped": True, "reason": reason}
+        indexer_instance = MagicMock()
+        indexer_instance.process_incremental = AsyncMock(return_value=metrics)
+        before = utcnow()
+
+        with (
+            patch("tasks.resource_indexer_job.get_db", _mock_get_db(db_session)),
+            patch("tasks.resource_indexer_job.get_redis_client", return_value=client),
+            patch(
+                "tasks.resource_indexer_job.ResourceIndexer",
+                MagicMock(return_value=indexer_instance),
+            ),
+            patch("tasks.resource_indexer_job.record_indexer_run", AsyncMock()),
+        ):
+            await run_queued_indexers()
+
+        await db_session.refresh(seeded_state)
+        assert seeded_state.job_status == "queued"
+        assert before + timedelta(minutes=59) <= seeded_state.next_run_at
+        assert seeded_state.next_run_at <= utcnow() + timedelta(hours=1)
 
     async def test_rate_limited_job_is_skipped_and_stays_queued(self, db_session, seeded_state):
         """can_run_indexer → False: the indexer is never built and state stays queued."""

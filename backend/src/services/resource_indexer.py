@@ -30,7 +30,7 @@ from db.qdrant import (
     KAGURA_MEMORIES_VECTOR_NAME,
     get_qdrant_client,
 )
-from models.auth import Context
+from models.auth import Context, Workspace
 from models.memory import (  # Issue #262: Memory model for resource data storage
     SOURCE_TYPE_CONNECTOR,
     Memory,
@@ -38,6 +38,7 @@ from models.memory import (  # Issue #262: Memory model for resource data storag
 from models.resource import IndexerState, Resource, ResourceEvent, ResourceSchema
 from services.context_routing import resolve_context_routing
 from services.embedding_service import EmbeddingService
+from services.plan_suspension import ingest_suspended
 from services.quota_service import QuotaService
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import QdrantError
@@ -90,6 +91,8 @@ _KNOWN_SKIPPED_REASONS: frozenset[str] = frozenset(
         "empty_valid_points",
         "resource_entity_missing",
         "memories_per_day_exceeded",  # #1549: batch deferred to the UTC reset
+        "plan_suspended",  # #1939: the plan no longer carries this ingest
+        "memory_limit_exceeded",  # #1939: workspace memory limit reached
     }
 )
 
@@ -470,6 +473,21 @@ class ResourceIndexer:
                 )
                 return metrics
 
+            # #1939: a workspace back on Free keeps its resources, but the
+            # paid-only ingest is suspended. Nothing is applied and the offset
+            # stays put, so the events survive until it re-subscribes; the job
+            # re-queues the row (tasks/resource_indexer_job.py).
+            if await self._plan_suspended(context, resource_pk):
+                metrics.skipped = True
+                metrics.reason = "plan_suspended"
+                logger.info(
+                    "indexer_plan_suspended",
+                    resource_id=resource_id,
+                    context_id=context_id,
+                    workspace_id=str(context.workspace_id),
+                )
+                return metrics
+
             # 4. Load schema for JSONB projection
             schema = await self._get_latest_schema(resource_pk)
             if not schema:
@@ -509,6 +527,27 @@ class ResourceIndexer:
             else:
                 new_count = 0
             if new_count:
+                # #1939: resource ingest creates memories too, so it honours the
+                # workspace memory limit like remember does. Read BEFORE the
+                # daily charge so a refused batch burns no daily budget, and
+                # without the workspace row lock: the batch then embeds for a
+                # while, and holding the lock that long would stall every
+                # remember in the workspace. Advisory, like the daily cap.
+                within_limit, limit_error = await QuotaService(self.db).check_memory_quota(
+                    context.workspace_id, lock_workspace=False
+                )
+                if not within_limit:
+                    metrics.skipped = True
+                    metrics.reason = "memory_limit_exceeded"
+                    logger.warning(
+                        "indexer_memory_limit_exceeded",
+                        resource_id=resource_id,
+                        context_id=context_id,
+                        workspace_id=str(context.workspace_id),
+                        new_docs=new_count,
+                        error=limit_error,
+                    )
+                    return metrics
                 allowed, quota_error = await QuotaService(self.db).check_memories_per_day(
                     context.workspace_id, count=new_count
                 )
@@ -586,6 +625,22 @@ class ResourceIndexer:
             metrics.errors += 1
             metrics.reason = str(e)
             return metrics
+
+    async def _plan_suspended(self, context: Context, resource_pk: UUID) -> bool:
+        """Whether ingest into ``resource_pk`` is suspended on the plan (#1939).
+
+        Args:
+            context: The resource's context (carries ``workspace_id``).
+            resource_pk: ``resources.id`` being indexed.
+
+        Returns:
+            True when the workspace's plan no longer carries the connector /
+            resource ingest this resource needs.
+        """
+        workspace = await self.db.get(Workspace, context.workspace_id)
+        if workspace is None:
+            return False
+        return await ingest_suspended(self.db, workspace, resource_pk)
 
     # ========================================================================
     # JSONB Projection

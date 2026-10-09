@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import pytest
 
+import mcp_server.tools.resource as resource_tools
 from auth.workspace_roles import WorkspaceRole
 from mcp_server.tools.resource import handle_ingest_events
 from utils.exceptions import RateLimitError
@@ -72,6 +73,21 @@ def _assign_event_id(event):
 @pytest.fixture
 def workspace_id():
     return uuid4()
+
+
+# The #1939 plan-suspension check reads the workspace and the resource; these
+# tests drive the quota wiring with a scripted ``db.execute`` sequence, so the
+# check is stubbed out (paid plan) except where a test restores it.
+_REAL_SUSPENSION_CHECK = getattr(resource_tools, "_ingest_suspension_error", None)
+
+
+@pytest.fixture(autouse=True)
+def _paid_plan():
+    with patch(
+        "mcp_server.tools.resource._ingest_suspension_error",
+        new=AsyncMock(return_value=None),
+    ):
+        yield
 
 
 def _patch_get_db(mock_db):
@@ -254,3 +270,62 @@ async def test_no_active_workspace_returns_early_without_quota(workspace_id):
         assert data["error"] == "workspace_required"
         mock_resolve.assert_not_awaited()
         mock_quota.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# #1939: ingest suspended on a plan that no longer carries it
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("connector_owned", "feature"), [(True, "connectors"), (False, "resources")]
+)
+async def test_ingest_refused_with_plan_required_when_suspended(
+    workspace_id, connector_owned, feature
+):
+    """A Free workspace keeps its resource, but ingest answers ``plan_required``
+    (the same envelope ``setup_resource`` / ``setup_connector`` use) and writes
+    nothing."""
+    from models.auth import Workspace
+
+    mock_db = _build_db_mock(role=WorkspaceRole.MEMBER, boundary_ok=True)
+    mock_db.get = AsyncMock(
+        return_value=Workspace(id=workspace_id, name="w", plan_name="free", owner_user_id="u")
+    )
+    mock_db.add = MagicMock()
+
+    with (
+        _patch_get_db(mock_db),
+        _patch_log_tool_usage(),
+        patch(
+            "mcp_server.tools.resource._ingest_suspension_error",
+            new=_REAL_SUSPENSION_CHECK,
+        ),
+        patch(
+            "services.resource_ingest_service.resolve_authoritative_resource_pk",
+            new=AsyncMock(return_value=uuid4()),
+        ),
+        patch(
+            "services.plan_suspension._is_connector_resource",
+            new=AsyncMock(return_value=connector_owned),
+        ),
+        patch(
+            "mcp_server.tools.resource.check_event_quota", new=AsyncMock(return_value=None)
+        ) as mock_quota,
+    ):
+        result = await handle_ingest_events(
+            {
+                "resource_id": "ec_products",
+                "events": [{"op": "upsert", "doc_id": "D", "version": 1, "payload": {}}],
+            },
+            "user-1",
+            workspace_id,
+        )
+
+    body = _json_of(result)
+    assert body["error"] == "plan_required"
+    assert body["feature"] == feature
+    assert body["gate"] == "plan"
+    mock_quota.assert_not_awaited()
+    mock_db.add.assert_not_called()

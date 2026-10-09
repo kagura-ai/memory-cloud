@@ -19,10 +19,11 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import Context
+from models.auth import Context, Workspace
 from models.sleep import SleepReport
 from neural.config import NeuralMemoryConfig
 from services.llm_service import LLMService
+from services.plan_suspension import sleep_suspended
 from services.sleep.consolidation import ConsolidationPhase
 from services.sleep.dedup_merge import DedupMergePhase
 from services.sleep.edge_discovery import EdgeDiscoveryPhase
@@ -253,7 +254,14 @@ class SleepOrchestrator:
             )
 
     async def _get_sleep_mode(self, context_id: str | None) -> str:
-        """Get sleep_mode for a context. Defaults to 'skip' if not found."""
+        """Get the effective sleep_mode for a context.
+
+        Defaults to 'skip' if the context is not found. Also 'skip' when the
+        context's workspace has Sleep suspended — it fell back to a plan with
+        no Sleep allowance (#1939). The stored ``Context.sleep_mode`` is left
+        as it is, so re-subscribing resumes Sleep with no further action.
+        Every run (nightly sweep, admin trigger) reads its mode here.
+        """
         if not context_id:
             return "skip"
         try:
@@ -261,6 +269,15 @@ class SleepOrchestrator:
             result = await self.db.execute(stmt)
             context = result.scalar_one_or_none()
             if context and context.sleep_mode:
+                if context.sleep_mode != "skip":
+                    workspace = await self.db.get(Workspace, context.workspace_id)
+                    if workspace is not None and sleep_suspended(workspace):
+                        logger.info(
+                            "sleep_suspended_by_plan",
+                            context_id=context_id,
+                            workspace_id=str(context.workspace_id),
+                        )
+                        return "skip"
                 return context.sleep_mode
         except Exception as e:
             logger.warning(

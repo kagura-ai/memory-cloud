@@ -350,6 +350,41 @@ class TestGetSleepModeFallback:
         result = MagicMock()
         result.scalar_one_or_none = MagicMock(return_value=ctx)
         mock_db.execute = AsyncMock(return_value=result)
+        mock_db.get = AsyncMock(return_value=_workspace("pro"))
+        assert await orchestrator._get_sleep_mode(str(uuid4())) == "edges_only"
+
+
+def _workspace(plan: str):
+    from models.auth import Workspace
+
+    return Workspace(id=uuid4(), name="w", plan_name=plan, owner_user_id="u")
+
+
+class TestSleepSuspendedOnFree:
+    """#1939: a Free-again workspace keeps each context's sleep_mode, but Sleep
+    (LLM cost) does not run — for the nightly sweep and the admin trigger
+    alike, since both go through ``_get_sleep_mode``."""
+
+    def _orchestrator(self, mock_db, plan: str, sleep_mode: str = "full"):
+        ctx = MagicMock()
+        ctx.sleep_mode = sleep_mode
+        ctx.workspace_id = uuid4()
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ctx)
+        mock_db.execute = AsyncMock(return_value=result)
+        mock_db.get = AsyncMock(return_value=_workspace(plan))
+        return SleepOrchestrator(mock_db), ctx
+
+    @pytest.mark.asyncio
+    async def test_free_workspace_skips(self, mock_db):
+        orchestrator, ctx = self._orchestrator(mock_db, "free")
+        assert await orchestrator._get_sleep_mode(str(uuid4())) == "skip"
+        # Stored preference is untouched: re-subscribing resumes it.
+        assert ctx.sleep_mode == "full"
+
+    @pytest.mark.asyncio
+    async def test_pro_workspace_runs_its_mode(self, mock_db):
+        orchestrator, _ = self._orchestrator(mock_db, "pro", "edges_only")
         assert await orchestrator._get_sleep_mode(str(uuid4())) == "edges_only"
 
 

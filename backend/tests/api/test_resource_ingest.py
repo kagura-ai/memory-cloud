@@ -718,6 +718,8 @@ class TestConnectorOwnedIngest:
         )
         request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
         db = MagicMock()
+        # #1939: the plan-suspension gate reads the workspace; a paid one ingests.
+        db.get = AsyncMock(return_value=SimpleNamespace(plan_name="promax"))
 
         with (
             patch(
@@ -728,6 +730,7 @@ class TestConnectorOwnedIngest:
                 "api.routes.resource_ingest._resolve_authoritative_context",
                 new=AsyncMock(return_value=None),
             ),
+            patch("api.routes.resource_ingest.ensure_ingest_allowed", new=AsyncMock()),
             patch(
                 "api.routes.resource_ingest._resolve_connector_workspace_id",
                 new=AsyncMock(return_value=workspace_id),
@@ -829,3 +832,62 @@ class TestConnectorOwnedIngest:
                 )
 
         assert "idempotency_key prefix" in str(exc_info.value)
+
+
+class TestIngestSuspendedOnFree:
+    """#1939: a workspace back on Free keeps its tokens, but ingest stops."""
+
+    async def _verify(self, plan: str, *, connector_owned: bool):
+        from models.auth import Workspace
+
+        workspace_id = uuid4()
+        token = SimpleNamespace(
+            id=1,
+            resource_pk=uuid4(),
+            workspace_id=workspace_id,
+            quota_events_per_hour=1000,
+            created_by="user-1",
+        )
+        context = SimpleNamespace(id=uuid4(), resource_id="res", workspace_id=workspace_id)
+        workspace = Workspace(id=workspace_id, name="w", plan_name=plan, owner_user_id="user-1")
+        db = MagicMock()
+        db.get = AsyncMock(return_value=workspace)
+        with (
+            patch(
+                "api.routes.resource_ingest.ResourceTokenManager.verify_token",
+                new=AsyncMock(return_value=token),
+            ),
+            patch(
+                "api.routes.resource_ingest._resolve_authoritative_context",
+                new=AsyncMock(return_value=context),
+            ),
+            patch("api.routes.resource_ingest._enforce_workspace_membership", new=AsyncMock()),
+            patch(
+                "services.plan_suspension._is_connector_resource",
+                new=AsyncMock(return_value=connector_owned),
+            ),
+        ):
+            return await verify_resource_token(
+                "res", SimpleNamespace(), x_resource_api_key="kagura_resource_plain", db=db
+            )
+
+    @pytest.mark.asyncio
+    async def test_ordinary_token_refused_on_free(self):
+        from utils.exceptions import FeatureNotAvailableError
+
+        with pytest.raises(FeatureNotAvailableError) as exc:
+            await self._verify("free", connector_owned=False)
+        assert exc.value.details["feature"] == "resources"
+
+    @pytest.mark.asyncio
+    async def test_connector_token_refused_on_free(self):
+        from utils.exceptions import FeatureNotAvailableError
+
+        with pytest.raises(FeatureNotAvailableError) as exc:
+            await self._verify("free", connector_owned=True)
+        assert exc.value.details["feature"] == "connectors"
+
+    @pytest.mark.asyncio
+    async def test_paid_plan_still_ingests(self):
+        token, quota, _ = await self._verify("promax", connector_owned=True)
+        assert quota == 1000

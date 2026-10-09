@@ -3662,7 +3662,11 @@
         "no_pending_events": "No pending events since the last run.",
         "schema_not_found": "Last run was skipped: no schema is registered for this resource.",
         "context_not_found": "Last run was skipped: the context bound to this resource could not be resolved.",
-        "empty_valid_points": "Last run produced no valid points to upsert (likely payload/schema mismatches)."
+        "empty_valid_points": "Last run produced no valid points to upsert (likely payload/schema mismatches).",
+        "resource_entity_missing": "Last run was skipped: the resource has no backing entity record.",
+        "memories_per_day_exceeded": "Last run was deferred: today's memory-creation limit is reached. Indexing resumes after the daily reset (UTC midnight).",
+        "plan_suspended": "Ingestion is paused: the workspace's current plan does not include it. Pending events are kept and resume once you re-subscribe.",
+        "memory_limit_exceeded": "Ingestion is paused: the workspace has reached its memory limit. Pending events are kept; delete memories or upgrade to resume."
       },
       "noRecentEvents": "No ingest events in the log yet.",
       "recentEvents": "Recent ingest events",
