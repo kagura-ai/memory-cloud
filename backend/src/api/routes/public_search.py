@@ -444,14 +444,6 @@ async def public_search(
                 message="This public context belongs to a different workspace. Please switch workspaces or use anonymous access."
             )
 
-    # #1941: a workspace over its Free capacity pauses search, public reads
-    # included. A member session sees the numbers; an anonymous or bound-key
-    # reader is never a member, so it gets the redacted refusal.
-    if user is not None and bound_key is None:
-        await ensure_not_capacity_locked(db, context.workspace_id, user_id=user.get("user_id"))
-    else:
-        await ensure_not_capacity_locked(db, context.workspace_id, outsider=True)
-
     # 3. Rate limit dispatch by principal type.
     # The Workspace fetch is deferred to after this gate so a flood of
     # 429-bound anonymous requests don't burn a DB lookup each. Bound-key
@@ -483,6 +475,17 @@ async def public_search(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Context workspace not found",
             )
+
+    # #1941: a workspace over its Free capacity pauses search, public reads
+    # included. Placed after the rate buckets and on the already-loaded
+    # Workspace, so a 429 flood costs no lock read. Order with the plan-pause
+    # gate (#1939): plan pause (anonymous) first, then this capacity check.
+    # A member session sees the numbers; an anonymous or bound-key reader is
+    # never a member, so it gets the redacted refusal.
+    if user is not None and bound_key is None:
+        await ensure_not_capacity_locked(db, workspace, user_id=user.get("user_id"))
+    else:
+        await ensure_not_capacity_locked(db, workspace, outsider=True)
 
     # 5. Hoist usage-log attribution + caller id once so the success and
     # error paths below share one definition.

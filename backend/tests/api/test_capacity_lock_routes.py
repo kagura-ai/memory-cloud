@@ -399,49 +399,68 @@ class TestAgentBootstrap:
 
 
 class TestPublicSearch:
-    def _ctx(self, ws):
-        return SimpleNamespace(id=uuid4(), workspace_id=ws, is_public=True)
-
-    async def _call(self, *, user, bound_key=None):
+    async def _call(self, *, user, bound_key=None, order=None):
         from api.routes import public_search as ps
 
-        ws = uuid4()
-        ctx = self._ctx(ws)
-        db = MagicMock(get=AsyncMock(return_value=ctx))
+        ws_id = uuid4()
+        ctx = SimpleNamespace(id=uuid4(), workspace_id=ws_id, is_public=True)
+        workspace = SimpleNamespace(id=ws_id, plan_name="free")
+        order = order if order is not None else []
+
+        async def get(model, _id):
+            if model is ps.Context:
+                return ctx
+            order.append("workspace_loaded")
+            return workspace
+
+        db = MagicMock(get=AsyncMock(side_effect=get))
         search = AsyncMock()
+
+        async def anon_bucket(*_a, **_k):
+            order.append("anonymous_bucket")
+
+        async def locked(*_a, **_k):
+            order.append("capacity")
+            raise _locked()
+
         with (
             patch.object(ps, "_resolve_public_attribution", AsyncMock(return_value=bound_key)),
             patch.object(ps, "check_pre_auth_rate_limit", AsyncMock()),
-            patch.object(ps, "check_public_search_rate_limit", AsyncMock()) as anon_bucket,
+            patch.object(ps, "check_bound_key_rate_limit", AsyncMock()),
+            patch.object(ps, "check_public_search_rate_limit", AsyncMock(side_effect=anon_bucket)),
             patch.object(
                 ps, "SearchService", MagicMock(return_value=MagicMock(hybrid_search=search))
             ),
-            _lock("public_search", "ensure_not_capacity_locked") as ensure,
+            patch.object(ps, "ensure_not_capacity_locked", AsyncMock(side_effect=locked)) as ensure,
             pytest.raises(CapacityLockedError),
         ):
             await ps.public_search(
                 context_id=ctx.id,
                 request=ps.PublicSearchRequest(query="q"),
-                user=user if user is None else {**user, "current_workspace_id": ws},
+                user=user if user is None else {**user, "current_workspace_id": ws_id},
                 api_key="k" if bound_key else None,
                 db=db,
             )
         search.assert_not_awaited()
-        return ensure, ws, anon_bucket
+        return ensure, workspace, order
 
     @pytest.mark.asyncio
     async def test_a_member_session_sees_the_numbers(self) -> None:
-        ensure, ws, _ = await self._call(user={"user_id": "u1"})
-        assert ensure.await_args.args[1] == ws
+        ensure, workspace, _ = await self._call(user={"user_id": "u1"})
+        assert ensure.await_args.args[1] is workspace
         assert ensure.await_args.kwargs == {"user_id": "u1"}
 
     @pytest.mark.asyncio
-    async def test_an_anonymous_reader_is_an_outsider(self) -> None:
-        ensure, ws, _ = await self._call(user=None)
-        assert ensure.await_args.args[1] == ws
+    async def test_an_anonymous_reader_is_an_outsider_checked_after_its_bucket(self) -> None:
+        ensure, workspace, order = await self._call(user=None)
+        # The loaded Workspace is passed (no second lookup), after the
+        # anonymous bucket and the workspace load.
+        assert ensure.await_args.args[1] is workspace
         assert ensure.await_args.kwargs == {"outsider": True}
+        assert order == ["anonymous_bucket", "workspace_loaded", "capacity"]
 
     @pytest.mark.asyncio
     async def test_a_bound_key_reader_is_an_outsider(self) -> None:
-        ensure, _, _ = await self._call(user=None, bound_key=SimpleNamespace(id=7))
+        ensure, _, order = await self._call(user=None, bound_key=SimpleNamespace(id=7))
         assert ensure.await_args.kwargs == {"outsider": True}
+        assert order == ["workspace_loaded", "capacity"]
