@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   BulkDeleteMemoriesDialog,
+  pinCreatedBefore,
   toForgetBulkFilters,
 } from "./BulkDeleteMemoriesDialog";
 import en from "@/messages/en.json";
@@ -54,6 +55,23 @@ describe("toForgetBulkFilters", () => {
   });
 });
 
+describe("pinCreatedBefore", () => {
+  it("keeps the earlier bound", () => {
+    expect(pinCreatedBefore(undefined, "2026-01-02T00:00:00.000Z")).toBe(
+      "2026-01-02T00:00:00.000Z",
+    );
+    expect(
+      pinCreatedBefore("2026-01-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z"),
+    ).toBe("2026-01-01T00:00:00.000Z");
+    expect(
+      pinCreatedBefore("2026-03-01T00:00:00.000Z", "2026-01-02T00:00:00.000Z"),
+    ).toBe("2026-01-02T00:00:00.000Z");
+    expect(pinCreatedBefore("2026-03-01T00:00:00.000Z", null)).toBe(
+      "2026-03-01T00:00:00.000Z",
+    );
+  });
+});
+
 describe("BulkDeleteMemoriesDialog", () => {
   it("refuses to count without a filter", async () => {
     renderDialog();
@@ -88,11 +106,16 @@ describe("BulkDeleteMemoriesDialog", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Delete 12 memories" }));
     await waitFor(() => expect(onDeleted).toHaveBeenCalledWith(12));
-    expect(forgetBulk).toHaveBeenLastCalledWith({
+    // The delete is pinned to rows created before the count was taken.
+    const del = forgetBulk.mock.calls[1][0];
+    expect(del).toMatchObject({
       context_id: "ctx-1",
       type: "note",
       dry_run: false,
     });
+    expect(new Date(del.created_before).getTime()).toBeLessThanOrEqual(
+      Date.now(),
+    );
   });
 
   it("changing a filter discards the old count", async () => {

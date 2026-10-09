@@ -131,9 +131,6 @@ export async function updateContext(
 // Issue #246: switchContext() removed (use URL navigation: router.push(`/memories?context=${contextId}`))
 
 /**
- * Delete a context
- */
-/**
  * Export a context as portable JSON (#950): its metadata, search config and
  * every memory the caller can see. Stays available while the workspace is
  * over its Free capacity (#1941), so the owner can keep a copy before deleting.
@@ -142,6 +139,9 @@ export async function exportContext(contextId: string): Promise<unknown> {
   return apiClient.get<unknown>(`/api/v1/contexts/${contextId}/export`);
 }
 
+/**
+ * Delete a context
+ */
 export async function deleteContext(contextId: string): Promise<void> {
   await apiClient.delete<void>(`/api/v1/contexts/${contextId}`);
 }

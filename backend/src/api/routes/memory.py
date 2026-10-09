@@ -624,20 +624,10 @@ async def forget(
         # is None (the isolation helper short-circuits), wired for symmetry so the
         # confinement holds the moment forget regains a declared context.
         key_workspace_id=user.get("api_key_workspace_id"),
-        current_workspace_id=_session_workspace(user),
+        current_workspace_id=user.get("current_workspace_id"),
     )
 
     return result
-
-
-def _session_workspace(user: dict) -> UUID | None:
-    raw = user.get("current_workspace_id")
-    if raw is None or isinstance(raw, UUID):
-        return raw
-    try:
-        return UUID(str(raw))
-    except ValueError:
-        return None
 
 
 @router.post("/forget-bulk", response_model=ForgetBulkResponse)

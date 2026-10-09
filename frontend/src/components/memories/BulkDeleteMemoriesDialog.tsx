@@ -64,6 +64,18 @@ export function toForgetBulkFilters(
   return Object.keys(out).length > 0 ? out : null;
 }
 
+/** The earlier of the user's ``created_before`` and the count time (both ISO). */
+export function pinCreatedBefore(
+  createdBefore: string | undefined,
+  countedAt: string | null,
+): string | undefined {
+  if (!countedAt) return createdBefore;
+  if (!createdBefore) return countedAt;
+  return new Date(createdBefore) < new Date(countedAt)
+    ? createdBefore
+    : countedAt;
+}
+
 interface BulkDeleteMemoriesDialogProps {
   contextId: string;
   open: boolean;
@@ -88,6 +100,12 @@ export function BulkDeleteMemoriesDialog({
   const t = useTranslations("contextDetail.bulkDelete");
   const [filters, setFilters] = useState<BulkDeleteFilters>(EMPTY);
   const [matched, setMatched] = useState<number | null>(null);
+  /**
+   * When the count was taken (ISO). The delete is pinned to rows created
+   * before it, so memories saved after the user saw the count are not
+   * swept up by the confirm.
+   */
+  const [countedAt, setCountedAt] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /** Memories deleted so far by the current confirm (the server caps a request). */
   const [progress, setProgress] = useState<number | null>(null);
@@ -114,14 +132,17 @@ export function BulkDeleteMemoriesDialog({
     let deleted = 0;
     try {
       if (dryRun) {
+        const at = new Date().toISOString();
         const res = await forgetBulk({
           context_id: contextId,
           ...request,
           dry_run: true,
         });
         setMatched(res.matched ?? 0);
+        setCountedAt(at);
         return;
       }
+      const pinned = pinCreatedBefore(request.created_before, countedAt);
       // One request deletes at most 2,000 memories; repeat until none remain.
       // Each request resumes at the previous one's cursor, so rows this
       // member may not delete are not rescanned.
@@ -131,6 +152,7 @@ export function BulkDeleteMemoriesDialog({
         const res = await forgetBulk({
           context_id: contextId,
           ...request,
+          ...(pinned ? { created_before: pinned } : {}),
           dry_run: false,
           ...(cursor ? { cursor } : {}),
         });
