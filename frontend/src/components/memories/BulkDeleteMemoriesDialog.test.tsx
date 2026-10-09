@@ -15,7 +15,7 @@ vi.mock("@/lib/api/memory", () => ({
   forgetBulk: (p: unknown) => forgetBulk(p),
 }));
 
-function renderDialog(onDeleted = vi.fn()) {
+function renderDialog(onDeleted = vi.fn(), onPartial = vi.fn()) {
   render(
     <NextIntlClientProvider locale="en" messages={en}>
       <BulkDeleteMemoriesDialog
@@ -23,6 +23,7 @@ function renderDialog(onDeleted = vi.fn()) {
         open
         onOpenChange={vi.fn()}
         onDeleted={onDeleted}
+        onPartial={onPartial}
       />
     </NextIntlClientProvider>,
   );
@@ -139,12 +140,14 @@ describe("BulkDeleteMemoriesDialog", () => {
         matched: null,
         deleted: 2000,
         remaining: true,
+        next_cursor: "c1",
       })
       .mockResolvedValueOnce({
         dry_run: false,
         matched: null,
         deleted: 2000,
         remaining: true,
+        next_cursor: "c2",
       })
       .mockResolvedValueOnce({
         dry_run: false,
@@ -163,9 +166,12 @@ describe("BulkDeleteMemoriesDialog", () => {
     );
     await waitFor(() => expect(onDeleted).toHaveBeenCalledWith(4500));
     expect(forgetBulk).toHaveBeenCalledTimes(4);
+    expect(forgetBulk.mock.calls[1][0].cursor).toBeUndefined();
+    expect(forgetBulk.mock.calls[2][0]).toMatchObject({ cursor: "c1" });
+    expect(forgetBulk.mock.calls[3][0]).toMatchObject({ cursor: "c2" });
   });
 
-  it("refreshes with what was deleted when a later batch fails", async () => {
+  it("keeps the dialog and the error when a later batch fails", async () => {
     forgetBulk
       .mockResolvedValueOnce({ dry_run: true, matched: 3000, deleted: null })
       .mockResolvedValueOnce({
@@ -173,9 +179,11 @@ describe("BulkDeleteMemoriesDialog", () => {
         matched: null,
         deleted: 2000,
         remaining: true,
+        next_cursor: "c1",
       })
       .mockRejectedValueOnce(new Error("boom"));
-    const onDeleted = renderDialog();
+    const onPartial = vi.fn();
+    const onDeleted = renderDialog(vi.fn(), onPartial);
     fireEvent.change(screen.getByLabelText("Type"), {
       target: { value: "note" },
     });
@@ -185,7 +193,16 @@ describe("BulkDeleteMemoriesDialog", () => {
       screen.getByRole("button", { name: "Delete 3,000 memories" }),
     );
     expect(await screen.findByText("boom")).toBeInTheDocument();
-    expect(onDeleted).toHaveBeenCalledWith(2000);
+    expect(
+      screen.getByText(
+        "2,000 memories were deleted before the error. Count again to continue.",
+      ),
+    ).toBeInTheDocument();
+    // No success path: the parent refreshes quietly instead.
+    expect(onDeleted).not.toHaveBeenCalled();
+    expect(onPartial).toHaveBeenCalledWith(2000);
+    // The second request resumed at the first one's cursor.
+    expect(forgetBulk.mock.calls[2][0]).toMatchObject({ cursor: "c1" });
   });
 
   it("stops when a request deletes nothing even if it says more remain", async () => {

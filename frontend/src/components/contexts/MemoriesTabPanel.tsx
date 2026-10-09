@@ -277,6 +277,12 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     [fetchMemories, toast, tBulk, page],
   );
 
+  // A later batch failed: the dialog keeps the error; refresh quietly.
+  const handleBulkPartial = useCallback(() => {
+    requestCapacityRefresh();
+    void fetchMemories();
+  }, [fetchMemories]);
+
   const handleDeleteSuccess = useCallback(() => {
     dialog.applyDeleteSuccess();
     toast({ title: t("deleteSuccess") });
@@ -457,6 +463,7 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         open={bulkOpen}
         onOpenChange={setBulkOpen}
         onDeleted={handleBulkDeleted}
+        onPartial={handleBulkPartial}
       />
       {dialog.hydrated && (
         <DeleteMemoryDialog

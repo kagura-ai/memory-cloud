@@ -149,6 +149,8 @@ export interface ForgetBulkParams {
   tags?: string[];
   all?: boolean;
   dry_run: boolean;
+  /** The previous response's `next_cursor` (resume point). */
+  cursor?: string;
 }
 
 export interface ForgetBulkResponse {
@@ -158,6 +160,8 @@ export interface ForgetBulkResponse {
   deleted: number | null;
   /** True when more memories match; repeat the request (≤ 2,000 per request). */
   remaining?: boolean | null;
+  /** Pass back as `cursor` to continue where this request stopped. */
+  next_cursor?: string | null;
 }
 
 /**

@@ -421,6 +421,7 @@ Delete every memory in one context that matches a filter. Filters combine with A
 | `tags` | string[] | No* | Only memories carrying any of these tags |
 | `all` | boolean | No* | Match every memory in the context |
 | `dry_run` | boolean | No | Count without deleting (default: `true`) |
+| `cursor` | string | No | The previous response's `next_cursor` (ignored on a dry run) |
 
 *At least one filter, or `"all": true`, is required — an empty body is refused with 422.
 
@@ -428,7 +429,9 @@ Permissions are the same as `/forget`: write access to the context (404 otherwis
 memory the caller may not delete is skipped and not counted. Each deleted memory is removed the
 way `/forget` removes one (soft delete, search index point and graph edges), in batches of 500,
 each committed and audited on its own. One request deletes at most 2,000 memories: when more
-match, the response says `"remaining": true` — repeat the same request until it is `false`.
+match, the response says `"remaining": true` and carries `next_cursor` — repeat the same request
+with `"cursor": "<next_cursor>"` until `remaining` is `false`. The cursor is opaque; it resumes after
+the last memory deleted, so memories the caller may not delete are not scanned again.
 Allowed while the workspace is over its Free plan's capacity (`CAPACITY-001`).
 
 **Response:**
@@ -437,7 +440,7 @@ Allowed while the workspace is over its Free plan's capacity (`CAPACITY-001`).
 { "status": "success", "dry_run": true, "matched": 120, "deleted": null }
 ```
 
-With `"dry_run": false` the response carries `deleted` and `remaining` instead of `matched`
+With `"dry_run": false` the response carries `deleted`, `remaining` and `next_cursor` instead of `matched`
 (a dry run always reports the full match count).
 
 ---

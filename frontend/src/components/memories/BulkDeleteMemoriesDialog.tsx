@@ -70,6 +70,12 @@ interface BulkDeleteMemoriesDialogProps {
   onOpenChange: (open: boolean) => void;
   /** Called with the number deleted, after the delete succeeded. */
   onDeleted: (deleted: number) => void;
+  /**
+   * Called when a later batch failed after earlier ones deleted ``deleted``
+   * memories. The dialog stays open with the error; the parent refreshes its
+   * list (and the capacity banner) but shows no success message.
+   */
+  onPartial?: (deleted: number) => void;
 }
 
 export function BulkDeleteMemoriesDialog({
@@ -77,6 +83,7 @@ export function BulkDeleteMemoriesDialog({
   open,
   onOpenChange,
   onDeleted,
+  onPartial,
 }: BulkDeleteMemoriesDialogProps) {
   const t = useTranslations("contextDetail.bulkDelete");
   const [filters, setFilters] = useState<BulkDeleteFilters>(EMPTY);
@@ -84,6 +91,8 @@ export function BulkDeleteMemoriesDialog({
   const [busy, setBusy] = useState(false);
   /** Memories deleted so far by the current confirm (the server caps a request). */
   const [progress, setProgress] = useState<number | null>(null);
+  /** Deleted before a failed batch — shown beside the error. */
+  const [partial, setPartial] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const update = (key: keyof BulkDeleteFilters, value: string) => {
@@ -101,6 +110,7 @@ export function BulkDeleteMemoriesDialog({
     }
     setBusy(true);
     setError(null);
+    setPartial(null);
     let deleted = 0;
     try {
       if (dryRun) {
@@ -113,24 +123,35 @@ export function BulkDeleteMemoriesDialog({
         return;
       }
       // One request deletes at most 2,000 memories; repeat until none remain.
+      // Each request resumes at the previous one's cursor, so rows this
+      // member may not delete are not rescanned.
       setProgress(0);
+      let cursor: string | undefined;
       for (;;) {
         const res = await forgetBulk({
           context_id: contextId,
           ...request,
           dry_run: false,
+          ...(cursor ? { cursor } : {}),
         });
         deleted += res.deleted ?? 0;
         setProgress(deleted);
-        if (!res.remaining || !res.deleted) break;
+        if (!res.remaining || !res.deleted || !res.next_cursor) break;
+        cursor = res.next_cursor;
       }
       onDeleted(deleted);
       setFilters(EMPTY);
       setMatched(null);
     } catch (err) {
+      // The error stays in the dialog (frontend.md: errors in a dialog body
+      // are an Alert inside it). Batches that did delete are reported beside
+      // it and the parent refreshes quietly; the old count no longer applies.
       setError(err instanceof Error ? err.message : t("failed"));
-      // Some batches may have been deleted before the failure: refresh.
-      if (deleted > 0) onDeleted(deleted);
+      if (deleted > 0) {
+        setPartial(deleted);
+        setMatched(null);
+        onPartial?.(deleted);
+      }
     } finally {
       setBusy(false);
       setProgress(null);
@@ -143,6 +164,7 @@ export function BulkDeleteMemoriesDialog({
       setFilters(EMPTY);
       setMatched(null);
       setError(null);
+      setPartial(null);
     }
     onOpenChange(next);
   };
@@ -209,7 +231,14 @@ export function BulkDeleteMemoriesDialog({
         )}
         {error && (
           <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
+            <AlertDescription>
+              {error}
+              {partial !== null && (
+                <span className="block">
+                  {t("partial", { count: partial })}
+                </span>
+              )}
+            </AlertDescription>
           </Alert>
         )}
 
