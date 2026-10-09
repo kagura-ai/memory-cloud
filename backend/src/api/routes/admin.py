@@ -1124,6 +1124,20 @@ async def delete_user(
         # resurrect ghost members for an account that no longer exists.
         await db.execute(delete(WorkspaceMember).where(WorkspaceMember.user_id == user_id))
 
+        # Issue #1940: an admin delete is the operator's override of the
+        # running-subscription block — log the workspaces so billing can be
+        # reconciled (same event as admin force-erase).
+        from services.account_erasure_service import owned_workspaces_under_contract
+
+        under_contract = await owned_workspaces_under_contract(db, user_id)
+        if under_contract:
+            logger.warning(
+                "erasure_admin_override_billing_contract",
+                user_id=user_id,
+                admin_id=admin_id,
+                workspace_ids=[str(ws.id) for ws in under_contract],
+            )
+
         # Delete workspaces owned by the user
         # #687: operation-on-deleted — hard-delete cascades over soft-deleted
         # workspaces; the user is leaving the system entirely, so any workspace

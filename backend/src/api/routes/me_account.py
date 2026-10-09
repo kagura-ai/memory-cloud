@@ -190,6 +190,8 @@ async def create_erasure_request(
     Other status codes:
         - 403: user is the protected initial admin
         - 409: an active erasure request already exists for this user
+          (``ERASURE-006``), or the user owns a workspace with a running
+          paid subscription (``BILLING-005``, Issue #1940)
         - 503: OAuth user but the confirmation email failed to dispatch
           (mapped from EmailDispatchError); the pending row is rolled back
           so the user can retry once the email backend recovers.
@@ -223,7 +225,9 @@ async def confirm_erasure_request(
 
     Password-auth users must re-supply their password as a second factor.
     OAuth users rely on the email-link click + active session cookie.
-    Returns 400 on invalid/expired token, 403 on password mismatch.
+    Returns 400 on invalid/expired token, 403 on password mismatch, 409
+    ``BILLING-005`` when the user owns a workspace with a running paid
+    subscription (Issue #1940).
     """
     service = AccountErasureService(db)
     record = await service.confirm_self_service(

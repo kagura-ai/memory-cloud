@@ -145,6 +145,9 @@ export function DeleteAccountSection() {
       } else if (code === "ERASURE-005") {
         // Sole owner of a shared workspace — a structural block, not transient.
         setDialogError(t("workspaceTransferError"));
+      } else if (code === "BILLING-005") {
+        // #1940: owns a workspace whose paid subscription is still running.
+        setDialogError(t("subscriptionActiveError"));
       } else if (code === "ERASURE-006") {
         // An active request already exists (other tab, or a stale pending row).
         // Close and re-sync so the card shows that request instead of looping
@@ -177,6 +180,9 @@ export function DeleteAccountSection() {
       const code = e instanceof ApiError ? e.error : undefined;
       if (code === "ERASURE-002") {
         setDialogError(t("confirmTokenExpired"));
+      } else if (code === "BILLING-005") {
+        // #1940: a subscription started (or was resumed) since the request.
+        setDialogError(t("subscriptionActiveError"));
       } else if (code === "ERASURE-006") {
         setOpen(false);
         reset();

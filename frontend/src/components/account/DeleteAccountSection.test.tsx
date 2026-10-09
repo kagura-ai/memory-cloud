@@ -210,6 +210,40 @@ describe("DeleteAccountSection", () => {
     expect(mockConfirm).not.toHaveBeenCalled();
   });
 
+  it("BILLING-005: shows the active-subscription message on request (#1940)", async () => {
+    mockGetActive.mockResolvedValue(null);
+    mockRequest.mockRejectedValue(
+      new ApiError({ status: 409, error: "BILLING-005", message: "x" }),
+    );
+    render(<DeleteAccountSection />);
+    fireEvent.click(await screen.findByText("deleteButton"));
+    fireEvent.click(await screen.findByText("dialogConfirm"));
+    expect(await screen.findByText("subscriptionActiveError")).toBeInTheDocument();
+    expect(screen.queryByText("requestError")).not.toBeInTheDocument();
+    expect(mockConfirm).not.toHaveBeenCalled();
+  });
+
+  it("password step BILLING-005: shows the active-subscription message, not 'wrong password' (#1940)", async () => {
+    mockGetActive.mockResolvedValue(null);
+    mockRequest.mockResolvedValue({
+      request_id: "r1",
+      status: "pending",
+      requested_at: "x",
+      confirm_token: "tok-123",
+    });
+    mockConfirm.mockRejectedValue(
+      new ApiError({ status: 409, error: "BILLING-005", message: "x" }),
+    );
+    render(<DeleteAccountSection />);
+    fireEvent.click(await screen.findByText("deleteButton"));
+    fireEvent.click(await screen.findByText("dialogConfirm"));
+    const pw = await screen.findByLabelText("passwordLabel");
+    fireEvent.change(pw, { target: { value: "hunter2" } });
+    fireEvent.click(screen.getByText("dialogConfirm"));
+    expect(await screen.findByText("subscriptionActiveError")).toBeInTheDocument();
+    expect(screen.queryByText("confirmError")).not.toBeInTheDocument();
+  });
+
   it("ERASURE-006: re-syncs the existing request and toasts instead of looping", async () => {
     // mount → no request; after the 409, loadActive() returns the existing one.
     mockGetActive

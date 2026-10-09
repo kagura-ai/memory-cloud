@@ -1840,6 +1840,25 @@ class Workspace(Base):
         return get_plan_tier(self.plan_name)
 
     @property
+    def has_active_billing_contract(self) -> bool:
+        """Whether a paid subscription is still running for this workspace (#1940).
+
+        True while the external billing service owns the entitlement and keeps
+        it on a paid tier. Billing holds the paid tier through a scheduled
+        cancellation and through the payment-failure grace period, and pushes
+        ``free`` only once the contract has ended, so these two columns cover
+        the whole window in which the workspace (or its owner's account) must
+        not be deleted. A locally-owned paid tier (``admin_grant``, e.g. a comp
+        grant) has no subscription behind it and does not count.
+        """
+        from config.plan_tiers import PlanName
+
+        return (
+            self.entitlement_source == ENTITLEMENT_SOURCE_EXTERNAL_BILLING
+            and self.plan_name != PlanName.FREE
+        )
+
+    @property
     def effective_memory_limit(self) -> int:
         """Memory limit including addon bonus and the referral bonus (#1470).
 

@@ -95,7 +95,11 @@ def _service() -> AccountErasureService:
     # send_erasure_confirmation defaults to success — Issue #469's OAuth path
     # exercises this; tests that need failure modes override per-test.
     email.send_erasure_confirmation = AsyncMock(return_value=True)
-    return AccountErasureService(db, email_service=email)
+    svc = AccountErasureService(db, email_service=email)
+    # #1940: no workspace under a billing contract unless a test says so. The
+    # query itself is covered by calling the unbound method directly.
+    svc._owned_workspaces_under_contract = AsyncMock(return_value=[])
+    return svc
 
 
 # ---------------------------------------------------------------------------
@@ -1471,3 +1475,160 @@ class TestEmailLinkErasureStaysConfirmable1678:
             await self._request_then_confirm(
                 password_at_request="hashed", password_at_confirm="hashed", password=None
             )
+
+
+# ---------------------------------------------------------------------------
+# Billing contract blocks self-service erasure (Issue #1940)
+# ---------------------------------------------------------------------------
+
+
+def _contract_workspace() -> SimpleNamespace:
+    return SimpleNamespace(id=uuid4(), plan_name="pro")
+
+
+class TestBillingContractBlocksErasure:
+    @pytest.mark.asyncio
+    async def test_contract_query_targets_live_paid_billing_workspaces(self):
+        svc = _service()
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        svc.db.execute = AsyncMock(return_value=result)
+
+        assert await AccountErasureService._owned_workspaces_under_contract(svc, "u-1") == []
+
+        sql = str(svc.db.execute.await_args.args[0].compile()).lower()
+        assert "workspaces.owner_user_id" in sql
+        assert "workspaces.deleted_at is null" in sql
+        assert "workspaces.entitlement_source" in sql
+        assert "workspaces.plan_name !=" in sql
+
+    @pytest.mark.asyncio
+    async def test_request_refused_while_owning_contract_workspace(self):
+        from utils.exceptions import BillingContractActiveError
+
+        svc = _service()
+        svc._load_user_or_404 = AsyncMock(return_value=_user())
+        svc._find_active_request = AsyncMock(return_value=None)
+        ws = _contract_workspace()
+        svc._owned_workspaces_under_contract = AsyncMock(return_value=[ws])
+
+        with pytest.raises(BillingContractActiveError) as exc:
+            await svc.request_self_service_erasure(user_id="u-1")
+
+        assert exc.value.status_code == 409
+        assert exc.value.details["workspace_ids"] == [str(ws.id)]
+        svc.db.add.assert_not_called()
+        svc.email_service.send_erasure_confirmation.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_request_reports_contract_before_a_leftover_pending_row(self):
+        """A confirm refused for the contract leaves its pending row behind;
+        a fresh request must still name the contract, not "already requested"."""
+        from utils.exceptions import BillingContractActiveError
+
+        svc = _service()
+        svc._load_user_or_404 = AsyncMock(return_value=_user())
+        svc._find_active_request = AsyncMock(return_value=SimpleNamespace(status=STATUS_PENDING))
+        svc._owned_workspaces_under_contract = AsyncMock(return_value=[_contract_workspace()])
+
+        with pytest.raises(BillingContractActiveError):
+            await svc.request_self_service_erasure(user_id="u-1")
+
+    @pytest.mark.asyncio
+    async def test_confirm_refused_while_owning_contract_workspace(self):
+        from utils.exceptions import BillingContractActiveError
+
+        svc = _service()
+        target = _user(auth_method="oauth")
+        svc._load_user_or_404 = AsyncMock(return_value=target)
+        svc._check_no_blocking_workspace_transfers = AsyncMock()
+        svc._owned_workspaces_under_contract = AsyncMock(return_value=[_contract_workspace()])
+
+        token = "raw-token-abc"
+        request_id = uuid4()
+        request = ErasureRequest(
+            user_id="u-1",
+            user_email_hash=_sha256_hex(target.email),
+            initiated_by="u-1",
+            is_self_service=True,
+            reason_code=REASON_SELF_SERVICE,
+            status=STATUS_PENDING,
+            confirm_token_hash=_sha256_hex(token),
+        )
+        request.id = request_id
+        svc._load_request_or_404 = AsyncMock(return_value=request)
+
+        with patch("services.account_erasure_service.get_redis_client") as mock_redis:
+            redis_client = MagicMock()
+            redis_client.get = AsyncMock(return_value=str(request_id))
+            redis_client.delete = AsyncMock()
+            mock_redis.return_value = redis_client
+
+            with pytest.raises(BillingContractActiveError):
+                await svc.confirm_self_service(user_id="u-1", token=token)
+
+        assert request.status == STATUS_PENDING
+        svc.db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sweep_execution_fails_request_when_contract_started_in_cooling_off(self):
+        from models.erasure import STATUS_FAILED
+        from utils.exceptions import BillingContractActiveError
+
+        svc = _service()
+        svc._list_owned_workspaces = AsyncMock(return_value=[])
+        svc._owned_workspaces_under_contract = AsyncMock(return_value=[_contract_workspace()])
+        request = ErasureRequest(
+            user_id="u-1",
+            user_email_hash=_sha256_hex("alice@example.com"),
+            initiated_by="u-1",
+            is_self_service=True,
+            reason_code=REASON_SELF_SERVICE,
+            status=STATUS_COOLING_OFF,
+        )
+        request.id = uuid4()
+
+        with patch(
+            "services.account_erasure_service.delete_user_points", new=AsyncMock()
+        ) as qdrant_delete:
+            with pytest.raises(BillingContractActiveError):
+                await svc._execute(request, _user())
+
+        qdrant_delete.assert_not_awaited()
+        failed_update = svc.db.execute.await_args.args[0]
+        params = failed_update.compile().params
+        assert params["status"] == STATUS_FAILED
+        assert params["failure_reason"].startswith("billing_contract_active")
+
+    @pytest.mark.asyncio
+    async def test_admin_force_erase_is_not_blocked_but_logged(self):
+        svc = _service()
+        svc._list_owned_workspaces = AsyncMock(return_value=[])
+        svc._owned_workspaces_under_contract = AsyncMock(return_value=[_contract_workspace()])
+        request = ErasureRequest(
+            user_id="u-1",
+            user_email_hash=_sha256_hex("alice@example.com"),
+            initiated_by="admin-1",
+            is_self_service=False,
+            reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
+            status="in_progress",
+        )
+        request.id = uuid4()
+
+        class _Reached(Exception):
+            pass
+
+        with (
+            patch(
+                "services.account_erasure_service.delete_user_points",
+                new=AsyncMock(side_effect=_Reached()),
+            ),
+            patch("services.account_erasure_service.logger") as mock_logger,
+        ):
+            with pytest.raises(_Reached):
+                await svc._execute(request, _user())
+
+        assert any(
+            call.args and call.args[0] == "erasure_admin_override_billing_contract"
+            for call in mock_logger.warning.call_args_list
+        )

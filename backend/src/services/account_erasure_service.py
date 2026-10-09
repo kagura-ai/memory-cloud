@@ -44,11 +44,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.session import get_session_manager
 from auth.workspace_roles import WorkspaceRole
+from config.plan_tiers import PlanName
 from config.settings import get_settings
 from db.qdrant import delete_user_points
 from db.redis import clear_co_activations, clear_user_rate_limits, get_redis_client
 from models.agent import Agent, AgentContextBinding
 from models.auth import (
+    ENTITLEMENT_SOURCE_EXTERNAL_BILLING,
     APIKey,
     AuditLog,
     Context,
@@ -80,6 +82,7 @@ from services.system_admin_service import SystemAdminService
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
+    BillingContractActiveError,
     EmailDispatchError,
     ErasureAlreadyInProgressError,
     ErasureForbiddenError,
@@ -139,6 +142,32 @@ def _audit_salt() -> str:
 _sha256_hex = sha256_hex  # backward-compat alias for tests + this module
 
 
+async def owned_workspaces_under_contract(db: AsyncSession, user_id: str) -> list[Workspace]:
+    """Live workspaces ``user_id`` owns that have a running subscription (#1940).
+
+    Same predicate as ``Workspace.has_active_billing_contract``, in SQL. Every
+    owned workspace counts, including one that erasure would hand to another
+    admin: the subscription is the erased user's, so it must end before the
+    account goes. Admin deletion paths call this too, to log what they override.
+
+    Args:
+        db: Async database session.
+        user_id: Owner whose workspaces are checked.
+
+    Returns:
+        The matching workspaces (empty when none is under contract).
+    """
+    result = await db.execute(
+        select(Workspace).where(
+            Workspace.owner_user_id == user_id,
+            Workspace.deleted_at.is_(None),
+            Workspace.entitlement_source == ENTITLEMENT_SOURCE_EXTERNAL_BILLING,
+            Workspace.plan_name != PlanName.FREE.value,
+        )
+    )
+    return list(result.scalars().all())
+
+
 class AccountErasureService:
     """Service-layer orchestrator for GDPR right-to-erasure.
 
@@ -183,6 +212,8 @@ class AccountErasureService:
         Raises:
             NotFoundException: User does not exist.
             InitialAdminCannotBeErasedError: User is the protected initial admin.
+            BillingContractActiveError: User owns a workspace with a running paid
+                subscription (409 ``BILLING-005``, #1940).
             ErasureAlreadyInProgressError: An active (pending/cooling_off) request
                 already exists for this user.
             EmailDispatchError: OAuth user but ``send_erasure_confirmation``
@@ -192,6 +223,12 @@ class AccountErasureService:
         target = await self._load_user_or_404(user_id)
         if target.is_initial_admin:
             raise InitialAdminCannotBeErasedError()
+
+        # Issue #1940: no erasure while the user owns a workspace with a running
+        # subscription. Refuse before any row, token or email is created — and
+        # before the active-request check, so a pending row left by a refused
+        # confirm still answers with the real reason, not "already requested".
+        await self._check_no_active_billing_contract(user_id)
 
         existing = await self._find_active_request(user_id)
         if existing:
@@ -403,6 +440,8 @@ class AccountErasureService:
             ErasureTokenInvalidError: Token missing/expired/mismatched.
             ErasureForbiddenError: Password mismatch on the password path.
             ErasureRequestNotFoundError: No pending request exists.
+            BillingContractActiveError: User owns a workspace with a running paid
+                subscription (409 ``BILLING-005``, #1940).
         """
         target = await self._load_user_or_404(user_id)
 
@@ -467,6 +506,9 @@ class AccountErasureService:
         # cooling-off (admin leaves, etc.), so this is best-effort, not
         # a guarantee. The cron's identical check remains the safety net.
         await self._check_no_blocking_workspace_transfers(user_id)
+        # Issue #1940: same best-effort pre-check for a subscription started (or
+        # resumed) since the request; the sweep re-checks before executing.
+        await self._check_no_active_billing_contract(user_id)
 
         now = utcnow()
         request.status = STATUS_COOLING_OFF
@@ -752,6 +794,22 @@ class AccountErasureService:
         try:
             owned_workspaces = await self._list_owned_workspaces(target.user_id)
 
+            # Issue #1940: the enforcement point for self-service erasure — a
+            # subscription can start during the 7-day cooling-off. Admin
+            # force-erase stays the operator's escape hatch (e.g. a plan that
+            # billing failed to push back to Free) and is only logged.
+            under_contract = await self._owned_workspaces_under_contract(target.user_id)
+            if under_contract:
+                ws_ids = [str(ws.id) for ws in under_contract]
+                if request.is_self_service:
+                    raise BillingContractActiveError(workspace_ids=ws_ids)
+                logger.warning(
+                    "erasure_admin_override_billing_contract",
+                    request_id=str(request.id),
+                    user_id=target.user_id,
+                    workspace_ids=ws_ids,
+                )
+
             # Stripe customer/subscription teardown is no longer this backend's
             # job (#1096): the OSS backend is Stripe-agnostic. memory-cloud erases
             # only its own data below.
@@ -798,6 +856,26 @@ class AccountErasureService:
                     error=str(exc),
                 )
 
+        except BillingContractActiveError as exc:
+            # Caller-actionable, like the transfer case below: terminal
+            # `failed` with a structured reason; the user creates a new request
+            # once the contract has ended. Nothing was deleted yet.
+            await self.db.rollback()
+            await self.db.execute(
+                update(ErasureRequest)
+                .where(ErasureRequest.id == request.id)
+                .values(
+                    status=STATUS_FAILED,
+                    failure_reason=(
+                        f"billing_contract_active: workspace_ids={','.join(exc.details['workspace_ids'])}. "
+                        "Cancel the subscription and wait for the contract period to end, "
+                        "then create a new erasure request."
+                    )[:1000],
+                    deleted_data_summary=summary or None,
+                )
+            )
+            await self.db.commit()
+            raise
         except WorkspaceTransferRequiredError as exc:
             # Caller-actionable error. Move the row to the terminal `failed`
             # state with a structured reason so the operator can fix
@@ -866,6 +944,16 @@ class AccountErasureService:
         """All workspaces this user owns (drives the ownership-transfer / member checks)."""
         result = await self.db.execute(select(Workspace).where(Workspace.owner_user_id == user_id))
         return list(result.scalars().all())
+
+    async def _owned_workspaces_under_contract(self, user_id: str) -> list[Workspace]:
+        """Live workspaces this user owns that have a running subscription (#1940)."""
+        return await owned_workspaces_under_contract(self.db, user_id)
+
+    async def _check_no_active_billing_contract(self, user_id: str) -> None:
+        """Raise BillingContractActiveError if the user owns a workspace under contract."""
+        under_contract = await self._owned_workspaces_under_contract(user_id)
+        if under_contract:
+            raise BillingContractActiveError(workspace_ids=[str(ws.id) for ws in under_contract])
 
     async def _check_no_blocking_workspace_transfers(self, user_id: str) -> None:
         """Raise WorkspaceTransferRequiredError if any owned workspace would

@@ -46,6 +46,7 @@ vi.mock("@/lib/api/account-erasure", () => ({
   confirmErasure: (...a: unknown[]) => mockConfirm(...a),
 }));
 
+import { ApiError } from "@/lib/api/base";
 import ConfirmErasurePage from "./page";
 
 function confirmedState() {
@@ -113,5 +114,15 @@ describe("ConfirmErasurePage", () => {
     render(<ConfirmErasurePage />);
     await waitFor(() => expect(mockConfirm).toHaveBeenCalledWith("tok-1"));
     expect(await screen.findByText("confirmPageInvalidBody")).toBeInTheDocument();
+  });
+
+  it("shows the subscription message, not 'link expired', on BILLING-005 (#1940)", async () => {
+    mockConfirm.mockRejectedValue(
+      new ApiError({ status: 409, error: "BILLING-005", message: "x" }),
+    );
+    render(<ConfirmErasurePage />);
+    expect(await screen.findByText("subscriptionActiveError")).toBeInTheDocument();
+    expect(screen.getByText("confirmPageBlockedTitle")).toBeInTheDocument();
+    expect(screen.queryByText("confirmPageInvalidBody")).not.toBeInTheDocument();
   });
 });
