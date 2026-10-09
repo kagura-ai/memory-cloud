@@ -36,9 +36,13 @@ def _ws(
     )
 
 
-def _db(memory_count: int | None, used_bytes: int | None) -> MagicMock:
+def _db(
+    memory_count: int | None, used_bytes: int | None, hidden_bytes: int | None = 0
+) -> MagicMock:
+    """Scripted reads: memory count, storage counter, then — only when the
+    counter is over the limit — the bytes of files in soft-deleted contexts."""
     db = MagicMock()
-    db.scalar = AsyncMock(side_effect=[memory_count, used_bytes])
+    db.scalar = AsyncMock(side_effect=[memory_count, used_bytes, hidden_bytes])
     return db
 
 
@@ -90,6 +94,25 @@ class TestThePredicate:
         assert lock.over_bytes == 1
         assert lock.used_bytes == 100 * MB + 1
         assert lock.storage_limit_bytes == 100 * MB
+
+    @pytest.mark.asyncio
+    async def test_files_of_deleted_contexts_do_not_hold_the_lock(self) -> None:
+        """They are invisible in list_files and the storage page, so the owner
+        could never delete them away: the lock's figure leaves them out."""
+        assert await cl.capacity_lock_state(_db(3, 120 * MB, 30 * MB), _ws()) is None
+
+    @pytest.mark.asyncio
+    async def test_visible_bytes_still_lock_after_the_deduction(self) -> None:
+        lock = await cl.capacity_lock_state(_db(3, 120 * MB, 10 * MB), _ws())
+        assert lock is not None
+        assert lock.used_bytes == 110 * MB
+        assert lock.over_bytes == 10 * MB
+
+    @pytest.mark.asyncio
+    async def test_the_deduction_is_only_read_when_over_storage(self) -> None:
+        db = _db(3, 100 * MB)
+        assert await cl.capacity_lock_state(db, _ws()) is None
+        assert db.scalar.await_count == 2
 
     @pytest.mark.asyncio
     async def test_the_cleanup_url_points_at_the_plan_page(self) -> None:

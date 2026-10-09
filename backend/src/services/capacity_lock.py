@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.plan_tiers import PlanName
 from config.settings import get_settings
 from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING, Context, Workspace, WorkspaceMember
-from models.file_objects import WorkspaceStorageUsage
+from models.file_objects import FileObject, WorkspaceStorageUsage
 from models.memory import Memory
 from utils.exceptions import CapacityLockedError
 
@@ -81,6 +81,32 @@ def is_lock_candidate(workspace: Workspace) -> bool:
     )
 
 
+async def _bytes_in_deleted_contexts(db: AsyncSession, workspace_id: UUID) -> int:
+    """Bytes of live uploaded files bound to a soft-deleted context.
+
+    ``delete_context`` keeps the context's files (the context can be restored
+    from its rows, ``services/context_restore.py``), so they stay in
+    ``workspace_storage_usage``. But the owner can no longer see them —
+    ``list_files`` and the storage page only show files of live contexts — so
+    counting them would leave a storage lock the owner has no way to lift by
+    deleting. The lock's figure therefore excludes them; the counter itself
+    (and the upload quota) are unchanged.
+    """
+    deleted_contexts = select(Context.id).where(
+        Context.workspace_id == workspace_id,
+        Context.deleted_at.is_not(None),
+    )
+    total = await db.scalar(
+        select(func.coalesce(func.sum(FileObject.size_bytes), 0)).where(
+            FileObject.workspace_id == workspace_id,
+            FileObject.deleted_at.is_(None),
+            FileObject.status == "uploaded",
+            FileObject.context_id.in_(deleted_contexts),
+        )
+    )
+    return int(total or 0)
+
+
 async def capacity_lock_state(db: AsyncSession, workspace: Workspace) -> CapacityLock | None:
     """The lock on ``workspace``, or ``None`` when it is not locked.
 
@@ -115,6 +141,9 @@ async def capacity_lock_state(db: AsyncSession, workspace: Workspace) -> Capacit
     )
     memory_limit = int(workspace.effective_memory_limit)
     storage_limit = int(workspace.effective_storage_limit_bytes)
+    if 0 <= storage_limit < used_bytes:
+        # Only on the over-storage path, so an unlocked workspace pays nothing.
+        used_bytes -= await _bytes_in_deleted_contexts(db, workspace.id)
     # A negative limit would mean "unlimited"; Free has none today, but a
     # settings override must not lock a workspace against an unlimited cap.
     over_memories = max(0, memory_count - memory_limit) if memory_limit >= 0 else 0
