@@ -60,6 +60,18 @@ def hand_over():
         yield mock
 
 
+@pytest.fixture(autouse=True)
+def owned_contracts():
+    """#1940: no owned workspace under a billing contract unless a test sets
+    ``owned_contracts.return_value``. The query itself is covered in
+    ``tests/services/test_billing_contract.py``."""
+    with patch(
+        "services.account_erasure_service.owned_workspaces_under_contract",
+        new=AsyncMock(return_value=[]),
+    ) as mock:
+        yield mock
+
+
 def _user(
     *,
     user_id: str = "u-1",
@@ -95,11 +107,7 @@ def _service() -> AccountErasureService:
     # send_erasure_confirmation defaults to success — Issue #469's OAuth path
     # exercises this; tests that need failure modes override per-test.
     email.send_erasure_confirmation = AsyncMock(return_value=True)
-    svc = AccountErasureService(db, email_service=email)
-    # #1940: no workspace under a billing contract unless a test says so. The
-    # query itself is covered in tests/services/test_billing_contract.py.
-    svc._owned_workspaces_under_contract = AsyncMock(return_value=[])
-    return svc
+    return AccountErasureService(db, email_service=email)
 
 
 # ---------------------------------------------------------------------------
@@ -1482,20 +1490,49 @@ class TestEmailLinkErasureStaysConfirmable1678:
 # ---------------------------------------------------------------------------
 
 
-def _contract_workspace() -> SimpleNamespace:
-    return SimpleNamespace(id=uuid4(), plan_name="pro")
+def _contract_workspace(*, deleted: bool = False) -> SimpleNamespace:
+    from utils.datetime import utcnow
+
+    return SimpleNamespace(
+        id=uuid4(),
+        plan_name="pro",
+        has_active_billing_contract=True,
+        deleted_at=utcnow() if deleted else None,
+    )
+
+
+def _execute_request(*, self_service: bool) -> ErasureRequest:
+    request = ErasureRequest(
+        user_id="u-1",
+        user_email_hash=_sha256_hex("alice@example.com"),
+        initiated_by="u-1" if self_service else "admin-1",
+        is_self_service=self_service,
+        reason_code=REASON_SELF_SERVICE if self_service else REASON_USER_REQUEST_VIA_SUPPORT,
+        status=STATUS_COOLING_OFF if self_service else "in_progress",
+    )
+    request.id = uuid4()
+    return request
+
+
+def _stub_execute_steps(svc: AccountErasureService) -> None:
+    svc._handle_owned_workspaces = AsyncMock(return_value={})
+    svc._delete_postgres = AsyncMock(return_value={})
+    svc._pseudonymize_audit_logs = AsyncMock(return_value=0)
+    svc._clear_redis = AsyncMock(return_value={})
+    svc._write_audit_log = AsyncMock()
+    svc._finalize = AsyncMock()
 
 
 class TestBillingContractBlocksErasure:
     @pytest.mark.asyncio
-    async def test_request_refused_while_owning_contract_workspace(self):
+    async def test_request_refused_while_owning_contract_workspace(self, owned_contracts):
         from utils.exceptions import BillingContractActiveError
 
         svc = _service()
         svc._load_user_or_404 = AsyncMock(return_value=_user())
         svc._find_active_request = AsyncMock(return_value=None)
         ws = _contract_workspace()
-        svc._owned_workspaces_under_contract = AsyncMock(return_value=[ws])
+        owned_contracts.return_value = [ws]
 
         with pytest.raises(BillingContractActiveError) as exc:
             await svc.request_self_service_erasure(user_id="u-1")
@@ -1506,28 +1543,30 @@ class TestBillingContractBlocksErasure:
         svc.email_service.send_erasure_confirmation.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_request_reports_contract_before_a_leftover_pending_row(self):
-        """A confirm refused for the contract leaves its pending row behind;
-        a fresh request must still name the contract, not "already requested"."""
-        from utils.exceptions import BillingContractActiveError
-
+    async def test_request_keeps_reporting_an_active_request_first(self, owned_contracts):
+        """A scheduled (cooling_off) erasure stays visible as such; the sweep
+        is what fails it if the contract is still running then."""
         svc = _service()
         svc._load_user_or_404 = AsyncMock(return_value=_user())
-        svc._find_active_request = AsyncMock(return_value=SimpleNamespace(status=STATUS_PENDING))
-        svc._owned_workspaces_under_contract = AsyncMock(return_value=[_contract_workspace()])
+        svc._find_active_request = AsyncMock(
+            return_value=SimpleNamespace(status=STATUS_COOLING_OFF)
+        )
+        owned_contracts.return_value = [_contract_workspace()]
 
-        with pytest.raises(BillingContractActiveError):
+        with pytest.raises(ErasureAlreadyInProgressError):
             await svc.request_self_service_erasure(user_id="u-1")
 
     @pytest.mark.asyncio
-    async def test_confirm_refused_while_owning_contract_workspace(self):
+    async def test_confirm_refused_cancels_the_pending_request(self, owned_contracts):
+        """Refusing confirm also cancels the request and burns its token, so a
+        fresh request works once the contract has ended (no dead pending row)."""
         from utils.exceptions import BillingContractActiveError
 
         svc = _service()
         target = _user(auth_method="oauth")
         svc._load_user_or_404 = AsyncMock(return_value=target)
         svc._check_no_blocking_workspace_transfers = AsyncMock()
-        svc._owned_workspaces_under_contract = AsyncMock(return_value=[_contract_workspace()])
+        owned_contracts.return_value = [_contract_workspace()]
 
         token = "raw-token-abc"
         request_id = uuid4()
@@ -1552,8 +1591,12 @@ class TestBillingContractBlocksErasure:
             with pytest.raises(BillingContractActiveError):
                 await svc.confirm_self_service(user_id="u-1", token=token)
 
-        assert request.status == STATUS_PENDING
-        svc.db.commit.assert_not_awaited()
+        assert request.status == STATUS_CANCELLED
+        assert request.cancelled_at is not None
+        assert request.scheduled_for is None
+        svc.db.commit.assert_awaited_once()
+        redis_client.delete.assert_awaited_once()
+        svc.email_service.send_erasure_cooling_off_started.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_sweep_execution_fails_request_when_contract_started_in_cooling_off(self):
@@ -1561,17 +1604,8 @@ class TestBillingContractBlocksErasure:
         from utils.exceptions import BillingContractActiveError
 
         svc = _service()
-        svc._list_owned_workspaces = AsyncMock(return_value=[])
-        svc._owned_workspaces_under_contract = AsyncMock(return_value=[_contract_workspace()])
-        request = ErasureRequest(
-            user_id="u-1",
-            user_email_hash=_sha256_hex("alice@example.com"),
-            initiated_by="u-1",
-            is_self_service=True,
-            reason_code=REASON_SELF_SERVICE,
-            status=STATUS_COOLING_OFF,
-        )
-        request.id = uuid4()
+        svc._list_owned_workspaces = AsyncMock(return_value=[_contract_workspace()])
+        request = _execute_request(self_service=True)
 
         with patch(
             "services.account_erasure_service.delete_user_points", new=AsyncMock()
@@ -1586,34 +1620,40 @@ class TestBillingContractBlocksErasure:
         assert params["failure_reason"].startswith("billing_contract_active")
 
     @pytest.mark.asyncio
-    async def test_admin_force_erase_is_not_blocked_but_logged(self):
+    async def test_sweep_ignores_a_soft_deleted_contract_workspace(self):
+        """Only live workspaces block; a deleted one is hard-deleted with the
+        account (billing's read of it already answers 404 → cancel)."""
         svc = _service()
-        svc._list_owned_workspaces = AsyncMock(return_value=[])
-        svc._owned_workspaces_under_contract = AsyncMock(return_value=[_contract_workspace()])
-        request = ErasureRequest(
-            user_id="u-1",
-            user_email_hash=_sha256_hex("alice@example.com"),
-            initiated_by="admin-1",
-            is_self_service=False,
-            reason_code=REASON_USER_REQUEST_VIA_SUPPORT,
-            status="in_progress",
-        )
-        request.id = uuid4()
+        svc._list_owned_workspaces = AsyncMock(return_value=[_contract_workspace(deleted=True)])
+        _stub_execute_steps(svc)
 
-        class _Reached(Exception):
-            pass
+        with patch("services.account_erasure_service.delete_user_points", new=AsyncMock()):
+            await svc._execute(_execute_request(self_service=True), _user())
+
+        svc._finalize.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_admin_force_erase_proceeds_and_logs_after_completion(self):
+        svc = _service()
+        live, deleted = _contract_workspace(), _contract_workspace(deleted=True)
+        svc._list_owned_workspaces = AsyncMock(return_value=[live, deleted])
+        _stub_execute_steps(svc)
+        order: list[str] = []
+        svc._finalize = AsyncMock(side_effect=lambda *a: order.append("finalize"))
 
         with (
-            patch(
-                "services.account_erasure_service.delete_user_points",
-                new=AsyncMock(side_effect=_Reached()),
-            ),
+            patch("services.account_erasure_service.delete_user_points", new=AsyncMock()),
             patch("services.account_erasure_service.logger") as mock_logger,
         ):
-            with pytest.raises(_Reached):
-                await svc._execute(request, _user())
+            mock_logger.warning.side_effect = lambda *a, **k: order.append(a[0])
+            await svc._execute(_execute_request(self_service=False), _user())
 
-        assert any(
-            call.args and call.args[0] == "erasure_admin_override_billing_contract"
+        override = [
+            call
             for call in mock_logger.warning.call_args_list
-        )
+            if call.args and call.args[0] == "erasure_admin_override_billing_contract"
+        ]
+        assert len(override) == 1
+        # Soft-deleted ones are hard-deleted too, so they are part of the log.
+        assert override[0].kwargs["workspace_ids"] == [str(live.id), str(deleted.id)]
+        assert order.index("finalize") < order.index("erasure_admin_override_billing_contract")

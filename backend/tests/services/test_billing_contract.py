@@ -26,20 +26,43 @@ def _ws(plan_name: str, source: str = ENTITLEMENT_SOURCE_EXTERNAL_BILLING) -> Wo
     )
 
 
-@pytest.mark.asyncio
-async def test_owned_query_keeps_only_live_workspaces_under_contract():
-    paid = _ws("pro")
-    rows = [paid, _ws("free"), _ws("pro", ENTITLEMENT_SOURCE_ADMIN_GRANT)]
+def _db_returning(rows: list) -> MagicMock:
     result = MagicMock()
     result.scalars.return_value.all.return_value = rows
     db = MagicMock()
     db.execute = AsyncMock(return_value=result)
+    return db
+
+
+@pytest.mark.asyncio
+async def test_owned_query_keeps_only_live_workspaces_under_contract():
+    from utils.datetime import utcnow
+
+    paid = _ws("pro")
+    deleted_paid = _ws("pro")
+    deleted_paid.deleted_at = utcnow()
+    db = _db_returning(
+        [paid, deleted_paid, _ws("free"), _ws("pro", ENTITLEMENT_SOURCE_ADMIN_GRANT)]
+    )
 
     assert await owned_workspaces_under_contract(db, "u-1") == [paid]
+    assert "workspaces.owner_user_id" in str(db.execute.await_args.args[0].compile()).lower()
 
-    sql = str(db.execute.await_args.args[0].compile()).lower()
-    assert "workspaces.owner_user_id" in sql
-    assert "workspaces.deleted_at is null" in sql
+
+@pytest.mark.asyncio
+async def test_owned_query_can_include_soft_deleted():
+    """The admin override log covers workspaces the hard delete removes."""
+    from utils.datetime import utcnow
+
+    paid = _ws("pro")
+    deleted_paid = _ws("basic")
+    deleted_paid.deleted_at = utcnow()
+    db = _db_returning([paid, deleted_paid, _ws("free")])
+
+    assert await owned_workspaces_under_contract(db, "u-1", include_deleted=True) == [
+        paid,
+        deleted_paid,
+    ]
 
 
 def test_ensure_no_billing_contract_names_the_workspaces():

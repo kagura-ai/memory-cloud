@@ -16,8 +16,32 @@ from models.auth import Workspace
 from utils.exceptions import BillingContractActiveError
 
 
-async def owned_workspaces_under_contract(db: AsyncSession, user_id: str) -> list[Workspace]:
-    """Live workspaces ``user_id`` owns that have a running subscription.
+def workspaces_under_contract(
+    workspaces: list[Workspace], *, include_deleted: bool = False
+) -> list[Workspace]:
+    """Filter ``workspaces`` down to those with a running subscription.
+
+    Args:
+        workspaces: Candidate workspaces (e.g. everything a user owns).
+        include_deleted: Keep soft-deleted ones too. The deletion checks look
+            at live workspaces only; the admin override log includes deleted
+            ones, because a hard delete removes them and billing may still be
+            charging for one deleted before this rule existed.
+
+    Returns:
+        The workspaces under contract, in input order.
+    """
+    return [
+        ws
+        for ws in workspaces
+        if ws.has_active_billing_contract and (include_deleted or ws.deleted_at is None)
+    ]
+
+
+async def owned_workspaces_under_contract(
+    db: AsyncSession, user_id: str, *, include_deleted: bool = False
+) -> list[Workspace]:
+    """Workspaces ``user_id`` owns that have a running subscription.
 
     Every owned workspace counts, including one that account erasure would hand
     to another admin: the subscription is the erased user's, so it must end
@@ -28,17 +52,13 @@ async def owned_workspaces_under_contract(db: AsyncSession, user_id: str) -> lis
     Args:
         db: Async database session.
         user_id: Owner whose workspaces are checked.
+        include_deleted: See ``workspaces_under_contract``.
 
     Returns:
         The matching workspaces (empty when none is under contract).
     """
-    result = await db.execute(
-        select(Workspace).where(
-            Workspace.owner_user_id == user_id,
-            Workspace.deleted_at.is_(None),
-        )
-    )
-    return [ws for ws in result.scalars().all() if ws.has_active_billing_contract]
+    result = await db.execute(select(Workspace).where(Workspace.owner_user_id == user_id))
+    return workspaces_under_contract(list(result.scalars().all()), include_deleted=include_deleted)
 
 
 def ensure_no_billing_contract(workspaces: list[Workspace]) -> None:

@@ -74,7 +74,11 @@ from models.erasure import (
     ErasureRequest,
 )
 from models.memory import Memory
-from services.billing_contract import owned_workspaces_under_contract
+from services.billing_contract import (
+    ensure_no_billing_contract,
+    owned_workspaces_under_contract,
+    workspaces_under_contract,
+)
 from services.email_service import EmailService, get_email_service
 from services.oauth_grant_revocation import revoke_oauth_grants
 from services.system_admin_service import SystemAdminService
@@ -197,15 +201,13 @@ class AccountErasureService:
         if target.is_initial_admin:
             raise InitialAdminCannotBeErasedError()
 
-        # Issue #1940: no erasure while the user owns a workspace with a running
-        # subscription. Refuse before any row, token or email is created — and
-        # before the active-request check, so a pending row left by a refused
-        # confirm still answers with the real reason, not "already requested".
-        await self._check_no_active_billing_contract(user_id)
-
         existing = await self._find_active_request(user_id)
         if existing:
             raise ErasureAlreadyInProgressError(existing.status)
+
+        # Issue #1940: no erasure while the user owns a workspace with a running
+        # subscription. Refuse before any row, token or email is created.
+        ensure_no_billing_contract(await owned_workspaces_under_contract(self.db, user_id))
 
         token = secrets.token_urlsafe(32)
         token_hash = _sha256_hex(token)
@@ -481,7 +483,16 @@ class AccountErasureService:
         await self._check_no_blocking_workspace_transfers(user_id)
         # Issue #1940: same best-effort pre-check for a subscription started (or
         # resumed) since the request; the sweep re-checks before executing.
-        await self._check_no_active_billing_contract(user_id)
+        # The request is cancelled (and its token burned) so the user can start
+        # a fresh one once the contract has ended, instead of meeting
+        # "already requested" for the life of a dead pending row.
+        under_contract = await owned_workspaces_under_contract(self.db, user_id)
+        if under_contract:
+            request.status = STATUS_CANCELLED
+            request.cancelled_at = utcnow()
+            await self.db.commit()
+            await redis.delete(redis_key)
+            ensure_no_billing_contract(under_contract)
 
         now = utcnow()
         request.status = STATUS_COOLING_OFF
@@ -780,18 +791,14 @@ class AccountErasureService:
             # Issue #1940: the enforcement point for self-service erasure — a
             # subscription can start during the 7-day cooling-off. Admin
             # force-erase stays the operator's escape hatch (e.g. a plan that
-            # billing failed to push back to Free) and is only logged.
-            under_contract = await self._owned_workspaces_under_contract(target.user_id)
-            if under_contract:
-                ws_ids = [str(ws.id) for ws in under_contract]
-                if request.is_self_service:
-                    raise BillingContractActiveError(workspace_ids=ws_ids)
-                logger.warning(
-                    "erasure_admin_override_billing_contract",
-                    request_id=str(request.id),
-                    user_id=target.user_id,
-                    workspace_ids=ws_ids,
-                )
+            # billing failed to push back to Free); what it overrides is logged
+            # once the erasure has completed. Soft-deleted workspaces are
+            # hard-deleted here too, so the log includes them.
+            if request.is_self_service:
+                ensure_no_billing_contract(workspaces_under_contract(owned_workspaces))
+                overridden: list[Workspace] = []
+            else:
+                overridden = workspaces_under_contract(owned_workspaces, include_deleted=True)
 
             # Stripe customer/subscription teardown is no longer this backend's
             # job (#1096): the OSS backend is Stripe-agnostic. memory-cloud erases
@@ -821,6 +828,13 @@ class AccountErasureService:
 
             # Step 7: finalize the erasure_requests row
             await self._finalize(request, summary)
+            if overridden:
+                logger.warning(
+                    "erasure_admin_override_billing_contract",
+                    request_id=str(request.id),
+                    user_id=target.user_id,
+                    workspace_ids=[str(ws.id) for ws in overridden],
+                )
 
             # Step 8: completion notification — outside the success path's
             # transactional integrity guarantees. A future real EmailService
@@ -927,16 +941,6 @@ class AccountErasureService:
         """All workspaces this user owns (drives the ownership-transfer / member checks)."""
         result = await self.db.execute(select(Workspace).where(Workspace.owner_user_id == user_id))
         return list(result.scalars().all())
-
-    async def _owned_workspaces_under_contract(self, user_id: str) -> list[Workspace]:
-        """Live workspaces this user owns that have a running subscription (#1940)."""
-        return await owned_workspaces_under_contract(self.db, user_id)
-
-    async def _check_no_active_billing_contract(self, user_id: str) -> None:
-        """Raise BillingContractActiveError if the user owns a workspace under contract."""
-        under_contract = await self._owned_workspaces_under_contract(user_id)
-        if under_contract:
-            raise BillingContractActiveError(workspace_ids=[str(ws.id) for ws in under_contract])
 
     async def _check_no_blocking_workspace_transfers(self, user_id: str) -> None:
         """Raise WorkspaceTransferRequiredError if any owned workspace would

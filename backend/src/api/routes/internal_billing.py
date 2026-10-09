@@ -48,7 +48,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.plan_tiers import PLAN_TIERS
+from config.plan_tiers import PLAN_TIERS, PlanName
 from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -202,10 +202,18 @@ async def set_workspace_plan_from_billing(
     except ValueError as exc:
         raise ValidationError("Invalid workspace_id", field="workspace_id") from exc
 
+    # FOR UPDATE serializes with ``WorkspaceService.delete_workspace``, which
+    # checks the billing contract under the same row lock (#1940).
     workspace = (
-        await db.execute(select(Workspace).where(Workspace.id == ws_uuid))
+        await db.execute(select(Workspace).where(Workspace.id == ws_uuid).with_for_update())
     ).scalar_one_or_none()
     if workspace is None:
+        raise NotFoundException("Workspace")
+    # A paid entitlement cannot land on a soft-deleted workspace (#1940): the
+    # owner deleted it, so billing must not keep charging for it. 404 matches
+    # the entitlement read, which the reconciler treats as "cancel". Pushing
+    # ``free`` (a cancellation catching up) is still accepted.
+    if workspace.deleted_at is not None and body.plan_name != PlanName.FREE:
         raise NotFoundException("Workspace")
 
     # Apply entitlement (absolute set → idempotent). Mark provenance as
@@ -272,9 +280,10 @@ async def get_workspace_entitlement(
 
     # Soft-delete safe (#687/#681 pattern): a soft-deleted workspace is "gone" →
     # 404, so the reconciler treats it as cancellable rather than resurrecting a
-    # stale entitlement. (The idempotent PUT deliberately does NOT filter — a #954
-    # reconciliation set may target a just-deleted row; a READ for a skip decision
-    # is the opposite concern.)
+    # stale entitlement. (The idempotent PUT does NOT filter — a #954
+    # reconciliation set may target a just-deleted row — but since #1940 it
+    # accepts only ``free`` there; a READ for a skip decision is the opposite
+    # concern.)
     workspace = (
         await db.execute(
             select(Workspace).where(Workspace.id == ws_uuid, Workspace.deleted_at.is_(None))
