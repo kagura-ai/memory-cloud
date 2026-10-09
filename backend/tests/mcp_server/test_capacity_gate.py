@@ -118,6 +118,49 @@ def _member(answer: bool):
     return patch("services.capacity_lock.is_workspace_member", AsyncMock(return_value=answer))
 
 
+@pytest.fixture(autouse=True)
+def _fresh_candidate_cache():
+    gate.invalidate_capacity_candidate_cache()
+    yield
+    gate.invalidate_capacity_candidate_cache()
+
+
+class TestTheSplit:
+    def test_the_dispatcher_only_tools_are_exactly_these(self) -> None:
+        """The BLOCKED tools with no service-level second line (CSO F3 list)."""
+        assert gate.CAPACITY_LOCK_DISPATCHER_ONLY_TOOLS == {
+            "analyze_context",
+            "bootstrap",
+            "changes_since",
+            "create_edge",
+            "feedback",
+            "get_active_analysis",
+            "get_agent_bootstrap",
+            "get_analysis",
+            "get_cluster",
+            "get_sleep_history",
+            "get_sleep_report",
+            "get_state",
+            "ingest_events",
+            "list_analyses",
+            "list_edges",
+            "merge_contexts",
+            "recall_nearby",
+            "recall_series",
+            "recall_upcoming",
+            "record_measurement",
+            "rollback_sleep_run",
+            "set_state",
+            "setup_connector",
+            "setup_resource",
+            "update_edge",
+            "update_search_config",
+        }
+
+    def test_service_gated_tools_are_blocked_tools(self) -> None:
+        assert gate.CAPACITY_LOCK_SERVICE_GATED_TOOLS <= CAPACITY_LOCK_BLOCKED_TOOLS
+
+
 class TestTheDispatcher:
     @pytest.mark.asyncio
     async def test_a_blocked_tool_on_the_locked_session_workspace_is_refused(self) -> None:
@@ -148,11 +191,27 @@ class TestTheDispatcher:
         db.scalars.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_a_service_gated_tool_with_an_argument_target_is_left_to_the_service(
+        self,
+    ) -> None:
+        """CSO F3: the post-authorization service check answers instead."""
+        db = _fake_db([_ws()])
+        with _patch_db(db), _locked_state():
+            for tool in ("recall", "remember", "update_memory", "complete_file_upload"):
+                args = (
+                    {"file_id": str(uuid4())}
+                    if tool == "complete_file_upload"
+                    else {"context_id": str(uuid4())}
+                )
+                assert await gate.capacity_lock_refusal(tool, args, "u1", uuid4()) is None
+        db.scalars.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_a_member_of_the_argument_workspace_is_refused(self) -> None:
         other = uuid4()
         with _patch_db(_fake_db([_ws(other)])), _locked_state(), _member(True) as member:
             result = await gate.capacity_lock_refusal(
-                "recall", {"context_id": str(uuid4())}, "u1", uuid4()
+                "get_state", {"context_id": str(uuid4())}, "u1", uuid4()
             )
         assert result is not None
         assert _payload(result)["error"] == "capacity_locked"
@@ -164,7 +223,7 @@ class TestTheDispatcher:
         with _patch_db(_fake_db([_ws()])), _locked_state(), _member(False):
             assert (
                 await gate.capacity_lock_refusal(
-                    "recall", {"context_id": str(uuid4())}, "u1", uuid4()
+                    "get_state", {"context_id": str(uuid4())}, "u1", uuid4()
                 )
                 is None
             )
@@ -176,7 +235,7 @@ class TestTheDispatcher:
         ws = uuid4()
         with _patch_db(_fake_db([_ws(ws)])), _locked_state(), _member(False) as member:
             result = await gate.capacity_lock_refusal(
-                "remember", {"context_id": str(uuid4())}, "u1", ws
+                "set_state", {"context_id": str(uuid4())}, "u1", ws
             )
         assert result is not None
         member.assert_not_awaited()
@@ -191,7 +250,7 @@ class TestTheDispatcher:
         with _patch_db(db), patch("services.capacity_lock.capacity_lock_state", state):
             assert (
                 await gate.capacity_lock_refusal(
-                    "recall", {"context_ids": [str(uuid4()), str(uuid4())]}, "u1", uuid4()
+                    "recall_series", {"context_ids": [str(uuid4()), str(uuid4())]}, "u1", uuid4()
                 )
                 is None
             )
@@ -202,18 +261,35 @@ class TestTheDispatcher:
         state.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_file_and_workspace_arguments_are_targets(self) -> None:
+    async def test_a_non_candidate_session_workspace_is_cached(self) -> None:
+        """A paid session workspace opens no database session on the next call."""
+        ws = uuid4()
+        db = _fake_db([])
+        opened = 0
+
+        async def _gen():
+            nonlocal opened
+            opened += 1
+            yield db
+
+        with patch("db.base.get_db", lambda: _gen()):
+            assert await gate.capacity_lock_refusal("recall", {}, "u1", ws) is None
+            assert await gate.capacity_lock_refusal("remember", {}, "u1", ws) is None
+        assert opened == 1
+
+    @pytest.mark.asyncio
+    async def test_the_cache_expires(self, monkeypatch) -> None:
+        ws = uuid4()
+        gate._remember_not_candidate(ws)
+        assert gate._known_not_candidate(ws)
+        monkeypatch.setattr(gate.time, "monotonic", lambda: 10**12)
+        assert not gate._known_not_candidate(ws)
+
+    def test_file_and_workspace_arguments_are_targets(self) -> None:
         from sqlalchemy.dialects import postgresql
 
-        db = _fake_db([])
-        with _patch_db(db):
-            await gate.capacity_lock_refusal(
-                "complete_file_upload",
-                {"file_id": str(uuid4()), "workspace_id": str(uuid4())},
-                "u1",
-                None,
-            )
-        sql = str(db.scalars.await_args.args[0].compile(dialect=postgresql.dialect()))
+        clause = gate._argument_target_clause(set(), uuid4(), uuid4())
+        sql = str(clause.compile(dialect=postgresql.dialect()))
         assert "file_objects" in sql
         assert "workspaces.id =" in sql
 
@@ -223,3 +299,13 @@ class TestTheDispatcher:
         db.scalars = AsyncMock(side_effect=RuntimeError("db down"))
         with _patch_db(db):
             assert await gate.capacity_lock_refusal("recall", {}, "u1", uuid4()) is None
+
+
+class TestTheServiceRefusalKeepsTheCode:
+    def test_a_handler_legacy_code_does_not_hide_the_lock(self) -> None:
+        from mcp_server.tools._errors import describe_tool_exception
+
+        failure = describe_tool_exception("remember", _locked(), error="remember_error")
+        body = json.loads(failure.response()[0].text)
+        assert body["error"] == "capacity_locked"
+        assert body["gate"] == "capacity"

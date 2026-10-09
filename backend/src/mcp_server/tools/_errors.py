@@ -414,6 +414,10 @@ def describe_tool_exception(
     Returns:
         The failure, for ``.response()`` (tool result) or ``.jsonrpc_data()``.
     """
+    if isinstance(exc, CapacityLockedError):
+        # #1941: one code on every door — a handler's legacy ``<tool>_error``
+        # must not hide the lock when the service-level check raised it.
+        error = None
     if _is_refusal(exc, echo_value_error=echo_value_error):
         code, message, details = _refusal(exc)
         if isinstance(exc, MemoryCloudException):
