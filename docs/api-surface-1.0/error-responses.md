@@ -209,6 +209,7 @@ Auth failure before dispatch (`transport.py:531-580`): HTTP 401, body `{"error":
 | `QUOTA-001` | `QuotaExceededError` — exceptions.py:339; also inline at api/middleware/rate_limit.py:156 | 429 (**403** on two caps) | Quota exceeded; `Retry-After: 86400` on the middleware path. Since #1644 every **typed** instance — one whose `quota_type` is in the [frozen vocabulary](#quota_type-vocabulary-frozen) — carries the [quota gate block](#gate-refusals-1644) (`gate: "quota"`, `quota_type`, and `current`/`limit` where counts exist). An untyped `QUOTA-001` (the 1 MB memory-size guard, the total memory cap, a missing workspace) is not a plan quota and carries **no** `gate` — see [Not every `QUOTA-001` is a gate](#not-every-quota-001-is-a-gate). ⚠ Two caps answer **403**, not 429, because they always have and clients branch on it: the resource-token cap (`POST /resource-tokens`) and — under its own `CONNECTOR-001` code — the connector seat cap. `QuotaExceededError` takes a `status_code` kwarg for exactly those two; everything else uses the 429 default. |
 | `QUOTA-002` | `EmbeddingSpendCapExceeded` — exceptions.py:383 | 429 | BYOK embedding spend cap reached (`details.period` = daily/monthly). Carries `gate: "quota"` and `quota_type` (`embedding_spend_daily` / `embedding_spend_monthly`) but **no** `current`/`limit`: the cap is USD, and the canonical count pair is integers. `cap_usd` / `current_usd` remain the numbers to render. |
 | `FEAT-001` | `FeatureNotAvailableError` — exceptions.py:602 | 403 | Feature not available on current plan tier. Since #1551 also the "may create" refusal for XL-only features — `POST /resource-tokens` (`details.feature="resources"`), connector provisioning (`"connectors"`, REST and MCP `setup_connector`, where MCP surfaces it under `plan_required` with `required_plan`), `PUT /contexts/{id}` with `is_public=true` and the bound public API-key mint (`"public_contexts"`). The message names the minimum tier from the plan registry (`feature_denied_message`). Existing objects on lower tiers are never refused (block-new-only). Since #1644 it also covers `team_invitations` (`POST /invitations`, previously a raw `HTTPException(403)`), `shared_contexts` (previously `VAL-001`/422 on the service path), `sleep_mode`, `managed_embeddings` (previously `CFG-001`/500) and `managed_llm`; every instance carries the [feature gate block](#gate-refusals-1644), and `details.gate` distinguishes a **plan** refusal from an **allowlist** (rollout kill switch) or **deployment** (operator switch) refusal — the three used to be wire-identical. |
+| `CAPACITY-001` | `CapacityLockedError` — exceptions.py | 403 | Capacity-over lock (#1941): a Free workspace whose entitlement came from the billing service holds more memories or file bytes than Free allows. Search and saving (recall, reference, explore, pinned/guardrail loads, remember, memory edits, uploads, context creation) are refused until it is cleaned up or re-subscribed; listing, deleting and export stay allowed. Carries the [capacity gate block](#capacity-001-403--capacity-gate-1941). On MCP the envelope code is `capacity_locked`. |
 | `DB-001` | `DatabaseError` — exceptions.py:406 | 500 | Database operation failed. |
 | `DB-002` | `DatabaseConnectionError` — exceptions.py:416; also via `SQLAlchemyError`/connection-error handlers (api/main.py:342-403) | 503 | DB unavailable; `Retry-After: 5`. |
 | `EXT-001` | `ExternalServiceError` (default) — exceptions.py:426; inherited by `QdrantError` (exceptions.py:434-438) and direct raises in storage/factory.py:47,65, storage/r2.py:102 | 502 | Generic external-service error. ⚠ Qdrant has no dedicated code; `EXT-101` is an unexplained gap before Redis's `EXT-102`. |
@@ -304,6 +305,7 @@ status, the same message and the same pre-existing detail fields it always did.
 | `quota` | A cap was reached. | Only when a higher tier raises that cap. |
 | `allowlist` | A rollout kill switch. Plan-neutral: no tier turns it on. | Never. |
 | `deployment` | The operator disabled the feature on this deployment. | Never. |
+| `capacity` | The workspace holds more than its Free plan allows (#1941); search and saving pause until it is cleaned up. | Re-subscribing lifts it; so does deleting down to the cap. |
 | `role` | Vocabulary member only — **never serialized**. Role refusals are `AUTH-101` and have their `details` stripped wholesale (CWE-639 defence in depth); a client identifies them by the code. | — |
 
 ### `FEAT-001` (403) — feature gate
@@ -398,6 +400,36 @@ the fields it carried before (`required_plan`, `help`, the legacy counts); the g
 added beside them. The `quota_exceeded` envelopes omit `null` values, which a client reads the
 same as `null`. `test_gate_error_contract.py` lists which refusals reach an MCP tool and why the
 rest do not.
+
+### `CAPACITY-001` (403) — capacity gate (#1941)
+
+```jsonc
+{
+  "error": "CAPACITY-001",
+  "message": "This workspace is over the Free plan's capacity (200 memories and 50 MB over). ...",
+  "details": {
+    "gate": "capacity",
+    "memory_count": 1200,          // live (not soft-deleted) memories in the workspace
+    "memory_limit": 1000,          // effective_memory_limit (plan + addons + referral)
+    "over_memories": 200,          // 0 when the memory axis is within the limit
+    "used_bytes": 157286400,       // workspace_storage_usage.used_bytes (0 when no row)
+    "storage_limit_bytes": 104857600,
+    "over_bytes": 52428800,        // 0 when the storage axis is within the limit
+    "cleanup_url": "<frontend_url>/workspace/settings/plan"
+  }
+}
+```
+
+The lock applies only when the plan is `free` **and** `entitlement_source` is
+`external_billing` (the workspace came back from a subscription); a self-hosted or
+admin-managed Free workspace is never locked. It is computed on every gated call, never
+stored, so deleting down to the cap unlocks the next call. No `feature` and no `quota_type`:
+the refusal is not one feature or one cap. On MCP the dispatcher refuses every blocked tool
+with `error: "capacity_locked"`, the same keys as top-level fields, and a `help` naming how
+much to remove, what still works (`list`, `forget`, `delete_context`, `delete_file`,
+`get_usage`, export from the web UI) and the `cleanup_url`. `GET /api/v1/workspace/usage/current`
+reports the same numbers under `capacity_lock` (`null` when not locked), and MCP `get_usage`
+under `capacity_lock`.
 
 ### `quota_type` vocabulary (frozen)
 

@@ -1547,3 +1547,79 @@ class TestTheMcpEnvelopeCarriesTheSameGate:
         assert mcp["error"] == "quota_exceeded"
         assert "gate" not in mcp
         assert "quota_type" not in mcp
+
+
+# ---------------------------------------------------------------------------
+# The capacity gate (#1941)
+# ---------------------------------------------------------------------------
+
+
+def _capacity_locked() -> MemoryCloudException:
+    from utils.exceptions import CapacityLockedError
+
+    return CapacityLockedError(
+        memory_count=1200,
+        memory_limit=1000,
+        over_memories=200,
+        used_bytes=150 * 1024 * 1024,
+        storage_limit_bytes=100 * 1024 * 1024,
+        over_bytes=50 * 1024 * 1024,
+        cleanup_url="https://app.example.test/workspace/settings/plan",
+    )
+
+
+_CAPACITY_KEYS = (
+    "gate",
+    "memory_count",
+    "memory_limit",
+    "over_memories",
+    "used_bytes",
+    "storage_limit_bytes",
+    "over_bytes",
+    "cleanup_url",
+)
+
+
+class TestTheCapacityGate:
+    """``CAPACITY-001`` is a gate of its own, not a quota and not a plan
+    feature: no ``quota_type`` and no ``feature``, because nothing one tier
+    key lifts is missing — the workspace holds more than its plan allows."""
+
+    def test_capacity_is_in_the_vocabulary(self) -> None:
+        from config.constants import GATE_CAPACITY
+
+        assert GATE_CAPACITY == "capacity"
+        assert GATE_CAPACITY in GATE_KINDS
+
+    def test_the_refusal_is_a_403_with_its_own_code(self) -> None:
+        exc = _capacity_locked()
+        assert exc.status_code == 403
+        assert exc.error_code == "CAPACITY-001"
+        assert exc.details["gate"] == "capacity"
+        assert "quota_type" not in exc.details
+        assert "feature" not in exc.details
+        for key in ("memory_count", "memory_limit", "over_memories", "used_bytes"):
+            assert isinstance(exc.details[key], int)
+
+    @pytest.mark.asyncio
+    async def test_rest_body_carries_every_capacity_key(self) -> None:
+        exc = _capacity_locked()
+        rest = await _rest_details(exc)
+        for key in _CAPACITY_KEYS:
+            assert rest[key] == exc.details[key], key
+
+    @pytest.mark.asyncio
+    async def test_mcp_envelope_carries_the_same_keys_and_a_concrete_help(self) -> None:
+        from mcp_server.tools._errors import describe_tool_exception
+
+        exc = _capacity_locked()
+        rest = await _rest_details(exc)
+        mcp = json.loads(describe_tool_exception("recall", exc).response()[0].text)
+
+        assert mcp["error"] == "capacity_locked"
+        assert mcp["message"] == exc.message
+        for key in _CAPACITY_KEYS:
+            assert mcp[key] == rest[key], key
+        assert "200 memories and 50 MB" in mcp["help"]
+        assert "forget" in mcp["help"]
+        assert rest["cleanup_url"] in mcp["help"]

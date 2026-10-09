@@ -41,6 +41,7 @@ from mcp_server.tools._helpers import ToolErrorContent, _ContextNotFoundError, _
 from utils.exceptions import (
     AdminProtectionError,
     AuthorizationError,
+    CapacityLockedError,
     DatabaseConnectionError,
     ExternalServiceError,
     FeatureNotAvailableError,
@@ -174,6 +175,12 @@ _REFUSAL_HELP: dict[str, str] = {
         "This feature is not enabled for the workspace; the response says which plan or "
         "switch it needs."
     ),
+    # #1941: the real help is built per refusal (``CapacityLockedError.help_text``
+    # names how much to remove and the cleanup URL); this is the fallback.
+    "capacity_locked": (
+        "The workspace is over its Free plan capacity. list, forget, delete_context, "
+        "delete_file and get_usage still work; remove data or re-subscribe from the web UI."
+    ),
 }
 
 _READ_ONLY = "This tool only reads, so"
@@ -289,6 +296,12 @@ def _refusal(exc: BaseException) -> tuple[str, str, dict[str, Any]]:
             return "permission_denied", "Permission denied for this operation.", {}
         return "validation_error", str(exc), {}
 
+    if isinstance(exc, CapacityLockedError):
+        # #1941: before the 401/403 arm — the lock is not a role denial, and
+        # its details (the counts and the cleanup URL) are the whole point.
+        details = {k: v for k, v in exc.details.items() if v is not None}
+        details["help"] = exc.help_text
+        return "capacity_locked", exc.message, details
     if isinstance(exc, QuotaExceededError):
         code = "quota_exceeded"
     elif isinstance(exc, RateLimitError):

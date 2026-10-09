@@ -7,7 +7,14 @@ Based on: kagura-ai/src/kagura/exceptions.py
 
 from typing import Any
 
-from config.constants import GATE_ALLOWLIST, GATE_DEPLOYMENT, GATE_PLAN, GATE_QUOTA, QUOTA_TYPES
+from config.constants import (
+    GATE_ALLOWLIST,
+    GATE_CAPACITY,
+    GATE_DEPLOYMENT,
+    GATE_PLAN,
+    GATE_QUOTA,
+    QUOTA_TYPES,
+)
 
 
 class MemoryCloudException(Exception):
@@ -872,6 +879,85 @@ class FeatureNotAvailableError(MemoryCloudException):
             The exception, ready to ``raise``.
         """
         return cls(message, feature=feature, gate=GATE_DEPLOYMENT)
+
+
+class CapacityLockedError(MemoryCloudException):
+    """The workspace is over its Free plan capacity and is locked (403, #1941).
+
+    Raised for search and saving (recall, reference, explore, remember,
+    uploads, context creation …) while a Free workspace that came back from a
+    subscription still holds more memories or file bytes than Free allows.
+    Listing, deleting and export are never refused with it.
+
+    ``details`` carries ``gate="capacity"``, the counts on both axes, how far
+    over each one is (``over_memories`` / ``over_bytes``, 0 when that axis is
+    within the limit) and ``cleanup_url`` — the web page where the owner can
+    clean up or re-subscribe — so an AI client can tell its user exactly what
+    to do without matching on prose.
+    """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        memory_count: int,
+        memory_limit: int,
+        over_memories: int,
+        used_bytes: int,
+        storage_limit_bytes: int,
+        over_bytes: int,
+        cleanup_url: str,
+    ) -> None:
+        super().__init__(
+            message or capacity_locked_message(over_memories, over_bytes),
+            status_code=403,
+            error_code="CAPACITY-001",
+            gate=GATE_CAPACITY,
+            memory_count=memory_count,
+            memory_limit=memory_limit,
+            over_memories=over_memories,
+            used_bytes=used_bytes,
+            storage_limit_bytes=storage_limit_bytes,
+            over_bytes=over_bytes,
+            cleanup_url=cleanup_url,
+        )
+
+    @property
+    def help_text(self) -> str:
+        """The next step for an MCP caller: what still works, how much to remove."""
+        d = self.details
+        return (
+            f"Remove {capacity_overage_text(d['over_memories'], d['over_bytes'])} or "
+            f"re-subscribe at {d['cleanup_url']}. Until then you can still call list, "
+            "list_contexts and get_usage, delete with forget, delete_context or delete_file, "
+            "and export a context from the web UI."
+        )
+
+
+def _format_mb(n_bytes: int) -> str:
+    """Bytes as megabytes for prose, rounded UP so "remove X MB" is enough."""
+    mb = -(-n_bytes * 10 // (1024 * 1024)) / 10
+    return f"{mb:g} MB"
+
+
+def capacity_overage_text(over_memories: int, over_bytes: int) -> str:
+    """``"12 memories and 3.5 MB"`` — only the axes that are over."""
+    parts: list[str] = []
+    if over_memories > 0:
+        parts.append(f"{over_memories} {'memory' if over_memories == 1 else 'memories'}")
+    if over_bytes > 0:
+        parts.append(_format_mb(over_bytes))
+    return " and ".join(parts) or "nothing"
+
+
+def capacity_locked_message(over_memories: int, over_bytes: int) -> str:
+    """The refusal text shared by REST and MCP."""
+    return (
+        "This workspace is over the Free plan's capacity "
+        f"({capacity_overage_text(over_memories, over_bytes)} over). "
+        "Search and saving are paused until it is cleaned up or re-subscribed; "
+        "listing, deleting and export still work."
+    )
 
 
 # Database Errors (5xx)

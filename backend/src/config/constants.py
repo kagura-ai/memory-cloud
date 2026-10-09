@@ -232,13 +232,18 @@ GATE_PLAN = "plan"
 GATE_QUOTA = "quota"
 GATE_DEPLOYMENT = "deployment"
 GATE_ALLOWLIST = "allowlist"
+# #1941: a Free workspace that holds more memories or file bytes than the Free
+# plan allows (it came back from a subscription over the cap). Not an upsell
+# for one feature: search and saving pause until the workspace is cleaned up
+# or re-subscribed, while listing, deleting and export keep working.
+GATE_CAPACITY = "capacity"
 # ``GATE_ROLE`` is a vocabulary member only — never serialized. Role refusals
 # (``AUTH-101``) have their ``details`` stripped by
 # ``api.main.memory_cloud_exception_handler`` as CWE-639 defence in depth, and
 # #1644 does not touch that; a client identifies them by the error code.
 GATE_ROLE = "role"
 GATE_KINDS: frozenset[str] = frozenset(
-    {GATE_PLAN, GATE_QUOTA, GATE_DEPLOYMENT, GATE_ALLOWLIST, GATE_ROLE}
+    {GATE_PLAN, GATE_QUOTA, GATE_DEPLOYMENT, GATE_ALLOWLIST, GATE_CAPACITY, GATE_ROLE}
 )
 
 # Every ``details.quota_type`` a quota refusal may carry. Frozen: a later
