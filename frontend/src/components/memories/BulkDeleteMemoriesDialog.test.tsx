@@ -187,4 +187,24 @@ describe("BulkDeleteMemoriesDialog", () => {
     expect(await screen.findByText("boom")).toBeInTheDocument();
     expect(onDeleted).toHaveBeenCalledWith(2000);
   });
+
+  it("stops when a request deletes nothing even if it says more remain", async () => {
+    forgetBulk
+      .mockResolvedValueOnce({ dry_run: true, matched: 10, deleted: null })
+      .mockResolvedValueOnce({
+        dry_run: false,
+        matched: null,
+        deleted: 0,
+        remaining: true,
+      });
+    const onDeleted = renderDialog();
+    fireEvent.change(screen.getByLabelText("Type"), {
+      target: { value: "note" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Count matches" }));
+    await screen.findByText("10 memories match.");
+    fireEvent.click(screen.getByRole("button", { name: "Delete 10 memories" }));
+    await waitFor(() => expect(onDeleted).toHaveBeenCalledWith(0));
+    expect(forgetBulk).toHaveBeenCalledTimes(2);
+  });
 });
