@@ -19,6 +19,7 @@ import { MemoryContextProvider } from "@/contexts/MemoryContextContext";
 import { Sidebar } from "@/components/dashboard/Sidebar";
 import { WorkspaceSelectionScreen } from "@/components/workspaces/WorkspaceSelectionScreen";
 import { TermsReacceptanceDialog } from "@/components/auth/TermsReacceptanceDialog";
+import { CapacityLockBanner } from "@/components/common/CapacityLockBanner";
 
 /**
  * Issue #1665: shown INSTEAD of the app while `/auth/me` reports
@@ -263,6 +264,9 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
                   </p>
                 </div>
               )}
+
+              {/* #1941: a Free workspace over its capacity */}
+              <CapacityLockBanner />
 
               {/* Page Content */}
               <main className="flex-1 overflow-y-auto bg-slate-50 dark:bg-slate-900">

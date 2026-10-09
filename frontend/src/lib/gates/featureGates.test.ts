@@ -70,6 +70,7 @@ const SERVER_GATE_KINDS: RefusedGateState[] = [
   "deployment",
   "role",
   "allowlist",
+  "capacity",
 ];
 
 describe("normalizeGate — not a gate", () => {
@@ -210,7 +211,9 @@ describe("normalizeGate — older servers (semantic code only)", () => {
 
   it("maps a typed QUOTA-001 to quota", () => {
     expect(
-      normalizeGate(429, "QUOTA-001", { quota_type: "workspace_limit_reached" }),
+      normalizeGate(429, "QUOTA-001", {
+        quota_type: "workspace_limit_reached",
+      }),
     ).toEqual({ state: "quota", quotaType: "workspace_limit_reached" });
   });
 
@@ -1612,5 +1615,54 @@ describe("no gate decision outside the descriptor (#1645)", () => {
     expect(DECISION[1].test(stripComments('// plan_name === "free"'))).toBe(
       false,
     );
+  });
+});
+
+describe("normalizeGate — the capacity lock (#1941)", () => {
+  const body = {
+    gate: "capacity",
+    memory_count: 1012,
+    memory_limit: 1000,
+    over_memories: 12,
+    used_bytes: 0,
+    storage_limit_bytes: 104857600,
+    over_bytes: 0,
+    cleanup_url: "https://app.example.test/workspace/settings/plan",
+  };
+
+  it("reads the overage and the cleanup page off details", () => {
+    expect(normalizeGate(403, "CAPACITY-001", body)).toEqual({
+      state: "capacity",
+      overMemories: 12,
+      overBytes: 0,
+      cleanupUrl: "https://app.example.test/workspace/settings/plan",
+    });
+  });
+
+  it("recognises CAPACITY-001 by its code when details.gate is absent", () => {
+    const { gate: _gate, ...noGate } = body;
+    expect(normalizeGate(403, "CAPACITY-001", noGate)?.state).toBe("capacity");
+  });
+
+  it("is not a capacity gate at any other status", () => {
+    expect(normalizeGate(500, "CAPACITY-001", {})).toBeUndefined();
+  });
+
+  it("never carries quota counts or an upgrade", () => {
+    const facts = normalizeGate(403, "CAPACITY-001", body);
+    expect(facts?.current).toBeUndefined();
+    expect(facts?.limit).toBeUndefined();
+    expect(narrowCanUpgrade("capacity", undefined, true)).toBe(false);
+  });
+
+  it("omits the numbers a non-member refusal does not carry", () => {
+    expect(
+      normalizeGate(403, "CAPACITY-001", {
+        gate: "capacity",
+        over_memories: null,
+        over_bytes: null,
+        cleanup_url: null,
+      }),
+    ).toEqual({ state: "capacity" });
   });
 });

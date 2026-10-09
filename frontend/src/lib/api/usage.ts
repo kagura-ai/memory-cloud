@@ -81,6 +81,21 @@ export interface UsageStatus {
   is_exceeded: boolean;
 }
 
+/**
+ * #1941: a Free workspace over its plan capacity. While present, search and
+ * saving are refused (`CAPACITY-001`); listing, deleting and export work.
+ * `over_*` is 0 on an axis that is within its limit.
+ */
+export interface CapacityLock {
+  memory_count: number;
+  memory_limit: number;
+  over_memories: number;
+  used_bytes: number;
+  storage_limit_bytes: number;
+  over_bytes: number;
+  cleanup_url: string;
+}
+
 export interface UsageCurrentResponse {
   plan: PlanLimits;
   usage: CurrentUsage;
@@ -88,6 +103,7 @@ export interface UsageCurrentResponse {
   daily_api_usage: UsageStatus;
   weekly_api_usage: UsageStatus;
   memories_today_usage?: UsageStatus | null; // Issue #1549 (optional: additive field)
+  capacity_lock?: CapacityLock | null; // Issue #1941 (optional: additive field)
 }
 
 export interface DailyUsage {

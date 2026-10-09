@@ -2006,6 +2006,14 @@
     "bodyCritical": "You are very close to your limit for {resource}. Consider upgrading to avoid service interruption.",
     "upgrade": "Upgrade Plan"
   },
+  "capacityLock": {
+    "title": "This workspace is over the Free plan's capacity",
+    "body": "Remove {amount}, or re-subscribe. Until then, search and saving are paused; listing, deleting and export still work.",
+    "amountMemories": "{count, plural, one {# memory} other {# memories}}",
+    "amountStorage": "{mb} MB",
+    "amountBoth": "{memories} and {storage}",
+    "viewPlan": "View plan"
+  },
   "usageStats": {
     "failedToLoad": "Failed to load usage statistics",
     "workspaceUsage": "Workspace Usage",
@@ -3499,7 +3507,9 @@
       "confirm": "Save Changes",
       "saving": "Saving...",
       "failed": "Failed to update memory"
-    }
+    },
+    "export": "Export",
+    "exportFailed": "Could not export this context. Try again."
   },
   "contextSettings": {
     "title": "{contextName} — Settings",
@@ -4316,6 +4326,12 @@
       "description": "Access to {feature} is being rolled out gradually. Reach out if you would like early access.",
       "badge": "Not enabled",
       "hint": "Not enabled for this workspace"
+    },
+    "capacity": {
+      "title": "This workspace is over its plan's capacity",
+      "description": "Searching and saving are paused until some data is removed or the workspace is re-subscribed. Listing, deleting and export still work.",
+      "badge": "Over capacity",
+      "hint": "Paused: over the plan's capacity"
     },
     "features": {
       "resources": {

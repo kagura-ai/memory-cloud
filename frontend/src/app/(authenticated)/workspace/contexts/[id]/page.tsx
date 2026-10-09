@@ -43,6 +43,7 @@ import { SettingsTabPanel } from "@/components/contexts/SettingsTabPanel";
 import { SearchSettingsSection } from "@/components/contexts/SearchSettingsSection";
 import { MembersSection } from "@/components/contexts/MembersSection";
 import { ProtectionSection } from "@/components/contexts/ProtectionSection";
+import { ExportContextButton } from "@/components/contexts/ExportContextButton";
 // Issue #233: graph viz tab — lazy-loaded so d3 modules are code-split.
 const GraphTabPanel = dynamic(
   () =>
@@ -276,6 +277,11 @@ export default function ContextDetailPage() {
                 }
               </Badge>
             )}
+            {/* #1941: export stays available on a capacity-locked workspace */}
+            <ExportContextButton
+              contextId={contextId}
+              contextName={context.name}
+            />
           </div>
         }
       />

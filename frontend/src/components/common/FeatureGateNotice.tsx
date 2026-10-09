@@ -119,7 +119,11 @@ export type GateMessageKey =
   | "allowlist.title"
   | "allowlist.description"
   | "allowlist.badge"
-  | "allowlist.hint";
+  | "allowlist.hint"
+  | "capacity.title"
+  | "capacity.description"
+  | "capacity.badge"
+  | "capacity.hint";
 
 /**
  * Which `gate.features.<key>` sub-key a message interpolates as `{feature}`:
@@ -175,6 +179,11 @@ export const GATE_NOUN_FORM: Readonly<
   "allowlist.description": "plural",
   "allowlist.badge": null,
   "allowlist.hint": null,
+  // #1941: the whole workspace is over capacity, so no message names a feature.
+  "capacity.title": null,
+  "capacity.description": null,
+  "capacity.badge": null,
+  "capacity.hint": null,
 };
 
 /** The messages one refusal renders. `null` = that slot does not exist. */
@@ -297,6 +306,18 @@ export function gateMessageKeys(
         action: null,
         badge: "allowlist.badge",
         hint: "allowlist.hint",
+      };
+    case "capacity":
+      // #1941: not one feature — the whole workspace is over its Free
+      // capacity. The app-wide CapacityLockBanner carries the numbers and the
+      // link; this copy only says why the action was refused.
+      return {
+        title: "capacity.title",
+        description: "capacity.description",
+        upsell: null,
+        action: null,
+        badge: "capacity.badge",
+        hint: "capacity.hint",
       };
   }
 }
@@ -442,6 +463,7 @@ const ALERT_VARIANT: Readonly<
   deployment: "default",
   role: "default",
   allowlist: "default",
+  capacity: "warning",
 };
 
 const ICON: Readonly<Record<RefusedGateState, LucideIcon>> = {
@@ -450,6 +472,7 @@ const ICON: Readonly<Record<RefusedGateState, LucideIcon>> = {
   deployment: Info,
   role: ShieldAlert,
   allowlist: Lock,
+  capacity: AlertTriangle,
 };
 
 interface FeatureGateNoticeBaseProps {

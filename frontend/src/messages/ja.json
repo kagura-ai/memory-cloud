@@ -2006,6 +2006,14 @@
     "bodyCritical": "{resource}の上限に近づいています。サービスの中断を避けるため、アップグレードを検討してください。",
     "upgrade": "プランをアップグレード"
   },
+  "capacityLock": {
+    "title": "このワークスペースは Free プランの容量を超えています",
+    "body": "{amount}を減らすか、再契約してください。それまでは検索と保存が停止します。一覧・削除・エクスポートは引き続き使えます。",
+    "amountMemories": "メモリー {count} 件",
+    "amountStorage": "{mb} MB",
+    "amountBoth": "{memories}と{storage}",
+    "viewPlan": "プランを見る"
+  },
   "usageStats": {
     "failedToLoad": "使用状況統計の読み込みに失敗しました",
     "workspaceUsage": "ワークスペースの使用状況",
@@ -3499,7 +3507,9 @@
       "confirm": "変更を保存",
       "saving": "保存中...",
       "failed": "メモリの更新に失敗しました"
-    }
+    },
+    "export": "エクスポート",
+    "exportFailed": "このコンテキストをエクスポートできませんでした。もう一度お試しください。"
   },
   "contextSettings": {
     "title": "{contextName} — 設定",
@@ -4316,6 +4326,12 @@
       "description": "{feature} は段階的に提供しています。ご利用をご希望の場合はお問い合わせください。",
       "badge": "未有効化",
       "hint": "このワークスペースでは未有効化"
+    },
+    "capacity": {
+      "title": "このワークスペースはプランの容量を超えています",
+      "description": "データを減らすか再契約するまで、検索と保存は停止します。一覧・削除・エクスポートは引き続き使えます。",
+      "badge": "容量超過",
+      "hint": "停止中：プランの容量を超えています"
     },
     "features": {
       "resources": {

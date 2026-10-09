@@ -36,7 +36,7 @@ type Expect<T extends true> = T;
 /**
  * Why a feature is unavailable. Exactly one applies.
  *
- * The five terminal members are byte-identical to the server's `details.gate`
+ * The six terminal members are byte-identical to the server's `details.gate`
  * vocabulary (`backend/src/config/constants.py` `GATE_KINDS`), so the wire
  * value maps 1:1 onto the descriptor with no translation table.
  * "pending" and "allowed" are client-only and never appear on the wire.
@@ -48,7 +48,8 @@ export type FeatureGateState =
   | "quota" // included, but the cap is reached
   | "deployment" // an operator flag is off on this deployment
   | "role" // included, but this member's workspace role may not
-  | "allowlist"; // included, but this workspace is not in the rollout
+  | "allowlist" // included, but this workspace is not in the rollout
+  | "capacity"; // #1941: a Free workspace over its capacity — search and saving pause
 
 /** The subset a refusal can carry. */
 export type RefusedGateState = Exclude<FeatureGateState, "pending" | "allowed">;
@@ -59,6 +60,7 @@ const REFUSED_GATE_STATES: readonly RefusedGateState[] = [
   "deployment",
   "role",
   "allowlist",
+  "capacity",
 ];
 
 function isRefusedGateState(v: unknown): v is RefusedGateState {
@@ -68,7 +70,7 @@ function isRefusedGateState(v: unknown): v is RefusedGateState {
   );
 }
 
-/** True for the five refusal states. Exported so no call site writes the negation twice. */
+/** True for the six refusal states. Exported so no call site writes the negation twice. */
 export function isBlocked(g: { state: FeatureGateState }): boolean {
   return g.state !== "pending" && g.state !== "allowed";
 }
@@ -315,6 +317,12 @@ export interface FeatureGateFacts {
   readonly limit?: number;
   /** ISO-8601; time-windowed quotas only. */
   readonly resetsAt?: string;
+  /** #1941: memories to remove to unlock. Only ever set when state === "capacity". */
+  readonly overMemories?: number;
+  /** #1941: file bytes to remove to unlock. Only ever set when state === "capacity". */
+  readonly overBytes?: number;
+  /** #1941: the page where the owner cleans up or re-subscribes. Capacity only. */
+  readonly cleanupUrl?: string;
 }
 
 // ── The UI descriptor ───────────────────────────────────────────────────────
@@ -446,6 +454,10 @@ function stateFromErrorCode(
     case "QUOTA-002":
     case "CONNECTOR-001":
       return "quota";
+    case "CAPACITY-001":
+      // #1941: the capacity-over lock. Its own gate, never a quota: no tier
+      // key and no single cap lifts it — the workspace holds too much.
+      return status === 403 ? "capacity" : undefined;
     case "AUTH-101":
       // The role refusal: its details are stripped server-side (CWE-639
       // defence in depth), so the code is the only signal there is.
@@ -460,11 +472,11 @@ function stateFromErrorCode(
  * point. Returns `undefined` when the error is not a gate refusal — and
  * NEVER guesses from a bare status code.
  *
- * 1. `details.gate` wins when it is one of the five terminal states; an
+ * 1. `details.gate` wins when it is one of the six terminal states; an
  *    unknown value is ignored rather than trusted.
  * 2. Otherwise the semantic error code decides (an older server):
  *    FEAT-001 → plan; QUOTA-001 with a frozen `quota_type`, QUOTA-002 and
- *    CONNECTOR-001 → quota; AUTH-101 at 403 → role.
+ *    CONNECTOR-001 → quota; AUTH-101 at 403 → role; CAPACITY-001 at 403 → capacity.
  * 3. Legacy count names are aliased onto `current` / `limit`, and a
  *    CONNECTOR-001 with no `quota_type` reads as `connectors`.
  */
@@ -512,6 +524,15 @@ export function normalizeGate(
 
     const resetsAt = asString(d.resets_at);
     if (resetsAt) facts.resetsAt = resetsAt;
+  }
+
+  if (state === "capacity") {
+    const overMemories = asNumber(d.over_memories);
+    if (overMemories !== undefined) facts.overMemories = overMemories;
+    const overBytes = asNumber(d.over_bytes);
+    if (overBytes !== undefined) facts.overBytes = overBytes;
+    const cleanupUrl = asString(d.cleanup_url);
+    if (cleanupUrl) facts.cleanupUrl = cleanupUrl;
   }
 
   return facts;
