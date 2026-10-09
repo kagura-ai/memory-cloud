@@ -365,6 +365,8 @@ class CapacityLockNoticeResult(BaseModel):
     Free state fits — nothing to warn about), ``already_sent`` (a notice for
     this ``period_end`` was already sent), ``no_owner_email`` or
     ``delivery_failed`` (retry later; the idempotency claim is released).
+    ``sent=true, reason="delivery_uncertain"``: the provider timed out after it
+    may have accepted the email; the claim is kept, so it is never resent.
     """
 
     sent: bool
@@ -482,6 +484,11 @@ async def send_capacity_lock_notice(
             cleanup_url=lock.cleanup_url,
             contexts_url=f"{base_url}/workspace/contexts",
         )
+    except TimeoutError:
+        # The provider may have accepted it: keep the claim so a retry does
+        # not send a second copy (at most once).
+        logger.warning("capacity_lock_notice_delivery_uncertain", workspace_id=workspace_id)
+        return result(True, "delivery_uncertain")
     except Exception as exc:  # noqa: BLE001 — implementations must not raise; be safe
         logger.warning(
             "capacity_lock_notice_send_raised",

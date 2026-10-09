@@ -611,4 +611,7 @@ class ResendEmailService:
                 "over_bytes": over_bytes,
                 "template": "capacity_lock_notice",
             },
+            # At most once: a timeout after the provider may have accepted the
+            # email raises, and the caller keeps its idempotency claim.
+            raise_if_uncertain=True,
         )

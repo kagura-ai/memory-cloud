@@ -1673,6 +1673,16 @@ def _zero_floor(base: int, addon: int | None) -> int:
     return base + (addon or 0)
 
 
+def stacked_limit(base: int, addon: int | None) -> int:
+    """A tier base plus a bonus, under the #569 zero-floor rule (public form).
+
+    For code outside this module that projects a limit for a tier the
+    workspace is not on yet (the #1941 pre-expiry notice); the ``effective_*``
+    properties stay the source for the workspace's current tier.
+    """
+    return _zero_floor(base, addon)
+
+
 # Entitlement provenance (#1095). The values name WHO last set the entitlement, so
 # the external billing reconciler can revert ONLY what it owns:
 #   - external_billing → billing-owned: the external service set it via the internal

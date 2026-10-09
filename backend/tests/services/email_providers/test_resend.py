@@ -662,3 +662,25 @@ async def test_send_capacity_lock_notice_payload() -> None:
     ):
         assert fragment in text, fragment
     assert "html" not in params
+
+
+@pytest.mark.asyncio
+async def test_send_capacity_lock_notice_raises_when_delivery_is_uncertain() -> None:
+    """#1941: at most once — an uncertain send raises instead of returning False."""
+    from datetime import UTC, datetime
+
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    with (
+        patch.object(resend_module, "_may_have_been_delivered", return_value=True),
+        patch.object(resend_module.resend.Emails, "send", side_effect=RuntimeError("timeout")),
+        pytest.raises(TimeoutError),
+    ):
+        await svc.send_capacity_lock_notice(
+            to_email="owner@example.test",
+            workspace_name="Research",
+            period_end=datetime(2026, 11, 1, tzinfo=UTC),
+            over_memories=1,
+            over_bytes=0,
+            cleanup_url="https://app.example.test/workspace/settings/plan",
+            contexts_url="https://app.example.test/workspace/contexts",
+        )

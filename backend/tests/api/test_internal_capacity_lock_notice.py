@@ -188,3 +188,14 @@ class TestTheNotice:
 
     def test_period_end_is_required(self, harness) -> None:
         assert harness.client.post(_PATH, json={}, headers=_AUTH).status_code == 422
+
+
+class TestAtMostOnce:
+    def test_an_uncertain_delivery_counts_as_sent_and_keeps_the_claim(self, harness) -> None:
+        harness.email.send_capacity_lock_notice = AsyncMock(side_effect=TimeoutError())
+        resp = harness.client.post(_PATH, json=_BODY, headers=_AUTH)
+        assert resp.json()["sent"] is True
+        assert resp.json()["reason"] == "delivery_uncertain"
+        assert len(harness.redis.keys) == 1
+        again = harness.client.post(_PATH, json=_BODY, headers=_AUTH)
+        assert again.json()["reason"] == "already_sent"

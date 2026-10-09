@@ -380,7 +380,12 @@ class EmailService(Protocol):
 
         Returns:
             True on delivery (or logging fallback), False on hard failure.
-            Implementations MUST NOT raise.
+
+        Raises:
+            TimeoutError: The provider may have accepted the email but its
+                answer never came. The caller counts it as possibly sent and
+                does not resend (at most once), like
+                ``send_security_notification``.
         """
         ...
 

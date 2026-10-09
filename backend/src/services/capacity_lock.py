@@ -141,14 +141,14 @@ async def projected_free_capacity(db: AsyncSession, workspace: Workspace) -> Cap
     deleted-context storage exclusion, so the notice and the lock agree.
     """
     from config.plan_tiers import PLAN_TIERS
-    from models.auth import _zero_floor
+    from models.auth import stacked_limit
 
     free = PLAN_TIERS[PlanName.FREE]
-    memory_limit = _zero_floor(
+    memory_limit = stacked_limit(
         free.memory_limit,
         (workspace.addon_memory_bonus or 0) + (workspace.referral_memory_bonus or 0),
     )
-    storage_limit = _zero_floor(
+    storage_limit = stacked_limit(
         free.storage_limit_bytes, (workspace.addon_storage_bonus_mb or 0) * 1024 * 1024
     )
     return await _measure(db, workspace.id, memory_limit=memory_limit, storage_limit=storage_limit)
