@@ -15,7 +15,12 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING, Workspace
+from models.auth import (
+    ENTITLEMENT_SOURCE_EXTERNAL_BILLING,
+    Workspace,
+    WorkspaceMember,
+    WorkspaceRole,
+)
 from models.file_objects import FileObject, WorkspaceStorageUsage
 from models.memory import Memory
 from services.capacity_lock import (
@@ -145,4 +150,35 @@ async def test_the_candidate_filter_skips_a_paid_workspace(db_session, free_ws) 
     ws.plan_name = "pro"
     await db_session.commit()
     await ensure_context_not_capacity_locked(db_session, ctx.id)
+    assert await capacity_lock_state(db_session, ws) is None
+
+
+@pytest.mark.asyncio
+async def test_bulk_delete_unlocks_on_the_real_schema(db_session, free_ws) -> None:
+    """forget_bulk's chunk statements (UPDATE … RETURNING, the shared-point
+    read, the edge DELETE) against real tables, and the lock lifting after."""
+    from unittest.mock import AsyncMock
+
+    from services.memory_service import MemoryService
+
+    ws, ctx, owner = free_ws
+    db_session.add(WorkspaceMember(workspace_id=ws.id, user_id=owner, role=WorkspaceRole.OWNER))
+    db_session.add_all([_memory(ws, ctx, owner) for _ in range(MEMORY_LIMIT + 3)])
+    await db_session.commit()
+    assert await capacity_lock_state(db_session, ws) is not None
+
+    service = MemoryService(db_session)
+    with (
+        patch("db.qdrant.delete_points_from_qdrant", AsyncMock()) as points,
+        patch(
+            "services.memory_service.resolve_collection_name",
+            AsyncMock(return_value="kagura_memories"),
+        ),
+        patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()),
+    ):
+        count, remaining, _ = await service.forget_bulk(
+            owner, context_id=ctx.id, created_before=utcnow(), dry_run=False, chunk_size=2
+        )
+    assert (count, remaining) == (MEMORY_LIMIT + 3, False)
+    assert points.await_count == 3
     assert await capacity_lock_state(db_session, ws) is None

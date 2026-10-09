@@ -848,6 +848,28 @@ class ForgetResponse(BaseModel):
     memory_ids: list[UUID]
 
 
+def encode_forget_bulk_cursor(created_at: datetime, memory_id: UUID) -> str:
+    """Opaque resume point for ``forget-bulk`` (#1941): the last deleted row."""
+    import base64
+
+    raw = f"{created_at.isoformat()}|{memory_id}".encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def decode_forget_bulk_cursor(cursor: str) -> tuple[datetime, UUID]:
+    """Inverse of :func:`encode_forget_bulk_cursor`; ``ValueError`` when malformed."""
+    import base64
+    import binascii
+
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        stamp, memory_id = base64.urlsafe_b64decode(padded).decode().split("|", 1)
+        created_at = datetime.fromisoformat(stamp)
+        return created_at.replace(tzinfo=None), UUID(memory_id)
+    except (ValueError, binascii.Error, UnicodeDecodeError) as exc:
+        raise ValueError("invalid cursor") from exc
+
+
 class ForgetBulkRequest(BaseModel):
     """Request schema for ``POST /memory/forget-bulk`` (#1941).
 
@@ -868,6 +890,21 @@ class ForgetBulkRequest(BaseModel):
     tags: list[str] | None = Field(None, description="Only memories carrying ANY of these tags")
     all: bool = Field(False, description="Match every memory in the context (no filter)")
     dry_run: bool = Field(True, description="Count the matches without deleting")
+    cursor: str | None = Field(
+        None,
+        max_length=200,
+        description=(
+            "Resume point: the previous response's next_cursor, so rows this caller "
+            "may not delete are not rescanned. Ignored on a dry run."
+        ),
+    )
+
+    @field_validator("cursor")
+    @classmethod
+    def _valid_cursor(cls, v: str | None) -> str | None:
+        if v is not None:
+            decode_forget_bulk_cursor(v)
+        return v
 
     @field_validator("tags")
     @classmethod
@@ -906,9 +943,10 @@ class ForgetBulkRequest(BaseModel):
 class ForgetBulkResponse(BaseModel):
     """Response schema for ``POST /memory/forget-bulk`` (#1941).
 
-    ``matched`` (the full count) on a dry run; ``deleted`` and ``remaining``
-    otherwise — one request deletes at most 2,000 memories, and
-    ``remaining: true`` means matching memories are left for the next request.
+    ``matched`` (the full count) on a dry run; ``deleted``, ``remaining`` and
+    ``next_cursor`` otherwise — one request deletes at most 2,000 memories;
+    ``remaining: true`` means matching memories are left: repeat the request
+    with ``cursor: next_cursor``.
     """
 
     status: str = "success"
@@ -916,6 +954,7 @@ class ForgetBulkResponse(BaseModel):
     matched: int | None = None
     deleted: int | None = None
     remaining: bool | None = None
+    next_cursor: str | None = None
 
 
 class UpdateMemoryRequest(BaseModel):

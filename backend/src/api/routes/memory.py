@@ -36,6 +36,8 @@ from models.schemas import (
     ReferenceResponse,
     RememberRequest,
     RememberResponse,
+    decode_forget_bulk_cursor,
+    encode_forget_bulk_cursor,
 )
 from services.agent_binding_service import binding_memory_sql_predicate
 from services.identity_link_service import owned_by
@@ -622,9 +624,20 @@ async def forget(
         # is None (the isolation helper short-circuits), wired for symmetry so the
         # confinement holds the moment forget regains a declared context.
         key_workspace_id=user.get("api_key_workspace_id"),
+        current_workspace_id=_session_workspace(user),
     )
 
     return result
+
+
+def _session_workspace(user: dict) -> UUID | None:
+    raw = user.get("current_workspace_id")
+    if raw is None or isinstance(raw, UUID):
+        return raw
+    try:
+        return UUID(str(raw))
+    except ValueError:
+        return None
 
 
 @router.post("/forget-bulk", response_model=ForgetBulkResponse)
@@ -641,7 +654,8 @@ async def forget_bulk(
     returns ``matched``; with ``dry_run: false`` the matches are deleted the
     way ``/forget`` deletes one memory (soft delete, search point and graph
     edges removed) and ``deleted`` is returned. One request deletes at most
-    2,000 memories; ``remaining: true`` means more match — repeat the request.
+    2,000 memories; ``remaining: true`` means more match — repeat the request
+    with ``cursor`` set to the returned ``next_cursor``.
 
     Permissions are ``/forget``'s: write access to the context (uniform 404
     otherwise), then the per-memory delete check — a memory the caller may
@@ -654,7 +668,7 @@ async def forget_bulk(
         context_id=str(request.context_id),
         dry_run=request.dry_run,
     )
-    count, remaining = await memory_service.forget_bulk(
+    count, remaining, next_after = await memory_service.forget_bulk(
         user["user_id"],
         context_id=request.context_id,
         created_before=request.created_before,
@@ -663,10 +677,20 @@ async def forget_bulk(
         tags=request.tags or None,
         dry_run=request.dry_run,
         key_workspace_id=user.get("api_key_workspace_id"),
+        after=(
+            decode_forget_bulk_cursor(request.cursor)
+            if request.cursor and not request.dry_run
+            else None
+        ),
     )
     if request.dry_run:
         return ForgetBulkResponse(dry_run=True, matched=count)
-    return ForgetBulkResponse(dry_run=False, deleted=count, remaining=remaining)
+    return ForgetBulkResponse(
+        dry_run=False,
+        deleted=count,
+        remaining=remaining,
+        next_cursor=encode_forget_bulk_cursor(*next_after) if next_after else None,
+    )
 
 
 @router.post("/explore", response_model=ExploreResponse)

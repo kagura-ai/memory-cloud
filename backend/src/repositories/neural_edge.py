@@ -1296,6 +1296,46 @@ class NeuralEdgeRepository:
 
         return deleted_count
 
+    async def delete_nodes_edges(
+        self,
+        user_id: str,
+        node_ids: list[UUID],
+        workspace_id: str | None = None,
+        context_id: str | None = None,
+    ) -> int:
+        """``delete_node_edges`` for many nodes in ONE statement (#1941 bulk forget).
+
+        Same isolation (user, workspace, context) as the single-node form.
+        """
+        self._validate_isolation_params(workspace_id, context_id)
+        if not node_ids:
+            return 0
+        conditions = [
+            NeuralMemoryEdge.user_id == user_id,
+            or_(
+                NeuralMemoryEdge.src_id.in_(node_ids),
+                NeuralMemoryEdge.dst_id.in_(node_ids),
+            ),
+        ]
+        if workspace_id:
+            conditions.append(NeuralMemoryEdge.workspace_id == UUID(workspace_id))
+        if context_id:
+            conditions.append(NeuralMemoryEdge.context_id == UUID(context_id))
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(delete(NeuralMemoryEdge).where(and_(*conditions))),
+        )
+        deleted_count = result.rowcount or 0
+        logger.info(
+            "nodes_edges_deleted",
+            user_id=user_id,
+            nodes=len(node_ids),
+            count=deleted_count,
+            workspace_id=workspace_id,
+            context_id=context_id,
+        )
+        return deleted_count
+
     async def transfer_edges(
         self,
         from_node_id: UUID,

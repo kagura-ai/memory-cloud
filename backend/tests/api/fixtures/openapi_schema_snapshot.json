@@ -4300,6 +4300,17 @@
               }
             ]
           },
+          "cursor": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "dry_run": {
             "default": true,
             "type": "boolean"
@@ -4353,6 +4364,16 @@
             "anyOf": [
               {
                 "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
               },
               {
                 "type": "null"

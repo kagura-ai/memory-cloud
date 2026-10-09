@@ -82,8 +82,8 @@ def _service(rows, *, can_access=True) -> tuple[MemoryService, MagicMock]:
     service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
         return_value=(MagicMock(), str(WS), str(CTX))
     )
-    service._soft_delete_memory = AsyncMock(  # type: ignore[method-assign]
-        side_effect=lambda user_id, memory, *a, **kw: memory.id
+    service._soft_delete_chunk = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda user_id, ids, *a, **kw: (list(ids), [str(i) for i in ids])
     )
     perm = MagicMock(
         can_access_memory=AsyncMock(
@@ -103,6 +103,10 @@ async def _run(service, perm, **kwargs):
     return count
 
 
+def _deleted_ids(service) -> list:
+    return [i for c in service._soft_delete_chunk.await_args_list for i in c.args[1]]
+
+
 async def _run_full(service, perm, **kwargs):
     AUDIT.reset_mock()
     POINTS.reset_mock()
@@ -117,7 +121,8 @@ async def _run_full(service, perm, **kwargs):
     ):
         result = await service.forget_bulk("u1", context_id=CTX, **kwargs)
     service.resolve_calls = resolve.await_count
-    return result
+    service.next_after = result[2]
+    return result[0], result[1]
 
 
 class TestPermissions:
@@ -129,7 +134,7 @@ class TestPermissions:
         )
         with pytest.raises(NotFoundException):
             await _run(service, perm, dry_run=False)
-        service._soft_delete_memory.assert_not_awaited()
+        service._soft_delete_chunk.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_the_context_gate_is_forgets_write_gate(self) -> None:
@@ -168,7 +173,7 @@ class TestDryRunAndDelete:
     async def test_dry_run_counts_and_deletes_nothing(self) -> None:
         service, perm = _service([_row(), _row(), _row()])
         assert await _run(service, perm, dry_run=True) == 3
-        service._soft_delete_memory.assert_not_awaited()
+        service._soft_delete_chunk.assert_not_awaited()
         service.db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -176,13 +181,13 @@ class TestDryRunAndDelete:
         rows = [_row() for _ in range(5)]
         service, perm = _service(rows)
         assert await _run(service, perm, dry_run=False, chunk_size=2) == 5
-        assert service._soft_delete_memory.await_count == 5
+        assert len(_deleted_ids(service)) == 5
+        assert [len(c.args[1]) for c in service._soft_delete_chunk.await_args_list] == [2, 2, 1]
         # 3 chunks (2 + 2 + 1), each committed.
         assert service.db.commit.await_count == 3
-        call = service._soft_delete_memory.await_args
+        call = service._soft_delete_chunk.await_args
         assert call.args[0] == "u1"
         assert call.args[2:] == (str(WS), str(CTX))
-        assert call.kwargs == {"delete_point": False}
 
     @pytest.mark.asyncio
     async def test_each_chunk_is_audited_and_its_points_removed_in_one_request(self) -> None:
@@ -203,7 +208,7 @@ class TestDryRunAndDelete:
         service, perm = _service(rows)
         count, remaining = await _run_full(service, perm, dry_run=False, max_rows=3, chunk_size=2)
         assert (count, remaining) == (3, True)
-        assert service._soft_delete_memory.await_count == 3
+        assert len(_deleted_ids(service)) == 3
 
     @pytest.mark.asyncio
     async def test_the_last_request_reports_nothing_remaining(self) -> None:
@@ -332,3 +337,129 @@ class TestBoundedReads:
         assert AUDIT.await_count == 1
         assert AUDIT.await_args.kwargs["result_count"] == 2
         service.db.rollback.assert_awaited_once()
+
+
+class TestForgetByQueryUsesTheSessionWorkspace:
+    @pytest.mark.asyncio
+    async def test_the_session_workspace_wins(self) -> None:
+        from models.schemas import ForgetRequest
+
+        session_ws = uuid4()
+        service = MemoryService(MagicMock())
+        service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
+            return_value=(MagicMock(), str(WS), str(CTX))
+        )
+        service.recall = AsyncMock(side_effect=RuntimeError("stop"))  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="stop"):
+            await service.forget(
+                ForgetRequest(query="old notes", k=5), "u1", CTX, current_workspace_id=session_ws
+            )
+        assert service.recall.await_args.kwargs["current_workspace_id"] == session_ws
+
+    @pytest.mark.asyncio
+    async def test_query_matches_go_through_the_by_id_helper(self) -> None:
+        """Same #1924 stamp, point rule and edge isolation as forget(memory_id)."""
+        from models.schemas import ForgetRequest
+
+        memory = SimpleNamespace(
+            id=uuid4(), workspace_id=WS, context_id=CTX, is_tool_triggered=False
+        )
+        service = MemoryService(MagicMock(commit=AsyncMock()))
+        service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
+            return_value=(MagicMock(), str(WS), str(CTX))
+        )
+        service.recall = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(
+                degraded=False, results=[SimpleNamespace(memory_id=memory.id)]
+            )
+        )
+        service.memory_repo = MagicMock(get=AsyncMock(return_value=memory))
+        service._soft_delete_memory = AsyncMock()  # type: ignore[method-assign]
+        with patch("services.memory_access_event_writer.emit_memory_access_event", AsyncMock()):
+            resp = await service.forget(ForgetRequest(query="old", k=5), "u1", CTX)
+        assert resp.deleted_count == 1
+        service._soft_delete_memory.assert_awaited_once_with("u1", memory, str(WS), str(CTX))
+
+
+class TestResumeCursor:
+    @pytest.mark.asyncio
+    async def test_next_after_is_the_last_deleted_row(self) -> None:
+        rows = [_row() for _ in range(5)]
+        service, perm = _service(rows)
+        await _run_full(service, perm, dry_run=False, max_rows=3)
+        assert service.next_after == (rows[2].created_at, rows[2].id)
+
+    @pytest.mark.asyncio
+    async def test_nothing_remaining_means_no_cursor(self) -> None:
+        service, perm = _service([_row() for _ in range(2)])
+        await _run_full(service, perm, dry_run=False, max_rows=3)
+        assert service.next_after is None
+
+    @pytest.mark.asyncio
+    async def test_a_resume_point_starts_the_scan_after_it(self) -> None:
+        from datetime import datetime as dt
+
+        service, perm = _service([_row()])
+        resume = (dt(2026, 1, 1), uuid4())
+        await _run_full(service, perm, dry_run=False, after=resume)
+        page = next(st for st in service.db.statements if st._limit_clause is not None)
+        sql = str(page.compile(dialect=postgresql.dialect()))
+        assert "(memories.created_at, memories.id) >" in sql
+
+
+class TestTheChunkIsAFixedNumberOfStatements:
+    @pytest.mark.asyncio
+    async def test_update_shared_point_read_and_edge_delete(self) -> None:
+        """One UPDATE, one shared-point SELECT, one edge DELETE per chunk —
+        whatever the chunk size."""
+        own = [uuid4() for _ in range(3)]
+        shared_point = uuid4()
+        resource_row = uuid4()
+        returned = [SimpleNamespace(id=i, summary_embedding_id=i) for i in own] + [
+            SimpleNamespace(id=resource_row, summary_embedding_id=shared_point)
+        ]
+        statements: list = []
+
+        async def execute(stmt):
+            statements.append(stmt)
+            r = MagicMock()
+            if len(statements) == 1:
+                r.all.return_value = returned
+            elif len(statements) == 2:
+                r.scalars.return_value = [shared_point]  # still owned by a live row
+            else:
+                r.rowcount = 4
+            return r
+
+        db = MagicMock(execute=AsyncMock(side_effect=execute))
+        service = MemoryService(db)
+        deleted, points = await service._soft_delete_chunk(
+            "u1", [*own, resource_row], str(WS), str(CTX)
+        )
+        assert len(statements) == 3
+        sqls = [str(st.compile(dialect=postgresql.dialect())) for st in statements]
+        assert sqls[0].startswith("UPDATE memories SET deleted_at=")
+        assert "deleted_by" in sqls[0] and "updated_at" not in sqls[0]  # #1924
+        assert "memories.context_id =" in sqls[0]
+        assert sqls[2].startswith("DELETE FROM neural_memory_edges")
+        for fragment in ("user_id", "workspace_id", "context_id"):
+            assert f"neural_memory_edges.{fragment} =" in sqls[2]
+        assert deleted == [*own, resource_row]
+        # The shared point another live row owns is kept out of the index delete.
+        assert points == [str(i) for i in own]
+
+    @pytest.mark.asyncio
+    async def test_no_shared_points_skips_the_select(self) -> None:
+        own = [uuid4() for _ in range(2)]
+        statements: list = []
+
+        async def execute(stmt):
+            statements.append(stmt)
+            r = MagicMock()
+            r.all.return_value = [SimpleNamespace(id=i, summary_embedding_id=None) for i in own]
+            r.rowcount = 0
+            return r
+
+        service = MemoryService(MagicMock(execute=AsyncMock(side_effect=execute)))
+        await service._soft_delete_chunk("u1", own, str(WS), str(CTX))
+        assert len(statements) == 2

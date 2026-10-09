@@ -1287,6 +1287,8 @@ async def handle_forget(
                     request,
                     user_id=user_id,
                     current_context_id=current_context_id,
+                    # forget(query=...) recalls from the session workspace.
+                    current_workspace_id=workspace_id,
                 ),
                 operation_name="forget",
             )
