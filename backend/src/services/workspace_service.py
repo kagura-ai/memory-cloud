@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.workspace_roles import WorkspaceRole
 from models.auth import Context, ExternalAPIKey, UsageStats, Workspace, WorkspaceMember
 from models.memory import Memory
+from services.billing_contract import ensure_no_billing_contract
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import utcnow
 from utils.exceptions import NotFoundException, ValidationError
@@ -497,12 +498,22 @@ class WorkspaceService:
         Args:
             workspace_id: Workspace ID
             deleted_by: User ID who deleted the workspace
+
+        Raises:
+            NotFoundException: The workspace is missing or already deleted.
+            BillingContractActiveError: A paid subscription is still running
+                (409 ``BILLING-005``, Issue #1940).
         """
         from sqlalchemy import delete
 
         from models.auth import User
 
-        workspace = await self.get_workspace(workspace_id)
+        # Issue #1940: lock the row and refuse while a paid subscription runs
+        # (including a scheduled cancellation). Checked under the lock so a
+        # billing push that upgrades the plan cannot slip in between the check
+        # and the soft delete.
+        workspace = await lock_workspace_for_update(self.db, workspace_id)
+        ensure_no_billing_contract([workspace])
 
         # Issue #223: Delete external API keys (hard delete to allow re-creation)
         # The unique constraint is (user_id, key_name), so we need to delete them

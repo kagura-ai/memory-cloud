@@ -1127,7 +1127,7 @@ async def delete_user(
         # Issue #1940: an admin delete is the operator's override of the
         # running-subscription block — log the workspaces so billing can be
         # reconciled (same event as admin force-erase).
-        from services.account_erasure_service import owned_workspaces_under_contract
+        from services.billing_contract import owned_workspaces_under_contract
 
         under_contract = await owned_workspaces_under_contract(db, user_id)
         if under_contract:

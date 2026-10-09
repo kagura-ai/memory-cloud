@@ -44,13 +44,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.session import get_session_manager
 from auth.workspace_roles import WorkspaceRole
-from config.plan_tiers import PlanName
 from config.settings import get_settings
 from db.qdrant import delete_user_points
 from db.redis import clear_co_activations, clear_user_rate_limits, get_redis_client
 from models.agent import Agent, AgentContextBinding
 from models.auth import (
-    ENTITLEMENT_SOURCE_EXTERNAL_BILLING,
     APIKey,
     AuditLog,
     Context,
@@ -76,6 +74,7 @@ from models.erasure import (
     ErasureRequest,
 )
 from models.memory import Memory
+from services.billing_contract import owned_workspaces_under_contract
 from services.email_service import EmailService, get_email_service
 from services.oauth_grant_revocation import revoke_oauth_grants
 from services.system_admin_service import SystemAdminService
@@ -140,32 +139,6 @@ def _audit_salt() -> str:
 
 
 _sha256_hex = sha256_hex  # backward-compat alias for tests + this module
-
-
-async def owned_workspaces_under_contract(db: AsyncSession, user_id: str) -> list[Workspace]:
-    """Live workspaces ``user_id`` owns that have a running subscription (#1940).
-
-    Same predicate as ``Workspace.has_active_billing_contract``, in SQL. Every
-    owned workspace counts, including one that erasure would hand to another
-    admin: the subscription is the erased user's, so it must end before the
-    account goes. Admin deletion paths call this too, to log what they override.
-
-    Args:
-        db: Async database session.
-        user_id: Owner whose workspaces are checked.
-
-    Returns:
-        The matching workspaces (empty when none is under contract).
-    """
-    result = await db.execute(
-        select(Workspace).where(
-            Workspace.owner_user_id == user_id,
-            Workspace.deleted_at.is_(None),
-            Workspace.entitlement_source == ENTITLEMENT_SOURCE_EXTERNAL_BILLING,
-            Workspace.plan_name != PlanName.FREE.value,
-        )
-    )
-    return list(result.scalars().all())
 
 
 class AccountErasureService:
@@ -765,6 +738,16 @@ class AccountErasureService:
             try:
                 await self._execute(req, target)
                 executed += 1
+            except BillingContractActiveError as exc:
+                # Expected refusal (#1940), not a fault: `_execute` already
+                # marked the row failed with the reason. No stack trace/alert.
+                logger.warning(
+                    "erasure_sweep_blocked_by_billing_contract",
+                    request_id=str(req.id),
+                    user_id=req.user_id,
+                    workspace_ids=exc.details.get("workspace_ids"),
+                )
+                continue
             except Exception as exc:
                 logger.error(
                     "erasure_sweep_execute_failed",

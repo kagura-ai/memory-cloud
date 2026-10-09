@@ -29,7 +29,7 @@ def _db() -> MagicMock:
     return db
 
 
-async def _call(under_contract: list) -> MagicMock:
+async def _call(under_contract: list) -> tuple[MagicMock, MagicMock]:
     with (
         patch("services.system_admin_service.SystemAdminService") as admin_svc,
         patch(
@@ -38,15 +38,16 @@ async def _call(under_contract: list) -> MagicMock:
         ),
         patch("services.file_storage_service.FileStorageService") as storage,
         patch(
-            "services.account_erasure_service.owned_workspaces_under_contract",
+            "services.billing_contract.owned_workspaces_under_contract",
             new=AsyncMock(return_value=under_contract),
         ),
         patch("api.routes.admin.logger") as mock_logger,
     ):
         admin_svc.return_value.can_delete_admin = AsyncMock(return_value=(True, None))
         storage.return_value.purge_files_for_contexts = AsyncMock(return_value={})
-        await delete_user("target-1", {"user_id": "admin-1"}, _db())
-    return mock_logger
+        db = _db()
+        await delete_user("target-1", {"user_id": "admin-1"}, db)
+    return mock_logger, db
 
 
 def _override_calls(mock_logger: MagicMock) -> list:
@@ -60,12 +61,18 @@ def _override_calls(mock_logger: MagicMock) -> list:
 @pytest.mark.asyncio
 async def test_logs_workspaces_under_contract():
     ws = SimpleNamespace(id=uuid4())
-    calls = _override_calls(await _call([ws]))
+    mock_logger, db = await _call([ws])
+    calls = _override_calls(mock_logger)
     assert len(calls) == 1
     assert calls[0].kwargs["workspace_ids"] == [str(ws.id)]
     assert calls[0].kwargs["user_id"] == "target-1"
+    # Not refused: the user row is still deleted and committed.
+    db.delete.assert_awaited_once()
+    db.commit.assert_awaited()
 
 
 @pytest.mark.asyncio
 async def test_no_log_without_contract():
-    assert _override_calls(await _call([])) == []
+    mock_logger, db = await _call([])
+    assert _override_calls(mock_logger) == []
+    db.delete.assert_awaited_once()

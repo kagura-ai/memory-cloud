@@ -97,7 +97,7 @@ def _service() -> AccountErasureService:
     email.send_erasure_confirmation = AsyncMock(return_value=True)
     svc = AccountErasureService(db, email_service=email)
     # #1940: no workspace under a billing contract unless a test says so. The
-    # query itself is covered by calling the unbound method directly.
+    # query itself is covered in tests/services/test_billing_contract.py.
     svc._owned_workspaces_under_contract = AsyncMock(return_value=[])
     return svc
 
@@ -1487,21 +1487,6 @@ def _contract_workspace() -> SimpleNamespace:
 
 
 class TestBillingContractBlocksErasure:
-    @pytest.mark.asyncio
-    async def test_contract_query_targets_live_paid_billing_workspaces(self):
-        svc = _service()
-        result = MagicMock()
-        result.scalars.return_value.all.return_value = []
-        svc.db.execute = AsyncMock(return_value=result)
-
-        assert await AccountErasureService._owned_workspaces_under_contract(svc, "u-1") == []
-
-        sql = str(svc.db.execute.await_args.args[0].compile()).lower()
-        assert "workspaces.owner_user_id" in sql
-        assert "workspaces.deleted_at is null" in sql
-        assert "workspaces.entitlement_source" in sql
-        assert "workspaces.plan_name !=" in sql
-
     @pytest.mark.asyncio
     async def test_request_refused_while_owning_contract_workspace(self):
         from utils.exceptions import BillingContractActiveError

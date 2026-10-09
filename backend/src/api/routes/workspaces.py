@@ -42,7 +42,7 @@ from services.workspace_ownership_service import WorkspaceOwnershipService
 from services.workspace_service import WorkspaceService
 from utils.auth_helpers import get_user_id
 from utils.datetime import to_utc_iso
-from utils.exceptions import BillingContractActiveError, ValidationError
+from utils.exceptions import ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -558,11 +558,6 @@ async def delete_workspace(
         raise HTTPException(
             status_code=403, detail="Only the workspace owner can delete the workspace."
         )
-
-    # Issue #1940: a running subscription (including a scheduled cancellation)
-    # blocks deletion until billing pushes the workspace back to Free.
-    if workspace.has_active_billing_contract:
-        raise BillingContractActiveError(workspace_ids=[str(workspace.id)])
 
     await workspace_service.delete_workspace(workspace_id, deleted_by=user["user_id"])
 
