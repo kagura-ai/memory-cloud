@@ -130,6 +130,10 @@ async def run_queued_indexers() -> None:
                     IndexerState.job_status == "queued",
                     IndexerState.next_run_at <= utcnow(),
                 )
+                # Longest-waiting first (#1939): rows held back by a plan
+                # suspension or the memory limit re-queue hourly and must not
+                # crowd runnable rows out of the 10-row pick. id breaks ties.
+                .order_by(IndexerState.next_run_at.asc(), IndexerState.id.asc())
                 .limit(10)  # Process up to 10 per cycle
             )
             states = list(result.scalars().all())

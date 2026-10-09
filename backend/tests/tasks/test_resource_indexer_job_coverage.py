@@ -233,6 +233,26 @@ class TestRunQueuedIndexers:
             await run_queued_indexers()
         indexer_ctor.assert_not_called()
 
+    async def test_queue_pick_runs_the_longest_waiting_rows_first(self):
+        """#1939: held-back rows re-queue hourly, so the 10-row pick must be
+        ordered — oldest due ``next_run_at`` first, ``id`` as the tie-break —
+        or they could keep crowding out runnable rows."""
+        from sqlalchemy.dialects import postgresql
+
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=result)
+
+        with patch("tasks.resource_indexer_job.get_db", _mock_get_db(db)):
+            await run_queued_indexers()
+
+        stmt = db.execute.await_args.args[0]
+        sql = str(stmt.compile(dialect=postgresql.dialect()))
+        table = IndexerState.__tablename__
+        assert f"ORDER BY {table}.next_run_at ASC, {table}.id ASC" in sql
+        assert "LIMIT" in sql
+
     async def test_successful_run_transitions_to_idle_and_records(self, db_session, seeded_state):
         """Due queued job, allowed by rate limit → running → idle, metrics stored, run recorded."""
         client = _fake_redis()
