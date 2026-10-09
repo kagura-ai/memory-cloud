@@ -114,3 +114,51 @@ async def test_delete_workspace_soft_deletes_a_free_workspace():
 
     assert ws.deleted_at is not None
     db.commit.assert_awaited()
+
+
+def test_ensure_ignores_soft_deleted_workspaces():
+    """Raw owned lists can be passed: a deleted workspace never blocks."""
+    from utils.datetime import utcnow
+
+    deleted_paid = _ws("pro")
+    deleted_paid.deleted_at = utcnow()
+    ensure_no_billing_contract([deleted_paid])
+
+
+@pytest.mark.asyncio
+async def test_delete_workspace_commits_before_the_qdrant_cleanup():
+    """The row lock is released before network I/O, so billing pushes and
+    owner mutations do not wait on Qdrant."""
+    from types import SimpleNamespace
+
+    order: list[str] = []
+    ctx = SimpleNamespace(id=uuid4(), name="c")
+
+    def _rows(rows: list) -> MagicMock:
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = rows
+        return result
+
+    db = MagicMock()
+    # external API keys, users on this workspace, then (after commit) contexts
+    db.execute = AsyncMock(side_effect=[_rows([]), _rows([]), _rows([ctx])])
+    db.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+    ws = _ws("free")
+
+    async def _drop(*_a, **_k):
+        order.append("qdrant")
+
+    with (
+        patch(
+            "services.workspace_service.lock_workspace_for_update",
+            new=AsyncMock(return_value=ws),
+        ),
+        patch("db.qdrant.list_memory_collections", new=AsyncMock(return_value=[])),
+        patch(
+            "services.context_service.ContextService._delete_context_collection",
+            new=_drop,
+        ),
+    ):
+        await WorkspaceService(db).delete_workspace(ws.id, deleted_by="u-1")
+
+    assert order == ["commit", "qdrant"]

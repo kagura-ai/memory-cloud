@@ -182,7 +182,13 @@ export function DeleteAccountSection() {
         setDialogError(t("confirmTokenExpired"));
       } else if (code === "BILLING-005") {
         // #1940: a subscription started (or was resumed) since the request.
+        // The backend cancelled the request and burned the token, so drop
+        // both here and re-sync — a retry must not resend a dead token.
+        setToken(null);
+        setPassword("");
+        setStep("intro");
         setDialogError(t("subscriptionActiveError"));
+        await loadActive();
       } else if (code === "ERASURE-006") {
         setOpen(false);
         reset();

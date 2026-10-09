@@ -62,7 +62,10 @@ async def owned_workspaces_under_contract(
 
 
 def ensure_no_billing_contract(workspaces: list[Workspace]) -> None:
-    """Raise ``BillingContractActiveError`` if any workspace is under contract.
+    """Raise ``BillingContractActiveError`` if a live workspace is under contract.
+
+    Applies the same filter as ``workspaces_under_contract`` (soft-deleted
+    workspaces never block), so callers can pass raw lists.
 
     Args:
         workspaces: Workspaces about to be deleted (directly or with their owner).
@@ -71,6 +74,6 @@ def ensure_no_billing_contract(workspaces: list[Workspace]) -> None:
         BillingContractActiveError: At least one has a running subscription
             (409 ``BILLING-005``); ``details.workspace_ids`` lists them.
     """
-    under_contract = [str(ws.id) for ws in workspaces if ws.has_active_billing_contract]
+    under_contract = workspaces_under_contract(workspaces)
     if under_contract:
-        raise BillingContractActiveError(workspace_ids=under_contract)
+        raise BillingContractActiveError(workspace_ids=[str(ws.id) for ws in under_contract])

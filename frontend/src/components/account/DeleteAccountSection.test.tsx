@@ -242,6 +242,10 @@ describe("DeleteAccountSection", () => {
     fireEvent.click(screen.getByText("dialogConfirm"));
     expect(await screen.findByText("subscriptionActiveError")).toBeInTheDocument();
     expect(screen.queryByText("confirmError")).not.toBeInTheDocument();
+    // The request was cancelled server-side: the dead token is dropped (back to
+    // the intro step, no password field) and the active request re-synced.
+    expect(screen.queryByLabelText("passwordLabel")).not.toBeInTheDocument();
+    expect(mockGetActive).toHaveBeenCalledTimes(2);
   });
 
   it("ERASURE-006: re-syncs the existing request and toasts instead of looping", async () => {

@@ -491,7 +491,16 @@ class AccountErasureService:
             request.status = STATUS_CANCELLED
             request.cancelled_at = utcnow()
             await self.db.commit()
-            await redis.delete(redis_key)
+            try:
+                await redis.delete(redis_key)
+            except Exception as exc:
+                # Best-effort: the row is already cancelled, so a leftover token
+                # cannot confirm anything; keep the 409 instead of a 500.
+                logger.warning(
+                    "erasure_confirm_token_delete_failed",
+                    request_id=str(request.id),
+                    error=str(exc),
+                )
             ensure_no_billing_contract(under_contract)
 
         now = utcnow()
@@ -795,7 +804,7 @@ class AccountErasureService:
             # once the erasure has completed. Soft-deleted workspaces are
             # hard-deleted here too, so the log includes them.
             if request.is_self_service:
-                ensure_no_billing_contract(workspaces_under_contract(owned_workspaces))
+                ensure_no_billing_contract(owned_workspaces)
                 overridden: list[Workspace] = []
             else:
                 overridden = workspaces_under_contract(owned_workspaces, include_deleted=True)

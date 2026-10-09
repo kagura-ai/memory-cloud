@@ -1599,6 +1599,40 @@ class TestBillingContractBlocksErasure:
         svc.email_service.send_erasure_cooling_off_started.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_confirm_refusal_survives_a_redis_failure(self, owned_contracts):
+        """The token delete is best-effort: the client still gets BILLING-005."""
+        from utils.exceptions import BillingContractActiveError
+
+        svc = _service()
+        target = _user(auth_method="oauth")
+        svc._load_user_or_404 = AsyncMock(return_value=target)
+        svc._check_no_blocking_workspace_transfers = AsyncMock()
+        owned_contracts.return_value = [_contract_workspace()]
+        token = "raw-token-abc"
+        request = ErasureRequest(
+            user_id="u-1",
+            user_email_hash=_sha256_hex(target.email),
+            initiated_by="u-1",
+            is_self_service=True,
+            reason_code=REASON_SELF_SERVICE,
+            status=STATUS_PENDING,
+            confirm_token_hash=_sha256_hex(token),
+        )
+        request.id = uuid4()
+        svc._load_request_or_404 = AsyncMock(return_value=request)
+
+        with patch("services.account_erasure_service.get_redis_client") as mock_redis:
+            redis_client = MagicMock()
+            redis_client.get = AsyncMock(return_value=str(request.id))
+            redis_client.delete = AsyncMock(side_effect=RuntimeError("redis down"))
+            mock_redis.return_value = redis_client
+
+            with pytest.raises(BillingContractActiveError):
+                await svc.confirm_self_service(user_id="u-1", token=token)
+
+        assert request.status == STATUS_CANCELLED
+
+    @pytest.mark.asyncio
     async def test_sweep_execution_fails_request_when_contract_started_in_cooling_off(self):
         from models.erasure import STATUS_FAILED
         from utils.exceptions import BillingContractActiveError

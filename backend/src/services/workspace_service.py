@@ -511,7 +511,9 @@ class WorkspaceService:
         # Issue #1940: lock the row and refuse while a paid subscription runs
         # (including a scheduled cancellation). Checked under the lock so a
         # billing push that upgrades the plan cannot slip in between the check
-        # and the soft delete.
+        # and the soft delete. The row changes commit first (releasing the
+        # lock); the slow Qdrant cleanup runs afterwards so billing pushes and
+        # owner mutations do not wait on network I/O.
         workspace = await lock_workspace_for_update(self.db, workspace_id)
         ensure_no_billing_contract([workspace])
 
@@ -529,8 +531,30 @@ class WorkspaceService:
                 delete(ExternalAPIKey).where(ExternalAPIKey.workspace_id == workspace_id)
             )
             logger.info(
-                f"Deleted {external_keys_count} external API keys for workspace {workspace.id}"
+                f"Deleted {external_keys_count} external API keys for workspace {workspace_id}"
             )
+
+        # Soft delete
+        workspace.deleted_at = func.now()
+        workspace.updated_at = func.now()
+
+        # Issue #218: Clear current_workspace_id for all users who had this workspace as current
+        # This ensures they get a new workspace auto-created on next login
+        result = await self.db.execute(
+            select(User).where(User.current_workspace_id == workspace_id)
+        )
+        users = result.scalars().all()
+
+        for user in users:
+            user.current_workspace_id = None
+            # Issue #246: current_context_id removed
+            logger.info(
+                "cleared_user_workspace_and_context",
+                user_id=user.user_id,
+                workspace_id=str(workspace_id),
+            )
+
+        await self.db.commit()
 
         # Delete Qdrant points for ALL contexts (including soft-deleted)
         # Workspace deletion is permanent — clean up everything
@@ -578,29 +602,7 @@ class WorkspaceService:
                     error=str(e),
                 )
 
-        # Soft delete
-        workspace.deleted_at = func.now()
-        workspace.updated_at = func.now()
-
-        # Issue #218: Clear current_workspace_id for all users who had this workspace as current
-        # This ensures they get a new workspace auto-created on next login
-        result = await self.db.execute(
-            select(User).where(User.current_workspace_id == workspace_id)
-        )
-        users = result.scalars().all()
-
-        for user in users:
-            user.current_workspace_id = None
-            # Issue #246: current_context_id removed
-            logger.info(
-                "cleared_user_workspace_and_context",
-                user_id=user.user_id,
-                workspace_id=str(workspace.id),
-            )
-
-        await self.db.commit()
-
-        logger.info(f"Deleted workspace: {workspace.id} (by: {deleted_by})")
+        logger.info(f"Deleted workspace: {workspace_id} (by: {deleted_by})")
 
     # ========================================================================
     # Member Management
