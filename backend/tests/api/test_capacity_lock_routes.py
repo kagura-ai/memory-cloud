@@ -391,3 +391,57 @@ class TestAgentBootstrap:
         inst.build_envelope.assert_not_awaited()
         assert ensure.await_args.args[1] == ws
         assert ensure.await_args.kwargs == {"user_id": "u1"}
+
+
+# ---------------------------------------------------------------------------
+# Public context search (#1941 review)
+# ---------------------------------------------------------------------------
+
+
+class TestPublicSearch:
+    def _ctx(self, ws):
+        return SimpleNamespace(id=uuid4(), workspace_id=ws, is_public=True)
+
+    async def _call(self, *, user, bound_key=None):
+        from api.routes import public_search as ps
+
+        ws = uuid4()
+        ctx = self._ctx(ws)
+        db = MagicMock(get=AsyncMock(return_value=ctx))
+        search = AsyncMock()
+        with (
+            patch.object(ps, "_resolve_public_attribution", AsyncMock(return_value=bound_key)),
+            patch.object(ps, "check_pre_auth_rate_limit", AsyncMock()),
+            patch.object(ps, "check_public_search_rate_limit", AsyncMock()) as anon_bucket,
+            patch.object(
+                ps, "SearchService", MagicMock(return_value=MagicMock(hybrid_search=search))
+            ),
+            _lock("public_search", "ensure_not_capacity_locked") as ensure,
+            pytest.raises(CapacityLockedError),
+        ):
+            await ps.public_search(
+                context_id=ctx.id,
+                request=ps.PublicSearchRequest(query="q"),
+                user=user if user is None else {**user, "current_workspace_id": ws},
+                api_key="k" if bound_key else None,
+                db=db,
+            )
+        search.assert_not_awaited()
+        return ensure, ws, anon_bucket
+
+    @pytest.mark.asyncio
+    async def test_a_member_session_sees_the_numbers(self) -> None:
+        ensure, ws, _ = await self._call(user={"user_id": "u1"})
+        assert ensure.await_args.args[1] == ws
+        assert ensure.await_args.kwargs == {"user_id": "u1"}
+
+    @pytest.mark.asyncio
+    async def test_an_anonymous_reader_is_an_outsider(self) -> None:
+        ensure, ws, _ = await self._call(user=None)
+        assert ensure.await_args.args[1] == ws
+        assert ensure.await_args.kwargs == {"outsider": True}
+
+    @pytest.mark.asyncio
+    async def test_a_bound_key_reader_is_an_outsider(self) -> None:
+        ensure, _, _ = await self._call(user=None, bound_key=SimpleNamespace(id=7))
+        assert ensure.await_args.kwargs == {"outsider": True}

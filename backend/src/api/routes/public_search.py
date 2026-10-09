@@ -20,6 +20,7 @@ from config.plan_tiers import get_plan_tier
 from db.base import get_db
 from db.redis import incrby_counter
 from models.auth import Context, Workspace
+from services.capacity_lock import ensure_not_capacity_locked
 from services.resource_lookup import get_latest_schema
 from services.search_service import SearchService
 from utils.datetime import to_utc_iso, utcnow
@@ -442,6 +443,14 @@ async def public_search(
             raise AuthorizationError(
                 message="This public context belongs to a different workspace. Please switch workspaces or use anonymous access."
             )
+
+    # #1941: a workspace over its Free capacity pauses search, public reads
+    # included. A member session sees the numbers; an anonymous or bound-key
+    # reader is never a member, so it gets the redacted refusal.
+    if user is not None and bound_key is None:
+        await ensure_not_capacity_locked(db, context.workspace_id, user_id=user.get("user_id"))
+    else:
+        await ensure_not_capacity_locked(db, context.workspace_id, outsider=True)
 
     # 3. Rate limit dispatch by principal type.
     # The Workspace fetch is deferred to after this gate so a flood of
