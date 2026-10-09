@@ -3527,7 +3527,8 @@
       "cancel": "Cancel",
       "needFilter": "Set at least one filter.",
       "failed": "Could not delete the memories. Try again.",
-      "deleted": "{count, plural, one {Deleted # memory} other {Deleted # memories}}"
+      "deleted": "{count, plural, one {Deleted # memory} other {Deleted # memories}}",
+      "progress": "{count, plural, one {Deleting… # memory deleted} other {Deleting… # memories deleted}}"
     }
   },
   "contextSettings": {

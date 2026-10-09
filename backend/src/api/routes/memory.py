@@ -640,7 +640,8 @@ async def forget_bulk(
     filter or ``all: true`` is required. ``dry_run`` defaults to ``true`` and
     returns ``matched``; with ``dry_run: false`` the matches are deleted the
     way ``/forget`` deletes one memory (soft delete, search point and graph
-    edges removed) and ``deleted`` is returned.
+    edges removed) and ``deleted`` is returned. One request deletes at most
+    2,000 memories; ``remaining: true`` means more match — repeat the request.
 
     Permissions are ``/forget``'s: write access to the context (uniform 404
     otherwise), then the per-memory delete check — a memory the caller may
@@ -653,7 +654,7 @@ async def forget_bulk(
         context_id=str(request.context_id),
         dry_run=request.dry_run,
     )
-    count = await memory_service.forget_bulk(
+    count, remaining = await memory_service.forget_bulk(
         user["user_id"],
         context_id=request.context_id,
         created_before=request.created_before,
@@ -665,7 +666,7 @@ async def forget_bulk(
     )
     if request.dry_run:
         return ForgetBulkResponse(dry_run=True, matched=count)
-    return ForgetBulkResponse(dry_run=False, deleted=count)
+    return ForgetBulkResponse(dry_run=False, deleted=count, remaining=remaining)
 
 
 @router.post("/explore", response_model=ExploreResponse)

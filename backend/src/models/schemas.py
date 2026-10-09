@@ -902,13 +902,16 @@ class ForgetBulkRequest(BaseModel):
 class ForgetBulkResponse(BaseModel):
     """Response schema for ``POST /memory/forget-bulk`` (#1941).
 
-    ``matched`` on a dry run, ``deleted`` otherwise; the other is null.
+    ``matched`` (the full count) on a dry run; ``deleted`` and ``remaining``
+    otherwise — one request deletes at most 2,000 memories, and
+    ``remaining: true`` means matching memories are left for the next request.
     """
 
     status: str = "success"
     dry_run: bool
     matched: int | None = None
     deleted: int | None = None
+    remaining: bool | None = None
 
 
 class UpdateMemoryRequest(BaseModel):

@@ -3527,7 +3527,8 @@
       "cancel": "キャンセル",
       "needFilter": "条件を 1 つ以上指定してください。",
       "failed": "メモリーを削除できませんでした。もう一度お試しください。",
-      "deleted": "{count, plural, other {# 件のメモリーを削除しました}}"
+      "deleted": "{count, plural, other {# 件のメモリーを削除しました}}",
+      "progress": "{count, plural, other {削除中… # 件削除しました}}"
     }
   },
   "contextSettings": {

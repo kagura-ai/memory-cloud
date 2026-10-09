@@ -4360,6 +4360,16 @@
               }
             ]
           },
+          "remaining": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "status": {
             "default": "success",
             "type": "string"

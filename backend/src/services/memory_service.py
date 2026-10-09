@@ -109,6 +109,9 @@ _PINNED_LOAD_CAP_MAX = 1000
 # #1941: rows deleted and committed per batch by ``forget_bulk`` — bounds the
 # transaction (and the lock window on the rows) for a context of any size.
 FORGET_BULK_CHUNK = 500
+# Rows one forget-bulk request deletes at most; the client repeats the request
+# while the response says ``remaining`` (bounds request time and lock windows).
+FORGET_BULK_MAX_PER_REQUEST = 2000
 
 # Issue #1052: recall-confidence thresholds for absence detection.
 #
@@ -5384,6 +5387,14 @@ class MemoryService:
         no other live row names it. Memories the API wrote have their own
         point (``point_id == id``) and skip the check.
         """
+        point_id = await self._point_to_delete(memory)
+        if point_id is None:
+            return
+        del_collection = await resolve_collection_name(self.db, memory.context_id)
+        await delete_memory_from_qdrant(user_id, point_id, collection_name=del_collection)
+
+    async def _point_to_delete(self, memory: Memory) -> UUID | None:
+        """``memory``'s vector point id, or ``None`` when another live row owns it too."""
         point_id = memory.point_id
         if point_id != memory.id:
             # Not scoped by context_id on purpose: the row to find is one in
@@ -5404,18 +5415,27 @@ class MemoryService:
                     memory_id=str(memory.id),
                     point_id=str(point_id),
                 )
-                return
-        del_collection = await resolve_collection_name(self.db, memory.context_id)
-        await delete_memory_from_qdrant(user_id, point_id, collection_name=del_collection)
+                return None
+        return point_id
 
     async def _soft_delete_memory(
-        self, user_id: str, memory: Memory, workspace_id: str, context_id: str
-    ) -> None:
+        self,
+        user_id: str,
+        memory: Memory,
+        workspace_id: str,
+        context_id: str,
+        *,
+        delete_point: bool = True,
+    ) -> UUID | None:
         """Delete one memory the caller may delete: ``forget``'s by-id side effects.
 
         Soft-deletes the row, removes its search point and its neural edges
         (3-level isolation). Shared by ``forget(memory_id=...)`` and
         ``forget_bulk`` so the two can never drift. The caller commits.
+
+        With ``delete_point=False`` the point is not deleted here: its id is
+        returned (``None`` when another live row still owns it) so a batch
+        caller can remove a whole chunk's points in one request.
         """
         # Soft delete in PostgreSQL (set deleted_at, deleted_by)
         memory.deleted_at = utcnow()
@@ -5427,7 +5447,11 @@ class MemoryService:
 
         # Hard delete from Qdrant (remove from search index) — by the
         # row's point id, not its row id (#1829).
-        await self._delete_memory_point(user_id, memory)
+        point_to_delete: UUID | None = None
+        if delete_point:
+            await self._delete_memory_point(user_id, memory)
+        else:
+            point_to_delete = await self._point_to_delete(memory)
 
         # Clean up neural memory edges with 3-level isolation
         from repositories.neural_edge import NeuralEdgeRepository
@@ -5446,6 +5470,7 @@ class MemoryService:
                 edges_deleted=edges_deleted,
                 user_id=user_id,
             )
+        return point_to_delete
 
     async def forget_bulk(
         self,
@@ -5459,7 +5484,8 @@ class MemoryService:
         dry_run: bool = True,
         key_workspace_id: UUID | None = None,
         chunk_size: int = FORGET_BULK_CHUNK,
-    ) -> int:
+        max_rows: int = FORGET_BULK_MAX_PER_REQUEST,
+    ) -> tuple[int, bool]:
         """Delete every live memory in one context that matches the filters (#1941).
 
         The permission model is ``forget``'s, applied to each candidate: the
@@ -5483,9 +5509,17 @@ class MemoryService:
             dry_run: Count only.
             key_workspace_id: Pure key scope (#963), as for forget.
             chunk_size: Rows deleted and committed per batch.
+            max_rows: Rows one request deletes at most; the caller repeats
+                the request while ``remaining`` is true.
 
         Returns:
-            The number of memories matched (``dry_run``) or deleted.
+            ``(count, remaining)``: on a dry run the FULL matched count and
+            ``False``; otherwise the number deleted by this request and
+            whether matching rows are left for the next one.
+
+        Each chunk is committed, its search points removed in one request
+        (collection resolved once), and audited on its own — an interrupted
+        request leaves an audit row for every chunk it did delete.
         """
         from services.permission_service import CallerId, MemoryAuthorId, PermissionService
 
@@ -5555,9 +5589,18 @@ class MemoryService:
             victims.append(row.id)
 
         if dry_run:
-            return len(victims)
+            return len(victims), False
 
-        deleted: list[UUID] = []
+        from db.qdrant import delete_points_from_qdrant
+        from services.memory_access_event_writer import (
+            MAX_METADATA_MEMORY_IDS,
+            emit_memory_access_event,
+        )
+
+        remaining = len(victims) > max_rows
+        victims = victims[:max_rows]
+        collection = await resolve_collection_name(self.db, context_id)
+        deleted_total = 0
         for start in range(0, len(victims), chunk_size):
             chunk = victims[start : start + chunk_size]
             memories = (
@@ -5569,38 +5612,41 @@ class MemoryService:
                 .scalars()
                 .all()
             )
+            deleted: list[UUID] = []
+            points: list[str] = []
             for memory in memories:
-                await self._soft_delete_memory(user_id, memory, workspace_id_str, context_id_str)
+                point = await self._soft_delete_memory(
+                    user_id, memory, workspace_id_str, context_id_str, delete_point=False
+                )
+                if point is not None:
+                    points.append(str(point))
                 deleted.append(memory.id)
+            await delete_points_from_qdrant(points, collection)
             await self.db.commit()
+            deleted_total += len(deleted)
+            await emit_memory_access_event(
+                operation="forget",
+                outcome="success",
+                workspace_id=UUID(workspace_id_str),
+                user_id=user_id,
+                context_id=context_id,
+                memory_id=deleted[0] if len(deleted) == 1 else None,
+                result_count=len(deleted),
+                extra_metadata=(
+                    {"memory_ids": [str(mid) for mid in deleted[:MAX_METADATA_MEMORY_IDS]]}
+                    if len(deleted) > 1
+                    else None
+                ),
+            )
 
         logger.info(
             "memories_soft_deleted_in_bulk",
             context_id=context_id_str,
-            count=len(deleted),
+            count=deleted_total,
+            remaining=remaining,
             user_id=user_id,
         )
-
-        from services.memory_access_event_writer import (
-            MAX_METADATA_MEMORY_IDS,
-            emit_memory_access_event,
-        )
-
-        await emit_memory_access_event(
-            operation="forget",
-            outcome="success",
-            workspace_id=UUID(workspace_id_str),
-            user_id=user_id,
-            context_id=context_id,
-            memory_id=deleted[0] if len(deleted) == 1 else None,
-            result_count=len(deleted),
-            extra_metadata=(
-                {"memory_ids": [str(mid) for mid in deleted[:MAX_METADATA_MEMORY_IDS]]}
-                if len(deleted) > 1
-                else None
-            ),
-        )
-        return len(deleted)
+        return deleted_total, remaining
 
     async def forget(
         self,
@@ -5734,8 +5780,14 @@ class MemoryService:
             )
 
             # Issue #82: Pass project ID to recall
+            # recall() requires the workspace as well as the context; the
+            # isolation helper above resolved it from the context.
             search_response = await self.recall(
-                recall_request, user_id, current_context_id, capacity_gate=False
+                recall_request,
+                user_id,
+                current_context_id,
+                current_workspace_id=UUID(workspace_id_str) if workspace_id_str else None,
+                capacity_gate=False,
             )
 
             # #1515: the pin above says the router must never choose the

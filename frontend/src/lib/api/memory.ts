@@ -156,6 +156,8 @@ export interface ForgetBulkResponse {
   dry_run: boolean;
   matched: number | null;
   deleted: number | null;
+  /** True when more memories match; repeat the request (≤ 2,000 per request). */
+  remaining?: boolean | null;
 }
 
 /**

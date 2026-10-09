@@ -82,6 +82,8 @@ export function BulkDeleteMemoriesDialog({
   const [filters, setFilters] = useState<BulkDeleteFilters>(EMPTY);
   const [matched, setMatched] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Memories deleted so far by the current confirm (the server caps a request). */
+  const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const update = (key: keyof BulkDeleteFilters, value: string) => {
@@ -99,23 +101,39 @@ export function BulkDeleteMemoriesDialog({
     }
     setBusy(true);
     setError(null);
+    let deleted = 0;
     try {
-      const res = await forgetBulk({
-        context_id: contextId,
-        ...request,
-        dry_run: dryRun,
-      });
       if (dryRun) {
+        const res = await forgetBulk({
+          context_id: contextId,
+          ...request,
+          dry_run: true,
+        });
         setMatched(res.matched ?? 0);
-      } else {
-        onDeleted(res.deleted ?? 0);
-        setFilters(EMPTY);
-        setMatched(null);
+        return;
       }
+      // One request deletes at most 2,000 memories; repeat until none remain.
+      setProgress(0);
+      for (;;) {
+        const res = await forgetBulk({
+          context_id: contextId,
+          ...request,
+          dry_run: false,
+        });
+        deleted += res.deleted ?? 0;
+        setProgress(deleted);
+        if (!res.remaining || !res.deleted) break;
+      }
+      onDeleted(deleted);
+      setFilters(EMPTY);
+      setMatched(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("failed"));
+      // Some batches may have been deleted before the failure: refresh.
+      if (deleted > 0) onDeleted(deleted);
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   };
 
@@ -179,9 +197,14 @@ export function BulkDeleteMemoriesDialog({
           </div>
         </div>
 
-        {matched !== null && (
+        {matched !== null && progress === null && (
           <p className="text-sm" role="status">
             {t("matched", { count: matched })}
+          </p>
+        )}
+        {progress !== null && (
+          <p className="text-sm" role="status">
+            {t("progress", { count: progress })}
           </p>
         )}
         {error && (

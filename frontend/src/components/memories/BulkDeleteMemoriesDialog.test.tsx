@@ -66,7 +66,12 @@ describe("BulkDeleteMemoriesDialog", () => {
   it("dry-runs, shows the count, then deletes the same filter", async () => {
     forgetBulk
       .mockResolvedValueOnce({ dry_run: true, matched: 12, deleted: null })
-      .mockResolvedValueOnce({ dry_run: false, matched: null, deleted: 12 });
+      .mockResolvedValueOnce({
+        dry_run: false,
+        matched: null,
+        deleted: 12,
+        remaining: false,
+      });
     const onDeleted = renderDialog();
 
     fireEvent.change(screen.getByLabelText("Type"), {
@@ -124,5 +129,62 @@ describe("BulkDeleteMemoriesDialog", () => {
     expect(
       await screen.findByRole("button", { name: "Nothing to delete" }),
     ).toBeDisabled();
+  });
+
+  it("repeats the delete until nothing remains and reports the total", async () => {
+    forgetBulk
+      .mockResolvedValueOnce({ dry_run: true, matched: 4500, deleted: null })
+      .mockResolvedValueOnce({
+        dry_run: false,
+        matched: null,
+        deleted: 2000,
+        remaining: true,
+      })
+      .mockResolvedValueOnce({
+        dry_run: false,
+        matched: null,
+        deleted: 2000,
+        remaining: true,
+      })
+      .mockResolvedValueOnce({
+        dry_run: false,
+        matched: null,
+        deleted: 500,
+        remaining: false,
+      });
+    const onDeleted = renderDialog();
+    fireEvent.change(screen.getByLabelText("Type"), {
+      target: { value: "note" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Count matches" }));
+    await screen.findByText("4,500 memories match.");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete 4,500 memories" }),
+    );
+    await waitFor(() => expect(onDeleted).toHaveBeenCalledWith(4500));
+    expect(forgetBulk).toHaveBeenCalledTimes(4);
+  });
+
+  it("refreshes with what was deleted when a later batch fails", async () => {
+    forgetBulk
+      .mockResolvedValueOnce({ dry_run: true, matched: 3000, deleted: null })
+      .mockResolvedValueOnce({
+        dry_run: false,
+        matched: null,
+        deleted: 2000,
+        remaining: true,
+      })
+      .mockRejectedValueOnce(new Error("boom"));
+    const onDeleted = renderDialog();
+    fireEvent.change(screen.getByLabelText("Type"), {
+      target: { value: "note" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Count matches" }));
+    await screen.findByText("3,000 memories match.");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete 3,000 memories" }),
+    );
+    expect(await screen.findByText("boom")).toBeInTheDocument();
+    expect(onDeleted).toHaveBeenCalledWith(2000);
   });
 });

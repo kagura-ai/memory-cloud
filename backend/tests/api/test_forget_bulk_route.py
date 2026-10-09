@@ -44,7 +44,7 @@ class TestTheRequest:
 class TestTheRoute:
     @pytest.mark.asyncio
     async def test_dry_run_returns_matched(self) -> None:
-        service = MagicMock(forget_bulk=AsyncMock(return_value=7))
+        service = MagicMock(forget_bulk=AsyncMock(return_value=(7, False)))
         req = ForgetBulkRequest(context_id=uuid4(), type="note")
         resp = await forget_bulk(request=req, user=USER, memory_service=service)
         assert (resp.dry_run, resp.matched, resp.deleted) == (True, 7, None)
@@ -52,7 +52,7 @@ class TestTheRoute:
 
     @pytest.mark.asyncio
     async def test_delete_returns_deleted_and_passes_every_filter(self) -> None:
-        service = MagicMock(forget_bulk=AsyncMock(return_value=3))
+        service = MagicMock(forget_bulk=AsyncMock(return_value=(3, True)))
         ctx = uuid4()
         req = ForgetBulkRequest(
             context_id=ctx,
@@ -63,7 +63,7 @@ class TestTheRoute:
             dry_run=False,
         )
         resp = await forget_bulk(request=req, user=USER, memory_service=service)
-        assert (resp.dry_run, resp.matched, resp.deleted) == (False, None, 3)
+        assert (resp.dry_run, resp.matched, resp.deleted, resp.remaining) == (False, None, 3, True)
         kwargs = service.forget_bulk.await_args.kwargs
         assert kwargs["context_id"] == ctx
         # created_at is naive UTC: an aware bound is normalised.
