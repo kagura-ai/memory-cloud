@@ -3,7 +3,7 @@
  * so the sentences are the ones a user reads in each locale.
  */
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { NextIntlClientProvider } from "next-intl";
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -73,6 +73,9 @@ describe("CapacityLockBannerView", () => {
       "href",
       "/workspace/settings/plan",
     );
+    expect(
+      screen.getByRole("link", { name: "Clean up contexts" }),
+    ).toHaveAttribute("href", "/workspace/contexts");
   });
 
   it("names both axes when both are over", () => {
@@ -124,6 +127,24 @@ describe("CapacityLockBanner", () => {
     expect(
       await screen.findByTestId("capacity-lock-banner"),
     ).toBeInTheDocument();
+  });
+});
+
+describe("CapacityLockBanner refresh", () => {
+  it("re-reads usage when a delete asks for it, and clears once unlocked", async () => {
+    const { requestCapacityRefresh } = await import("@/lib/capacityRefresh");
+    getUsage
+      .mockResolvedValueOnce({ capacity_lock: lock() })
+      .mockResolvedValueOnce({ capacity_lock: null });
+    renderIn("en", <CapacityLockBanner />);
+    expect(
+      await screen.findByTestId("capacity-lock-banner"),
+    ).toBeInTheDocument();
+    act(() => requestCapacityRefresh());
+    await waitFor(() =>
+      expect(screen.queryByTestId("capacity-lock-banner")).toBeNull(),
+    );
+    expect(getUsage).toHaveBeenCalledTimes(2);
   });
 });
 

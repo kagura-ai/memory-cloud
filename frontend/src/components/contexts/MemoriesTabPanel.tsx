@@ -27,6 +27,9 @@ import { FileText, Search, SearchX } from "lucide-react";
 import { MemoriesTable } from "@/components/memories/MemoriesTable";
 import { MemoryDetailDialog } from "@/components/memories/MemoryDetailDialog";
 import { DeleteMemoryDialog } from "@/components/memories/DeleteMemoryDialog";
+import { BulkDeleteMemoriesDialog } from "@/components/memories/BulkDeleteMemoriesDialog";
+import { Button } from "@/components/ui/button";
+import { requestCapacityRefresh } from "@/lib/capacityRefresh";
 import { EditMemoryDialog } from "@/components/memories/EditMemoryDialog";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -257,9 +260,27 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
     [dialog, fetchMemories, toast, t],
   );
 
+  // #1941: delete by filter (date range / type / tags).
+  const tBulk = useTranslations("contextDetail.bulkDelete");
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const handleBulkDeleted = useCallback(
+    (deleted: number) => {
+      setBulkOpen(false);
+      toast({ title: tBulk("deleted", { count: deleted }) });
+      requestCapacityRefresh();
+      if (page > 1) {
+        setPage(1);
+      } else {
+        void fetchMemories();
+      }
+    },
+    [fetchMemories, toast, tBulk, page],
+  );
+
   const handleDeleteSuccess = useCallback(() => {
     dialog.applyDeleteSuccess();
     toast({ title: t("deleteSuccess") });
+    requestCapacityRefresh();
 
     // Avoid stranding the user on an empty page when the deleted row was the
     // last one on this page. Dropping `page` back triggers the fetch effect;
@@ -277,6 +298,11 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
   // which can be tall — sits below so it never pushes search off-screen.
   const filterControls = (
     <div className="space-y-3">
+      <div className="flex justify-end">
+        <Button variant="outline" size="sm" onClick={() => setBulkOpen(true)}>
+          {tBulk("open")}
+        </Button>
+      </div>
       <div className="relative">
         <Search
           className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400"
@@ -425,6 +451,12 @@ export function MemoriesTabPanel({ contextId }: MemoriesTabPanelProps) {
         supersedeCandidate={dialog.supersedeCandidate}
         onAcceptSupersede={dialog.acceptSupersede}
         supersedeAccepting={dialog.supersedeAccepting}
+      />
+      <BulkDeleteMemoriesDialog
+        contextId={contextId}
+        open={bulkOpen}
+        onOpenChange={setBulkOpen}
+        onDeleted={handleBulkDeleted}
       />
       {dialog.hydrated && (
         <DeleteMemoryDialog

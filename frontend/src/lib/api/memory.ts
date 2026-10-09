@@ -140,6 +140,38 @@ export async function forgetMemory(memoryId: string): Promise<void> {
   });
 }
 
+/** Filters for `forgetBulk` (#1941). Combined with AND; at least one, or `all`. */
+export interface ForgetBulkParams {
+  context_id: string;
+  created_before?: string;
+  created_after?: string;
+  type?: string;
+  tags?: string[];
+  all?: boolean;
+  dry_run: boolean;
+}
+
+export interface ForgetBulkResponse {
+  status: string;
+  dry_run: boolean;
+  matched: number | null;
+  deleted: number | null;
+}
+
+/**
+ * Delete every memory in one context matching the filters (#1941).
+ * `dry_run: true` only counts. Allowed while the workspace is over its
+ * Free capacity — it is how the workspace gets back under the cap.
+ */
+export async function forgetBulk(
+  params: ForgetBulkParams,
+): Promise<ForgetBulkResponse> {
+  return apiClient.post<ForgetBulkResponse>(
+    "/api/v1/memory/forget-bulk",
+    params,
+  );
+}
+
 /**
  * Partial update of a memory by UUID (Issue #439).
  *

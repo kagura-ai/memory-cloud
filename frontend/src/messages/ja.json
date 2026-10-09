@@ -2012,7 +2012,8 @@
     "amountMemories": "メモリー {count} 件",
     "amountStorage": "{mb} MB",
     "amountBoth": "{memories}と{storage}",
-    "viewPlan": "プランを見る"
+    "viewPlan": "プランを見る",
+    "cleanUp": "コンテキストを整理"
   },
   "usageStats": {
     "failedToLoad": "使用状況統計の読み込みに失敗しました",
@@ -3509,7 +3510,25 @@
       "failed": "メモリの更新に失敗しました"
     },
     "export": "エクスポート",
-    "exportFailed": "このコンテキストをエクスポートできませんでした。もう一度お試しください。"
+    "exportFailed": "このコンテキストをエクスポートできませんでした。もう一度お試しください。",
+    "bulkDelete": {
+      "open": "条件で削除",
+      "title": "条件に一致するメモリーを削除",
+      "description": "このコンテキストで、指定したすべての条件に一致するメモリーを削除します。まず件数を確認します。確定するまで何も削除されません。",
+      "from": "作成日（から）",
+      "to": "作成日（まで）",
+      "type": "タイプ",
+      "typePlaceholder": "例: note",
+      "tags": "タグ（いずれか）",
+      "tagsPlaceholder": "カンマ区切り",
+      "count": "件数を確認",
+      "matched": "{count, plural, =0 {一致するメモリーはありません。} other {# 件のメモリーが一致します。}}",
+      "confirm": "{count, plural, =0 {削除するものはありません} other {# 件のメモリーを削除}}",
+      "cancel": "キャンセル",
+      "needFilter": "条件を 1 つ以上指定してください。",
+      "failed": "メモリーを削除できませんでした。もう一度お試しください。",
+      "deleted": "{count, plural, other {# 件のメモリーを削除しました}}"
+    }
   },
   "contextSettings": {
     "title": "{contextName} — 設定",

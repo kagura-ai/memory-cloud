@@ -11,7 +11,7 @@
  * when the read fails, or before it lands.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useTranslations } from "next-intl";
@@ -21,8 +21,11 @@ import { Button } from "@/components/ui/button";
 import { useWorkspace } from "@/contexts/WorkspaceContext";
 import { getWorkspaceUsageCurrent } from "@/lib/api/workspaces";
 import type { CapacityLock } from "@/lib/api/usage";
+import { CAPACITY_REFRESH_EVENT } from "@/lib/capacityRefresh";
 
 export const PLAN_PAGE_PATH = "/workspace/settings/plan";
+/** Where data is removed: each context's Memories tab (delete by filter) and storage. */
+export const CLEANUP_PAGE_PATH = "/workspace/contexts";
 
 /** Megabytes for prose, rounded UP to 0.1 so "remove X MB" is enough. */
 export function overageMegabytes(bytes: number): string {
@@ -56,6 +59,9 @@ export function CapacityLockBannerView({ lock }: { lock: CapacityLock }) {
       <AlertDescription className="flex flex-wrap items-center gap-3">
         <span>{t("body", { amount })}</span>
         <Button asChild size="sm" variant="outline">
+          <Link href={CLEANUP_PAGE_PATH}>{t("cleanUp")}</Link>
+        </Button>
+        <Button asChild size="sm" variant="outline">
           <Link href={PLAN_PAGE_PATH}>{t("viewPlan")}</Link>
         </Button>
       </AlertDescription>
@@ -67,11 +73,24 @@ export function CapacityLockBanner() {
   const { currentWorkspaceId } = useWorkspace();
   const pathname = usePathname();
   const [lock, setLock] = useState<CapacityLock | null>(null);
-  // While locked, re-read on navigation so a cleanup on one page clears the
-  // banner on the next without a reload. While unlocked, only a workspace
-  // switch re-reads: the usage read is not free, and it would run on every
-  // page of every workspace that is never locked.
-  const refreshKey = lock ? pathname : null;
+  // Bumped by a delete anywhere in the app (`requestCapacityRefresh`), and
+  // by navigation while locked — so a cleanup on one page clears the banner
+  // on the next without a reload. While unlocked, navigation does not re-read:
+  // the usage read is not free, and it would run on every page of every
+  // workspace that is never locked.
+  const [nonce, setNonce] = useState(0);
+  const locked = lock !== null;
+  const lastPathname = useRef(pathname);
+  useEffect(() => {
+    if (pathname === lastPathname.current) return;
+    lastPathname.current = pathname;
+    if (locked) setNonce((n) => n + 1);
+  }, [pathname, locked]);
+  useEffect(() => {
+    const bump = () => setNonce((n) => n + 1);
+    window.addEventListener(CAPACITY_REFRESH_EVENT, bump);
+    return () => window.removeEventListener(CAPACITY_REFRESH_EVENT, bump);
+  }, []);
 
   useEffect(() => {
     if (!currentWorkspaceId) {
@@ -90,7 +109,7 @@ export function CapacityLockBanner() {
     return () => {
       cancelled = true;
     };
-  }, [currentWorkspaceId, refreshKey]);
+  }, [currentWorkspaceId, nonce]);
 
   if (!lock) return null;
   return <CapacityLockBannerView lock={lock} />;
