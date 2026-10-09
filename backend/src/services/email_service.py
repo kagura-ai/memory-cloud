@@ -22,6 +22,7 @@ caller code in ``AccountErasureService`` does not change.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Protocol
 
 from utils.logger import get_logger
@@ -350,6 +351,39 @@ class EmailService(Protocol):
         """
         ...
 
+    async def send_capacity_lock_notice(
+        self,
+        *,
+        to_email: str,
+        workspace_name: str,
+        period_end: datetime,
+        over_memories: int,
+        over_bytes: int,
+        cleanup_url: str,
+        contexts_url: str,
+    ) -> bool:
+        """Warn the owner that the workspace will be locked when it returns to Free (#1941).
+
+        Sent before the paid period ends, when the workspace holds more than
+        the Free plan allows. The body names the workspace, the end date, how
+        much is over, what is paused versus what keeps working, and links to
+        the cleanup and export pages. It never carries memory content.
+
+        Args:
+            to_email: The workspace owner's address.
+            workspace_name: Display name for the body.
+            period_end: When the paid period ends (aware or naive UTC).
+            over_memories: Memories over the Free limit (0 when within).
+            over_bytes: File bytes over the Free limit (0 when within).
+            cleanup_url: The plan / usage page.
+            contexts_url: The contexts page (delete by filter, export).
+
+        Returns:
+            True on delivery (or logging fallback), False on hard failure.
+            Implementations MUST NOT raise.
+        """
+        ...
+
 
 class LoggingEmailService:
     """Default stub implementation: structured logs only, no SMTP.
@@ -557,6 +591,30 @@ class LoggingEmailService:
             digest=digest,
             email_dispatch_required=True,
             template="security_notification",
+        )
+        return True
+
+    async def send_capacity_lock_notice(
+        self,
+        *,
+        to_email: str,
+        workspace_name: str,
+        period_end: datetime,
+        over_memories: int,
+        over_bytes: int,
+        cleanup_url: str,
+        contexts_url: str,
+    ) -> bool:
+        del cleanup_url, contexts_url
+        logger.info(
+            "capacity_lock_notice_email",
+            recipient_hash=redact_recipient(to_email),
+            workspace_name=workspace_name,
+            period_end=period_end.isoformat(),
+            over_memories=over_memories,
+            over_bytes=over_bytes,
+            email_dispatch_required=True,
+            template="capacity_lock_notice",
         )
         return True
 

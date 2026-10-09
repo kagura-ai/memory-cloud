@@ -267,3 +267,51 @@ class TestShareKeyReaders:
             await cl.ensure_not_capacity_locked(db, _ws_model(), user_id="owner", outsider=True)
         assert exc.value.details["over_memories"] is None
         assert db.scalar.await_count == 2
+
+
+class TestProjectedFreeCapacity:
+    """The pre-expiry notice evaluates the Free state a paid workspace will have."""
+
+    def _paid(self, *, memory_addon: int = 0, referral: int = 0, storage_mb: int = 0):
+        return types.SimpleNamespace(
+            id=uuid4(),
+            plan_name="pro",
+            entitlement_source=ENTITLEMENT_SOURCE_EXTERNAL_BILLING,
+            addon_memory_bonus=memory_addon,
+            referral_memory_bonus=referral,
+            addon_storage_bonus_mb=storage_mb,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_paid_workspace_is_measured_against_free(self) -> None:
+        from config.plan_tiers import PLAN_TIERS
+
+        free = PLAN_TIERS["free"]
+        lock = await cl.projected_free_capacity(_db(free.memory_limit + 5, 0), self._paid())
+        assert lock is not None
+        assert lock.memory_limit == free.memory_limit
+        assert lock.over_memories == 5
+
+    @pytest.mark.asyncio
+    async def test_kept_bonuses_raise_the_projected_limits(self) -> None:
+        """Mirrors the downgrade-eligibility rule: addons and referral survive."""
+        from config.plan_tiers import PLAN_TIERS
+
+        free = PLAN_TIERS["free"]
+        ws = self._paid(memory_addon=10, referral=5, storage_mb=1)
+        lock = await cl.projected_free_capacity(_db(free.memory_limit + 15, 0), ws)
+        assert lock is None
+        lock = await cl.projected_free_capacity(_db(0, free.storage_limit_bytes + MB + 1, 0), ws)
+        assert lock is not None
+        assert lock.storage_limit_bytes == free.storage_limit_bytes + MB
+        assert lock.over_bytes == 1
+
+    @pytest.mark.asyncio
+    async def test_files_of_deleted_contexts_are_excluded_here_too(self) -> None:
+        from config.plan_tiers import PLAN_TIERS
+
+        free = PLAN_TIERS["free"]
+        lock = await cl.projected_free_capacity(
+            _db(0, free.storage_limit_bytes + 10 * MB, 10 * MB), self._paid()
+        )
+        assert lock is None

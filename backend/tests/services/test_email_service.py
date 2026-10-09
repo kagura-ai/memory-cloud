@@ -446,3 +446,46 @@ def test_redact_recipient_differs_per_address() -> None:
     assert email_service_module.redact_recipient(
         "a@example.com"
     ) != email_service_module.redact_recipient("b@example.com")
+
+
+# ---------------------------------------------------------------------------
+# #1941: capacity-lock notice + Protocol parity
+# ---------------------------------------------------------------------------
+
+
+def _send_methods(cls) -> set[str]:
+    return {name for name in vars(cls) if name.startswith("send_")}
+
+
+def test_every_implementation_covers_the_protocol() -> None:
+    """A new Protocol method must land in every implementation."""
+    from services.email_providers.resend import ResendEmailService
+    from services.email_service import EmailService, LoggingEmailService
+
+    protocol = _send_methods(EmailService)
+    assert "send_capacity_lock_notice" in protocol
+    assert _send_methods(LoggingEmailService) == protocol
+    assert _send_methods(ResendEmailService) == protocol
+
+
+@pytest.mark.asyncio
+async def test_logging_capacity_lock_notice_redacts_the_recipient(caplog) -> None:
+    from datetime import UTC, datetime
+
+    from services.email_service import LoggingEmailService
+
+    with patch("services.email_service.logger") as log:
+        ok = await LoggingEmailService().send_capacity_lock_notice(
+            to_email="owner@example.test",
+            workspace_name="Research",
+            period_end=datetime(2026, 11, 1, tzinfo=UTC),
+            over_memories=12,
+            over_bytes=0,
+            cleanup_url="https://app.example.test/workspace/settings/plan",
+            contexts_url="https://app.example.test/workspace/contexts",
+        )
+    assert ok is True
+    kwargs = log.info.call_args.kwargs
+    assert kwargs["template"] == "capacity_lock_notice"
+    assert kwargs["over_memories"] == 12
+    assert "owner@example.test" not in repr(log.info.call_args)

@@ -338,3 +338,168 @@ async def get_downgrade_eligibility(
         current_plan=workspace.plan_name,
         targets=targets,
     )
+
+
+# ============================================================================
+# Pre-expiry capacity notice (#1941)
+# ============================================================================
+
+# A notice is sent at most once per (workspace, period_end). The key outlives
+# the period end by this much so a late retry from the billing service is
+# still recognised as a repeat.
+_NOTICE_KEY_GRACE_SECONDS = 7 * 24 * 3600
+
+
+class CapacityLockNoticeRequest(BaseModel):
+    """Body of ``POST /internal/workspaces/{id}/capacity-lock-notice`` (#1941)."""
+
+    period_end: datetime = Field(
+        ..., description="When the paid period ends and the workspace returns to Free"
+    )
+
+
+class CapacityLockNoticeResult(BaseModel):
+    """Outcome of a notice request. Never carries the recipient address.
+
+    ``reason`` (when ``sent`` is false): ``within_capacity`` (the projected
+    Free state fits — nothing to warn about), ``already_sent`` (a notice for
+    this ``period_end`` was already sent), ``no_owner_email`` or
+    ``delivery_failed`` (retry later; the idempotency claim is released).
+    """
+
+    sent: bool
+    reason: str | None = None
+    over_memories: int
+    over_bytes: int
+
+
+def _naive_utc(value: datetime) -> datetime:
+    """An aware instant as naive UTC (the codebase's storage convention)."""
+    offset = value.utcoffset()
+    return value if offset is None else value.replace(tzinfo=None) - offset
+
+
+def _notice_key(workspace_id: UUID, period_end: datetime) -> str:
+    end = _naive_utc(period_end).isoformat(timespec="seconds")
+    return f"capacity_lock_notice:{workspace_id}:{end}"
+
+
+def _notice_ttl_seconds(period_end: datetime) -> int:
+    from utils.datetime import utcnow
+
+    remaining = int((_naive_utc(period_end) - utcnow()).total_seconds())
+    return max(remaining, 0) + _NOTICE_KEY_GRACE_SECONDS
+
+
+@router.post(
+    "/workspaces/{workspace_id}/capacity-lock-notice",
+    response_model=CapacityLockNoticeResult,
+)
+async def send_capacity_lock_notice(
+    workspace_id: str,
+    body: CapacityLockNoticeRequest,
+    _: None = Depends(verify_billing_service_token),
+    db: AsyncSession = Depends(get_db),
+) -> CapacityLockNoticeResult:
+    """Warn the owner before a paid period ends that Free would lock the workspace (#1941).
+
+    memory-cloud does not store ``current_period_end``, so the billing service
+    decides WHEN (e.g. 7 days before the end of a cancelled subscription) and
+    calls this. memory-cloud evaluates the projected Free state with the same
+    counting as the capacity lock — Free tier limits plus the bonuses a
+    downgrade keeps, files of deleted contexts excluded — and, when over,
+    emails the workspace owner (plain text, no memory content).
+
+    Idempotent per ``(workspace, period_end)``: a repeat answers
+    ``sent=false, reason="already_sent"``. A failed delivery releases the
+    claim so a retry can send. 404 for a missing or soft-deleted workspace.
+    """
+    from db.redis import get_redis_client
+    from models.auth import User
+    from services.capacity_lock import projected_free_capacity
+    from services.email_service import get_email_service
+
+    try:
+        ws_uuid = UUID(workspace_id)
+    except ValueError as exc:
+        raise ValidationError("Invalid workspace_id", field="workspace_id") from exc
+
+    workspace = (
+        await db.execute(
+            select(Workspace).where(Workspace.id == ws_uuid, Workspace.deleted_at.is_(None))
+        )
+    ).scalar_one_or_none()
+    if workspace is None:
+        raise NotFoundException("Workspace")
+
+    lock = await projected_free_capacity(db, workspace)
+    if lock is None:
+        return CapacityLockNoticeResult(
+            sent=False, reason="within_capacity", over_memories=0, over_bytes=0
+        )
+
+    def result(sent: bool, reason: str | None = None) -> CapacityLockNoticeResult:
+        return CapacityLockNoticeResult(
+            sent=sent,
+            reason=reason,
+            over_memories=lock.over_memories,
+            over_bytes=lock.over_bytes,
+        )
+
+    owner_email = (
+        await db.execute(select(User.email).where(User.user_id == workspace.owner_user_id))
+    ).scalar_one_or_none()
+    if not owner_email:
+        logger.warning("capacity_lock_notice_no_owner_email", workspace_id=workspace_id)
+        return result(False, "no_owner_email")
+
+    key = _notice_key(ws_uuid, body.period_end)
+    redis = get_redis_client()
+    try:
+        claimed = await redis.set(key, "1", nx=True, ex=_notice_ttl_seconds(body.period_end))
+    except Exception as exc:  # noqa: BLE001 — fail closed: never risk a duplicate
+        logger.warning(
+            "capacity_lock_notice_dedup_unavailable",
+            workspace_id=workspace_id,
+            error_type=type(exc).__name__,
+        )
+        raise MemoryCloudException(
+            "Notice deduplication is unavailable; retry later",
+            status_code=503,
+            error_code="BILLING-002",
+        ) from exc
+    if not claimed:
+        return result(False, "already_sent")
+
+    base_url = get_settings().frontend_url.strip().rstrip("/")
+    try:
+        delivered = await get_email_service().send_capacity_lock_notice(
+            to_email=owner_email,
+            workspace_name=workspace.name,
+            period_end=body.period_end,
+            over_memories=lock.over_memories,
+            over_bytes=lock.over_bytes,
+            cleanup_url=lock.cleanup_url,
+            contexts_url=f"{base_url}/workspace/contexts",
+        )
+    except Exception as exc:  # noqa: BLE001 — implementations must not raise; be safe
+        logger.warning(
+            "capacity_lock_notice_send_raised",
+            workspace_id=workspace_id,
+            error_type=type(exc).__name__,
+        )
+        delivered = False
+    if not delivered:
+        try:
+            await redis.delete(key)
+        except Exception:  # noqa: BLE001 — the TTL still bounds it
+            logger.warning("capacity_lock_notice_release_failed", workspace_id=workspace_id)
+        return result(False, "delivery_failed")
+
+    logger.info(
+        "capacity_lock_notice_sent",
+        workspace_id=workspace_id,
+        over_memories=lock.over_memories,
+        over_bytes=lock.over_bytes,
+    )
+    return result(True)

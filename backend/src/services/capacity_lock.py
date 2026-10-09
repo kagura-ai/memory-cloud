@@ -121,11 +121,46 @@ async def capacity_lock_state(db: AsyncSession, workspace: Workspace) -> Capacit
     """
     if not is_lock_candidate(workspace):
         return None
+    return await _measure(
+        db,
+        workspace.id,
+        memory_limit=int(workspace.effective_memory_limit),
+        storage_limit=int(workspace.effective_storage_limit_bytes),
+    )
 
+
+async def projected_free_capacity(db: AsyncSession, workspace: Workspace) -> CapacityLock | None:
+    """The lock ``workspace`` WOULD be in once it is back on Free, or ``None``.
+
+    For the pre-expiry notice: the workspace is still on its paid plan, so its
+    own effective limits do not apply. The Free tier's limits are taken with
+    the bonuses a downgrade keeps — the rule ``DowngradeEligibilityService``
+    applies (addons and the referral bonus are retained, a zero-base tier
+    never stacks them). The counting is the lock's own, including the
+    deleted-context storage exclusion, so the notice and the lock agree.
+    """
+    from config.plan_tiers import PLAN_TIERS
+    from models.auth import _zero_floor
+
+    free = PLAN_TIERS[PlanName.FREE]
+    memory_limit = _zero_floor(
+        free.memory_limit,
+        (workspace.addon_memory_bonus or 0) + (workspace.referral_memory_bonus or 0),
+    )
+    storage_limit = _zero_floor(
+        free.storage_limit_bytes, (workspace.addon_storage_bonus_mb or 0) * 1024 * 1024
+    )
+    return await _measure(db, workspace.id, memory_limit=memory_limit, storage_limit=storage_limit)
+
+
+async def _measure(
+    db: AsyncSession, workspace_id: UUID, *, memory_limit: int, storage_limit: int
+) -> CapacityLock | None:
+    """Count the workspace against the given limits; ``None`` when within both."""
     memory_count = int(
         await db.scalar(
             select(func.count(Memory.id)).where(
-                Memory.workspace_id == workspace.id,
+                Memory.workspace_id == workspace_id,
                 Memory.deleted_at.is_(None),
             )
         )
@@ -134,16 +169,14 @@ async def capacity_lock_state(db: AsyncSession, workspace: Workspace) -> Capacit
     used_bytes = int(
         await db.scalar(
             select(WorkspaceStorageUsage.used_bytes).where(
-                WorkspaceStorageUsage.workspace_id == workspace.id
+                WorkspaceStorageUsage.workspace_id == workspace_id
             )
         )
         or 0
     )
-    memory_limit = int(workspace.effective_memory_limit)
-    storage_limit = int(workspace.effective_storage_limit_bytes)
     if 0 <= storage_limit < used_bytes:
         # Only on the over-storage path, so an unlocked workspace pays nothing.
-        used_bytes -= await _bytes_in_deleted_contexts(db, workspace.id)
+        used_bytes -= await _bytes_in_deleted_contexts(db, workspace_id)
     # A negative limit would mean "unlimited"; Free has none today, but a
     # settings override must not lock a workspace against an unlimited cap.
     over_memories = max(0, memory_count - memory_limit) if memory_limit >= 0 else 0

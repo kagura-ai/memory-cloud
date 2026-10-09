@@ -1872,6 +1872,47 @@
         ],
         "type": "object"
       },
+      "CapacityLockNoticeRequest": {
+        "properties": {
+          "period_end": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "period_end"
+        ],
+        "type": "object"
+      },
+      "CapacityLockNoticeResult": {
+        "properties": {
+          "over_bytes": {
+            "type": "integer"
+          },
+          "over_memories": {
+            "type": "integer"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sent": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "over_bytes",
+          "over_memories",
+          "sent"
+        ],
+        "type": "object"
+      },
       "ClusterListResponse": {
         "properties": {
           "items": {
@@ -27694,6 +27735,69 @@
         },
         "tags": [
           "system"
+        ]
+      }
+    },
+    "/internal/workspaces/{workspace_id}/capacity-lock-notice": {
+      "post": {
+        "operationId": "send_capacity_lock_notice_internal_workspaces__workspace_id__capacity_lock_notice_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CapacityLockNoticeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapacityLockNoticeResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "internal-billing"
         ]
       }
     },

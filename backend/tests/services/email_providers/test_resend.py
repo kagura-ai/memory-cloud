@@ -623,3 +623,42 @@ async def test_reset_email_names_what_the_reset_revokes() -> None:
     assert "browser" in params["text"]
     assert "MCP client" in params["text"]
     assert "API keys and other integration" in params["text"]
+
+
+@pytest.mark.asyncio
+async def test_send_capacity_lock_notice_payload() -> None:
+    """#1941: plain text, English, the facts and the links — no memory content."""
+    from datetime import UTC, datetime
+
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    with patch.object(
+        resend_module.resend.Emails, "send", return_value={"id": "re_msg_cap"}
+    ) as mock_send:
+        ok = await svc.send_capacity_lock_notice(
+            to_email="owner@example.test",
+            workspace_name="Research",
+            period_end=datetime(2026, 11, 1, 9, tzinfo=UTC),
+            over_memories=200,
+            over_bytes=3 * 1024 * 1024,
+            cleanup_url="https://app.example.test/workspace/settings/plan",
+            contexts_url="https://app.example.test/workspace/contexts",
+        )
+    assert ok is True
+    (params,), _ = mock_send.call_args
+    assert params["to"] == ["owner@example.test"]
+    assert "2026-11-01" in params["subject"]
+    assert "Research" in params["subject"]
+    text = params["text"]
+    for fragment in (
+        "Research",
+        "2026-11-01",
+        "200 memories and 3 MB",
+        "Paused: search and recall, saving new memories",
+        "Still available: listing memories, deleting memories, contexts and files",
+        "https://app.example.test/workspace/contexts",
+        "https://app.example.test/workspace/settings/plan",
+        "export",
+        "Nothing is deleted automatically.",
+    ):
+        assert fragment in text, fragment
+    assert "html" not in params
