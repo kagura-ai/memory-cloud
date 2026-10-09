@@ -510,6 +510,48 @@ class TestWorkspaceUsageCurrent:
         assert response.memories_today_usage.is_warning is True
 
     @pytest.mark.asyncio
+    async def test_capacity_lock_is_null_when_not_locked(self, mock_db, mock_user, mock_workspace):
+        """#1941: additive and null for every workspace that is not locked."""
+        mock_db.execute.side_effect = self._build_execute_side_effects(mock_workspace)
+        with patch("services.effective_quota_service.EffectiveQuotaService") as mock_quota:
+            mock_quota.return_value.get_effective_quotas = AsyncMock(
+                return_value=self._make_effective_quotas()
+            )
+            response = await get_workspace_usage_current(user=mock_user, db=mock_db)
+        assert response.capacity_lock is None
+
+    @pytest.mark.asyncio
+    async def test_capacity_lock_carries_the_overage(self, mock_db, mock_user, mock_workspace):
+        """#1941: the banner reads how much to remove and where to go from here."""
+        from services.capacity_lock import CapacityLock
+
+        lock = CapacityLock(
+            memory_count=1012,
+            memory_limit=1000,
+            over_memories=12,
+            used_bytes=150,
+            storage_limit_bytes=100,
+            over_bytes=50,
+            cleanup_url="https://app.example.test/workspace/settings/plan",
+        )
+        mock_db.execute.side_effect = self._build_execute_side_effects(mock_workspace)
+        with (
+            patch("services.effective_quota_service.EffectiveQuotaService") as mock_quota,
+            patch(
+                "services.capacity_lock.capacity_lock_state", new=AsyncMock(return_value=lock)
+            ) as state,
+        ):
+            mock_quota.return_value.get_effective_quotas = AsyncMock(
+                return_value=self._make_effective_quotas()
+            )
+            response = await get_workspace_usage_current(user=mock_user, db=mock_db)
+        assert state.await_args.args[1] is mock_workspace
+        assert response.capacity_lock is not None
+        assert response.capacity_lock.over_memories == 12
+        assert response.capacity_lock.over_bytes == 50
+        assert response.capacity_lock.cleanup_url.endswith("/workspace/settings/plan")
+
+    @pytest.mark.asyncio
     async def test_no_member_ids_query(self, mock_db, mock_user, mock_workspace):
         """Issue #65: Verify member_ids query is no longer executed (redundant IN-list removed)."""
         call_count = 0

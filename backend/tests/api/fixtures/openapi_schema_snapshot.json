@@ -1835,6 +1835,43 @@
         },
         "type": "object"
       },
+      "CapacityLockInfo": {
+        "properties": {
+          "cleanup_url": {
+            "type": "string"
+          },
+          "memory_count": {
+            "type": "integer"
+          },
+          "memory_limit": {
+            "type": "integer"
+          },
+          "over_bytes": {
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "over_memories": {
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "storage_limit_bytes": {
+            "type": "integer"
+          },
+          "used_bytes": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cleanup_url",
+          "memory_count",
+          "memory_limit",
+          "over_bytes",
+          "over_memories",
+          "storage_limit_bytes",
+          "used_bytes"
+        ],
+        "type": "object"
+      },
       "ClusterListResponse": {
         "properties": {
           "items": {
@@ -9814,6 +9851,16 @@
       },
       "UsageCurrentResponse": {
         "properties": {
+          "capacity_lock": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CapacityLockInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "daily_api_usage": {
             "$ref": "#/components/schemas/UsageStatus"
           },

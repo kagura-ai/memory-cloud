@@ -177,6 +177,23 @@ class UsageStatus(BaseModel):
     is_exceeded: bool = Field(..., description="True if >= 100%")
 
 
+class CapacityLockInfo(BaseModel):
+    """A Free workspace over its plan capacity (#1941).
+
+    While present, search and saving are refused with ``CAPACITY-001``;
+    listing, deleting and export keep working. ``over_*`` is 0 on an axis that
+    is within its limit.
+    """
+
+    memory_count: int = Field(..., description="Live memories in the workspace")
+    memory_limit: int = Field(..., description="Effective memory limit")
+    over_memories: int = Field(..., ge=0, description="Memories to remove to unlock")
+    used_bytes: int = Field(..., description="Stored file bytes")
+    storage_limit_bytes: int = Field(..., description="Effective storage limit in bytes")
+    over_bytes: int = Field(..., ge=0, description="File bytes to remove to unlock")
+    cleanup_url: str = Field(..., description="Web page to clean up or re-subscribe")
+
+
 class UsageCurrentResponse(BaseModel):
     """Current usage vs limits response."""
 
@@ -188,6 +205,14 @@ class UsageCurrentResponse(BaseModel):
     # Issue #1549: additive — defaulted so older clients / payloads still parse.
     memories_today_usage: UsageStatus | None = Field(
         default=None, description="Memories created today vs the daily quota (Issue #1549)"
+    )
+    # #1941: additive — null unless the workspace is over its Free capacity.
+    capacity_lock: CapacityLockInfo | None = Field(
+        default=None,
+        description=(
+            "Present when the workspace is over its Free plan capacity: search and "
+            "saving are paused until it is cleaned up or re-subscribed (#1941)"
+        ),
     )
 
 
