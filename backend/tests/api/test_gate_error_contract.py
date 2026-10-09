@@ -1198,7 +1198,15 @@ async def _mcp_ingest_suspended(exc: MemoryCloudException) -> dict:
     from mcp_server.tools.resource import _ingest_suspension_error
 
     db = MagicMock()
-    db.get = AsyncMock(return_value=SimpleNamespace(plan_name=exc.details["current_plan"]))
+    # A Free-again workspace: zero allowances, so the paid-plan short-circuit
+    # does not skip the refusal.
+    db.get = AsyncMock(
+        return_value=SimpleNamespace(
+            plan_name=exc.details["current_plan"],
+            effective_max_connectors=0,
+            effective_max_resource_tokens=0,
+        )
+    )
     with (
         patch(
             "services.resource_ingest_service.resolve_authoritative_resource_pk",

@@ -242,10 +242,17 @@ async def _ingest_suspension_error(
         The error response, or ``None`` when ingest may proceed.
     """
     from models.auth import Workspace
-    from services.plan_suspension import ensure_ingest_allowed
+    from services.plan_suspension import (
+        connectors_suspended,
+        ensure_ingest_allowed,
+        resources_suspended,
+    )
 
     workspace = await db.get(Workspace, workspace_id)
     if workspace is None:
+        return None
+    # A paid plan suspends nothing: skip resolving the resource pk.
+    if not connectors_suspended(workspace) and not resources_suspended(workspace):
         return None
     resource_pk = await resource_ingest_service.resolve_authoritative_resource_pk(
         db, workspace_id=workspace_id, resource_id=resource_id
