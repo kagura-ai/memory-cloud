@@ -12,11 +12,13 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
+from config.plan_tiers import has_feature
 from models.auth import Context, ExternalAPIKey, UsageStats, Workspace, WorkspaceMember
 from models.memory import Memory
+from services.quota_service import QuotaService
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import utcnow
-from utils.exceptions import NotFoundException, ValidationError
+from utils.exceptions import FeatureNotAvailableError, NotFoundException, ValidationError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -615,6 +617,10 @@ class WorkspaceService:
 
         Raises:
             ValidationError: If member already exists
+            NotFoundException: If the workspace does not exist
+            FeatureNotAvailableError: If the plan has no ``team_invitations``
+            QuotaExceededError: If every seat is taken (members + pending
+                invitations), the same rule as creating an invitation
         """
         # Validate role
         self.validate_role(role)
@@ -623,6 +629,20 @@ class WorkspaceService:
         existing = await self.get_member(workspace_id, user_id, raise_if_not_found=False)
         if existing:
             raise ValidationError(f"User {user_id} is already a member")
+
+        # #1939: the same plan gates as creating an invitation
+        # (api/routes/invitations.py), so a direct add cannot grow a workspace
+        # past what its plan allows. Lives here rather than in the route so
+        # every caller gets it.
+        workspace = (
+            await self.db.execute(select(Workspace).where(Workspace.id == workspace_id))
+        ).scalar_one_or_none()
+        if workspace is None:
+            raise NotFoundException("Workspace", str(workspace_id))
+        if not has_feature(workspace.plan_name, "team_invitations"):
+            raise FeatureNotAvailableError.for_feature(workspace.plan_name, "team_invitations")
+
+        await QuotaService(self.db).check_member_quota(workspace_id, raise_on_exceeded=True)
 
         # Create membership
         member = WorkspaceMember(

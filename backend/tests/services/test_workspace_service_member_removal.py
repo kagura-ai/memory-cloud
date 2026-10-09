@@ -299,7 +299,7 @@ async def test_remove_member_with_no_context_memberships(db_session):
         id=uuid4(),
         name=f"test-workspace-{uuid4().hex[:8]}",
         owner_user_id=owner_id,
-        plan_name="free",
+        plan_name="pro",
         daily_api_limit=1000,
         weekly_api_limit=5000,
     )

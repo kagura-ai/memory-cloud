@@ -17,7 +17,12 @@ from models.memory import Memory
 from services.workspace_locks import lock_workspace_for_update
 from services.workspace_service import WorkspaceService
 from utils.datetime import utcnow
-from utils.exceptions import NotFoundException, ValidationError
+from utils.exceptions import (
+    FeatureNotAvailableError,
+    NotFoundException,
+    QuotaExceededError,
+    ValidationError,
+)
 
 # ---------------------------------------------------------------------------
 # validate_role
@@ -189,7 +194,7 @@ class TestAddMember:
     @pytest.mark.asyncio
     async def test_add_member_success(self, db_session) -> None:
         service = WorkspaceService(db_session)
-        ws = Workspace(id=uuid4(), name="W3", owner_user_id="u4", plan_name="free")
+        ws = Workspace(id=uuid4(), name="W3", owner_user_id="u4", plan_name="pro")
         db_session.add(ws)
         await db_session.flush()
 
@@ -198,9 +203,46 @@ class TestAddMember:
         assert member.role == "member"
 
     @pytest.mark.asyncio
+    async def test_free_plan_cannot_add_members(self, db_session) -> None:
+        """#1939: the direct-add route used to skip the invitation flow's plan
+        gate, so an API key could grow a Free workspace past its one seat."""
+        service = WorkspaceService(db_session)
+        ws = Workspace(id=uuid4(), name="W5", owner_user_id="u8", plan_name="free")
+        db_session.add(ws)
+        await db_session.flush()
+
+        with pytest.raises(FeatureNotAvailableError) as exc:
+            await service.add_member(ws.id, "u9", role=WorkspaceRole.MEMBER)
+        assert exc.value.details["feature"] == "team_invitations"
+        assert await service.get_member(ws.id, "u9", raise_if_not_found=False) is None
+
+    @pytest.mark.asyncio
+    async def test_seat_cap_counts_members_and_pending_invitations(
+        self, db_session, monkeypatch
+    ) -> None:
+        """Same seat rule as an invitation: members + pending invites < cap."""
+        import services.quota_service as qs
+
+        async def _two_seats(self, workspace_id):
+            return {"max_members": 2}
+
+        monkeypatch.setattr(qs.EffectiveQuotaService, "get_effective_quotas", _two_seats)
+        service = WorkspaceService(db_session)
+        ws = Workspace(id=uuid4(), name="W6", owner_user_id="u10", plan_name="pro")
+        db_session.add(ws)
+        await db_session.flush()
+        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u10", role="owner"))
+        await db_session.flush()
+
+        await service.add_member(ws.id, "u11", role=WorkspaceRole.MEMBER)  # seat 2 of 2
+        with pytest.raises(QuotaExceededError) as exc:
+            await service.add_member(ws.id, "u12", role=WorkspaceRole.MEMBER)
+        assert exc.value.details["quota_type"] == "members"
+
+    @pytest.mark.asyncio
     async def test_add_duplicate_raises(self, db_session) -> None:
         service = WorkspaceService(db_session)
-        ws = Workspace(id=uuid4(), name="W4", owner_user_id="u6", plan_name="free")
+        ws = Workspace(id=uuid4(), name="W4", owner_user_id="u6", plan_name="pro")
         db_session.add(ws)
         await db_session.flush()
 

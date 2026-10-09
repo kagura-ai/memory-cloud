@@ -200,6 +200,13 @@ REFUSALS: list[Refusal] = [
         site_literal="connectors",
         carries_counts=False,
     ),
+    Refusal(
+        id="plan/team_invitations-direct-add",
+        site="services.workspace_service:WorkspaceService.add_member",
+        exc=FeatureNotAvailableError.for_feature(_FREE, "team_invitations"),
+        site_literal="team_invitations",
+        carries_counts=False,
+    ),
     # #1939: paid-only ingest suspended (not revoked) on a plan without it.
     Refusal(
         id="plan/connectors-suspended",
@@ -1498,6 +1505,7 @@ MCP_ROUTES: dict[str, tuple[McpRoute, ...]] = {
 # in exactly one of the two tables (``test_every_refusal_is_routed_or_excused``).
 NOT_ON_MCP = {
     "plan/team_invitations": "REST route only; no MCP tool invites members",
+    "plan/team_invitations-direct-add": "REST route only; no MCP tool adds members",
     "quota/api_public_daily-suspended": "anonymous public REST routes only",
     "plan/shared_contexts-rest": "the REST route's own pre-check",
     "plan/public_contexts-api-key": "REST route only",

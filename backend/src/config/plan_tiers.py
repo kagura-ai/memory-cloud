@@ -411,7 +411,9 @@ FEATURE_ENFORCEMENT: dict[str, FeatureGate] = {
     ),
     "team_invitations": FeatureGate(
         FeatureEnforcement.ENFORCED,
-        "api/routes/invitations.py refuses to create an invitation (#165).",
+        "api/routes/invitations.py refuses to create an invitation (#165), and "
+        "services/workspace_service.py refuses a direct member add the same way, seat "
+        "cap included (#1939).",
     ),
     "shared_contexts": FeatureGate(
         FeatureEnforcement.ENFORCED,

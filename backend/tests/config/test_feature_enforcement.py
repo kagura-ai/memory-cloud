@@ -236,6 +236,7 @@ def test_suspension_gates_are_declared() -> None:
     """
     for feature in ("connectors", "resources", "public_contexts"):
         assert "services/plan_suspension.py" in FEATURE_ENFORCEMENT[feature].note, feature
+    assert "services/workspace_service.py" in FEATURE_ENFORCEMENT["team_invitations"].note
 
 
 def test_suspension_never_asks_has_feature() -> None:
