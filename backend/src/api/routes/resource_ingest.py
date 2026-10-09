@@ -24,7 +24,7 @@ from db.constraint_names import (
     RESOURCE_EVENTS_UPSERT_UNIQUE,
     integrity_error_constraint_name,
 )
-from models.auth import Context
+from models.auth import Context, Workspace
 from models.resource import Resource, ResourceEvent, ResourceToken, WorkspaceConnector
 from models.schemas import (
     ResourceEventBatchRequest,
@@ -37,6 +37,7 @@ from services.connector_provisioning import (
     validate_connector_idempotency_key,
 )
 from services.permission_service import PermissionService
+from services.plan_suspension import ensure_ingest_allowed
 from services.resource_ingest_service import IngestItemError
 from services.resource_lookup import resolve_resource_pk
 from services.resource_quota_service import check_event_quota
@@ -103,6 +104,8 @@ async def verify_resource_token(
         HTTPException 404: resource_id is not bound to any active Context
         HTTPException 409: resource_id is ambiguous across active Context bindings
             (only reachable pre-migration; see `_resolve_authoritative_context`)
+        FeatureNotAvailableError: 403 ``FEAT-001`` when the workspace's plan no
+            longer carries connectors / resources (#1939, suspended — not revoked)
     """
     if not x_resource_api_key:
         raise HTTPException(
@@ -144,6 +147,13 @@ async def verify_resource_token(
         )
 
     await _enforce_workspace_membership(db, request, token_record, context)
+
+    # #1939: a workspace back on Free keeps its tokens and connectors, but the
+    # paid-only ingest they drive is suspended until it re-subscribes. Checked
+    # after the membership gate so an outsider learns nothing about the plan.
+    workspace = await db.get(Workspace, context.workspace_id)
+    if workspace is not None:
+        await ensure_ingest_allowed(db, workspace, token_record.resource_pk)
 
     return token_record, token_record.quota_events_per_hour, context
 

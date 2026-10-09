@@ -190,10 +190,8 @@ class QuotaService:
         )
         current_count = memory_count_result.scalar() or 0
 
-        # If no memories, workspace has no usage
-        if current_count == 0:
-            return True, None
-
+        # No zero-count shortcut (#1939): a tier whose memory_limit is 0 must
+        # refuse the first memory too, so the limit is always read.
         # Issue #238: Use effective quotas (base + addons)
         effective_quota_service = EffectiveQuotaService(self.db)
         effective_quotas = await effective_quota_service.get_effective_quotas(workspace_id)

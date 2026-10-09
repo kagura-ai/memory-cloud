@@ -1850,6 +1850,25 @@ class Workspace(Base):
         return get_plan_tier(self.plan_name)
 
     @property
+    def has_active_billing_contract(self) -> bool:
+        """Whether a paid subscription is still running for this workspace (#1940).
+
+        True while the external billing service owns the entitlement and keeps
+        it on a paid tier. Billing holds the paid tier through a scheduled
+        cancellation and through the payment-failure grace period, and pushes
+        ``free`` only once the contract has ended, so these two columns cover
+        the whole window in which the workspace (or its owner's account) must
+        not be deleted. A locally-owned paid tier (``admin_grant``, e.g. a comp
+        grant) has no subscription behind it and does not count.
+        """
+        from config.plan_tiers import PlanName
+
+        return (
+            self.entitlement_source == ENTITLEMENT_SOURCE_EXTERNAL_BILLING
+            and self.plan_name != PlanName.FREE
+        )
+
+    @property
     def effective_memory_limit(self) -> int:
         """Memory limit including addon bonus and the referral bonus (#1470).
 
@@ -1906,13 +1925,12 @@ class Workspace(Base):
     def effective_public_calls_per_day(self) -> int:
         """Public REST API calls/day: plan tier base + addon (Issue #238).
 
-        FREE and BASIC have ``public_calls_per_day == 0``. There is **no
-        runtime tier gate** on the public REST *serve* routes —
-        ``api/routes/public_search.py`` rejects non-public contexts via
-        ``context.is_public`` but does not check the owner's plan tier — so the
-        zero-base guard here is the **primary** protection against a stray
-        ``WorkspaceAddon`` row granting public-API access to a tier that
-        excludes it (#569). The ``public_contexts`` feature flag gates only
+        FREE and BASIC have ``public_calls_per_day == 0``. The public REST
+        *serve* routes pause on exactly this value
+        (``services.plan_suspension.ensure_public_serving_allowed``, #1939),
+        so the zero-base guard here is what keeps a stray ``WorkspaceAddon``
+        row from granting public-API access to a tier that excludes it
+        (#569). The ``public_contexts`` feature flag gates only
         *making* a context public (#1551, XL-only): PRO keeps
         ``public_calls_per_day == 1000`` as a serve-only cap so contexts that
         are already public keep answering.

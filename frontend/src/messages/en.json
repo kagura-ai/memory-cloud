@@ -1093,6 +1093,7 @@
     "failedToLoadWorkspace": "Failed to load workspace",
     "failedToUpdateWorkspace": "Failed to update workspace",
     "failedToDeleteWorkspace": "Failed to delete workspace",
+    "deleteBlockedBySubscription": "This workspace has an active paid subscription. Cancel the subscription first; you can delete the workspace after the contract period ends. If it still cannot be deleted after that, contact support.",
     "workspaceNameRequired": "Workspace name is required",
     "validationFailed": "Validation failed",
     "dangerZone": "Danger Zone",
@@ -1230,12 +1231,24 @@
       "unavailable": "Plan changes are not available on this deployment.",
       "upgradeError": "Could not start the billing session. Please try again.",
       "usageTitle": "Usage & limits",
-      "usageDescription": "Your current entitlements — the limits this workspace runs under today. Resources, connectors and public contexts that already exist keep serving on any plan, so these can exceed the create matrix below.",
+      "usageDescription": "Your current entitlements — the limits this workspace runs under today. Resources, connectors and public contexts that already exist keep serving on any plan that still has an allowance for them, so these can exceed the create matrix below.",
       "memories": "Memories",
       "contexts": "Contexts",
       "mcpPerDay": "MCP calls / day",
       "restPerDay": "REST calls / day",
-      "publicPerDay": "Public calls / day"
+      "publicPerDay": "Public calls / day",
+      "suspended": {
+        "title": "Some features are paused on your current plan",
+        "description": "Nothing was deleted. Your current plan has no allowance for these, so they stay paused until the workspace moves to a plan that includes them:",
+        "features": {
+          "connectors": "Connectors (chat ingestion)",
+          "resources": "Resource ingestion",
+          "sleep": "Sleep maintenance",
+          "public": "Public search"
+        },
+        "resume": "Upgrade or re-subscribe to resume them.",
+        "viewPlan": "View plan"
+      }
     },
     "planMatrix": {
       "title": "Compare plans",
@@ -3693,7 +3706,11 @@
         "no_pending_events": "No pending events since the last run.",
         "schema_not_found": "Last run was skipped: no schema is registered for this resource.",
         "context_not_found": "Last run was skipped: the context bound to this resource could not be resolved.",
-        "empty_valid_points": "Last run produced no valid points to upsert (likely payload/schema mismatches)."
+        "empty_valid_points": "Last run produced no valid points to upsert (likely payload/schema mismatches).",
+        "resource_entity_missing": "Last run was skipped: the resource has no backing entity record.",
+        "memories_per_day_exceeded": "Last run was deferred: today's memory-creation limit is reached. Indexing resumes after the daily reset (UTC midnight).",
+        "plan_suspended": "Ingestion is paused: the workspace's current plan does not include it. Pending events are kept and resume once you re-subscribe.",
+        "memory_limit_exceeded": "Ingestion is paused: the workspace has reached its memory limit. Pending events are kept; delete memories or upgrade to resume."
       },
       "noRecentEvents": "No ingest events in the log yet.",
       "recentEvents": "Recent ingest events",
@@ -4271,6 +4288,7 @@
     "confirmError": "Could not confirm deletion. Check your password and try again.",
     "confirmTokenExpired": "This deletion request has expired or was already used. Please start again from your settings.",
     "workspaceTransferError": "You are the sole owner of a shared workspace. Transfer ownership (or remove the other members) before deleting your account.",
+    "subscriptionActiveError": "You own a workspace with an active paid subscription. Cancel the subscription first; you can delete your account after the contract period ends. If it still cannot be deleted after that, contact support.",
     "alreadyRequested": "You already have an account deletion request in progress.",
     "pendingTitle": "Deletion awaiting confirmation",
     "pendingBody": "You requested account deletion. Confirm it (check your email if you signed in with Google or GitHub) to start the 7-day cooling-off period, or cancel below.",
@@ -4285,6 +4303,7 @@
     "confirmPageSuccessTitle": "Deletion confirmed",
     "confirmPageSuccessBody": "Your account is scheduled for deletion on {date}. You can cancel from your settings until then.",
     "confirmPageInvalidTitle": "Link expired or already used",
+    "confirmPageBlockedTitle": "Account can't be deleted yet",
     "confirmPageInvalidBody": "This confirmation link is no longer valid. If you still want to delete your account, start again from your settings.",
     "goToProfile": "Go to settings",
     "protectedAccount": "This is the protected initial administrator account and cannot be deleted."

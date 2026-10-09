@@ -273,6 +273,8 @@ CREATE_PATH_GATES = {
     "api/routes/invitations.py": {"create_invitation"},
     # InvitationService.accept_invitation — the seat is taken on accept
     "services/invitation_service.py": {"accept_invitation"},
+    # POST /workspaces/{id}/members — a direct add takes a seat (#1939)
+    "services/workspace_service.py": {"add_member"},
 }
 
 

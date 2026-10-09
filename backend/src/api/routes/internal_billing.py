@@ -13,14 +13,18 @@ Design decisions (documented for the cross-repo contract; see #954):
   (``status``, ``current_period_end``) are billing-owned — they are accepted in
   the contract for audit/forward-compat and echoed back, but NOT persisted here
   (no schema commitment until the billing RFC settles).
-- **No destructive cascade.** Unlike the interactive owner-facing
-  ``PUT /api/v1/workspaces/{id}/plan`` (member removal, memory transfer, token
-  revocation, guarded downgrades), this automated webhook ONLY sets the
-  canonical entitlement. Feature/quota enforcement is gate-time (reads
-  ``plan_name``), so a downgrade takes effect immediately without this endpoint
-  silently destroying members/memories on a billing glitch. Billing-driven
-  membership/context cleanup is handled by the interactive flow or a
-  reconciliation job, not here.
+- **No destructive cascade.** This automated webhook ONLY sets the canonical
+  entitlement; it never removes members, transfers memories or revokes tokens.
+  (The owner-facing ``PUT /api/v1/workspaces/{id}/plan`` that once did that
+  cleanup was removed in #1116; plans now change only through this endpoint
+  or the system-admin ``PUT /api/v1/admin/plans/workspaces/{id}/plan``.)
+  Feature and quota enforcement is gate-time (reads ``plan_name`` and the
+  effective limits), so a downgrade takes effect immediately without this endpoint
+  silently destroying data on a billing glitch: over-limit objects are kept,
+  new ones are refused, and on a return to Free the paid-only work they drive
+  (connector / resource ingest, Sleep, anonymous public serving) is suspended
+  until the workspace re-subscribes (``services/plan_suspension.py``, #1939).
+  Any data cleanup is the owner's own action.
 - **Idempotent, full-replace addons.** PUT sets absolute values; re-delivery
   (reconciliation) yields the same state and 200, never a "already on this plan"
   400. When ``addons`` is provided it is the **complete desired addon state**:
@@ -48,7 +52,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.plan_tiers import PLAN_TIERS
+from config.plan_tiers import PLAN_TIERS, PlanName
 from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -202,10 +206,18 @@ async def set_workspace_plan_from_billing(
     except ValueError as exc:
         raise ValidationError("Invalid workspace_id", field="workspace_id") from exc
 
+    # FOR UPDATE serializes with ``WorkspaceService.delete_workspace``, which
+    # checks the billing contract under the same row lock (#1940).
     workspace = (
-        await db.execute(select(Workspace).where(Workspace.id == ws_uuid))
+        await db.execute(select(Workspace).where(Workspace.id == ws_uuid).with_for_update())
     ).scalar_one_or_none()
     if workspace is None:
+        raise NotFoundException("Workspace")
+    # A paid entitlement cannot land on a soft-deleted workspace (#1940): the
+    # owner deleted it, so billing must not keep charging for it. 404 matches
+    # the entitlement read, which the reconciler treats as "cancel". Pushing
+    # ``free`` (a cancellation catching up) is still accepted.
+    if workspace.deleted_at is not None and body.plan_name != PlanName.FREE:
         raise NotFoundException("Workspace")
 
     # Apply entitlement (absolute set → idempotent). Mark provenance as
@@ -272,9 +284,10 @@ async def get_workspace_entitlement(
 
     # Soft-delete safe (#687/#681 pattern): a soft-deleted workspace is "gone" →
     # 404, so the reconciler treats it as cancellable rather than resurrecting a
-    # stale entitlement. (The idempotent PUT deliberately does NOT filter — a #954
-    # reconciliation set may target a just-deleted row; a READ for a skip decision
-    # is the opposite concern.)
+    # stale entitlement. (The idempotent PUT does NOT filter — a #954
+    # reconciliation set may target a just-deleted row — but since #1940 it
+    # accepts only ``free`` there; a READ for a skip decision is the opposite
+    # concern.)
     workspace = (
         await db.execute(
             select(Workspace).where(Workspace.id == ws_uuid, Workspace.deleted_at.is_(None))

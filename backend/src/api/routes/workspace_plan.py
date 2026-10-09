@@ -18,7 +18,7 @@ Endpoints:
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,6 +39,7 @@ from models.auth import (
 )
 from models.memory import Memory
 from services.permission_service import PermissionService
+from services.plan_suspension import suspended_features
 from utils.logger import get_logger
 from utils.plan_resolver import tier_owned_workspace_cap
 
@@ -86,6 +87,11 @@ class WorkspacePlanInfo(BaseModel):
     quotas: WorkspacePlanQuotas
     can_upgrade: bool
     can_downgrade: bool
+    # Issue #1939: paid-only features paused because the plan no longer
+    # carries them (back on Free) while the workspace still has objects they
+    # drive — a subset of ``connectors`` / ``resources`` / ``sleep`` /
+    # ``public``. Nothing was deleted; re-subscribing resumes them.
+    suspended: list[str] = Field(default_factory=list)
 
 
 class AvailablePlanInfo(BaseModel):
@@ -241,6 +247,7 @@ async def get_workspace_plan(
         ),
         can_upgrade=current_index < len(PLAN_ORDER) - 1,
         can_downgrade=current_index > 0,
+        suspended=await suspended_features(db, workspace),
     )
 
 

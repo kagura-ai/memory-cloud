@@ -228,6 +228,42 @@ async def _check_resource_workspace_boundary(
     return None
 
 
+async def _ingest_suspension_error(
+    db: Any, workspace_id: UUID, resource_id: str
+) -> list[TextContent] | None:
+    """Refuse ingest a Free-again workspace's plan no longer carries (#1939).
+
+    The resource and its tokens stay; only the paid-only ingest is suspended,
+    and re-subscribing resumes it. Answers the ``plan_required`` envelope
+    ``setup_resource`` / ``setup_connector`` use, so MCP clients read one
+    vocabulary for "upgrade to use this".
+
+    Returns:
+        The error response, or ``None`` when ingest may proceed.
+    """
+    from models.auth import Workspace
+    from services.plan_suspension import (
+        connectors_suspended,
+        ensure_ingest_allowed,
+        resources_suspended,
+    )
+
+    workspace = await db.get(Workspace, workspace_id)
+    if workspace is None:
+        return None
+    # A paid plan suspends nothing: skip resolving the resource pk.
+    if not connectors_suspended(workspace) and not resources_suspended(workspace):
+        return None
+    resource_pk = await resource_ingest_service.resolve_authoritative_resource_pk(
+        db, workspace_id=workspace_id, resource_id=resource_id
+    )
+    try:
+        await ensure_ingest_allowed(db, workspace, resource_pk)
+    except FeatureNotAvailableError as exc:
+        return _error_response("plan_required", exc.message, **exc.details)
+    return None
+
+
 # ============================================================================
 # Read-only handlers
 # ============================================================================
@@ -655,6 +691,12 @@ async def handle_ingest_events(
             boundary_err = await _check_resource_workspace_boundary(db, resource_id, workspace_id)
             if boundary_err:
                 return boundary_err
+
+            # #1939: paid-only ingest is suspended on a plan without it —
+            # before the quota counter so a refused batch burns nothing.
+            suspension_err = await _ingest_suspension_error(db, workspace_id, resource_id)
+            if suspension_err:
+                return suspension_err
 
             # MCP shares the per-hour ceiling with the HTTP ingest path via a
             # workspace-scoped Redis counter. Keep the check after permission

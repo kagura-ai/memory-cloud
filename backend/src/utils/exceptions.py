@@ -1285,6 +1285,28 @@ class WorkspaceTransferRequiredError(MemoryCloudException):
         )
 
 
+class BillingContractActiveError(MemoryCloudException):
+    """A paid subscription is still running, so deletion is refused (409, Issue #1940).
+
+    Raised when deleting a workspace that is under a billing contract, or when
+    erasing an account that owns one. A scheduled cancellation still counts:
+    the workspace can be deleted once the contract period has ended and it is
+    back on the Free plan.
+    """
+
+    def __init__(self, workspace_ids: list[str]):
+        super().__init__(
+            (
+                "A paid subscription is active for this workspace. Cancel the "
+                "subscription first; you can delete it after the contract period ends. "
+                "If it still cannot be deleted after that, contact support."
+            ),
+            status_code=409,
+            error_code="BILLING-005",
+            workspace_ids=workspace_ids,
+        )
+
+
 class ErasureAlreadyInProgressError(MemoryCloudException):
     """An erasure request for this user is already pending or in progress (409)."""
 

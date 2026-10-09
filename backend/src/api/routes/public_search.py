@@ -21,6 +21,7 @@ from db.base import get_db
 from db.redis import incrby_counter
 from models.auth import Context, Workspace
 from services.capacity_lock import ensure_not_capacity_locked
+from services.plan_suspension import ensure_public_serving_allowed
 from services.resource_lookup import get_latest_schema
 from services.search_service import SearchService
 from utils.datetime import to_utc_iso, utcnow
@@ -381,7 +382,8 @@ async def public_search(
         - 403: Context is not public, OR API key is not public-bound, OR
                API key is bound to a different context (CWE-639 IDOR)
         - 404: Context not found
-        - 429: Rate limit exceeded (anonymous or per-key bucket)
+        - 429: Rate limit exceeded (anonymous or per-key bucket), or the
+               workspace's plan has no public API allowance (#1939)
     """
     start_time = utcnow()
 
@@ -475,6 +477,16 @@ async def public_search(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Context workspace not found",
             )
+
+    # #1939: anonymous serving pauses when the owner's plan has no public
+    # allowance (it fell back to Free) — after the anonymous bucket, so a
+    # flood is still refused before this lookup. The bound-key path is
+    # already refused on such a plan (zero per-key bucket), and signed-in
+    # callers are metered by the daily-quota middleware on their own plan
+    # (``api_public_daily``, refused at a zero allowance), so this gate only
+    # has to cover anonymous callers.
+    if user is None and bound_key is None:
+        ensure_public_serving_allowed(workspace)
 
     # #1941: a workspace over its Free capacity pauses search, public reads
     # included. Placed after the rate buckets and on the already-loaded
@@ -643,6 +655,7 @@ async def get_public_context_info(
         - 403: Context is not public, OR API key is not public-bound, OR
                API key is bound to a different context (CWE-639 IDOR)
         - 404: Context not found
+        - 429: The workspace's plan has no public API allowance (#1939)
     """
     # Issue #626: pre-auth rate limit + IDOR guard run before context
     # lookup, symmetry with /search. The pre-auth gate protects
@@ -658,6 +671,12 @@ async def get_public_context_info(
 
     if context.is_public is not True:
         raise AuthorizationError("This context is not public")
+
+    # #1939: the context stays public, but serving pauses while the owner's
+    # plan has no public allowance — same refusal as /search.
+    workspace = await db.get(Workspace, context.workspace_id)
+    if workspace is not None:
+        ensure_public_serving_allowed(workspace)
 
     # Load schema if resource-backed.
     schema = (

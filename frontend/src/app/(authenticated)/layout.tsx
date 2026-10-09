@@ -20,6 +20,7 @@ import { Sidebar } from "@/components/dashboard/Sidebar";
 import { WorkspaceSelectionScreen } from "@/components/workspaces/WorkspaceSelectionScreen";
 import { TermsReacceptanceDialog } from "@/components/auth/TermsReacceptanceDialog";
 import { CapacityLockBanner } from "@/components/common/CapacityLockBanner";
+import { WorkspaceSuspensionNotice } from "@/components/plan/WorkspaceSuspensionNotice";
 
 /**
  * Issue #1665: shown INSTEAD of the app while `/auth/me` reports
@@ -267,6 +268,8 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
 
               {/* #1941: a Free workspace over its capacity */}
               <CapacityLockBanner />
+              {/* #1939: paid-only features paused (back on Free) — owner-only */}
+              <WorkspaceSuspensionNotice />
 
               {/* Page Content */}
               <main className="flex-1 overflow-y-auto bg-slate-50 dark:bg-slate-900">

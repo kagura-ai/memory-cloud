@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy  # noqa: F401  isort: skip  # load-bearing: pre-load numpy's C ext before --cov instrumentation (else "cannot load module more than once")
 import pydantic.root_model  # noqa: F401  isort: skip
+import pytest
 import pytest_asyncio
 
 # Importing ``tasks.resource_indexer_job`` triggers ``tasks/__init__`` →
@@ -232,6 +233,26 @@ class TestRunQueuedIndexers:
             await run_queued_indexers()
         indexer_ctor.assert_not_called()
 
+    async def test_queue_pick_runs_the_longest_waiting_rows_first(self):
+        """#1939: held-back rows re-queue hourly, so the 10-row pick must be
+        ordered — oldest due ``next_run_at`` first, ``id`` as the tie-break —
+        or they could keep crowding out runnable rows."""
+        from sqlalchemy.dialects import postgresql
+
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=result)
+
+        with patch("tasks.resource_indexer_job.get_db", _mock_get_db(db)):
+            await run_queued_indexers()
+
+        stmt = db.execute.await_args.args[0]
+        sql = str(stmt.compile(dialect=postgresql.dialect()))
+        table = IndexerState.__tablename__
+        assert f"ORDER BY {table}.next_run_at ASC, {table}.id ASC" in sql
+        assert "LIMIT" in sql
+
     async def test_successful_run_transitions_to_idle_and_records(self, db_session, seeded_state):
         """Due queued job, allowed by rate limit → running → idle, metrics stored, run recorded."""
         client = _fake_redis()
@@ -299,6 +320,42 @@ class TestRunQueuedIndexers:
         # The attempt still counts toward the hourly token bucket.
         record.assert_awaited_once()
 
+    @pytest.mark.parametrize(
+        ("reason", "wait"),
+        [("plan_suspended", timedelta(hours=24)), ("memory_limit_exceeded", timedelta(hours=1))],
+    )
+    async def test_suspended_or_full_requeues_later(self, db_session, seeded_state, reason, wait):
+        """#1939: a batch held back because the plan suspended ingest or the
+        workspace is at its memory limit applied nothing. The row stays queued
+        (the events are kept) and is retried later — a plan pause daily (it
+        lifts only on a plan change), a full workspace hourly."""
+        client = _fake_redis()
+        client.get = AsyncMock(return_value=None)  # allowed
+
+        metrics = MagicMock()
+        metrics.skipped = True
+        metrics.reason = reason
+        metrics.to_dict.return_value = {"skipped": True, "reason": reason}
+        indexer_instance = MagicMock()
+        indexer_instance.process_incremental = AsyncMock(return_value=metrics)
+        before = utcnow()
+
+        with (
+            patch("tasks.resource_indexer_job.get_db", _mock_get_db(db_session)),
+            patch("tasks.resource_indexer_job.get_redis_client", return_value=client),
+            patch(
+                "tasks.resource_indexer_job.ResourceIndexer",
+                MagicMock(return_value=indexer_instance),
+            ),
+            patch("tasks.resource_indexer_job.record_indexer_run", AsyncMock()),
+        ):
+            await run_queued_indexers()
+
+        await db_session.refresh(seeded_state)
+        assert seeded_state.job_status == "queued"
+        assert before + wait - timedelta(minutes=1) <= seeded_state.next_run_at
+        assert seeded_state.next_run_at <= utcnow() + wait
+
     async def test_rate_limited_job_is_skipped_and_stays_queued(self, db_session, seeded_state):
         """can_run_indexer → False: the indexer is never built and state stays queued."""
         client = _fake_redis()
@@ -319,6 +376,8 @@ class TestRunQueuedIndexers:
         record.assert_not_awaited()
         await db_session.refresh(seeded_state)
         assert seeded_state.job_status == "queued"
+        # Moved behind the rows that can run now (longest-waiting-first pick).
+        assert seeded_state.next_run_at > utcnow() + timedelta(minutes=4)
 
     async def test_indexer_failure_marks_state_failed_with_error(self, db_session, seeded_state):
         """process_incremental raises → state transitions to failed with the error metric."""

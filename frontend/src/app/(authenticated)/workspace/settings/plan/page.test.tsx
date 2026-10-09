@@ -163,6 +163,31 @@ describe("WorkspacePlanPage (#1141)", () => {
     expect(screen.queryByText("Starter")).toBeNull();
   });
 
+  it("shows the paused-features banner when the plan API reports suspensions (#1939)", async () => {
+    mockWorkspace = { current_user_role: "owner", plan_name: "free" };
+    mockGetWorkspacePlan.mockResolvedValue(
+      planInfo({ current_plan: "free", suspended: ["connectors", "public"] }),
+    );
+    render(<WorkspacePlanPage />);
+    expect(
+      await screen.findByText("planPage.suspended.title"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("planPage.suspended.features.connectors"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("planPage.suspended.features.public"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no paused-features banner when nothing is suspended (#1939)", async () => {
+    mockWorkspace = { current_user_role: "owner", plan_name: "free" };
+    mockGetWorkspacePlan.mockResolvedValue(planInfo({ suspended: [] }));
+    render(<WorkspacePlanPage />);
+    await screen.findByText("planPage.currentPlan");
+    expect(screen.queryByText("planPage.suspended.title")).toBeNull();
+  });
+
   it("free (unsubscribed) owner keeps the change-plan wording and shows no hint", async () => {
     mockWorkspace = { current_user_role: "owner", plan_name: "free" };
     render(<WorkspacePlanPage />);

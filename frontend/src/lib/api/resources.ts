@@ -66,7 +66,11 @@ export type IndexerSkippedReason =
   | "no_pending_events"
   | "schema_not_found"
   | "context_not_found"
-  | "empty_valid_points";
+  | "empty_valid_points"
+  | "resource_entity_missing"
+  | "memories_per_day_exceeded"
+  | "plan_suspended"
+  | "memory_limit_exceeded";
 
 export interface IndexerStateMetrics {
   applied_upserts: number;

@@ -116,7 +116,7 @@ class TestCheckMemoryQuota:
     """QuotaService.check_memory_quota — counts memories across members."""
 
     async def test_no_memories_returns_true(self, db_session):
-        """Zero memories short-circuits to (True, None) without a quota lookup."""
+        """Zero memories under a positive limit → (True, None)."""
         ws = await _make_workspace(db_session, "free")
         service = QuotaService(db_session)
 
@@ -124,6 +124,21 @@ class TestCheckMemoryQuota:
 
         assert can_create is True
         assert error is None
+
+    async def test_zero_limit_refuses_the_first_memory(self, db_session, monkeypatch):
+        """#1939: an empty workspace on a tier whose memory_limit is 0 cannot
+        create its first memory — the zero-count shortcut used to let it."""
+        ws = await _make_workspace(db_session, "free")
+
+        async def _zero(self, workspace_id):
+            return {"memory_limit": 0}
+
+        monkeypatch.setattr(qs.EffectiveQuotaService, "get_effective_quotas", _zero)
+
+        can_create, error = await QuotaService(db_session).check_memory_quota(ws.id)
+
+        assert can_create is False
+        assert error is not None and "Limit: 0" in error
 
     async def test_under_limit_returns_true(self, db_session):
         """A few memories well under the free 1000 limit → allowed."""

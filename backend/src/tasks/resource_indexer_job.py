@@ -33,6 +33,21 @@ def _next_utc_midnight() -> datetime:
     return datetime.combine(utcnow().date() + timedelta(days=1), datetime.min.time())
 
 
+# #1939: how long a batch held back by a plan suspension or the workspace
+# memory limit waits before the next attempt. Neither has a known reset time
+# (re-subscribing or deleting memories lifts them), so the row is retried on a
+# slow cadence instead of every 5-minute cycle.
+HELD_BACK_RETRY = timedelta(hours=1)
+HELD_BACK_REASONS = frozenset({"plan_suspended", "memory_limit_exceeded"})
+# A plan pause lifts only on a plan change, so its rows retry daily rather than
+# hourly: they cannot progress before then, and each retry spends a queue slot.
+HELD_BACK_RETRY_BY_REASON = {"plan_suspended": timedelta(hours=24)}
+# A row the per-resource rate limit refuses moves behind the rows that can run
+# now, so a burst of re-queued rows cannot hold every slot of the
+# longest-waiting-first pick cycle after cycle.
+RATE_LIMITED_RETRY = timedelta(minutes=5)
+
+
 async def can_run_indexer(resource_id: str, context_id: UUID) -> tuple[bool, str]:
     """Check if indexer can run now (rate limiting).
 
@@ -122,6 +137,10 @@ async def run_queued_indexers() -> None:
                     IndexerState.job_status == "queued",
                     IndexerState.next_run_at <= utcnow(),
                 )
+                # Longest-waiting first (#1939): rows held back by a plan
+                # suspension or the memory limit re-queue hourly and must not
+                # crowd runnable rows out of the 10-row pick. id breaks ties.
+                .order_by(IndexerState.next_run_at.asc(), IndexerState.id.asc())
                 .limit(10)  # Process up to 10 per cycle
             )
             states = list(result.scalars().all())
@@ -143,6 +162,8 @@ async def run_queued_indexers() -> None:
                         context_id=state.context_id,
                         reason=reason,
                     )
+                    state.next_run_at = utcnow() + RATE_LIMITED_RETRY
+                    await db.commit()
                     continue
 
                 # Mark as running
@@ -166,6 +187,12 @@ async def run_queued_indexers() -> None:
                     if metrics.reason == "memories_per_day_exceeded":
                         state.job_status = "queued"
                         state.next_run_at = _next_utc_midnight()
+                    elif metrics.reason in HELD_BACK_REASONS:
+                        # #1939: same "applied nothing, keep the events" shape.
+                        state.job_status = "queued"
+                        state.next_run_at = utcnow() + HELD_BACK_RETRY_BY_REASON.get(
+                            metrics.reason, HELD_BACK_RETRY
+                        )
                     else:
                         state.job_status = "idle"
                     state.metrics = metrics.to_dict()

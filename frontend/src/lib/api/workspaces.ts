@@ -375,6 +375,13 @@ export interface WorkspacePlanInfo {
   };
   can_upgrade: boolean;
   can_downgrade: boolean;
+  /**
+   * #1939: paid-only features paused because the plan no longer carries them
+   * (back on Free) while the workspace still has objects they drive. Nothing
+   * was deleted; re-subscribing resumes them. Kept as `string[]` so a name a
+   * newer backend adds degrades to "not shown" rather than a type error.
+   */
+  suspended?: string[];
 }
 
 export interface AvailablePlanInfo {

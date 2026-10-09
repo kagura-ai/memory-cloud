@@ -225,3 +225,32 @@ def test_modes_serialize_as_plain_sorted_strings() -> None:
     assert set(modes) == set(FEATURE_ENFORCEMENT)
     assert set(modes.values()) <= {"enforced", "conditional", "degrades", "advertised"}
     assert all(isinstance(value, str) and type(value) is str for value in modes.values())
+
+
+def test_suspension_gates_are_declared() -> None:
+    """#1939: the suspension gates are runtime behaviour of these features too.
+
+    They read effective limits rather than calling ``has_feature``, so the
+    scanner above cannot see them; the notes are where a reader learns that a
+    Free-again workspace keeps its objects but their paid-only work pauses.
+    """
+    for feature in ("connectors", "resources", "public_contexts"):
+        assert "services/plan_suspension.py" in FEATURE_ENFORCEMENT[feature].note, feature
+    assert "services/workspace_service.py" in FEATURE_ENFORCEMENT["team_invitations"].note
+
+
+def test_suspension_never_asks_has_feature() -> None:
+    """Feature flags gate creation only; Basic / Pro keep positive serve-only
+    limits for objects made on a higher plan (#1551). A suspension decided by
+    ``has_feature`` would stop those, so the module tests limits — the one
+    exception is ``public_suspended``, where the flag can only LIFT a pause
+    (a tier allowed to create public contexts keeps serving them)."""
+    tree = ast.parse((SRC_ROOT / "services" / "plan_suspension.py").read_text(encoding="utf-8"))
+    offenders = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        callees = {_callee_name(n) for n in ast.walk(fn) if isinstance(n, ast.Call)}
+        if callees & GATE_CALLEES and fn.name != "public_suspended":
+            offenders.append(fn.name)
+    assert not offenders

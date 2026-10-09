@@ -350,6 +350,105 @@ class TestGetSleepModeFallback:
         result = MagicMock()
         result.scalar_one_or_none = MagicMock(return_value=ctx)
         mock_db.execute = AsyncMock(return_value=result)
+        mock_db.get = AsyncMock(return_value=_workspace("pro"))
+        assert await orchestrator._get_sleep_mode(str(uuid4())) == "edges_only"
+
+
+def _workspace(plan: str):
+    from models.auth import Workspace
+
+    return Workspace(id=uuid4(), name="w", plan_name=plan, owner_user_id="u")
+
+
+class TestSleepSuspendedOnFree:
+    """#1939: a Free-again workspace keeps each context's sleep_mode, but Sleep
+    (LLM cost) does not run — for the nightly sweep and the admin trigger
+    alike, since both go through ``_get_sleep_mode``."""
+
+    def _orchestrator(self, mock_db, plan: str, sleep_mode: str = "full"):
+        ctx = MagicMock()
+        ctx.sleep_mode = sleep_mode
+        ctx.workspace_id = uuid4()
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=ctx)
+        mock_db.execute = AsyncMock(return_value=result)
+        mock_db.get = AsyncMock(return_value=_workspace(plan))
+        return SleepOrchestrator(mock_db), ctx
+
+    @pytest.mark.asyncio
+    async def test_free_workspace_full_mode_is_suspended(self, mock_db):
+        """Suspended rather than skipped: the non-LLM retention phases keep running."""
+        orchestrator, ctx = self._orchestrator(mock_db, "free")
+        assert await orchestrator._get_sleep_mode(str(uuid4())) == "suspended"
+        # Stored preference is untouched: re-subscribing resumes it.
+        assert ctx.sleep_mode == "full"
+
+    @pytest.mark.asyncio
+    async def test_free_workspace_edges_only_skips(self, mock_db):
+        """edges_only never ran the retention phases, so there is nothing left to run."""
+        orchestrator, ctx = self._orchestrator(mock_db, "free", "edges_only")
+        assert await orchestrator._get_sleep_mode(str(uuid4())) == "skip"
+        assert ctx.sleep_mode == "edges_only"
+
+    @pytest.mark.asyncio
+    async def test_suspended_run_keeps_retention_and_pauses_the_llm_phases(self, mock_db):
+        """Retention / privacy cleanup is housekeeping, not the paid LLM work:
+        it keeps purging on schedule while Sleep is suspended."""
+        executed: list[str] = []
+        patches = {
+            "edge_discovery": "EdgeDiscoveryPhase",
+            "dedup_merge": "DedupMergePhase",
+            "merge_retention": "MergeRetentionPhase",
+            "forget_retention": "ForgetRetentionPhase",
+            "measurement_retention": "MeasurementRetentionPhase",
+            "importance_reeval": "ImportanceReevalPhase",
+            "consolidation": "ConsolidationPhase",
+        }
+        with (
+            patch("services.sleep.orchestrator.LLMService"),
+            patch("services.sleep.orchestrator.SleepReporter") as MockReporter,
+            patch("services.sleep.orchestrator.ReindexPhase") as MockRI,
+        ):
+            reporter = AsyncMock()
+            MockReporter.return_value = reporter
+            phase_patches = []
+            for name, cls in patches.items():
+                inst = AsyncMock()
+
+                async def _execute(cfg, uid, ws, ctx, budget, n=name, **kwargs):
+                    executed.append(n)
+                    return PhaseResult(phase_name=n)
+
+                inst.execute = _execute
+                p = patch(f"services.sleep.orchestrator.{cls}", return_value=inst)
+                p.start()
+                phase_patches.append(p)
+            MockRI.return_value.execute = AsyncMock(return_value=PhaseResult(phase_name="reindex"))
+            try:
+                orchestrator = SleepOrchestrator(mock_db)
+                orchestrator._get_sleep_mode = AsyncMock(return_value="suspended")
+                orchestrator._get_context_embedding_info = AsyncMock(
+                    return_value=(None, "kagura_memories")
+                )
+                await orchestrator.run("user-1", "ws-1", str(uuid4()), config=_make_config())
+            finally:
+                for p in phase_patches:
+                    p.stop()
+
+        assert executed == ["merge_retention", "forget_retention", "measurement_retention"]
+        results = reporter.complete_report.call_args[0][1]
+        skipped = {r.phase_name: r.skip_reason for r in results if r.skipped}
+        assert set(skipped) == {
+            "edge_discovery",
+            "dedup_merge",
+            "importance_reeval",
+            "consolidation",
+        }
+        assert set(skipped.values()) == {"sleep_mode_suspended"}
+
+    @pytest.mark.asyncio
+    async def test_pro_workspace_runs_its_mode(self, mock_db):
+        orchestrator, _ = self._orchestrator(mock_db, "pro", "edges_only")
         assert await orchestrator._get_sleep_mode(str(uuid4())) == "edges_only"
 
 

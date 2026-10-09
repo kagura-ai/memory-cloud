@@ -209,10 +209,16 @@ export default function WorkspaceSettingsPage() {
       }
     } catch (error: unknown) {
       console.error("Failed to delete workspace:", error);
+      // #1940: a running subscription blocks deletion — branch on error_code.
+      const blockedBySubscription =
+        error instanceof ApiError && error.error === "BILLING-005";
       toast({
         title: tCommon("error"),
-        description:
-          error instanceof Error ? error.message : t("failedToDeleteWorkspace"),
+        description: blockedBySubscription
+          ? t("deleteBlockedBySubscription")
+          : error instanceof Error
+            ? error.message
+            : t("failedToDeleteWorkspace"),
         variant: "destructive",
       });
       setDeleting(false);

@@ -404,7 +404,9 @@ class TestPublicSearch:
 
         ws_id = uuid4()
         ctx = SimpleNamespace(id=uuid4(), workspace_id=ws_id, is_public=True)
-        workspace = SimpleNamespace(id=ws_id, plan_name="free")
+        # A public allowance, so the #1939 anonymous plan pause (which runs
+        # first) lets the call through to the capacity check under test.
+        workspace = SimpleNamespace(id=ws_id, plan_name="free", effective_public_calls_per_day=1000)
         order = order if order is not None else []
 
         async def get(model, _id):
