@@ -79,9 +79,11 @@ def _ws(ws_id=None):
     return SimpleNamespace(id=ws_id or uuid4())
 
 
-def _fake_db(workspaces=()) -> MagicMock:
+def _fake_db(workspaces=(), *, public: bool = False) -> MagicMock:
     db = MagicMock()
     db.scalars = AsyncMock(return_value=MagicMock(all=lambda: list(workspaces)))
+    # _names_public_context's EXISTS read.
+    db.scalar = AsyncMock(return_value=public)
     return db
 
 
@@ -218,15 +220,57 @@ class TestTheDispatcher:
         assert member.await_args.args[1:] == (other, "u1")
 
     @pytest.mark.asyncio
-    async def test_a_non_member_is_left_to_the_handlers_not_found(self) -> None:
-        """No existence / billing-state oracle: the handler answers first."""
-        with _patch_db(_fake_db([_ws()])), _locked_state(), _member(False):
+    async def test_a_non_member_on_a_private_context_is_left_to_the_handler(self) -> None:
+        """No existence / billing-state oracle: the handler's not-found answers."""
+        db = _fake_db([_ws()], public=False)
+        with _patch_db(db), _locked_state(), _member(False):
             assert (
                 await gate.capacity_lock_refusal(
                     "get_state", {"context_id": str(uuid4())}, "u1", uuid4()
                 )
                 is None
             )
+        db.scalar.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_non_member_on_a_public_context_gets_the_redacted_refusal(self) -> None:
+        """A public context of a locked workspace is paused for outsiders too —
+        without the owner's numbers (as REST public search and graph do)."""
+        with (
+            _patch_db(_fake_db([_ws()], public=True)),
+            _locked_state(),
+            _member(False),
+        ):
+            result = await gate.capacity_lock_refusal(
+                "recall_upcoming", {"context_id": str(uuid4())}, "u1", uuid4()
+            )
+        assert result is not None
+        body = _payload(result)
+        assert body["error"] == "capacity_locked"
+        assert body["gate"] == "capacity"
+        for key in ("over_memories", "memory_count", "cleanup_url"):
+            assert key not in body
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("locked_ws", [True, False])
+    async def test_the_session_generator_is_closed_on_every_path(self, locked_ws) -> None:
+        """Refusal (raise) and pass (return) both release the session at once."""
+        closed = []
+
+        async def _gen():
+            try:
+                yield _fake_db([_ws()])
+            finally:
+                closed.append(True)
+
+        state = AsyncMock(return_value=_lock_obj() if locked_ws else None)
+        with (
+            patch("db.base.get_db", lambda: _gen()),
+            patch("services.capacity_lock.capacity_lock_state", state),
+        ):
+            result = await gate.capacity_lock_refusal("recall", {}, "u1", uuid4())
+        assert (result is not None) is locked_ws
+        assert closed == [True]
 
     @pytest.mark.asyncio
     async def test_the_session_workspace_named_in_arguments_needs_no_membership_read(

@@ -17,6 +17,7 @@ reaches ``MemoryService`` is refused even if it were misclassified here.
 from __future__ import annotations
 
 import time
+from contextlib import aclosing
 from typing import Any
 from uuid import UUID
 
@@ -273,6 +274,27 @@ def _argument_target_clause(
     return or_(*clauses)
 
 
+async def _names_public_context(db: Any, workspace_id: UUID, context_ids: set[UUID]) -> bool:
+    """Whether the call names a live public context of ``workspace_id``."""
+    if not context_ids:
+        return False
+    from sqlalchemy import exists
+
+    from models.auth import Context
+
+    found = await db.scalar(
+        select(
+            exists().where(
+                Context.id.in_(context_ids),
+                Context.workspace_id == workspace_id,
+                Context.is_public.is_(True),
+                Context.deleted_at.is_(None),
+            )
+        )
+    )
+    return bool(found)
+
+
 async def capacity_lock_refusal(
     tool_name: str,
     args: dict[str, Any],
@@ -306,23 +328,33 @@ async def capacity_lock_refusal(
     from services.capacity_lock import capacity_lock_state, is_workspace_member
 
     try:
-        async for db in get_db():
-            if from_args:
-                where = _argument_target_clause(context_ids, workspace_arg, file_id)
-            else:
-                where = Workspace.id == workspace_id
-            workspaces = await _candidate_workspaces(db, where)
-            if not from_args and not workspaces and workspace_id is not None:
-                _remember_not_candidate(workspace_id)
-            for ws in workspaces:
-                lock = await capacity_lock_state(db, ws)
-                if lock is None:
-                    continue
-                if from_args and ws.id != workspace_id:
-                    if not await is_workspace_member(db, ws.id, user_id):
+        # aclosing: an early return / raise releases the session at once
+        # instead of leaving the generator (and its connection) to the GC.
+        async with aclosing(get_db()) as sessions:
+            async for db in sessions:
+                if from_args:
+                    where = _argument_target_clause(context_ids, workspace_arg, file_id)
+                else:
+                    where = Workspace.id == workspace_id
+                workspaces = await _candidate_workspaces(db, where)
+                if not from_args and not workspaces and workspace_id is not None:
+                    _remember_not_candidate(workspace_id)
+                for ws in workspaces:
+                    lock = await capacity_lock_state(db, ws)
+                    if lock is None:
                         continue
-                raise lock.to_error()
-            return None
+                    if from_args and ws.id != workspace_id:
+                        if not await is_workspace_member(db, ws.id, user_id):
+                            # A non-member reaches a locked workspace only
+                            # through one of its PUBLIC contexts — refuse that
+                            # in the redacted form (as the REST public and
+                            # graph routes do). Anything else is left to the
+                            # handler's own not-found: no existence oracle.
+                            if await _names_public_context(db, ws.id, context_ids):
+                                raise CapacityLockedError.for_outsider()
+                            continue
+                    raise lock.to_error()
+                return None
     except CapacityLockedError as exc:
         return describe_tool_exception(tool_name, exc).response()
     except Exception as exc:  # noqa: BLE001 — fail open, logged
