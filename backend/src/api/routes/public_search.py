@@ -480,8 +480,10 @@ async def public_search(
     # #1939: anonymous serving pauses when the owner's plan has no public
     # allowance (it fell back to Free) — after the anonymous bucket, so a
     # flood is still refused before this lookup. The bound-key path is
-    # already refused on such a plan (zero per-key bucket); a member session
-    # is the owner's own workspace and keeps working.
+    # already refused on such a plan (zero per-key bucket), and signed-in
+    # callers are metered by the daily-quota middleware on their own plan
+    # (``api_public_daily``, refused at a zero allowance), so this gate only
+    # has to cover anonymous callers.
     if user is None and bound_key is None:
         ensure_public_serving_allowed(workspace)
 

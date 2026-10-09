@@ -24,9 +24,10 @@ vi.mock("next/link", () => ({
 let mockPathname = "/dashboard";
 vi.mock("next/navigation", () => ({ usePathname: () => mockPathname }));
 let mockRole = "owner";
+let mockWorkspaceId = "ws-1";
 vi.mock("@/contexts/WorkspaceContext", () => ({
   useWorkspace: () => ({
-    currentWorkspaceId: "ws-1",
+    currentWorkspaceId: mockWorkspaceId,
     currentWorkspace: { current_user_role: mockRole },
   }),
 }));
@@ -42,6 +43,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockPathname = "/dashboard";
   mockRole = "owner";
+  mockWorkspaceId = "ws-1";
   mockGetWorkspacePlan.mockResolvedValue({ suspended: ["sleep"] });
 });
 
@@ -120,5 +122,22 @@ describe("WorkspaceSuspensionNotice", () => {
     const { container } = render(<WorkspaceSuspensionNotice />);
     await waitFor(() => expect(mockGetWorkspacePlan).toHaveBeenCalled());
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("drops the previous workspace's list at once on a workspace switch", async () => {
+    const { rerender } = render(<WorkspaceSuspensionNotice />);
+    expect(
+      await screen.findByText("planPage.suspended.features.sleep"),
+    ).toBeInTheDocument();
+    // Workspace B's read never answers: the stale list must not linger.
+    mockGetWorkspacePlan.mockReturnValue(new Promise(() => {}));
+    mockWorkspaceId = "ws-2";
+    rerender(<WorkspaceSuspensionNotice />);
+    await waitFor(() =>
+      expect(
+        screen.queryByText("planPage.suspended.features.sleep"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(mockGetWorkspacePlan).toHaveBeenLastCalledWith("ws-2");
   });
 });

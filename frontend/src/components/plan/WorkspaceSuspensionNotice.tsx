@@ -46,6 +46,11 @@ export function WorkspaceSuspensionNotice() {
     }
     const key = `${currentWorkspaceId}|${pathname}`;
     if (fetchedFor.current === key) return;
+    // Another workspace: drop the previous one's list at once rather than
+    // showing it until (or, on a slow failure, long after) this read answers.
+    if (!fetchedFor.current?.startsWith(`${currentWorkspaceId}|`)) {
+      setSuspended([]);
+    }
     fetchedFor.current = key;
     let cancelled = false;
     let settled = false;

@@ -195,8 +195,9 @@ def paused_message(plan_name: str | None, feature: str, limit_attr: str) -> str:
 def ensure_public_serving_allowed(workspace: Workspace) -> None:
     """Refuse anonymous public serving on a plan with no public-call allowance.
 
-    Mirrors the refusal an authenticated caller already gets on such a plan
-    from the rate-limit middleware (``api_public_daily``, no counts — the
+    For anonymous callers only: signed-in callers are metered by the
+    rate-limit middleware on their own plan, which answers the same
+    ``api_public_daily`` refusal at a zero allowance (no counts — the
     rate-limit family has none to ship). The context keeps ``is_public``;
     re-subscribing serves it again.
 

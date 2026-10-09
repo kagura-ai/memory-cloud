@@ -320,12 +320,15 @@ class TestRunQueuedIndexers:
         # The attempt still counts toward the hourly token bucket.
         record.assert_awaited_once()
 
-    @pytest.mark.parametrize("reason", ["plan_suspended", "memory_limit_exceeded"])
-    async def test_suspended_or_full_requeues_an_hour_out(self, db_session, seeded_state, reason):
+    @pytest.mark.parametrize(
+        ("reason", "wait"),
+        [("plan_suspended", timedelta(hours=24)), ("memory_limit_exceeded", timedelta(hours=1))],
+    )
+    async def test_suspended_or_full_requeues_later(self, db_session, seeded_state, reason, wait):
         """#1939: a batch held back because the plan suspended ingest or the
         workspace is at its memory limit applied nothing. The row stays queued
-        (the events are kept) and is retried an hour out — no reset time is
-        known for either, and re-polling every cycle would be a busy loop."""
+        (the events are kept) and is retried later — a plan pause daily (it
+        lifts only on a plan change), a full workspace hourly."""
         client = _fake_redis()
         client.get = AsyncMock(return_value=None)  # allowed
 
@@ -350,8 +353,8 @@ class TestRunQueuedIndexers:
 
         await db_session.refresh(seeded_state)
         assert seeded_state.job_status == "queued"
-        assert before + timedelta(minutes=59) <= seeded_state.next_run_at
-        assert seeded_state.next_run_at <= utcnow() + timedelta(hours=1)
+        assert before + wait - timedelta(minutes=1) <= seeded_state.next_run_at
+        assert seeded_state.next_run_at <= utcnow() + wait
 
     async def test_rate_limited_job_is_skipped_and_stays_queued(self, db_session, seeded_state):
         """can_run_indexer → False: the indexer is never built and state stays queued."""
@@ -373,6 +376,8 @@ class TestRunQueuedIndexers:
         record.assert_not_awaited()
         await db_session.refresh(seeded_state)
         assert seeded_state.job_status == "queued"
+        # Moved behind the rows that can run now (longest-waiting-first pick).
+        assert seeded_state.next_run_at > utcnow() + timedelta(minutes=4)
 
     async def test_indexer_failure_marks_state_failed_with_error(self, db_session, seeded_state):
         """process_incremental raises → state transitions to failed with the error metric."""
