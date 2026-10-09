@@ -353,3 +353,89 @@ class TestTheServiceRefusalKeepsTheCode:
         body = json.loads(failure.response()[0].text)
         assert body["error"] == "capacity_locked"
         assert body["gate"] == "capacity"
+
+
+class TestArgumentNames:
+    def test_every_target_arg_name_is_in_a_blocked_tools_schema(self) -> None:
+        """No dead or misnamed argument in the gate's vocabulary."""
+        from mcp_server.tools._definitions import get_tool_definitions
+
+        props = {
+            d["name"]: set(d["inputSchema"].get("properties", {}))
+            for d in get_tool_definitions()
+            if d["name"] in CAPACITY_LOCK_BLOCKED_TOOLS
+        }
+        names = (
+            gate._CONTEXT_ARGS + gate._CONTEXT_LIST_ARGS + gate._WORKSPACE_ARGS + gate._FILE_ARGS
+        )
+        for name in names:
+            assert any(name in p for p in props.values()), name
+
+    def test_every_context_argument_of_a_blocked_tool_is_read(self) -> None:
+        """A context-naming argument the gate ignored would skip the target."""
+        from mcp_server.tools._definitions import get_tool_definitions
+
+        known = set(gate._CONTEXT_ARGS + gate._CONTEXT_LIST_ARGS)
+        for d in get_tool_definitions():
+            if d["name"] not in CAPACITY_LOCK_BLOCKED_TOOLS:
+                continue
+            for prop in d["inputSchema"].get("properties", {}):
+                if prop.endswith(("context_id", "context_ids")):
+                    assert prop in known, (d["name"], prop)
+
+    def test_edge_endpoints_are_memory_ids_not_contexts(self) -> None:
+        ctx = uuid4()
+        targets, _, _ = gate._argument_targets(
+            {"context_id": str(ctx), "source_id": str(uuid4()), "target_id": str(uuid4())}
+        )
+        assert targets == {ctx}
+
+    def test_merge_contexts_names_both_contexts(self) -> None:
+        a, b = uuid4(), uuid4()
+        targets, _, _ = gate._argument_targets(
+            {"source_context_id": str(a), "target_context_id": str(b)}
+        )
+        assert targets == {a, b}
+
+
+class TestContextCache:
+    @pytest.mark.asyncio
+    async def test_a_paid_context_costs_no_session_on_the_second_call(self) -> None:
+        ctx = str(uuid4())
+        db = _fake_db([])
+        opened = 0
+
+        async def _gen():
+            nonlocal opened
+            opened += 1
+            yield db
+
+        with patch("db.base.get_db", lambda: _gen()):
+            assert (
+                await gate.capacity_lock_refusal("get_state", {"context_id": ctx}, "u1", None)
+                is None
+            )
+            assert (
+                await gate.capacity_lock_refusal("set_state", {"context_id": ctx}, "u1", None)
+                is None
+            )
+        assert opened == 1
+
+    @pytest.mark.asyncio
+    async def test_a_context_of_a_candidate_workspace_is_not_cached(self) -> None:
+        ctx = str(uuid4())
+        db = _fake_db([_ws()], public=False)
+        opened = 0
+
+        async def _gen():
+            nonlocal opened
+            opened += 1
+            yield db
+
+        with (
+            patch("db.base.get_db", lambda: _gen()),
+            patch("services.capacity_lock.capacity_lock_state", AsyncMock(return_value=None)),
+        ):
+            await gate.capacity_lock_refusal("get_state", {"context_id": ctx}, "u1", None)
+            await gate.capacity_lock_refusal("get_state", {"context_id": ctx}, "u1", None)
+        assert opened == 2

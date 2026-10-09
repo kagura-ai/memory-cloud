@@ -169,22 +169,29 @@ CAPACITY_LOCK_DISPATCHER_ONLY_TOOLS: frozenset[str] = (
 # does not call ``invalidate_rate_limit_cache`` either), so the short TTL
 # bounds how long a workspace that just returned to Free goes unchecked here;
 # the service-level checks are unaffected.
-_NOT_CANDIDATE_CACHE: dict[UUID, float] = {}
+#
+# Keyed by ``(kind, id)``: ``("ws", workspace_id)`` for a session or named
+# workspace, ``("ctx", context_id)`` for a context named in the arguments — a
+# dispatcher-only tool called with a context of a paid workspace then costs no
+# session either after its first call. A context is cached only when the whole
+# call resolved to no candidate at all.
+_NOT_CANDIDATE_CACHE: dict[tuple[str, UUID], float] = {}
 _NOT_CANDIDATE_TTL = 30.0  # seconds
 _NOT_CANDIDATE_CACHE_MAX_SIZE = 10_000
 
 
-def _known_not_candidate(workspace_id: UUID) -> bool:
-    expires = _NOT_CANDIDATE_CACHE.get(workspace_id)
+def _known_not_candidate(target_id: UUID, kind: str = "ws") -> bool:
+    key = (kind, target_id)
+    expires = _NOT_CANDIDATE_CACHE.get(key)
     if expires is None:
         return False
     if expires <= time.monotonic():
-        _NOT_CANDIDATE_CACHE.pop(workspace_id, None)
+        _NOT_CANDIDATE_CACHE.pop(key, None)
         return False
     return True
 
 
-def _remember_not_candidate(workspace_id: UUID) -> None:
+def _remember_not_candidate(target_id: UUID, kind: str = "ws") -> None:
     now = time.monotonic()
     if len(_NOT_CANDIDATE_CACHE) >= _NOT_CANDIDATE_CACHE_MAX_SIZE:
         for key in [k for k, v in _NOT_CANDIDATE_CACHE.items() if v <= now]:
@@ -192,7 +199,7 @@ def _remember_not_candidate(workspace_id: UUID) -> None:
         if len(_NOT_CANDIDATE_CACHE) >= _NOT_CANDIDATE_CACHE_MAX_SIZE:
             oldest = min(_NOT_CANDIDATE_CACHE, key=lambda k: _NOT_CANDIDATE_CACHE[k])
             del _NOT_CANDIDATE_CACHE[oldest]
-    _NOT_CANDIDATE_CACHE[workspace_id] = now + _NOT_CANDIDATE_TTL
+    _NOT_CANDIDATE_CACHE[(kind, target_id)] = now + _NOT_CANDIDATE_TTL
 
 
 def invalidate_capacity_candidate_cache(workspace_id: UUID | None = None) -> None:
@@ -200,17 +207,22 @@ def invalidate_capacity_candidate_cache(workspace_id: UUID | None = None) -> Non
     if workspace_id is None:
         _NOT_CANDIDATE_CACHE.clear()
     else:
-        _NOT_CANDIDATE_CACHE.pop(workspace_id, None)
+        _NOT_CANDIDATE_CACHE.pop(("ws", workspace_id), None)
 
 
-# Arguments naming a context whose workspace is the target.
+# Arguments naming a context whose workspace is the target. ``source_id`` /
+# ``target_id`` are NOT here: in create_edge / update_edge they are memory ids,
+# and those tools carry ``context_id`` as well. merge_contexts names its two
+# contexts ``source_context_id`` / ``target_context_id``. A test checks every
+# name against the BLOCKED tools' input schemas.
 _CONTEXT_ARGS = (
     "context_id",
     "source_context_id",
-    "source_id",
     "target_context_id",
-    "target_id",
 )
+_CONTEXT_LIST_ARGS = ("context_ids",)
+_WORKSPACE_ARGS = ("workspace_id",)
+_FILE_ARGS = ("file_id",)
 
 
 def _uuid(value: object) -> UUID | None:
@@ -226,9 +238,10 @@ def _uuid(value: object) -> UUID | None:
 
 def _target_context_ids(args: dict[str, Any]) -> set[UUID]:
     ids = {cid for key in _CONTEXT_ARGS if (cid := _uuid(args.get(key))) is not None}
-    many = args.get("context_ids")
-    if isinstance(many, list):
-        ids.update(cid for v in many if (cid := _uuid(v)) is not None)
+    for key in _CONTEXT_LIST_ARGS:
+        many = args.get(key)
+        if isinstance(many, list):
+            ids.update(cid for v in many if (cid := _uuid(v)) is not None)
     return ids
 
 
@@ -322,6 +335,13 @@ async def capacity_lock_refusal(
         return None
     if not from_args and (workspace_id is None or _known_not_candidate(workspace_id)):
         return None
+    if (
+        from_args
+        and file_id is None
+        and all(_known_not_candidate(cid, "ctx") for cid in context_ids)
+        and (workspace_arg is None or _known_not_candidate(workspace_arg))
+    ):
+        return None
 
     from db.base import get_db
     from models.auth import Workspace
@@ -337,8 +357,13 @@ async def capacity_lock_refusal(
                 else:
                     where = Workspace.id == workspace_id
                 workspaces = await _candidate_workspaces(db, where)
-                if not from_args and not workspaces and workspace_id is not None:
-                    _remember_not_candidate(workspace_id)
+                if not workspaces:
+                    if not from_args and workspace_id is not None:
+                        _remember_not_candidate(workspace_id)
+                    for cid in context_ids:
+                        _remember_not_candidate(cid, "ctx")
+                    if workspace_arg is not None:
+                        _remember_not_candidate(workspace_arg)
                 for ws in workspaces:
                     lock = await capacity_lock_state(db, ws)
                     if lock is None:
