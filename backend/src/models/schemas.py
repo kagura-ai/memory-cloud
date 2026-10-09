@@ -4,7 +4,7 @@ Based on Issue #1 - API specifications.
 """
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -846,6 +846,69 @@ class ForgetResponse(BaseModel):
     status: str = "success"
     deleted_count: int
     memory_ids: list[UUID]
+
+
+class ForgetBulkRequest(BaseModel):
+    """Request schema for ``POST /memory/forget-bulk`` (#1941).
+
+    Deletes every live memory in ONE context matching ALL the given filters.
+    At least one filter, or an explicit ``all: true``, is required so an empty
+    body can never wipe a context. ``dry_run`` defaults to true: the caller
+    sees the count before anything is deleted.
+    """
+
+    context_id: UUID = Field(..., description="The context to delete from")
+    created_before: datetime | None = Field(
+        None, description="Only memories created before this instant (exclusive)"
+    )
+    created_after: datetime | None = Field(
+        None, description="Only memories created at or after this instant (inclusive)"
+    )
+    type: str | None = Field(None, max_length=50, description="Only memories of this type")
+    tags: list[str] | None = Field(
+        None, max_length=50, description="Only memories carrying ANY of these tags"
+    )
+    all: bool = Field(False, description="Match every memory in the context (no filter)")
+    dry_run: bool = Field(True, description="Count the matches without deleting")
+
+    @field_validator("created_before", "created_after")
+    @classmethod
+    def _naive_utc(cls, value: datetime | None) -> datetime | None:
+        """``memories.created_at`` is naive UTC; normalise an aware bound to it."""
+        if value is None or value.tzinfo is None:
+            return value
+        return value.astimezone(UTC).replace(tzinfo=None)
+
+    @model_validator(mode="after")
+    def _require_a_filter(self) -> "ForgetBulkRequest":
+        has_filter = any(
+            v is not None and v != []
+            for v in (self.created_before, self.created_after, self.type, self.tags)
+        )
+        if not has_filter and not self.all:
+            raise ValueError(
+                "Give at least one filter (created_before, created_after, type, tags) "
+                "or all=true to match every memory in the context."
+            )
+        if (
+            self.created_before is not None
+            and self.created_after is not None
+            and self.created_after >= self.created_before
+        ):
+            raise ValueError("created_after must be earlier than created_before")
+        return self
+
+
+class ForgetBulkResponse(BaseModel):
+    """Response schema for ``POST /memory/forget-bulk`` (#1941).
+
+    ``matched`` on a dry run, ``deleted`` otherwise; the other is null.
+    """
+
+    status: str = "success"
+    dry_run: bool
+    matched: int | None = None
+    deleted: int | None = None
 
 
 class UpdateMemoryRequest(BaseModel):

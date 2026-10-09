@@ -39,6 +39,7 @@ from models.memory import (
     SOURCE_TYPE_CONNECTOR,
     SOURCE_TYPE_MANUAL,
     Memory,
+    tool_triggered_predicate,
 )
 from models.schemas import (
     ExploreHint,
@@ -104,6 +105,10 @@ if TYPE_CHECKING:
 # ``LoadPinnedRequest.cap`` le=1000. The MCP path sends the raw arg with no
 # Pydantic validation, so the service clamps defensively (see _clamp_pinned_cap).
 _PINNED_LOAD_CAP_MAX = 1000
+
+# #1941: rows deleted and committed per batch by ``forget_bulk`` — bounds the
+# transaction (and the lock window on the rows) for a context of any size.
+FORGET_BULK_CHUNK = 500
 
 # Issue #1052: recall-confidence thresholds for absence detection.
 #
@@ -5392,6 +5397,200 @@ class MemoryService:
         del_collection = await resolve_collection_name(self.db, memory.context_id)
         await delete_memory_from_qdrant(user_id, point_id, collection_name=del_collection)
 
+    async def _soft_delete_memory(
+        self, user_id: str, memory: Memory, workspace_id: str, context_id: str
+    ) -> None:
+        """Delete one memory the caller may delete: ``forget``'s by-id side effects.
+
+        Soft-deletes the row, removes its search point and its neural edges
+        (3-level isolation). Shared by ``forget(memory_id=...)`` and
+        ``forget_bulk`` so the two can never drift. The caller commits.
+        """
+        # Soft delete in PostgreSQL (set deleted_at, deleted_by)
+        memory.deleted_at = utcnow()
+        memory.deleted_by = user_id
+        # touch=False: the delete is dated by deleted_at, not
+        # updated_at — else changes_since lists an "updated" event
+        # after the "forgotten" one (#1924).
+        await self.memory_repo.update(memory.id, memory, touch=False)
+
+        # Hard delete from Qdrant (remove from search index) — by the
+        # row's point id, not its row id (#1829).
+        await self._delete_memory_point(user_id, memory)
+
+        # Clean up neural memory edges with 3-level isolation
+        from repositories.neural_edge import NeuralEdgeRepository
+
+        edge_repo = NeuralEdgeRepository(self.db)
+        edges_deleted = await edge_repo.delete_node_edges(
+            user_id=user_id,
+            node_id=memory.id,
+            workspace_id=workspace_id,
+            context_id=context_id,
+        )
+        if edges_deleted > 0:
+            logger.info(
+                "neural_edges_cleaned",
+                memory_id=str(memory.id),
+                edges_deleted=edges_deleted,
+                user_id=user_id,
+            )
+
+    async def forget_bulk(
+        self,
+        user_id: str,
+        *,
+        context_id: UUID,
+        created_before: datetime | None = None,
+        created_after: datetime | None = None,
+        memory_type: str | None = None,
+        tags: list[str] | None = None,
+        dry_run: bool = True,
+        key_workspace_id: UUID | None = None,
+        chunk_size: int = FORGET_BULK_CHUNK,
+    ) -> int:
+        """Delete every live memory in one context that matches the filters (#1941).
+
+        The permission model is ``forget``'s, applied to each candidate: the
+        context gate (``_get_context_isolation_params`` with ``access="write"``,
+        uniform 404), then ``can_access_memory(access="write")`` — evaluated
+        once per distinct (author, type, source) group, since the answer
+        depends on nothing else — and the guardrail author gate. A row the
+        caller may not delete is skipped, exactly as forget skips it, and is
+        not counted.
+
+        Not gated by the capacity lock: deleting is how a locked workspace
+        gets back under its cap.
+
+        Args:
+            user_id: Caller.
+            context_id: The context to delete from.
+            created_before / created_after: ``created_at`` bounds (exclusive /
+                inclusive), naive UTC.
+            memory_type: Exact ``type``.
+            tags: Rows carrying ANY of these tags.
+            dry_run: Count only.
+            key_workspace_id: Pure key scope (#963), as for forget.
+            chunk_size: Rows deleted and committed per batch.
+
+        Returns:
+            The number of memories matched (``dry_run``) or deleted.
+        """
+        from services.permission_service import CallerId, MemoryAuthorId, PermissionService
+
+        _context, workspace_id_str, context_id_str = await self._get_context_isolation_params(
+            user_id,
+            context_id,
+            access="write",
+            key_workspace_id=key_workspace_id,
+            operation="forget",
+        )
+        if not workspace_id_str or not context_id_str:
+            raise NotFoundException("Context", str(context_id))
+
+        conditions = [Memory.context_id == context_id, Memory.deleted_at.is_(None)]
+        if created_before is not None:
+            conditions.append(Memory.created_at < created_before)
+        if created_after is not None:
+            conditions.append(Memory.created_at >= created_after)
+        if memory_type is not None:
+            conditions.append(Memory.type == memory_type)
+        if tags:
+            conditions.append(Memory.tags.overlap(tags))
+        rows = (
+            await self.db.execute(
+                select(
+                    Memory.id,
+                    Memory.user_id,
+                    Memory.type,
+                    Memory.source_type,
+                    tool_triggered_predicate().label("is_guardrail"),
+                )
+                .where(*conditions)
+                .order_by(Memory.created_at, Memory.id)
+            )
+        ).all()
+
+        perm = PermissionService(self.db)
+        allowed_groups: dict[tuple[str, str, str | None], bool] = {}
+        guardrail_ok: bool | None = None
+        victims: list[UUID] = []
+        for row in rows:
+            group = (row.user_id, row.type, row.source_type)
+            if group not in allowed_groups:
+                allowed_groups[group] = await perm.can_access_memory(
+                    user_id=CallerId(user_id),
+                    memory_user_id=MemoryAuthorId(row.user_id),
+                    workspace_id=UUID(workspace_id_str),
+                    context_id=context_id,
+                    access="write",
+                    operation="forget",
+                    memory_type=row.type,
+                    memory_source_type=row.source_type,
+                )
+            if not allowed_groups[group]:
+                continue
+            if row.is_guardrail:
+                if guardrail_ok is None:
+                    from utils.exceptions import AuthorizationError
+
+                    try:
+                        await self._require_guardrail_author(user_id, context_id)
+                        guardrail_ok = True
+                    except (AuthorizationError, ValueError):
+                        guardrail_ok = False
+                if not guardrail_ok:
+                    continue
+            victims.append(row.id)
+
+        if dry_run:
+            return len(victims)
+
+        deleted: list[UUID] = []
+        for start in range(0, len(victims), chunk_size):
+            chunk = victims[start : start + chunk_size]
+            memories = (
+                (
+                    await self.db.execute(
+                        select(Memory).where(Memory.id.in_(chunk), Memory.deleted_at.is_(None))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for memory in memories:
+                await self._soft_delete_memory(user_id, memory, workspace_id_str, context_id_str)
+                deleted.append(memory.id)
+            await self.db.commit()
+
+        logger.info(
+            "memories_soft_deleted_in_bulk",
+            context_id=context_id_str,
+            count=len(deleted),
+            user_id=user_id,
+        )
+
+        from services.memory_access_event_writer import (
+            MAX_METADATA_MEMORY_IDS,
+            emit_memory_access_event,
+        )
+
+        await emit_memory_access_event(
+            operation="forget",
+            outcome="success",
+            workspace_id=UUID(workspace_id_str),
+            user_id=user_id,
+            context_id=context_id,
+            memory_id=deleted[0] if len(deleted) == 1 else None,
+            result_count=len(deleted),
+            extra_metadata=(
+                {"memory_ids": [str(mid) for mid in deleted[:MAX_METADATA_MEMORY_IDS]]}
+                if len(deleted) > 1
+                else None
+            ),
+        )
+        return len(deleted)
+
     async def forget(
         self,
         request: ForgetRequest,
@@ -5495,36 +5694,9 @@ class MemoryService:
                 deleted_workspace_ids.add(memory.workspace_id)
                 deleted_context_ids.add(memory.context_id)
 
-                # Soft delete in PostgreSQL (set deleted_at, deleted_by)
-
-                memory.deleted_at = utcnow()
-                memory.deleted_by = user_id
-                # touch=False: the delete is dated by deleted_at, not
-                # updated_at — else changes_since lists an "updated" event
-                # after the "forgotten" one (#1924).
-                await self.memory_repo.update(memory.id, memory, touch=False)
-
-                # Hard delete from Qdrant (remove from search index) — by the
-                # row's point id, not its row id (#1829).
-                await self._delete_memory_point(user_id, memory)
-
-                # Clean up neural memory edges with 3-level isolation
-                from repositories.neural_edge import NeuralEdgeRepository
-
-                edge_repo = NeuralEdgeRepository(self.db)
-                edges_deleted = await edge_repo.delete_node_edges(
-                    user_id=user_id,
-                    node_id=request.memory_id,
-                    workspace_id=memory_workspace_id,
-                    context_id=memory_context_id,
+                await self._soft_delete_memory(
+                    user_id, memory, memory_workspace_id, memory_context_id
                 )
-                if edges_deleted > 0:
-                    logger.info(
-                        "neural_edges_cleaned",
-                        memory_id=str(request.memory_id),
-                        edges_deleted=edges_deleted,
-                        user_id=user_id,
-                    )
 
                 deleted_ids.append(request.memory_id)
 

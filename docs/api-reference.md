@@ -393,6 +393,52 @@ Permanently delete a memory by ID or search query.
 
 ---
 
+### POST /api/v1/memory/forget-bulk
+
+Delete every memory in one context that matches a filter. Filters combine with AND.
+`dry_run` defaults to `true`, so a first call only counts.
+
+**Request Body:**
+
+```json
+{
+  "context_id": "550e8400-e29b-41d4-a716-446655440000",
+  "created_before": "2026-01-01T00:00:00Z",
+  "type": "note",
+  "tags": ["scratch"],
+  "dry_run": true
+}
+```
+
+**Parameters:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `context_id` | string (UUID) | Yes | The context to delete from |
+| `created_before` | string (ISO 8601) | No* | Only memories created before this instant (exclusive) |
+| `created_after` | string (ISO 8601) | No* | Only memories created at or after this instant (inclusive) |
+| `type` | string | No* | Only memories of this type |
+| `tags` | string[] | No* | Only memories carrying any of these tags |
+| `all` | boolean | No* | Match every memory in the context |
+| `dry_run` | boolean | No | Count without deleting (default: `true`) |
+
+*At least one filter, or `"all": true`, is required — an empty body is refused with 422.
+
+Permissions are the same as `/forget`: write access to the context (404 otherwise), and a
+memory the caller may not delete is skipped and not counted. Each deleted memory is removed the
+way `/forget` removes one (soft delete, search index point and graph edges), in batches of 500.
+Allowed while the workspace is over its Free plan's capacity (`CAPACITY-001`).
+
+**Response:**
+
+```json
+{ "status": "success", "dry_run": true, "matched": 120, "deleted": null }
+```
+
+With `"dry_run": false` the response carries `deleted` instead of `matched`.
+
+---
+
 ### POST /api/v1/memory/explore
 
 Discover related memories through Neural Memory graph traversal using activation spreading.

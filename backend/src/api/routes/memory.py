@@ -20,6 +20,8 @@ from models.memory import Memory
 from models.schemas import (
     ExploreRequest,
     ExploreResponse,
+    ForgetBulkRequest,
+    ForgetBulkResponse,
     ForgetRequest,
     ForgetResponse,
     LoadGuardrailsRequest,
@@ -623,6 +625,47 @@ async def forget(
     )
 
     return result
+
+
+@router.post("/forget-bulk", response_model=ForgetBulkResponse)
+async def forget_bulk(
+    request: ForgetBulkRequest,
+    user: APIKeyOrSessionUser,
+    memory_service: MemoryServiceDep,
+) -> ForgetBulkResponse:
+    """Delete every memory in one context that matches the filters (#1941).
+
+    Filters combine with AND: ``created_before`` (exclusive),
+    ``created_after`` (inclusive), ``type``, ``tags`` (any of). At least one
+    filter or ``all: true`` is required. ``dry_run`` defaults to ``true`` and
+    returns ``matched``; with ``dry_run: false`` the matches are deleted the
+    way ``/forget`` deletes one memory (soft delete, search point and graph
+    edges removed) and ``deleted`` is returned.
+
+    Permissions are ``/forget``'s: write access to the context (uniform 404
+    otherwise), then the per-memory delete check — a memory the caller may
+    not delete is skipped and not counted. Allowed while the workspace is over
+    its Free capacity: deleting is how it gets back under the cap.
+    """
+    logger.info(
+        "forget_bulk_request",
+        user_id=user["user_id"],
+        context_id=str(request.context_id),
+        dry_run=request.dry_run,
+    )
+    count = await memory_service.forget_bulk(
+        user["user_id"],
+        context_id=request.context_id,
+        created_before=request.created_before,
+        created_after=request.created_after,
+        memory_type=request.type,
+        tags=request.tags or None,
+        dry_run=request.dry_run,
+        key_workspace_id=user.get("api_key_workspace_id"),
+    )
+    if request.dry_run:
+        return ForgetBulkResponse(dry_run=True, matched=count)
+    return ForgetBulkResponse(dry_run=False, deleted=count)
 
 
 @router.post("/explore", response_model=ExploreResponse)
