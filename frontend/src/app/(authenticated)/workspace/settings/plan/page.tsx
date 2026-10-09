@@ -38,6 +38,7 @@ import {
   planLabelFromEnv,
 } from "@/lib/utils/planLabel";
 import { PlanFeatureMatrix } from "@/components/plan/PlanFeatureMatrix";
+import { SuspendedFeaturesBanner } from "@/components/plan/SuspendedFeaturesBanner";
 import { useSystemFeatures } from "@/hooks/useSystemFeatures";
 import { useFeatureGate } from "@/hooks/useFeatureGate";
 import { FeatureGateNotice } from "@/components/common/FeatureGateNotice";
@@ -168,6 +169,11 @@ export default function WorkspacePlanPage() {
         title={t("planPage.title")}
         description={t("planPage.description")}
       />
+
+      {/* #1939: back on Free with paid-only objects left — say what paused. */}
+      {plan?.suspended && plan.suspended.length > 0 && (
+        <SuspendedFeaturesBanner suspended={plan.suspended} className="mb-6" />
+      )}
 
       <Section title={t("planPage.currentPlan")}>
         <div className="flex flex-wrap items-center justify-between gap-3">

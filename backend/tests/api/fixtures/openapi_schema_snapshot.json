@@ -11357,6 +11357,12 @@
           "quotas": {
             "$ref": "#/components/schemas/WorkspacePlanQuotas"
           },
+          "suspended": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "usage": {
             "additionalProperties": true,
             "type": "object"

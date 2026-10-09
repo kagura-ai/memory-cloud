@@ -1235,7 +1235,19 @@
       "contexts": "Contexts",
       "mcpPerDay": "MCP calls / day",
       "restPerDay": "REST calls / day",
-      "publicPerDay": "Public calls / day"
+      "publicPerDay": "Public calls / day",
+      "suspended": {
+        "title": "Free plan limits exceeded — some features are paused",
+        "description": "Nothing was deleted. These features stay paused until the workspace re-subscribes:",
+        "features": {
+          "connectors": "Connectors (chat ingestion)",
+          "resources": "Resource ingestion",
+          "sleep": "Sleep maintenance",
+          "public": "Public search"
+        },
+        "resume": "Re-subscribe to resume them.",
+        "viewPlan": "View plan"
+      }
     },
     "planMatrix": {
       "title": "Compare plans",

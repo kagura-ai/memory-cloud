@@ -1235,7 +1235,19 @@
       "contexts": "コンテキスト",
       "mcpPerDay": "MCP呼び出し / 日",
       "restPerDay": "REST呼び出し / 日",
-      "publicPerDay": "公開呼び出し / 日"
+      "publicPerDay": "公開呼び出し / 日",
+      "suspended": {
+        "title": "Free プランの上限を超えています — 一部の機能を一時停止しています",
+        "description": "データは削除していません。次の機能は再契約するまで停止します:",
+        "features": {
+          "connectors": "コネクタ（チャットの取り込み）",
+          "resources": "リソースの取り込み",
+          "sleep": "Sleep メンテナンス",
+          "public": "公開検索"
+        },
+        "resume": "再契約すると再開します。",
+        "viewPlan": "プランを表示"
+      }
     },
     "planMatrix": {
       "title": "プラン比較",

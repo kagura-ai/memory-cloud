@@ -75,6 +75,12 @@ def make_client() -> Iterator[Callable[[str], TestClient]]:
     perm_patcher = patch("api.routes.workspace_plan.PermissionService")
     perm_cls = perm_patcher.start()
     perm_cls.return_value.check_workspace_owner = AsyncMock(return_value=None)
+    # #1939: the suspension list has its own suite (tests/services/
+    # test_plan_suspension.py); here it is the route's pass-through.
+    suspended_patcher = patch(
+        "api.routes.workspace_plan.suspended_features", new=AsyncMock(return_value=[])
+    )
+    suspended = suspended_patcher.start()
 
     def _make(plan_name: str) -> TestClient:
         db = MagicMock()
@@ -95,7 +101,9 @@ def make_client() -> Iterator[Callable[[str], TestClient]]:
         app.dependency_overrides[get_db] = mock_db
         return TestClient(app, raise_server_exceptions=False)
 
+    _make.suspended = suspended  # type: ignore[attr-defined]
     yield _make
+    suspended_patcher.stop()
     perm_patcher.stop()
     app.dependency_overrides.clear()
 
@@ -128,3 +136,18 @@ def test_plan_carries_no_price(make_client) -> None:
     body = resp.json()
     assert body["current_plan"] == "pro"
     assert "price_monthly" not in body
+
+
+def test_plan_lists_the_suspended_features(make_client) -> None:
+    """#1939: the web UI's "features paused" banner reads this list."""
+    make_client.suspended.return_value = ["connectors", "sleep"]
+    resp = make_client("free").get(ENDPOINT)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["suspended"] == ["connectors", "sleep"]
+    make_client.suspended.assert_awaited_once()
+
+
+def test_paid_plan_lists_nothing_suspended(make_client) -> None:
+    resp = make_client("promax").get(ENDPOINT)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["suspended"] == []
