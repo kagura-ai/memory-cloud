@@ -4,6 +4,30 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.99.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.99.0) — 2026-10-10
+
+Plans and billing state now shape what a workspace can do: a running subscription blocks deletion, paid-only features pause (never delete) when a plan drops them, and a workspace that comes back to Free over its capacity is locked until it is cleaned up or re-subscribed.
+
+### Added
+- **Capacity-over lock** ([#1941](https://github.com/kagura-ai/memory-cloud/issues/1941)): a workspace back on Free from a subscription (`entitlement_source=external_billing`) that holds more live memories or storage than the Free limits pauses search and saving — recall, reference, explore, pinned, remember, update, uploads, context creation, graph, analyses, agent state, feedback, share-key recall and public search answer `403 CAPACITY-001` (`details.gate: "capacity"`, how much is over and a cleanup URL; non-members and public readers get a redacted form). Listing, deleting (incl. MCP `forget`), export and guardrails keep working, and the lock lifts as soon as usage fits. Self-hosted and admin-managed Free workspaces are never locked. The web UI shows a banner with the numbers, and `GET /api/v1/workspace/usage/current` and MCP `get_usage` carry `capacity_lock`.
+- **Bulk delete** ([#1941](https://github.com/kagura-ai/memory-cloud/issues/1941)): `POST /api/v1/memory/forget-bulk` deletes the memories of one context that match date / type / tags filters (or `all: true`), with a dry-run count, at most 2,000 rows per request and a resume `cursor`; same permissions as `/memory/forget`. The context page gets a "Delete by filter" dialog and an Export button.
+- **Pre-expiry capacity notice** ([#1941](https://github.com/kagura-ai/memory-cloud/issues/1941)): `POST /internal/workspaces/{id}/capacity-lock-notice` (billing service token) emails the owner when the workspace would be locked once its plan returns to Free; at most once per period and once per 24 hours.
+
+### Changed
+- **Deletion is blocked while a paid subscription runs** ([#1940](https://github.com/kagura-ai/memory-cloud/issues/1940)): deleting a workspace, or requesting / confirming account erasure while owning one, answers `409 BILLING-005` until the subscription has ended (a scheduled cancellation counts as running). The erasure sweep re-checks and fails a self-service request instead of erasing; admin force-erase and admin user delete stay allowed and log the override. The billing plan push refuses a paid plan onto a soft-deleted workspace (404).
+- **Paid-only features pause when a plan drops them** ([#1939](https://github.com/kagura-ai/memory-cloud/issues/1939)): when a plan's allowance for a feature is 0 (typically back on Free), connector and resource-token ingest (`FEAT-001`), worker dispatch, indexing, Sleep's LLM passes and anonymous public search pause; nothing is deleted and a plan that includes them resumes everything. Retention phases keep running, held-back indexing never drops events, and the owner sees which features are paused (`GET /workspaces/{id}/plan` → `suspended`).
+- **Resource indexing honours the workspace memory limit** ([#1939](https://github.com/kagura-ai/memory-cloud/issues/1939)): a batch applies as far as the limit allows and the rest waits.
+
+### Fixed
+- **Direct member add enforces the plan** ([#1939](https://github.com/kagura-ai/memory-cloud/issues/1939)): `POST /workspaces/{id}/members` now checks the `team_invitations` feature and the seat cap, like invitations.
+- **A zero memory limit refuses the first memory** ([#1939](https://github.com/kagura-ai/memory-cloud/issues/1939)).
+- **`forget` by query** ([#1941](https://github.com/kagura-ai/memory-cloud/issues/1941)) no longer fails on a missing workspace argument, and deletes with the same isolation as `forget` by id.
+
+### Notes
+- No migration, no new environment variables, no operator action.
+- The billing service can now call the capacity-notice endpoint; its contract is in the #1941 issue comments.
+- On `M`, Sleep and anonymous public serving are paused too (both allowances are 0 there), unless a self-hosted `PLAN_<KEY>_FEATURES` override includes `public_contexts`.
+
 ## [v0.98.1](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.98.1) — 2026-10-08
 
 Hotfix for the v0.98.0 save skills.
