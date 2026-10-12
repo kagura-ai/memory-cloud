@@ -38,6 +38,7 @@ from models.auth import Context, ExternalAPIKey, User, Workspace
 from models.schemas import OpenAIKeyStatusResponse
 from services.email_service import get_email_service
 from services.permission_service import PermissionService
+from services.plan_suspension import seat_paused_member_ids
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from services.workspace_service import WorkspaceService
 from utils.auth_helpers import get_user_id
@@ -306,6 +307,9 @@ class WorkspaceMemberResponse(BaseModel):
     user_email: str | None = None
     role: str
     joined_at: str | None
+    # #1943: no seat on the workspace's plan — refused until the plan carries
+    # enough seats or a member is removed (the owner always has a seat).
+    seat_paused: bool = False
     credentials_status: CredentialsStatusInfo | None = None  # New: credentials info
 
     # User activity fields
@@ -630,6 +634,12 @@ async def list_members(
     )
 
     members = await workspace_service.list_members(workspace_id)
+    # #1943: which members have no seat on the plan (so the owner can choose
+    # whom to remove); empty on a plan with room for everyone.
+    workspace_row = await db.get(Workspace, workspace_id)
+    seat_paused_ids = (
+        await seat_paused_member_ids(db, workspace_row) if workspace_row is not None else set()
+    )
 
     # Fetch user details + credentials status for each member
     from sqlalchemy import and_, func
@@ -722,6 +732,7 @@ async def list_members(
                 user_email=user_record.email if user_record else None,
                 role=m.role,
                 joined_at=to_utc_iso(m.joined_at),
+                seat_paused=m.id in seat_paused_ids,
                 credentials_status=credentials_status,
                 last_login_at=to_utc_iso(user_record.last_login_at) if user_record else None,
                 allowed_context_ids=allowed_context_ids_str,

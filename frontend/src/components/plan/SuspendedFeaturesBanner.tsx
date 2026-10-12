@@ -26,6 +26,8 @@ export const SUSPENDABLE_FEATURES = [
   "resources",
   "sleep",
   "public",
+  "members", // #1943: members beyond the plan's seats
+  "contexts", // #1943: contexts beyond the plan's writable slots
 ] as const;
 export type SuspendableFeature = (typeof SUSPENDABLE_FEATURES)[number];
 

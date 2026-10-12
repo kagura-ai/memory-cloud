@@ -27,6 +27,12 @@ describe("SuspendedFeaturesBanner", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("names seats and writable slots like the other pauses (#1943)", () => {
+    render(<SuspendedFeaturesBanner suspended={["members", "contexts"]} />);
+    expect(screen.getByText("planPage.suspended.features.members")).toBeInTheDocument();
+    expect(screen.getByText("planPage.suspended.features.contexts")).toBeInTheDocument();
+  });
+
   it("lists each suspended feature with the re-subscribe hint", () => {
     render(<SuspendedFeaturesBanner suspended={["connectors", "sleep"]} />);
     expect(screen.getByRole("alert")).toBeInTheDocument();

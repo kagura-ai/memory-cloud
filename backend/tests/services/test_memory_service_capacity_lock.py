@@ -121,7 +121,7 @@ class TestBlocked:
         service = _service()
         ws = uuid4()
         service._update_load_authorized = AsyncMock(  # type: ignore[method-assign]
-            return_value=SimpleNamespace(workspace_id=ws)
+            return_value=SimpleNamespace(workspace_id=ws, context_id=uuid4())
         )
         with pytest.raises(CapacityLockedError):
             await service.update_memory(
@@ -255,7 +255,7 @@ class TestBlockedReadsAfterAccess:
         service = _service()
         ws = uuid4()
         service._patch_load_authorized = AsyncMock(  # type: ignore[method-assign]
-            return_value=SimpleNamespace(workspace_id=ws)
+            return_value=SimpleNamespace(workspace_id=ws, context_id=uuid4())
         )
         with pytest.raises(CapacityLockedError):
             await service.patch_memory(

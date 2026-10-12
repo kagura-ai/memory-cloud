@@ -57,6 +57,8 @@ export interface WorkspaceMember {
   user_email: string | null;
   role: WorkspaceRole;
   joined_at: string | null;
+  /** #1943: no seat on the plan — refused until seats are freed or the plan grows. */
+  seat_paused?: boolean;
   credentials_status?: CredentialsStatusInfo | null; // New: credentials info
 
   // User activity fields

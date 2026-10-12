@@ -1244,7 +1244,9 @@
           "connectors": "Connectors (chat ingestion)",
           "resources": "Resource ingestion",
           "sleep": "Sleep maintenance",
-          "public": "Public search"
+          "public": "Public search",
+          "members": "Members beyond the plan's seats (the owner always keeps one)",
+          "contexts": "Contexts beyond the plan's writable slots (they stay readable)"
         },
         "resume": "Upgrade or re-subscribe to resume them.",
         "viewPlan": "View plan"

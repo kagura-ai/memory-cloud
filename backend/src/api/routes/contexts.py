@@ -28,11 +28,13 @@ from config.constants import (
 )
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
+from models.auth import Workspace
 from models.schemas import ContextExportResponse, RelatedTagItem
 from models.sleep import SleepMode
 from services.capacity_lock import CapacityPolicy
 from services.context_service import ContextService, TagSortMode
 from services.identity_link_service import linked_user_ids
+from services.plan_suspension import writes_paused_context_ids
 from utils.datetime import to_utc_iso
 from utils.exceptions import FeatureNotAvailableError, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -222,6 +224,11 @@ class ContextResponse(TZAwareBaseModel):
     resource_id: str | None = Field(
         default=None, description="Resource ID for public contexts"
     )  # Issue #238
+    # #1943: no writable slot on the workspace's plan — content writes are
+    # refused until the plan carries enough contexts or an older one is deleted.
+    writes_paused: bool = Field(
+        default=False, description="Content writes paused: the plan has no slot for this context"
+    )
     is_locked: bool = Field(
         default=False, description="When true, deletion is prevented until unlocked"
     )
@@ -332,6 +339,12 @@ async def list_contexts(
     # Issue #246: current_context_id removed
 
     contexts_list = await service.list_contexts(user_id)
+    # #1943: the live contexts beyond the plan's writable slots.
+    writes_paused_ids: set[UUID] = set()
+    if user.get("current_workspace_id"):
+        workspace_row = await db.get(Workspace, UUID(str(user["current_workspace_id"])))
+        if workspace_row is not None:
+            writes_paused_ids = await writes_paused_context_ids(db, workspace_row)
 
     # Get creator names for all contexts
     creator_ids = [c.created_by for c in contexts_list if c.created_by]
@@ -453,6 +466,7 @@ async def list_contexts(
                 is_public=context.is_public,  # Issue #238
                 resource_id=context.resource_id,  # Issue #238
                 is_locked=context.is_locked,  # Issue #85
+                writes_paused=context.id in writes_paused_ids,  # #1943
                 sleep_mode=context.sleep_mode,
                 created_by=context.created_by,  # Issue #165
                 created_by_name=creator_names.get(context.created_by)
