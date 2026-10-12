@@ -252,8 +252,10 @@ async def test_presence_checks_are_exists_not_counts() -> None:
         SUSPENDED_RESOURCES,
         SUSPENDED_SLEEP,
         SUSPENDED_PUBLIC,
+        plan_suspension.SUSPENDED_MEMBERS,  # #1943
+        plan_suspension.SUSPENDED_CONTEXTS,
     ]
-    assert db.execute.await_count == 4
+    assert db.execute.await_count == 6
     for call in db.execute.await_args_list:
         sql = str(call.args[0].compile(dialect=postgresql.dialect())).lower()
         assert sql.startswith("select exists")
@@ -267,6 +269,8 @@ def test_vocabulary_is_stable() -> None:
         "resources",
         "sleep",
         "public",
+        "members",  # #1943
+        "contexts",  # #1943
     )
 
 

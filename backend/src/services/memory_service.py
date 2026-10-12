@@ -635,6 +635,7 @@ class MemoryService:
         *,
         workspace_id: UUID | str | None = None,
         context_ids: list[UUID] | tuple[UUID | None, ...] = (),
+        write_context_id: UUID | str | None = None,
     ) -> None:
         """Refuse when the target workspace is over its Free capacity (#1941).
 
@@ -642,17 +643,23 @@ class MemoryService:
         write that reaches this service is checked against the workspace that
         OWNS the data (the context's, not the caller's session workspace).
         ``forget``, listing, stats and export never call it.
+
+        ``write_context_id`` (#1943): the context a content write targets —
+        refused as well when that context has no writable slot on the plan.
         """
         from services.capacity_lock import (
             ensure_contexts_not_capacity_locked,
             ensure_not_capacity_locked,
         )
+        from services.plan_suspension import ensure_context_writable
 
         if workspace_id is not None:
             await ensure_not_capacity_locked(self.db, workspace_id, user_id=user_id)
         if any(c is not None for c in context_ids):
             # One query for every context, deduplicated per workspace (#1941).
             await ensure_contexts_not_capacity_locked(self.db, context_ids, user_id=user_id)
+        if write_context_id is not None:
+            await ensure_context_writable(self.db, write_context_id)
 
     async def remember(
         self,
@@ -784,7 +791,9 @@ class MemoryService:
         # #1941: after the write gate, so a context the caller cannot write
         # answers its uniform not-found, never the lock.
         if not capacity_checked:
-            await self._ensure_capacity(user_id, workspace_id=workspace_id_str)
+            await self._ensure_capacity(
+                user_id, workspace_id=workspace_id_str, write_context_id=context_id_str
+            )
 
         # #1853: dedupe="check" asks BEFORE the quota is charged and the row
         # exists — a candidate above the suggestion threshold comes back to
@@ -1070,7 +1079,9 @@ class MemoryService:
         _context, workspace_id_str, context_id_str = isolation
         if not workspace_id_str or not context_id_str:
             raise ValueError("remember_batch() requires current_context_id")
-        await self._ensure_capacity(user_id, workspace_id=workspace_id_str)
+        await self._ensure_capacity(
+            user_id, workspace_id=workspace_id_str, write_context_id=context_id_str
+        )
         tag_canonical = (
             await self.tag_canonical_map(
                 workspace_id=UUID(workspace_id_str),
@@ -1488,7 +1499,9 @@ class MemoryService:
 
         memory = await self._update_load_authorized(request.memory_id, user_id)
         # #1941: after the access check, so the lock is no existence oracle.
-        await self._ensure_capacity(user_id, workspace_id=memory.workspace_id)
+        await self._ensure_capacity(
+            user_id, workspace_id=memory.workspace_id, write_context_id=memory.context_id
+        )
 
         # Tool guardrails: any edit of a guardrail row, or a details write that
         # adds / changes / removes tool_trigger, needs context EDITOR or above
@@ -2226,7 +2239,9 @@ class MemoryService:
 
         memory = await self._patch_load_authorized(memory_id, user_id)
         # #1941: after the access check, so the lock is no existence oracle.
-        await self._ensure_capacity(user_id, workspace_id=memory.workspace_id)
+        await self._ensure_capacity(
+            user_id, workspace_id=memory.workspace_id, write_context_id=memory.context_id
+        )
 
         # `model_fields_set` is the set of field names the client EXPLICITLY
         # sent (including those set to None), so `{"details": null}` puts

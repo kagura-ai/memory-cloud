@@ -29,6 +29,7 @@ from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
 from models.sleep import SleepMode
 from services.capacity_lock import CapacityPolicy
 from services.identity_link_service import is_same_owner, owned_by
+from services.plan_suspension import ensure_member_seated
 from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,
@@ -398,6 +399,11 @@ class ContextService:
         workspace_member = await self._get_workspace_member(user_id, context.workspace_id)
         if not workspace_member:
             raise NotFoundException("Context", str(context_id))
+        # #1943: remember's authorizer runs through here — a member without a
+        # seat is refused after membership (the owner always has one).
+        workspace = await self.db.get(Workspace, context.workspace_id)
+        if workspace is not None:
+            await ensure_member_seated(self.db, workspace, workspace_member)
 
         # Issue #165: Privacy check - private contexts are creator-only
         if context.is_private and context.created_by != user_id:

@@ -18,11 +18,12 @@ from __future__ import annotations
 from typing import Any, Final
 from uuid import UUID
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.resource_tokens import workspace_regular_active_tokens
-from models.auth import Context, Workspace
+from auth.workspace_roles import WorkspaceRole
+from models.auth import Context, Workspace, WorkspaceMember
 from models.resource import ResourceToken, WorkspaceConnector
 from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
 
@@ -32,11 +33,16 @@ SUSPENDED_CONNECTORS: Final = "connectors"
 SUSPENDED_RESOURCES: Final = "resources"
 SUSPENDED_SLEEP: Final = "sleep"
 SUSPENDED_PUBLIC: Final = "public"
+# #1943: members without a seat and contexts without a writable slot.
+SUSPENDED_MEMBERS: Final = "members"
+SUSPENDED_CONTEXTS: Final = "contexts"
 SUSPENDABLE_FEATURES: Final = (
     SUSPENDED_CONNECTORS,
     SUSPENDED_RESOURCES,
     SUSPENDED_SLEEP,
     SUSPENDED_PUBLIC,
+    SUSPENDED_MEMBERS,
+    SUSPENDED_CONTEXTS,
 )
 
 
@@ -186,7 +192,9 @@ async def ensure_ingest_allowed(
         )
 
 
-def paused_details(plan_name: str | None, feature: str, limit_attr: str) -> dict[str, Any]:
+def paused_details(
+    plan_name: str | None, feature: str, limit_attr: str, *, above: int = 0, **extra: Any
+) -> dict[str, Any]:
     """``FEAT-001`` details for a paused feature, naming the tier that RESUMES it.
 
     ``FeatureNotAvailableError.for_feature`` names the tier that can CREATE
@@ -199,39 +207,231 @@ def paused_details(plan_name: str | None, feature: str, limit_attr: str) -> dict
         plan_name: The workspace's plan key.
         feature: Registry feature key (``connectors`` / ``resources``).
         limit_attr: ``PlanTier`` field whose positive value resumes it.
+        above: The value the resuming tier must exceed — ``0`` for a feature
+            that is simply off; ``count - 1`` for a cap the workspace is over
+            (#1943: the tier that seats everyone / makes every context writable).
+        extra: Further ``details`` keys (e.g. ``limit`` / ``count``).
 
     Returns:
         ``gate`` / ``feature`` / ``required_plan`` / ``required_plan_display``
-        / ``current_plan``, ready to splat into the exception.
+        / ``current_plan`` (+ ``extra``), ready to splat into the exception.
     """
     from config.plan_tiers import PLAN_TIERS, feature_gate_details, lowest_tier_with_limit
 
-    required = lowest_tier_with_limit(limit_attr, 0)
+    required = lowest_tier_with_limit(limit_attr, above)
     tier = PLAN_TIERS.get(required) if required else None
     details = feature_gate_details(plan_name, feature)
     details["required_plan"] = required
     details["required_plan_display"] = tier.display_name if tier else None
+    details.update(extra)
     return details
 
 
-def paused_message(plan_name: str | None, feature: str, limit_attr: str) -> str:
+def paused_message(plan_name: str | None, feature: str, limit_attr: str, *, above: int = 0) -> str:
     """Refusal text for a paused feature; names the tier that resumes it.
 
     Args:
         plan_name: The workspace's plan key.
         feature: Registry feature key.
         limit_attr: ``PlanTier`` field whose positive value resumes it.
+        above: See :func:`paused_details`.
 
     Returns:
         The message.
     """
     from config.plan_tiers import PLAN_TIERS, lowest_tier_with_limit, plan_display_name
 
-    required = lowest_tier_with_limit(limit_attr, 0)
+    required = lowest_tier_with_limit(limit_attr, above)
     message = f"Feature '{feature}' is paused on {plan_display_name(plan_name)} plan."
     if required is not None:
         message += f" Upgrade to {PLAN_TIERS[required].display_name} plan to resume it."
     return message
+
+
+# ---------------------------------------------------------------------------
+# #1943: seats and writable slots
+# ---------------------------------------------------------------------------
+
+MEMBERS_LIMIT_ATTR: Final = "max_members_per_workspace"
+CONTEXTS_LIMIT_ATTR: Final = "max_contexts_per_workspace"
+
+
+def _seat_order() -> tuple[Any, ...]:
+    """Owner first, then earliest join (``invited_at`` for a legacy row), then id."""
+    return (
+        case((WorkspaceMember.role == WorkspaceRole.OWNER, 0), else_=1),
+        func.coalesce(WorkspaceMember.joined_at, WorkspaceMember.invited_at).asc().nulls_last(),
+        WorkspaceMember.id.asc(),
+    )
+
+
+def _seat_limit(workspace: Workspace, limit: int | None) -> int:
+    """At least one seat — the owner always sits."""
+    return max(workspace.effective_max_members if limit is None else limit, 1)
+
+
+async def seated_member_ids(
+    db: AsyncSession, workspace: Workspace, *, limit: int | None = None
+) -> set[int]:
+    """The ``WorkspaceMember.id`` of every member who keeps a seat."""
+    rows = await db.scalars(
+        select(WorkspaceMember.id)
+        .where(WorkspaceMember.workspace_id == workspace.id)
+        .order_by(*_seat_order())
+        .limit(_seat_limit(workspace, limit))
+    )
+    return set(rows.all())
+
+
+async def seat_paused_member_ids(
+    db: AsyncSession, workspace: Workspace, *, limit: int | None = None
+) -> set[int]:
+    """The members who have no seat under the (effective or given) limit."""
+    seated = await seated_member_ids(db, workspace, limit=limit)
+    everyone = await db.scalars(
+        select(WorkspaceMember.id).where(WorkspaceMember.workspace_id == workspace.id)
+    )
+    return set(everyone.all()) - seated
+
+
+async def member_seat_suspended(
+    db: AsyncSession, workspace: Workspace, member: WorkspaceMember
+) -> bool:
+    """Whether ``member`` has no seat on the workspace's plan (#1943).
+
+    The owner always has one (no query). Under a one-seat plan every other
+    member is seat-less (no query). Otherwise one ranked SELECT decides.
+    """
+    if member.role == WorkspaceRole.OWNER:
+        return False
+    if _seat_limit(workspace, None) <= 1:
+        return True
+    return member.id not in await seated_member_ids(db, workspace)
+
+
+async def _member_count(db: AsyncSession, workspace_id: UUID) -> int:
+    return int(
+        await db.scalar(
+            select(func.count(WorkspaceMember.id)).where(
+                WorkspaceMember.workspace_id == workspace_id
+            )
+        )
+        or 0
+    )
+
+
+async def ensure_member_seated(
+    db: AsyncSession, workspace: Workspace, member: WorkspaceMember
+) -> None:
+    """Refuse a member without a seat (``FEAT-001`` ``members``, #1943).
+
+    Called AFTER membership and role are established, so a non-member keeps
+    its uniform refusal and the seat never answers for someone else's
+    workspace. The refusal names the tier that would seat everyone.
+
+    Raises:
+        FeatureNotAvailableError: 403 ``FEAT-001`` with ``feature="members"``,
+            ``limit`` (the seats) and ``count`` (the members).
+    """
+    if not await member_seat_suspended(db, workspace, member):
+        return
+    count = await _member_count(db, workspace.id)
+    limit = _seat_limit(workspace, None)
+    raise FeatureNotAvailableError(
+        paused_message(workspace.plan_name, SUSPENDED_MEMBERS, MEMBERS_LIMIT_ATTR, above=count - 1),
+        **paused_details(
+            workspace.plan_name,
+            SUSPENDED_MEMBERS,
+            MEMBERS_LIMIT_ATTR,
+            above=count - 1,
+            limit=limit,
+            count=count,
+        ),
+    )
+
+
+def _live_contexts(workspace_id: UUID):
+    return and_(Context.workspace_id == workspace_id, Context.deleted_at.is_(None))
+
+
+async def context_writes_suspended(
+    db: AsyncSession, workspace: Workspace, context: Context
+) -> bool:
+    """Whether ``context`` has no writable slot on the workspace's plan (#1943).
+
+    The oldest ``effective_max_contexts`` live contexts (``created_at``, then
+    ``id``) keep their slot; one indexed COUNT of the older live contexts
+    decides. A deleted context frees its slot for the next one.
+    """
+    limit = max(workspace.effective_max_contexts, 0)
+    if limit <= 0:
+        return True
+    older = await db.scalar(
+        select(func.count(Context.id)).where(
+            _live_contexts(workspace.id),
+            or_(
+                Context.created_at < context.created_at,
+                and_(Context.created_at == context.created_at, Context.id < context.id),
+            ),
+        )
+    )
+    return int(older or 0) >= limit
+
+
+async def writes_paused_context_ids(db: AsyncSession, workspace: Workspace) -> set[UUID]:
+    """The live contexts beyond the writable slots, oldest-first ranking."""
+    limit = max(workspace.effective_max_contexts, 0)
+    rows = await db.scalars(
+        select(Context.id)
+        .where(_live_contexts(workspace.id))
+        .order_by(Context.created_at.asc(), Context.id.asc())
+        .offset(limit)
+    )
+    return set(rows.all())
+
+
+async def ensure_context_writable(db: AsyncSession, context: Context | UUID | str) -> None:
+    """Refuse a content write into a context without a slot (``FEAT-001`` ``contexts``).
+
+    Called after the caller's write access to the context is established and
+    after the #1941 capacity lock. Reads, listing, export, delete and metadata
+    updates never call this. ``context`` may be the row (the resolvers) or its
+    id (the service's write paths); an unknown id passes — the caller's own
+    not-found handling owns that case.
+
+    Raises:
+        FeatureNotAvailableError: 403 ``FEAT-001`` with ``feature="contexts"``,
+            ``limit`` (the slots) and ``count`` (the live contexts).
+    """
+    if not isinstance(context, Context):
+        try:
+            context_id = context if isinstance(context, UUID) else UUID(str(context))
+        except (ValueError, TypeError, AttributeError):
+            return
+        loaded = await db.get(Context, context_id)
+        if loaded is None:
+            return
+        context = loaded
+    workspace = await db.get(Workspace, context.workspace_id)
+    if workspace is None or not await context_writes_suspended(db, workspace, context):
+        return
+    count = int(
+        await db.scalar(select(func.count(Context.id)).where(_live_contexts(workspace.id))) or 0
+    )
+    limit = max(workspace.effective_max_contexts, 0)
+    raise FeatureNotAvailableError(
+        paused_message(
+            workspace.plan_name, SUSPENDED_CONTEXTS, CONTEXTS_LIMIT_ATTR, above=count - 1
+        ),
+        **paused_details(
+            workspace.plan_name,
+            SUSPENDED_CONTEXTS,
+            CONTEXTS_LIMIT_ATTR,
+            above=count - 1,
+            limit=limit,
+            count=count,
+        ),
+    )
 
 
 def ensure_public_serving_allowed(workspace: Workspace) -> None:
@@ -301,4 +501,18 @@ async def suspended_features(db: AsyncSession, workspace: Workspace) -> list[str
         db, select(Context.id).where(*live_contexts, Context.is_public.is_(True))
     ):
         suspended.append(SUSPENDED_PUBLIC)
+    # #1943: over the seats / slots — "is there a row beyond the limit", as an
+    # EXISTS over an OFFSET, so this stays a presence check like the others.
+    if await _exists(
+        db,
+        select(WorkspaceMember.id)
+        .where(WorkspaceMember.workspace_id == workspace_id)
+        .offset(_seat_limit(workspace, None)),
+    ):
+        suspended.append(SUSPENDED_MEMBERS)
+    if await _exists(
+        db,
+        select(Context.id).where(*live_contexts).offset(max(workspace.effective_max_contexts, 0)),
+    ):
+        suspended.append(SUSPENDED_CONTEXTS)
     return suspended

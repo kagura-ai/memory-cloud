@@ -60,7 +60,10 @@ async def _user(db: AsyncSession, prefix: str = "u") -> User:
 
 
 async def _workspace(db: AsyncSession, owner: User, *members: User) -> Workspace:
-    workspace = Workspace(id=uuid4(), name="Link Test", owner_user_id=owner.user_id)
+    # #1943: several members need seats — Free seats only the owner.
+    workspace = Workspace(
+        id=uuid4(), name="Link Test", owner_user_id=owner.user_id, plan_name="pro"
+    )
     db.add(workspace)
     await db.flush()
     db.add(

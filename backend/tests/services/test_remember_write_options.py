@@ -32,7 +32,7 @@ async def _scope(db, owner: str) -> tuple[Workspace, Context]:
     ws = Workspace(
         id=uuid4(),
         name=f"rw-ws-{uuid4().hex[:8]}",
-        plan_name="free",
+        plan_name="pro",  # #1943: a second member needs a seat; Free seats only the owner
         owner_user_id=owner,
         daily_api_limit=5000,
         weekly_api_limit=25000,

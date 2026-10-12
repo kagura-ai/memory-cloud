@@ -47,6 +47,7 @@ from models.file_objects import FileObject, WorkspaceStorageUsage
 from services import storage_quota_service
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.permission_service import PermissionService
+from services.plan_suspension import ensure_context_writable
 from storage.factory import get_blob_storage
 from storage.protocol import BlobStorageProtocol
 from utils.datetime import utcnow
@@ -322,6 +323,9 @@ class FileStorageService:
         # #1941: a workspace over its Free capacity cannot add files until it
         # is cleaned up (deleting files stays allowed).
         await ensure_not_capacity_locked(self.db, workspace)
+        # #1943: a file attached to a context is a content write into it.
+        if context_id is not None and ctx is not None:
+            await ensure_context_writable(self.db, ctx)
 
         # R5/R3: reserve in Redis BEFORE inserting the row so a quota
         # rejection short-circuits without touching the DB.

@@ -684,7 +684,7 @@ async def _get_workspace_member_role(
     from models.auth import Workspace, WorkspaceMember
 
     result = await db.execute(
-        select(WorkspaceMember)
+        select(WorkspaceMember, Workspace)
         .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
         .where(
             WorkspaceMember.user_id == user_id,
@@ -692,8 +692,17 @@ async def _get_workspace_member_role(
             Workspace.deleted_at.is_(None),
         )
     )
-    member = result.scalar_one_or_none()
-    return member.role if member else None
+    row = result.first()
+    if row is None:
+        return None
+    member, workspace = row
+    # #1943: a member without a seat on the plan is refused (FEAT-001), after
+    # membership — the dispatcher's exception mapper renders the same envelope
+    # as the other plan pauses.
+    from services.plan_suspension import ensure_member_seated
+
+    await ensure_member_seated(db, workspace, member)
+    return member.role
 
 
 async def _check_workspace_membership(

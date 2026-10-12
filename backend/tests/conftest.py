@@ -68,6 +68,12 @@ def _capacity_gate_needs_a_session(monkeypatch):
 # service whose session is a bare MagicMock; the same rule as above applies.
 _CAPACITY_GATED_ROUTES = (
     ("services.permission_service", "ensure_not_capacity_locked"),
+    ("services.permission_service", "ensure_member_seated"),
+    ("services.plan_suspension", "ensure_member_seated"),
+    ("services.plan_suspension", "ensure_context_writable"),
+    ("services.permission_service", "ensure_context_writable"),
+    ("services.context_service", "ensure_member_seated"),
+    ("services.file_storage_service", "ensure_context_writable"),
     ("api.routes.share_keys", "ensure_context_not_capacity_locked"),
     ("api.routes.feedback", "ensure_not_capacity_locked"),
     ("api.routes.analyses", "ensure_not_capacity_locked"),

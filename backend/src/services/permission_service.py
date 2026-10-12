@@ -19,9 +19,10 @@ from auth.workspace_roles import (
 from auth.workspace_roles import (
     WORKSPACE_ROLE_WEIGHTS as ORG_ROLE_WEIGHTS,
 )
-from models.auth import Context, ContextMember, WorkspaceMember
+from models.auth import Context, ContextMember, Workspace, WorkspaceMember
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.identity_link_service import is_same_owner, owned_by
+from services.plan_suspension import ensure_context_writable, ensure_member_seated
 from services.workspace_service import WorkspaceService
 from utils.exceptions import AuthorizationError, NotFoundException
 from utils.logger import get_logger
@@ -153,6 +154,10 @@ class PermissionService:
                 "Insufficient permissions",
                 reason="role_too_low",
             )
+
+        # #1943: a member without a seat on the workspace's plan is refused —
+        # after membership and role, so a non-member keeps the uniform refusal.
+        await ensure_member_seated(self.db, workspace, member)
 
         return member
 
@@ -435,6 +440,9 @@ class PermissionService:
         # the caller gets the full refusal (counts and cleanup URL).
         if capacity is not CapacityPolicy.ALLOWED:
             await ensure_not_capacity_locked(self.db, context.workspace_id)
+            # #1943: a content write into a context without a writable slot.
+            if access == "write":
+                await ensure_context_writable(self.db, context)
 
         return context
 
@@ -610,6 +618,9 @@ class PermissionService:
         # without a membership row.
         if capacity is not CapacityPolicy.ALLOWED:
             await ensure_not_capacity_locked(self.db, context.workspace_id, user_id=user_id)
+            # #1943: a content write into a context without a writable slot.
+            if access == "write":
+                await ensure_context_writable(self.db, context)
 
         return context, effective_role
 
@@ -670,6 +681,12 @@ class PermissionService:
 
         if not workspace_member:
             raise AuthorizationError("Insufficient permissions")
+
+        # #1943: the seat check sits right after the membership row, before the
+        # owner/admin bypass (the owner always has a seat; no query for them).
+        workspace = await self.db.get(Workspace, context.workspace_id)
+        if workspace is not None:
+            await ensure_member_seated(self.db, workspace, workspace_member)
 
         # Workspace owner/admin → bypass context checks (full access)
         # Note: allowed_context_ids is ignored for owner/admin
