@@ -577,7 +577,9 @@ class MemoryService:
             )
         if context_id is None:
             raise ValueError("a tool guardrail write requires a context")
-        # remember's own capacity line (_ensure_capacity) already ran.
+        # ALLOWED: forget / forget_bulk reach this for a guardrail row and must
+        # keep working under the lock (the cleanup surface); the write paths
+        # are gated upstream by _ensure_capacity.
         await PermissionService(self.db).check_context_write(
             user_id, UUID(str(context_id)), capacity=CapacityPolicy.ALLOWED
         )

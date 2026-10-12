@@ -157,12 +157,9 @@ async def verify_resource_token(
         await ensure_ingest_allowed(db, workspace, token_record.resource_pk)
         # #1941/#1948: ingest writes memory content, like MCP ingest_events
         # (blocked at the dispatcher). The membership gate above proved the
-        # token's creator is a member, so they get the full refusal; a token
-        # without a creator is refused in the redacted form.
-        if token_record.created_by:
-            await ensure_not_capacity_locked(db, workspace, user_id=token_record.created_by)
-        else:
-            await ensure_not_capacity_locked(db, workspace, outsider=True)
+        # token's creator is a member, so the refusal is the full form (counts
+        # and cleanup URL) with no further membership read.
+        await ensure_not_capacity_locked(db, workspace)
 
     return token_record, token_record.quota_events_per_hour, context
 

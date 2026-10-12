@@ -478,7 +478,7 @@ class TestPublicSearch:
 
 class TestResourceIngest:
     @pytest.mark.asyncio
-    async def test_a_locked_workspace_refuses_ingest_in_the_redacted_form(self) -> None:
+    async def test_a_locked_workspace_refuses_ingest_after_the_plan_pause(self) -> None:
         from api.routes import resource_ingest as ri
 
         ws = SimpleNamespace(id=uuid4(), plan_name="free")
@@ -512,11 +512,11 @@ class TestResourceIngest:
             await ri.verify_resource_token(
                 resource_id="res", request=MagicMock(), x_resource_api_key="k", db=db
             )
-        # After the #1939 plan pause; the token's creator is a member (the
-        # membership gate ran first) and gets the numbers.
+        # After the #1939 plan pause; membership was proven before, so the
+        # refusal is the full form with no further membership read.
         assert order == ["plan_pause", "capacity"]
         assert ensure.await_args.args[1] is ws
-        assert ensure.await_args.kwargs == {"user_id": "owner"}
+        assert ensure.await_args.kwargs == {}
 
 
 # ---------------------------------------------------------------------------

@@ -134,11 +134,11 @@ class TestResolveForWorkspaceRead:
 class TestFailClosed:
     @pytest.mark.asyncio
     async def test_a_non_enum_value_gates(self) -> None:
-        """``"blocked"`` (or any stray value) is not a way around the lock."""
+        """No stray value — not even the string ``"allowed"`` — is a way around the lock."""
         svc = PermissionService(MagicMock())
         svc._check_context_access_rbac = AsyncMock(return_value=(_context(), ContextRole.OWNER))
         svc._apply_agent_binding_filter = AsyncMock(return_value=None)
-        for value in ("blocked", "whatever", None):
+        for value in ("blocked", "allowed", "whatever", None):
             with _lock(_locked()), pytest.raises(CapacityLockedError):
                 await svc.check_context_access(USER, CTX, capacity=value)  # type: ignore[arg-type]
 

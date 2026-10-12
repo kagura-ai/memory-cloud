@@ -430,10 +430,10 @@ class PermissionService:
             binding_decision_out.append(decision)
 
         # #1948: the capacity-over lock, after authorization (never an
-        # existence oracle). Anything but an explicit ALLOWED gates — a stray
-        # non-enum value must fail closed. Membership was established above, so
+        # existence oracle). Only the enum member ALLOWED skips the lock — a
+        # stray value, even the string "allowed", fails closed. Membership was established above, so
         # the caller gets the full refusal (counts and cleanup URL).
-        if capacity != CapacityPolicy.ALLOWED:
+        if capacity is not CapacityPolicy.ALLOWED:
             await ensure_not_capacity_locked(self.db, context.workspace_id)
 
         return context
@@ -605,10 +605,10 @@ class PermissionService:
         )
 
         # #1948: the capacity-over lock, after authorization (never an oracle);
-        # anything but an explicit ALLOWED gates. ``user_id`` keeps the outsider
+        # only the enum member ALLOWED skips it (a stray value fails closed). ``user_id`` keeps the outsider
         # redaction for the private-context creator shortcut, which reaches here
         # without a membership row.
-        if capacity != CapacityPolicy.ALLOWED:
+        if capacity is not CapacityPolicy.ALLOWED:
             await ensure_not_capacity_locked(self.db, context.workspace_id, user_id=user_id)
 
         return context, effective_role
