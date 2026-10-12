@@ -23,6 +23,7 @@ from fastapi import HTTPException
 
 from api.routes.memory import recall
 from models.schemas import RecallRequest, RecallResponse
+from services.capacity_lock import CapacityPolicy
 from utils.exceptions import NotFoundException
 
 MOCK_USER = {"user_id": "u1", "current_workspace_id": uuid4()}
@@ -60,6 +61,9 @@ async def test_recall_route_forwards_context_id_from_filters():
     assert kwargs["context_workspace_id"] == context.workspace_id
     resolve.assert_awaited_once()
     assert resolve.await_args.kwargs["user_id"] == "u1"
+    # #1948: MemoryService.recall carries the capacity lock; the route does not
+    # ask the resolver to gate again (one check on the hot path).
+    assert resolve.await_args.kwargs["capacity"] is CapacityPolicy.ALLOWED
     assert resolve.await_args.kwargs["context_id"] == ctx
 
 

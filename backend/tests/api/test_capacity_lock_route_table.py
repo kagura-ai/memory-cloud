@@ -193,40 +193,6 @@ CONTENT_ROUTERS = {
 }
 
 
-def _registered_routes() -> dict[tuple[str, str], str]:
-    """``{(method, path): router module}`` for every REST route of the app.
-
-    FastAPI registers included routers lazily (``_IncludedRouter``); the
-    original router and its include prefix are read back, so this needs no
-    application startup (no Redis, no database).
-    """
-    rows: dict[tuple[str, str], str] = {}
-
-    def add(route, prefix: str) -> None:
-        methods = getattr(route, "methods", None)
-        path = getattr(route, "path", None)
-        if not methods or path is None:
-            return
-        full = prefix + path
-        if "/mcp" in full or full in ("/openapi.json", "/docs/oauth2-redirect"):
-            return
-        module = route.endpoint.__module__.removeprefix("api.routes.")
-        for method in methods - {"HEAD", "OPTIONS"}:
-            rows[(method, full)] = module
-
-    def walk(routes, prefix: str) -> None:
-        for route in routes:
-            original = getattr(route, "original_router", None)
-            if original is None:
-                add(route, prefix)
-                continue
-            # Included routers nest (auth includes the google/github routers).
-            walk(original.routes, prefix + (getattr(route.include_context, "prefix", "") or ""))
-
-    walk(app.routes, "")
-    return rows
-
-
 # BLOCKED rows whose gate is the service's own second line, not a resolver call
 # in the handler (the REST twin of ``CAPACITY_LOCK_SERVICE_GATED_TOOLS``):
 # MemoryService._ensure_capacity, FileStorageService.reserve/confirm,
