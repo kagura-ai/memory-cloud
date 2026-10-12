@@ -31,6 +31,7 @@ from mcp_server.tools._helpers import (
     _resolve_context_for_read,
     set_mcp_key_workspace_scope,
 )
+from services.capacity_lock import CapacityPolicy
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +54,9 @@ async def test_read_forwards_contextvar_scope_to_service():
         P.return_value.resolve_context_for_workspace_read = resolver
         await _resolve_context_for_read(AsyncMock(), "u", uuid4())
         assert resolver.await_args.kwargs["key_workspace_id"] == ws
+        # #1948: the dispatcher's table is the MCP capacity decision; the
+        # resolver is not asked to gate again.
+        assert resolver.await_args.kwargs["capacity"] is CapacityPolicy.ALLOWED
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,7 @@ from models.auth import (
 )
 from models.memory import Memory
 from models.schemas import RecallRequest, RecallResponse
+from services.capacity_lock import CapacityPolicy
 from services.context_service import ContextService
 from services.identity_link_service import (
     MAX_LINKED_IDENTITIES,
@@ -462,17 +463,23 @@ class TestPrivateContextAcrossLinkedAccounts:
         permissions = PermissionService(db_session)
 
         with pytest.raises(AuthorizationError):
-            await permissions.check_context_access(oauth.user_id, context.id)
+            await permissions.check_context_access(
+                oauth.user_id, context.id, capacity=CapacityPolicy.ALLOWED
+            )
         with pytest.raises(NotFoundException):
             await ContextService(db_session).get_context(oauth.user_id, context.id)
 
         await IdentityLinkService(db_session).link(oauth.user_id, admin.user_id)
 
-        _, role = await permissions.check_context_access(oauth.user_id, context.id)
+        _, role = await permissions.check_context_access(
+            oauth.user_id, context.id, capacity=CapacityPolicy.ALLOWED
+        )
         assert role.value == "owner"
         opened = await ContextService(db_session).get_context(oauth.user_id, context.id)
         assert opened.id == context.id
-        resolved = await permissions.resolve_context_for_workspace_read(oauth.user_id, context.id)
+        resolved = await permissions.resolve_context_for_workspace_read(
+            oauth.user_id, context.id, capacity=CapacityPolicy.ALLOWED
+        )
         assert resolved.id == context.id
         listed = await permissions.get_accessible_contexts(oauth.user_id, workspace.id)
         assert context.id in {c.id for c in listed}
@@ -488,7 +495,9 @@ class TestPrivateContextAcrossLinkedAccounts:
         await service.unlink(admin.user_id, oauth.user_id)
 
         with pytest.raises(AuthorizationError):
-            await PermissionService(db_session).check_context_access(oauth.user_id, context.id)
+            await PermissionService(db_session).check_context_access(
+                oauth.user_id, context.id, capacity=CapacityPolicy.ALLOWED
+            )
         listed = await PermissionService(db_session).get_accessible_contexts(
             oauth.user_id, workspace.id
         )
@@ -505,9 +514,13 @@ class TestPrivateContextAcrossLinkedAccounts:
         permissions = PermissionService(db_session)
 
         with pytest.raises(AuthorizationError):
-            await permissions.check_context_access(outsider.user_id, context.id)
+            await permissions.check_context_access(
+                outsider.user_id, context.id, capacity=CapacityPolicy.ALLOWED
+            )
         with pytest.raises(NotFoundException):
-            await permissions.resolve_context_for_workspace_read(outsider.user_id, context.id)
+            await permissions.resolve_context_for_workspace_read(
+                outsider.user_id, context.id, capacity=CapacityPolicy.ALLOWED
+            )
         with pytest.raises(NotFoundException):
             await ContextService(db_session).get_context(outsider.user_id, context.id)
 
@@ -520,7 +533,9 @@ class TestPrivateContextAcrossLinkedAccounts:
         permissions = PermissionService(db_session)
 
         with pytest.raises(AuthorizationError):
-            await permissions.check_context_access(stranger.user_id, context.id)
+            await permissions.check_context_access(
+                stranger.user_id, context.id, capacity=CapacityPolicy.ALLOWED
+            )
         listed = await permissions.get_accessible_contexts(stranger.user_id, workspace.id)
         assert context.id not in {c.id for c in listed}
 
@@ -694,20 +709,29 @@ class TestALinkDoesNotLiftTheCallersOwnLimits:
         permissions = PermissionService(db_session)
 
         _, role = await permissions.check_context_access(
-            oauth.user_id, context.id, required_role="viewer"
+            oauth.user_id,
+            context.id,
+            required_role="viewer",
+            capacity=CapacityPolicy.ALLOWED,
         )
         assert role.value == "viewer"
         with pytest.raises(AuthorizationError):
-            await permissions.check_context_write(oauth.user_id, context.id)
+            await permissions.check_context_write(
+                oauth.user_id, context.id, capacity=CapacityPolicy.ALLOWED
+            )
         with pytest.raises(AuthorizationError):
-            await permissions.check_context_owner(oauth.user_id, context.id)
+            await permissions.check_context_owner(
+                oauth.user_id, context.id, capacity=CapacityPolicy.ALLOWED
+            )
 
     @pytest.mark.asyncio
     async def test_a_member_whose_whitelist_names_the_context_owns_it(self, db_session):
         oauth, context = await self._seed(db_session, WorkspaceRole.MEMBER, allowed_self=True)
 
         _, role = await PermissionService(db_session).check_context_access(
-            oauth.user_id, context.id
+            oauth.user_id,
+            context.id,
+            capacity=CapacityPolicy.ALLOWED,
         )
 
         assert role.value == "owner"
@@ -717,7 +741,9 @@ class TestALinkDoesNotLiftTheCallersOwnLimits:
         oauth, context = await self._seed(db_session, WorkspaceRole.MEMBER, allowed_self=False)
 
         with pytest.raises(AuthorizationError):
-            await PermissionService(db_session).check_context_access(oauth.user_id, context.id)
+            await PermissionService(db_session).check_context_access(
+                oauth.user_id, context.id, capacity=CapacityPolicy.ALLOWED
+            )
 
     @pytest.mark.asyncio
     async def test_a_suspended_member_is_refused(self, db_session):
@@ -726,9 +752,13 @@ class TestALinkDoesNotLiftTheCallersOwnLimits:
         permissions = PermissionService(db_session)
 
         with pytest.raises(AuthorizationError):
-            await permissions.check_context_access(oauth.user_id, context.id)
+            await permissions.check_context_access(
+                oauth.user_id, context.id, capacity=CapacityPolicy.ALLOWED
+            )
         with pytest.raises(NotFoundException):
-            await permissions.resolve_context_for_workspace_read(oauth.user_id, context.id)
+            await permissions.resolve_context_for_workspace_read(
+                oauth.user_id, context.id, capacity=CapacityPolicy.ALLOWED
+            )
         with pytest.raises(NotFoundException):
             await ContextService(db_session).get_context(oauth.user_id, context.id)
 
@@ -1064,7 +1094,9 @@ class TestErasingOneLinkedAccount:
         assert await linked_user_ids(db_session, oauth.user_id) == {oauth.user_id}
         # The survivor reads its own memory through its own id from here on.
         _, role = await PermissionService(db_session).check_context_access(
-            oauth.user_id, context.id
+            oauth.user_id,
+            context.id,
+            capacity=CapacityPolicy.ALLOWED,
         )
         assert role.value == "owner"
         assert await PermissionService(db_session).can_access_memory(
@@ -1330,7 +1362,9 @@ class TestErasingThroughTheService:
         assert context.created_by == oauth.user_id
         assert await linked_user_ids(db_session, oauth.user_id) == {oauth.user_id}
         permissions = PermissionService(db_session)
-        _, role = await permissions.check_context_access(oauth.user_id, context.id)
+        _, role = await permissions.check_context_access(
+            oauth.user_id, context.id, capacity=CapacityPolicy.ALLOWED
+        )
         assert role.value == "owner"
         assert await permissions.can_access_memory(
             user_id=oauth.user_id,

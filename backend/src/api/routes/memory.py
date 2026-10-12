@@ -280,7 +280,9 @@ async def recall(
             # Issue #963/#1281 item 2: pure key scope (None unless workspace-scoped key).
             key_workspace_id=user.get("api_key_workspace_id"),
             operation="recall",
-            capacity=CapacityPolicy.BLOCKED,
+            # MemoryService.recall carries the capacity lock (#1941); gating
+            # here too would run the check twice on the hot path (#1948).
+            capacity=CapacityPolicy.ALLOWED,
         )
         context_workspace_id = context.workspace_id
 

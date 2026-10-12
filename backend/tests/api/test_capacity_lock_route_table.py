@@ -233,6 +233,7 @@ def _registered_routes() -> dict[tuple[str, str], str]:
 # ContextService.create_context.
 SERVICE_GATED_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
+        ("POST", "/api/v1/memory/recall"),
         ("POST", "/api/v1/memory/reference"),
         ("POST", "/api/v1/memory/explore"),
         ("POST", "/api/v1/memory/pinned"),
@@ -244,55 +245,106 @@ SERVICE_GATED_ROUTES: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
-# What a handler's source must mention to count as gating the route itself:
-# the resolver policy, the lock helpers, or the analyses wrapper (#1941).
-_GATE_TOKENS = (
-    "CapacityPolicy.BLOCKED",
-    "ensure_not_capacity_locked(",
-    "ensure_context_not_capacity_locked(",
-    "ensure_contexts_not_capacity_locked(",
-    "_verify_context_in_workspace(",
-)
 
+def _walk():
+    """Yield ``(method, path, endpoint)`` for every REST route of the app.
 
-def _handlers() -> dict[tuple[str, str], object]:
-    found: dict[tuple[str, str], object] = {}
+    FastAPI registers included routers lazily (``_IncludedRouter``); the original
+    router and its include prefix are read back, recursively (auth includes the
+    google/github routers), so this needs no application startup.
+    """
 
-    def walk(routes, prefix: str) -> None:
+    def inner(routes, prefix: str):
         for route in routes:
             original = getattr(route, "original_router", None)
             if original is not None:
-                walk(original.routes, prefix + (getattr(route.include_context, "prefix", "") or ""))
+                yield from inner(
+                    original.routes, prefix + (getattr(route.include_context, "prefix", "") or "")
+                )
                 continue
             methods = getattr(route, "methods", None)
-            if not methods:
+            path = getattr(route, "path", None)
+            if not methods or path is None:
+                continue
+            full = prefix + path
+            if "/mcp" in full or full in ("/openapi.json", "/docs/oauth2-redirect"):
                 continue
             for method in methods - {"HEAD", "OPTIONS"}:
-                found[(method, prefix + route.path)] = route.endpoint
+                yield method, full, route.endpoint
 
-    walk(app.routes, "")
-    return found
+    yield from inner(app.routes, "")
+
+
+def _registered_routes() -> dict[tuple[str, str], str]:
+    """``{(method, path): router module}`` for every REST route of the app."""
+    return {
+        (method, path): endpoint.__module__.removeprefix("api.routes.")
+        for method, path, endpoint in _walk()
+    }
+
+
+def _gates_in(func) -> bool:
+    """Whether ``func``'s body reaches a capacity gate (AST, so comments do not count).
+
+    A gate is a call carrying ``capacity=CapacityPolicy.BLOCKED``, a call to one
+    of the ``ensure_*_capacity_locked`` helpers, or the analyses wrapper
+    ``_verify_context_in_workspace`` without ``capacity_gate=False``.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(inspect.unwrap(func))))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = (
+            node.func.id
+            if isinstance(node.func, ast.Name)
+            else node.func.attr
+            if isinstance(node.func, ast.Attribute)
+            else ""
+        )
+        if name.endswith("capacity_locked"):
+            return True
+        if name == "_verify_context_in_workspace" and not any(
+            kw.arg == "capacity_gate"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is False
+            for kw in node.keywords
+        ):
+            return True
+        for kw in node.keywords:
+            v = kw.value
+            if (
+                kw.arg == "capacity"
+                and isinstance(v, ast.Attribute)
+                and v.attr == "BLOCKED"
+                and isinstance(v.value, ast.Name)
+                and v.value.id == "CapacityPolicy"
+            ):
+                return True
+    return False
 
 
 def test_every_blocked_row_is_visibly_gated() -> None:
-    """A BLOCKED row names a gate the handler reaches, or sits in the explicit
-    service-gated set — a row cannot promise a protection nothing implements."""
+    """A BLOCKED row names a gate the handler (or one of its ``Depends``) reaches,
+    or sits in the explicit service-gated set — a row cannot promise a
+    protection nothing implements."""
     import inspect
 
-    handlers = _handlers()
+    handlers = {(method, path): endpoint for method, path, endpoint in _walk()}
     ungated = []
     for key, policy in ROUTES.items():
         if policy != BLOCKED or key in SERVICE_GATED_ROUTES:
             continue
         handler = handlers[key]
-        source = inspect.getsource(inspect.unwrap(handler))
-        # A dependency can carry the gate (resource ingest: verify_resource_token).
-        deps = ""
-        for param in inspect.signature(handler).parameters.values():
-            dependency = getattr(param.default, "dependency", None)
-            if callable(dependency):
-                deps += inspect.getsource(inspect.unwrap(dependency))
-        if not any(tok in source or tok in deps for tok in _GATE_TOKENS):
+        dependencies = [
+            dependency
+            for param in inspect.signature(handler).parameters.values()
+            if callable(dependency := getattr(param.default, "dependency", None))
+        ]
+        if not (_gates_in(handler) or any(_gates_in(d) for d in dependencies)):
             ungated.append(key)
     assert not ungated, f"BLOCKED rows whose handler reaches no gate: {ungated}"
     assert SERVICE_GATED_ROUTES <= {k for k, v in ROUTES.items() if v == BLOCKED}

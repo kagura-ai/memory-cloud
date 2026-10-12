@@ -31,6 +31,7 @@ from models.memory import SOURCE_TYPE_MANUAL, Memory
 from models.memory_access_event import MemoryAccessEvent
 from models.schemas import RecallRequest
 from services.agent_binding_service import AgentBindingService
+from services.capacity_lock import CapacityPolicy
 from services.memory_service import MemoryService
 from utils.exceptions import NotFoundException
 
@@ -399,7 +400,10 @@ async def test_read_pre_gate_enforce_deny_persists_row(env, db_session):
     )
     with pytest.raises(NotFoundException):
         await PermissionService(db_session).resolve_context_for_workspace_read(
-            user_id=env["uid"], context_id=env["ctx_unbound"], operation="recall"
+            user_id=env["uid"],
+            context_id=env["ctx_unbound"],
+            operation="recall",
+            capacity=CapacityPolicy.ALLOWED,
         )
 
     rows = await _mae_rows(db_session, env["ws_id"])
