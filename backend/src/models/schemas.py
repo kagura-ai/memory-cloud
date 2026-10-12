@@ -17,6 +17,7 @@ from pydantic import (
     model_validator,
 )
 
+from auth.connector_keys import reject_reserved_key_name
 from auth.workspace_roles import ContextRole, WorkspaceRole
 from models.api_base import TZAwareBaseModel
 from utils.public_id import PublicIdPrefix, public_id_pattern
@@ -1850,15 +1851,8 @@ class CreateAPIKeyRequest(BaseModel):
     auto_hide_minutes: int = 10  # Auto-hide after 10 minutes (default)
     bound_context_id: str | None = None  # Issue #626
 
-    @field_validator("name")
-    @classmethod
-    def _name_not_reserved(cls, value: str) -> str:
-        # #1944: ``connector:{id}`` names are resolved to connectors at verify time.
-        from auth.api_keys import CONNECTOR_KEY_PREFIX, CONNECTOR_KEY_PREFIX_RESERVED_MESSAGE
-
-        if value.startswith(CONNECTOR_KEY_PREFIX):
-            raise ValueError(CONNECTOR_KEY_PREFIX_RESERVED_MESSAGE)
-        return value
+    # #1944: ``connector:{id}`` names are resolved to connectors at verify time.
+    _name_not_reserved = field_validator("name")(reject_reserved_key_name)
 
     # Issue #1165: owner-provisioned mints REQUIRE an expiry (the route enforces
     # 400 if omitted for the programmatic path); session self-mint leaves it None

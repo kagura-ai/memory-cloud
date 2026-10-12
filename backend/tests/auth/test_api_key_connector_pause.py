@@ -25,10 +25,11 @@ from cryptography.fernet import Fernet
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.api_keys import (
+from auth.api_keys import APIKeyManager
+from auth.connector_keys import (
     CONNECTOR_KEY_PREFIX,
-    APIKeyManager,
     connector_id_from_key_name,
+    connector_key_name,
 )
 from models.auth import User, Workspace
 from models.resource import Resource, WorkspaceConnector
@@ -47,7 +48,9 @@ CONNECTOR_ID = uuid4()
 
 def test_connector_id_from_key_name():
     cid = uuid4()
-    assert connector_id_from_key_name(f"{CONNECTOR_KEY_PREFIX}{cid}") == cid
+    assert connector_key_name(cid) == f"{CONNECTOR_KEY_PREFIX}{cid}"
+    # The formatter provisioning uses and the parser verify_key uses round-trip.
+    assert connector_id_from_key_name(connector_key_name(cid)) == cid
     assert connector_id_from_key_name("connector:not-a-uuid") is None
     assert connector_id_from_key_name("my laptop") is None
     assert connector_id_from_key_name("") is None
@@ -243,11 +246,42 @@ async def connector_key(db_session: AsyncSession, monkeypatch) -> AsyncIterator[
     user_plaintext, _row = await manager.create_key(
         name=f"connector:{uuid4()}", user_id=user_id, workspace_id=workspace_id
     )
+    # A second Free workspace with its own connector: a key in the first
+    # workspace that names THIS connector must stay an ordinary key (the join
+    # is confined to the key's own workspace).
+    other_ws_id = uuid4()
+    db_session.add(
+        Workspace(
+            id=other_ws_id,
+            name=f"cpause-other-{uuid4().hex[:8]}",
+            plan_name="free",
+            owner_user_id=user_id,
+            daily_api_limit=500,
+            weekly_api_limit=2500,
+        )
+    )
+    other_resource_pk = uuid4()
+    db_session.add(
+        Resource(id=other_resource_pk, workspace_id=other_ws_id, resource_id="other-conn-res")
+    )
+    await db_session.flush()
+    other_connector = WorkspaceConnector(
+        resource_pk=other_resource_pk,
+        workspace_id=other_ws_id,
+        connector_type="slack",
+        created_by=user_id,
+    )
+    db_session.add(other_connector)
+    await db_session.flush()
+    cross_plaintext, _row = await manager.create_key(
+        name=connector_key_name(other_connector.id), user_id=user_id, workspace_id=workspace_id
+    )
     yield {
         "workspace": workspace,
         "connector": connector,
         "plaintext": plaintext,
         "user_plaintext": user_plaintext,
+        "cross_plaintext": cross_plaintext,
         "manager": manager,
     }
     enc_module._encryptor = None
@@ -271,6 +305,12 @@ class TestConnectorKeyPauseDB:
         verified = await manager.verify_key(connector_key["plaintext"])  # type: ignore[arg-type]
         assert verified is not None
         assert verified.workspace_id == workspace.id
+
+    async def test_a_key_naming_another_workspaces_connector_is_ordinary(
+        self, db_session, connector_key
+    ) -> None:
+        manager: APIKeyManager = connector_key["manager"]  # type: ignore[assignment]
+        assert await manager.verify_key(connector_key["cross_plaintext"]) is not None  # type: ignore[arg-type]
 
     async def test_a_look_alike_user_key_keeps_working_on_free(
         self, db_session, connector_key

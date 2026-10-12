@@ -19,6 +19,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.connector_keys import connector_key_name
 from auth.resource_tokens import ResourceTokenManager
 from config.plan_tiers import has_feature, lowest_tier_with_limit, quota_gate_details
 from models.auth import Workspace
@@ -397,7 +398,7 @@ class ConnectorProvisioningService:
                 from auth.api_keys import APIKeyManager
 
                 plaintext_kmc_api_key, kmc_key_row = await APIKeyManager(self.db).create_key(
-                    name=f"connector:{connector.id}",
+                    name=connector_key_name(connector.id),
                     user_id=user_id,
                     workspace_id=workspace_id,
                 )
@@ -1019,7 +1020,7 @@ class ConnectorProvisioningService:
             update(APIKey)
             .where(
                 APIKey.workspace_id == workspace_id,
-                APIKey.name == f"connector:{connector_id}",
+                APIKey.name == connector_key_name(connector_id),
                 APIKey.revoked_at.is_(None),
             )
             .values(revoked_at=utcnow())
@@ -1410,7 +1411,7 @@ class ConnectorProvisioningService:
         # expires_at on the row; reuse that exact value for the connector column
         # so the two never drift (a second utcnow() would differ by microseconds).
         plaintext_new_key, new_key_row = await APIKeyManager(self.db).create_key(
-            name=f"connector:{connector_id}",
+            name=connector_key_name(connector_id),
             user_id=owner_user_id,
             workspace_id=workspace_id,
             expires_days=expires_days,

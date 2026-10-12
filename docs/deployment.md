@@ -1582,7 +1582,7 @@ runs, so re-subscribing resumes everything with no further action.
 
 | Limit at `0` | Suspended | Kept |
 |---|---|---|
-| `max_connectors` | connector ingest (`FEAT-001`), worker dispatch (`GET /workers/config` answers the not-ready 404, so the worker skips the team), indexing, and the connector's own write key (the workspace API key named `connector:{id}`) — it fails verification (`401`) like a revoked key while the seats are `0` ([#1944](https://github.com/kagura-ai/memory-cloud/issues/1944)), so a worker still holding it cannot `remember` around the pause | the connector, its token and its key |
+| `max_connectors` | connector ingest (`FEAT-001`), worker dispatch (`GET /workers/config` answers the not-ready 404, so the worker skips the team), indexing, and the connector's own write key (the workspace API key named `connector:{id}`) — it fails verification (`401`) like a revoked key while the seats are `0` ([#1944](https://github.com/kagura-ai/memory-cloud/issues/1944)), so a worker still holding it cannot `remember` around the pause (a `401` together with the API log line `api_key_rejected_connectors_suspended` is this pause, not a revoked key; no re-issue is needed) | the connector, its token and its key |
 | `max_resource_tokens` | ingest on ordinary resource tokens (REST and MCP `ingest_events`, `FEAT-001`), indexing | the tokens and resources |
 | `sleep_enabled_contexts_limit` | Sleep's LLM phases (nightly and admin-triggered); a `full` context still runs the non-LLM retention purges | each context's `sleep_mode` |
 | `public_calls_per_day` | anonymous public `search` / `info` answer `429` (`api_public_daily`), as bound keys and signed-in callers already did | `is_public` and bound keys |
