@@ -310,6 +310,10 @@ class PermissionService:
                 a member of its owning workspace with the required role.
                 The uniform 404 hides whether the context exists in another
                 workspace (CWE-639 / OWASP A01).
+            FeatureNotAvailableError: the caller IS a member of the owning
+                workspace but holds no seat on its plan (#1943, FEAT-001
+                ``members``) — raised after membership is established, so it
+                never answers for a context in someone else's workspace.
         """
         context_result = await self.db.execute(
             select(Context).where(

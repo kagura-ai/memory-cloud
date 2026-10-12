@@ -1248,7 +1248,7 @@
           "members": "Members beyond the plan's seats (the owner always keeps one)",
           "contexts": "Contexts beyond the plan's writable slots (they stay readable)"
         },
-        "resume": "Upgrade or re-subscribe to resume them.",
+        "resume": "Upgrade or re-subscribe to resume them — or bring the workspace back under the plan's limits (remove members, delete or merge older contexts).",
         "viewPlan": "View plan"
       }
     },

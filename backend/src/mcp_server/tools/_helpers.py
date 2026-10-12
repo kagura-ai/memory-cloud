@@ -386,7 +386,6 @@ async def _resolve_context(
     context_id: UUID,
     *,
     operation: str | None = None,
-    access: str = "read",
 ) -> Any:
     """Resolve and validate context access.
 
@@ -478,14 +477,6 @@ async def _resolve_context(
                 context_id, "Context not found or you don't have access to it."
             )
 
-    if access == "write":
-        # #1943: a content write into a context without a writable slot on the
-        # plan is refused (FEAT-001 contexts), like the REST twins.
-        # Resolved at call time on purpose: tests patch and guard the helper
-        # at ``services.plan_suspension`` (no import cycle is being avoided).
-        from services.plan_suspension import ensure_context_writable
-
-        await ensure_context_writable(db, context)
     return context
 
 
@@ -496,7 +487,6 @@ async def _resolve_context_for_read(
     *,
     required_role: str = "viewer",
     operation: str | None = None,
-    access: str = "read",
 ) -> Any:
     """Resolve a context_id to a Context the caller can read, MCP-flavored.
 
@@ -506,6 +496,10 @@ async def _resolve_context_for_read(
     same uniform context_not_found shape (CWE-639 / OWASP A01 uniform
     disclosure) regardless of the underlying deny reason (not found, private
     non-creator, not a workspace member, member-suspended, whitelist miss).
+    One exception by design (#1943): a member of the owning workspace whose
+    plan gives them no seat is refused with ``FeatureNotAvailableError``
+    (FEAT-001 ``members``) — raised after membership is established, so an
+    outsider still sees the uniform not-found.
 
     The ``required_role="viewer"`` default matches the HTTP ``/graph/*`` and
     ``/memory/stats`` reference implementations — writers should pass ``admin``
@@ -542,14 +536,6 @@ async def _resolve_context_for_read(
             context_id,
             "Context not found or you don't have access to it.",
         ) from exc
-    if access == "write":
-        # #1943: a content write into a context without a writable slot on the
-        # plan is refused (FEAT-001 contexts), like the REST twins.
-        # Resolved at call time on purpose: tests patch and guard the helper
-        # at ``services.plan_suspension`` (no import cycle is being avoided).
-        from services.plan_suspension import ensure_context_writable
-
-        await ensure_context_writable(db, context)
     return context
 
 

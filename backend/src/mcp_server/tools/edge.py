@@ -278,11 +278,19 @@ async def handle_create_edge(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-            context = await _resolve_context(db, user_id, current_context_id, access="write")
+            context = await _resolve_context(db, user_id, current_context_id)
 
             perm_error = await _check_viewer_permission(db, user_id, workspace_id, "create edges")
             if perm_error:
                 return perm_error
+
+            # #1943: a content write — the context must hold a writable slot on the
+            # plan. After the role gate, so a viewer still gets permission_denied.
+            # Resolved at call time: tests patch and guard the helper at
+            # ``services.plan_suspension``.
+            from services.plan_suspension import ensure_context_writable
+
+            await ensure_context_writable(db, context)
 
             ws_id = str(workspace_id) if workspace_id else str(context.workspace_id)
             ctx_id = str(current_context_id)
@@ -389,11 +397,19 @@ async def handle_update_edge(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-            context = await _resolve_context(db, user_id, current_context_id, access="write")
+            context = await _resolve_context(db, user_id, current_context_id)
 
             perm_error = await _check_viewer_permission(db, user_id, workspace_id, "update edges")
             if perm_error:
                 return perm_error
+
+            # #1943: a content write — the context must hold a writable slot on the
+            # plan. After the role gate, so a viewer still gets permission_denied.
+            # Resolved at call time: tests patch and guard the helper at
+            # ``services.plan_suspension``.
+            from services.plan_suspension import ensure_context_writable
+
+            await ensure_context_writable(db, context)
 
             ws_id = str(workspace_id) if workspace_id else str(context.workspace_id)
             ctx_id = str(current_context_id)

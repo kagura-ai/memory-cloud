@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import timedelta
+from unittest.mock import PropertyMock, patch
 from uuid import uuid4
 
 import pytest
@@ -31,7 +32,6 @@ from services.plan_suspension import (
     ensure_context_writable,
     ensure_member_seated,
     member_seat_suspended,
-    seat_paused_member_ids,
     suspended_features,
     writes_paused_context_ids,
 )
@@ -128,6 +128,25 @@ async def seats(db_session: AsyncSession) -> AsyncIterator[dict[str, object]]:
     }
 
 
+def _seats(n: int):
+    """Pretend the plan gives ``n`` seats (no tier has exactly three)."""
+    return patch.object(
+        Workspace, "effective_max_members", new_callable=PropertyMock, return_value=n
+    )
+
+
+async def _paused_ids(db: AsyncSession, ws: Workspace) -> set[int]:
+    """The members the refusal would pause — the same test the routes apply."""
+    rows = (
+        await db.execute(
+            __import__("sqlalchemy")
+            .select(WorkspaceMember)
+            .where(WorkspaceMember.workspace_id == ws.id)
+        )
+    ).scalars()
+    return {m.id for m in rows if await member_seat_suspended(db, ws, m)}
+
+
 def _refresh(ws: Workspace, plan: str, **addons: int) -> None:
     ws.plan_name = plan
     for k, v in addons.items():
@@ -150,10 +169,9 @@ class TestSeats:
         _refresh(seats["ws"], "pro")  # 10 seats: everyone sits
         for key in ("m_second", "m_third", "m_legacy"):
             assert not await member_seat_suspended(db_session, seats["ws"], seats[key]), key
-        # No tier has exactly three seats, so the ranking is pinned through the
-        # helper's explicit limit: the fourth-ranked member is 'third'.
-        paused = await seat_paused_member_ids(db_session, seats["ws"], limit=3)
-        assert paused == {seats["m_third"].id}
+        # Three seats: the fourth-ranked member is 'third'.
+        with _seats(3):
+            assert await _paused_ids(db_session, seats["ws"]) == {seats["m_third"].id}
 
     async def test_refusal_names_the_tier_that_seats_everyone(self, db_session, seats) -> None:
         with pytest.raises(FeatureNotAvailableError) as exc:
@@ -170,7 +188,7 @@ class TestSeats:
         await ensure_member_seated(db_session, seats["ws"], seats["m_owner"])
 
     async def test_paused_member_ids_on_free(self, db_session, seats) -> None:
-        paused = await seat_paused_member_ids(db_session, seats["ws"])
+        paused = await _paused_ids(db_session, seats["ws"])
         assert paused == {seats["m_second"].id, seats["m_third"].id, seats["m_legacy"].id}
 
 
@@ -247,10 +265,10 @@ class TestTieBreaks:
         nobody_knows = await _member(db_session, ws, await _user(db_session, "c"))  # no dates
 
         # Three seats: owner, then the two equal-time rows by id; the dateless row last.
-        paused = await seat_paused_member_ids(db_session, ws, limit=3)
-        assert paused == {nobody_knows.id}
-        paused = await seat_paused_member_ids(db_session, ws, limit=2)
-        assert paused == {second.id, nobody_knows.id}
+        with _seats(3):
+            assert await _paused_ids(db_session, ws) == {nobody_knows.id}
+        with _seats(2):
+            assert await _paused_ids(db_session, ws) == {second.id, nobody_knows.id}
         assert first.id < second.id
 
     async def test_contexts_created_at_the_same_time_rank_by_id(self, db_session) -> None:
@@ -285,9 +303,8 @@ class TestOwnerIdentity:
         elder = await _member(db_session, ws, await _user(db_session, "elder"), joined_at=T0)
         await db_session.flush()
 
-        assert await seat_paused_member_ids(db_session, ws) == {elder.id}
+        assert await _paused_ids(db_session, ws) == {elder.id}
         assert not await member_seat_suspended(db_session, ws, owner_row)
-        assert await member_seat_suspended(db_session, ws, elder)
 
     async def test_without_an_owner_row_the_one_seat_goes_to_the_first_member(
         self, db_session
@@ -303,7 +320,6 @@ class TestOwnerIdentity:
         second = await _member(
             db_session, ws, await _user(db_session, "b"), joined_at=T0 + timedelta(days=1)
         )
-        # The refusal, the flags and the list order give the same answer.
-        assert await seat_paused_member_ids(db_session, ws) == {second.id}
+        # The refusal and the list order give the same answer.
+        assert await _paused_ids(db_session, ws) == {second.id}
         assert not await member_seat_suspended(db_session, ws, first)
-        assert await member_seat_suspended(db_session, ws, second)

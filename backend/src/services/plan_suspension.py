@@ -296,35 +296,18 @@ def seat_order() -> tuple[Any, ...]:
 
 def seat_limit(workspace: Workspace) -> int:
     """The seats the plan gives this workspace — at least one; the owner always sits."""
-    return _seat_limit(workspace, None)
+    return max(workspace.effective_max_members, 1)
 
 
-def _seat_limit(workspace: Workspace, limit: int | None) -> int:
-    return max(workspace.effective_max_members if limit is None else limit, 1)
-
-
-async def seated_member_ids(
-    db: AsyncSession, workspace: Workspace, *, limit: int | None = None
-) -> set[int]:
+async def seated_member_ids(db: AsyncSession, workspace: Workspace) -> set[int]:
     """The ``WorkspaceMember.id`` of every member who keeps a seat."""
     rows = await db.scalars(
         select(WorkspaceMember.id)
         .where(WorkspaceMember.workspace_id == workspace.id)
         .order_by(*seat_order())
-        .limit(_seat_limit(workspace, limit))
+        .limit(seat_limit(workspace))
     )
     return set(rows.all())
-
-
-async def seat_paused_member_ids(
-    db: AsyncSession, workspace: Workspace, *, limit: int | None = None
-) -> set[int]:
-    """The members who have no seat under the (effective or given) limit."""
-    seated = await seated_member_ids(db, workspace, limit=limit)
-    everyone = await db.scalars(
-        select(WorkspaceMember.id).where(WorkspaceMember.workspace_id == workspace.id)
-    )
-    return set(everyone.all()) - seated
 
 
 async def member_seat_suspended(
@@ -334,8 +317,8 @@ async def member_seat_suspended(
 
     The owner always has one (no query). Otherwise one ranked SELECT decides —
     also under a one-seat plan, where the seat goes to whoever ranks first
-    (the owner when it holds a membership row), the same answer
-    ``seat_paused_member_ids`` and the members list give.
+    (the owner when it holds a membership row), the same answer the members
+    list gives.
     """
     if member.role == WorkspaceRole.OWNER or member.user_id == workspace.owner_user_id:
         return False
@@ -378,7 +361,7 @@ async def ensure_member_seated(
     if not await member_seat_suspended(db, workspace, member):
         return
     count = await _member_count(db, workspace.id)
-    limit = _seat_limit(workspace, None)
+    limit = seat_limit(workspace)
     raise FeatureNotAvailableError(
         paused_message(workspace.plan_name, "members", MEMBERS_LIMIT_ATTR, above=count - 1),
         **paused_details(
@@ -526,7 +509,7 @@ async def suspended_features(db: AsyncSession, workspace: Workspace) -> list[str
         A subset of :data:`SUSPENDABLE_FEATURES`, in that order.
     """
     workspace_id = workspace.id
-    live_contexts = (Context.workspace_id == workspace_id, Context.deleted_at.is_(None))
+    live = _live_contexts(workspace_id)
     suspended: list[str] = []
     if connectors_suspended(workspace) and await _exists(
         db,
@@ -538,11 +521,11 @@ async def suspended_features(db: AsyncSession, workspace: Workspace) -> list[str
     ):
         suspended.append(SUSPENDED_RESOURCES)
     if sleep_suspended(workspace) and await _exists(
-        db, select(Context.id).where(*live_contexts, Context.sleep_mode != "skip")
+        db, select(Context.id).where(live, Context.sleep_mode != "skip")
     ):
         suspended.append(SUSPENDED_SLEEP)
     if public_suspended(workspace) and await _exists(
-        db, select(Context.id).where(*live_contexts, Context.is_public.is_(True))
+        db, select(Context.id).where(live, Context.is_public.is_(True))
     ):
         suspended.append(SUSPENDED_PUBLIC)
     # #1943: over the seats / slots — "is there a row beyond the limit", as an
@@ -551,12 +534,12 @@ async def suspended_features(db: AsyncSession, workspace: Workspace) -> list[str
         db,
         select(WorkspaceMember.id)
         .where(WorkspaceMember.workspace_id == workspace_id)
-        .offset(_seat_limit(workspace, None)),
+        .offset(seat_limit(workspace)),
     ):
         suspended.append(SUSPENDED_MEMBERS)
     if await _exists(
         db,
-        select(Context.id).where(*live_contexts).offset(max(workspace.effective_max_contexts, 0)),
+        select(Context.id).where(live).offset(max(workspace.effective_max_contexts, 0)),
     ):
         suspended.append(SUSPENDED_CONTEXTS)
     return suspended

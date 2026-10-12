@@ -47,7 +47,9 @@ class TestMembersList:
             for i, role in ((1, "owner"), (2, "member"), (3, "member"))
         ]
         service = MagicMock(list_members=AsyncMock(return_value=rows_in))
-        db = _generic_db(SimpleNamespace(id=ws_id, plan_name="free", effective_max_members=2))
+        db = _generic_db(
+            SimpleNamespace(id=ws_id, plan_name="free", effective_max_members=2, owner_user_id="u1")
+        )
         with (
             patch.object(ws_routes, "authorize_workspace_management", AsyncMock()),
             patch.object(ws_routes, "WorkspaceService", return_value=service),
@@ -57,6 +59,33 @@ class TestMembersList:
             )
         rows = response if isinstance(response, list) else response.members
         assert [r.user_id for r in rows] == ["u1", "u2", "u3"]  # the service's order, kept
+        assert [r.seat_paused for r in rows] == [False, False, True]
+
+    @pytest.mark.asyncio
+    async def test_an_owner_row_past_the_seats_is_never_marked_paused(self) -> None:
+        """The flag exempts what the refusal exempts: the ``owner`` role and
+        ``workspace.owner_user_id`` — even when a desync ranks a second owner row late."""
+        from api.routes import workspaces as ws_routes
+
+        ws_id = uuid4()
+        rows_in = [
+            SimpleNamespace(
+                id=i, user_id=f"u{i}", role=role, joined_at=utcnow(), allowed_context_ids=None
+            )
+            for i, role in ((1, "owner"), (2, "admin"), (3, "member"))
+        ]
+        service = MagicMock(list_members=AsyncMock(return_value=rows_in))
+        db = _generic_db(
+            SimpleNamespace(id=ws_id, plan_name="free", effective_max_members=1, owner_user_id="u2")
+        )
+        with (
+            patch.object(ws_routes, "authorize_workspace_management", AsyncMock()),
+            patch.object(ws_routes, "WorkspaceService", return_value=service),
+        ):
+            response = await ws_routes.list_members(
+                workspace_id=ws_id, user={"user_id": "o"}, db=db
+            )
+        rows = response if isinstance(response, list) else response.members
         assert [r.seat_paused for r in rows] == [False, False, True]
 
     @pytest.mark.asyncio

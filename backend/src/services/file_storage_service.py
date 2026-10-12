@@ -42,7 +42,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
-from models.auth import Workspace
+from models.auth import Context, Workspace
 from models.file_objects import FileObject, WorkspaceStorageUsage
 from services import storage_quota_service
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
@@ -227,6 +227,7 @@ class FileStorageService:
         # unauthorized caller learns nothing about (and spends nothing on) the
         # upload. check_context_write raises AuthorizationError (403) /
         # NotFoundException (404, incl. a soft-deleted context) on denial.
+        ctx: Context | None = None
         if context_id is not None:
             # The workspace capacity line below is this service's own gate.
             ctx = await PermissionService(self.db).check_context_write(
@@ -324,7 +325,7 @@ class FileStorageService:
         # is cleaned up (deleting files stays allowed).
         await ensure_not_capacity_locked(self.db, workspace)
         # #1943: a file attached to a context is a content write into it.
-        if context_id is not None and ctx is not None:
+        if ctx is not None:
             await ensure_context_writable(self.db, ctx)
 
         # R5/R3: reserve in Redis BEFORE inserting the row so a quota

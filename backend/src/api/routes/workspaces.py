@@ -640,6 +640,7 @@ async def list_members(
     # order the list is shown in.
     workspace_row = await db.get(Workspace, workspace_id)
     seats = seat_limit(workspace_row) if workspace_row is not None else len(members)
+    owner_user_id = workspace_row.owner_user_id if workspace_row is not None else None
 
     # Fetch user details + credentials status for each member
     from sqlalchemy import and_, func
@@ -732,7 +733,11 @@ async def list_members(
                 user_email=user_record.email if user_record else None,
                 role=m.role,
                 joined_at=to_utc_iso(m.joined_at),
-                seat_paused=position >= seats,  # #1943
+                # #1943: past the seats — unless the row is the owner (role or
+                # ``owner_user_id``), who the refusal never pauses either.
+                seat_paused=position >= seats
+                and m.role != WorkspaceRole.OWNER
+                and m.user_id != owner_user_id,
                 credentials_status=credentials_status,
                 last_login_at=to_utc_iso(user_record.last_login_at) if user_record else None,
                 allowed_context_ids=allowed_context_ids_str,

@@ -73,11 +73,15 @@ async def handle_feedback(
             return _error_response("invalid_context_id_format", str(exc))
         try:
             # Read-adjacent: verify the caller can reach the context (IDOR guard).
-            await _resolve_context_for_read(
-                db, user_id, context_id, operation="feedback", access="write"
-            )
+            context = await _resolve_context_for_read(db, user_id, context_id, operation="feedback")
         except _ContextNotFoundError as exc:
             return exc.to_response()
+        # #1943: feedback is a content write — the context must hold a writable
+        # slot on the plan (no role gate here: feedback has none). Resolved at
+        # call time: tests patch and guard the helper at ``services.plan_suspension``.
+        from services.plan_suspension import ensure_context_writable
+
+        await ensure_context_writable(db, context)
 
         try:
             row = await FeedbackService(db).record_feedback(
