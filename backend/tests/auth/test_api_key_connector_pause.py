@@ -159,6 +159,17 @@ class TestVerifyKeyConnectorGate:
         assert db.execute.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_connector_gate_runs_before_the_agent_read(self) -> None:
+        """An agent-bound connector key at 0 seats is refused before the Agent
+        row is read — so no liveness touch (a write) happens for a refusal."""
+        record = _key_record(f"connector:{CONNECTOR_ID}")
+        record.agent_id = uuid4()
+        db = _db(record, _workspace(0))
+
+        assert await _verify(db) is None
+        assert db.execute.await_count == 2  # key row, connector join — no Agent SELECT
+
+    @pytest.mark.asyncio
     async def test_connector_gate_runs_after_revocation(self) -> None:
         """A revoked connector key is None for the usual reason, with no extra query."""
         record = _key_record(f"connector:{CONNECTOR_ID}")

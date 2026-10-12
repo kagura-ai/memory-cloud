@@ -27,11 +27,12 @@ from config.constants import DeployColor
 from config.settings import get_settings
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
-from models.auth import Workspace
 from models.worker_runtime import WorkerLocale, WorkerRuntimeConfig, normalize_worker_locale
 from services.active_color import read_active_color_settled
 from services.connector_provisioning import ConnectorProvisioningService
-from services.plan_suspension import connectors_suspended
+
+# The name is kept: tests patch ``api.routes.workers._connectors_suspended_for``.
+from services.plan_suspension import connectors_suspended_for as _connectors_suspended_for
 from services.worker_app_identity import (
     WorkerAppIdentityService,
     identity_collection_revision,
@@ -140,17 +141,6 @@ class WorkerActiveColorResponse(BaseModel):
 
     active_color: DeployColor
     responding_color: DeployColor | None
-
-
-async def _connectors_suspended_for(db: AsyncSession, workspace_id: UUID) -> bool:
-    """Whether the connector's workspace has its connectors suspended (#1939).
-
-    A workspace on a plan without connectors (e.g. back on Free) keeps its connectors; dispatch stops until it
-    re-subscribes. A missing workspace row reads as not suspended — the
-    connector lookup above already decided the connector exists.
-    """
-    workspace = await db.get(Workspace, workspace_id)
-    return workspace is not None and connectors_suspended(workspace)
 
 
 def _etag(revision: str) -> str:

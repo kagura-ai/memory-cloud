@@ -1847,7 +1847,7 @@ class CreateAPIKeyRequest(BaseModel):
     stored with ``workspace_id=NULL``.
     """
 
-    name: str
+    name: str = Field(..., min_length=1, max_length=100)  # APIKey.name is String(100)
     auto_hide_minutes: int = 10  # Auto-hide after 10 minutes (default)
     bound_context_id: str | None = None  # Issue #626
 
