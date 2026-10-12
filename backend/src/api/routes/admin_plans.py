@@ -348,20 +348,9 @@ async def list_workspaces_with_plans(
 
         workspace_infos = []
 
-        # Critical Fix: Avoid N+1 query - fetch all workspace members and memories in bulk
+        # Avoid an N+1: one grouped memory count for every listed workspace
+        # (the shared predicate, #1946).
         workspace_ids = [w.id for w in workspaces]
-
-        # Fetch all members for all workspaces in one query
-        all_members_result = await db.execute(
-            select(WorkspaceMember).where(WorkspaceMember.workspace_id.in_(workspace_ids))
-        )
-        members_by_workspace = {}
-        for member in all_members_result.scalars():
-            if member.workspace_id not in members_by_workspace:
-                members_by_workspace[member.workspace_id] = []
-            members_by_workspace[member.workspace_id].append(member.user_id)
-
-        # Fetch all memory counts grouped by workspace (the shared predicate, #1946)
         memory_counts_by_workspace = await live_memory_counts_by_workspace(db, workspace_ids)
 
         for workspace in workspaces:

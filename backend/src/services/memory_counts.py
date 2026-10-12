@@ -32,6 +32,12 @@ def live_memory_count_stmt(workspace_id: UUID) -> Select[int]:
 
     Exposed for callers that run their own scalar reads in a batch; most
     callers want :func:`count_live_memories`.
+
+    Args:
+        workspace_id: The workspace whose rows are counted.
+
+    Returns:
+        A one-column count statement, not yet executed.
     """
     return select(func.count(Memory.id)).where(
         Memory.workspace_id == workspace_id,
@@ -40,8 +46,17 @@ def live_memory_count_stmt(workspace_id: UUID) -> Select[int]:
 
 
 async def count_live_memories(db: AsyncSession, workspace_id: UUID) -> int:
-    """Number of live memories the workspace holds (the figure every
-    ``memory_limit`` check compares against)."""
+    """Number of live memories the workspace holds.
+
+    This is the figure every ``memory_limit`` check compares against.
+
+    Args:
+        db: The request-scoped async session.
+        workspace_id: The workspace whose rows are counted.
+
+    Returns:
+        The count, ``0`` for an empty or unknown workspace.
+    """
     result = await db.execute(live_memory_count_stmt(workspace_id))
     return int(result.scalar() or 0)
 
@@ -51,8 +66,13 @@ async def live_memory_counts_by_workspace(
 ) -> dict[UUID, int]:
     """The same count for many workspaces in one grouped query.
 
-    Workspaces with no live memories are absent from the result (callers use
-    ``.get(ws_id, 0)``); an empty ``workspace_ids`` issues no query.
+    Args:
+        db: The request-scoped async session.
+        workspace_ids: The workspaces to count; an empty list issues no query.
+
+    Returns:
+        ``{workspace_id: count}``. Workspaces with no live memories are absent
+        (callers use ``.get(ws_id, 0)``).
     """
     if not workspace_ids:
         return {}

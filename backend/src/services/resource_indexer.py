@@ -689,12 +689,10 @@ class ResourceIndexer:
     async def _workspace_memory_room(self, workspace_id: UUID) -> int:
         """How many more memories the workspace may hold (#1939).
 
-        The workspace's OWN live memories (``Memory.workspace_id`` match,
-        not soft-deleted) against ``Workspace.effective_memory_limit``.
-        Deliberately not ``QuotaService.check_memory_quota``'s member-join
-        count, which also counts the members' memories in other workspaces
-        and so could hold a small workspace's ingest back for good. No row
-        lock: the batch embeds for a while after this read.
+        The workspace's live memories (``services.memory_counts``, the same
+        count the remember gate uses since #1946) against
+        ``Workspace.effective_memory_limit``. No row lock: the batch embeds
+        for a while after this read.
 
         Returns:
             ``limit - live``; zero or negative when the workspace is full or
