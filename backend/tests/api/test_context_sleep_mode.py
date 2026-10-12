@@ -244,6 +244,9 @@ class TestContextSleepModeReadRoundTrip:
         empty_result.all.return_value = []
         db = AsyncMock()
         db.execute = AsyncMock(return_value=empty_result)
+        # #1943: list_contexts loads the workspace row for the writes_paused
+        # flags; no row here means no slot ranking (and no second query).
+        db.get = AsyncMock(return_value=None)
         app.dependency_overrides[get_db] = lambda: db
 
     def _build_mock_context(self, sleep_mode: str, is_private: bool = True):
