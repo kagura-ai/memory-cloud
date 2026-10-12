@@ -224,10 +224,10 @@ class TestQuotaStatusMemoriesToday:
         ws.effective_memory_limit = 1000
         workspace_result = MagicMock()
         workspace_result.scalar_one_or_none.return_value = ws
-        members_result = MagicMock()
-        members_result.all.return_value = []  # no members → memory_count 0
+        count_result = MagicMock()
+        count_result.scalar.return_value = 0  # workspace-scoped live count (#1946)
         db = MagicMock()
-        db.execute = AsyncMock(side_effect=[workspace_result, members_result])
+        db.execute = AsyncMock(side_effect=[workspace_result, count_result])
         service = QuotaService(db)
 
         with patch("services.quota_service.get_cache", new_callable=AsyncMock, return_value="40"):

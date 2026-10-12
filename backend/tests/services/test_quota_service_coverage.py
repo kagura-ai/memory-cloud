@@ -168,7 +168,7 @@ class TestCheckMemoryQuota:
         await _add_member(db_session, ws.id, user_id)
         # One real, counted memory (the control).
         await _add_memory(db_session, user_id, ws.id)
-        # Orphaned (workspace_id NULL) — excluded by the isnot(None) filter.
+        # Orphaned (workspace_id NULL) — never equal to the workspace's id (#1946).
         await _add_memory(db_session, user_id, None)
         # Soft-deleted — excluded by deleted_at.is_(None).
         await _add_memory(db_session, user_id, ws.id, deleted_at=utcnow())
