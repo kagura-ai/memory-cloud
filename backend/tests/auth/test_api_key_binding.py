@@ -300,6 +300,7 @@ class TestVerifyKeyTimingSafeComparison:
     def _record(key_hash: str) -> SimpleNamespace:
         return SimpleNamespace(
             id=1,
+            name="laptop",  # #1944: verify_key reads the name
             user_id="user-1",
             workspace_id=None,
             bound_context_id=None,
@@ -346,6 +347,7 @@ class TestVerifyKeyLastUsedThrottle:
     def _key_record(last_used_at: datetime | None) -> SimpleNamespace:
         return SimpleNamespace(
             id=1,
+            name="laptop",  # #1944: verify_key reads the name
             user_id="user-1",
             workspace_id=None,
             bound_context_id=None,

@@ -8,17 +8,46 @@ from __future__ import annotations
 
 import secrets
 from datetime import timedelta
-from typing import NamedTuple
+from typing import Final, NamedTuple
 from uuid import UUID
 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
-from models.auth import APIKey, Context
+from models.auth import APIKey, Context, Workspace
+from models.resource import WorkspaceConnector
 from utils.datetime import utcnow
 from utils.hashing import sha256_hex
 from utils.logger import get_logger
+
+# A connector's KMC write key is named after the connector it serves
+# (``connector_provisioning`` mints and rotates it under this name, and deletes
+# it by this name). ``verify_key`` resolves the name back to the connector
+# (#1944), so the user-facing create endpoints refuse the prefix.
+CONNECTOR_KEY_PREFIX: Final = "connector:"
+CONNECTOR_KEY_PREFIX_RESERVED_MESSAGE: Final = (
+    f"names starting with '{CONNECTOR_KEY_PREFIX}' are reserved for connector keys"
+)
+
+
+def connector_id_from_key_name(name: str) -> UUID | None:
+    """The connector id a ``connector:{uuid}`` key name carries, else ``None``.
+
+    Args:
+        name: ``APIKey.name``.
+
+    Returns:
+        The UUID after the prefix; ``None`` for any other name, including a
+        prefix followed by something that is not a UUID.
+    """
+    if not name.startswith(CONNECTOR_KEY_PREFIX):
+        return None
+    try:
+        return UUID(name[len(CONNECTOR_KEY_PREFIX) :])
+    except ValueError:
+        return None
+
 
 logger = get_logger(__name__)
 
@@ -379,6 +408,28 @@ class APIKeyManager:
 
             await AgentRegistryService(self.db).touch_last_seen(agent.id)
 
+        # #1944: a connector's write key stops with the connector it serves.
+        # #1939 pauses connector ingest (REST/MCP ingest, worker config,
+        # indexer) while the workspace has no connector seats, but the worker
+        # also holds this workspace key for its legacy ``remember`` fallback.
+        # Resolve the name to a connector OF THIS WORKSPACE (a user-minted
+        # ``connector:<uuid>`` names none and stays an ordinary key) and
+        # refuse while ``connectors_suspended``. ``None`` — not an exception:
+        # the MCP transport turns an exception here into a 503 (#1742). Nothing
+        # is stored, so a re-subscription lifts this on the next call. Only
+        # connector keys pay the one extra SELECT, and a refused attempt is
+        # not usage (this runs before the last_used_at write).
+        connector_id = connector_id_from_key_name(key_record.name)
+        if connector_id is not None and key_record.workspace_id is not None:
+            if await self._connector_paused(connector_id, key_record.workspace_id):
+                logger.warning(
+                    "api_key_rejected_connectors_suspended",
+                    key_prefix=key_record.key_prefix,
+                    workspace_id=str(key_record.workspace_id),
+                    connector_id=str(connector_id),
+                )
+                return None
+
         # Update last_used_at — throttled (#947). This runs on EVERY auth (one
         # per MCP tool call), so writing the row each time is hot-row
         # write-amplification. Skip the write while the stored timestamp is
@@ -401,6 +452,27 @@ class APIKeyManager:
             agent_id=key_record.agent_id,
             agent_enforcement_mode=agent_enforcement_mode,
         )
+
+    async def _connector_paused(self, connector_id: UUID, workspace_id: UUID) -> bool:
+        """Whether ``connector_id`` is a connector of ``workspace_id`` whose
+        workspace currently has no connector seats (#1944).
+
+        One query: the workspace row joined through its connector, so a name
+        that matches no connector of the key's workspace resolves to ``False``
+        without a second lookup.
+        """
+        from services.plan_suspension import connectors_suspended
+
+        result = await self.db.execute(
+            select(Workspace)
+            .join(WorkspaceConnector, WorkspaceConnector.workspace_id == Workspace.id)
+            .where(
+                WorkspaceConnector.id == connector_id,
+                WorkspaceConnector.workspace_id == workspace_id,
+            )
+        )
+        workspace = result.scalar_one_or_none()
+        return workspace is not None and connectors_suspended(workspace)
 
     async def list_keys(
         self,

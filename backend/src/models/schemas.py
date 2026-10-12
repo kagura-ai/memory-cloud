@@ -1849,6 +1849,17 @@ class CreateAPIKeyRequest(BaseModel):
     name: str
     auto_hide_minutes: int = 10  # Auto-hide after 10 minutes (default)
     bound_context_id: str | None = None  # Issue #626
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_reserved(cls, value: str) -> str:
+        # #1944: ``connector:{id}`` names are resolved to connectors at verify time.
+        from auth.api_keys import CONNECTOR_KEY_PREFIX, CONNECTOR_KEY_PREFIX_RESERVED_MESSAGE
+
+        if value.startswith(CONNECTOR_KEY_PREFIX):
+            raise ValueError(CONNECTOR_KEY_PREFIX_RESERVED_MESSAGE)
+        return value
+
     # Issue #1165: owner-provisioned mints REQUIRE an expiry (the route enforces
     # 400 if omitted for the programmatic path); session self-mint leaves it None
     # (unchanged — no expiry, as today). 1–3650 days mirrors /api/v1/config/api-keys.

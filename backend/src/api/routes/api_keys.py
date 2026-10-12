@@ -11,11 +11,15 @@ from datetime import datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.api_keys import APIKeyManager
+from auth.api_keys import (
+    CONNECTOR_KEY_PREFIX,
+    CONNECTOR_KEY_PREFIX_RESERVED_MESSAGE,
+    APIKeyManager,
+)
 from auth.dependencies import SessionUser, get_current_user
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
@@ -62,6 +66,15 @@ class APIKeyCreate(BaseModel):
     name: str = Field(
         ..., min_length=1, max_length=100, description="Friendly name for the API key"
     )
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_reserved(cls, value: str) -> str:
+        # #1944: ``connector:{id}`` names are resolved to connectors at verify time.
+        if value.startswith(CONNECTOR_KEY_PREFIX):
+            raise ValueError(CONNECTOR_KEY_PREFIX_RESERVED_MESSAGE)
+        return value
+
     # Issue #1537: omitted → server default (365 days); 0 → never expires
     # (explicit opt-in — a key cannot end up without an expiry by accident).
     expires_days: int | None = Field(
