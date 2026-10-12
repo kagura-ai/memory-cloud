@@ -18,6 +18,12 @@ paths:
 ## Authorization (RBAC)
 - Always check workspace access: `PermissionService.check_workspace_access()`
 - Context-level checks for memory operations
+- The context resolvers (`resolve_context_for_workspace_read`, `check_context_access`,
+  `check_context_write`, `check_context_owner`) take a required `capacity=CapacityPolicy`
+  (#1948): `BLOCKED` for anything that reads or writes memory content (refused with
+  `CAPACITY-001` after authorization, #1941), `ALLOWED` for the cleanup / metadata surface.
+  Every REST route is classified in `tests/api/test_capacity_lock_route_table.py` — a new
+  route must be added there (and MCP tools in `mcp_server/tools/_capacity_gate.py`)
 - Never trust client-supplied workspace_id without verification
 
 ## Database Security
