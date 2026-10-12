@@ -116,8 +116,6 @@ class PermissionService:
         # Issue #276: Verify workspace exists and is not deleted
         from sqlalchemy import select
 
-        from models.auth import Workspace
-
         workspace_result = await self.db.execute(
             select(Workspace).where(
                 Workspace.id == workspace_id,
@@ -684,9 +682,7 @@ class PermissionService:
 
         # #1943: the seat check sits right after the membership row, before the
         # owner/admin bypass (the owner always has a seat; no query for them).
-        workspace = await self.db.get(Workspace, context.workspace_id)
-        if workspace is not None:
-            await ensure_member_seated(self.db, workspace, workspace_member)
+        await ensure_member_seated(self.db, context.workspace_id, workspace_member)
 
         # Workspace owner/admin → bypass context checks (full access)
         # Note: allowed_context_ids is ignored for owner/admin

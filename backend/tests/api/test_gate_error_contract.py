@@ -229,6 +229,31 @@ REFUSALS: list[Refusal] = [
         site_literal="resources",
         carries_counts=False,
     ),
+    # #1943: a member without a seat / a context without a writable slot on a
+    # plan below what the workspace holds. Both carry ``limit`` / ``current``
+    # so the client can say "remove N".
+    Refusal(
+        id="plan/members-seat",
+        site="services.plan_suspension:ensure_member_seated",
+        exc=FeatureNotAvailableError(
+            paused_message(_FREE, "members", "max_members_per_workspace", above=1),
+            **paused_details(
+                _FREE, "members", "max_members_per_workspace", above=1, limit=1, current=2
+            ),
+        ),
+        site_literal="members",
+    ),
+    Refusal(
+        id="plan/contexts-slot",
+        site="services.plan_suspension:ensure_context_writable",
+        exc=FeatureNotAvailableError(
+            paused_message(_FREE, "contexts", "max_contexts_per_workspace", above=1),
+            **paused_details(
+                _FREE, "contexts", "max_contexts_per_workspace", above=1, limit=1, current=2
+            ),
+        ),
+        site_literal="contexts",
+    ),
     Refusal(
         id="plan/any-feature-via-quota-service",
         site="services.quota_service:QuotaService.check_feature_access",
@@ -1489,6 +1514,14 @@ MCP_ROUTES: dict[str, tuple[McpRoute, ...]] = {
         McpRoute(_mcp_ingest_suspended, _PLAN_REQUIRED, frozenset({"required_plan", "feature"})),
     ),
     "plan/resources-suspended": (
+        McpRoute(_mcp_ingest_suspended, _PLAN_REQUIRED, frozenset({"required_plan", "feature"})),
+    ),
+    # #1943: the same FeatureNotAvailableError shape through the same envelope
+    # mapper (raised from the membership read / the write paths on MCP).
+    "plan/members-seat": (
+        McpRoute(_mcp_ingest_suspended, _PLAN_REQUIRED, frozenset({"required_plan", "feature"})),
+    ),
+    "plan/contexts-slot": (
         McpRoute(_mcp_ingest_suspended, _PLAN_REQUIRED, frozenset({"required_plan", "feature"})),
     ),
     "quota/connectors": (

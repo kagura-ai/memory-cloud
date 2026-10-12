@@ -401,9 +401,7 @@ class ContextService:
             raise NotFoundException("Context", str(context_id))
         # #1943: remember's authorizer runs through here — a member without a
         # seat is refused after membership (the owner always has one).
-        workspace = await self.db.get(Workspace, context.workspace_id)
-        if workspace is not None:
-            await ensure_member_seated(self.db, workspace, workspace_member)
+        await ensure_member_seated(self.db, context.workspace_id, workspace_member)
 
         # Issue #165: Privacy check - private contexts are creator-only
         if context.is_private and context.created_by != user_id:

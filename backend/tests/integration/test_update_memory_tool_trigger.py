@@ -63,7 +63,7 @@ async def guard_env(db_session):
         Workspace(
             id=ws_id,
             name=f"ws-{uuid.uuid4().hex[:8]}",
-            plan_name="free",
+            plan_name="pro",  # #1943: a second member needs a seat
             owner_user_id=owner,
             daily_api_limit=500,
             weekly_api_limit=2500,

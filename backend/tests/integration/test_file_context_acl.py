@@ -29,6 +29,8 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.workspace_roles import WorkspaceRole
+
+# #1943: these workspaces hold several members; Free seats only the owner, so they run on pro.
 from models.auth import Context, Workspace, WorkspaceMember
 from models.file_objects import FileObject
 from services.file_storage_service import FileStorageService
@@ -72,7 +74,7 @@ def _file(
 async def scenario(db_session: AsyncSession):
     """Workspace + owner/member/viewer/other + a private and a shared context."""
     ws_id = uuid.uuid4()
-    db_session.add(Workspace(id=ws_id, name=f"acl-{ws_id}", owner_user_id=OWNER))
+    db_session.add(Workspace(id=ws_id, name=f"acl-{ws_id}", owner_user_id=OWNER, plan_name="pro"))
     await db_session.flush()
 
     db_session.add_all(
@@ -217,7 +219,9 @@ async def test_reserve_rejects_context_from_another_workspace(scenario, db_sessi
     can't be bound across the workspace boundary."""
     svc, ws = scenario["svc"], scenario["ws"]
     other_ws = uuid.uuid4()
-    db_session.add(Workspace(id=other_ws, name=f"otherws-{other_ws}", owner_user_id=OWNER))
+    db_session.add(
+        Workspace(id=other_ws, name=f"otherws-{other_ws}", owner_user_id=OWNER, plan_name="pro")
+    )
     await db_session.flush()
     foreign_ctx = Context(
         id=uuid.uuid4(), workspace_id=other_ws, name="foreign", created_by=OWNER, is_private=False
@@ -263,7 +267,7 @@ async def test_duplicate_reserve_names_the_existing_file_only_in_its_context(db_
     """
     ws_id, ctx_a, ctx_b = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     sha = "f" * 64
-    db_session.add(Workspace(id=ws_id, name=f"dup-{ws_id}", owner_user_id=OWNER))
+    db_session.add(Workspace(id=ws_id, name=f"dup-{ws_id}", owner_user_id=OWNER, plan_name="pro"))
     await db_session.flush()
     db_session.add(WorkspaceMember(workspace_id=ws_id, user_id=OWNER, role=WorkspaceRole.OWNER))
     db_session.add_all(

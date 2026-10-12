@@ -96,7 +96,6 @@ class TestContextRbac:
         ctx_result = MagicMock()
         ctx_result.scalar_one_or_none.return_value = _context()
         db.execute = AsyncMock(return_value=ctx_result)
-        db.get = AsyncMock(return_value=SimpleNamespace(id=WS))
         svc = PermissionService(db)
         svc.workspace_service.get_member = AsyncMock(
             return_value=SimpleNamespace(id=7, role=WorkspaceRole.ADMIN, allowed_context_ids=None)
@@ -105,8 +104,9 @@ class TestContextRbac:
 
     @pytest.mark.asyncio
     async def test_the_seat_is_checked_before_the_admin_bypass(self, service) -> None:
-        with _seat(_refused()), pytest.raises(FeatureNotAvailableError):
+        with _seat(_refused()) as seat, pytest.raises(FeatureNotAvailableError):
             await service._check_context_access_rbac(USER, CTX, ContextRole.VIEWER)
+        assert seat.await_args.args[1] == WS  # the workspace id; loaded inside the helper
 
     @pytest.mark.asyncio
     async def test_a_private_context_of_the_creator_skips_membership_and_seat(

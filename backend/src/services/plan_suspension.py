@@ -210,7 +210,7 @@ def paused_details(
         above: The value the resuming tier must exceed — ``0`` for a feature
             that is simply off; ``count - 1`` for a cap the workspace is over
             (#1943: the tier that seats everyone / makes every context writable).
-        extra: Further ``details`` keys (e.g. ``limit`` / ``count``).
+        extra: Further ``details`` keys (e.g. ``limit`` / ``current``).
 
     Returns:
         ``gate`` / ``feature`` / ``required_plan`` / ``required_plan_display``
@@ -321,7 +321,7 @@ async def _member_count(db: AsyncSession, workspace_id: UUID) -> int:
 
 
 async def ensure_member_seated(
-    db: AsyncSession, workspace: Workspace, member: WorkspaceMember
+    db: AsyncSession, workspace: Workspace | UUID, member: WorkspaceMember
 ) -> None:
     """Refuse a member without a seat (``FEAT-001`` ``members``, #1943).
 
@@ -331,21 +331,30 @@ async def ensure_member_seated(
 
     Raises:
         FeatureNotAvailableError: 403 ``FEAT-001`` with ``feature="members"``,
-            ``limit`` (the seats) and ``count`` (the members).
+            ``limit`` (the seats) and ``current`` (the members).
     """
+    if member.role == WorkspaceRole.OWNER:
+        return
+    if not isinstance(workspace, Workspace):
+        # The id form (the resolvers' RBAC core, ContextService, MCP): loaded
+        # here, after the owner short-circuit, so the owner costs no query.
+        loaded = await db.get(Workspace, workspace)
+        if loaded is None:
+            return
+        workspace = loaded
     if not await member_seat_suspended(db, workspace, member):
         return
     count = await _member_count(db, workspace.id)
     limit = _seat_limit(workspace, None)
     raise FeatureNotAvailableError(
-        paused_message(workspace.plan_name, SUSPENDED_MEMBERS, MEMBERS_LIMIT_ATTR, above=count - 1),
+        paused_message(workspace.plan_name, "members", MEMBERS_LIMIT_ATTR, above=count - 1),
         **paused_details(
             workspace.plan_name,
-            SUSPENDED_MEMBERS,
+            "members",
             MEMBERS_LIMIT_ATTR,
             above=count - 1,
             limit=limit,
-            count=count,
+            current=count,
         ),
     )
 
@@ -401,7 +410,7 @@ async def ensure_context_writable(db: AsyncSession, context: Context | UUID | st
 
     Raises:
         FeatureNotAvailableError: 403 ``FEAT-001`` with ``feature="contexts"``,
-            ``limit`` (the slots) and ``count`` (the live contexts).
+            ``limit`` (the slots) and ``current`` (the live contexts).
     """
     if not isinstance(context, Context):
         try:
@@ -420,16 +429,14 @@ async def ensure_context_writable(db: AsyncSession, context: Context | UUID | st
     )
     limit = max(workspace.effective_max_contexts, 0)
     raise FeatureNotAvailableError(
-        paused_message(
-            workspace.plan_name, SUSPENDED_CONTEXTS, CONTEXTS_LIMIT_ATTR, above=count - 1
-        ),
+        paused_message(workspace.plan_name, "contexts", CONTEXTS_LIMIT_ATTR, above=count - 1),
         **paused_details(
             workspace.plan_name,
-            SUSPENDED_CONTEXTS,
+            "contexts",
             CONTEXTS_LIMIT_ATTR,
             above=count - 1,
             limit=limit,
-            count=count,
+            current=count,
         ),
     )
 

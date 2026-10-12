@@ -166,7 +166,7 @@ class TestSeats:
         d = exc.value.details
         assert d["gate"] == GATE_PLAN
         assert d["feature"] == SUSPENDED_MEMBERS
-        assert d["limit"] == 1 and d["count"] == 4
+        assert d["limit"] == 1 and d["current"] == 4
         assert d["required_plan"] == "pro"  # 4 members need a 10-seat tier
 
     async def test_the_owner_is_never_refused(self, db_session, seats) -> None:
@@ -200,7 +200,7 @@ class TestContextSlots:
             await ensure_context_writable(db_session, seats["c_new"])
         d = exc.value.details
         assert d["feature"] == SUSPENDED_CONTEXTS and d["gate"] == GATE_PLAN
-        assert d["limit"] == 1 and d["count"] == 3
+        assert d["limit"] == 1 and d["current"] == 3
         assert d["required_plan"] == "basic"  # 3 contexts fit Basic's 3
         await ensure_context_writable(db_session, seats["c_old"])  # the slot holder passes
 
