@@ -24,7 +24,7 @@ from auth.dependencies import APIKeyOrSessionUser, require_workspace_admin
 from auth.workspace_roles import ContextRole
 from db.base import get_db
 from models.retrieval_feedback import NOTE_MAX_LEN, QUERY_MAX_LEN
-from services.capacity_lock import CapacityPolicy
+from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.feedback_service import (
     HOST_EXPERIMENT_ID_MAX_LEN,
     HOST_VERDICT_REFERENCE_MAX_LEN,
@@ -197,12 +197,16 @@ async def record_host_feedback(
             context_id,
             required_role="admin",
             key_workspace_id=user.get("api_key_workspace_id"),
-            capacity=CapacityPolicy.BLOCKED,  # #1941/#1948: like MCP feedback
+            # The lock runs below, AFTER the selected-workspace confinement, so
+            # a context outside it keeps its uniform 404 (#1941 ordering).
+            capacity=CapacityPolicy.ALLOWED,
         )
         # Session/global-key operators are membership-authorized across their
         # workspaces; this mutation is deliberately confined to the selected one.
         if context.workspace_id != active_workspace_id:
             raise NotFoundException("Context")
+        # #1941: blocked on a workspace over its Free capacity, like MCP feedback.
+        await ensure_not_capacity_locked(perm.db, context.workspace_id, user_id=user_id)
 
         # Three credential shapes reach this operator endpoint (all built in
         # auth.dependencies): API keys carry api_key_workspace_id, OAuth

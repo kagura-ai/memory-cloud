@@ -69,6 +69,7 @@ def _capacity_gate_needs_a_session(monkeypatch):
 _CAPACITY_GATED_ROUTES = (
     ("services.permission_service", "ensure_not_capacity_locked"),
     ("api.routes.share_keys", "ensure_context_not_capacity_locked"),
+    ("api.routes.feedback", "ensure_not_capacity_locked"),
     ("api.routes.analyses", "ensure_not_capacity_locked"),
     ("api.routes.sleep_reports", "ensure_not_capacity_locked"),
     ("api.routes.agents", "ensure_not_capacity_locked"),

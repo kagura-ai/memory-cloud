@@ -103,7 +103,8 @@ class TestResolveForWorkspaceRead:
             )
         assert order == ["membership", "binding", "capacity"]
         assert ensure.await_args.args[1] == WS
-        assert ensure.await_args.kwargs == {"user_id": USER}
+        # Membership is established above, so no redaction read is needed.
+        assert ensure.await_args.kwargs == {}
 
     @pytest.mark.asyncio
     async def test_allowed_never_reads_the_lock(self, service) -> None:
@@ -128,6 +129,18 @@ class TestResolveForWorkspaceRead:
                 user_id=USER, context_id=CTX, capacity=CapacityPolicy.BLOCKED
             )
         ensure.assert_not_awaited()
+
+
+class TestFailClosed:
+    @pytest.mark.asyncio
+    async def test_a_non_enum_value_gates(self) -> None:
+        """``"blocked"`` (or any stray value) is not a way around the lock."""
+        svc = PermissionService(MagicMock())
+        svc._check_context_access_rbac = AsyncMock(return_value=(_context(), ContextRole.OWNER))
+        svc._apply_agent_binding_filter = AsyncMock(return_value=None)
+        for value in ("blocked", "whatever", None):
+            with _lock(_locked()), pytest.raises(CapacityLockedError):
+                await svc.check_context_access(USER, CTX, capacity=value)  # type: ignore[arg-type]
 
 
 class TestCheckContextAccess:

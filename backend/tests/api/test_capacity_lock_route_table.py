@@ -68,18 +68,10 @@ ROUTER_DEFAULTS: dict[str, str] = {
     "workers": NOT_APPLICABLE,
     "workspace_connectors": NOT_APPLICABLE,
     "workspace_plan": NOT_APPLICABLE,
-    # Metadata-only surfaces: counts, usage, members, tokens, schemas. They
-    # are what an owner uses to find their way back under the cap.
-    "workspace": ALLOWED,
-    "workspaces": ALLOWED,
-    "resources": ALLOWED,
-    "resource_indexer": ALLOWED,
-    "resource_schema": ALLOWED,
-    "resource_tokens": ALLOWED,
-    # Attachments were not gated by #1941 (bytes count toward the storage
-    # limit when confirmed); kept as they are.
-    "attachments": ALLOWED,
 }
+# No router defaults to ALLOWED: a router that touches workspace data lists
+# every route explicitly below, so a new content-reading route there cannot
+# slip through on a default.
 
 # Layer 2 — content routers: every route named, no default.
 ROUTES: dict[tuple[str, str], str] = {
@@ -171,6 +163,51 @@ ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/files"): ALLOWED,
     ("GET", "/api/v1/files/{file_id}/download-url"): ALLOWED,
     ("DELETE", "/api/v1/files/{file_id}"): ALLOWED,
+    # workspace / workspaces — counts, usage, members, settings: the way back
+    # under the cap. Content-derived analytics (timelines, activity) stay
+    # readable as #1941 decided.
+    ("GET", "/api/v1/workspace/embedding-status"): ALLOWED,
+    ("GET", "/api/v1/workspace/stats"): ALLOWED,
+    ("GET", "/api/v1/workspace/usage/breakdown"): ALLOWED,
+    ("GET", "/api/v1/workspace/usage/current"): ALLOWED,
+    ("GET", "/api/v1/workspace/usage/history"): ALLOWED,
+    ("GET", "/api/v1/workspace/usage/members"): ALLOWED,
+    ("GET", "/api/v1/workspaces"): ALLOWED,
+    ("POST", "/api/v1/workspaces"): ALLOWED,
+    ("GET", "/api/v1/workspaces/{workspace_id}"): ALLOWED,
+    ("PUT", "/api/v1/workspaces/{workspace_id}"): ALLOWED,
+    ("DELETE", "/api/v1/workspaces/{workspace_id}"): ALLOWED,
+    ("GET", "/api/v1/workspaces/{workspace_id}/contexts/stats"): ALLOWED,
+    ("GET", "/api/v1/workspaces/{workspace_id}/contexts/{context_id}/public-api-stats"): ALLOWED,
+    ("GET", "/api/v1/workspaces/{workspace_id}/contexts/{context_id}/usage-timeline"): ALLOWED,
+    ("GET", "/api/v1/workspaces/{workspace_id}/contexts/{context_id}/user-activity"): ALLOWED,
+    ("GET", "/api/v1/workspaces/{workspace_id}/members"): ALLOWED,
+    ("POST", "/api/v1/workspaces/{workspace_id}/members"): ALLOWED,
+    ("PUT", "/api/v1/workspaces/{workspace_id}/members/{user_id}"): ALLOWED,
+    ("DELETE", "/api/v1/workspaces/{workspace_id}/members/{user_id}"): ALLOWED,
+    ("PUT", "/api/v1/workspaces/{workspace_id}/members/{user_id}/context-access"): ALLOWED,
+    ("GET", "/api/v1/workspaces/{workspace_id}/memory-timeline"): ALLOWED,
+    ("GET", "/api/v1/workspaces/{workspace_id}/openai-key-status"): ALLOWED,
+    ("GET", "/api/v1/workspaces/{workspace_id}/stats"): ALLOWED,
+    ("POST", "/api/v1/workspaces/{workspace_id}/transfer-ownership"): ALLOWED,
+    ("PUT", "/api/v1/workspaces/{workspace_id}/switch"): ALLOWED,
+    # resources — tokens, schemas, impact and the indexer status are metadata
+    ("GET", "/api/v1/resources"): ALLOWED,
+    ("GET", "/api/v1/resources/{resource_id}/events"): ALLOWED,
+    ("GET", "/api/v1/resources/{resource_id}/indexer-status"): ALLOWED,
+    ("GET", "/api/v1/resources/{resource_id}/impact"): ALLOWED,
+    ("GET", "/api/v1/resources/{resource_id}/schema"): ALLOWED,
+    ("POST", "/api/v1/resources/{resource_id}/schema"): ALLOWED,
+    ("GET", "/api/v1/resource-tokens"): ALLOWED,
+    ("POST", "/api/v1/resource-tokens"): ALLOWED,
+    ("PATCH", "/api/v1/resource-tokens/{token_id}"): ALLOWED,
+    ("DELETE", "/api/v1/resource-tokens/{token_id}"): ALLOWED,
+    # attachments — not gated by #1941 (bytes count toward the storage limit
+    # when confirmed); kept as they are
+    ("GET", "/api/v1/attachments/memories/{memory_id}"): ALLOWED,
+    ("POST", "/api/v1/attachments/memories/{memory_id}"): ALLOWED,
+    ("GET", "/api/v1/attachments/{attachment_id}"): ALLOWED,
+    ("DELETE", "/api/v1/attachments/{attachment_id}"): ALLOWED,
     # resource ingest — MCP ingest_events
     ("POST", "/api/v1/resources/{resource_id}/events"): BLOCKED,
     ("POST", "/api/v1/resources/{resource_id}/events/batch"): BLOCKED,
@@ -190,6 +227,13 @@ CONTENT_ROUTERS = {
     "agents",
     "files",
     "resource_ingest",
+    "workspace",
+    "workspaces",
+    "resources",
+    "resource_indexer",
+    "resource_schema",
+    "resource_tokens",
+    "attachments",
 }
 
 
@@ -233,7 +277,11 @@ def _walk():
             if not methods or path is None:
                 continue
             full = prefix + path
-            if "/mcp" in full or full in ("/openapi.json", "/docs/oauth2-redirect"):
+            if (
+                full == "/mcp"
+                or full.startswith("/mcp/")
+                or full in ("/openapi.json", "/docs/oauth2-redirect")
+            ):
                 continue
             for method in methods - {"HEAD", "OPTIONS"}:
                 yield method, full, route.endpoint

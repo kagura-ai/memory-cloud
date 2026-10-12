@@ -201,7 +201,7 @@ class TestHostFeedbackRoute:
             context_id,
             required_role="admin",
             key_workspace_id=OPERATOR_USER["api_key_workspace_id"],
-            capacity=CapacityPolicy.BLOCKED,
+            capacity=CapacityPolicy.ALLOWED,  # the lock runs after the confinement check
         )
         service.record_host_feedback.assert_awaited_once_with(
             context_id=context_id,

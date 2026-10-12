@@ -484,7 +484,11 @@ class TestResourceIngest:
         ws = SimpleNamespace(id=uuid4(), plan_name="free")
         context = SimpleNamespace(id=uuid4(), resource_id="res", workspace_id=ws.id)
         token = SimpleNamespace(
-            id=1, public_id="rtok_x", resource_pk=uuid4(), quota_events_per_hour=100
+            id=1,
+            public_id="rtok_x",
+            resource_pk=uuid4(),
+            quota_events_per_hour=100,
+            created_by="owner",
         )
         manager = MagicMock(verify_token=AsyncMock(return_value=token))
         order: list[str] = []
@@ -508,10 +512,11 @@ class TestResourceIngest:
             await ri.verify_resource_token(
                 resource_id="res", request=MagicMock(), x_resource_api_key="k", db=db
             )
-        # After the #1939 plan pause; the token is not a member, so no numbers.
+        # After the #1939 plan pause; the token's creator is a member (the
+        # membership gate ran first) and gets the numbers.
         assert order == ["plan_pause", "capacity"]
         assert ensure.await_args.args[1] is ws
-        assert ensure.await_args.kwargs == {"outsider": True}
+        assert ensure.await_args.kwargs == {"user_id": "owner"}
 
 
 # ---------------------------------------------------------------------------
