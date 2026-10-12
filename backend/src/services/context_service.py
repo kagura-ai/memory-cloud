@@ -363,6 +363,10 @@ class ContextService:
         perm_service = PermissionService(self.db)
         try:
             return await perm_service.get_accessible_contexts(user_id, workspace_id)
+        except FeatureNotAvailableError:
+            # #1943: a member without a seat is refused, not shown an empty
+            # workspace — the same 403 FEAT-001 every other route answers.
+            raise
         except Exception as e:
             if raise_on_lookup_error:
                 raise ContextListingFailedError(str(e)) from e
@@ -953,8 +957,6 @@ class ContextService:
         # Validate owner access to both contexts
         source = await self.get_context(user_id, source_context_id)
         target = await self.get_context(user_id, target_context_id)
-        # #1943: merging copies memories into the target — a content write.
-        await ensure_context_writable(self.db, target)
 
         # Owner-only: merge is a privileged operation
         perm_service = PermissionService(self.db)
@@ -965,6 +967,9 @@ class ContextService:
         await perm_service.check_context_owner(
             user_id, target_context_id, capacity=CapacityPolicy.ALLOWED
         )
+        # #1943: merging copies memories into the target — a content write.
+        # After the owner checks, so the slot never answers before authorization.
+        await ensure_context_writable(self.db, target)
 
         # Same workspace required
         if source.workspace_id != target.workspace_id:

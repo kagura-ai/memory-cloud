@@ -38,7 +38,7 @@ from models.auth import Context, ExternalAPIKey, User, Workspace
 from models.schemas import OpenAIKeyStatusResponse
 from services.email_service import get_email_service
 from services.permission_service import PermissionService
-from services.plan_suspension import seat_paused_member_ids
+from services.plan_suspension import seat_limit
 from services.workspace_ownership_service import WorkspaceOwnershipService
 from services.workspace_service import WorkspaceService
 from utils.auth_helpers import get_user_id
@@ -634,12 +634,12 @@ async def list_members(
     )
 
     members = await workspace_service.list_members(workspace_id)
-    # #1943: which members have no seat on the plan (so the owner can choose
-    # whom to remove); empty on a plan with room for everyone.
+    # #1943: ``list_members`` is ordered by the seat ranking, so the first
+    # ``seat_limit`` rows hold the seats and the rest are paused — the flag
+    # is the row's position, no second query, and it cannot drift from the
+    # order the list is shown in.
     workspace_row = await db.get(Workspace, workspace_id)
-    seat_paused_ids = (
-        await seat_paused_member_ids(db, workspace_row) if workspace_row is not None else set()
-    )
+    seats = seat_limit(workspace_row) if workspace_row is not None else len(members)
 
     # Fetch user details + credentials status for each member
     from sqlalchemy import and_, func
@@ -647,7 +647,7 @@ async def list_members(
     from models.auth import APIKey, OAuth2Client
 
     member_responses = []
-    for m in members:
+    for position, m in enumerate(members):
         # Get user details from database
         user_result = await db.execute(select(User).where(User.user_id == m.user_id))
         user_record = user_result.scalar_one_or_none()
@@ -732,7 +732,7 @@ async def list_members(
                 user_email=user_record.email if user_record else None,
                 role=m.role,
                 joined_at=to_utc_iso(m.joined_at),
-                seat_paused=m.id in seat_paused_ids,
+                seat_paused=position >= seats,  # #1943
                 credentials_status=credentials_status,
                 last_login_at=to_utc_iso(user_record.last_login_at) if user_record else None,
                 allowed_context_ids=allowed_context_ids_str,

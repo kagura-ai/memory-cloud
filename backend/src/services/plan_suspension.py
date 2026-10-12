@@ -26,6 +26,7 @@ from uuid import UUID
 
 from sqlalchemy import Select, and_, case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from auth.resource_tokens import workspace_regular_active_tokens
 from auth.workspace_roles import WorkspaceRole
@@ -266,16 +267,39 @@ CONTEXTS_LIMIT_ATTR: Final = "max_contexts_per_workspace"
 
 
 def seat_order() -> tuple[Any, ...]:
-    """Owner first, then earliest join (``invited_at`` for a legacy row), then id."""
+    """Owner first, then earliest join (``invited_at`` for a legacy row), then id.
+
+    "Owner" is the ``owner`` role or the workspace's ``owner_user_id`` — the
+    same two tests ``member_seat_suspended`` short-circuits on, so the ranking,
+    the refusal and the ``seat_paused`` flags can never disagree.
+    """
+    owner_of_workspace = (
+        select(Workspace.owner_user_id)
+        .where(Workspace.id == WorkspaceMember.workspace_id)
+        .scalar_subquery()
+    )
     return (
-        case((WorkspaceMember.role == WorkspaceRole.OWNER, 0), else_=1),
+        case(
+            (
+                or_(
+                    WorkspaceMember.role == WorkspaceRole.OWNER,
+                    WorkspaceMember.user_id == owner_of_workspace,
+                ),
+                0,
+            ),
+            else_=1,
+        ),
         func.coalesce(WorkspaceMember.joined_at, WorkspaceMember.invited_at).asc().nulls_last(),
         WorkspaceMember.id.asc(),
     )
 
 
+def seat_limit(workspace: Workspace) -> int:
+    """The seats the plan gives this workspace — at least one; the owner always sits."""
+    return _seat_limit(workspace, None)
+
+
 def _seat_limit(workspace: Workspace, limit: int | None) -> int:
-    """At least one seat — the owner always sits."""
     return max(workspace.effective_max_members if limit is None else limit, 1)
 
 
@@ -308,13 +332,13 @@ async def member_seat_suspended(
 ) -> bool:
     """Whether ``member`` has no seat on the workspace's plan (#1943).
 
-    The owner always has one (no query). Under a one-seat plan every other
-    member is seat-less (no query). Otherwise one ranked SELECT decides.
+    The owner always has one (no query). Otherwise one ranked SELECT decides —
+    also under a one-seat plan, where the seat goes to whoever ranks first
+    (the owner when it holds a membership row), the same answer
+    ``seat_paused_member_ids`` and the members list give.
     """
     if member.role == WorkspaceRole.OWNER or member.user_id == workspace.owner_user_id:
         return False
-    if _seat_limit(workspace, None) <= 1:
-        return True
     return member.id not in await seated_member_ids(db, workspace)
 
 
@@ -368,7 +392,7 @@ async def ensure_member_seated(
     )
 
 
-def _live_contexts(workspace_id: UUID):
+def _live_contexts(workspace_id: UUID) -> ColumnElement[bool]:
     return and_(Context.workspace_id == workspace_id, Context.deleted_at.is_(None))
 
 

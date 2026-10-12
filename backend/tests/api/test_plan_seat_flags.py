@@ -34,32 +34,49 @@ def _generic_db(workspace) -> MagicMock:
 
 class TestMembersList:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("paused", [True, False])
-    async def test_seat_paused_follows_the_helper(self, paused: bool) -> None:
+    async def test_seat_paused_is_the_rows_position_past_the_plans_seats(self) -> None:
+        """``list_members`` is ordered by the seat ranking; the first
+        ``seat_limit`` rows hold the seats, the rest are paused — no second query."""
         from api.routes import workspaces as ws_routes
 
         ws_id = uuid4()
-        member = SimpleNamespace(
-            id=7, user_id="u2", role="member", joined_at=utcnow(), allowed_context_ids=None
-        )
-        service = MagicMock(list_members=AsyncMock(return_value=[member]))
-        db = _generic_db(SimpleNamespace(id=ws_id, plan_name="free"))
+        rows_in = [
+            SimpleNamespace(
+                id=i, user_id=f"u{i}", role=role, joined_at=utcnow(), allowed_context_ids=None
+            )
+            for i, role in ((1, "owner"), (2, "member"), (3, "member"))
+        ]
+        service = MagicMock(list_members=AsyncMock(return_value=rows_in))
+        db = _generic_db(SimpleNamespace(id=ws_id, plan_name="free", effective_max_members=2))
         with (
             patch.object(ws_routes, "authorize_workspace_management", AsyncMock()),
             patch.object(ws_routes, "WorkspaceService", return_value=service),
-            patch.object(
-                ws_routes,
-                "seat_paused_member_ids",
-                AsyncMock(return_value={7} if paused else set()),
-            ) as helper,
         ):
             response = await ws_routes.list_members(
                 workspace_id=ws_id, user={"user_id": "o"}, db=db
             )
-        helper.assert_awaited_once()
         rows = response if isinstance(response, list) else response.members
-        assert rows[0].user_id == "u2"
-        assert rows[0].seat_paused is paused
+        assert [r.user_id for r in rows] == ["u1", "u2", "u3"]  # the service's order, kept
+        assert [r.seat_paused for r in rows] == [False, False, True]
+
+    @pytest.mark.asyncio
+    async def test_no_workspace_row_pauses_nobody(self) -> None:
+        from api.routes import workspaces as ws_routes
+
+        member = SimpleNamespace(
+            id=7, user_id="u2", role="member", joined_at=utcnow(), allowed_context_ids=None
+        )
+        service = MagicMock(list_members=AsyncMock(return_value=[member]))
+        db = _generic_db(None)
+        with (
+            patch.object(ws_routes, "authorize_workspace_management", AsyncMock()),
+            patch.object(ws_routes, "WorkspaceService", return_value=service),
+        ):
+            response = await ws_routes.list_members(
+                workspace_id=uuid4(), user={"user_id": "o"}, db=db
+            )
+        rows = response if isinstance(response, list) else response.members
+        assert rows[0].seat_paused is False
 
 
 class TestContextsList:

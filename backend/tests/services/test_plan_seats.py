@@ -262,3 +262,48 @@ class TestTieBreaks:
         older, newer = (a, b) if a.id < b.id else (b, a)
         assert not await context_writes_suspended(db_session, ws, older)
         assert await context_writes_suspended(db_session, ws, newer)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+class TestOwnerIdentity:
+    """The ranking and the refusal agree on who the owner is: the ``owner``
+    role or ``workspace.owner_user_id`` — never only one of the two."""
+
+    async def test_the_owner_user_id_row_ranks_first_whatever_its_role(self, db_session) -> None:
+        owner = await _user(db_session, "owner")
+        ws = await _workspace(db_session, "free", owner)
+        # A desynced owner row (role admin) and an older member row.
+        owner_row = (
+            await db_session.execute(
+                __import__("sqlalchemy")
+                .select(WorkspaceMember)
+                .where(WorkspaceMember.workspace_id == ws.id, WorkspaceMember.user_id == owner)
+            )
+        ).scalar_one()
+        owner_row.role = WorkspaceRole.ADMIN
+        owner_row.joined_at = T0 + timedelta(days=9)
+        elder = await _member(db_session, ws, await _user(db_session, "elder"), joined_at=T0)
+        await db_session.flush()
+
+        assert await seat_paused_member_ids(db_session, ws) == {elder.id}
+        assert not await member_seat_suspended(db_session, ws, owner_row)
+        assert await member_seat_suspended(db_session, ws, elder)
+
+    async def test_without_an_owner_row_the_one_seat_goes_to_the_first_member(
+        self, db_session
+    ) -> None:
+        owner = await _user(db_session, "owner")
+        ws = await _workspace(db_session, "free", owner)
+        await db_session.execute(
+            __import__("sqlalchemy")
+            .delete(WorkspaceMember)
+            .where(WorkspaceMember.workspace_id == ws.id, WorkspaceMember.user_id == owner)
+        )
+        first = await _member(db_session, ws, await _user(db_session, "a"), joined_at=T0)
+        second = await _member(
+            db_session, ws, await _user(db_session, "b"), joined_at=T0 + timedelta(days=1)
+        )
+        # The refusal, the flags and the list order give the same answer.
+        assert await seat_paused_member_ids(db_session, ws) == {second.id}
+        assert not await member_seat_suspended(db_session, ws, first)
+        assert await member_seat_suspended(db_session, ws, second)
