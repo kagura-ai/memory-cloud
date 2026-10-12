@@ -29,7 +29,7 @@ from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
 from models.sleep import SleepMode
 from services.capacity_lock import CapacityPolicy
 from services.identity_link_service import is_same_owner, owned_by
-from services.plan_suspension import ensure_member_seated
+from services.plan_suspension import ensure_context_writable, ensure_member_seated
 from utils.datetime import utcnow
 from utils.exceptions import (
     ConflictError,
@@ -954,8 +954,6 @@ class ContextService:
         source = await self.get_context(user_id, source_context_id)
         target = await self.get_context(user_id, target_context_id)
         # #1943: merging copies memories into the target — a content write.
-        from services.plan_suspension import ensure_context_writable
-
         await ensure_context_writable(self.db, target)
 
         # Owner-only: merge is a privileged operation

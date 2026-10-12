@@ -22,7 +22,7 @@ async def test_merge_into_a_context_without_a_slot_is_refused() -> None:
     refused = FeatureNotAvailableError("paused", gate="plan", feature="contexts")
     with (
         patch(
-            "services.plan_suspension.ensure_context_writable", AsyncMock(side_effect=refused)
+            "services.context_service.ensure_context_writable", AsyncMock(side_effect=refused)
         ) as slot,
         patch("services.permission_service.PermissionService") as perm_cls,
         pytest.raises(FeatureNotAvailableError),

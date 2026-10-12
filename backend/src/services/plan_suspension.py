@@ -11,6 +11,12 @@ The predicates test the EFFECTIVE limit dropping to ``<= 0``, never
 ``has_feature``. Feature flags gate *creation* only; Basic and Pro keep
 positive serve-only limits so objects made on a higher plan keep serving
 (#1551), and a flag check here would stop those too.
+
+#1943 adds a second kind of pause: when a plan's cap is POSITIVE but below what
+the workspace holds, the members beyond the seats and the contexts beyond the
+writable slots are refused one by one (ranked, so the owner and the oldest
+contexts always keep theirs). Unlike the four predicates above these need a
+query; the same "nothing stored, re-read at use time" stance applies.
 """
 
 from __future__ import annotations
@@ -256,7 +262,7 @@ MEMBERS_LIMIT_ATTR: Final = "max_members_per_workspace"
 CONTEXTS_LIMIT_ATTR: Final = "max_contexts_per_workspace"
 
 
-def _seat_order() -> tuple[Any, ...]:
+def seat_order() -> tuple[Any, ...]:
     """Owner first, then earliest join (``invited_at`` for a legacy row), then id."""
     return (
         case((WorkspaceMember.role == WorkspaceRole.OWNER, 0), else_=1),
@@ -277,7 +283,7 @@ async def seated_member_ids(
     rows = await db.scalars(
         select(WorkspaceMember.id)
         .where(WorkspaceMember.workspace_id == workspace.id)
-        .order_by(*_seat_order())
+        .order_by(*seat_order())
         .limit(_seat_limit(workspace, limit))
     )
     return set(rows.all())

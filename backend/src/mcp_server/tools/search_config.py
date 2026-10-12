@@ -60,8 +60,10 @@ async def handle_update_search_config(
                 await perm_service.check_context_write(
                     user_id, ctx_uuid, capacity=CapacityPolicy.ALLOWED
                 )
-                # #1943: search settings are a content write; a context without
-                # a writable slot on the plan refuses it (like the REST twin).
+                # #1943: search settings change how the context's content is
+                # searched — treated as a content write, not metadata, like the
+                # REST twin. Resolved at call time on purpose (tests patch and
+                # guard the helper at ``services.plan_suspension``).
                 from services.plan_suspension import ensure_context_writable
 
                 await ensure_context_writable(db, ctx_uuid)

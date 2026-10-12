@@ -73,6 +73,7 @@ _CAPACITY_GATED_ROUTES = (
     ("services.plan_suspension", "ensure_context_writable"),
     ("services.permission_service", "ensure_context_writable"),
     ("services.context_service", "ensure_member_seated"),
+    ("services.context_service", "ensure_context_writable"),
     ("services.file_storage_service", "ensure_context_writable"),
     ("api.routes.share_keys", "ensure_context_not_capacity_locked"),
     ("api.routes.feedback", "ensure_not_capacity_locked"),

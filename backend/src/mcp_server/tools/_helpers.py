@@ -481,6 +481,8 @@ async def _resolve_context(
     if access == "write":
         # #1943: a content write into a context without a writable slot on the
         # plan is refused (FEAT-001 contexts), like the REST twins.
+        # Resolved at call time on purpose: tests patch and guard the helper
+        # at ``services.plan_suspension`` (no import cycle is being avoided).
         from services.plan_suspension import ensure_context_writable
 
         await ensure_context_writable(db, context)
@@ -543,6 +545,8 @@ async def _resolve_context_for_read(
     if access == "write":
         # #1943: a content write into a context without a writable slot on the
         # plan is refused (FEAT-001 contexts), like the REST twins.
+        # Resolved at call time on purpose: tests patch and guard the helper
+        # at ``services.plan_suspension`` (no import cycle is being avoided).
         from services.plan_suspension import ensure_context_writable
 
         await ensure_context_writable(db, context)
@@ -713,6 +717,7 @@ async def _get_workspace_member_role(
     # #1943: a member without a seat on the plan is refused (FEAT-001), after
     # membership — the dispatcher's exception mapper renders the same envelope
     # as the other plan pauses.
+    # Resolved at call time on purpose (tests patch/guard ``services.plan_suspension``).
     from services.plan_suspension import ensure_member_seated
 
     await ensure_member_seated(db, workspace_id, member)

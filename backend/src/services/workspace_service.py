@@ -17,6 +17,7 @@ from models.auth import Context, ExternalAPIKey, UsageStats, Workspace, Workspac
 from models.memory import Memory
 from services.billing_contract import ensure_no_billing_contract
 from services.memory_counts import count_live_memories
+from services.plan_suspension import seat_order
 from services.quota_service import QuotaService
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import utcnow
@@ -726,11 +727,10 @@ class WorkspaceService:
         stmt = (
             select(WorkspaceMember)
             .where(WorkspaceMember.workspace_id == workspace_id)
-            .order_by(
-                # Owner first, then admin, member, viewer
-                WorkspaceMember.role.desc(),
-                WorkspaceMember.joined_at,
-            )
+            # #1943: the seat ranking — owner first, then earliest join, then
+            # id — so the list order matches ``seat_paused`` (the first N rows
+            # hold the seats). The old ``role.desc()`` was string order.
+            .order_by(*seat_order())
         )
 
         result = await self.db.execute(stmt)

@@ -1602,7 +1602,14 @@ anonymous public serving are suspended there too — except that a tier whose
 contexts anonymously (`public_calls_per_day` itself has no override).
 The same evaluation applies between paid tiers (an XL → L drop seats the first 10 members and
 keeps the oldest 20 contexts writable), and to an admin-managed Free workspace with several
-members. `GET /api/v1/workspaces/{id}/plan` lists what is suspended in `suspended`
+members.
+
+**Before upgrading a self-hosted deployment** whose Free workspaces hold more than one member
+or context (a team on the default Free workspace, say): set `PLAN_FREE_MAX_MEMBERS_PER_WORKSPACE`
+/ `PLAN_FREE_MAX_CONTEXTS_PER_WORKSPACE` to what they hold first. There is no grace period — the
+seats and slots take effect on the first request after the upgrade, and every member but the owner
+of an over-cap Free workspace would answer `403 FEAT-001` until the cap is raised or members are
+removed. Nothing is deleted either way. `GET /api/v1/workspaces/{id}/plan` lists what is suspended in `suspended`
 (only features the workspace still has something for), and the web UI shows
 the owner a banner.
 
