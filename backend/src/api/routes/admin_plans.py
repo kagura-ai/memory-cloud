@@ -37,6 +37,7 @@ from models.memory import Memory
 from models.resource import WorkspaceAddon  # Issue #665: row-based admin grants
 from services.addon_calculator_service import ADDON_UNIT_VALUES, AddonCalculatorService
 from services.effective_quota_service import EffectiveQuotaService
+from services.memory_counts import count_live_memories
 from utils import db_transaction
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
@@ -746,14 +747,8 @@ async def get_workspace_quotas(
         effective_service = EffectiveQuotaService(db)
         effective = await effective_service.get_effective_quotas(ws_uuid)
 
-        # Get usage: memories count
-        memory_count_result = await db.execute(
-            select(func.count(Memory.id)).where(
-                Memory.workspace_id == ws_uuid,
-                Memory.deleted_at.is_(None),
-            )
-        )
-        memory_count = memory_count_result.scalar() or 0
+        # Get usage: memories count (the shared workspace-scoped count, #1946)
+        memory_count = await count_live_memories(db, ws_uuid)
 
         # Get usage: context count (non-deleted only)
         context_count_result = await db.execute(
@@ -1025,13 +1020,7 @@ async def _count_addon_usage(db: AsyncSession, workspace_id: UUID, guard_kind: s
         )
         return result.scalar() or 0
     if guard_kind == "memory":
-        result = await db.execute(
-            select(func.count(Memory.id)).where(
-                Memory.workspace_id == workspace_id,
-                Memory.deleted_at.is_(None),
-            )
-        )
-        return result.scalar() or 0
+        return await count_live_memories(db, workspace_id)
     if guard_kind == "sleep_contexts":
         result = await db.execute(
             select(func.count(Context.id)).where(

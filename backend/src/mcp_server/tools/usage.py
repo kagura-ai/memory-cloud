@@ -23,9 +23,9 @@ async def handle_get_usage(
 
     from db.base import get_db
     from models.auth import Context, Workspace, WorkspaceMember
-    from models.memory import Memory
     from services.capacity_lock import capacity_lock_state
     from services.effective_quota_service import EffectiveQuotaService
+    from services.memory_counts import count_live_memories
     from services.quota_service import QuotaService
 
     start_time = time.time()
@@ -41,13 +41,7 @@ async def handle_get_usage(
             if not workspace:
                 return _error_response("workspace_not_found", f"Workspace {workspace_id} not found")
 
-            mem_result = await db.execute(
-                select(func.count(Memory.id)).where(
-                    Memory.workspace_id == workspace_id,
-                    Memory.deleted_at.is_(None),
-                )
-            )
-            memory_count = mem_result.scalar() or 0
+            memory_count = await count_live_memories(db, workspace_id)
 
             ctx_result = await db.execute(
                 select(func.count(Context.id)).where(
