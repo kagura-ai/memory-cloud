@@ -217,7 +217,10 @@ class TestMemoryAccessControl:
 
     @pytest.fixture
     def service(self):
-        return PermissionService(MagicMock())
+        svc = PermissionService(MagicMock())
+        # #1943: the seat check reads the caller's membership row; no row here.
+        svc.workspace_service.get_member = AsyncMock(return_value=None)
+        return svc
 
     @pytest.mark.asyncio
     async def test_owner_can_access_own_memory(self, service):

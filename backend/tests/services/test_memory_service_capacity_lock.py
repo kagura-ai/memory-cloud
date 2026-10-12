@@ -312,3 +312,91 @@ class TestStillAllowed:
         with pytest.raises(RuntimeError, match="stop after"):
             await service.forget(ForgetRequest(query="old notes", k=5), "u", uuid4())
         assert service.recall.await_args.kwargs.get("capacity_gate") is False
+
+
+class TestWritableSlot:
+    """#1943: the content writes also ask whether the target context holds a
+    writable slot on the plan — after the capacity lock, never on reads."""
+
+    @pytest.fixture
+    def no_slot(self):
+        from utils.exceptions import FeatureNotAvailableError
+
+        with (
+            patch("services.capacity_lock.ensure_not_capacity_locked", AsyncMock()),
+            patch("services.capacity_lock.ensure_contexts_not_capacity_locked", AsyncMock()),
+            patch(
+                "services.plan_suspension.ensure_context_writable",
+                AsyncMock(
+                    side_effect=FeatureNotAvailableError(
+                        "Feature 'contexts' is paused", gate="plan", feature="contexts"
+                    )
+                ),
+            ) as slot,
+        ):
+            yield slot
+
+    @pytest.mark.asyncio
+    async def test_remember_asks_for_the_target_contexts_slot(self, no_slot) -> None:
+        from utils.exceptions import FeatureNotAvailableError
+
+        service = _service()
+        ctx = uuid4()
+        service._get_context_isolation_params = AsyncMock(  # type: ignore[method-assign]
+            return_value=(MagicMock(), str(uuid4()), str(ctx))
+        )
+        with pytest.raises(FeatureNotAvailableError):
+            await service.remember(
+                RememberRequest(summary="a summary long enough", content="body", type="note"),
+                user_id="u",
+                current_context_id=ctx,
+            )
+        assert no_slot.await_args.args[1] == str(ctx)
+
+    @pytest.mark.asyncio
+    async def test_update_memory_asks_for_the_memorys_contexts_slot(self, no_slot) -> None:
+        from utils.exceptions import FeatureNotAvailableError
+
+        service = _service()
+        ctx = uuid4()
+        service._update_load_authorized = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(workspace_id=uuid4(), context_id=ctx)
+        )
+        with pytest.raises(FeatureNotAvailableError):
+            await service.update_memory(
+                UpdateMemoryRequest(memory_id=uuid4(), summary="new summary text"),
+                user_id="u",
+                current_context_id=uuid4(),
+            )
+        assert no_slot.await_args.args[1] == ctx
+
+    @pytest.mark.asyncio
+    async def test_patch_memory_asks_for_the_memorys_contexts_slot(self, no_slot) -> None:
+        from utils.exceptions import FeatureNotAvailableError
+
+        service = _service()
+        ctx = uuid4()
+        service._patch_load_authorized = AsyncMock(  # type: ignore[method-assign]
+            return_value=SimpleNamespace(workspace_id=uuid4(), context_id=ctx)
+        )
+        with pytest.raises(FeatureNotAvailableError):
+            await service.patch_memory(
+                uuid4(), PatchMemoryRequest(summary="a changed summary"), "u"
+            )
+        assert no_slot.await_args.args[1] == ctx
+
+    @pytest.mark.asyncio
+    async def test_recall_never_asks_for_a_slot(self, no_slot) -> None:
+        service = _service()
+        service._recall_check_agent_bindings = AsyncMock()  # type: ignore[method-assign]
+        service._recall_prepare = AsyncMock(  # type: ignore[method-assign]
+            side_effect=NotFoundException("Context", "x")  # stop right after the gate
+        )
+        with pytest.raises(NotFoundException):
+            await service.recall(
+                RecallRequest(query="q"),
+                "u",
+                current_context_id=uuid4(),
+                current_workspace_id=uuid4(),
+            )
+        no_slot.assert_not_awaited()

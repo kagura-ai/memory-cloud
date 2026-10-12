@@ -147,14 +147,11 @@ class TestSeats:
     async def test_seats_go_to_the_earliest_joined(self, db_session, seats) -> None:
         """Three seats: owner, then the legacy row (invited 12h after T0 — it
         ranks by invited_at when joined_at is NULL), then 'second'."""
-        _refresh(seats["ws"], "free", addon_member_bonus=0)
         _refresh(seats["ws"], "pro")  # 10 seats: everyone sits
         for key in ("m_second", "m_third", "m_legacy"):
             assert not await member_seat_suspended(db_session, seats["ws"], seats[key]), key
-        # Shrink to three seats via a Basic-like cap: use the addon on free? Free's
-        # base is 1 and zero-floor keeps addons from raising a 0 base, so model
-        # "three seats" with pro minus an explicit limit through the helper's
-        # ranking: the fourth-ranked member is 'third'.
+        # No tier has exactly three seats, so the ranking is pinned through the
+        # helper's explicit limit: the fourth-ranked member is 'third'.
         paused = await seat_paused_member_ids(db_session, seats["ws"], limit=3)
         assert paused == {seats["m_third"].id}
 
@@ -218,3 +215,50 @@ class TestSuspendedList:
         _refresh(seats["ws"], "pro")
         listed = await suspended_features(db_session, seats["ws"])
         assert SUSPENDED_MEMBERS not in listed and SUSPENDED_CONTEXTS not in listed
+
+
+@pytest.mark.asyncio(loop_scope="session")
+class TestThroughPermissionService:
+    """The refusal as a route sees it: through PermissionService, on a real DB."""
+
+    async def test_a_seat_less_member_is_refused_and_the_owner_passes(
+        self, db_session, seats
+    ) -> None:
+        from services.permission_service import PermissionService
+
+        perm = PermissionService(db_session)
+        ws = seats["ws"]
+        assert (
+            await perm.check_workspace_access(seats["owner"], ws.id)
+        ).role == WorkspaceRole.OWNER
+        with pytest.raises(FeatureNotAvailableError) as exc:
+            await perm.check_workspace_access(seats["m_second"].user_id, ws.id)
+        assert exc.value.details["feature"] == SUSPENDED_MEMBERS
+
+
+@pytest.mark.asyncio(loop_scope="session")
+class TestTieBreaks:
+    async def test_equal_join_times_rank_by_id_and_null_join_ranks_last(self, db_session) -> None:
+        owner = await _user(db_session, "owner")
+        ws = await _workspace(db_session, "pro", owner)
+        same = T0 + timedelta(days=3)
+        first = await _member(db_session, ws, await _user(db_session, "a"), joined_at=same)
+        second = await _member(db_session, ws, await _user(db_session, "b"), joined_at=same)
+        nobody_knows = await _member(db_session, ws, await _user(db_session, "c"))  # no dates
+
+        # Three seats: owner, then the two equal-time rows by id; the dateless row last.
+        paused = await seat_paused_member_ids(db_session, ws, limit=3)
+        assert paused == {nobody_knows.id}
+        paused = await seat_paused_member_ids(db_session, ws, limit=2)
+        assert paused == {second.id, nobody_knows.id}
+        assert first.id < second.id
+
+    async def test_contexts_created_at_the_same_time_rank_by_id(self, db_session) -> None:
+        owner = await _user(db_session, "owner")
+        ws = await _workspace(db_session, "free", owner)
+        same = T0 + timedelta(days=5)
+        a = await _context(db_session, ws, owner, "a", same)
+        b = await _context(db_session, ws, owner, "b", same)
+        older, newer = (a, b) if a.id < b.id else (b, a)
+        assert not await context_writes_suspended(db_session, ws, older)
+        assert await context_writes_suspended(db_session, ws, newer)

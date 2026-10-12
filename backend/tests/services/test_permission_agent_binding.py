@@ -43,8 +43,16 @@ def _clean_scope():
     set_agent_scope(None)
 
 
-def _perm() -> PermissionService:
-    return PermissionService(MagicMock())
+def _perm(*, member: object | None = None) -> PermissionService:
+    """A service on a bare mock session.
+
+    ``can_access_memory`` reads the caller's membership row for the seat check
+    (#1943); the default stands in for an author with no row, which keeps the
+    pre-#1943 semantics these tests pin.
+    """
+    perm = PermissionService(MagicMock())
+    perm.workspace_service.get_member = AsyncMock(return_value=member)  # type: ignore[method-assign]
+    return perm
 
 
 def _patch_binding_service(allowed: bool, decision: str):
@@ -560,8 +568,7 @@ class TestCanAccessMemoryDenyCapture:
     async def test_non_member_rbac_deny_emits_rbac_denied(self):
         ws = uuid.uuid4()
         set_agent_scope(AgentScope(agent_id=AGENT_ID, enforcement_mode="enforce", workspace_id=ws))
-        perm = _perm()
-        perm.is_workspace_member = AsyncMock(return_value=False)
+        perm = _perm()  # no membership row → rbac_denied
         with (
             patch(
                 "services.context_service.ContextService.is_context_shared",

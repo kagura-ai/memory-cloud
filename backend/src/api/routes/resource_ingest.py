@@ -43,7 +43,12 @@ from services.resource_ingest_service import IngestItemError
 from services.resource_lookup import resolve_resource_pk
 from services.resource_quota_service import check_event_quota
 from utils.datetime import utcnow
-from utils.exceptions import AuthorizationError, ConflictError, ValidationError
+from utils.exceptions import (
+    AuthorizationError,
+    ConflictError,
+    FeatureNotAvailableError,
+    ValidationError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -272,7 +277,7 @@ async def _enforce_workspace_membership(
             workspace_id=context.workspace_id,
             required_role="member",
         )
-    except AuthorizationError as auth_error:
+    except (AuthorizationError, FeatureNotAvailableError) as auth_error:
         logger.warning(
             "cross_tenant_ingest_attempt",
             resource_id=context.resource_id,
@@ -281,7 +286,7 @@ async def _enforce_workspace_membership(
             target_workspace_id=str(context.workspace_id),
             token_creator=token_record.created_by,
             client_ip=request.client.host if request.client else None,
-            reason=auth_error.reason or "workspace_access_denied",
+            reason=getattr(auth_error, "reason", "seat_paused") or "workspace_access_denied",
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

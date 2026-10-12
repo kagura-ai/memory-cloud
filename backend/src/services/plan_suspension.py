@@ -32,6 +32,9 @@ from auth.workspace_roles import WorkspaceRole
 from models.auth import Context, Workspace, WorkspaceMember
 from models.resource import ResourceToken, WorkspaceConnector
 from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 # Wire vocabulary of ``GET /workspaces/{id}/plan`` ``suspended`` — the web UI
 # keys its copy on these strings, so they never change spelling.
@@ -308,7 +311,7 @@ async def member_seat_suspended(
     The owner always has one (no query). Under a one-seat plan every other
     member is seat-less (no query). Otherwise one ranked SELECT decides.
     """
-    if member.role == WorkspaceRole.OWNER:
+    if member.role == WorkspaceRole.OWNER or member.user_id == workspace.owner_user_id:
         return False
     if _seat_limit(workspace, None) <= 1:
         return True
@@ -421,7 +424,10 @@ async def ensure_context_writable(db: AsyncSession, context: Context | UUID | st
     if not isinstance(context, Context):
         try:
             context_id = context if isinstance(context, UUID) else UUID(str(context))
-        except (ValueError, TypeError, AttributeError):
+        except (ValueError, TypeError):
+            # The caller resolved the context already; an unparsable id here is
+            # a programming error upstream, not a reason to refuse — but say so.
+            logger.warning("context_slot_check_skipped_unparsable_id", context=str(context))
             return
         loaded = await db.get(Context, context_id)
         if loaded is None:

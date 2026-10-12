@@ -200,3 +200,80 @@ class TestWriteSlots:
                 capacity=CapacityPolicy.BLOCKED,
             )
         slot.assert_not_awaited()
+
+
+class TestCanAccessMemory:
+    """The REST memory-id routes (reference / patch / explore) authorize through
+    ``can_access_memory`` alone — it reads the seat too (#1943)."""
+
+    @pytest.fixture
+    def service(self):
+        svc = PermissionService(MagicMock())
+        svc.workspace_service.get_member = AsyncMock(
+            return_value=SimpleNamespace(id=7, user_id=USER, role=WorkspaceRole.MEMBER)
+        )
+        return svc
+
+    @pytest.mark.asyncio
+    async def test_the_author_shortcut_still_needs_a_seat(self, service) -> None:
+        with (
+            _seat(_refused()),
+            patch(
+                "services.agent_binding_service.agent_binding_permits", AsyncMock(return_value=True)
+            ),
+            pytest.raises(FeatureNotAvailableError),
+        ):
+            await service.can_access_memory(
+                user_id=USER, memory_user_id=USER, workspace_id=WS, context_id=CTX
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_shared_context_needs_a_seat(self, service) -> None:
+        with (
+            _seat(_refused()),
+            patch(
+                "services.context_service.ContextService.is_context_shared",
+                AsyncMock(return_value=True),
+            ),
+            pytest.raises(FeatureNotAvailableError),
+        ):
+            await service.can_access_memory(
+                user_id=USER, memory_user_id="someone-else", workspace_id=WS, context_id=CTX
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_seated_member_reads_a_shared_memory(self, service) -> None:
+        with (
+            _seat() as seat,
+            patch(
+                "services.context_service.ContextService.is_context_shared",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "services.agent_binding_service.agent_binding_permits", AsyncMock(return_value=True)
+            ),
+        ):
+            assert (
+                await service.can_access_memory(
+                    user_id=USER, memory_user_id="someone-else", workspace_id=WS, context_id=CTX
+                )
+                is True
+            )
+        seat.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_an_author_who_left_keeps_the_old_semantics(self, service) -> None:
+        service.workspace_service.get_member = AsyncMock(return_value=None)
+        with (
+            _seat(_refused()) as seat,
+            patch(
+                "services.agent_binding_service.agent_binding_permits", AsyncMock(return_value=True)
+            ),
+        ):
+            assert (
+                await service.can_access_memory(
+                    user_id=USER, memory_user_id=USER, workspace_id=WS, context_id=CTX
+                )
+                is True
+            )
+        seat.assert_not_awaited()

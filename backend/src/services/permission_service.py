@@ -1116,7 +1116,19 @@ class PermissionService:
 
         # Owner can always access their own memories (RBAC), but the binding
         # still subtracts.
+        async def _seat_held() -> None:
+            # #1943: a member without a seat on the plan is refused here too —
+            # the REST memory-id routes (reference / patch / explore) authorize
+            # through this method alone. A caller with no membership row (an
+            # author who left) keeps the pre-existing semantics.
+            member = await self.workspace_service.get_member(
+                workspace_id, user_id, raise_if_not_found=False
+            )
+            if member is not None:
+                await ensure_member_seated(self.db, workspace_id, member)
+
         if user_id == memory_user_id:
+            await _seat_held()
             return await _binding_ok()
 
         # Check if context is shared
@@ -1146,7 +1158,11 @@ class PermissionService:
             return False
 
         # Shared context: check workspace membership, then the binding.
-        if not await self.is_workspace_member(user_id, workspace_id):
+        shared_member = await self.workspace_service.get_member(
+            workspace_id, user_id, raise_if_not_found=False
+        )
+        if shared_member is None:
             await _emit_rbac_denied()
             return False
+        await ensure_member_seated(self.db, workspace_id, shared_member)  # #1943
         return await _binding_ok()
