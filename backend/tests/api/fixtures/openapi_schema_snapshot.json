@@ -2383,7 +2383,8 @@
           "summary": {},
           "updated_at": {},
           "usage_guide": {},
-          "use_rerank": {}
+          "use_rerank": {},
+          "writes_paused": {}
         },
         "required": [
           "created_at",
@@ -11530,6 +11531,10 @@
           },
           "role": {
             "type": "string"
+          },
+          "seat_paused": {
+            "default": false,
+            "type": "boolean"
           },
           "user_email": {
             "anyOf": [
