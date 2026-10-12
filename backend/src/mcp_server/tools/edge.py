@@ -278,7 +278,7 @@ async def handle_create_edge(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-            context = await _resolve_context(db, user_id, current_context_id)
+            context = await _resolve_context(db, user_id, current_context_id, access="write")
 
             perm_error = await _check_viewer_permission(db, user_id, workspace_id, "create edges")
             if perm_error:
@@ -389,7 +389,7 @@ async def handle_update_edge(
     async for db in get_db():
         try:
             current_context_id = _resolve_context_id(args["context_id"])
-            context = await _resolve_context(db, user_id, current_context_id)
+            context = await _resolve_context(db, user_id, current_context_id, access="write")
 
             perm_error = await _check_viewer_permission(db, user_id, workspace_id, "update edges")
             if perm_error:

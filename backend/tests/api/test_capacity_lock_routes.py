@@ -141,6 +141,38 @@ class TestFeedback:
         service.record_feedback.assert_not_awaited()
 
 
+class TestFeedbackSlot:
+    @pytest.mark.asyncio
+    async def test_rating_a_context_without_a_slot_is_refused(self) -> None:
+        """#1943: VIEWER may rate, so the resolver saw a read; the route asks for
+        the writable slot itself, after the access check."""
+        from api.routes.feedback import FeedbackRequest, record_feedback
+        from utils.exceptions import FeatureNotAvailableError
+
+        context = SimpleNamespace(id=uuid4(), workspace_id=uuid4())
+        service = MagicMock(record_feedback=AsyncMock())
+        perm = MagicMock(
+            check_context_access=AsyncMock(return_value=(context, "viewer")), db=MagicMock()
+        )
+        refused = FeatureNotAvailableError("paused", gate="plan", feature="contexts")
+        with (
+            patch(
+                "api.routes.feedback.ensure_context_writable", AsyncMock(side_effect=refused)
+            ) as slot,
+            pytest.raises(FeatureNotAvailableError),
+        ):
+            await record_feedback(
+                context_id=context.id,
+                body=FeedbackRequest(memory_id=uuid4(), helpful=True),
+                user=USER,
+                service=service,
+                perm=perm,
+            )
+        perm.check_context_access.assert_awaited_once()
+        assert slot.await_args.args[1] is context
+        service.record_feedback.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # Graph
 # ---------------------------------------------------------------------------

@@ -62,7 +62,10 @@ def service(memory_id):
 
 @pytest.fixture
 def perm():
-    return MagicMock(check_context_access=AsyncMock())
+    return MagicMock(
+        check_context_access=AsyncMock(return_value=(MagicMock(workspace_id=None), "viewer")),
+        db=MagicMock(),
+    )
 
 
 @pytest.mark.asyncio

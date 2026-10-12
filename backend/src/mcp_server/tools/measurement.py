@@ -107,7 +107,7 @@ async def handle_record_measurement(
             return _error_response("invalid_context_id_format", str(exc))
         try:
             # Verify the caller can reach the context (IDOR guard) ...
-            context = await _resolve_context_for_read(db, user_id, context_id)
+            context = await _resolve_context_for_read(db, user_id, context_id, access="write")
         except _ContextNotFoundError as exc:
             return exc.to_response()
         # ... and is not a read-only viewer (write gate, mirrors set_state).

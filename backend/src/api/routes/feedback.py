@@ -31,6 +31,7 @@ from services.feedback_service import (
     FeedbackService,
 )
 from services.permission_service import PermissionService
+from services.plan_suspension import ensure_context_writable
 from utils.exceptions import (
     AuthorizationError,
     InternalError,
@@ -145,13 +146,16 @@ async def record_feedback(
         # Read-adjacent: VIEWER may rate recall. Uniform 404 on unreachable
         # context (IDOR guard), same posture as the other context-scoped routes.
         # #1941/#1948: blocked on a workspace over its Free capacity, like MCP feedback.
-        await perm.check_context_access(
+        context, _ = await perm.check_context_access(
             user_id,
             context_id,
             required_role=ContextRole.VIEWER,
             operation="feedback",
             capacity=CapacityPolicy.BLOCKED,
         )
+        # #1943: rating is a content write (VIEWER may do it, so the resolver
+        # saw a read); a context without a writable slot on the plan refuses it.
+        await ensure_context_writable(perm.db, context)
         row = await service.record_feedback(
             context_id=context_id,
             memory_id=body.memory_id,
@@ -207,6 +211,7 @@ async def record_host_feedback(
             raise NotFoundException("Context")
         # #1941: blocked on a workspace over its Free capacity, like MCP feedback.
         await ensure_not_capacity_locked(perm.db, context.workspace_id, user_id=user_id)
+        await ensure_context_writable(perm.db, context)  # #1943
 
         # Three credential shapes reach this operator endpoint (all built in
         # auth.dependencies): API keys carry api_key_workspace_id, OAuth

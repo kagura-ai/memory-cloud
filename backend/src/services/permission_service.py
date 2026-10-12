@@ -192,7 +192,8 @@ class PermissionService:
             - Delegates final authorization to ``check_workspace_access`` so
               the workspace-deleted / non-member / role-too-low paths surface
               uniformly.
-            - Returns **404** on "not found OR not accessible" — never 403.
+            - Returns **404** on "not found OR not accessible" — never 403,
+              except a member without a seat on the plan (``FEAT-001``, #1943).
               A 403 would leak existence across workspace boundaries
               (CWE-639 / OWASP A01). The detail string is intentionally
               indistinguishable from a completely unknown slug.

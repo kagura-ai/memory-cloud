@@ -479,7 +479,8 @@ async def suspended_features(db: AsyncSession, workspace: Workspace) -> list[str
     A feature is listed only when it is suspended AND the workspace still has
     something it would drive — a Free workspace that never had a connector is
     not told its connectors are paused. Only suspended features are queried,
-    so a paid workspace costs no query at all.
+    so the four paid-only features cost a paid workspace nothing; the seat and
+    slot checks (#1943) are two indexed presence reads on every plan.
 
     Args:
         db: Database session.

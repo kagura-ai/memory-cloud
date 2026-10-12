@@ -60,6 +60,11 @@ async def handle_update_search_config(
                 await perm_service.check_context_write(
                     user_id, ctx_uuid, capacity=CapacityPolicy.ALLOWED
                 )
+                # #1943: search settings are a content write; a context without
+                # a writable slot on the plan refuses it (like the REST twin).
+                from services.plan_suspension import ensure_context_writable
+
+                await ensure_context_writable(db, ctx_uuid)
             except (AuthorizationError, NotFoundException) as perm_err:
                 # The two designed denials only (#1684): a database failure
                 # here reaches the catch-all below instead of being reported

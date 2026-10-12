@@ -386,6 +386,7 @@ async def _resolve_context(
     context_id: UUID,
     *,
     operation: str | None = None,
+    access: str = "read",
 ) -> Any:
     """Resolve and validate context access.
 
@@ -477,6 +478,12 @@ async def _resolve_context(
                 context_id, "Context not found or you don't have access to it."
             )
 
+    if access == "write":
+        # #1943: a content write into a context without a writable slot on the
+        # plan is refused (FEAT-001 contexts), like the REST twins.
+        from services.plan_suspension import ensure_context_writable
+
+        await ensure_context_writable(db, context)
     return context
 
 
@@ -487,6 +494,7 @@ async def _resolve_context_for_read(
     *,
     required_role: str = "viewer",
     operation: str | None = None,
+    access: str = "read",
 ) -> Any:
     """Resolve a context_id to a Context the caller can read, MCP-flavored.
 
@@ -517,7 +525,7 @@ async def _resolve_context_for_read(
         # binding filter so an enforce-mode hard deny at THIS pre-gate — which
         # stops the request before any service-layer gate — still persists
         # its denied row (the MCP read face of the #1291/#1292 parity lesson).
-        return await PermissionService(db).resolve_context_for_workspace_read(
+        context = await PermissionService(db).resolve_context_for_workspace_read(
             user_id=user_id,
             context_id=context_id,
             required_role=required_role,
@@ -532,6 +540,13 @@ async def _resolve_context_for_read(
             context_id,
             "Context not found or you don't have access to it.",
         ) from exc
+    if access == "write":
+        # #1943: a content write into a context without a writable slot on the
+        # plan is refused (FEAT-001 contexts), like the REST twins.
+        from services.plan_suspension import ensure_context_writable
+
+        await ensure_context_writable(db, context)
+    return context
 
 
 async def _touch_context_last_used(db: "AsyncSession", context: Any) -> bool:

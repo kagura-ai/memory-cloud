@@ -953,6 +953,10 @@ class ContextService:
         # Validate owner access to both contexts
         source = await self.get_context(user_id, source_context_id)
         target = await self.get_context(user_id, target_context_id)
+        # #1943: merging copies memories into the target — a content write.
+        from services.plan_suspension import ensure_context_writable
+
+        await ensure_context_writable(self.db, target)
 
         # Owner-only: merge is a privileged operation
         perm_service = PermissionService(self.db)

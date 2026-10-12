@@ -1604,8 +1604,7 @@ The same evaluation applies between paid tiers (an XL → L drop seats the first
 keeps the oldest 20 contexts writable), and to an admin-managed Free workspace with several
 members. `GET /api/v1/workspaces/{id}/plan` lists what is suspended in `suspended`
 (only features the workspace still has something for), and the web UI shows
-the owner a banner. Members, contexts beyond the cap and partial overage
-between paid tiers are not suspended.
+the owner a banner.
 
 Override via environment variables (`PLAN_<KEY>_<FIELD>`, key upper-cased):
 
