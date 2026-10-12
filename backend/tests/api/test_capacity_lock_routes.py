@@ -472,6 +472,49 @@ class TestPublicSearch:
 
 
 # ---------------------------------------------------------------------------
+# Resource ingest (REST twin of MCP ingest_events, #1948)
+# ---------------------------------------------------------------------------
+
+
+class TestResourceIngest:
+    @pytest.mark.asyncio
+    async def test_a_locked_workspace_refuses_ingest_in_the_redacted_form(self) -> None:
+        from api.routes import resource_ingest as ri
+
+        ws = SimpleNamespace(id=uuid4(), plan_name="free")
+        context = SimpleNamespace(id=uuid4(), resource_id="res", workspace_id=ws.id)
+        token = SimpleNamespace(
+            id=1, public_id="rtok_x", resource_pk=uuid4(), quota_events_per_hour=100
+        )
+        manager = MagicMock(verify_token=AsyncMock(return_value=token))
+        order: list[str] = []
+
+        async def plan_pause(*_a, **_k):
+            order.append("plan_pause")
+
+        async def locked(*_a, **_k):
+            order.append("capacity")
+            raise _locked()
+
+        db = MagicMock(get=AsyncMock(return_value=ws))
+        with (
+            patch.object(ri, "ResourceTokenManager", return_value=manager),
+            patch.object(ri, "_resolve_authoritative_context", AsyncMock(return_value=context)),
+            patch.object(ri, "_enforce_workspace_membership", AsyncMock()),
+            patch.object(ri, "ensure_ingest_allowed", AsyncMock(side_effect=plan_pause)),
+            patch.object(ri, "ensure_not_capacity_locked", AsyncMock(side_effect=locked)) as ensure,
+            pytest.raises(CapacityLockedError),
+        ):
+            await ri.verify_resource_token(
+                resource_id="res", request=MagicMock(), x_resource_api_key="k", db=db
+            )
+        # After the #1939 plan pause; the token is not a member, so no numbers.
+        assert order == ["plan_pause", "capacity"]
+        assert ensure.await_args.args[1] is ws
+        assert ensure.await_args.kwargs == {"outsider": True}
+
+
+# ---------------------------------------------------------------------------
 # Context search settings (MCP update_search_config is blocked)
 # ---------------------------------------------------------------------------
 
