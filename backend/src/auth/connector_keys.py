@@ -34,14 +34,18 @@ def connector_id_from_key_name(name: str) -> UUID | None:
 
     Returns:
         The UUID after the prefix; ``None`` for any other name, including a
-        prefix followed by something that is not a UUID.
+        prefix followed by something that is not the canonical UUID spelling.
     """
     if not name.startswith(CONNECTOR_KEY_PREFIX):
         return None
+    suffix = name[len(CONNECTOR_KEY_PREFIX) :]
     try:
-        return UUID(name[len(CONNECTOR_KEY_PREFIX) :])
+        connector_id = UUID(suffix)
     except ValueError:
         return None
+    # Only the canonical spelling the formatter produces — ``UUID()`` would
+    # also accept braces, ``urn:uuid:`` and the dashless form.
+    return connector_id if str(connector_id) == suffix else None
 
 
 def reject_reserved_key_name(name: str) -> str:

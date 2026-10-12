@@ -52,6 +52,11 @@ def test_connector_id_from_key_name():
     # The formatter provisioning uses and the parser verify_key uses round-trip.
     assert connector_id_from_key_name(connector_key_name(cid)) == cid
     assert connector_id_from_key_name("connector:not-a-uuid") is None
+    # Non-canonical spellings UUID() would accept are not the contract.
+    assert connector_id_from_key_name(f"connector:{{{cid}}}") is None
+    assert connector_id_from_key_name(f"connector:urn:uuid:{cid}") is None
+    assert connector_id_from_key_name(f"connector:{cid.hex}") is None
+    assert connector_id_from_key_name(f"connector:{str(cid).upper()}") is None
     assert connector_id_from_key_name("my laptop") is None
     assert connector_id_from_key_name("") is None
 
@@ -118,8 +123,8 @@ class TestVerifyKeyConnectorGate:
 
         assert record.last_used_at is None
         db.flush.assert_not_awaited()
-        logger.warning.assert_called_once()
-        assert logger.warning.call_args.args[0] == "api_key_rejected_connectors_suspended"
+        logger.info.assert_called_once()
+        assert logger.info.call_args.args[0] == "api_key_rejected_connectors_suspended"
 
     @pytest.mark.asyncio
     async def test_connector_key_on_a_plan_with_seats_is_valid(self) -> None:

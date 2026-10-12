@@ -359,7 +359,9 @@ class APIKeyManager:
             from services.plan_suspension import connector_key_suspended
 
             if await connector_key_suspended(self.db, connector_id, key_record.workspace_id):
-                logger.warning(
+                # ``info``: a paused worker retrying is the expected steady
+                # state while the plan has no seats, not an auth anomaly.
+                logger.info(
                     "api_key_rejected_connectors_suspended",
                     key_prefix=key_record.key_prefix,
                     workspace_id=str(key_record.workspace_id),

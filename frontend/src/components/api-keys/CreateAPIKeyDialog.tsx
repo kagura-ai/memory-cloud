@@ -43,6 +43,25 @@ interface CreateAPIKeyDialogProps {
   onSuccess: () => void;
 }
 
+/**
+ * The message to show for a failed create. A `422` carries field messages as
+ * an array of `{loc, msg, type}` (#992 aliases `errors` → `detail`), e.g. the
+ * reserved `connector:` name (#1944); older endpoints return a plain string.
+ */
+export function createKeyErrorText(err: unknown): string {
+  const fallback = err instanceof Error ? err.message : "Failed to create API key";
+  if (!(err instanceof ApiError)) return fallback;
+  const detail: unknown = err.details?.detail;
+  if (typeof detail === "string" && detail) return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => (item && typeof item === "object" ? (item as { msg?: unknown }).msg : undefined))
+      .filter((msg): msg is string => typeof msg === "string" && msg.length > 0);
+    if (messages.length > 0) return messages.join(" / ");
+  }
+  return fallback;
+}
+
 export function CreateAPIKeyDialog({
   isOpen,
   onClose,
@@ -84,11 +103,7 @@ export function CreateAPIKeyDialog({
       setCreatedKey(response);
     } catch (err) {
       console.error("Failed to create API key:", err);
-      const apiError = err instanceof ApiError ? err : null;
-      setError(
-        apiError?.details?.detail ||
-          (err instanceof Error ? err.message : "Failed to create API key"),
-      );
+      setError(createKeyErrorText(err));
     } finally {
       setLoading(false);
     }
