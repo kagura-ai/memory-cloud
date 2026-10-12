@@ -15,6 +15,7 @@ import pytest
 
 from api.routes.memory import list_memories
 from models.memory import Memory
+from services.capacity_lock import CapacityPolicy
 from utils.exceptions import NotFoundException
 
 MOCK_USER = {"user_id": "test_user_123"}
@@ -143,7 +144,10 @@ class TestListMemoriesContextFilter:
 
         mock_perm_cls.assert_called_once_with(mock_db)
         mock_perm_instance.resolve_context_for_workspace_read.assert_awaited_once_with(
-            user_id="test_user_123", context_id=context_id, key_workspace_id=None
+            user_id="test_user_123",
+            context_id=context_id,
+            key_workspace_id=None,
+            capacity=CapacityPolicy.ALLOWED,
         )
         assert response.total == 1
 
@@ -200,7 +204,10 @@ class TestListMemoriesContextFilter:
         # the context_id (CWE-639 regression).
         mock_perm_cls.assert_called_once_with(mock_db)
         mock_perm_instance.resolve_context_for_workspace_read.assert_awaited_once_with(
-            user_id="test_user_123", context_id=context_id, key_workspace_id=None
+            user_id="test_user_123",
+            context_id=context_id,
+            key_workspace_id=None,
+            capacity=CapacityPolicy.ALLOWED,
         )
         assert response.total == 1
 
@@ -419,7 +426,10 @@ class TestListMemoriesQueryFilter:
 
         mock_perm_cls.assert_called_once_with(mock_db)
         mock_perm_instance.resolve_context_for_workspace_read.assert_awaited_once_with(
-            user_id="test_user_123", context_id=context_id, key_workspace_id=None
+            user_id="test_user_123",
+            context_id=context_id,
+            key_workspace_id=None,
+            capacity=CapacityPolicy.ALLOWED,
         )
         assert response.total == 1
 
@@ -687,7 +697,10 @@ async def test_context_id_forwards_api_key_workspace():
         )
 
     mock_perm_instance.resolve_context_for_workspace_read.assert_awaited_once_with(
-        user_id="test_user_123", context_id=context_id, key_workspace_id=ws
+        user_id="test_user_123",
+        context_id=context_id,
+        key_workspace_id=ws,
+        capacity=CapacityPolicy.ALLOWED,
     )
 
 

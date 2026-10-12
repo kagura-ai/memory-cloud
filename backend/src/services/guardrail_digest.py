@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qsl
 from uuid import UUID
 
+from services.capacity_lock import CapacityPolicy
 from utils.logger import get_logger
 from utils.tool_trigger import guardrail_version
 
@@ -486,6 +487,7 @@ async def fetch_entries(
             required_role="viewer",
             key_workspace_id=key_workspace_id,
             operation=DIGEST_OPERATION,
+            capacity=CapacityPolicy.ALLOWED,  # load_guardrails stays allowed under the lock
         )
     except NotFoundException:
         logger.debug("guardrail_digest_context_denied", context_id=str(context_id))

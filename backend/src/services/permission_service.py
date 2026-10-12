@@ -20,6 +20,7 @@ from auth.workspace_roles import (
     WORKSPACE_ROLE_WEIGHTS as ORG_ROLE_WEIGHTS,
 )
 from models.auth import Context, ContextMember, WorkspaceMember
+from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.identity_link_service import is_same_owner, owned_by
 from services.workspace_service import WorkspaceService
 from utils.exceptions import AuthorizationError, NotFoundException
@@ -244,12 +245,19 @@ class PermissionService:
         user_id: str,
         context_id: UUID,
         *,
+        capacity: CapacityPolicy,
         required_role: WorkspaceRole | str = WorkspaceRole.VIEWER,
         key_workspace_id: UUID | None = None,
         operation: str | None = None,
         binding_decision_out: list[str] | None = None,
     ) -> Context:
         """Resolve a ``context_id`` to a Context the caller can read, with uniform 404.
+
+        #1948: ``capacity`` is required. With ``CapacityPolicy.BLOCKED`` the
+        resolved context's workspace is checked against the capacity-over lock
+        (#1941) *after* every authorization step, so the lock never answers for
+        a context the caller could not reach anyway; ``ALLOWED`` skips it (the
+        cleanup surface, and MCP handlers whose dispatcher already decided).
 
         Issue #383: centralizes the "look up a Context + verify workspace
         membership" chokepoint for UUID-addressed context reads. Returns a
@@ -421,6 +429,12 @@ class PermissionService:
         if binding_decision_out is not None and decision is not None:
             binding_decision_out.append(decision)
 
+        # #1948: the capacity-over lock, after authorization (never an
+        # existence oracle). ``user_id`` keeps the outsider redaction for a
+        # reader who reached a public context without membership.
+        if capacity is CapacityPolicy.BLOCKED:
+            await ensure_not_capacity_locked(self.db, context.workspace_id, user_id=user_id)
+
         return context
 
     async def _apply_agent_binding_filter(
@@ -535,9 +549,14 @@ class PermissionService:
         context_id: UUID,
         required_role: ContextRole | str = ContextRole.VIEWER,
         *,
+        capacity: CapacityPolicy,
         operation: str | None = None,
     ) -> tuple[Context, ContextRole]:
         """Check if user has required context access.
+
+        #1948: ``capacity`` is required — ``BLOCKED`` applies the capacity-over
+        lock (#1941) after the RBAC decision and the agent-binding filter;
+        ``ALLOWED`` is the cleanup / inspection surface (see ``CapacityPolicy``).
 
         Access hierarchy:
         1. Workspace owner/admin → Full access (bypass context membership)
@@ -583,6 +602,10 @@ class PermissionService:
         await self._apply_agent_binding_filter(
             context_id, access=access, user_id=user_id, operation=operation
         )
+
+        # #1948: the capacity-over lock, after authorization (never an oracle).
+        if capacity is CapacityPolicy.BLOCKED:
+            await ensure_not_capacity_locked(self.db, context.workspace_id, user_id=user_id)
 
         return context, effective_role
 
@@ -690,12 +713,15 @@ class PermissionService:
 
         return context, ContextRole(context_member.role)
 
-    async def check_context_write(self, user_id: str, context_id: UUID) -> Context:
+    async def check_context_write(
+        self, user_id: str, context_id: UUID, *, capacity: CapacityPolicy
+    ) -> Context:
         """Check if user can write to context (editor or owner).
 
         Args:
             user_id: User ID
             context_id: Context ID
+            capacity: #1948 — see ``CapacityPolicy``.
 
         Returns:
             Context
@@ -708,15 +734,19 @@ class PermissionService:
             user_id,
             context_id,
             required_role=ContextRole.EDITOR,
+            capacity=capacity,
         )
         return context
 
-    async def check_context_owner(self, user_id: str, context_id: UUID) -> Context:
+    async def check_context_owner(
+        self, user_id: str, context_id: UUID, *, capacity: CapacityPolicy
+    ) -> Context:
         """Check if user is context owner.
 
         Args:
             user_id: User ID
             context_id: Context ID
+            capacity: #1948 — see ``CapacityPolicy``.
 
         Returns:
             Context
@@ -729,6 +759,7 @@ class PermissionService:
             user_id,
             context_id,
             required_role=ContextRole.OWNER,
+            capacity=capacity,
         )
         return context
 
@@ -921,7 +952,8 @@ class PermissionService:
             True if can manage, False otherwise
         """
         try:
-            await self.check_context_owner(user_id, context_id)
+            # A capability probe, not a content access: never gated (#1948).
+            await self.check_context_owner(user_id, context_id, capacity=CapacityPolicy.ALLOWED)
             return True
         except (AuthorizationError, NotFoundException):
             return False
@@ -937,7 +969,8 @@ class PermissionService:
             True if can write, False otherwise
         """
         try:
-            await self.check_context_write(user_id, context_id)
+            # A capability probe, not a content access: never gated (#1948).
+            await self.check_context_write(user_id, context_id, capacity=CapacityPolicy.ALLOWED)
             return True
         except (AuthorizationError, NotFoundException):
             return False

@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 
 from auth.workspace_roles import WorkspaceRole
+from services.capacity_lock import CapacityPolicy
 from services.permission_service import (
     CONTEXT_ROLE_WEIGHTS,
     ORG_ROLE_WEIGHTS,
@@ -155,7 +156,9 @@ class TestContextAccess:
         mock_result.scalar_one_or_none.return_value = mock_ctx
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        context, role = await service.check_context_access("user1", ctx_id)
+        context, role = await service.check_context_access(
+            "user1", ctx_id, capacity=CapacityPolicy.ALLOWED
+        )
         assert role == "owner"
 
     @pytest.mark.asyncio
@@ -174,7 +177,7 @@ class TestContextAccess:
         mock_db.execute = AsyncMock(return_value=mock_result)
 
         with pytest.raises(AuthorizationError) as exc_info:
-            await service.check_context_access("user1", ctx_id)
+            await service.check_context_access("user1", ctx_id, capacity=CapacityPolicy.ALLOWED)
         assert exc_info.value.status_code == 403
 
     @pytest.mark.asyncio
@@ -185,7 +188,7 @@ class TestContextAccess:
         mock_db.execute = AsyncMock(return_value=mock_result)
 
         with pytest.raises(NotFoundException) as exc_info:
-            await service.check_context_access("user1", uuid4())
+            await service.check_context_access("user1", uuid4(), capacity=CapacityPolicy.ALLOWED)
         assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
@@ -388,7 +391,9 @@ class TestResolveContextWhitelistEnforcement:
         service = self._service_with_member(member, ctx)
 
         with pytest.raises(NotFoundException) as exc_info:
-            await service.resolve_context_for_workspace_read("user1", ctx_id)
+            await service.resolve_context_for_workspace_read(
+                "user1", ctx_id, capacity=CapacityPolicy.ALLOWED
+            )
         assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
@@ -401,7 +406,9 @@ class TestResolveContextWhitelistEnforcement:
         service = self._service_with_member(viewer, ctx)
 
         with pytest.raises(NotFoundException) as exc_info:
-            await service.resolve_context_for_workspace_read("user1", ctx_id)
+            await service.resolve_context_for_workspace_read(
+                "user1", ctx_id, capacity=CapacityPolicy.ALLOWED
+            )
         assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
@@ -413,7 +420,9 @@ class TestResolveContextWhitelistEnforcement:
         member.allowed_context_ids = [ctx_id]  # whitelist includes ctx_id
         service = self._service_with_member(member, ctx)
 
-        result = await service.resolve_context_for_workspace_read("user1", ctx_id)
+        result = await service.resolve_context_for_workspace_read(
+            "user1", ctx_id, capacity=CapacityPolicy.ALLOWED
+        )
         assert result is ctx
 
     @pytest.mark.asyncio
@@ -427,7 +436,9 @@ class TestResolveContextWhitelistEnforcement:
         admin.allowed_context_ids = [uuid4()]  # would exclude ctx_id if checked
         service = self._service_with_member(admin, ctx)
 
-        result = await service.resolve_context_for_workspace_read("user1", ctx_id)
+        result = await service.resolve_context_for_workspace_read(
+            "user1", ctx_id, capacity=CapacityPolicy.ALLOWED
+        )
         assert result is ctx
 
     @pytest.mark.asyncio
@@ -444,7 +455,9 @@ class TestResolveContextWhitelistEnforcement:
         service = self._service_with_member(suspended_member, ctx)
 
         with pytest.raises(NotFoundException) as exc_info:
-            await service.resolve_context_for_workspace_read("user1", ctx_id)
+            await service.resolve_context_for_workspace_read(
+                "user1", ctx_id, capacity=CapacityPolicy.ALLOWED
+            )
         assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
@@ -458,7 +471,9 @@ class TestResolveContextWhitelistEnforcement:
         viewer.allowed_context_ids = None  # no restriction (all contexts)
         service = self._service_with_member(viewer, ctx)
 
-        result = await service.resolve_context_for_workspace_read("user1", ctx_id)
+        result = await service.resolve_context_for_workspace_read(
+            "user1", ctx_id, capacity=CapacityPolicy.ALLOWED
+        )
         assert result is ctx
 
 
@@ -497,7 +512,10 @@ class TestResolveContextKeyWorkspaceConfinement:
 
         with pytest.raises(NotFoundException) as exc_info:
             await service.resolve_context_for_workspace_read(
-                "user-in-both", ctx.id, key_workspace_id=ws_a
+                "user-in-both",
+                ctx.id,
+                key_workspace_id=ws_a,
+                capacity=CapacityPolicy.ALLOWED,
             )
         assert exc_info.value.status_code == 404
 
@@ -508,7 +526,10 @@ class TestResolveContextKeyWorkspaceConfinement:
         service = self._service_for(ctx)
 
         result = await service.resolve_context_for_workspace_read(
-            "user1", ctx.id, key_workspace_id=ws
+            "user1",
+            ctx.id,
+            key_workspace_id=ws,
+            capacity=CapacityPolicy.ALLOWED,
         )
         assert result is ctx
 
@@ -519,6 +540,9 @@ class TestResolveContextKeyWorkspaceConfinement:
         service = self._service_for(ctx)
 
         result = await service.resolve_context_for_workspace_read(
-            "user1", ctx.id, key_workspace_id=None
+            "user1",
+            ctx.id,
+            key_workspace_id=None,
+            capacity=CapacityPolicy.ALLOWED,
         )
         assert result is ctx

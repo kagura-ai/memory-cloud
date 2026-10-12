@@ -26,6 +26,7 @@ from mcp_server.tools._helpers import (
     _resolve_context_id,
     execute_with_timeout,
 )
+from services.capacity_lock import CapacityPolicy
 from utils.exceptions import FeatureNotAvailableError, QuotaExceededError
 from utils.response_budget import DEFAULT_MAX_CHARS, MAX_CHARS_LIMIT, fit_items
 
@@ -668,11 +669,13 @@ async def handle_update_context(
             try:
                 if requested_fields & _OWNER_ONLY_CONTEXT_FIELDS:
                     # Owner-only fields → require context owner
-                    context = await perm_service.check_context_owner(user_id, ctx_uuid)
+                    context = await perm_service.check_context_owner(
+                        user_id, ctx_uuid, capacity=CapacityPolicy.ALLOWED
+                    )
                 else:
                     # display_name/description → require editor access
                     context, _ = await perm_service.check_context_access(
-                        user_id, ctx_uuid, required_role="editor"
+                        user_id, ctx_uuid, required_role="editor", capacity=CapacityPolicy.ALLOWED
                     )
             except NotFoundException:
                 await db.rollback()
@@ -1115,7 +1118,9 @@ async def handle_delete_context(
         try:
             # Owner-only: verify before delete
             perm_service = PermissionService(db)
-            await perm_service.check_context_owner(user_id, context_id)
+            await perm_service.check_context_owner(
+                user_id, context_id, capacity=CapacityPolicy.ALLOWED
+            )
 
             service = ContextService(db)
             context = await service.delete_context(user_id, context_id)

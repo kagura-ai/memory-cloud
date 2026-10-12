@@ -33,7 +33,7 @@ from models.api_base import TZAwareBaseModel
 from models.auth import ShareKey
 from models.schemas import RecallRequest, RecallResponse
 from services.agent_state_service import AgentStateService
-from services.capacity_lock import ensure_context_not_capacity_locked
+from services.capacity_lock import CapacityPolicy, ensure_context_not_capacity_locked
 from services.memory_service import MemoryService
 from services.permission_service import PermissionService
 from utils.auth_helpers import get_user_id
@@ -183,7 +183,9 @@ async def create_share_key(
 
     # Ownership gate — must be able to OWNER-access the bound context.
     perm = PermissionService(db)
-    await perm.check_context_access(user_id, data.context_id, required_role=ContextRole.OWNER)
+    await perm.check_context_access(
+        user_id, data.context_id, required_role=ContextRole.OWNER, capacity=CapacityPolicy.ALLOWED
+    )
 
     try:
         share_key, created = await manager.create_key(

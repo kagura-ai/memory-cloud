@@ -16,6 +16,7 @@ from mcp_server.tools._helpers import (
     _format_validation_error,
     _log_tool_usage,
 )
+from services.capacity_lock import CapacityPolicy
 
 
 async def handle_update_search_config(
@@ -55,7 +56,10 @@ async def handle_update_search_config(
             # Permission check (owner/editor)
             perm_service = PermissionService(db)
             try:
-                await perm_service.check_context_write(user_id, ctx_uuid)
+                # dispatcher-gated (update_search_config is a blocked tool)
+                await perm_service.check_context_write(
+                    user_id, ctx_uuid, capacity=CapacityPolicy.ALLOWED
+                )
             except (AuthorizationError, NotFoundException) as perm_err:
                 # The two designed denials only (#1684): a database failure
                 # here reaches the catch-all below instead of being reported

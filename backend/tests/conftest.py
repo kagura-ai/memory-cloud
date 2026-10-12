@@ -61,28 +61,28 @@ def _capacity_gate_needs_a_session(monkeypatch):
     monkeypatch.setattr(MemoryService, "_ensure_capacity", _gated)
 
 
-# Route modules that call the capacity lock directly (#1941), and the name each
-# binds. Their tests drive the handlers with a mocked ``db`` / ``perm`` /
+# Modules that call the capacity lock directly, and the name each binds. The
+# context resolvers carry it for every context-addressed route (#1948); the
+# workspace-addressed routes that resolve no context keep their own call
+# (#1941). Their tests drive the handlers with a mocked ``db`` / ``perm`` /
 # service whose session is a bare MagicMock; the same rule as above applies.
 _CAPACITY_GATED_ROUTES = (
-    ("api.routes.agent_state", "ensure_context_not_capacity_locked"),
-    ("api.routes.feedback", "ensure_context_not_capacity_locked"),
+    ("services.permission_service", "ensure_not_capacity_locked"),
     ("api.routes.share_keys", "ensure_context_not_capacity_locked"),
-    ("api.routes.graph", "ensure_not_capacity_locked"),
     ("api.routes.analyses", "ensure_not_capacity_locked"),
     ("api.routes.sleep_reports", "ensure_not_capacity_locked"),
     ("api.routes.agents", "ensure_not_capacity_locked"),
     ("api.routes.public_search", "ensure_not_capacity_locked"),
-    ("api.routes.context_search_config", "ensure_context_not_capacity_locked"),
 )
 
 
 @pytest.fixture(autouse=True)
 def _capacity_gated_routes_need_a_session(monkeypatch):
-    """Run the routes' capacity-lock check only against a session (#1941).
+    """Run the capacity-lock check only against a session (#1941, #1948).
 
-    ``tests/api/test_capacity_lock_routes.py`` patches each name with a
-    raising mock to pin where the check sits; that patch wins over this one.
+    ``tests/api/test_capacity_lock_routes.py`` and
+    ``tests/services/test_permission_capacity_policy.py`` patch each name with
+    a raising mock to pin where the check sits; that patch wins over this one.
     """
     import importlib
 

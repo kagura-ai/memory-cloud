@@ -17,6 +17,7 @@ from mcp.types import TextContent
 
 from config.settings import get_settings
 from mcp_server.tools._constants import T, get_tool_timeout
+from services.capacity_lock import CapacityPolicy
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -522,6 +523,9 @@ async def _resolve_context_for_read(
             required_role=required_role,
             key_workspace_id=get_mcp_key_workspace_scope(),
             operation=operation,
+            # #1948: the dispatcher's capacity table (``_capacity_gate``) is
+            # the MCP decision; the resolver does not re-gate here.
+            capacity=CapacityPolicy.ALLOWED,
         )
     except NotFoundException as exc:
         raise _ContextNotFoundError(

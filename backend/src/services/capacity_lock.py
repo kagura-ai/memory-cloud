@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
+from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
@@ -39,6 +40,26 @@ from utils.exceptions import CapacityLockedError
 
 # The web page where the owner sees the plan, the usage and the way back.
 CLEANUP_PATH = "/workspace/settings/plan"
+
+
+class CapacityPolicy(StrEnum):
+    """How a context-resolving call treats a capacity-locked workspace (#1948).
+
+    Every caller of ``PermissionService.resolve_context_for_workspace_read`` /
+    ``check_context_access`` (and the ``check_context_write`` / ``_owner``
+    wrappers) names its policy explicitly — there is no default, so a new route
+    cannot forget the decision either way. The words are the MCP dispatcher's
+    (``CAPACITY_LOCK_BLOCKED_TOOLS`` / ``CAPACITY_LOCK_ALLOWED_TOOLS``):
+
+    * ``BLOCKED`` — the call reads or writes memory content; refused with
+      ``CAPACITY-001`` once the caller is authorized.
+    * ``ALLOWED`` — the cleanup / inspection surface (list, delete, export,
+      metadata) that must keep working so the owner can get back under the cap;
+      also every MCP handler, whose dispatcher already applied the table.
+    """
+
+    BLOCKED = "blocked"
+    ALLOWED = "allowed"
 
 
 def cleanup_url() -> str:

@@ -22,6 +22,7 @@ from uuid import uuid4
 import pytest
 
 from api.routes.memory import get_access_patterns, get_memory_stats
+from services.capacity_lock import CapacityPolicy
 from utils.exceptions import NotFoundException
 
 MOCK_USER = {"user_id": "test_user_123"}
@@ -130,7 +131,10 @@ async def test_stats_shared_context_aggregates_across_members():
 
     perm_cls.assert_called_once_with(mock_db)
     perm.resolve_context_for_workspace_read.assert_awaited_once_with(
-        user_id="test_user_123", context_id=context_id, key_workspace_id=None
+        user_id="test_user_123",
+        context_id=context_id,
+        key_workspace_id=None,
+        capacity=CapacityPolicy.ALLOWED,
     )
     memory_service.get_stats.assert_awaited_once_with(
         user_id="test_user_123",
@@ -215,7 +219,10 @@ async def test_stats_forwards_api_key_workspace_scope():
         )
 
     perm.resolve_context_for_workspace_read.assert_awaited_once_with(
-        user_id="test_user_123", context_id=context_id, key_workspace_id=key_ws
+        user_id="test_user_123",
+        context_id=context_id,
+        key_workspace_id=key_ws,
+        capacity=CapacityPolicy.ALLOWED,
     )
 
 
@@ -282,5 +289,8 @@ async def test_access_patterns_forwards_api_key_workspace_scope():
         )
 
     perm.resolve_context_for_workspace_read.assert_awaited_once_with(
-        user_id="test_user_123", context_id=context_id, key_workspace_id=key_ws
+        user_id="test_user_123",
+        context_id=context_id,
+        key_workspace_id=key_ws,
+        capacity=CapacityPolicy.ALLOWED,
     )

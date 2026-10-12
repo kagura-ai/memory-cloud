@@ -69,6 +69,7 @@ from models.schemas import (
     WriteLintHint,
 )
 from repositories.memory import MemoryRepository
+from services.capacity_lock import CapacityPolicy
 from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
@@ -576,7 +577,10 @@ class MemoryService:
             )
         if context_id is None:
             raise ValueError("a tool guardrail write requires a context")
-        await PermissionService(self.db).check_context_write(user_id, UUID(str(context_id)))
+        # remember's own capacity line (_ensure_capacity) already ran.
+        await PermissionService(self.db).check_context_write(
+            user_id, UUID(str(context_id)), capacity=CapacityPolicy.ALLOWED
+        )
 
     async def _may_delete_guardrail(self, user_id: str, memory: Any) -> bool:
         """``forget``'s guardrail gate, shared by the by-id and by-query branches.

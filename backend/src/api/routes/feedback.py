@@ -24,7 +24,7 @@ from auth.dependencies import APIKeyOrSessionUser, require_workspace_admin
 from auth.workspace_roles import ContextRole
 from db.base import get_db
 from models.retrieval_feedback import NOTE_MAX_LEN, QUERY_MAX_LEN
-from services.capacity_lock import ensure_context_not_capacity_locked
+from services.capacity_lock import CapacityPolicy
 from services.feedback_service import (
     HOST_EXPERIMENT_ID_MAX_LEN,
     HOST_VERDICT_REFERENCE_MAX_LEN,
@@ -144,11 +144,14 @@ async def record_feedback(
     try:
         # Read-adjacent: VIEWER may rate recall. Uniform 404 on unreachable
         # context (IDOR guard), same posture as the other context-scoped routes.
+        # #1941/#1948: blocked on a workspace over its Free capacity, like MCP feedback.
         await perm.check_context_access(
-            user_id, context_id, required_role=ContextRole.VIEWER, operation="feedback"
+            user_id,
+            context_id,
+            required_role=ContextRole.VIEWER,
+            operation="feedback",
+            capacity=CapacityPolicy.BLOCKED,
         )
-        # #1941: blocked on a workspace over its Free capacity, like MCP feedback.
-        await ensure_context_not_capacity_locked(perm.db, context_id, user_id=user_id)
         row = await service.record_feedback(
             context_id=context_id,
             memory_id=body.memory_id,
@@ -194,6 +197,7 @@ async def record_host_feedback(
             context_id,
             required_role="admin",
             key_workspace_id=user.get("api_key_workspace_id"),
+            capacity=CapacityPolicy.BLOCKED,  # #1941/#1948: like MCP feedback
         )
         # Session/global-key operators are membership-authorized across their
         # workspaces; this mutation is deliberately confined to the selected one.
@@ -215,8 +219,6 @@ async def record_host_feedback(
         if user.get("api_key_prefix"):
             actor_metadata["key_prefix"] = user["api_key_prefix"]
 
-        # #1941: blocked on a workspace over its Free capacity, like MCP feedback.
-        await ensure_context_not_capacity_locked(perm.db, context_id, user_id=user_id)
         row = await service.record_host_feedback(
             context_id=context_id,
             memory_id=body.memory_id,

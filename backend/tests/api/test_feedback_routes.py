@@ -27,6 +27,7 @@ from api.routes.feedback import (
 from auth.agent_scope import AgentScope, set_agent_scope
 from auth.workspace_roles import ContextRole
 from models.agent import AGENT_ENFORCEMENT_ENFORCE
+from services.capacity_lock import CapacityPolicy
 from utils.exceptions import AuthorizationError, InternalError, NotFoundException
 
 MOCK_USER = {"user_id": "test_user"}
@@ -76,6 +77,7 @@ async def test_record_feedback_success_uses_read_gate(service, perm, context_id,
         "test_user",
         context_id,
         required_role=ContextRole.VIEWER,
+        capacity=CapacityPolicy.BLOCKED,
         # #1286 (P0-5): deny-capture audit identity — a binding/rbac deny at
         # this gate persists an operation="feedback" row.
         operation="feedback",
@@ -199,6 +201,7 @@ class TestHostFeedbackRoute:
             context_id,
             required_role="admin",
             key_workspace_id=OPERATOR_USER["api_key_workspace_id"],
+            capacity=CapacityPolicy.BLOCKED,
         )
         service.record_host_feedback.assert_awaited_once_with(
             context_id=context_id,

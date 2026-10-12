@@ -40,6 +40,7 @@ from models.schemas import (
     encode_forget_bulk_cursor,
 )
 from services.agent_binding_service import binding_memory_sql_predicate
+from services.capacity_lock import CapacityPolicy
 from services.identity_link_service import owned_by
 from services.memory_service import MemoryService
 from services.permission_service import PermissionService
@@ -279,6 +280,7 @@ async def recall(
             # Issue #963/#1281 item 2: pure key scope (None unless workspace-scoped key).
             key_workspace_id=user.get("api_key_workspace_id"),
             operation="recall",
+            capacity=CapacityPolicy.BLOCKED,
         )
         context_workspace_id = context.workspace_id
 
@@ -823,6 +825,7 @@ async def get_memory_stats(
             user_id=user_id,
             context_id=target_context_id,
             key_workspace_id=user.get("api_key_workspace_id"),
+            capacity=CapacityPolicy.ALLOWED,  # stats: metadata, kept usable under the lock
         )
         target_workspace_id = str(context.workspace_id)
 
@@ -1133,10 +1136,13 @@ async def list_memories(
         if context_id is not None:
             # Raises 404 on non-existent context, non-member, or private-context
             # non-creator (CWE-639 uniform disclosure). Matches the graph routes.
-            context = await PermissionService(db).resolve_context_for_workspace_read(
+            context = await PermissionService(
+                db
+            ).resolve_context_for_workspace_read(
                 user_id=user_id,
                 context_id=context_id,
                 key_workspace_id=user.get("api_key_workspace_id"),
+                capacity=CapacityPolicy.ALLOWED,  # list: the cleanup surface stays usable under the lock
             )
             owner_filter = user_id if context.is_private else None
 
@@ -1275,6 +1281,7 @@ async def get_access_patterns(
                 user_id=user_id,
                 context_id=target_context_id,
                 key_workspace_id=user.get("api_key_workspace_id"),
+                capacity=CapacityPolicy.ALLOWED,  # access patterns: usage metadata, not content
             )
             target_workspace_id = context.workspace_id
             if context.is_private:

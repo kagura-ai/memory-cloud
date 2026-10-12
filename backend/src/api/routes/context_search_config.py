@@ -13,7 +13,7 @@ from auth.dependencies import APIKeyOrSessionUser
 from db.base import get_db
 from models.schemas import ContextSearchConfigResponse, ContextSearchConfigUpdate
 from repositories.config_repository import ContextSearchConfigRepository
-from services.capacity_lock import ensure_context_not_capacity_locked
+from services.capacity_lock import CapacityPolicy
 from services.permission_service import PermissionService
 from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
@@ -50,7 +50,7 @@ async def get_context_search_config(
     try:
         # Check context write permission (owner/editor only)
         perm_service = PermissionService(db)
-        await perm_service.check_context_write(user_id, context_id)
+        await perm_service.check_context_write(user_id, context_id, capacity=CapacityPolicy.ALLOWED)
 
         repo = ContextSearchConfigRepository(db)
         config = await repo.create_or_get(context_id)
@@ -115,10 +115,10 @@ async def update_context_search_config(
     try:
         # Check context write permission (owner/editor only)
         perm_service = PermissionService(db)
-        await perm_service.check_context_write(user_id, context_id)
-        # #1941: search settings are writes the MCP twin (update_search_config)
-        # refuses on a capacity-locked workspace; after the write check.
-        await ensure_context_not_capacity_locked(db, context_id, user_id=user_id)
+        await perm_service.check_context_write(user_id, context_id, capacity=CapacityPolicy.BLOCKED)
+        # #1941/#1948: search settings are writes the MCP twin
+        # (update_search_config) refuses on a capacity-locked workspace — the
+        # write check above carries CapacityPolicy.BLOCKED.
 
         # Pydantic will automatically validate on model creation
         # Update config
@@ -193,9 +193,7 @@ async def reset_context_search_config(
     try:
         # Check context write permission (owner/editor only)
         perm_service = PermissionService(db)
-        await perm_service.check_context_write(user_id, context_id)
-        # #1941: as for the update (MCP update_search_config is blocked).
-        await ensure_context_not_capacity_locked(db, context_id, user_id=user_id)
+        await perm_service.check_context_write(user_id, context_id, capacity=CapacityPolicy.BLOCKED)
 
         repo = ContextSearchConfigRepository(db)
         config = await repo.reset_to_default(context_id)

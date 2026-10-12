@@ -15,7 +15,7 @@ from auth.dependencies import SessionUser
 from auth.workspace_roles import WorkspaceRole
 from db.base import get_db
 from models.memory import Memory
-from services.capacity_lock import ensure_not_capacity_locked
+from services.capacity_lock import CapacityPolicy
 from services.edge_service import VALID_EDGE_TYPES, create_declared_edge
 from services.graph_service import GraphService
 from services.identity_link_service import link_set_reads
@@ -203,12 +203,11 @@ async def get_graph_stats(
                 last_updated=to_utc_iso(utcnow()) or "",
             )
 
+        # #1941/#1948: the graph is memory content (MCP list_edges / create_edge
+        # are blocked too); refused on a workspace over its Free capacity.
         context = await PermissionService(db).resolve_context_for_workspace_read(
-            user_id=user_id, context_id=context_id
+            user_id=user_id, context_id=context_id, capacity=CapacityPolicy.BLOCKED
         )
-        # #1941: the graph is memory content (MCP list_edges / create_edge are
-        # blocked too); refused on a workspace over its Free capacity.
-        await ensure_not_capacity_locked(db, context.workspace_id, user_id=user_id)
         workspace_id = str(context.workspace_id)
         str_context_id = str(context.id)
         # #1834: inside a private context the edges of every account that owns it
@@ -307,12 +306,11 @@ async def get_graph_data(
     try:
         user_id = user["user_id"]
 
+        # #1941/#1948: the graph is memory content (MCP list_edges / create_edge
+        # are blocked too); refused on a workspace over its Free capacity.
         context = await PermissionService(db).resolve_context_for_workspace_read(
-            user_id=user_id, context_id=context_id
+            user_id=user_id, context_id=context_id, capacity=CapacityPolicy.BLOCKED
         )
-        # #1941: the graph is memory content (MCP list_edges / create_edge are
-        # blocked too); refused on a workspace over its Free capacity.
-        await ensure_not_capacity_locked(db, context.workspace_id, user_id=user_id)
         workspace_id = str(context.workspace_id)
         str_context_id = str(context.id)
         # #1834: inside a private context the edges of every account that owns it
@@ -522,10 +520,8 @@ async def create_graph_edge(
             user_id,
             body.context_id,
             required_role=WorkspaceRole.MEMBER,
+            capacity=CapacityPolicy.BLOCKED,  # #1941/#1948: the graph is memory content
         )
-        # #1941: the graph is memory content (MCP list_edges / create_edge are
-        # blocked too); refused on a workspace over its Free capacity.
-        await ensure_not_capacity_locked(db, context.workspace_id, user_id=user_id)
 
         # Context invariant: both endpoints must be live memories in this
         # (workspace, context). Prevents forging an edge to an out-of-scope

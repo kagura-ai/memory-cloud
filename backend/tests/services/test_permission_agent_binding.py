@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from auth.agent_scope import AgentScope, set_agent_scope
+from services.capacity_lock import CapacityPolicy
 from services.permission_service import PermissionService
 from utils.exceptions import NotFoundException
 
@@ -97,7 +98,9 @@ class TestCheckContextAccessWrapper:
         perm._check_context_access_rbac = AsyncMock(return_value=(context, "owner"))
         perm._apply_agent_binding_filter = AsyncMock()
 
-        result, _ = await perm.check_context_access("u", context.id, required_role)
+        result, _ = await perm.check_context_access(
+            "u", context.id, required_role, capacity=CapacityPolicy.ALLOWED
+        )
 
         assert result is context
         kwargs = perm._apply_agent_binding_filter.await_args.kwargs
@@ -112,7 +115,9 @@ class TestCheckContextAccessWrapper:
         )
         patcher, _ = _patch_binding_service(False, "binding_denied")
         with patcher, pytest.raises(NotFoundException):
-            await perm.check_context_access("u", uuid.uuid4(), "editor")
+            await perm.check_context_access(
+                "u", uuid.uuid4(), "editor", capacity=CapacityPolicy.ALLOWED
+            )
 
 
 class TestEnumerationIntersection:

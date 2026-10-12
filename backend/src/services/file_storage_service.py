@@ -45,7 +45,7 @@ from config.settings import get_settings
 from models.auth import Workspace
 from models.file_objects import FileObject, WorkspaceStorageUsage
 from services import storage_quota_service
-from services.capacity_lock import ensure_not_capacity_locked
+from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.permission_service import PermissionService
 from storage.factory import get_blob_storage
 from storage.protocol import BlobStorageProtocol
@@ -227,7 +227,10 @@ class FileStorageService:
         # upload. check_context_write raises AuthorizationError (403) /
         # NotFoundException (404, incl. a soft-deleted context) on denial.
         if context_id is not None:
-            ctx = await PermissionService(self.db).check_context_write(created_by, context_id)
+            # The workspace capacity line below is this service's own gate.
+            ctx = await PermissionService(self.db).check_context_write(
+                created_by, context_id, capacity=CapacityPolicy.ALLOWED
+            )
             if ctx.workspace_id != workspace_id:
                 msg = "context_id does not belong to this workspace"
                 raise ValidationError(msg)
@@ -480,7 +483,9 @@ class FileStorageService:
         if file.context_id is not None:
             if not actor_user_id:
                 raise AuthorizationError("Insufficient permissions")
-            await PermissionService(self.db).check_context_write(actor_user_id, file.context_id)
+            await PermissionService(self.db).check_context_write(
+                actor_user_id, file.context_id, capacity=CapacityPolicy.ALLOWED
+            )
 
         # Normalize caller sha256 to lowercase for symmetry with reserve_upload's
         # canonicalization (Copilot review #574 finding). Without this, an SDK
@@ -651,7 +656,7 @@ class FileStorageService:
                 if not actor_user_id:
                     raise AuthorizationError("Insufficient permissions")
                 await PermissionService(self.db).check_context_access(
-                    actor_user_id, file.context_id
+                    actor_user_id, file.context_id, capacity=CapacityPolicy.ALLOWED
                 )
             except (AuthorizationError, NotFoundException) as exc:
                 raise NotFoundException("file", str(file_id)) from exc
@@ -797,7 +802,9 @@ class FileStorageService:
             if not actor_user_id:
                 raise AuthorizationError("Insufficient permissions")
             try:
-                await PermissionService(self.db).check_context_write(actor_user_id, file.context_id)
+                await PermissionService(self.db).check_context_write(
+                    actor_user_id, file.context_id, capacity=CapacityPolicy.ALLOWED
+                )
             except NotFoundException:
                 pass  # owning context deleted → workspace gate (already enforced) suffices
 

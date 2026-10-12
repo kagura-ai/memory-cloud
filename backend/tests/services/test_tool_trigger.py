@@ -31,6 +31,7 @@ from models.schemas import (
     RememberRequest,
     UpdateMemoryRequest,
 )
+from services.capacity_lock import CapacityPolicy
 from services.memory_service import MemoryService
 from utils.exceptions import AuthorizationError
 
@@ -172,7 +173,9 @@ async def test_remember_normalizes_tool_trigger_and_requires_editor(service, per
         "match": "gh pr merge",
         "action": "inform",
     }
-    perm.check_context_write.assert_awaited_once_with("test_user", service._mock_context.id)
+    perm.check_context_write.assert_awaited_once_with(
+        "test_user", service._mock_context.id, capacity=CapacityPolicy.ALLOWED
+    )
 
 
 @pytest.mark.asyncio
@@ -274,7 +277,9 @@ async def test_update_with_tool_trigger_normalizes_and_requires_editor(service, 
     _prime_update(service, memory)
     await _update(service, UpdateMemoryRequest(memory_id=memory.id, details={"tool_trigger": TT}))
     assert memory.details["tool_trigger"]["on"] == "pre"
-    perm.check_context_write.assert_awaited_once_with("test_user", memory.context_id)
+    perm.check_context_write.assert_awaited_once_with(
+        "test_user", memory.context_id, capacity=CapacityPolicy.ALLOWED
+    )
 
 
 @pytest.mark.asyncio
@@ -282,7 +287,9 @@ async def test_update_of_a_guardrail_row_requires_editor_even_without_details(se
     memory = _memory({"tool_trigger": TT})
     _prime_update(service, memory)
     await _update(service, UpdateMemoryRequest(memory_id=memory.id, importance=0.9))
-    perm.check_context_write.assert_awaited_once_with("test_user", memory.context_id)
+    perm.check_context_write.assert_awaited_once_with(
+        "test_user", memory.context_id, capacity=CapacityPolicy.ALLOWED
+    )
 
 
 @pytest.mark.asyncio
@@ -349,7 +356,9 @@ async def test_patch_with_tool_trigger_requires_editor(service, perm):
     memory = _memory({"x": 1})
     _prime_patch(service, memory)
     await _patch(service, memory, PatchMemoryRequest(details={"tool_trigger": TT}))
-    perm.check_context_write.assert_awaited_once_with("test_user", memory.context_id)
+    perm.check_context_write.assert_awaited_once_with(
+        "test_user", memory.context_id, capacity=CapacityPolicy.ALLOWED
+    )
     assert memory.details["tool_trigger"]["action"] == "block"
 
 
@@ -414,7 +423,9 @@ async def test_forget_of_a_guardrail_row_by_editor_proceeds(service, perm):
     service.memory_repo.get = AsyncMock(return_value=memory)
     result = await _forget(service, memory)
     assert result.deleted_count == 1
-    perm.check_context_write.assert_awaited_once_with("test_user", memory.context_id)
+    perm.check_context_write.assert_awaited_once_with(
+        "test_user", memory.context_id, capacity=CapacityPolicy.ALLOWED
+    )
 
 
 @pytest.mark.asyncio
@@ -469,7 +480,9 @@ async def test_forget_by_query_skips_guardrail_rows_for_non_editor(service, perm
     assert result.memory_ids == [plain.id]
     updated = [call.args[0] for call in service.memory_repo.update.await_args_list]
     assert updated == [plain.id]
-    perm.check_context_write.assert_awaited_once_with("test_user", guardrail.context_id)
+    perm.check_context_write.assert_awaited_once_with(
+        "test_user", guardrail.context_id, capacity=CapacityPolicy.ALLOWED
+    )
 
 
 @pytest.mark.asyncio
@@ -480,7 +493,9 @@ async def test_forget_by_query_deletes_guardrail_rows_for_editor(service, perm):
     assert result.deleted_count == 2
     assert result.memory_ids == [guardrail.id, plain.id]
     # One role check per guardrail row; plain rows never touch the gate.
-    perm.check_context_write.assert_awaited_once_with("test_user", guardrail.context_id)
+    perm.check_context_write.assert_awaited_once_with(
+        "test_user", guardrail.context_id, capacity=CapacityPolicy.ALLOWED
+    )
 
 
 @pytest.mark.asyncio

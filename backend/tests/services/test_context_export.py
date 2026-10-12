@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import pytest
 
+from services.capacity_lock import CapacityPolicy
 from services.context_service import ContextService
 from utils.exceptions import ExportTooLargeError, NotFoundException
 
@@ -163,7 +164,10 @@ async def test_export_forwards_key_workspace_id():
         await ContextService(db).export_context(USER, ctx.id, key_workspace_id=key_ws)
 
     perm.resolve_context_for_workspace_read.assert_awaited_once_with(
-        user_id=USER, context_id=ctx.id, key_workspace_id=key_ws
+        user_id=USER,
+        context_id=ctx.id,
+        key_workspace_id=key_ws,
+        capacity=CapacityPolicy.ALLOWED,  # export is the way out of the lock (#1948)
     )
 
 

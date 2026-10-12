@@ -27,6 +27,7 @@ from config.plan_tiers import (
 from config.settings import get_settings
 from models.auth import Context, ContextMember, User, Workspace, WorkspaceMember
 from models.sleep import SleepMode
+from services.capacity_lock import CapacityPolicy
 from services.identity_link_service import is_same_owner, owned_by
 from utils.datetime import utcnow
 from utils.exceptions import (
@@ -455,6 +456,7 @@ class ContextService:
             user_id=user_id,
             context_id=context_id,
             key_workspace_id=key_workspace_id,
+            capacity=CapacityPolicy.ALLOWED,  # export is the way out of the lock
         )
 
         # Read-parity with GET /memory/list: private context => creator-only.
@@ -950,8 +952,13 @@ class ContextService:
 
         # Owner-only: merge is a privileged operation
         perm_service = PermissionService(self.db)
-        await perm_service.check_context_owner(user_id, source_context_id)
-        await perm_service.check_context_owner(user_id, target_context_id)
+        # MCP-only entry: the dispatcher's capacity table blocks merge_contexts.
+        await perm_service.check_context_owner(
+            user_id, source_context_id, capacity=CapacityPolicy.ALLOWED
+        )
+        await perm_service.check_context_owner(
+            user_id, target_context_id, capacity=CapacityPolicy.ALLOWED
+        )
 
         # Same workspace required
         if source.workspace_id != target.workspace_id:

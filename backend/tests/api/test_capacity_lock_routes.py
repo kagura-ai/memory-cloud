@@ -1,10 +1,14 @@
-"""The capacity-over lock on the REST routes outside MemoryService (#1941).
+"""The capacity-over lock on the REST routes outside MemoryService (#1941, #1948).
 
-Each route group is driven with its collaborators mocked and the route
-module's lock function patched to "locked", which pins WHERE the check sits:
-after the existing access check, before the work. The decisions mirror the
-MCP classification (``mcp_server/tools/_capacity_gate.py``): content reads and
-writes are refused; deleting, cancelling and listing metadata are not.
+Context-addressed routes carry the decision into the context resolver
+(``PermissionService`` with ``CapacityPolicy``, #1948): their tests pin the
+policy each route passes and that a refusal from the resolver stops the work.
+Workspace-addressed routes that resolve no context keep their own lock call:
+their tests patch the route module's lock function to "locked", which pins
+WHERE the check sits — after the existing access check, before the work. The
+decisions mirror the MCP classification (``mcp_server/tools/_capacity_gate.py``):
+content reads and writes are refused; deleting, cancelling and listing metadata
+are not.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from uuid import uuid4
 
 import pytest
 
+from services.capacity_lock import CapacityPolicy
 from utils.exceptions import CapacityLockedError
 
 
@@ -35,6 +40,13 @@ def _lock(module: str, name: str):
 
 
 USER = {"user_id": "u1"}
+BLOCKED = CapacityPolicy.BLOCKED
+ALLOWED = CapacityPolicy.ALLOWED
+
+
+def _policy(mock) -> CapacityPolicy:
+    """The ``capacity`` a route passed to a (mocked) resolver call."""
+    return mock.await_args.kwargs["capacity"]
 
 
 # ---------------------------------------------------------------------------
@@ -61,36 +73,37 @@ class TestAgentState:
         )
 
     @pytest.mark.asyncio
-    async def test_set_is_refused_after_the_write_gate(self, service, perm) -> None:
+    async def test_set_is_refused_by_the_write_gate(self, service, perm) -> None:
         from api.routes.agent_state import AgentStateSetRequest, set_agent_state
 
-        ctx = uuid4()
-        with _lock("agent_state", "ensure_context_not_capacity_locked") as ensure:
-            with pytest.raises(CapacityLockedError):
-                await set_agent_state(
-                    context_id=ctx,
-                    user=USER,
-                    body=AgentStateSetRequest(value={"a": 1}),
-                    key="k",
-                    service=service,
-                    perm=perm,
-                )
-        perm.check_context_write.assert_awaited_once()
+        perm.check_context_write.side_effect = _locked()
+        with pytest.raises(CapacityLockedError):
+            await set_agent_state(
+                context_id=uuid4(),
+                user=USER,
+                body=AgentStateSetRequest(value={"a": 1}),
+                key="k",
+                service=service,
+                perm=perm,
+            )
+        # The reach check is a pure 404 guard; the write gate carries the policy.
+        assert _policy(perm.resolve_context_for_workspace_read) is ALLOWED
+        assert _policy(perm.check_context_write) is BLOCKED
         service.set_state.assert_not_awaited()
-        assert ensure.await_args.args[1] == ctx
-        assert ensure.await_args.kwargs == {"user_id": "u1"}
 
     @pytest.mark.asyncio
-    async def test_get_and_list_are_refused(self, service, perm) -> None:
+    async def test_get_and_list_are_refused_by_the_read_gate(self, service, perm) -> None:
         from api.routes.agent_state import get_agent_state, list_agent_state
 
-        with _lock("agent_state", "ensure_context_not_capacity_locked"):
-            with pytest.raises(CapacityLockedError):
-                await get_agent_state(
-                    context_id=uuid4(), user=USER, key="k", service=service, perm=perm
-                )
-            with pytest.raises(CapacityLockedError):
-                await list_agent_state(context_id=uuid4(), user=USER, service=service, perm=perm)
+        perm.resolve_context_for_workspace_read.side_effect = _locked()
+        with pytest.raises(CapacityLockedError):
+            await get_agent_state(
+                context_id=uuid4(), user=USER, key="k", service=service, perm=perm
+            )
+        assert _policy(perm.resolve_context_for_workspace_read) is BLOCKED
+        with pytest.raises(CapacityLockedError):
+            await list_agent_state(context_id=uuid4(), user=USER, service=service, perm=perm)
+        assert _policy(perm.resolve_context_for_workspace_read) is BLOCKED
         service.get_state.assert_not_awaited()
         service.list_state.assert_not_awaited()
 
@@ -98,11 +111,9 @@ class TestAgentState:
     async def test_delete_stays_allowed(self, service, perm) -> None:
         from api.routes.agent_state import delete_agent_state
 
-        with _lock("agent_state", "ensure_context_not_capacity_locked") as ensure:
-            await delete_agent_state(
-                context_id=uuid4(), user=USER, key="k", service=service, perm=perm
-            )
-        ensure.assert_not_awaited()
+        await delete_agent_state(context_id=uuid4(), user=USER, key="k", service=service, perm=perm)
+        assert _policy(perm.resolve_context_for_workspace_read) is ALLOWED
+        assert _policy(perm.check_context_write) is ALLOWED
         service.delete_state.assert_awaited_once()
 
 
@@ -113,21 +124,20 @@ class TestAgentState:
 
 class TestFeedback:
     @pytest.mark.asyncio
-    async def test_feedback_is_refused_after_the_access_check(self) -> None:
+    async def test_feedback_is_refused_by_the_access_check(self) -> None:
         from api.routes.feedback import FeedbackRequest, record_feedback
 
         service = MagicMock(record_feedback=AsyncMock())
-        perm = MagicMock(check_context_access=AsyncMock(), db=MagicMock())
-        with _lock("feedback", "ensure_context_not_capacity_locked"):
-            with pytest.raises(CapacityLockedError):
-                await record_feedback(
-                    context_id=uuid4(),
-                    body=FeedbackRequest(memory_id=uuid4(), helpful=True),
-                    user=USER,
-                    service=service,
-                    perm=perm,
-                )
-        perm.check_context_access.assert_awaited_once()
+        perm = MagicMock(check_context_access=AsyncMock(side_effect=_locked()), db=MagicMock())
+        with pytest.raises(CapacityLockedError):
+            await record_feedback(
+                context_id=uuid4(),
+                body=FeedbackRequest(memory_id=uuid4(), helpful=True),
+                user=USER,
+                service=service,
+                perm=perm,
+            )
+        assert _policy(perm.check_context_access) is BLOCKED
         service.record_feedback.assert_not_awaited()
 
 
@@ -138,51 +148,44 @@ class TestFeedback:
 
 class TestGraph:
     @pytest.mark.asyncio
-    async def test_graph_data_is_refused_after_the_read_gate(self) -> None:
+    async def test_graph_data_is_refused_by_the_read_gate(self) -> None:
         from api.routes import graph
 
-        ws = uuid4()
-        context = SimpleNamespace(id=uuid4(), workspace_id=ws, is_private=True)
-        perm = MagicMock(resolve_context_for_workspace_read=AsyncMock(return_value=context))
+        perm = MagicMock(resolve_context_for_workspace_read=AsyncMock(side_effect=_locked()))
         with (
             patch.object(graph, "PermissionService", return_value=perm),
-            _lock("graph", "ensure_not_capacity_locked") as ensure,
             pytest.raises(CapacityLockedError),
         ):
             await graph.get_graph_data(
                 user={"user_id": "u1"},
                 db=MagicMock(),
-                context_id=context.id,
+                context_id=uuid4(),
                 limit_nodes=10,
                 min_weight=0.0,
                 memory_types=None,
             )
-        assert ensure.await_args.args[1] == ws
-        assert ensure.await_args.kwargs == {"user_id": "u1"}
+        assert _policy(perm.resolve_context_for_workspace_read) is BLOCKED
 
     @pytest.mark.asyncio
     async def test_graph_stats_is_refused(self) -> None:
         from api.routes import graph
 
-        context = SimpleNamespace(id=uuid4(), workspace_id=uuid4(), is_private=True)
-        perm = MagicMock(resolve_context_for_workspace_read=AsyncMock(return_value=context))
+        perm = MagicMock(resolve_context_for_workspace_read=AsyncMock(side_effect=_locked()))
         with (
             patch.object(graph, "PermissionService", return_value=perm),
-            _lock("graph", "ensure_not_capacity_locked"),
             pytest.raises(CapacityLockedError),
         ):
-            await graph.get_graph_stats(
-                user={"user_id": "u1"}, context_id=context.id, db=MagicMock()
-            )
+            await graph.get_graph_stats(user={"user_id": "u1"}, context_id=uuid4(), db=MagicMock())
+        assert _policy(perm.resolve_context_for_workspace_read) is BLOCKED
 
     @pytest.mark.asyncio
     async def test_creating_an_edge_is_refused(self) -> None:
         from api.routes import graph
 
-        context = SimpleNamespace(id=uuid4(), workspace_id=uuid4(), is_private=True)
-        perm = MagicMock(resolve_context_for_workspace_read=AsyncMock(return_value=context))
+        context_id = uuid4()
+        perm = MagicMock(resolve_context_for_workspace_read=AsyncMock(side_effect=_locked()))
         body = graph.CreateEdgeRequest(
-            context_id=context.id,
+            context_id=context_id,
             source_id=uuid4(),
             target_id=uuid4(),
             edge_type="related_to",
@@ -190,12 +193,12 @@ class TestGraph:
         db = MagicMock(execute=AsyncMock())
         with (
             patch.object(graph, "PermissionService", return_value=perm),
-            _lock("graph", "ensure_not_capacity_locked"),
             pytest.raises(CapacityLockedError),
         ):
             await graph.create_graph_edge(
                 body=body, user={"user_id": "u1"}, response=MagicMock(), db=db
             )
+        assert _policy(perm.resolve_context_for_workspace_read) is BLOCKED
         db.execute.assert_not_awaited()
 
 
@@ -476,17 +479,16 @@ class TestPublicSearch:
 class TestContextSearchConfig:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("route", ["update", "reset"])
-    async def test_writes_are_refused_after_the_write_check(self, route: str) -> None:
+    async def test_writes_are_refused_by_the_write_check(self, route: str) -> None:
         from api.routes import context_search_config as csc
         from models.schemas import ContextSearchConfigUpdate
 
         ctx = uuid4()
-        perm = MagicMock(check_context_write=AsyncMock())
+        perm = MagicMock(check_context_write=AsyncMock(side_effect=_locked()))
         repo = MagicMock(update=AsyncMock(), reset_to_default=AsyncMock())
         with (
             patch.object(csc, "PermissionService", return_value=perm),
             patch.object(csc, "ContextSearchConfigRepository", return_value=repo),
-            _lock("context_search_config", "ensure_context_not_capacity_locked") as ensure,
             pytest.raises(CapacityLockedError),
         ):
             if route == "update":
@@ -498,25 +500,22 @@ class TestContextSearchConfig:
                 )
             else:
                 await csc.reset_context_search_config(context_id=ctx, user=USER, db=MagicMock())
-        perm.check_context_write.assert_awaited_once()
+        assert _policy(perm.check_context_write) is BLOCKED
         repo.update.assert_not_awaited()
         repo.reset_to_default.assert_not_awaited()
-        assert ensure.await_args.args[1] == ctx
-        assert ensure.await_args.kwargs == {"user_id": "u1"}
 
     @pytest.mark.asyncio
     async def test_reading_the_settings_stays_allowed(self) -> None:
         from api.routes import context_search_config as csc
 
         perm = MagicMock(check_context_write=AsyncMock())
-        repo = MagicMock(get_or_create=AsyncMock(side_effect=RuntimeError("reached the read")))
+        repo = MagicMock(create_or_get=AsyncMock(side_effect=RuntimeError("reached the read")))
         with (
             patch.object(csc, "PermissionService", return_value=perm),
             patch.object(csc, "ContextSearchConfigRepository", return_value=repo),
-            _lock("context_search_config", "ensure_context_not_capacity_locked") as ensure,
         ):
             try:
                 await csc.get_context_search_config(context_id=uuid4(), user=USER, db=MagicMock())
             except Exception:  # noqa: BLE001 — the route maps the read failure to 500
                 pass
-        ensure.assert_not_awaited()
+        assert _policy(perm.check_context_write) is ALLOWED

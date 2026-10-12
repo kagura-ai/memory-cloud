@@ -26,6 +26,7 @@ from api.routes.agent_state import (
     list_agent_state,
     set_agent_state,
 )
+from services.capacity_lock import CapacityPolicy
 from utils.exceptions import AuthorizationError, NotFoundException, ValidationError
 
 MOCK_USER = {"user_id": "test_user"}
@@ -64,9 +65,11 @@ class TestSetAgentState:
         assert resp.key == "run"
         # Uniform-404 reach check happens, AND the editor/owner write gate.
         perm.resolve_context_for_workspace_read.assert_awaited_once_with(
-            "test_user", context_id, key_workspace_id=None
+            "test_user", context_id, key_workspace_id=None, capacity=CapacityPolicy.ALLOWED
         )
-        perm.check_context_write.assert_awaited_once_with("test_user", context_id)
+        perm.check_context_write.assert_awaited_once_with(
+            "test_user", context_id, capacity=CapacityPolicy.BLOCKED
+        )
         service.set_state.assert_awaited_once_with(context_id, "run", {"step": 3}, ttl_seconds=60)
 
     @pytest.mark.asyncio
@@ -134,7 +137,7 @@ class TestGetAgentState:
         assert resp.key == "run"
         assert resp.value == {"cursor": "abc"}
         perm.resolve_context_for_workspace_read.assert_awaited_once_with(
-            "test_user", context_id, key_workspace_id=None
+            "test_user", context_id, key_workspace_id=None, capacity=CapacityPolicy.BLOCKED
         )
         perm.check_context_write.assert_not_awaited()
 
@@ -176,7 +179,7 @@ class TestListAgentState:
         assert resp.states == {"a": 1, "b": {"x": 2}}
         assert resp.count == 2
         perm.resolve_context_for_workspace_read.assert_awaited_once_with(
-            "test_user", context_id, key_workspace_id=None
+            "test_user", context_id, key_workspace_id=None, capacity=CapacityPolicy.BLOCKED
         )
 
     @pytest.mark.asyncio
@@ -208,9 +211,11 @@ class TestDeleteAgentState:
         )
         assert resp.key == "run"
         perm.resolve_context_for_workspace_read.assert_awaited_once_with(
-            "test_user", context_id, key_workspace_id=None
+            "test_user", context_id, key_workspace_id=None, capacity=CapacityPolicy.ALLOWED
         )
-        perm.check_context_write.assert_awaited_once_with("test_user", context_id)
+        perm.check_context_write.assert_awaited_once_with(
+            "test_user", context_id, capacity=CapacityPolicy.ALLOWED
+        )
 
     @pytest.mark.asyncio
     async def test_delete_absent_returns_404(self, service, perm, context_id):
@@ -261,7 +266,7 @@ class TestAgentStateKeyWorkspaceConfinement:
             perm=perm,
         )
         perm.resolve_context_for_workspace_read.assert_awaited_once_with(
-            "test_user", context_id, key_workspace_id=ws
+            "test_user", context_id, key_workspace_id=ws, capacity=CapacityPolicy.BLOCKED
         )
 
     @pytest.mark.asyncio
@@ -278,7 +283,7 @@ class TestAgentStateKeyWorkspaceConfinement:
             perm=perm,
         )
         perm.resolve_context_for_workspace_read.assert_awaited_once_with(
-            "test_user", context_id, key_workspace_id=ws
+            "test_user", context_id, key_workspace_id=ws, capacity=CapacityPolicy.ALLOWED
         )
 
     @pytest.mark.asyncio
@@ -294,7 +299,7 @@ class TestAgentStateKeyWorkspaceConfinement:
             perm=perm,
         )
         perm.resolve_context_for_workspace_read.assert_awaited_once_with(
-            "test_user", context_id, key_workspace_id=ws
+            "test_user", context_id, key_workspace_id=ws, capacity=CapacityPolicy.ALLOWED
         )
 
     @pytest.mark.asyncio
@@ -308,5 +313,5 @@ class TestAgentStateKeyWorkspaceConfinement:
             perm=perm,
         )
         perm.resolve_context_for_workspace_read.assert_awaited_once_with(
-            "test_user", context_id, key_workspace_id=ws
+            "test_user", context_id, key_workspace_id=ws, capacity=CapacityPolicy.BLOCKED
         )

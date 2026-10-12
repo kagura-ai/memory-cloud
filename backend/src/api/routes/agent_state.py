@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.dependencies import APIKeyOrSessionUser
 from db.base import get_db
 from services.agent_state_service import AgentStateService
-from services.capacity_lock import ensure_context_not_capacity_locked
+from services.capacity_lock import CapacityPolicy
 from services.permission_service import PermissionService
 from utils.exceptions import MemoryCloudException, NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -119,12 +119,14 @@ async def set_agent_state(
         # must not leak its existence via a 403), then the editor/owner write
         # gate — whose 403 is safe once workspace membership is confirmed.
         await perm.resolve_context_for_workspace_read(
-            user_id, context_id, key_workspace_id=user.get("api_key_workspace_id")
+            user_id,
+            context_id,
+            key_workspace_id=user.get("api_key_workspace_id"),
+            capacity=CapacityPolicy.ALLOWED,
         )
-        await perm.check_context_write(user_id, context_id)
-        # #1941: blocked on a workspace over its Free capacity (MCP set_state /
-        # get_state are blocked at the dispatcher too). After the reach check.
-        await ensure_context_not_capacity_locked(perm.db, context_id, user_id=user_id)
+        # #1941/#1948: blocked on a workspace over its Free capacity (MCP
+        # set_state / get_state are blocked at the dispatcher too).
+        await perm.check_context_write(user_id, context_id, capacity=CapacityPolicy.BLOCKED)
         await service.set_state(context_id, key, body.value, ttl_seconds=body.ttl_seconds)
         return AgentStateKeyResponse(key=key)
     except (HTTPException, MemoryCloudException):
@@ -154,11 +156,11 @@ async def get_agent_state(
         # Read gate with UNIFORM 404 on an unreachable/cross-workspace context
         # (CWE-639 IDOR guard; mirrors the MCP handler's _resolve_context_for_read).
         await perm.resolve_context_for_workspace_read(
-            user_id, context_id, key_workspace_id=user.get("api_key_workspace_id")
+            user_id,
+            context_id,
+            key_workspace_id=user.get("api_key_workspace_id"),
+            capacity=CapacityPolicy.BLOCKED,
         )
-        # #1941: blocked on a workspace over its Free capacity (MCP set_state /
-        # get_state are blocked at the dispatcher too). After the reach check.
-        await ensure_context_not_capacity_locked(perm.db, context_id, user_id=user_id)
         value = await service.get_state(context_id, key)
         if value is None:
             raise NotFoundException("AgentState")
@@ -188,11 +190,11 @@ async def list_agent_state(
     try:
         # Uniform-404 read gate (CWE-639 IDOR guard).
         await perm.resolve_context_for_workspace_read(
-            user_id, context_id, key_workspace_id=user.get("api_key_workspace_id")
+            user_id,
+            context_id,
+            key_workspace_id=user.get("api_key_workspace_id"),
+            capacity=CapacityPolicy.BLOCKED,
         )
-        # #1941: blocked on a workspace over its Free capacity (MCP set_state /
-        # get_state are blocked at the dispatcher too). After the reach check.
-        await ensure_context_not_capacity_locked(perm.db, context_id, user_id=user_id)
         states = await service.list_state(context_id)
         return AgentStateListResponse(states=states, count=len(states))
     except (HTTPException, MemoryCloudException):
@@ -223,9 +225,14 @@ async def delete_agent_state(
     try:
         # Uniform-404 reach check, then the editor/owner write gate (CWE-639).
         await perm.resolve_context_for_workspace_read(
-            user_id, context_id, key_workspace_id=user.get("api_key_workspace_id")
+            user_id,
+            context_id,
+            key_workspace_id=user.get("api_key_workspace_id"),
+            capacity=CapacityPolicy.ALLOWED,
         )
-        await perm.check_context_write(user_id, context_id)
+        await perm.check_context_write(
+            user_id, context_id, capacity=CapacityPolicy.ALLOWED
+        )  # delete: cleanup
         removed = await service.delete_state(context_id, key)
         if not removed:
             raise NotFoundException("AgentState")

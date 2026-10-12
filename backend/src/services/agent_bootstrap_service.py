@@ -25,6 +25,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from services.capacity_lock import CapacityPolicy
 from services.recall_selection import RecallSelectionConfig
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
@@ -406,6 +407,9 @@ class AgentBootstrapService:
                 user_id=principal.user_id,
                 context_id=context_id,
                 key_workspace_id=principal.key_workspace_id,
+                # #1948: the REST route gates the workspace after this (MCP:
+                # the dispatcher), so no second check here.
+                capacity=CapacityPolicy.ALLOWED,
                 # #1402: thread the MAE operation so an enforce-mode agent-binding
                 # deny at this pre-gate persists a binding_denied row (in shadow
                 # mode, a would_deny row). Without it bootstrap — the surface that

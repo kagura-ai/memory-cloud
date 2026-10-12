@@ -30,6 +30,7 @@ from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.schemas import ContextExportResponse, RelatedTagItem
 from models.sleep import SleepMode
+from services.capacity_lock import CapacityPolicy
 from services.context_service import ContextService, TagSortMode
 from services.identity_link_service import linked_user_ids
 from utils.datetime import to_utc_iso
@@ -935,11 +936,13 @@ async def update_context(
     # Issue #272 M-3: Reuse context from permission check to avoid redundant DB query
     if is_updating_owner_fields:
         # Requires owner access
-        existing_context = await perm_service.check_context_owner(user_id, context_id)
+        existing_context = await perm_service.check_context_owner(
+            user_id, context_id, capacity=CapacityPolicy.ALLOWED
+        )
     else:
         # Editor can update description
         existing_context, _ = await perm_service.check_context_access(
-            user_id, context_id, required_role=ContextRole.EDITOR
+            user_id, context_id, required_role=ContextRole.EDITOR, capacity=CapacityPolicy.ALLOWED
         )
 
     try:
@@ -1119,7 +1122,9 @@ async def delete_context(
 
         perm_service = PermissionService(db)
         # Issue #272 M-3: Reuse context from permission check to avoid redundant DB query
-        context = await perm_service.check_context_owner(user_id, context_id)
+        context = await perm_service.check_context_owner(
+            user_id, context_id, capacity=CapacityPolicy.ALLOWED
+        )
 
         # Issue #85: Block deletion if context is locked
         if context.is_locked:
@@ -1239,7 +1244,10 @@ async def list_context_members(
     # Issue #271 Code Review C-2: check_context_access already verifies workspace membership
     # Issue #272 M-3: Reuse context from check_context_access to avoid redundant DB query
     context, _ = await perm_service.check_context_access(
-        user["user_id"], context_id, required_role=ContextRole.VIEWER
+        user["user_id"],
+        context_id,
+        required_role=ContextRole.VIEWER,
+        capacity=CapacityPolicy.ALLOWED,
     )
 
     # Get context for member list query
@@ -1416,7 +1424,9 @@ async def add_context_member(
     # SECURITY: Workspace boundary check
     # Issue #271 Code Review C-2: check_context_owner already verifies ownership
     # Issue #272 M-3: Reuse context from check_context_owner to avoid redundant DB query
-    context = await perm_service.check_context_owner(user["user_id"], context_id)
+    context = await perm_service.check_context_owner(
+        user["user_id"], context_id, capacity=CapacityPolicy.ALLOWED
+    )
 
     # Context already retrieved by check_context_owner (no second query needed)
 
@@ -1502,7 +1512,9 @@ async def update_context_member_role(
 
     # SECURITY: Workspace boundary check
     # Issue #271 Code Review C-2: check_context_owner already verifies ownership
-    await perm_service.check_context_owner(current_user["user_id"], context_id)
+    await perm_service.check_context_owner(
+        current_user["user_id"], context_id, capacity=CapacityPolicy.ALLOWED
+    )
 
     # Get member
     stmt = select(ContextMember).where(
@@ -1587,7 +1599,9 @@ async def remove_context_member(
 
     # SECURITY: Workspace boundary check
     # Issue #271 Code Review C-2: check_context_owner already verifies ownership
-    await perm_service.check_context_owner(current_user["user_id"], context_id)
+    await perm_service.check_context_owner(
+        current_user["user_id"], context_id, capacity=CapacityPolicy.ALLOWED
+    )
 
     # Issue #362: Prevent self-removal even when the caller is an owner/admin.
     # Governance change should always require another actor.
@@ -1698,7 +1712,9 @@ async def get_memory_usage_stats(
     from services.permission_service import PermissionService
 
     perm_service = PermissionService(db)
-    await perm_service.check_context_access(user["user_id"], context_id)
+    await perm_service.check_context_access(
+        user["user_id"], context_id, capacity=CapacityPolicy.ALLOWED
+    )
 
     if sort_by not in VALID_SORT_FIELDS:
         raise HTTPException(
@@ -1798,7 +1814,9 @@ async def find_duplicates(
     from services.permission_service import PermissionService
 
     perm_service = PermissionService(db)
-    await perm_service.check_context_access(user["user_id"], context_id)
+    await perm_service.check_context_access(
+        user["user_id"], context_id, capacity=CapacityPolicy.ALLOWED
+    )
 
     collection_name = KAGURA_MEMORIES_COLLECTION
 
