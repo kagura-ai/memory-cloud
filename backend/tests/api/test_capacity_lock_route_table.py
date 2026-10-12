@@ -90,7 +90,7 @@ ROUTES: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/memory/pinned"): BLOCKED,
     ("POST", "/api/v1/memory/remember"): BLOCKED,
     ("PATCH", "/api/v1/memory/{memory_id}"): BLOCKED,
-    ("POST", "/api/v1/memory/guardrails"): BLOCKED,
+    ("POST", "/api/v1/memory/guardrails"): ALLOWED,  # a safety rail, like MCP load_guardrails
     ("GET", "/api/v1/memory/guardrails/digest"): ALLOWED,  # MCP load_guardrails
     ("POST", "/api/v1/memory/forget"): ALLOWED,
     ("POST", "/api/v1/memory/forget-bulk"): ALLOWED,
@@ -151,9 +151,9 @@ ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/config/share-keys"): ALLOWED,
     ("POST", "/api/v1/config/share-keys"): ALLOWED,
     ("POST", "/api/v1/config/share-keys/{key_id}/revoke"): ALLOWED,
-    # public search — anonymous readers are outsiders
+    # public search — anonymous readers are outsiders; info is metadata
     ("POST", "/api/v1/public/{context_id}/search"): BLOCKED,
-    ("GET", "/api/v1/public/{context_id}/info"): BLOCKED,
+    ("GET", "/api/v1/public/{context_id}/info"): ALLOWED,
     # agents — bootstrap rehydrates memory content; the registry is metadata
     ("POST", "/api/v1/agents/{agent_id}/bootstrap"): BLOCKED,
     ("GET", "/api/v1/agents"): ALLOWED,
@@ -214,15 +214,88 @@ def _registered_routes() -> dict[tuple[str, str], str]:
         for method in methods - {"HEAD", "OPTIONS"}:
             rows[(method, full)] = module
 
-    for route in app.routes:
-        original = getattr(route, "original_router", None)
-        if original is None:
-            add(route, "")
-            continue
-        prefix = getattr(route.include_context, "prefix", "") or ""
-        for sub in original.routes:
-            add(sub, prefix)
+    def walk(routes, prefix: str) -> None:
+        for route in routes:
+            original = getattr(route, "original_router", None)
+            if original is None:
+                add(route, prefix)
+                continue
+            # Included routers nest (auth includes the google/github routers).
+            walk(original.routes, prefix + (getattr(route.include_context, "prefix", "") or ""))
+
+    walk(app.routes, "")
     return rows
+
+
+# BLOCKED rows whose gate is the service's own second line, not a resolver call
+# in the handler (the REST twin of ``CAPACITY_LOCK_SERVICE_GATED_TOOLS``):
+# MemoryService._ensure_capacity, FileStorageService.reserve/confirm,
+# ContextService.create_context.
+SERVICE_GATED_ROUTES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/api/v1/memory/reference"),
+        ("POST", "/api/v1/memory/explore"),
+        ("POST", "/api/v1/memory/pinned"),
+        ("POST", "/api/v1/memory/remember"),
+        ("PATCH", "/api/v1/memory/{memory_id}"),
+        ("POST", "/api/v1/contexts"),
+        ("POST", "/api/v1/files/reserve"),
+        ("POST", "/api/v1/files/{file_id}/confirm"),
+    }
+)
+
+# What a handler's source must mention to count as gating the route itself:
+# the resolver policy, the lock helpers, or the analyses wrapper (#1941).
+_GATE_TOKENS = (
+    "CapacityPolicy.BLOCKED",
+    "ensure_not_capacity_locked(",
+    "ensure_context_not_capacity_locked(",
+    "ensure_contexts_not_capacity_locked(",
+    "_verify_context_in_workspace(",
+)
+
+
+def _handlers() -> dict[tuple[str, str], object]:
+    found: dict[tuple[str, str], object] = {}
+
+    def walk(routes, prefix: str) -> None:
+        for route in routes:
+            original = getattr(route, "original_router", None)
+            if original is not None:
+                walk(original.routes, prefix + (getattr(route.include_context, "prefix", "") or ""))
+                continue
+            methods = getattr(route, "methods", None)
+            if not methods:
+                continue
+            for method in methods - {"HEAD", "OPTIONS"}:
+                found[(method, prefix + route.path)] = route.endpoint
+
+    walk(app.routes, "")
+    return found
+
+
+def test_every_blocked_row_is_visibly_gated() -> None:
+    """A BLOCKED row names a gate the handler reaches, or sits in the explicit
+    service-gated set — a row cannot promise a protection nothing implements."""
+    import inspect
+
+    handlers = _handlers()
+    ungated = []
+    for key, policy in ROUTES.items():
+        if policy != BLOCKED or key in SERVICE_GATED_ROUTES:
+            continue
+        handler = handlers[key]
+        source = inspect.getsource(inspect.unwrap(handler))
+        # A dependency can carry the gate (resource ingest: verify_resource_token).
+        deps = ""
+        for param in inspect.signature(handler).parameters.values():
+            dependency = getattr(param.default, "dependency", None)
+            if callable(dependency):
+                deps += inspect.getsource(inspect.unwrap(dependency))
+        if not any(tok in source or tok in deps for tok in _GATE_TOKENS):
+            ungated.append(key)
+    assert not ungated, f"BLOCKED rows whose handler reaches no gate: {ungated}"
+    assert SERVICE_GATED_ROUTES <= {k for k, v in ROUTES.items() if v == BLOCKED}
 
 
 def test_every_route_is_classified_exactly_once() -> None:
@@ -265,6 +338,7 @@ def test_the_blocked_set_matches_the_mcp_decisions() -> None:
         ("POST", "/api/v1/memory/remember"): "remember",
         ("PATCH", "/api/v1/memory/{memory_id}"): "update_memory",
         ("GET", "/api/v1/memory/guardrails/digest"): "load_guardrails",
+        ("POST", "/api/v1/memory/guardrails"): "load_guardrails",
         ("POST", "/api/v1/memory/forget"): "forget",
         ("GET", "/api/v1/memory/list"): "list",
         ("POST", "/api/v1/contexts"): "create_context",
