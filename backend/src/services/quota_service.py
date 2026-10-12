@@ -36,8 +36,8 @@ from models.auth import (
     WorkspaceInvitation,
     WorkspaceMember,
 )
-from models.memory import Memory
 from services.effective_quota_service import EffectiveQuotaService
+from services.memory_counts import count_live_memories
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import FeatureNotAvailableError, QuotaExceededError, RedisError
 from utils.logger import get_logger
@@ -174,21 +174,13 @@ class QuotaService:
                 raise QuotaExceededError(error)
             return False, error
 
-        # Count memories across all workspace members (optimized single query with JOIN)
-        # Issue #273 C-2: Add NULL workspace_id and deleted_at filters to prevent quota bypass
+        # The workspace's live memory count — the same definition the plan page,
+        # the capacity lock and the downgrade check use (#1946). The former
+        # member-user_id JOIN counted a member's memories from their other
+        # workspaces too and refused remember before the limit was reached.
         # Note: This count is still subject to TOCTOU race conditions between check and insert.
         #       For strict enforcement, consider adding a database CHECK constraint.
-        memory_count_result = await self.db.execute(
-            select(func.count(Memory.id))
-            .select_from(Memory)
-            .join(WorkspaceMember, Memory.user_id == WorkspaceMember.user_id)
-            .where(
-                WorkspaceMember.workspace_id == workspace_id,
-                Memory.workspace_id.isnot(None),  # Exclude NULL workspace_id (orphaned memories)
-                Memory.deleted_at.is_(None),  # Exclude soft-deleted memories
-            )
-        )
-        current_count = memory_count_result.scalar() or 0
+        current_count = await count_live_memories(self.db, workspace_id)
 
         # No zero-count shortcut (#1939): a tier whose memory_limit is 0 must
         # refuse the first memory too, so the limit is always read.
@@ -1056,27 +1048,8 @@ class QuotaService:
         # Get plan tier
         plan = get_plan_tier(workspace.plan_name)
 
-        # Get all member user_ids
-        members_result = await self.db.execute(
-            select(WorkspaceMember.user_id).where(WorkspaceMember.workspace_id == workspace_id)
-        )
-        member_ids = [row[0] for row in members_result.all()]
-
-        # Calculate memory usage
-        # Issue #273 C-2: Add NULL workspace_id and deleted_at filters to prevent quota bypass
-        if member_ids:
-            memory_count_result = await self.db.execute(
-                select(func.count(Memory.id)).where(
-                    Memory.user_id.in_(member_ids),
-                    Memory.workspace_id.isnot(
-                        None
-                    ),  # Exclude NULL workspace_id (orphaned memories)
-                    Memory.deleted_at.is_(None),  # Exclude soft-deleted memories
-                )
-            )
-            memory_count = memory_count_result.scalar() or 0
-        else:
-            memory_count = 0
+        # Memory usage: the workspace-scoped live count (#1946).
+        memory_count = await count_live_memories(self.db, workspace_id)
 
         # Calculate percentages
         effective_limit = workspace.effective_memory_limit

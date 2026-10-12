@@ -16,6 +16,7 @@ from config.plan_tiers import has_feature
 from models.auth import Context, ExternalAPIKey, UsageStats, Workspace, WorkspaceMember
 from models.memory import Memory
 from services.billing_contract import ensure_no_billing_contract
+from services.memory_counts import count_live_memories
 from services.quota_service import QuotaService
 from services.workspace_locks import lock_workspace_for_update
 from utils.datetime import utcnow
@@ -1061,24 +1062,9 @@ class WorkspaceService:
         member_result = await self.db.execute(member_count_stmt)
         member_count = member_result.scalar() or 0
 
-        # Get all member user_ids
-        members_stmt = select(WorkspaceMember.user_id).where(
-            WorkspaceMember.workspace_id == workspace_id
-        )
-        members_result = await self.db.execute(members_stmt)
-        member_ids = [row[0] for row in members_result.all()]
-
-        # Aggregate memories across all workspace members
-        if member_ids:
-            memory_count_stmt = select(func.count(Memory.id)).where(
-                Memory.user_id.in_(member_ids),
-                Memory.deleted_at.is_(None),
-            )
-
-            memory_count_result = await self.db.execute(memory_count_stmt)
-            total_memories = memory_count_result.scalar() or 0
-        else:
-            total_memories = 0
+        # Memories: the workspace-scoped live count shared with the quota gate
+        # and the plan page (#1946).
+        total_memories = await count_live_memories(self.db, workspace_id)
 
         return {
             "context_count": context_count,

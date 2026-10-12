@@ -230,10 +230,8 @@ class TestQuotaStatusOverLimit:
         ws = _make_workspace(
             workspace_id, effective_memory_limit=LIMIT, effective_memories_per_day=50
         )
-        members_result = MagicMock()
-        members_result.all = MagicMock(return_value=[("user-1",)])
-        # Call order: select(Workspace) → select(member user_ids) → count(Memory).
-        mock_db.execute.side_effect = [_returning(ws), members_result, _counting(OVER)]
+        # Call order: select(Workspace) → workspace-scoped count(Memory) (#1946).
+        mock_db.execute.side_effect = [_returning(ws), _counting(OVER)]
 
         status = await service.get_quota_status(workspace_id)
 

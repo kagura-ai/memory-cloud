@@ -680,6 +680,49 @@ class TestGetWorkspaceStats:
         assert stats["member_count"] == 1
         assert stats["total_memories"] == 1
 
+    @pytest.mark.asyncio
+    async def test_counts_by_workspace_not_by_member(self, db_session) -> None:
+        """#1946: a member's memories in another workspace, soft-deleted rows
+        and legacy rows without a workspace stay out; a departed author's row
+        in this workspace stays in."""
+        service = WorkspaceService(db_session)
+        ws = Workspace(id=uuid4(), name="W14", owner_user_id="u22", plan_name="free")
+        other = Workspace(id=uuid4(), name="W15", owner_user_id="u22", plan_name="free")
+        db_session.add_all([ws, other])
+        await db_session.flush()
+        db_session.add(WorkspaceMember(workspace_id=ws.id, user_id="u22", role=WorkspaceRole.OWNER))
+        db_session.add(
+            WorkspaceMember(workspace_id=other.id, user_id="u22", role=WorkspaceRole.OWNER)
+        )
+        await db_session.flush()
+
+        def _mem(user_id: str, workspace_id, **kwargs) -> Memory:
+            return Memory(
+                id=uuid4(),
+                user_id=user_id,
+                workspace_id=workspace_id,
+                summary="s",
+                content="c",
+                type="note",
+                client="test",
+                client_version="1.0",
+                **kwargs,
+            )
+
+        db_session.add_all(
+            [
+                _mem("u22", ws.id),  # counted
+                _mem("left-the-workspace", ws.id),  # counted: not a member any more
+                _mem("u22", other.id),  # other workspace
+                _mem("u22", ws.id, deleted_at=utcnow()),  # soft-deleted
+                _mem("u22", None),  # legacy row without a workspace
+            ]
+        )
+        await db_session.flush()
+
+        stats = await service.get_workspace_stats(ws.id)
+        assert stats["total_memories"] == 2
+
 
 # ---------------------------------------------------------------------------
 # ensure_personal_workspace

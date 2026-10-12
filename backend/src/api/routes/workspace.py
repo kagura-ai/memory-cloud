@@ -36,6 +36,7 @@ from db.base import get_db
 from models.auth import Context, User, Workspace, WorkspaceMember
 from models.auth import UsageStats as UsageStatsModel
 from models.memory import Memory
+from services.memory_counts import count_live_memories
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import AuthenticationError
 
@@ -376,13 +377,8 @@ async def get_workspace_usage_current(
         )
 
         # Issue #65: workspace_id scoping is sufficient — no need to fetch member_ids
-        memory_count_result = await db.execute(
-            select(func.count(Memory.id)).where(
-                Memory.workspace_id == workspace_id,
-                Memory.deleted_at.is_(None),
-            )
-        )
-        memory_count = memory_count_result.scalar() or 0
+        # #1946: the shared workspace-scoped count helper, still one query.
+        memory_count = await count_live_memories(db, workspace_id)
 
         # Issue #1549: today's memory creations come from the Redis day counter
         # (no DB query — the Issue #65 query-count invariant is unchanged).

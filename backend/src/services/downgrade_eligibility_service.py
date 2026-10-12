@@ -33,8 +33,8 @@ from auth.resource_tokens import workspace_regular_active_tokens
 from config.plan_tiers import PLAN_ORDER, PLAN_TIERS, PlanTier, plan_rank
 from models.auth import Context, Workspace, WorkspaceMember, _zero_floor
 from models.file_objects import FileObject
-from models.memory import Memory
 from models.resource import ResourceToken, WorkspaceConnector
+from services.memory_counts import live_memory_count_stmt
 
 # A downgrade target is any tier strictly below the workspace's current tier in
 # ``PLAN_ORDER`` (lowest → highest, derived from the registry — #1548).
@@ -155,17 +155,9 @@ class DowngradeEligibilityService:
             )
         )
         # Memories belonging to THIS workspace (the per-workspace memory_limit is
-        # what a downgrade must fit, and the cleanup must be actionable here). NB:
-        # the live memory-quota gate (quota_service) joins on member user_id and
-        # can over-count a multi-workspace member's memories across workspaces —
-        # an orthogonal #273 quirk; the eligibility read uses the precise
-        # per-workspace count.
-        memories = await self._scalar(
-            select(func.count(Memory.id)).where(
-                Memory.workspace_id == workspace_id,
-                Memory.deleted_at.is_(None),
-            )
-        )
+        # what a downgrade must fit, and the cleanup must be actionable here) —
+        # the same count the quota gate uses since #1946.
+        memories = await self._scalar(live_memory_count_stmt(workspace_id))
         # Workspace-scoped active resource tokens, excluding connector-owned
         # tokens — the create-time cap's own builder (#1919), so the
         # eligibility read counts exactly what the cap and the quota ceiling

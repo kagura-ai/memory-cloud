@@ -82,14 +82,14 @@ def make_client() -> Iterator[Callable[[str], TestClient]]:
     )
     suspended = suspended_patcher.start()
 
-    def _make(plan_name: str) -> TestClient:
+    def _make(plan_name: str, *, memories: int = 0) -> TestClient:
         db = MagicMock()
-        # Route order: workspace row → member ids (empty, so the memory count
-        # query is skipped) → context count.
+        # Route order: workspace row → workspace-scoped memory count (#1946, no
+        # member lookup any more) → context count.
         db.execute = AsyncMock(
             side_effect=[
                 _result(scalar_one_or_none=_workspace(plan_name)),
-                _result(all=[]),
+                _result(scalar=memories),
                 _result(scalar=0),
             ]
         )
@@ -99,7 +99,9 @@ def make_client() -> Iterator[Callable[[str], TestClient]]:
 
         app.dependency_overrides[require_session_auth] = mock_session
         app.dependency_overrides[get_db] = mock_db
-        return TestClient(app, raise_server_exceptions=False)
+        client = TestClient(app, raise_server_exceptions=False)
+        client.db = db  # type: ignore[attr-defined]  # per-client, so tests can count queries
+        return client
 
     _make.suspended = suspended  # type: ignore[attr-defined]
     yield _make
@@ -151,3 +153,13 @@ def test_paid_plan_lists_nothing_suspended(make_client) -> None:
     resp = make_client("promax").get(ENDPOINT)
     assert resp.status_code == 200, resp.text
     assert resp.json()["suspended"] == []
+
+
+def test_usage_memories_is_the_workspace_scoped_count(make_client) -> None:
+    """#1946: ``usage.memories`` is the same count the remember gate compares
+    against the limit — three queries, none of them a member lookup."""
+    client = make_client("free", memories=7)
+    resp = client.get(ENDPOINT)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["usage"]["memories"] == 7
+    assert client.db.execute.await_count == 3  # type: ignore[attr-defined]

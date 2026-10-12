@@ -35,9 +35,8 @@ from db.base import get_db
 from models.auth import (
     Context,
     Workspace,
-    WorkspaceMember,
 )
-from models.memory import Memory
+from services.memory_counts import count_live_memories
 from services.permission_service import PermissionService
 from services.plan_suspension import suspended_features
 from utils.logger import get_logger
@@ -191,18 +190,9 @@ async def get_workspace_plan(
     plan_tier = get_plan_tier(workspace.plan_name)
 
     # Get current usage stats
-    # Count memories across all workspace members
-    members_result = await db.execute(
-        select(WorkspaceMember.user_id).where(WorkspaceMember.workspace_id == workspace_uuid)
-    )
-    member_user_ids = [row[0] for row in members_result.all()]
-
-    memory_count = 0
-    if member_user_ids:
-        memory_count_result = await db.execute(
-            select(func.count(Memory.id)).where(Memory.user_id.in_(member_user_ids))
-        )
-        memory_count = memory_count_result.scalar() or 0
+    # Memories: the same workspace-scoped live count the remember gate compares
+    # against memory_limit (#1946), so the page and the gate agree.
+    memory_count = await count_live_memories(db, workspace_uuid)
 
     # Count contexts
     context_count_result = await db.execute(

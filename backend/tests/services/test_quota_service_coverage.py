@@ -113,7 +113,7 @@ async def _add_usage(db, workspace_id, user_id="u", method="MCP", on_date=None):
 
 
 class TestCheckMemoryQuota:
-    """QuotaService.check_memory_quota — counts memories across members."""
+    """QuotaService.check_memory_quota — counts the workspace's live memories (#1946)."""
 
     async def test_no_memories_returns_true(self, db_session):
         """Zero memories under a positive limit → (True, None)."""
@@ -208,6 +208,45 @@ class TestCheckMemoryQuota:
         assert "Memory quota exceeded" in error
         assert "Limit: 2" in error
         assert "free" in error
+
+    async def test_other_workspace_memories_of_a_member_do_not_count(self, db_session, monkeypatch):
+        """#1946: a member of two workspaces fills workspace B; workspace A's
+        gate must not see those rows (the member-user_id JOIN counted them and
+        refused A's first remember)."""
+        ws_a = await _make_workspace(db_session, "free")
+        ws_b = await _make_workspace(db_session, "free")
+        user_id = f"member-{uuid4().hex[:8]}"
+        await _add_member(db_session, ws_a.id, user_id)
+        await _add_member(db_session, ws_b.id, user_id)
+        await _add_memory(db_session, user_id, ws_b.id)
+        await _add_memory(db_session, user_id, ws_b.id)
+
+        async def _limit_one(self, workspace_id):
+            return {"memory_limit": 1}
+
+        monkeypatch.setattr(qs.EffectiveQuotaService, "get_effective_quotas", _limit_one)
+
+        can_create, error = await QuotaService(db_session).check_memory_quota(ws_a.id)
+
+        assert can_create is True
+        assert error is None
+
+    async def test_memories_of_a_departed_member_still_count(self, db_session, monkeypatch):
+        """#1946: rows stay in the workspace when their author leaves, and the
+        workspace-scoped count keeps them (the member JOIN silently dropped
+        them, under-counting against the limit)."""
+        ws = await _make_workspace(db_session, "free")
+        await _add_memory(db_session, f"departed-{uuid4().hex[:8]}", ws.id)
+
+        async def _limit_one(self, workspace_id):
+            return {"memory_limit": 1}
+
+        monkeypatch.setattr(qs.EffectiveQuotaService, "get_effective_quotas", _limit_one)
+
+        can_create, error = await QuotaService(db_session).check_memory_quota(ws.id)
+
+        assert can_create is False
+        assert error is not None and "Current: 1, Limit: 1" in error
 
     async def test_at_limit_raises_when_requested(self, db_session, monkeypatch):
         """raise_on_exceeded=True converts the over-limit result to a raise."""
@@ -495,8 +534,24 @@ class TestGetQuotaStatus:
 
         assert await service.get_quota_status(uuid4()) == {}
 
+    async def test_other_workspace_memories_do_not_count(self, db_session):
+        """#1946: the status reads the workspace-scoped count, so a member's
+        rows in another workspace are not reported here."""
+        ws_a = await _make_workspace(db_session, "free")
+        ws_b = await _make_workspace(db_session, "free")
+        user_id = f"member-{uuid4().hex[:8]}"
+        await _add_member(db_session, ws_a.id, user_id)
+        await _add_member(db_session, ws_b.id, user_id)
+        await _add_memory(db_session, user_id, ws_a.id)
+        await _add_memory(db_session, user_id, ws_b.id)
+        await _add_memory(db_session, user_id, ws_b.id)
+
+        status = await QuotaService(db_session).get_quota_status(ws_a.id)
+
+        assert status["memory"]["current"] == 1
+
     async def test_no_members_zero_memory(self, db_session):
-        """No members → memory_count branch is the empty-member path (0)."""
+        """No members and no rows → 0."""
         ws = await _make_workspace(db_session, "free")
         service = QuotaService(db_session)
 
@@ -513,8 +568,8 @@ class TestGetQuotaStatus:
         assert status["plan"]["display_name"] == get_plan_tier("free").display_name
 
     async def test_with_members_counts_memories(self, db_session):
-        """With members and memories, current count is the live JOIN count
-        and percentage is computed against the effective limit."""
+        """With members and memories, current count is the workspace's live
+        count and percentage is computed against the effective limit."""
         ws = await _make_workspace(db_session, "free")
         user_id = f"member-{uuid4().hex[:8]}"
         await _add_member(db_session, ws.id, user_id)

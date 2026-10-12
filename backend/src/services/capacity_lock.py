@@ -34,7 +34,7 @@ from config.plan_tiers import PlanName
 from config.settings import get_settings
 from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING, Context, Workspace, WorkspaceMember
 from models.file_objects import FileObject, WorkspaceStorageUsage
-from models.memory import Memory
+from services.memory_counts import live_memory_count_stmt
 from utils.exceptions import CapacityLockedError
 
 # The web page where the owner sees the plan, the usage and the way back.
@@ -158,15 +158,7 @@ async def _measure(
     db: AsyncSession, workspace_id: UUID, *, memory_limit: int, storage_limit: int
 ) -> CapacityLock | None:
     """Count the workspace against the given limits; ``None`` when within both."""
-    memory_count = int(
-        await db.scalar(
-            select(func.count(Memory.id)).where(
-                Memory.workspace_id == workspace_id,
-                Memory.deleted_at.is_(None),
-            )
-        )
-        or 0
-    )
+    memory_count = int(await db.scalar(live_memory_count_stmt(workspace_id)) or 0)
     used_bytes = int(
         await db.scalar(
             select(WorkspaceStorageUsage.used_bytes).where(
