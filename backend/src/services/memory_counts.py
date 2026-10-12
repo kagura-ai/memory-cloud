@@ -18,6 +18,7 @@ without a cycle.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from uuid import UUID
 
 from sqlalchemy import Select, func, select
@@ -43,3 +44,24 @@ async def count_live_memories(db: AsyncSession, workspace_id: UUID) -> int:
     ``memory_limit`` check compares against)."""
     result = await db.execute(live_memory_count_stmt(workspace_id))
     return int(result.scalar() or 0)
+
+
+async def live_memory_counts_by_workspace(
+    db: AsyncSession, workspace_ids: Sequence[UUID]
+) -> dict[UUID, int]:
+    """The same count for many workspaces in one grouped query.
+
+    Workspaces with no live memories are absent from the result (callers use
+    ``.get(ws_id, 0)``); an empty ``workspace_ids`` issues no query.
+    """
+    if not workspace_ids:
+        return {}
+    result = await db.execute(
+        select(Memory.workspace_id, func.count(Memory.id).label("memory_count"))
+        .where(
+            Memory.workspace_id.in_(list(workspace_ids)),
+            Memory.deleted_at.is_(None),
+        )
+        .group_by(Memory.workspace_id)
+    )
+    return {row.workspace_id: int(row.memory_count) for row in result.all()}

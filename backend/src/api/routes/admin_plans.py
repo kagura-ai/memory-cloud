@@ -33,11 +33,10 @@ from models.auth import (
     WorkspaceInvitation,
     WorkspaceMember,
 )
-from models.memory import Memory
 from models.resource import WorkspaceAddon  # Issue #665: row-based admin grants
 from services.addon_calculator_service import ADDON_UNIT_VALUES, AddonCalculatorService
 from services.effective_quota_service import EffectiveQuotaService
-from services.memory_counts import count_live_memories
+from services.memory_counts import count_live_memories, live_memory_counts_by_workspace
 from utils import db_transaction
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
@@ -362,18 +361,8 @@ async def list_workspaces_with_plans(
                 members_by_workspace[member.workspace_id] = []
             members_by_workspace[member.workspace_id].append(member.user_id)
 
-        # Fetch all memory counts grouped by workspace
-        memory_counts_result = await db.execute(
-            select(Memory.workspace_id, func.count(Memory.id).label("memory_count"))
-            .where(
-                Memory.workspace_id.in_(workspace_ids),
-                Memory.deleted_at.is_(None),
-            )
-            .group_by(Memory.workspace_id)
-        )
-        memory_counts_by_workspace = {
-            row.workspace_id: row.memory_count for row in memory_counts_result.all()
-        }
+        # Fetch all memory counts grouped by workspace (the shared predicate, #1946)
+        memory_counts_by_workspace = await live_memory_counts_by_workspace(db, workspace_ids)
 
         for workspace in workspaces:
             total_memories = memory_counts_by_workspace.get(workspace.id, 0)

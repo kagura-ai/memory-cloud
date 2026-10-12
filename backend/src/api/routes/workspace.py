@@ -307,7 +307,8 @@ async def get_workspace_usage_current(
 ):
     """Get workspace-wide usage vs plan limits.
 
-    Aggregates usage across all workspace members.
+    Counts are workspace-scoped (#1946): every live memory of the workspace,
+    whoever wrote it, and nothing from members' other workspaces.
 
     Returns:
         Workspace usage statistics with plan limits and warning flags

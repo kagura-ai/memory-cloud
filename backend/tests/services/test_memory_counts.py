@@ -16,7 +16,11 @@ import pytest
 
 from models.auth import Workspace
 from models.memory import Memory
-from services.memory_counts import count_live_memories, live_memory_count_stmt
+from services.memory_counts import (
+    count_live_memories,
+    live_memory_count_stmt,
+    live_memory_counts_by_workspace,
+)
 from utils.datetime import utcnow
 
 pytestmark = pytest.mark.asyncio
@@ -81,3 +85,21 @@ async def test_statement_matches_the_helper(db_session):
 
     assert (await db_session.execute(live_memory_count_stmt(ws.id))).scalar() == 1
     assert await count_live_memories(db_session, ws.id) == 1
+
+
+async def test_grouped_counts_match_the_single_count(db_session):
+    """The admin list reads many workspaces at once; same predicate, one query,
+    and a workspace without live rows is simply absent."""
+    ws_a = await _workspace(db_session)
+    ws_b = await _workspace(db_session)
+    ws_empty = await _workspace(db_session)
+    await _memory(db_session, "u", ws_a.id)
+    await _memory(db_session, "v", ws_a.id)
+    await _memory(db_session, "u", ws_a.id, deleted_at=utcnow())
+    await _memory(db_session, "u", ws_b.id)
+
+    counts = await live_memory_counts_by_workspace(db_session, [ws_a.id, ws_b.id, ws_empty.id])
+
+    assert counts == {ws_a.id: 2, ws_b.id: 1}
+    assert counts.get(ws_a.id) == await count_live_memories(db_session, ws_a.id)
+    assert await live_memory_counts_by_workspace(db_session, []) == {}
