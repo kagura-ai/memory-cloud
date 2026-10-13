@@ -96,6 +96,7 @@ async def lifespan(app: FastAPI):
     from tasks import (
         get_scheduler,
         schedule_bm25_drift_tasks,
+        schedule_capacity_purge_tasks,
         schedule_credentials_tasks,
         schedule_device_code_tasks,
         schedule_email_action_token_tasks,
@@ -126,6 +127,7 @@ async def lifespan(app: FastAPI):
     schedule_bm25_drift_tasks(scheduler)
     schedule_erasure_tasks(scheduler)
     schedule_file_tasks(scheduler)
+    schedule_capacity_purge_tasks(scheduler)
     schedule_semantic_edge_reverify_tasks(scheduler)
     start_scheduler()
     logger.info("background_tasks_scheduled")

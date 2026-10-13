@@ -11,9 +11,11 @@ Implements scheduled tasks for:
 - Expired device code cleanup (hourly) — Issue #1656
 - Security notice digests (every minute) — Issue #1752
 - Used/expired email action token cleanup (hourly) — Issue #1738
+- Capacity-over purge sweep (daily 04:00 UTC) — Issue #1969
 """
 
 from .bm25_drift_tasks import schedule_bm25_drift_tasks
+from .capacity_purge_tasks import schedule_capacity_purge_tasks
 from .credentials_tasks import schedule_credentials_tasks
 from .device_code_tasks import schedule_device_code_tasks
 from .email_action_token_tasks import schedule_email_action_token_tasks
@@ -47,4 +49,5 @@ __all__ = [
     "schedule_bm25_drift_tasks",
     "schedule_file_tasks",
     "schedule_semantic_edge_reverify_tasks",
+    "schedule_capacity_purge_tasks",
 ]
