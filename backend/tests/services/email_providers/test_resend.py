@@ -800,7 +800,7 @@ async def test_send_capacity_purge_notice_payload_ja() -> None:
     text = params["text"]
     assert "2026-11-13" in text
     assert "アカウントは残り" in text
-    assert "記憶 1 件と 3 MB" in text
+    assert "メモリー 1 件と 3 MB" in text
     assert "memory" not in text
     assert _CONTEXTS_URL in text and _PLAN_URL in text
 
@@ -878,7 +878,13 @@ async def test_send_capacity_purge_complete_payload_ja() -> None:
     (params,), _ = m.call_args
     assert "削除しました" in params["subject"]
     text = params["text"]
-    for fragment in ("2026-11-13", "コンテキスト 3 件", "記憶 1200 件", "ファイル 4 件", _PLAN_URL):
+    for fragment in (
+        "2026-11-13",
+        "コンテキスト 3 件",
+        "メモリー 1200 件",
+        "ファイル 4 件",
+        _PLAN_URL,
+    ):
         assert fragment in text, fragment
 
 

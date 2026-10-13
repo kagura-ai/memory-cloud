@@ -977,10 +977,10 @@ def capacity_overage_text(over_memories: int, over_bytes: int) -> str:
 
 
 def capacity_overage_text_ja(over_memories: int, over_bytes: int) -> str:
-    """``"記憶 12 件と 3.5 MB"`` — the Japanese form of :func:`capacity_overage_text`."""
+    """``"メモリー 12 件と 3.5 MB"`` — the Japanese form of :func:`capacity_overage_text`."""
     parts: list[str] = []
     if over_memories > 0:
-        parts.append(f"記憶 {over_memories} 件")
+        parts.append(f"メモリー {over_memories} 件")
     if over_bytes > 0:
         parts.append(_format_mb(over_bytes))
     return "と ".join(parts) or "なし"

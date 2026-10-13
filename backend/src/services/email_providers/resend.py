@@ -652,7 +652,7 @@ class ResendEmailService:
             subject = f"【残り {days_left} 日】{workspace_name} のデータは {day} に削除されます"
             text = (
                 f"ワークスペース「{workspace_name}」は Free プランの上限を {overage} 超えています。\n"
-                f"{day}(UTC)まで超過したままの場合、このワークスペースの記憶・コンテキスト・\n"
+                f"{day}(UTC)まで超過したままの場合、このワークスペースのメモリー・コンテキスト・\n"
                 "ファイルはすべて削除されます。アカウントは残り、空の状態で Free プランを\n"
                 "引き続き使えます。\n"
                 "\n"
@@ -720,7 +720,7 @@ class ResendEmailService:
             text = (
                 f"ワークスペース「{workspace_name}」は Free プランの上限を 30 日間超えていたため、\n"
                 f"{day}(UTC)にデータを削除しました。\n"
-                f"削除したもの: コンテキスト {contexts_deleted} 件、記憶 {memories_deleted} 件、"
+                f"削除したもの: コンテキスト {contexts_deleted} 件、メモリー {memories_deleted} 件、"
                 f"ファイル {files_deleted} 件\n"
                 "\n"
                 "アカウントはそのまま残っています。空の状態で Free プランを引き続き使えます。\n"
