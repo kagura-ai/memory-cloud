@@ -4,6 +4,25 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.100.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.100.0) — 2026-10-13
+
+The plan-change work of v0.99.0 completed: a workspace that drops below what it holds keeps everything, and the plan's seats and writable context slots are decided at use time; the capacity-over lock moved into the context resolvers; two gaps in the paused-feature set are closed.
+
+### Added
+- **Seats and writable slots when a plan drops below what a workspace holds** ([#1943](https://github.com/kagura-ai/memory-cloud/issues/1943)): members are ranked owner first, then earliest joined; the first `max_members` keep a seat and a member without one is refused on every workspace route (`403 FEAT-001`, `feature: members`, with the tier that would seat everyone). Live contexts are ranked oldest first; the first `max_contexts` stay writable and a context without a slot refuses content writes only (`FEAT-001`, `feature: contexts`) — remember, update, patch, uploads, agent state, edges, measurements, feedback and search settings — while reads, listing, export, delete, metadata updates and merge keep working so the owner can get back under the cap. Nothing is stored or deleted: re-subscribing, adding seats, or removing members / contexts restores everything on the next call, and paid → paid overage follows the same ranking. `GET /workspaces/{id}/plan` lists `members` / `contexts` under `suspended`, the members list carries `seat_paused` (and is ordered by the seat ranking), the contexts list `writes_paused`, and the web banner names both.
+
+### Changed
+- **The capacity-over lock is decided in the context resolvers** ([#1948](https://github.com/kagura-ai/memory-cloud/issues/1948)): `PermissionService.resolve_context_for_workspace_read` / `check_context_access` take a required `capacity` policy (`BLOCKED` runs the #1941 lock after every authorization step, `ALLOWED` never reads it), so every context-addressed REST route is gated in one place and a new route must choose; the MCP dispatcher table keeps deciding for MCP tools. A route table test pins which REST routes are gated, which are cleanup, and which rely on the service layer. Resource-token ingest is also refused while the owning workspace is locked.
+
+### Fixed
+- **One definition of a workspace's live memory count** ([#1946](https://github.com/kagura-ai/memory-cloud/issues/1946)): the memory quota gate, the capacity lock, the downgrade check, the admin plan list and MCP `get_usage` count the same thing (live rows of that workspace); the quota gate counted across workspaces before.
+- **A connector's API key is refused while its connectors are paused** ([#1944](https://github.com/kagura-ai/memory-cloud/issues/1944)): a `connector:*` key answers `401` on every call once the plan no longer includes connectors (the worker dispatch was already cut off); the reserved `connector:` name prefix is refused on user-created keys.
+
+### Notes
+- No migration, no new environment variables.
+- Self-hosted operators: before raising a workspace's plan, check `PLAN_FREE_MAX_MEMBERS_PER_WORKSPACE` / `PLAN_FREE_MAX_CONTEXTS_PER_WORKSPACE` — an admin-managed Free workspace with several members now seats only the owner (`docs/deployment.md`).
+- Follow-ups filed for v1.0.0: #1951, #1952, #1954, #1956, #1957.
+
 ## [v0.99.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.99.0) — 2026-10-10
 
 Plans and billing state now shape what a workspace can do: a running subscription blocks deletion, paid-only features pause (never delete) when a plan drops them, and a workspace that comes back to Free over its capacity is locked until it is cleaned up or re-subscribed.
