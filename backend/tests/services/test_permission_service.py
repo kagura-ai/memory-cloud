@@ -1,5 +1,6 @@
 """Tests for PermissionService RBAC."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -155,6 +156,10 @@ class TestContextAccess:
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = mock_ctx
         mock_db.execute = AsyncMock(return_value=mock_result)
+        # #1957: the creator shortcut reads membership (and the seat) now.
+        service.workspace_service.get_member = AsyncMock(
+            return_value=SimpleNamespace(id=1, role=WorkspaceRole.MEMBER, allowed_context_ids=None)
+        )
 
         context, role = await service.check_context_access(
             "user1", ctx_id, capacity=CapacityPolicy.ALLOWED

@@ -670,7 +670,9 @@ class PermissionService:
                 # known to be the creator, so a non-creator still learns nothing
                 # here (#394 ordering). A creator with no membership row is not
                 # expected (removing a member hands their contexts to the
-                # owner, #275); it keeps the historical pass, logged.
+                # owner, #275); it keeps the historical pass, logged. The
+                # shortcut still skips the role and whitelist rules below —
+                # that is #165's contract for the creator, not part of #1957.
                 creator_member = await self.workspace_service.get_member(
                     context.workspace_id, user_id, raise_if_not_found=False
                 )

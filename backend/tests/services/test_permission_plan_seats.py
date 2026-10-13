@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+import structlog
 
 from auth.workspace_roles import ContextRole, WorkspaceRole
 from services.capacity_lock import CapacityPolicy
@@ -117,10 +118,11 @@ class TestContextRbac:
         answer the seat-less creator the same way the context resolvers and
         MCP already did."""
         service.db.execute.return_value.scalar_one_or_none.return_value = _context(is_private=True)
-        with _seat(_refused()) as seat, pytest.raises(FeatureNotAvailableError):
+        with _seat(_refused()) as seat, pytest.raises(FeatureNotAvailableError) as exc:
             await service._check_context_access_rbac(USER, CTX, ContextRole.OWNER)
         assert seat.await_args.args[1] == WS
         assert seat.await_args.args[2].id == 7
+        assert (exc.value.details["gate"], exc.value.details["feature"]) == ("plan", "members")
 
     @pytest.mark.asyncio
     async def test_a_seated_creator_keeps_owner_access_to_their_private_context(
@@ -140,10 +142,12 @@ class TestContextRbac:
         #275); kept as before, but now observable in the log."""
         service.db.execute.return_value.scalar_one_or_none.return_value = _context(is_private=True)
         service.workspace_service.get_member = AsyncMock(return_value=None)
-        with _seat(_refused()) as seat:
+        with _seat(_refused()) as seat, structlog.testing.capture_logs() as logs:
             _, role = await service._check_context_access_rbac(USER, CTX, ContextRole.OWNER)
         assert role is ContextRole.OWNER
         seat.assert_not_awaited()
+        warned = [e for e in logs if e.get("event") == "private_context_creator_without_membership"]
+        assert len(warned) == 1 and warned[0]["workspace_id"] == str(WS)
 
     @pytest.mark.asyncio
     async def test_a_non_creator_is_refused_before_membership_or_seat_is_read(
@@ -171,9 +175,11 @@ class TestContextRbac:
         with (
             patch("services.permission_service.is_same_owner", AsyncMock(return_value=True)),
             _seat(_refused()),
-            pytest.raises(FeatureNotAvailableError),
+            pytest.raises(FeatureNotAvailableError) as exc,
         ):
             await service._check_context_access_rbac(USER, CTX, ContextRole.VIEWER)
+        # Identical envelope to the direct creator's refusal above.
+        assert (exc.value.details["gate"], exc.value.details["feature"]) == ("plan", "members")
 
 
 class TestWriteSlots:
