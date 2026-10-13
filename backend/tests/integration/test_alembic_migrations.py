@@ -151,6 +151,30 @@ B02_REV = "b02_383_edges_ws_ctx_idx"
 B03_REV = "b03_396_edges_ws_ctx_not_null"
 
 
+def _reset_and_upgrade_to(revision: str) -> None:
+    """Drop the test schema and upgrade to ``revision``, ready for seeding.
+
+    Steers migrations at the test DB via ``_alembic_at_test_db()`` — without
+    it, env.py's ``get_database_url()`` override would silently redirect the
+    upgrade to the dev DB. The non-test-DB guard mirrors ``_reset_alembic_state``
+    so a misconfigured ``TEST_DATABASE_URL`` cannot drop a dev/prod database.
+    Shared by every seeded-state migration test class in this module.
+    """
+    test_url = os.getenv("TEST_DATABASE_URL", _DEFAULT_TEST_URL)
+    db_name = test_url.rsplit("/", 1)[-1].split("?")[0]
+    if not db_name.endswith("_test"):
+        raise RuntimeError(f"Refusing to reset non-test database: {db_name}")
+
+    engine = _sync_engine()
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+    engine.dispose()
+
+    with _alembic_at_test_db():
+        command.upgrade(_get_alembic_config(), revision)
+
+
 class TestB03NeuralEdgesBackfillMigration:
     """Seeded-state tests for b03_396_neural_edges_ws_ctx_not_null (#396 AC 5).
 
@@ -173,27 +197,8 @@ class TestB03NeuralEdgesBackfillMigration:
 
     @staticmethod
     def _reset_and_upgrade_to_b02():
-        """Drop schema, upgrade to b02 (one step before b03), ready for seeding.
-
-        Steers migrations at the test DB via ``_alembic_at_test_db()`` —
-        without it, env.py's ``get_database_url()`` override would silently
-        redirect the upgrade to the dev DB.
-        """
-        # Safety guard — mirrors _reset_alembic_state's non-test-DB check so
-        # a misconfigured TEST_DATABASE_URL cannot drop a dev/prod database.
-        test_url = os.getenv("TEST_DATABASE_URL", _DEFAULT_TEST_URL)
-        db_name = test_url.rsplit("/", 1)[-1].split("?")[0]
-        if not db_name.endswith("_test"):
-            raise RuntimeError(f"Refusing to reset non-test database: {db_name}")
-
-        engine = _sync_engine()
-        with engine.begin() as conn:
-            conn.execute(text("DROP SCHEMA public CASCADE"))
-            conn.execute(text("CREATE SCHEMA public"))
-        engine.dispose()
-
-        with _alembic_at_test_db():
-            command.upgrade(_get_alembic_config(), B02_REV)
+        """Drop schema, upgrade to b02 (one step before b03), ready for seeding."""
+        _reset_and_upgrade_to(B02_REV)
 
     @staticmethod
     def _upgrade_head_with_test_db():
@@ -632,6 +637,7 @@ class TestE95MemoriesWorkspaceIdNotNull:
         owner_id: str,
         workspace_id: str | None,
         context_id: str | None,
+        deleted: bool = False,
     ) -> None:
         """Insert a memory as the e94 schema requires (``use_count`` is gone by then)."""
         conn.execute(
@@ -639,28 +645,22 @@ class TestE95MemoriesWorkspaceIdNotNull:
                 "INSERT INTO memories "
                 "(id, user_id, workspace_id, context_id, summary, content, type, "
                 " embedding_status, importance, confidence, scope, long_term, "
-                " access_count, client, source) "
+                " access_count, client, source, deleted_at) "
                 "VALUES (:id, :u, :ws, :ctx, 'm', 'x', 'note', 'pending', "
-                " 0.5, 1.0, 'working', false, 0, 'test', 'test')"
+                " 0.5, 1.0, 'working', false, 0, 'test', 'test', :deleted_at)"
             ),
-            {"id": mem_id, "u": owner_id, "ws": workspace_id, "ctx": context_id},
+            {
+                "id": mem_id,
+                "u": owner_id,
+                "ws": workspace_id,
+                "ctx": context_id,
+                "deleted_at": "2026-01-01T00:00:00" if deleted else None,
+            },
         )
 
     @staticmethod
     def _reset_and_upgrade_to_e94():
-        test_url = os.getenv("TEST_DATABASE_URL", _DEFAULT_TEST_URL)
-        db_name = test_url.rsplit("/", 1)[-1].split("?")[0]
-        if not db_name.endswith("_test"):
-            raise RuntimeError(f"Refusing to reset non-test database: {db_name}")
-
-        engine = _sync_engine()
-        with engine.begin() as conn:
-            conn.execute(text("DROP SCHEMA public CASCADE"))
-            conn.execute(text("CREATE SCHEMA public"))
-        engine.dispose()
-
-        with _alembic_at_test_db():
-            command.upgrade(_get_alembic_config(), E94_REV)
+        _reset_and_upgrade_to(E94_REV)
 
     @staticmethod
     def _upgrade_head():
@@ -711,7 +711,9 @@ class TestE95MemoriesWorkspaceIdNotNull:
             self._seed_memory(conn, mem_id, owner, None, None)
         engine.dispose()
 
-        with pytest.raises(RuntimeError, match="neither workspace_id nor context_id"):
+        with pytest.raises(
+            RuntimeError, match="live memories have neither workspace_id nor context_id"
+        ):
             self._upgrade_head()
 
         engine = _sync_engine()
@@ -732,6 +734,38 @@ class TestE95MemoriesWorkspaceIdNotNull:
                 conn.execute(text("DELETE FROM memories WHERE id = :id"), {"id": mem_id})
             engine.dispose()
             self._upgrade_head()
+
+    def test_tombstoned_orphan_is_purged_and_the_migration_proceeds(self):
+        """A soft-deleted NULL/NULL row is not user-visible content: it is
+        removed, and a live fillable row next to it still gets its workspace."""
+        self._reset_and_upgrade_to_e94()
+        owner = "owner-1951-tombstone"
+        dead_id = str(uuid.uuid4())
+        live_id = str(uuid.uuid4())
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            ws_id, ctx_id = self._seed_workspace_and_context(conn, owner)
+            self._seed_memory(conn, dead_id, owner, None, None, deleted=True)
+            self._seed_memory(conn, live_id, owner, None, ctx_id)
+        engine.dispose()
+
+        self._upgrade_head()
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            assert (
+                conn.execute(
+                    text("SELECT count(*) FROM memories WHERE id = :id"), {"id": dead_id}
+                ).scalar_one()
+                == 0
+            )
+            row = conn.execute(
+                text("SELECT workspace_id FROM memories WHERE id = :id"), {"id": live_id}
+            ).one()
+            assert str(row.workspace_id) == ws_id
+            assert not self._workspace_id_is_nullable(conn)
+        engine.dispose()
 
     def test_existing_workspace_is_not_rewritten(self):
         """A row whose workspace disagrees with its context's keeps its value.

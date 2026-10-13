@@ -22,10 +22,15 @@ from services.context_service import ContextService
 
 def _memory_constructor_kwargs() -> dict[str, ast.expr]:
     tree = ast.parse(textwrap.dedent(inspect.getsource(ContextService.merge_contexts)))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Memory":
-            return {kw.arg: kw.value for kw in node.keywords if kw.arg}
-    raise AssertionError("merge_contexts no longer constructs Memory(...) directly")
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Memory"
+    ]
+    # Exactly one construction: a second one would make "the copy" ambiguous
+    # and this pin would silently inspect the wrong call.
+    assert len(calls) == 1, f"expected one Memory(...) in merge_contexts, found {len(calls)}"
+    return {kw.arg: kw.value for kw in calls[0].keywords if kw.arg}
 
 
 def test_merged_copy_takes_the_target_workspace() -> None:

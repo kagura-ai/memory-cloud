@@ -5848,8 +5848,8 @@ class MemoryService:
                 if not await self._may_delete_guardrail(user_id, memory):
                     return ForgetResponse(deleted_count=0, memory_ids=[])
                 # Migration 063: Get workspace_id/context_id from memory directly
-                # CRITICAL: Validate workspace_id/context_id are not NULL (data integrity)
-                if not memory.workspace_id or not memory.context_id:
+                # CRITICAL: a row without a context cannot be placed (workspace_id is NOT NULL, e95)
+                if not memory.context_id:
                     raise ValueError(
                         f"Memory {memory.id} has no context_id (workspace_id is NOT NULL "
                         "since e95, #1951); the row cannot be placed in a collection."
@@ -5935,7 +5935,7 @@ class MemoryService:
                 # not delete one by one. Skipped rows are simply not counted.
                 if not await self._may_delete_guardrail(user_id, memory):
                     continue
-                if not memory.workspace_id or not memory.context_id:
+                if not memory.context_id:
                     raise ValueError(
                         f"Memory {memory.id} has no context_id (workspace_id is NOT NULL "
                         "since e95, #1951); the row cannot be placed in a collection."
@@ -6148,8 +6148,8 @@ class MemoryService:
         await self._ensure_capacity(user_id, workspace_id=seed_memory.workspace_id)
 
         # Migration 063: Get workspace_id and context_id directly from seed memory
-        # CRITICAL: Validate seed memory has workspace_id/context_id (data integrity)
-        if not seed_memory.workspace_id or not seed_memory.context_id:
+        # CRITICAL: the seed needs a context to be placed (workspace_id is NOT NULL, e95)
+        if not seed_memory.context_id:
             raise ValueError(
                 f"Seed memory {seed_memory.id} has no context_id (workspace_id is NOT NULL "
                 "since e95, #1951); the row cannot be placed in a collection."
@@ -6687,7 +6687,7 @@ async def _create_knn_seed_edges(
         if not config.knn_seed_enabled:
             return
 
-        if not memory.workspace_id or not memory.context_id:
+        if not memory.context_id:
             # Defensive: 3-level isolation requires both
             return
 
@@ -6995,7 +6995,7 @@ async def _create_tag_cooccurrence_seed_edges(
         if not config.tag_cooccurrence_enabled:
             return
 
-        if not memory.workspace_id or not memory.context_id:
+        if not memory.context_id:
             # Defensive: 3-level isolation requires both
             return
 
