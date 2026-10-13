@@ -1419,18 +1419,28 @@ deploy apart, in this order:
    within the cap or no longer Free and billing-managed, so a cleanup or a
    re-subscribe restarts the 30 days. Run it at least one day in production
    and check that the `capacity_lock_stamped` / `capacity_lock_cleared` events
-   look right.
+   look right. One workspace that fails to evaluate is logged as
+   `capacity_lock_stamp_failed` and left as it was; the others are still
+   stamped or cleared (`failed` in `capacity_purge_sweep_done`).
 2. **Notify**: `CAPACITY_PURGE_NOTICE_ENABLED=true`. Mails the owner on days
    0/7/14/23/27/29 of the stamp (`capacity_purge_notice_sent`; one Redis claim
    per workspace, stamp and stage, so a missed day sends one catch-up mail,
-   not several). Needs the e-mail provider configured. With the logging stub
-   the mails appear as `email_dispatch_required=true`. The day-29 mail
-   ("1 day left"), once sent or possibly sent (delivery timed out), is
-   recorded in `workspaces.capacity_purge_final_notice_at`; the stamp stage
-   clears it together with the stamp.
+   not several). The first mail of a lock, once sent or possibly sent
+   (delivery timed out), is recorded in
+   `workspaces.capacity_purge_first_notice_at`, and the day-29 mail
+   ("1 day left") in `workspaces.capacity_purge_final_notice_at`; the stamp
+   stage clears both together with the stamp.
+
+   **Stages 2 and 3 need a real mail provider** (`EMAIL_PROVIDER=resend`).
+   The default logging stub reports every mail as sent without sending
+   anything, so the final notice would be recorded and the purge would follow
+   with no one warned. Without a real provider each run logs
+   `capacity_purge_no_mail_provider` (warning) and skips both the notices and
+   the purge, whatever the two flags say. Stamping still runs.
 3. **Purge**: `CAPACITY_PURGE_ENABLED=true`. A workspace is purged by the
    04:00 UTC run on calendar day 30 of its stamp, provided its day-29 mail
-   went out on an earlier calendar day. That is the date shown in the mails
+   went out on an earlier calendar day and its first mail at least 7 calendar
+   days before the run. That is the date shown in the mails
    and, once this flag is on, in the web banner and as
    `capacity_lock.purge_at` on `GET /api/v1/workspace/usage/current` (null
    while the flag is off). Because of the stamp stage, the first purge
@@ -1440,27 +1450,41 @@ deploy apart, in this order:
    `audit_logs` row (`action = capacity_purge`, `resource = workspace:<id>`)
    with the counts and bytes.
 
-   **No deletion without the final notice.** A workspace on day 30 or later
-   whose day-29 mail has not gone out on an earlier calendar day is not
-   purged: it is logged as `capacity_purge_awaiting_final_notice` and counted
-   as `purge_awaiting_notice` in `capacity_purge_sweep_done`. So
-   `CAPACITY_PURGE_ENABLED=true` with the notices off deletes nothing, and a
+   **No deletion without a real warning.** A workspace on day 30 or later
+   whose day-29 mail has not gone out on an earlier calendar day, or whose
+   first mail went out less than 7 calendar days ago, is not purged: it is
+   logged as `capacity_purge_awaiting_final_notice` and counted as
+   `purge_awaiting_notice` in `capacity_purge_sweep_done`. So
+   `CAPACITY_PURGE_ENABLED=true` with the notices off deletes nothing; a
    day-29 mail that fails or is sent late (a missed run catches up with it)
-   moves the purge to the run after the day it went out.
+   moves the purge to the run after the day it went out; and notices turned
+   on late (stage 2 enabled when stamps are already weeks old) give every
+   owner at least a week between the first mail and the deletion, even if
+   that is later than the date the mails show.
+
+   **Memories outside live contexts go too.** The lock counts every live
+   memory of the workspace. After the contexts, the purge tombstones every
+   memory still live in the workspace (no context, or under a context deleted
+   earlier) in the same 1,000-row chunks. Their vectors are removed by the
+   orphan vector sweep, not by the purge. After a completed purge the lock is
+   measured again; a workspace still over the cap is logged as
+   `capacity_purge_still_over` (warning, with the counts) and is not purged
+   again in that run.
 
 Before stage 3, list what the next runs will purge:
 
 ```sql
 SELECT id, capacity_locked_since, capacity_locked_since::date + 30 AS purge_date,
-       capacity_purge_final_notice_at
+       capacity_purge_first_notice_at, capacity_purge_final_notice_at
 FROM workspaces
 WHERE deleted_at IS NULL AND capacity_locked_since IS NOT NULL
 ORDER BY capacity_locked_since;
 ```
 
-A row whose `purge_date` is on or before a run's date (UTC) and whose
-`capacity_purge_final_notice_at` is on an earlier date is purged on that run,
-unless it is within capacity by then.
+A row whose `purge_date` is on or before a run's date (UTC), whose
+`capacity_purge_final_notice_at` is on an earlier date and whose
+`capacity_purge_first_notice_at` is at least 7 days before that date is purged
+on that run, unless it is within capacity by then.
 
 **Re-subscribe during a purge.** Before each context and after every
 1,000-memory chunk, the purge reads the workspace row again. If the workspace
