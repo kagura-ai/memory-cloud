@@ -421,6 +421,12 @@ rest do not.
 }
 ```
 
+The envelope is unchanged by the capacity-over purge
+([#1969](https://github.com/kagura-ai/memory-cloud/issues/1969)): a workspace that stays
+locked for 30 days has its memories, contexts and files deleted, and the date that happens is
+on `GET /api/v1/workspace/usage/current` as `capacity_lock.purge_at` (ISO-8601 UTC, `null`
+until the daily sweep has stamped the workspace), not in this error.
+
 The lock applies only when the plan is `free` **and** `entitlement_source` is
 `external_billing` (the workspace came back from a subscription); a self-hosted or
 admin-managed Free workspace is never locked. It is computed on every gated call, never

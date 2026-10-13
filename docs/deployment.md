@@ -1395,6 +1395,103 @@ from surviving vector-store points, for a context whose rows are gone. It finds
 no points for a context deleted on v0.88.0 or later, and says to use the
 restore above when the context's row is still there.
 
+## Capacity-over purge rollout — Issue #1969
+
+A Free workspace whose entitlement comes from the billing service
+(`plan_name = free` and `entitlement_source = external_billing`) that stays
+over the Free capacity for 30 consecutive days has its memories, contexts and
+files deleted. The account and the workspace remain; the default context is
+kept, empty, so the workspace is usable on Free. Self-hosted and
+admin-managed Free workspaces are never stamped, mailed or purged.
+
+The deletion is a soft delete: memories are tombstoned with
+`deleted_by = 'system:capacity-purge'` and hard-deleted by the tombstone purge
+after `CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`; files are soft-deleted and
+hard-deleted by the file GC after its 7-day retention. Neural edges are
+dropped, as on a normal context delete.
+
+The daily sweep (`capacity_purge_sweep`, 04:00 UTC, after the 03:15 UTC file
+GC, single-flight across API processes) has three stages. Enable them one
+deploy apart, in this order:
+
+1. **Stamp**: always on. Writes `workspaces.capacity_locked_since` the first
+   time a workspace is seen over the cap, and clears it once the workspace is
+   within the cap or no longer Free and billing-managed, so a cleanup or a
+   re-subscribe restarts the 30 days. Run it at least one day in production
+   and check that the `capacity_lock_stamped` / `capacity_lock_cleared` events
+   look right.
+2. **Notify**: `CAPACITY_PURGE_NOTICE_ENABLED=true`. Mails the owner on days
+   0/7/14/23/27/29 of the stamp (`capacity_purge_notice_sent`; one Redis claim
+   per workspace, stamp and stage, so a missed day sends one catch-up mail,
+   not several). Needs the e-mail provider configured. With the logging stub
+   the mails appear as `email_dispatch_required=true`.
+3. **Purge**: `CAPACITY_PURGE_ENABLED=true`. A workspace is purged by the
+   04:00 UTC run on calendar day 30 of its stamp. That is the date shown in the
+   mails, in the web banner and as `capacity_lock.purge_at` on
+   `GET /api/v1/workspace/usage/current`. Because of the stamp stage, the first
+   purge happens no earlier than 30 days after stage 1 ran. At most 5
+   workspaces are purged per run, oldest stamp first; the rest wait for the
+   next run. The lock is checked again just before the purge. Each purge
+   writes an `audit_logs` row (`action = capacity_purge`,
+   `resource = workspace:<id>`) with the counts and bytes.
+
+Before stage 3, list what the next runs will purge:
+
+```sql
+SELECT id, capacity_locked_since, capacity_locked_since::date + 30 AS purge_date
+FROM workspaces
+WHERE deleted_at IS NULL AND capacity_locked_since IS NOT NULL
+ORDER BY capacity_locked_since;
+```
+
+A row whose `purge_date` is on or before a run's date (UTC) is purged on that
+run, unless it is within capacity by then.
+
+**Re-subscribe during a purge.** Before each context and after every
+1,000-memory chunk, the purge reads the workspace row again. If the workspace
+re-subscribed or was erased in the meantime, the purge stops. The stamp is
+cleared, the audit row has `"aborted": true`, `capacity_purge_aborted` is
+logged and no completion mail is sent. Non-default contexts are purged first
+and the default context last, so an abort leaves the default context's
+memories alone. A context the purge stopped in is not deleted, but the chunks
+of its memories that were already committed stay tombstoned.
+
+**Restoring after a purge.** A deleted non-default context can be restored
+within the tombstone retention, like any deleted context (see
+[Restoring a deleted context](#restoring-a-deleted-context--issue-1804)). The
+default context is never deleted, so a context restore cannot bring its
+memories back. To recover them within the retention, run this in Postgres:
+
+```sql
+UPDATE memories
+SET deleted_at = NULL, deleted_by = NULL, embedding_status = 'pending'
+WHERE workspace_id = '<workspace-id>'
+  AND context_id = '<default-context-id>'
+  AND deleted_by = 'system:capacity-purge';
+```
+
+The embedding sweep then rebuilds their vectors. Memories tombstoned in a
+context the purge stopped in, or before a crash part-way through a context,
+have a `deleted_at` other than the context's. A context restore does not bring
+them back; use the same `UPDATE` with that context's id.
+
+**Completion mail is best-effort.** It is sent once, after the commit that
+clears the stamp and writes the audit row, and is not retried. Each purge logs
+`capacity_purge_completed` and then one of `capacity_purge_complete_mail_sent`,
+`capacity_purge_complete_mail_failed` or `capacity_purge_complete_send_raised`,
+all with the same `workspace_id`. A `capacity_purge_completed` with no
+`capacity_purge_complete_mail_sent` for the same workspace means the owner
+did not get the mail (`capacity_purge_complete_no_owner_email`: no address on
+file). Alert on it and follow up by hand.
+
+Other events: `capacity_purge_audit_failed` (the purge ran but its audit
+commit failed; the stamp stays and the next run retries. That run usually finds
+the workspace within capacity and only clears the stamp),
+`capacity_purge_nothing_to_delete` (due, but the purge removed nothing:
+stamp cleared, audit row written, no mail) and `capacity_purge_failed` (the
+purge raised; the stamp stays and the next run retries). The run summary is
+`capacity_purge_sweep_done`.
+
 ## Embedding model migration — Issue #1525
 
 `python -m src.cli.migrate_context_embedding` moves a context to another
