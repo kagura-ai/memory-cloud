@@ -18,7 +18,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from db.base import get_db
-from services.capacity_purge import run_capacity_purge_sweep
+from services.capacity_purge import SWEEP_HOUR_UTC, run_capacity_purge_sweep
 from tasks.single_flight import single_flight
 from utils.datetime import utcnow
 from utils.logger import get_logger
@@ -50,7 +50,7 @@ def schedule_capacity_purge_tasks(scheduler: AsyncIOScheduler) -> None:
     """Register the daily sweep (04:00 UTC, after the 03:15 file GC)."""
     scheduler.add_job(
         capacity_purge_sweep,
-        trigger=CronTrigger(hour=4, minute=0, timezone="UTC"),
+        trigger=CronTrigger(hour=SWEEP_HOUR_UTC, minute=0, timezone="UTC"),
         id="capacity_purge_sweep",
         name="Capacity-over purge sweep (#1969)",
         replace_existing=True,

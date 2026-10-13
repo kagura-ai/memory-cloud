@@ -12,12 +12,14 @@ from services.capacity_purge import (
     NOTICE_KEY_TTL_SECONDS,
     PURGE_AFTER,
     PURGE_MAX_WORKSPACES_PER_RUN,
+    SWEEP_HOUR_UTC,
     NoticeCounts,
     PurgeCounts,
     StampCounts,
     notice_key,
     notice_stage,
     purge_at,
+    purge_due,
     purge_expired_workspaces,
     run_capacity_purge_sweep,
     send_due_purge_notices,
@@ -29,6 +31,23 @@ def test_purge_at_is_thirty_days_after_lock_start() -> None:
     since = datetime(2026, 10, 1, 4, 0)
     assert purge_at(since) == datetime(2026, 10, 31, 4, 0)
     assert PURGE_AFTER == timedelta(days=30)
+
+
+@pytest.mark.parametrize(
+    "since",
+    [
+        datetime(2026, 10, 1, 4, 0, 5),  # a few seconds into the 04:00 run
+        datetime(2026, 10, 1, 0, 30),  # a manual run before the day's sweep
+        datetime(2026, 10, 1, 23, 59, 59),  # a manual run late in the day
+    ],
+)
+def test_purge_at_is_the_sweep_that_purges(since) -> None:
+    """The date the owner is shown is the 04:00 UTC run on calendar day 30 —
+    the run ``purge_due`` first says yes to — not stamp + 30 x 24 hours."""
+    deadline = purge_at(since)
+    assert deadline == datetime(2026, 10, 31, SWEEP_HOUR_UTC, 0)
+    assert purge_due(since, deadline)
+    assert not purge_due(since, deadline - timedelta(days=1))
 
 
 def test_purge_at_none_when_not_locked() -> None:
@@ -141,6 +160,7 @@ async def test_sends_day_zero_notice_once() -> None:
     assert kwargs["days_left"] == 30 and kwargs["locale"] == "en"
     assert kwargs["to_email"] == "owner@example.test"
     assert kwargs["purge_at"] == now + timedelta(days=30)
+    assert kwargs["purge_at"] == purge_at(ws.capacity_locked_since)
     assert kwargs["over_memories"] == 2 and kwargs["over_bytes"] == 0
     assert kwargs["contexts_url"].endswith("/workspace/contexts")
     assert redis.keys[notice_key(ws.id, now, 0)] == NOTICE_KEY_TTL_SECONDS
@@ -179,6 +199,10 @@ async def test_stage_counts_calendar_days_not_elapsed_time() -> None:
         )
     assert counts.sent == 1
     assert email.send_capacity_purge_notice.call_args.kwargs["days_left"] == 23
+    # The mail names the run that purges: 04:00 sharp, not 04:00:30.
+    assert email.send_capacity_purge_notice.call_args.kwargs["purge_at"] == datetime(
+        2026, 10, 31, 4, 0, 0
+    )
     assert notice_key(ws.id, since, 7) in redis.keys
 
 

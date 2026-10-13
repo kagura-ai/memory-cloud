@@ -25,7 +25,7 @@ memory-cloud owns the clock — ``workspaces.capacity_locked_since``:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -47,6 +47,9 @@ logger = get_logger(__name__)
 
 #: Days of continuous capacity-over after which the data is deleted (policy #12).
 PURGE_AFTER = timedelta(days=30)
+#: Hour (UTC) of the daily sweep (``tasks/capacity_purge_tasks.py``); the
+#: deletion date shown to the owner is that run on calendar day 30.
+SWEEP_HOUR_UTC = 4
 #: Days after the stamp on which the owner gets a "N days left" mail (policy #13).
 NOTICE_DAYS: tuple[int, ...] = (0, 7, 14, 23, 27, 29)
 #: Stamp sweep commits every this many workspaces (load: no long transaction).
@@ -58,8 +61,16 @@ NOTICE_KEY_TTL_SECONDS = 45 * 24 * 3600
 
 
 def purge_at(locked_since: datetime | None) -> datetime | None:
-    """When the data is deleted if the lock holds — ``None`` while not locked."""
-    return None if locked_since is None else locked_since + PURGE_AFTER
+    """When the data is deleted if the lock holds — ``None`` while not locked.
+
+    The :data:`SWEEP_HOUR_UTC` run on calendar day 30 of the stamp: the first
+    run :func:`purge_due` says yes to, whatever time of day the stamp was
+    written. Naive UTC. The usage payload, the banner and the countdown mails
+    all show this value.
+    """
+    if locked_since is None:
+        return None
+    return datetime.combine(locked_since.date() + PURGE_AFTER, time(SWEEP_HOUR_UTC))
 
 
 @dataclass(frozen=True)

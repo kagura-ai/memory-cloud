@@ -441,6 +441,7 @@ class TestWorkspaceUsageCurrent:
         ws.memory_limit = 10000
         ws.daily_api_limit = 1000
         ws.weekly_api_limit = 5000
+        ws.capacity_locked_since = None
         return ws
 
     @pytest.mark.asyncio
@@ -550,6 +551,42 @@ class TestWorkspaceUsageCurrent:
         assert response.capacity_lock.over_memories == 12
         assert response.capacity_lock.over_bytes == 50
         assert response.capacity_lock.cleanup_url.endswith("/workspace/settings/plan")
+        assert response.capacity_lock.purge_at is None  # not stamped by the sweep yet
+
+    @pytest.mark.asyncio
+    async def test_capacity_lock_carries_purge_at_when_stamped(
+        self, mock_db, mock_user, mock_workspace
+    ):
+        """#1969: the banner reads the deletion date from the lock payload — the
+        04:00 UTC sweep on calendar day 30 of the stamp, ISO-8601 with ``Z``."""
+        from datetime import datetime
+
+        from services.capacity_lock import CapacityLock
+
+        lock = CapacityLock(
+            memory_count=1012,
+            memory_limit=1000,
+            over_memories=12,
+            used_bytes=0,
+            storage_limit_bytes=100,
+            over_bytes=0,
+            cleanup_url="https://app.example.test/workspace/settings/plan",
+        )
+        mock_workspace.capacity_locked_since = datetime(2026, 10, 1, 4, 0, 7)
+        mock_db.execute.side_effect = self._build_execute_side_effects(mock_workspace)
+        with (
+            patch("services.effective_quota_service.EffectiveQuotaService") as mock_quota,
+            patch("services.capacity_lock.capacity_lock_state", new=AsyncMock(return_value=lock)),
+        ):
+            mock_quota.return_value.get_effective_quotas = AsyncMock(
+                return_value=self._make_effective_quotas()
+            )
+            response = await get_workspace_usage_current(user=mock_user, db=mock_db)
+        assert response.capacity_lock is not None
+        assert response.capacity_lock.purge_at == "2026-10-31T04:00:00Z"
+        assert response.model_dump(mode="json")["capacity_lock"]["purge_at"] == (
+            "2026-10-31T04:00:00Z"
+        )
 
     @pytest.mark.asyncio
     async def test_no_member_ids_query(self, mock_db, mock_user, mock_workspace):

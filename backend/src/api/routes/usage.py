@@ -198,6 +198,14 @@ class CapacityLockInfo(BaseModel):
     storage_limit_bytes: int = Field(..., description="Effective storage limit in bytes")
     over_bytes: int = Field(..., ge=0, description="File bytes to remove to unlock")
     cleanup_url: str = Field(..., description="Web page to clean up or re-subscribe")
+    purge_at: str | None = Field(
+        default=None,
+        description=(
+            "When the workspace's memories, contexts and files are deleted if it is still "
+            "over capacity (#1969): the 04:00 UTC daily sweep 30 days after that sweep first "
+            "saw it over, ISO-8601 UTC. Null until that sweep has run."
+        ),
+    )
 
 
 class UsageCurrentResponse(BaseModel):

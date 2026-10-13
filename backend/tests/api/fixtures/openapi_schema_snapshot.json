@@ -1854,6 +1854,16 @@
             "minimum": 0.0,
             "type": "integer"
           },
+          "purge_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "storage_limit_bytes": {
             "type": "integer"
           },
