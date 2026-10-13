@@ -27,18 +27,27 @@ def test_chain_and_id_length() -> None:
     assert e95.down_revision == "e94_1869_summary_emb_idx"
 
 
-def test_backfill_writes_only_null_rows_from_the_memory_context() -> None:
+def test_backfill_writes_only_null_rows_and_requeues_their_embedding() -> None:
     sql = " ".join(e95.BACKFILL_SQL.split())
-    assert "SET workspace_id = c.workspace_id" in sql
+    assert "SET workspace_id = c.workspace_id, embedding_status = 'pending'" in sql
     assert "m.context_id = c.id" in sql
     assert "m.workspace_id IS NULL" in sql
     assert "COALESCE" not in sql.upper()
 
 
-def test_orphan_guard_targets_live_rows_nothing_can_fill() -> None:
-    for sql in (e95.ORPHAN_COUNT_SQL, e95.ORPHAN_SAMPLE_SQL):
-        assert "workspace_id IS NULL AND context_id IS NULL" in sql
-        assert "deleted_at IS NULL" in sql
+def test_orphan_guard_targets_live_rows_nothing_can_fill_in_one_pass() -> None:
+    sql = e95.ORPHAN_SQL
+    assert "workspace_id IS NULL AND context_id IS NULL" in sql
+    assert "deleted_at IS NULL" in sql
+    assert "count(*) OVER ()" in sql
+    assert not hasattr(e95, "ORPHAN_COUNT_SQL")
+
+
+def test_the_alter_waits_for_its_lock_only_so_long() -> None:
+    import inspect
+
+    assert e95.LOCK_TIMEOUT.endswith("s")
+    assert "SET LOCAL lock_timeout" in inspect.getsource(e95.upgrade)
 
 
 def test_tombstoned_orphans_are_purged_not_refused() -> None:

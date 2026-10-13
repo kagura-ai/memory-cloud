@@ -1642,7 +1642,14 @@ schema untouched. Check before upgrading:
 SELECT id, user_id, created_at FROM memories
 WHERE workspace_id IS NULL AND context_id IS NULL AND deleted_at IS NULL;
 
--- rows the migration will fill (sizes the backfill)
+-- soft-deleted rows with neither: the migration hard-deletes these, whatever
+-- CLEANUP_DELETED_MEMORIES_RETENTION_DAYS says — export the ids first if an
+-- erasure audit needs them
+SELECT id, user_id, deleted_at FROM memories
+WHERE workspace_id IS NULL AND context_id IS NULL AND deleted_at IS NOT NULL;
+
+-- rows the migration will fill (sizes the backfill; each is re-queued for
+-- embedding so its search point gets the workspace payload)
 SELECT count(*) FROM memories WHERE workspace_id IS NULL;
 
 -- audit only: rows whose stored workspace disagrees with their context's.
@@ -1655,7 +1662,10 @@ Such a live row has no context to restore from: give it a `workspace_id` (and
 a `context_id`) by hand after checking its `user_id`, or delete it, then run
 the migration again. The upgrade is one transaction, so `memories` is locked
 from the `ALTER` to the commit — the backfill touches legacy rows only and the
-`SET NOT NULL` scan is a single pass over the table.
+`SET NOT NULL` scan is a single pass over the table. The `ALTER` waits at most
+`lock_timeout` (10 s) for a reader to finish; past that the upgrade fails
+without changing anything and you rerun it, rather than every query on
+`memories` queueing behind the lock request.
 
 ### Feature set override (`PLAN_<KEY>_FEATURES`)
 

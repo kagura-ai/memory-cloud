@@ -638,6 +638,7 @@ class TestE95MemoriesWorkspaceIdNotNull:
         workspace_id: str | None,
         context_id: str | None,
         deleted: bool = False,
+        embedding_status: str = "pending",
     ) -> None:
         """Insert a memory as the e94 schema requires (``use_count`` is gone by then)."""
         conn.execute(
@@ -646,7 +647,7 @@ class TestE95MemoriesWorkspaceIdNotNull:
                 "(id, user_id, workspace_id, context_id, summary, content, type, "
                 " embedding_status, importance, confidence, scope, long_term, "
                 " access_count, client, source, deleted_at) "
-                "VALUES (:id, :u, :ws, :ctx, 'm', 'x', 'note', 'pending', "
+                "VALUES (:id, :u, :ws, :ctx, 'm', 'x', 'note', :embedding_status, "
                 " 0.5, 1.0, 'working', false, 0, 'test', 'test', :deleted_at)"
             ),
             {
@@ -655,6 +656,7 @@ class TestE95MemoriesWorkspaceIdNotNull:
                 "ws": workspace_id,
                 "ctx": context_id,
                 "deleted_at": "2026-01-01T00:00:00" if deleted else None,
+                "embedding_status": embedding_status,
             },
         )
 
@@ -687,7 +689,9 @@ class TestE95MemoriesWorkspaceIdNotNull:
         engine = _sync_engine()
         with engine.begin() as conn:
             ws_id, ctx_id = self._seed_workspace_and_context(conn, owner)
-            self._seed_memory(conn, mem_id, owner, None, ctx_id)
+            # An embedded legacy row: its Qdrant point predates the workspace
+            # payload, so the backfill must also send it back through the sweep.
+            self._seed_memory(conn, mem_id, owner, None, ctx_id, embedding_status="success")
         engine.dispose()
 
         self._upgrade_head()
@@ -695,9 +699,11 @@ class TestE95MemoriesWorkspaceIdNotNull:
         engine = _sync_engine()
         with engine.begin() as conn:
             row = conn.execute(
-                text("SELECT workspace_id FROM memories WHERE id = :id"), {"id": mem_id}
+                text("SELECT workspace_id, embedding_status FROM memories WHERE id = :id"),
+                {"id": mem_id},
             ).one()
             assert str(row.workspace_id) == ws_id
+            assert row.embedding_status == "pending"
             assert not self._workspace_id_is_nullable(conn)
         engine.dispose()
 
@@ -771,8 +777,8 @@ class TestE95MemoriesWorkspaceIdNotNull:
         """A row whose workspace disagrees with its context's keeps its value.
 
         Cross-rooted rows are possible because ``memories`` has no compound FK
-        on (workspace_id, context_id); the migration counts them for the log
-        and must not "repair" them.
+        on (workspace_id, context_id); the migration must not "repair" them —
+        the audit query for them lives in ``docs/deployment.md``.
         """
         self._reset_and_upgrade_to_e94()
         owner = "owner-1951-cross"
@@ -782,7 +788,7 @@ class TestE95MemoriesWorkspaceIdNotNull:
         with engine.begin() as conn:
             _ws_a, ctx_a = self._seed_workspace_and_context(conn, owner)
             ws_b, _ctx_b = self._seed_workspace_and_context(conn, owner)
-            self._seed_memory(conn, mem_id, owner, ws_b, ctx_a)
+            self._seed_memory(conn, mem_id, owner, ws_b, ctx_a, embedding_status="success")
         engine.dispose()
 
         self._upgrade_head()
@@ -790,9 +796,12 @@ class TestE95MemoriesWorkspaceIdNotNull:
         engine = _sync_engine()
         with engine.begin() as conn:
             row = conn.execute(
-                text("SELECT workspace_id FROM memories WHERE id = :id"), {"id": mem_id}
+                text("SELECT workspace_id, embedding_status FROM memories WHERE id = :id"),
+                {"id": mem_id},
             ).one()
             assert str(row.workspace_id) == ws_b
+            # Untouched rows are not re-queued either.
+            assert row.embedding_status == "success"
         engine.dispose()
 
     def test_downgrade_restores_nullable(self):

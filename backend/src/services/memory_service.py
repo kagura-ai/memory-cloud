@@ -2140,7 +2140,7 @@ class MemoryService:
         arrays (the helper's signature requires non-null FKs; workspace_id is
         NOT NULL since e95, #1951).
         """
-        if memory.workspace_id and memory.context_id:
+        if memory.context_id:
             (
                 outgoing_links,
                 outgoing_has_more,
