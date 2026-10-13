@@ -10,21 +10,25 @@ from __future__ import annotations
 
 import uuid
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import (
     ENTITLEMENT_SOURCE_ADMIN_GRANT,
     ENTITLEMENT_SOURCE_EXTERNAL_BILLING,
+    Context,
     Workspace,
     WorkspaceMember,
     WorkspaceRole,
 )
+from models.file_objects import FileObject
 from models.memory import Memory
 from services.capacity_purge import stamp_capacity_locks
+from services.context_service import CAPACITY_PURGE_ACTOR, ContextService
 from utils.datetime import utcnow
 
 from ._admin_helpers import make_context, make_user, make_workspace
@@ -158,3 +162,201 @@ async def test_stamp_commits_in_batches(db_session, free_ws) -> None:
     assert counts.evaluated >= counts.stamped + counts.cleared + counts.kept
     await db_session.refresh(ws)
     assert ws.capacity_locked_since == t0
+
+
+# ---------------------------------------------------------------------------
+# ContextService.purge_workspace_data (Task 6)
+# ---------------------------------------------------------------------------
+
+
+def _file(ws, ctx, owner: str, *, size: int, status: str = "uploaded") -> FileObject:
+    """Same kwargs as ``test_context_delete_files._file``."""
+    sha = uuid.uuid4().hex + uuid.uuid4().hex
+    return FileObject(
+        id=uuid.uuid4(),
+        workspace_id=ws.id,
+        context_id=ctx.id if ctx is not None else None,
+        sha256=sha,
+        size_bytes=size,
+        content_type="application/octet-stream",
+        filename="f.bin",
+        storage_backend="r2",
+        storage_key=f"{ws.id}/{sha[:2]}/{sha}",
+        status=status,
+        created_by=owner,
+    )
+
+
+async def _live_contexts(db_session: AsyncSession, ws) -> list[Context]:
+    rows = await db_session.execute(
+        select(Context).where(Context.workspace_id == ws.id, Context.deleted_at.is_(None))
+    )
+    return list(rows.scalars().all())
+
+
+async def _live_memories(db_session: AsyncSession, ws) -> list[Memory]:
+    rows = await db_session.execute(
+        select(Memory).where(Memory.workspace_id == ws.id, Memory.deleted_at.is_(None))
+    )
+    return list(rows.scalars().all())
+
+
+async def _live_files(db_session: AsyncSession, ws) -> list[FileObject]:
+    rows = await db_session.execute(
+        select(FileObject).where(FileObject.workspace_id == ws.id, FileObject.deleted_at.is_(None))
+    )
+    return list(rows.scalars().all())
+
+
+@pytest.fixture
+def purge_side_effects():
+    """Vector removal and the Redis release are post-commit side effects."""
+    with (
+        patch.object(ContextService, "_remove_context_points", new=AsyncMock()) as points,
+        patch("services.storage_quota_service.release_storage_bytes", new=AsyncMock()) as release,
+    ):
+        yield points, release
+
+
+@pytest.mark.asyncio
+async def test_purge_workspace_data_locked_private_and_default(
+    db_session, free_ws, purge_side_effects
+) -> None:
+    """Every live context goes (locked and private included); the default
+    context stays, empty; workspace-scoped files go too; the report is exact."""
+    points, release = purge_side_effects
+    ws, ctx, owner = free_ws
+    default = Context(workspace_id=ws.id, name="default", created_by=owner.user_id)
+    locked = make_context(workspace_id=ws.id, created_by=owner.user_id)
+    locked.is_locked = True
+    private = make_context(workspace_id=ws.id, created_by="someone-else", is_private=True)
+    db_session.add_all([default, locked, private])
+    await db_session.flush()
+    for c in (default, ctx, locked, private):
+        db_session.add(_memory(ws, c, owner.user_id))
+    db_session.add(_file(ws, ctx, owner.user_id, size=50))
+    db_session.add(_file(ws, None, owner.user_id, size=60))  # workspace-scoped
+    db_session.add(_file(ws, locked, owner.user_id, size=5, status="reserved"))  # in flight
+    await db_session.flush()
+
+    report = await ContextService(db_session).purge_workspace_data(
+        ws.id, actor=CAPACITY_PURGE_ACTOR
+    )
+
+    assert report.contexts_deleted == 3
+    assert report.contexts_emptied == 1
+    assert report.memories_deleted == 4
+    assert report.files_deleted == 2  # uploaded rows; the cancelled reservation is not a file
+    assert report.bytes_released == 50 + 60 + 5
+    assert report.aborted is False
+    assert [c.name for c in await _live_contexts(db_session, ws)] == ["default"]
+    for c in (ctx, locked, private):
+        await db_session.refresh(c)
+        assert c.deleted_at is not None and c.deleted_by == CAPACITY_PURGE_ACTOR
+    await db_session.refresh(default)
+    assert default.deleted_at is None
+    assert await _live_memories(db_session, ws) == []
+    tombstoned = (
+        (await db_session.execute(select(Memory).where(Memory.workspace_id == ws.id)))
+        .scalars()
+        .all()
+    )
+    assert {m.deleted_by for m in tombstoned} == {CAPACITY_PURGE_ACTOR}
+    assert await _live_files(db_session, ws) == []
+    assert points.await_count == 4  # every context, the default one included
+    assert {c.args[1] for c in points.await_args_list} == {
+        str(c.id) for c in (default, ctx, locked, private)
+    }
+    released = sum(c.kwargs["size_bytes"] for c in release.await_args_list)
+    assert released == 50 + 60 + 5
+
+
+@pytest.mark.asyncio
+async def test_purge_chunks_memories(db_session, free_ws) -> None:
+    """The purge path tombstones memories in bulk UPDATE chunks, one commit each."""
+    ws, ctx, owner = free_ws
+    for _ in range(5):
+        db_session.add(_memory(ws, ctx, owner.user_id))
+    await db_session.flush()
+    t = utcnow()
+    commits = 0
+    real_commit = db_session.commit
+
+    async def counting_commit() -> None:
+        nonlocal commits
+        commits += 1
+        await real_commit()
+
+    with patch.object(db_session, "commit", counting_commit):
+        total = await ContextService(db_session)._tombstone_memories_chunked(
+            ctx, actor=CAPACITY_PURGE_ACTOR, deleted_at=t, chunk=2
+        )
+
+    assert total == 5
+    assert commits == 3  # 2 + 2 + 1
+    rows = (
+        (await db_session.execute(select(Memory).where(Memory.context_id == ctx.id)))
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 5
+    for m in rows:
+        await db_session.refresh(m)
+        assert (m.deleted_at, m.deleted_by) == (t, CAPACITY_PURGE_ACTOR)
+
+
+@pytest.mark.asyncio
+async def test_purge_workspace_data_never_loads_memories_as_orm(
+    db_session, free_ws, purge_side_effects
+) -> None:
+    """``purge_workspace_data`` goes through the chunked UPDATE, not the ORM loop
+    ``delete_context`` keeps (100k-memory former paid workspaces)."""
+    ws, ctx, owner = free_ws
+    for _ in range(5):
+        db_session.add(_memory(ws, ctx, owner.user_id))
+    await db_session.flush()
+    with (
+        patch("services.context_service.PURGE_MEMORY_CHUNK", 2),
+        patch.object(
+            ContextService,
+            "_tombstone_memories_orm",
+            new=AsyncMock(side_effect=AssertionError("ORM path used")),
+        ),
+    ):
+        report = await ContextService(db_session).purge_workspace_data(
+            ws.id, actor=CAPACITY_PURGE_ACTOR
+        )
+    assert report.memories_deleted == 5
+    assert await _live_memories(db_session, ws) == []
+
+
+@pytest.mark.asyncio
+async def test_purge_workspace_data_stops_when_told_to(
+    db_session, free_ws, purge_side_effects
+) -> None:
+    """``should_continue`` is asked before each context and before the
+    workspace-scoped files; False stops the purge with a partial report."""
+    ws, ctx, owner = free_ws
+    second = make_context(workspace_id=ws.id, created_by=owner.user_id)
+    db_session.add(second)
+    await db_session.flush()
+    db_session.add(_file(ws, None, owner.user_id, size=60))
+    await db_session.flush()
+    answers = iter([True, False])
+    asked = 0
+
+    async def should_continue() -> bool:
+        nonlocal asked
+        asked += 1
+        return next(answers)
+
+    report = await ContextService(db_session).purge_workspace_data(
+        ws.id, actor=CAPACITY_PURGE_ACTOR, should_continue=should_continue
+    )
+
+    assert asked == 2
+    assert report.aborted is True
+    assert report.contexts_deleted == 1
+    live = await _live_contexts(db_session, ws)
+    assert len(live) == 1 and live[0].id in {ctx.id, second.id}
+    assert len(await _live_files(db_session, ws)) == 1  # workspace-scoped file untouched

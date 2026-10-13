@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -959,24 +959,47 @@ class FileStorageService:
         _, visible, released = await self._purge_live_files([context_id], deleted_at)
         return visible, sum(released.values())
 
+    async def purge_workspace_scoped_files(
+        self, workspace_id: UUID, *, deleted_at: datetime | None = None
+    ) -> tuple[int, int]:
+        """Soft-delete a workspace's live files that belong to no context (#1969).
+
+        The capacity purge deletes every context, which takes the context-bound
+        files with it; the workspace-scoped rows (``context_id IS NULL``, the
+        legacy upload scope) would otherwise keep the storage axis of the lock
+        on. Same rows and accounting as :meth:`purge_context_files`:
+        ``(uploaded rows soft-deleted, Redis bytes to release)``. Does not commit.
+        """
+        _, visible, released = await self._purge_live_rows(
+            (FileObject.workspace_id == workspace_id) & FileObject.context_id.is_(None),
+            deleted_at,
+            context_count=0,
+        )
+        return visible, sum(released.values())
+
     async def _purge_live_files(
         self, context_ids: Sequence[UUID], deleted_at: datetime | None
     ) -> tuple[list[FileObject], int, dict[UUID, int]]:
         """Soft-delete the live rows: ``(rows, visible rows among them, Redis bytes per workspace)``."""
         if not context_ids:
             return [], 0, {}
+        return await self._purge_live_rows(
+            FileObject.context_id.in_(list(context_ids)),
+            deleted_at,
+            context_count=len(set(context_ids)),
+        )
+
+    async def _purge_live_rows(
+        self, where: ColumnElement[bool], deleted_at: datetime | None, *, context_count: int
+    ) -> tuple[list[FileObject], int, dict[UUID, int]]:
+        """Soft-delete the live rows matching ``where`` (see :meth:`purge_files_for_contexts`)."""
         # FOR UPDATE locks the rows we are about to cancel so a concurrent
         # confirm_upload (which now also loads its row FOR UPDATE) cannot slip
         # a reserved→uploaded transition in between this SELECT and the caller's
         # commit — the two fully serialize on the row lock, keeping the status
         # decision (reserved-cancel vs uploaded-decrement) authoritative.
         result = await self.db.execute(
-            select(FileObject)
-            .where(
-                FileObject.context_id.in_(list(context_ids)),
-                FileObject.deleted_at.is_(None),
-            )
-            .with_for_update()
+            select(FileObject).where(where, FileObject.deleted_at.is_(None)).with_for_update()
         )
         files = list(result.scalars().all())
         visible = sum(1 for f in files if f.status == "uploaded")
@@ -1008,7 +1031,7 @@ class FileStorageService:
         if files:
             logger.info(
                 "context_bound_files_purged",
-                context_count=len(set(context_ids)),
+                context_count=context_count,
                 file_count=len(files),
                 workspaces=[str(w) for w in released],
             )

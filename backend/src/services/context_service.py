@@ -9,6 +9,9 @@ Contexts are owned by workspaces, not individual users.
 """
 
 import re
+from collections.abc import Awaitable, Callable
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from uuid import UUID
 
@@ -59,6 +62,32 @@ EXPORT_MAX_MEMORIES = 50_000
 # Issue #614: list_tags sort modes — single source of truth shared by REST
 # Query type and MCP handler validation.
 TagSortMode = Literal["count", "recent", "alpha"]
+
+#: ``deleted_by`` written by the capacity-over purge (#1969): not a user id, so an
+#: audit reader can tell policy deletions from the owner's own.
+CAPACITY_PURGE_ACTOR = "system:capacity-purge"
+#: Memories tombstoned per bulk UPDATE (and commit) by the capacity purge (#1969):
+#: a former paid workspace can hold 100k memories, and the purge runs in the API
+#: process — no ORM load of a whole context, no transaction across all of it.
+PURGE_MEMORY_CHUNK = 1000
+
+
+@dataclass(frozen=True)
+class WorkspacePurgeReport:
+    """What :meth:`ContextService.purge_workspace_data` removed.
+
+    ``files_deleted`` counts uploaded rows (what a file list shows); cancelled
+    reservations are purged and their bytes are in ``bytes_released``.
+    ``aborted``: the purge stopped early because ``should_continue`` said so —
+    the counts are what was removed before that.
+    """
+
+    contexts_deleted: int
+    contexts_emptied: int
+    memories_deleted: int
+    files_deleted: int
+    bytes_released: int
+    aborted: bool = False
 
 
 class ContextListingFailedError(Exception):
@@ -1295,8 +1324,51 @@ class ContextService:
         if context.is_locked:
             raise ConflictError("Context is locked. Unlock it before deleting.")
 
-        # Soft-delete memories
-        from models.memory import Memory, NeuralMemoryEdge
+        # #1804: the context and its memories share one timestamp, which is
+        # how a restore (services/context_restore.py) tells the memories this
+        # deletion tombstoned from ones forgotten before it. #1960: the files
+        # are paired the same way, so ``context.deleted_at`` must never be
+        # rewritten while the context is deleted — the files would orphan.
+        deleted_at = utcnow()
+        memories_deleted = await self._tombstone_memories_orm(
+            context, actor=user_id, deleted_at=deleted_at
+        )
+        await self._purge_context_files_and_edges(context, deleted_at=deleted_at)
+
+        logger.info(
+            "context_data_cleanup",
+            workspace_id=str(context.workspace_id),
+            context_name=context.name,
+            memories_deleted=memories_deleted,
+        )
+
+        await self._detach_context(context, actor=user_id, deleted_at=deleted_at)
+        if _commit:
+            await self.db.commit()
+
+        logger.info(
+            "context_soft_deleted",
+            user_id=user_id,
+            workspace_id=str(context.workspace_id),
+            context_id=str(context_id),
+            context_name=context.name,
+        )
+
+        if _commit:
+            await self._remove_context_points(str(context.workspace_id), str(context_id))
+            await self._release_pending_storage()
+
+        return context
+
+    async def _tombstone_memories_orm(
+        self, context: Context, *, actor: str, deleted_at: datetime
+    ) -> int:
+        """Soft-delete the context's live memories through the ORM (``delete_context``).
+
+        Loads every row into the session; the capacity purge uses
+        :meth:`_tombstone_memories_chunked` instead. Does not commit.
+        """
+        from models.memory import Memory
 
         memories_result = await self.db.execute(
             select(Memory).where(
@@ -1308,23 +1380,76 @@ class ContextService:
             )
         )
         memories_to_delete = list(memories_result.scalars().all())
-        # #1804: the context and its memories share one timestamp, which is
-        # how a restore (services/context_restore.py) tells the memories this
-        # deletion tombstoned from ones forgotten before it. #1960: the files
-        # are paired the same way, so ``context.deleted_at`` must never be
-        # rewritten while the context is deleted — the files would orphan.
-        deleted_at = utcnow()
         for memory in memories_to_delete:
             memory.deleted_at = deleted_at
-            memory.deleted_by = user_id
+            memory.deleted_by = actor
+        return len(memories_to_delete)
 
-        # #1960: the context's files go with it, stamped alike so a restore
-        # within the GC window finds them (FileStorageService.restore_context_files).
+    async def _tombstone_memories_chunked(
+        self,
+        context: Context,
+        *,
+        actor: str,
+        deleted_at: datetime,
+        chunk: int = PURGE_MEMORY_CHUNK,
+    ) -> int:
+        """Soft-delete the context's live memories in bulk UPDATEs of ``chunk`` rows (#1969).
+
+        Commits after each chunk, so no transaction spans a large context and no
+        row is loaded as an ORM object (``synchronize_session=False``: objects
+        already in the session are not updated — callers read counts, not
+        instances). Loops until a chunk updates nothing. Returns the total.
+        """
+        from models.memory import Memory
+
+        total = 0
+        while True:
+            ids = (
+                select(Memory.id)
+                .where(
+                    Memory.workspace_id == context.workspace_id,
+                    Memory.context_id == context.id,
+                    Memory.deleted_at.is_(None),
+                )
+                .limit(chunk)
+                .scalar_subquery()
+            )
+            result = cast(
+                "CursorResult[Any]",
+                await self.db.execute(
+                    update(Memory)
+                    .where(Memory.id.in_(ids))
+                    .values(deleted_at=deleted_at, deleted_by=actor)
+                    .execution_options(synchronize_session=False)
+                ),
+            )
+            done = result.rowcount or 0
+            if done == 0:
+                return total
+            await self.db.commit()
+            total += done
+
+    async def _purge_context_files_and_edges(
+        self, context: Context, *, deleted_at: datetime
+    ) -> int:
+        """Soft-delete the context's files and hard-delete its neural edges.
+
+        #1960: the files go with the context, stamped with its timestamp so a
+        restore within the GC window finds them
+        (``FileStorageService.restore_context_files``). Their Redis bytes are
+        ADDED to ``_storage_release_pending`` (released after the caller's
+        commit). Does not commit. Returns the uploaded rows soft-deleted.
+        """
+        from models.memory import NeuralMemoryEdge
         from services.file_storage_service import FileStorageService
 
-        self._storage_release_pending = await FileStorageService(self.db).purge_files_for_contexts(
-            [context.id], deleted_at=deleted_at
+        _, visible, released = await FileStorageService(self.db)._purge_live_files(
+            [context.id], deleted_at
         )
+        for ws_id, size in released.items():
+            self._storage_release_pending[ws_id] = (
+                self._storage_release_pending.get(ws_id, 0) + size
+            )
 
         # Hard-delete neural edges (no soft-delete needed, reconstructable)
         await self.db.execute(
@@ -1335,17 +1460,13 @@ class ContextService:
                 )
             )
         )
+        return visible
 
-        logger.info(
-            "context_data_cleanup",
-            workspace_id=str(context.workspace_id),
-            context_name=context.name,
-            memories_deleted=len(memories_to_delete),
-        )
-
+    async def _detach_context(self, context: Context, *, actor: str, deleted_at: datetime) -> None:
+        """Drop the context from member whitelists, cancel its running analyses,
+        and stamp the row deleted (``deleted_at`` / ``deleted_by``). Does not commit.
+        """
         # Remove context from all members' allowed_context_ids
-        from sqlalchemy import func, update
-
         await self.db.execute(
             update(WorkspaceMember)
             .where(
@@ -1420,23 +1541,118 @@ class ContextService:
 
         # Issue #84: Soft-delete context record (previously hard-deleted)
         context.deleted_at = deleted_at
-        context.deleted_by = user_id
-        if _commit:
-            await self.db.commit()
+        context.deleted_by = actor
 
-        logger.info(
-            "context_soft_deleted",
-            user_id=user_id,
-            workspace_id=str(context.workspace_id),
-            context_id=str(context_id),
-            context_name=context.name,
+    async def purge_workspace_data(
+        self,
+        workspace_id: UUID,
+        *,
+        actor: str,
+        should_continue: Callable[[], Awaitable[bool]] | None = None,
+    ) -> WorkspacePurgeReport:
+        """Delete every memory, context and file of a workspace (#1969 capacity purge).
+
+        A system operation: no membership, privacy, whitelist, ``is_locked`` or
+        capacity check — the policy decided. For every live context the
+        memories are tombstoned in chunks (:meth:`_tombstone_memories_chunked`,
+        a commit per chunk), then its files and neural edges are purged as
+        :meth:`delete_context` does, and every context except the default one
+        is detached and soft-deleted, in one short transaction. After that
+        commit its vectors are removed and its Redis bytes released. The
+        default context stays, empty, so the workspace is usable on Free.
+        Workspace-scoped files (no context) are purged last.
+
+        ``should_continue`` is awaited before each context and before the
+        workspace-scoped files; when it returns False (the workspace
+        re-subscribed or was erased meanwhile) the purge stops and the
+        partial report comes back with ``aborted=True``.
+
+        Soft deletes: the tombstone sweep hard-deletes memories after
+        ``CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`` and the file GC after
+        ``FILE_SOFT_DELETE_RETENTION``. Until then the admin restore
+        (``services/context_restore.py``) can bring a deleted context back,
+        with two exceptions:
+
+        * The default context is never deleted, so a context restore cannot
+          bring its memories back. Ops recovery within the tombstone
+          retention: ``UPDATE memories SET deleted_at = NULL, deleted_by =
+          NULL, embedding_status = 'pending' WHERE workspace_id = :ws AND
+          context_id = :default_ctx AND deleted_by = 'system:capacity-purge'``
+          (the embedding sweep then rebuilds the vectors).
+        * A crash part-way through a context leaves the chunks already
+          committed stamped with a ``deleted_at`` other than the one the
+          context gets on the next run, so those memories are not restored
+          with the context. Acceptable for a policy purge.
+
+        Args:
+            workspace_id: The workspace to empty.
+            actor: Written as ``deleted_by`` (:data:`CAPACITY_PURGE_ACTOR`).
+            should_continue: Optional abort check (see above).
+
+        Returns:
+            What was removed. Commits; never leaves an open write.
+        """
+        from services.file_storage_service import FileStorageService
+
+        contexts = list(
+            (
+                await self.db.execute(
+                    select(Context)
+                    .where(Context.workspace_id == workspace_id, Context.deleted_at.is_(None))
+                    .order_by(Context.created_at, Context.id)
+                )
+            )
+            .scalars()
+            .all()
         )
-
-        if _commit:
-            await self._remove_context_points(str(context.workspace_id), str(context_id))
+        deleted = emptied = memories = files = released_total = 0
+        aborted = False
+        for context in contexts:
+            if should_continue is not None and not await should_continue():
+                aborted = True
+                break
+            self._storage_release_pending = {}
+            deleted_at = utcnow()
+            memories += await self._tombstone_memories_chunked(
+                context, actor=actor, deleted_at=deleted_at
+            )
+            files += await self._purge_context_files_and_edges(context, deleted_at=deleted_at)
+            if context.is_default:
+                emptied += 1
+            else:
+                await self._detach_context(context, actor=actor, deleted_at=deleted_at)
+                deleted += 1
+            await self.db.commit()
+            released_total += sum(self._storage_release_pending.values())
+            await self._remove_context_points(str(workspace_id), str(context.id))
             await self._release_pending_storage()
 
-        return context
+        if not aborted and should_continue is not None and not await should_continue():
+            aborted = True
+        if not aborted:
+            self._storage_release_pending = {}
+            ws_files, ws_bytes = await FileStorageService(self.db).purge_workspace_scoped_files(
+                workspace_id, deleted_at=utcnow()
+            )
+            await self.db.commit()
+            files += ws_files
+            released_total += ws_bytes
+            if ws_bytes:
+                self._storage_release_pending = {workspace_id: ws_bytes}
+                await self._release_pending_storage()
+
+        report = WorkspacePurgeReport(
+            contexts_deleted=deleted,
+            contexts_emptied=emptied,
+            memories_deleted=memories,
+            files_deleted=files,
+            bytes_released=released_total,
+            aborted=aborted,
+        )
+        logger.info(
+            "workspace_data_purged", workspace_id=str(workspace_id), actor=actor, **asdict(report)
+        )
+        return report
 
     async def _release_pending_storage(self) -> None:
         """Release the Redis storage counter for the files a delete purged (#1960).
