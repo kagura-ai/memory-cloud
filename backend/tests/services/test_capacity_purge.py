@@ -8,6 +8,7 @@ import pytest
 
 from services.capacity_lock import CapacityLock
 from services.capacity_purge import (
+    MIN_WARNING_DAYS,
     NOTICE_DAYS,
     NOTICE_KEY_TTL_SECONDS,
     PURGE_AFTER,
@@ -49,8 +50,10 @@ def test_purge_at_is_the_sweep_that_purges(since) -> None:
     deadline = purge_at(since)
     assert deadline == datetime(2026, 10, 31, SWEEP_HOUR_UTC, 0)
     final = deadline - timedelta(days=1)  # the day-29 "1 day left" mail
-    assert purge_due(since, deadline, final_notice_at=final)
-    assert not purge_due(since, deadline - timedelta(days=1), final_notice_at=final)
+    assert purge_due(since, deadline, final_notice_at=final, first_notice_at=since)
+    assert not purge_due(
+        since, deadline - timedelta(days=1), final_notice_at=final, first_notice_at=since
+    )
 
 
 @pytest.mark.parametrize(
@@ -63,7 +66,33 @@ def test_purge_at_is_the_sweep_that_purges(since) -> None:
 )
 def test_purge_needs_the_final_notice_a_day_earlier(final_notice_at, due) -> None:
     since = datetime(2026, 10, 1, 4, 0, 5)
-    assert purge_due(since, datetime(2026, 10, 31, 4, 0), final_notice_at=final_notice_at) is due
+    assert (
+        purge_due(
+            since,
+            datetime(2026, 10, 31, 4, 0),
+            final_notice_at=final_notice_at,
+            first_notice_at=since,
+        )
+        is due
+    )
+
+
+@pytest.mark.parametrize(
+    ("first_notice_at", "due"),
+    [
+        (None, False),  # no first notice recorded: never deleted
+        (datetime(2026, 10, 28, 4, 0, 5), False),  # notices started 3 days ago
+        (datetime(2026, 10, 25, 4, 0, 5), False),  # 6 days: one short
+        (datetime(2026, 10, 24, 4, 0, 5), True),  # 7 calendar days
+    ],
+)
+def test_purge_needs_the_first_notice_a_week_earlier(first_notice_at, due) -> None:
+    """A late-enabled notice flag must not turn into a one-day warning."""
+    assert MIN_WARNING_DAYS == 7
+    since = datetime(2026, 9, 1, 4, 0, 5)
+    now = datetime(2026, 10, 31, 4, 0)
+    final = datetime(2026, 10, 30, 4, 0, 5)
+    assert purge_due(since, now, final_notice_at=final, first_notice_at=first_notice_at) is due
 
 
 def test_purge_at_none_when_not_locked() -> None:
@@ -113,6 +142,7 @@ def _ws(since: datetime | None, *, plan: str = "free"):
     ws.plan_name = plan
     ws.entitlement_source = "external_billing"
     ws.capacity_locked_since = since
+    ws.capacity_purge_first_notice_at = None
     ws.capacity_purge_final_notice_at = None
     return ws
 
@@ -264,6 +294,7 @@ async def test_final_notice_is_recorded_on_the_workspace(send, stamped) -> None:
 async def test_earlier_notices_do_not_record_the_final_notice() -> None:
     since = datetime(2026, 10, 1, 4, 0, 30)
     ws = _ws(since)
+    ws.capacity_purge_first_notice_at = since  # the day-0 mail
     db = _db([ws])
     email = _email(return_value=True)
     with _locked():
@@ -273,6 +304,41 @@ async def test_earlier_notices_do_not_record_the_final_notice() -> None:
     assert counts.sent == 1
     assert email.send_capacity_purge_notice.call_args.kwargs["days_left"] == 3  # stage 27
     assert ws.capacity_purge_final_notice_at is None
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("send", "recorded"),
+    [
+        (AsyncMock(return_value=True), True),
+        (AsyncMock(side_effect=TimeoutError()), True),  # may have been delivered
+        (AsyncMock(return_value=False), False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_first_notice_is_recorded_once_per_lock(send, recorded) -> None:
+    """The first mail of a lock (sent or possibly sent) records
+    ``capacity_purge_first_notice_at``; a later mail never moves it."""
+    since = datetime(2026, 10, 1, 4, 0, 30)
+    day0 = datetime(2026, 10, 1, 4, 0, 31)
+    ws = _ws(since)
+    redis = _Redis()
+    db = _db([ws])
+    with _locked():
+        await send_due_purge_notices(
+            db, now=day0, redis=redis, email=MagicMock(send_capacity_purge_notice=send)
+        )
+    assert ws.capacity_purge_first_notice_at == (day0 if recorded else None)
+    assert db.commit.await_count == int(recorded)
+    if not recorded:
+        return
+    db = _db([ws])
+    with _locked():
+        counts = await send_due_purge_notices(
+            db, now=datetime(2026, 10, 8, 4, 0), redis=redis, email=_email(return_value=True)
+        )
+    assert counts.sent == 1
+    assert ws.capacity_purge_first_notice_at == day0  # unchanged by the day-7 mail
     db.commit.assert_not_awaited()
 
 
@@ -412,10 +478,13 @@ def _purge_ws(
     *,
     plan: str = "free",
     final_notice_at: datetime | None = datetime(2026, 10, 30, 4, 0, 2),
+    first_notice_at: datetime | None = datetime(2026, 10, 1, 4, 0, 2),
 ):
-    """A stamped workspace; by default warned by the day-29 run before ``_NOW``."""
+    """A stamped workspace; by default warned by the day-0 run and by the
+    day-29 run before ``_NOW``."""
     ws = _ws(since, plan=plan)
     ws.deleted_at = None
+    ws.capacity_purge_first_notice_at = first_notice_at
     ws.capacity_purge_final_notice_at = final_notice_at
     return ws
 
@@ -488,6 +557,23 @@ async def test_purge_waits_for_the_final_notice(final_notice_at) -> None:
     assert [e["workspace_id"] for e in waiting] == [str(ws.id)]
 
 
+@pytest.mark.parametrize(("first_notice_days_ago", "purged"), [(3, False), (7, True)])
+@pytest.mark.asyncio
+async def test_purge_needs_a_first_notice_a_week_before(first_notice_days_ago, purged) -> None:
+    """Day 30 and the final notice went out the previous day, but the notices
+    started only ``first_notice_days_ago`` days ago (flag turned on late):
+    deleted only once the first warning is a week old."""
+    ws = _purge_ws(
+        datetime(2026, 9, 25, 4, 0),
+        first_notice_at=_NOW - timedelta(days=first_notice_days_ago),
+    )
+    counts, service, _, _ = await _run_purge([ws], now=_NOW)
+    assert counts.purged == int(purged)
+    assert counts.awaiting_notice == int(not purged)
+    assert service.purge_workspace_data.await_count == int(purged)
+    assert (ws.capacity_locked_since is None) is purged
+
+
 @pytest.mark.asyncio
 async def test_awaiting_notice_does_not_take_a_purge_slot() -> None:
     """Workspaces still waiting for their final notice do not crowd warned ones
@@ -508,6 +594,7 @@ async def test_purge_clears_the_final_notice_with_the_stamp() -> None:
     counts, _, _, _ = await _run_purge([ws], now=_NOW)
     assert counts.purged == 1
     assert (ws.capacity_locked_since, ws.capacity_purge_final_notice_at) == (None, None)
+    assert ws.capacity_purge_first_notice_at is None
 
 
 @pytest.mark.asyncio
@@ -516,6 +603,7 @@ async def test_purge_skip_clears_the_final_notice_with_the_stamp() -> None:
     counts, _, _, _ = await _run_purge([ws], now=_NOW, lock=None)
     assert counts.skipped_within == 1
     assert (ws.capacity_locked_since, ws.capacity_purge_final_notice_at) == (None, None)
+    assert ws.capacity_purge_first_notice_at is None
 
 
 @pytest.mark.asyncio

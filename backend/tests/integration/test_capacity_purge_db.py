@@ -127,11 +127,13 @@ async def test_stamp_clear_also_clears_the_final_notice(db_session, free_ws) -> 
     ws, ctx, owner = free_ws
     ws.capacity_locked_since = utcnow() - timedelta(days=30)
     ws.capacity_purge_final_notice_at = utcnow() - timedelta(days=1)
+    ws.capacity_purge_first_notice_at = utcnow() - timedelta(days=30)
     await db_session.flush()
     await stamp_capacity_locks(db_session, now=utcnow())
     await db_session.refresh(ws)
     assert ws.capacity_locked_since is None
     assert ws.capacity_purge_final_notice_at is None
+    assert ws.capacity_purge_first_notice_at is None
 
 
 @pytest.mark.asyncio
@@ -529,6 +531,7 @@ async def test_purge_after_thirty_days(
         since = now - timedelta(days=30)
     ws.capacity_locked_since = since
     ws.capacity_purge_final_notice_at = now - timedelta(days=1)  # the day-29 run
+    ws.capacity_purge_first_notice_at = now - timedelta(days=30)  # the day-0 run
     await db_session.flush()
     email = _mail()
 
@@ -582,6 +585,7 @@ async def test_purge_skips_workspace_now_within_capacity(
     now = utcnow()
     ws.capacity_locked_since = now - timedelta(days=31)
     ws.capacity_purge_final_notice_at = now - timedelta(days=2)
+    ws.capacity_purge_first_notice_at = now - timedelta(days=30)  # the day-0 run
     await db_session.flush()
     email = _mail()
     counts = await purge_expired_workspaces(db_session, now=now, email=email)
@@ -611,6 +615,7 @@ async def test_purge_aborts_when_resubscribed_mid_run(
     now = utcnow()
     ws.capacity_locked_since = now - timedelta(days=30)
     ws.capacity_purge_final_notice_at = now - timedelta(days=1)
+    ws.capacity_purge_first_notice_at = now - timedelta(days=30)  # the day-0 run
     await db_session.flush()
     await db_session.commit()
 
@@ -661,6 +666,9 @@ async def test_purge_continues_after_one_workspace_fails(
     bad.capacity_purge_final_notice_at = good.capacity_purge_final_notice_at = now - timedelta(
         days=1
     )
+    bad.capacity_purge_first_notice_at = good.capacity_purge_first_notice_at = now - timedelta(
+        days=30
+    )
     await db_session.flush()
     await db_session.commit()
 
@@ -703,6 +711,7 @@ async def test_purge_waits_for_the_final_notice(
     ws.capacity_locked_since = now - timedelta(days=30)
     if final_notice_days_ago is not None:
         ws.capacity_purge_final_notice_at = now - timedelta(days=final_notice_days_ago)
+    ws.capacity_purge_first_notice_at = now - timedelta(days=30)
     await db_session.flush()
     email = _mail()
 
@@ -752,3 +761,28 @@ async def test_final_notice_is_persisted_by_the_day_29_mail(
     assert counts.sent == 1
     await db_session.refresh(ws)
     assert ws.capacity_purge_final_notice_at == (now if final else None)
+    assert ws.capacity_purge_first_notice_at == now  # the first mail of this lock
+
+
+@pytest.mark.parametrize(("first_notice_days_ago", "purged"), [(3, False), (7, True)])
+@pytest.mark.asyncio
+async def test_purge_needs_a_first_notice_a_week_before(
+    db_session, free_ws, purge_side_effects, only_workspaces, first_notice_days_ago, purged
+) -> None:
+    """Day 30, final notice the previous day, but the first notice only
+    ``first_notice_days_ago`` days ago: deleted only once it is a week old."""
+    ws, ctx, owner = free_ws
+    only_workspaces.add(ws.id)
+    await _over_cap(db_session, ws, ctx, owner)
+    now = utcnow().replace(microsecond=0)
+    ws.capacity_locked_since = now - timedelta(days=30)
+    ws.capacity_purge_final_notice_at = now - timedelta(days=1)
+    ws.capacity_purge_first_notice_at = now - timedelta(days=first_notice_days_ago)
+    await db_session.flush()
+
+    counts = await purge_expired_workspaces(db_session, now=now, email=_mail())
+
+    assert (counts.purged, counts.awaiting_notice) == (int(purged), int(not purged))
+    await db_session.refresh(ctx)
+    assert (ctx.deleted_at is not None) is purged
+    assert (len(await _live_memories(db_session, ws)) == 0) is purged

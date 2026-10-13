@@ -1829,6 +1829,11 @@ class Workspace(Base):
     # later calendar day, so no data is deleted without that final warning.
     # Cleared together with ``capacity_locked_since``.
     capacity_purge_final_notice_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # #1969: when the first countdown mail of the current lock went out (or
+    # may have), naive UTC. The purge also needs it at least 7 calendar days
+    # earlier, so a late-enabled notice flag never yields a one-day warning.
+    # Cleared together with ``capacity_locked_since``.
+    capacity_purge_first_notice_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Issue #709: Per-workspace embedding spend caps (USD, BYOK-only). NULL =
     # "inherit tier default from ``PlanTier.embedding_*_cap_usd``"; non-NULL =
