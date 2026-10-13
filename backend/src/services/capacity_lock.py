@@ -15,9 +15,10 @@ until it is cleaned up or re-subscribed:
 * **Still allowed**: listing, deleting (memories, contexts, files), export,
   usage and plan pages — everything the owner needs to get back under the cap.
 
-The state is computed at gate time from two cheap queries (an indexed COUNT
-and one primary-key row) and never stored, so deleting down to the cap or a
-plan push unlocks on the very next call with nothing to invalidate.
+The state is computed at gate time from two indexed aggregates (the live
+memory COUNT and the reducible-storage SUM of ``services/storage_counts.py``,
+#1961) and never stored, so deleting down to the cap or a plan push unlocks on
+the very next call with nothing to invalidate.
 """
 
 from __future__ import annotations
@@ -34,7 +35,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.plan_tiers import PlanName
 from config.settings import get_settings
 from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING, Context, Workspace, WorkspaceMember
-from models.file_objects import WorkspaceStorageUsage
 from services.memory_counts import live_memory_count_stmt
 from services.storage_counts import reducible_storage_bytes
 from utils.exceptions import CapacityLockedError
@@ -156,22 +156,14 @@ async def _measure(
 ) -> CapacityLock | None:
     """Count the workspace against the given limits; ``None`` when within both."""
     memory_count = int(await db.scalar(live_memory_count_stmt(workspace_id)) or 0)
-    # The upload counter is an upper bound of the reducible figure (it holds
-    # every live uploaded byte, the files of deleted contexts included), so a
-    # counter within the limit settles the storage axis with one PK read —
-    # the hot path on every gated request of a candidate workspace. Only an
-    # over-limit counter is confirmed against the one shared figure (#1961),
-    # the same number the downgrade-eligibility read reports.
-    used_bytes = int(
-        await db.scalar(
-            select(WorkspaceStorageUsage.used_bytes).where(
-                WorkspaceStorageUsage.workspace_id == workspace_id
-            )
-        )
-        or 0
-    )
-    if 0 <= storage_limit < used_bytes:
-        used_bytes = await reducible_storage_bytes(db, workspace_id)
+    # #1961: the one storage figure, shared with the downgrade-eligibility read,
+    # on every call. The upload counter (``workspace_storage_usage``) is not a
+    # sound short-cut: it is delta-maintained, floored at 0, never reseeded
+    # from the rows and read as 0 when its row is missing, so "counter within
+    # the limit → unlocked" can skip a lock that eligibility reports — and the
+    # lock payload must carry the same ``used_bytes`` eligibility does. The
+    # SUM is indexed by workspace and bounded by the Free storage limit.
+    used_bytes = await reducible_storage_bytes(db, workspace_id)
     # A negative limit would mean "unlimited"; Free has none today, but a
     # settings override must not lock a workspace against an unlimited cap.
     over_memories = max(0, memory_count - memory_limit) if memory_limit >= 0 else 0

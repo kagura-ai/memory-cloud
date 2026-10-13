@@ -36,15 +36,11 @@ def _ws(
     )
 
 
-def _db(
-    memory_count: int | None, used_bytes: int | None, reducible_bytes: int | None = None
-) -> MagicMock:
-    """Scripted reads: the live memory count, the upload counter, then — only
-    when the counter is over the limit — the shared reducible-storage figure
-    (#1961; the counter is its upper bound). Defaults to the counter itself."""
+def _db(memory_count: int | None, reducible_bytes: int | None) -> MagicMock:
+    """Scripted reads: the live memory count, then the shared reducible-storage
+    figure (#1961). The upload counter is never read by the lock."""
     db = MagicMock()
-    third = used_bytes if reducible_bytes is None else reducible_bytes
-    db.scalar = AsyncMock(side_effect=[memory_count, used_bytes, third])
+    db.scalar = AsyncMock(side_effect=[memory_count, reducible_bytes])
     return db
 
 
@@ -98,27 +94,27 @@ class TestThePredicate:
         assert lock.storage_limit_bytes == 100 * MB
 
     @pytest.mark.asyncio
-    async def test_a_counter_within_the_limit_settles_storage_with_one_read(self) -> None:
-        """The counter bounds the figure from above, so under the limit the
-        shared figure is never read (hot path: one PK read)."""
-        db = _db(3, 100 * MB)
+    async def test_the_lock_reads_the_shared_figure_and_nothing_else(self) -> None:
+        """#1961: two reads — the memory count and the reducible figure. The
+        upload counter (drift-prone, floored, possibly absent) never decides."""
+        db = _db(3, 90 * MB)
         assert await cl.capacity_lock_state(db, _ws()) is None
-        assert db.scalar.await_count == 2  # memory count + counter
-
-    @pytest.mark.asyncio
-    async def test_an_over_counter_is_confirmed_against_the_shared_figure(self) -> None:
-        """Counter 120 MB, 30 MB of it in deleted contexts: the figure (90 MB)
-        decides and the lock stays off (#1961)."""
-        db = _db(3, 120 * MB, 90 * MB)
-        assert await cl.capacity_lock_state(db, _ws()) is None
-        assert db.scalar.await_count == 3
+        assert db.scalar.await_count == 2
 
     @pytest.mark.asyncio
     async def test_visible_bytes_over_the_limit_lock(self) -> None:
-        lock = await cl.capacity_lock_state(_db(3, 120 * MB, 110 * MB), _ws())
+        lock = await cl.capacity_lock_state(_db(3, 110 * MB), _ws())
         assert lock is not None
         assert lock.used_bytes == 110 * MB
         assert lock.over_bytes == 10 * MB
+
+    @pytest.mark.asyncio
+    async def test_a_memory_lock_reports_the_shared_storage_figure_too(self) -> None:
+        """When only the memory axis locks, used_bytes is still the shared figure,
+        so the payload never shows a number eligibility would not."""
+        lock = await cl.capacity_lock_state(_db(1001, 70 * MB), _ws())
+        assert lock is not None
+        assert (lock.over_memories, lock.used_bytes, lock.over_bytes) == (1, 70 * MB, 0)
 
     @pytest.mark.asyncio
     async def test_the_cleanup_url_points_at_the_plan_page(self) -> None:
@@ -338,9 +334,7 @@ class TestProjectedFreeCapacity:
         from config.plan_tiers import PLAN_TIERS
 
         free = PLAN_TIERS["free"]
-        # The counter is over the Free limit but the shared figure (files of
-        # deleted contexts left out) is under it: no lock is projected.
-        lock = await cl.projected_free_capacity(
-            _db(0, free.storage_limit_bytes + 10 * MB, free.storage_limit_bytes - MB), self._paid()
-        )
+        # The shared figure (files of deleted contexts left out) is under the
+        # Free limit: no lock is projected, whatever the upload counter says.
+        lock = await cl.projected_free_capacity(_db(0, free.storage_limit_bytes - MB), self._paid())
         assert lock is None

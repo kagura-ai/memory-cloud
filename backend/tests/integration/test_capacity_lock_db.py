@@ -155,6 +155,20 @@ async def test_files_of_a_deleted_context_do_not_hold_the_lock(db_session, free_
 
 
 @pytest.mark.asyncio
+async def test_the_lock_does_not_need_the_upload_counter(db_session, free_ws) -> None:
+    """#1961: with no ``workspace_storage_usage`` row at all (or one that
+    drifted low), the files alone decide — the same way eligibility counts."""
+    ws, ctx, owner = free_ws
+    db_session.add_all([_file(ws, ctx, owner, 150), _file(ws, None, owner, 100)])
+    await db_session.commit()
+
+    lock = await capacity_lock_state(db_session, ws)
+    assert lock is not None and (lock.used_bytes, lock.over_bytes) == (250, 50)
+    usage = await DowngradeEligibilityService(db_session).current_usage(ws.id)
+    assert usage.storage_bytes == 250
+
+
+@pytest.mark.asyncio
 async def test_the_context_subquery_finds_the_locked_workspace(db_session, free_ws) -> None:
     ws, ctx, owner = free_ws
     db_session.add_all([_memory(ws, ctx, owner) for _ in range(MEMORY_LIMIT + 1)])
