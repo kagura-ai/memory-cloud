@@ -188,7 +188,13 @@ class CapacityLockInfo(BaseModel):
     memory_count: int = Field(..., description="Live memories in the workspace")
     memory_limit: int = Field(..., description="Effective memory limit")
     over_memories: int = Field(..., ge=0, description="Memories to remove to unlock")
-    used_bytes: int = Field(..., description="Stored file bytes")
+    used_bytes: int = Field(
+        ...,
+        description=(
+            "File bytes the owner can still delete: uploaded, not soft-deleted files that are "
+            "workspace-scoped or in a live context (#1961) — the figure downgrade-eligibility shares"
+        ),
+    )
     storage_limit_bytes: int = Field(..., description="Effective storage limit in bytes")
     over_bytes: int = Field(..., ge=0, description="File bytes to remove to unlock")
     cleanup_url: str = Field(..., description="Web page to clean up or re-subscribe")

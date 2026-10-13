@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from sqlalchemy.dialects import postgresql
 
-from services import capacity_lock, downgrade_eligibility_service
+from services import capacity_lock, downgrade_eligibility_service, storage_counts
 from services.storage_counts import reducible_storage_bytes_stmt
 
 
@@ -27,10 +27,13 @@ def test_counts_only_what_the_owner_can_still_delete() -> None:
 
 
 def test_both_gates_use_the_shared_figure() -> None:
-    lock_src = inspect.getsource(capacity_lock)
-    elig_src = inspect.getsource(downgrade_eligibility_service)
-    assert "reducible_storage_bytes" in lock_src
-    assert "reducible_storage_bytes_stmt" in elig_src
-    # Neither keeps a private sum of file_objects any more.
-    assert "func.sum(FileObject.size_bytes)" not in lock_src
-    assert "func.sum(FileObject.size_bytes)" not in elig_src
+    # The gates bind the very objects storage_counts exports (an identity
+    # check, not a source grep): a local re-implementation would fail here.
+    assert capacity_lock.reducible_storage_bytes is storage_counts.reducible_storage_bytes
+    assert (
+        downgrade_eligibility_service.reducible_storage_bytes_stmt
+        is storage_counts.reducible_storage_bytes_stmt
+    )
+    # And neither keeps a private sum of file_objects any more.
+    for module in (capacity_lock, downgrade_eligibility_service):
+        assert "func.sum(FileObject.size_bytes)" not in inspect.getsource(module)

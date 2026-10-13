@@ -8,7 +8,8 @@ is **the bytes the owner can still delete**: uploaded, not soft-deleted files
 that are either workspace-scoped (``context_id IS NULL``) or bound to a live
 context — the owner's view of ``FileStorageService.list_files`` and the storage
 page (a member sees the subset of contexts they can access). Files left behind
-in a soft-deleted context (``delete_context`` kept them before #1960) are not
+in a soft-deleted context (``delete_context`` leaves them until #1960 purges
+them with the context) are not
 listed anywhere in the UI, so counting them would describe a lock the owner
 cannot lift from the product and an eligibility they cannot earn.
 
