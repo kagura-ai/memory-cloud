@@ -36,6 +36,7 @@ from sqlalchemy.engine import CursorResult
 from db.base import get_db
 from models.file_objects import FileObject
 from services import storage_quota_service
+from services.file_storage_service import FILE_SOFT_DELETE_RETENTION
 from storage.factory import get_blob_storage
 from utils.datetime import utcnow
 from utils.exceptions import ExternalServiceError
@@ -57,7 +58,7 @@ _ORPHAN_GRACE_SECONDS = 3600
 # are gone. There is currently no user-facing undelete API; if one is
 # added (#563) the retention window's framing will shift to a true
 # user-visible "trash" window with stricter race-window guarantees.
-_GC_RETENTION_SECONDS = 7 * 86400
+_GC_RETENTION_SECONDS = int(FILE_SOFT_DELETE_RETENTION.total_seconds())
 
 
 async def sweep_orphan_files() -> dict[str, int]:

@@ -5,7 +5,8 @@ change an over-storage owner could only lift the lock file by file; the
 context's files survived ``delete_context`` (restorable, #1804) and sat in the
 storage counter. Now ``delete_context`` soft-deletes them with the context's
 own timestamp and frees their bytes, and ``restore_deleted_context`` revives
-the ones the 7-day GC has not yet removed.
+the ones still inside the 7-day GC window whose content was not uploaded
+again in the meantime.
 
 The fixture hands back ids, not ORM instances: the services commit, which
 expires the session's objects, and touching an expired attribute from a test
@@ -16,12 +17,13 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import (
@@ -35,7 +37,7 @@ from models.file_objects import FileObject, WorkspaceStorageUsage
 from services.capacity_lock import capacity_lock_state
 from services.context_restore import restore_deleted_context
 from services.context_service import ContextService
-from services.file_storage_service import FileStorageService
+from services.file_storage_service import FILE_SOFT_DELETE_RETENTION, FileStorageService
 
 from ._admin_helpers import make_context, make_user, make_workspace
 
@@ -70,10 +72,19 @@ class Seeded:
     keep_id: UUID
     doomed_id: UUID
     owner: str
+    doomed_sha: str  # content hash of the doomed context's 150-byte upload
 
 
-def _file(ws_id: UUID, ctx_id: UUID | None, owner: str, size: int, *, status: str = "uploaded"):
-    sha = uuid.uuid4().hex + uuid.uuid4().hex
+def _file(
+    ws_id: UUID,
+    ctx_id: UUID | None,
+    owner: str,
+    size: int,
+    *,
+    status: str = "uploaded",
+    sha: str | None = None,
+):
+    sha = sha or uuid.uuid4().hex + uuid.uuid4().hex
     return FileObject(
         id=uuid.uuid4(),
         workspace_id=ws_id,
@@ -106,16 +117,17 @@ async def seeded(db_session: AsyncSession) -> Seeded:
     doomed = make_context(workspace_id=ws.id, created_by=owner.user_id, is_private=True)
     db_session.add_all([keep, doomed])
     await db_session.flush()
+    doomed_upload = _file(ws.id, doomed.id, owner.user_id, 150)
     db_session.add_all(
         [
             _file(ws.id, keep.id, owner.user_id, 100),
-            _file(ws.id, doomed.id, owner.user_id, 150),
+            doomed_upload,
             _file(ws.id, doomed.id, owner.user_id, 40, status="reserved"),
         ]
     )
     db_session.add(WorkspaceStorageUsage(workspace_id=ws.id, used_bytes=250, file_count=2))
     await db_session.commit()
-    return Seeded(ws.id, keep.id, doomed.id, owner.user_id)
+    return Seeded(ws.id, keep.id, doomed.id, owner.user_id, doomed_upload.sha256)
 
 
 async def _workspace(db_session: AsyncSession, ws_id: UUID) -> Workspace:
@@ -139,6 +151,10 @@ async def _files(db_session: AsyncSession, ctx_id: UUID, *, live_only: bool = Fa
     if live_only:
         stmt = stmt.where(FileObject.deleted_at.is_(None))
     return (await db_session.execute(stmt)).scalars().all()
+
+
+async def _restore(db_session: AsyncSession, ctx_id: UUID, *, dry_run: bool = False):
+    return await restore_deleted_context(db_session, ctx_id, dry_run=dry_run, actor_id="t")
 
 
 @pytest.mark.asyncio
@@ -165,18 +181,52 @@ async def test_deleting_a_context_frees_its_files_and_lifts_the_lock(
 
 
 @pytest.mark.asyncio
+async def test_a_rolled_back_delete_releases_nothing_later(
+    db_session, seeded: Seeded, side_effects
+) -> None:
+    """The pending Redis release belongs to the delete that committed, not to an
+    earlier one on the same service that was rolled back."""
+    release, _bump = side_effects
+    service = ContextService(db_session)
+    await service.delete_context(seeded.owner, seeded.keep_id, _commit=False)
+    await db_session.rollback()
+    assert (await _usage(db_session, seeded.workspace_id)).used_bytes == 250
+
+    await service.delete_context(seeded.owner, seeded.doomed_id)
+
+    release.assert_awaited_once_with(workspace_id=seeded.workspace_id, size_bytes=190)
+    assert (await _usage(db_session, seeded.workspace_id)).used_bytes == 100
+
+
+@pytest.mark.asyncio
+async def test_merging_away_the_source_frees_its_files(
+    db_session, seeded: Seeded, side_effects
+) -> None:
+    release, _bump = side_effects
+    with patch("services.context_service.ContextService._remove_context_points", AsyncMock()):
+        await ContextService(db_session).merge_contexts(
+            seeded.owner, seeded.doomed_id, seeded.keep_id, delete_source=True
+        )
+
+    assert (await _context(db_session, seeded.doomed_id)).deleted_at is not None
+    assert await _files(db_session, seeded.doomed_id, live_only=True) == []
+    assert (await _usage(db_session, seeded.workspace_id)).used_bytes == 100
+    release.assert_awaited_once_with(workspace_id=seeded.workspace_id, size_bytes=190)
+
+
+@pytest.mark.asyncio
 async def test_restore_brings_the_files_back_with_their_bytes(
     db_session, seeded: Seeded, side_effects
 ) -> None:
     _release, bump = side_effects
     await ContextService(db_session).delete_context(seeded.owner, seeded.doomed_id)
 
-    dry = await restore_deleted_context(db_session, seeded.doomed_id, dry_run=True)
+    dry = await _restore(db_session, seeded.doomed_id, dry_run=True)
     assert (dry.files_restored, dry.file_bytes_restored) == (1, 150)
+    # 100 live + 150 back = 250 > the 200 limit: the admin is told.
+    assert any("capacity-locked" in w for w in dry.warnings)
 
-    result = await restore_deleted_context(
-        db_session, seeded.doomed_id, dry_run=False, actor_id="t"
-    )
+    result = await _restore(db_session, seeded.doomed_id)
     assert (result.files_restored, result.file_bytes_restored) == (1, 150)
     live = await _files(db_session, seeded.doomed_id, live_only=True)
     assert [f.size_bytes for f in live] == [150]  # the cancelled reservation stays gone
@@ -186,27 +236,63 @@ async def test_restore_brings_the_files_back_with_their_bytes(
 
 
 @pytest.mark.asyncio
-async def test_a_file_the_gc_already_swept_is_not_restored(
+async def test_a_file_uploaded_again_since_the_deletion_blocks_its_restore(
     db_session, seeded: Seeded, side_effects
 ) -> None:
+    """``uq_file_objects_workspace_sha256_active`` allows one live row per content
+    hash: the re-upload stays, the old row stays deleted, the restore says so."""
+    _release, bump = side_effects
     await ContextService(db_session).delete_context(seeded.owner, seeded.doomed_id)
-    # The soft-delete GC marks a swept row failed (and removes the R2 object).
-    swept = (
-        await db_session.execute(
-            select(FileObject).where(
-                FileObject.context_id == seeded.doomed_id, FileObject.status == "uploaded"
-            )
-        )
-    ).scalar_one()
-    swept.status = "failed"
+    db_session.add(
+        _file(seeded.workspace_id, seeded.keep_id, seeded.owner, 150, sha=seeded.doomed_sha)
+    )
+    await db_session.execute(
+        update(WorkspaceStorageUsage)
+        .where(WorkspaceStorageUsage.workspace_id == seeded.workspace_id)
+        .values(used_bytes=250, file_count=2)
+    )
     await db_session.commit()
 
-    result = await restore_deleted_context(
-        db_session, seeded.doomed_id, dry_run=False, actor_id="t"
-    )
+    dry = await _restore(db_session, seeded.doomed_id, dry_run=True)
+    assert (dry.files_restored, dry.file_bytes_restored) == (0, 0)
+    assert any("uploaded again" in w for w in dry.warnings)
+
+    result = await _restore(db_session, seeded.doomed_id)
     assert (result.files_restored, result.file_bytes_restored) == (0, 0)
-    usage = await _usage(db_session, seeded.workspace_id)
-    assert usage.used_bytes == 100
+    assert (await _context(db_session, seeded.doomed_id)).deleted_at is None  # the context is back
+    assert await _files(db_session, seeded.doomed_id, live_only=True) == []
+    assert (await _usage(db_session, seeded.workspace_id)).used_bytes == 250
+    bump.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_files_past_the_retention_window_are_not_restored(
+    db_session, seeded: Seeded, side_effects
+) -> None:
+    """The GC removes the R2 object before the row, so a row restored while the
+    sweep is on it would come back without its bytes: past the window the restore
+    leaves every file deleted."""
+    _release, bump = side_effects
+    await ContextService(db_session).delete_context(seeded.owner, seeded.doomed_id)
+    doomed = await _context(db_session, seeded.doomed_id)
+    assert doomed.deleted_at is not None
+    long_ago = doomed.deleted_at - FILE_SOFT_DELETE_RETENTION - timedelta(hours=1)
+    await db_session.execute(
+        update(FileObject)
+        .where(FileObject.context_id == seeded.doomed_id)
+        .values(deleted_at=long_ago)
+    )
+    await db_session.execute(
+        update(Context).where(Context.id == seeded.doomed_id).values(deleted_at=long_ago)
+    )
+    await db_session.commit()
+
+    result = await _restore(db_session, seeded.doomed_id)
+    assert (result.files_restored, result.file_bytes_restored) == (0, 0)
+    assert any("retention window" in w for w in result.warnings)
+    assert await _files(db_session, seeded.doomed_id, live_only=True) == []
+    assert (await _usage(db_session, seeded.workspace_id)).used_bytes == 100
+    bump.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -215,11 +301,11 @@ async def test_purging_a_live_contexts_files_keeps_the_context(
 ) -> None:
     """The service path ``DELETE /contexts/{id}/files`` takes (#1960): every live
     file of the context goes, the quota follows, the context stays."""
-    released = await FileStorageService(db_session).purge_files_for_contexts([seeded.keep_id])
+    files, released = await FileStorageService(db_session).purge_context_files(seeded.doomed_id)
     await db_session.commit()
-    assert released == {seeded.workspace_id: 100}
+    # Two live rows went (the upload and the cancelled reservation); both release Redis bytes.
+    assert (files, released) == (2, 190)
     usage = await _usage(db_session, seeded.workspace_id)
-    assert (usage.used_bytes, usage.file_count) == (150, 1)
-    assert (await _context(db_session, seeded.keep_id)).deleted_at is None
-    (stamped,) = await _files(db_session, seeded.keep_id)
-    assert stamped.deleted_at is not None
+    assert (usage.used_bytes, usage.file_count) == (100, 1)
+    assert (await _context(db_session, seeded.doomed_id)).deleted_at is None
+    assert all(f.deleted_at is not None for f in await _files(db_session, seeded.doomed_id))

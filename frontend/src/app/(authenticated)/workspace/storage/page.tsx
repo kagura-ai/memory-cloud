@@ -89,6 +89,13 @@ export default function StoragePage() {
     currentWorkspace?.current_user_role,
     WorkspaceRole.Member,
   );
+  // Clearing a whole context's files needs the context's owner role on the
+  // backend (#1960); workspace owner/admin hold it on every context, a plain
+  // member only on contexts they created, which this page cannot tell apart.
+  const canClearContext = hasWorkspaceRole(
+    currentWorkspace?.current_user_role,
+    WorkspaceRole.Admin,
+  );
 
   const loadFiles = useCallback(
     async (nextLimit: number, mode: "initial" | "more" | "refresh") => {
@@ -344,7 +351,7 @@ export default function StoragePage() {
                             <Trash2 className="h-4 w-4" aria-hidden="true" />
                           </Button>
                         )}
-                        {canDelete && f.context_id && (
+                        {canClearContext && f.context_id && (
                           <Button
                             variant="ghost"
                             size="sm"

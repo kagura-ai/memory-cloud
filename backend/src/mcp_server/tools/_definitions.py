@@ -978,7 +978,7 @@ Returns: {status, message, updated_fields, context_id, context_name, context_dis
         # =================================================================
         {
             "name": "delete_context",
-            "description": """Soft-delete a context and ALL its memories: it disappears from list_contexts() and search; the data is retained for recovery. DESTRUCTIVE — confirm with the user. Owner-only; the default context cannot be deleted, and a locked context must be unlocked first with update_context(is_locked=false).
+            "description": """Soft-delete a context and ALL its memories and files: it disappears from list_contexts() and search, the files' bytes leave the storage quota at once; the data is retained for recovery (files for 7 days). DESTRUCTIVE — confirm with the user. Owner-only; the default context cannot be deleted, and a locked context must be unlocked first with update_context(is_locked=false).
 
 Returns: {status, message, context_id, context_name}.""",
             "inputSchema": {

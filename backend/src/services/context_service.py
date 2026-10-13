@@ -87,6 +87,9 @@ class ContextService:
             db: SQLAlchemy async session
         """
         self.db = db
+        #: Redis bytes a ``delete_context`` purged, released after the commit
+        #: that made the purge durable (#1960, ``_release_pending_storage``).
+        self._storage_release_pending: dict[UUID, int] = {}
 
     # ========================================================================
     # Collection Name Utilities
@@ -1184,7 +1187,12 @@ class ContextService:
         if delete_source:
             await self.delete_context(user_id, source_context_id, _commit=False)
 
-        await self.db.commit()
+        try:
+            await self.db.commit()
+        except Exception:
+            # Nothing was purged, so nothing is released (#1960).
+            self._storage_release_pending = {}
+            raise
 
         # #1798: the source's own points go once the merge is durable — the
         # copies above carry the target's context_id and are not touched.
@@ -1257,6 +1265,9 @@ class ContextService:
             NotFoundException: If context not found
             ValidationError: If trying to delete default context
         """
+        # A previous delete on this service that was rolled back must not
+        # release its bytes with this one.
+        self._storage_release_pending = {}
         context = await self.get_context(user_id, context_id)
 
         # Cannot delete default context
@@ -1282,7 +1293,9 @@ class ContextService:
         memories_to_delete = list(memories_result.scalars().all())
         # #1804: the context and its memories share one timestamp, which is
         # how a restore (services/context_restore.py) tells the memories this
-        # deletion tombstoned from ones forgotten before it.
+        # deletion tombstoned from ones forgotten before it. #1960: the files
+        # are paired the same way, so ``context.deleted_at`` must never be
+        # rewritten while the context is deleted — the files would orphan.
         deleted_at = utcnow()
         for memory in memories_to_delete:
             memory.deleted_at = deleted_at
@@ -1416,7 +1429,7 @@ class ContextService:
         failure here leaves the counter high until the next DB sweep, never
         low. Clears the pending map so a second call is a no-op.
         """
-        pending: dict[UUID, int] = getattr(self, "_storage_release_pending", None) or {}
+        pending = self._storage_release_pending
         self._storage_release_pending = {}
         if not pending:
             return

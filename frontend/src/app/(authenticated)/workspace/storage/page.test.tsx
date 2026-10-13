@@ -286,6 +286,7 @@ describe("StoragePage", () => {
   });
 
   it("deletes every file of a context after confirmation and refetches (#1960)", async () => {
+    mockCurrentWorkspace = { id: "ws-1", current_user_role: "owner" };
     mockListFiles
       .mockResolvedValueOnce([file({ context_id: "ctx-1" })])
       .mockResolvedValueOnce([]);
@@ -322,6 +323,7 @@ describe("StoragePage", () => {
   });
 
   it("offers the context-wide delete only for context-bound files", async () => {
+    mockCurrentWorkspace = { id: "ws-1", current_user_role: "owner" };
     mockListFiles.mockResolvedValue([file()]); // workspace-scoped: context_id null
 
     render(<StoragePage />);
@@ -329,6 +331,24 @@ describe("StoragePage", () => {
     await waitFor(() => {
       expect(screen.getByText("report.pdf")).toBeInTheDocument();
     });
+    expect(
+      screen.queryByRole("button", { name: "list.actions.deleteContextFiles" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides the context-wide delete from a plain member (#1960)", async () => {
+    // The backend needs the context's owner role; a member keeps the per-file delete.
+    mockCurrentWorkspace = { id: "ws-1", current_user_role: "member" };
+    mockListFiles.mockResolvedValue([file({ context_id: "ctx-1" })]);
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("button", { name: "list.actions.delete" }),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "list.actions.deleteContextFiles" }),
     ).not.toBeInTheDocument();

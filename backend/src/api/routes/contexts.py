@@ -29,7 +29,6 @@ from config.constants import (
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import Workspace
-from models.file_objects import FileObject
 from models.schemas import ContextExportResponse, RelatedTagItem
 from models.sleep import SleepMode
 from services.capacity_lock import CapacityPolicy
@@ -1112,7 +1111,11 @@ async def update_context(
 class ContextFilesDeleteResponse(BaseModel):
     """What ``DELETE /contexts/{id}/files`` removed (#1960)."""
 
-    deleted: int = Field(..., ge=0, description="Files soft-deleted")
+    deleted: int = Field(
+        ...,
+        ge=0,
+        description="Live files soft-deleted (uploaded files and cancelled in-flight uploads)",
+    )
     released_bytes: int = Field(..., ge=0, description="Bytes released from the storage quota")
 
 
@@ -1142,19 +1145,8 @@ async def delete_context_files(
     context = await PermissionService(db).check_context_owner(
         user_id, context_id, capacity=CapacityPolicy.ALLOWED
     )
-    count = int(
-        await db.scalar(
-            select(func.count()).where(
-                FileObject.workspace_id == context.workspace_id,
-                FileObject.context_id == context.id,
-                FileObject.deleted_at.is_(None),
-            )
-        )
-        or 0
-    )
-    released = await FileStorageService(db).purge_files_for_contexts([context.id])
+    count, released_bytes = await FileStorageService(db).purge_context_files(context.id)
     await db.commit()
-    released_bytes = int(released.get(context.workspace_id, 0))
     if released_bytes:
         # After the commit: Redis follows the durable rows (R5).
         await storage_quota_service.release_storage_bytes(
@@ -1179,7 +1171,10 @@ async def delete_context(
 ):
     """Delete a context and its collection.
 
-    Only context owner can delete their context.
+    Only context owner can delete their context. The context, its memories and
+    its files are soft-deleted together and the files' bytes leave the storage
+    quota at once (#1960); an admin restore within 7 days brings the files back
+    unless the same content was uploaded again in the meantime.
 
     Args:
         context_id: Context UUID to delete
