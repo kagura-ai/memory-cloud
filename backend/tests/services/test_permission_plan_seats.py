@@ -143,6 +143,7 @@ class TestContextRbac:
         for the same caller — and logged so a real occurrence is visible."""
         service.db.execute.return_value.scalar_one_or_none.return_value = _context(is_private=True)
         service.workspace_service.get_member = AsyncMock(return_value=None)
+        service.db.get = AsyncMock(return_value=SimpleNamespace(owner_user_id="someone-else"))
         with (
             _seat(_refused()) as seat,
             structlog.testing.capture_logs() as logs,
@@ -152,6 +153,22 @@ class TestContextRbac:
         seat.assert_not_awaited()
         warned = [e for e in logs if e.get("event") == "private_context_creator_without_membership"]
         assert len(warned) == 1 and warned[0]["workspace_id"] == str(WS)
+
+    @pytest.mark.asyncio
+    async def test_the_owner_user_id_holder_passes_without_a_membership_row(self, service) -> None:
+        """A workspace whose owner has no OWNER row (#1108 desync) still lets
+        the owner into their own private context — the same exception
+        ``member_seat_suspended`` makes for ``owner_user_id``."""
+        service.db.execute.return_value.scalar_one_or_none.return_value = _context(is_private=True)
+        service.workspace_service.get_member = AsyncMock(return_value=None)
+        service.db.get = AsyncMock(return_value=SimpleNamespace(owner_user_id=USER))
+        with _seat(_refused()) as seat, structlog.testing.capture_logs() as logs:
+            _, role = await service._check_context_access_rbac(USER, CTX, ContextRole.OWNER)
+        assert role is ContextRole.OWNER
+        seat.assert_not_awaited()
+        assert not [
+            e for e in logs if e.get("event") == "private_context_creator_without_membership"
+        ]
 
     @pytest.mark.asyncio
     async def test_a_non_creator_is_refused_before_membership_or_seat_is_read(
