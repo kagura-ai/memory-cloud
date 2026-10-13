@@ -53,6 +53,7 @@ def _print_plan(result: ContextRestoreResult) -> None:
             f"           {result.memories_left_deleted} stay deleted "
             "(forgotten before the deletion, or Sleep tombstones)"
         )
+    print(f"files      {result.files_restored} to restore ({result.file_bytes_restored} bytes)")
     for warning in result.warnings:
         print(f"warning    {warning}")
 
@@ -62,6 +63,7 @@ def _print_applied(result: ContextRestoreResult) -> None:
         f"memories restored: {result.memories_restored}; the embedding sweep rebuilds "
         "their vectors over the next runs"
     )
+    print(f"files restored: {result.files_restored} ({result.file_bytes_restored} bytes)")
 
 
 async def _main(args: argparse.Namespace) -> int:

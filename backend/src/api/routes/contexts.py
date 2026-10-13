@@ -1116,7 +1116,14 @@ class ContextFilesDeleteResponse(BaseModel):
         ge=0,
         description="Live files soft-deleted (uploaded files and cancelled in-flight uploads)",
     )
-    released_bytes: int = Field(..., ge=0, description="Bytes released from the storage quota")
+    released_bytes: int = Field(
+        ...,
+        ge=0,
+        description=(
+            "Bytes released from the storage quota: the uploaded files' bytes plus the "
+            "reservations of cancelled in-flight uploads"
+        ),
+    )
 
 
 @router.delete("/{context_id}/files", response_model=ContextFilesDeleteResponse)

@@ -1610,6 +1610,10 @@ class ContextRestoreResponse(BaseModel):
     deleted_by: str | None
     memories_restored: int
     memories_left_deleted: int
+    files_restored: int = Field(
+        0, description="Files the deletion purged that come back with the context (#1960)"
+    )
+    file_bytes_restored: int = Field(0, description="Their bytes, re-added to the storage usage")
     warnings: list[str]
     dry_run: bool
 
@@ -1654,6 +1658,8 @@ async def restore_context(
         deleted_by=result.deleted_by,
         memories_restored=result.memories_restored,
         memories_left_deleted=result.memories_left_deleted,
+        files_restored=result.files_restored,
+        file_bytes_restored=result.file_bytes_restored,
         warnings=result.warnings,
         dry_run=result.dry_run,
     )

@@ -431,10 +431,12 @@ async def restore_deleted_context(
     try:
         await db.commit()
     except IntegrityError as e:
-        # A context took the name (or the resource) after the check above.
+        # A context took the name (or the resource) after the check above — or,
+        # since the file check (#1960), the same content was uploaded again.
         await db.rollback()
         raise ConflictError(
-            f"Context {context_id} could not be restored: its name or resource is now taken"
+            f"Context {context_id} could not be restored: its name or resource is now "
+            "taken, or one of its files was uploaded again in the meantime; retry"
         ) from e
 
     if result.file_bytes_restored:

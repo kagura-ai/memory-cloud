@@ -2451,6 +2451,14 @@
           "dry_run": {
             "type": "boolean"
           },
+          "file_bytes_restored": {
+            "default": 0,
+            "type": "integer"
+          },
+          "files_restored": {
+            "default": 0,
+            "type": "integer"
+          },
           "memories_left_deleted": {
             "type": "integer"
           },

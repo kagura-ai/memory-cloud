@@ -954,8 +954,9 @@ class CapacityLockedError(MemoryCloudException):
         return (
             f"Remove {capacity_overage_text(d['over_memories'] or 0, d['over_bytes'] or 0)} or "
             f"re-subscribe at {d['cleanup_url']}. Until then you can still call list, "
-            "list_contexts and get_usage, delete with forget, delete_context or delete_file, "
-            "and export a context from the web UI."
+            "list_contexts and get_usage, delete with forget, delete_context (which frees "
+            "the context's files too) or delete_file, clear a context's files in bulk from "
+            "the web UI's storage page, and export a context from the web UI."
         )
 
 

@@ -35,6 +35,8 @@ def _result(*, dry_run: bool, **overrides) -> ContextRestoreResult:
         "dry_run": dry_run,
         "memories_restored": 5,
         "memories_left_deleted": 2,
+        "files_restored": 1,
+        "file_bytes_restored": 150,
     }
     fields.update(overrides)
     return ContextRestoreResult(**fields)
@@ -74,6 +76,7 @@ class TestRestoreContextCommand:
         out = capsys.readouterr().out
         assert "restored 1 context(s)" in out
         assert "memories restored: 5" in out
+        assert "files restored: 1 (150 bytes)" in out  # #1960
 
     def test_a_context_with_no_memories_left_is_still_restored(self, capsys):
         empty = {"memories_restored": 0, "memories_left_deleted": 0}

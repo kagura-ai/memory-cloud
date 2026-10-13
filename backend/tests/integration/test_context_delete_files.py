@@ -296,6 +296,25 @@ async def test_files_past_the_retention_window_are_not_restored(
 
 
 @pytest.mark.asyncio
+async def test_the_default_contexts_files_can_be_purged(
+    db_session, seeded: Seeded, side_effects
+) -> None:
+    """The issue's case: the default context cannot be deleted, so this is the
+    only bulk road for its files."""
+    await db_session.execute(
+        update(Context).where(Context.id == seeded.keep_id).values(is_default=True)
+    )
+    await db_session.commit()
+
+    files, released = await FileStorageService(db_session).purge_context_files(seeded.keep_id)
+    await db_session.commit()
+
+    assert (files, released) == (1, 100)
+    assert (await _usage(db_session, seeded.workspace_id)).used_bytes == 150
+    assert (await _context(db_session, seeded.keep_id)).deleted_at is None
+
+
+@pytest.mark.asyncio
 async def test_purging_a_live_contexts_files_keeps_the_context(
     db_session, seeded: Seeded, side_effects
 ) -> None:

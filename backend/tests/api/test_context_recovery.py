@@ -177,6 +177,8 @@ class TestRestoreContextEndpoint:
             dry_run=False,
             memories_restored=4,
             memories_left_deleted=1,
+            files_restored=2,
+            file_bytes_restored=4096,
             renamed_from="original",
         )
         db = AsyncMock()
@@ -200,6 +202,7 @@ class TestRestoreContextEndpoint:
             actor_email="admin@test.com",
         )
         assert response.memories_restored == 4
+        assert (response.files_restored, response.file_bytes_restored) == (2, 4096)  # #1960
         assert response.renamed_from == "original"
         assert response.deleted_at == "2026-09-30T12:00:00Z"
 

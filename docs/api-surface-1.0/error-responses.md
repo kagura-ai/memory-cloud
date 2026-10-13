@@ -429,7 +429,7 @@ the refusal is not one feature or one cap. On MCP the dispatcher refuses every b
 with `error: "capacity_locked"`, the same keys as top-level fields, and a `help` naming how
 much to remove, what still works (`list`, `forget`, `delete_context` — which since
 [#1960](https://github.com/kagura-ai/memory-cloud/issues/1960) also frees the context's files —
-`delete_file`, `DELETE /contexts/{id}/files`,
+`delete_file`, the storage page's bulk clear backed by `DELETE /contexts/{id}/files`,
 `get_usage`, export from the web UI) and the `cleanup_url`. On REST the refusal comes from the memory
 service (recall, reference, explore, pinned loads, remember, edits), uploads, context
 creation, and the graph, analysis (all but cancel), agent-state (all but delete), feedback, workspace
