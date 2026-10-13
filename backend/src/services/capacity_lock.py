@@ -34,7 +34,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config.plan_tiers import PlanName
 from config.settings import get_settings
 from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING, Context, Workspace, WorkspaceMember
-from models.file_objects import WorkspaceStorageUsage
 from services.memory_counts import live_memory_count_stmt
 from services.storage_counts import reducible_storage_bytes
 from utils.exceptions import CapacityLockedError
@@ -156,20 +155,12 @@ async def _measure(
 ) -> CapacityLock | None:
     """Count the workspace against the given limits; ``None`` when within both."""
     memory_count = int(await db.scalar(live_memory_count_stmt(workspace_id)) or 0)
-    used_bytes = int(
-        await db.scalar(
-            select(WorkspaceStorageUsage.used_bytes).where(
-                WorkspaceStorageUsage.workspace_id == workspace_id
-            )
-        )
-        or 0
-    )
-    if 0 <= storage_limit < used_bytes:
-        # The counter also holds files the owner cannot see (left in a deleted
-        # context), so an over-counter reading is confirmed against the shared
-        # reducible figure (#1961) — only on this path, so an unlocked
-        # workspace pays nothing. The counter is never below that figure.
-        used_bytes = await reducible_storage_bytes(db, workspace_id)
+    # #1961: the one storage figure, shared with the downgrade-eligibility read.
+    # Not the ``workspace_storage_usage`` counter: that one also holds files
+    # left in deleted contexts (which the owner cannot see) and is only a
+    # delta-maintained upload-quota figure that can drift, so reading it first
+    # as a short-cut could skip the lock while eligibility still reports over.
+    used_bytes = await reducible_storage_bytes(db, workspace_id)
     # A negative limit would mean "unlimited"; Free has none today, but a
     # settings override must not lock a workspace against an unlimited cap.
     over_memories = max(0, memory_count - memory_limit) if memory_limit >= 0 else 0

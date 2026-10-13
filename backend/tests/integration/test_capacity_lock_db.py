@@ -64,11 +64,12 @@ def _memory(ws, ctx, owner) -> Memory:
 
 
 def _file(ws, ctx, owner, size: int) -> FileObject:
+    """``ctx=None`` makes a workspace-scoped file (``context_id IS NULL``)."""
     sha = uuid.uuid4().hex + uuid.uuid4().hex
     return FileObject(
         id=uuid.uuid4(),
         workspace_id=ws.id,
-        context_id=ctx.id,
+        context_id=None if ctx is None else ctx.id,
         sha256=sha,
         size_bytes=size,
         content_type="application/octet-stream",
@@ -117,22 +118,29 @@ async def test_files_of_a_deleted_context_do_not_hold_the_lock(db_session, free_
     gone = make_context(workspace_id=ws.id, created_by=owner, is_private=True)
     db_session.add(gone)
     await db_session.flush()
-    db_session.add_all([_file(ws, ctx, owner, 100), _file(ws, gone, owner, 200)])
-    db_session.add(WorkspaceStorageUsage(workspace_id=ws.id, used_bytes=300, file_count=2))
+    db_session.add_all(
+        [
+            _file(ws, ctx, owner, 100),
+            _file(ws, gone, owner, 200),
+            _file(ws, None, owner, 50),  # workspace-scoped: visible, counts
+        ]
+    )
+    db_session.add(WorkspaceStorageUsage(workspace_id=ws.id, used_bytes=350, file_count=3))
     await db_session.commit()
 
     # Over the 200-byte limit while the second context is live…
     lock = await capacity_lock_state(db_session, ws)
-    assert lock is not None and lock.over_bytes == 100
+    assert lock is not None and lock.over_bytes == 150
 
     # …and not once it is soft-deleted: its files are invisible to the owner.
     gone.deleted_at = utcnow()
     await db_session.commit()
     assert await capacity_lock_state(db_session, ws) is None
-    # #1961: the downgrade-eligibility read reports the same figure (the 100
-    # visible bytes, not the counter's 300), so billing and the lock agree.
+    # #1961: the downgrade-eligibility read reports the same figure (the 150
+    # visible bytes — context file plus workspace-scoped file — not the
+    # counter's 350), so billing and the lock agree.
     usage = await DowngradeEligibilityService(db_session).current_usage(ws.id)
-    assert usage.storage_bytes == 100
+    assert usage.storage_bytes == 150
 
 
 @pytest.mark.asyncio

@@ -72,7 +72,10 @@ class DowngradeBlocker(BaseModel):
     ``overage`` is how much must be shed to fit the target. For ``shared_contexts``
     (a tier feature, not a numeric cap) the limit is 0 and ``overage`` equals the
     full shared-context count — all of them must be unshared. ``storage_bytes`` is
-    in bytes.
+    in bytes and is the reducible figure of ``services/storage_counts.py`` (#1961):
+    uploaded, not soft-deleted files that are workspace-scoped or in a live
+    context — the same number the capacity lock uses, not the upload-quota
+    counter.
     """
 
     dimension: DowngradeDimension

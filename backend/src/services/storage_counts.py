@@ -6,10 +6,11 @@ deleting files) and the downgrade eligibility read the billing side uses
 (#1123, "could this workspace fit the lower tier after cleanup"). The figure
 is **the bytes the owner can still delete**: uploaded, not soft-deleted files
 that are either workspace-scoped (``context_id IS NULL``) or bound to a live
-context — exactly what ``FileStorageService.list_files`` and the storage page
-show. Files left behind in a soft-deleted context (``delete_context`` kept them
-before #1960) are invisible and undeletable from the UI, so counting them would
-describe a lock nobody can lift and an eligibility nobody can earn.
+context — the owner's view of ``FileStorageService.list_files`` and the storage
+page (a member sees the subset of contexts they can access). Files left behind
+in a soft-deleted context (``delete_context`` kept them before #1960) are not
+listed anywhere in the UI, so counting them would describe a lock the owner
+cannot lift from the product and an eligibility they cannot earn.
 
 This is deliberately *not* the upload quota's figure. The upload quota
 (``storage_quota_service``, the ``workspace_storage_usage`` counter) bounds the
