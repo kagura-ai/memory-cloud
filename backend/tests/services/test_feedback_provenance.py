@@ -130,8 +130,12 @@ class TestFeedbackProvenance:
 
 
 def _svc_with_legacy_memory(context_workspace_id):
-    """A FeedbackService whose memory row has workspace_id=None (legacy) and
-    whose Context lookup resolves to ``context_workspace_id``."""
+    """A FeedbackService whose memory row carries no workspace_id and whose
+    Context lookup resolves to ``context_workspace_id``.
+
+    The column is NOT NULL since e95 (#1951); this models an ORM object built
+    without one, which is the defensive path the service keeps.
+    """
     db = MagicMock()
     memory_row = MagicMock()
     memory_row.workspace_id = None
@@ -148,8 +152,8 @@ def _svc_with_legacy_memory(context_workspace_id):
 
 class TestHostFeedbackWorkspaceAttribution:
     """Audit attribution must never record a null workspace_id (PR #1307
-    review): Memory.workspace_id is nullable for legacy rows, so the owning
-    Context's NOT NULL workspace_id is the fallback."""
+    review). The column is NOT NULL since e95 (#1951); the owning Context's
+    workspace_id stays as the fallback for an ORM object built without one."""
 
     async def test_audit_derives_workspace_from_context_for_legacy_memory(self):
         ctx_ws = uuid4()

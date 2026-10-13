@@ -917,9 +917,7 @@ class MemoryService:
         memory = Memory(
             id=memory_id,
             user_id=user_id,
-            workspace_id=UUID(workspace_id_str)
-            if workspace_id_str
-            else None,  # Migration 063: 3-level isolation
+            workspace_id=UUID(workspace_id_str),  # NOT NULL since e95 (#1951); guarded above
             context_id=UUID(context_id_str)
             if context_id_str
             else None,  # Migration 063: 3-level isolation
@@ -2138,8 +2136,9 @@ class MemoryService:
         re-run the permission check, bump access-stats (a write — wrong for
         PATCH) and issue a second commit. The declared_link refs still come from
         ``_fetch_declared_link_refs``, which has none of those side effects.
-        NULL workspace_id/context_id rows skip the link fetch and return empty
-        link arrays (the helper's signature requires non-null FKs).
+        A row without a context_id skips the link fetch and returns empty link
+        arrays (the helper's signature requires non-null FKs; workspace_id is
+        NOT NULL since e95, #1951).
         """
         if memory.workspace_id and memory.context_id:
             (
@@ -5852,8 +5851,8 @@ class MemoryService:
                 # CRITICAL: Validate workspace_id/context_id are not NULL (data integrity)
                 if not memory.workspace_id or not memory.context_id:
                     raise ValueError(
-                        f"Memory {memory.id} has NULL workspace_id/context_id. "
-                        "This indicates data migration issue. Run Migration 063."
+                        f"Memory {memory.id} has no context_id (workspace_id is NOT NULL "
+                        "since e95, #1951); the row cannot be placed in a collection."
                     )
 
                 memory_workspace_id = str(memory.workspace_id)
@@ -5938,8 +5937,8 @@ class MemoryService:
                     continue
                 if not memory.workspace_id or not memory.context_id:
                     raise ValueError(
-                        f"Memory {memory.id} has NULL workspace_id/context_id. "
-                        "This indicates data migration issue. Run Migration 063."
+                        f"Memory {memory.id} has no context_id (workspace_id is NOT NULL "
+                        "since e95, #1951); the row cannot be placed in a collection."
                     )
                 victims.append(memory)
 
@@ -6152,8 +6151,8 @@ class MemoryService:
         # CRITICAL: Validate seed memory has workspace_id/context_id (data integrity)
         if not seed_memory.workspace_id or not seed_memory.context_id:
             raise ValueError(
-                f"Seed memory {seed_memory.id} has NULL workspace_id/context_id. "
-                "This indicates data migration issue. Run Migration 063."
+                f"Seed memory {seed_memory.id} has no context_id (workspace_id is NOT NULL "
+                "since e95, #1951); the row cannot be placed in a collection."
             )
 
         if not current_context_id:
