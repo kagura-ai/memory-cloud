@@ -91,13 +91,15 @@ class StampCounts:
     """What one stamp sweep did.
 
     ``evaluated`` also counts candidates that were within capacity and never
-    stamped, so it is at least ``stamped + cleared + kept``.
+    stamped, so it is at least ``stamped + cleared + kept + failed``.
+    ``failed``: evaluating the workspace raised; logged, left as it was.
     """
 
     evaluated: int
     stamped: int
     cleared: int
     kept: int
+    failed: int = 0
 
 
 async def stamp_capacity_locks(db: AsyncSession, *, now: datetime) -> StampCounts:
@@ -108,7 +110,11 @@ async def stamp_capacity_locks(db: AsyncSession, *, now: datetime) -> StampCount
     that left the candidate set while stamped is cleared. Commits every
     :data:`STAMP_COMMIT_EVERY` workspaces and once at the end, so no single
     transaction spans the whole sweep (sessions are ``expire_on_commit=False``,
-    so the rows loaded up front stay usable across those commits). Clearing
+    so the rows loaded up front stay usable across those commits). Each
+    workspace is evaluated inside its own SAVEPOINT: one that raises (a
+    plain error, or a database error that aborts the transaction) is logged
+    as ``capacity_lock_stamp_failed`` and left as it was, without undoing the
+    other stamps of the batch or stopping the pass. Clearing
     the stamp also clears ``capacity_purge_first_notice_at`` and
     ``capacity_purge_final_notice_at``: the next lock needs its own notices.
 
@@ -128,27 +134,27 @@ async def stamp_capacity_locks(db: AsyncSession, *, now: datetime) -> StampCount
         )
         .order_by(Workspace.id)
     )
-    evaluated = stamped = cleared = kept = 0
-    for ws in rows.scalars().all():
+    # Ids read now, while the rows are loaded: the failure log must not touch
+    # an instance a savepoint rollback may have expired (a lazy load there is
+    # MissingGreenlet on AsyncSession and would end the pass).
+    batch = [(ws, ws.id) for ws in rows.scalars().all()]
+    evaluated = stamped = cleared = kept = failed = 0
+    for ws, ws_id in batch:
         evaluated += 1
         if evaluated % STAMP_COMMIT_EVERY == 0:
             await db.commit()  # keep the transaction short
-        lock = await capacity_lock_state(db, ws) if is_lock_candidate(ws) else None
-        if lock is None:
-            if ws.capacity_locked_since is not None:
-                _clear_stamp(ws)
-                cleared += 1
-                logger.info("capacity_lock_cleared", workspace_id=str(ws.id))
-        elif ws.capacity_locked_since is None:
-            ws.capacity_locked_since = now
+        try:
+            async with db.begin_nested():
+                outcome = await _stamp_one(db, ws, now=now)
+        except Exception:  # noqa: BLE001 — one workspace must not stop the pass
+            logger.exception("capacity_lock_stamp_failed", workspace_id=str(ws_id))
+            failed += 1
+            continue
+        if outcome == "stamped":
             stamped += 1
-            logger.info(
-                "capacity_lock_stamped",
-                workspace_id=str(ws.id),
-                over_memories=lock.over_memories,
-                over_bytes=lock.over_bytes,
-            )
-        else:
+        elif outcome == "cleared":
+            cleared += 1
+        elif outcome == "kept":
             kept += 1
     await db.commit()
     logger.info(
@@ -157,8 +163,33 @@ async def stamp_capacity_locks(db: AsyncSession, *, now: datetime) -> StampCount
         stamped=stamped,
         cleared=cleared,
         kept=kept,
+        failed=failed,
     )
-    return StampCounts(evaluated=evaluated, stamped=stamped, cleared=cleared, kept=kept)
+    return StampCounts(
+        evaluated=evaluated, stamped=stamped, cleared=cleared, kept=kept, failed=failed
+    )
+
+
+async def _stamp_one(db: AsyncSession, ws: Workspace, *, now: datetime) -> str | None:
+    """Set / keep / clear one workspace's stamp; returns what it did (``None``:
+    within capacity and not stamped). Does not commit."""
+    lock = await capacity_lock_state(db, ws) if is_lock_candidate(ws) else None
+    if lock is None:
+        if ws.capacity_locked_since is None:
+            return None
+        _clear_stamp(ws)
+        logger.info("capacity_lock_cleared", workspace_id=str(ws.id))
+        return "cleared"
+    if ws.capacity_locked_since is not None:
+        return "kept"
+    ws.capacity_locked_since = now
+    logger.info(
+        "capacity_lock_stamped",
+        workspace_id=str(ws.id),
+        over_memories=lock.over_memories,
+        over_bytes=lock.over_bytes,
+    )
+    return "stamped"
 
 
 def _clear_stamp(ws: Workspace) -> None:

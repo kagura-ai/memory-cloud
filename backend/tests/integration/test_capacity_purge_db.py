@@ -186,6 +186,53 @@ async def test_stamp_commits_in_batches(db_session, free_ws) -> None:
     assert ws.capacity_locked_since == t0
 
 
+@pytest.mark.parametrize("failure", ["raise", "sql_error"])
+@pytest.mark.asyncio
+async def test_stamp_continues_after_one_workspace_fails(db_session, free_ws, failure) -> None:
+    """Measuring one workspace raises — a plain exception, or a database error
+    that aborts the transaction: it is logged and skipped, and the others are
+    still stamped (and an earlier stamp in the same batch is not lost)."""
+    import structlog
+    from sqlalchemy import text
+
+    first, first_ctx, first_owner = free_ws
+    bad, bad_ctx, bad_owner = await _make_free_ws(db_session)
+    good, good_ctx, good_owner = await _make_free_ws(db_session)
+    for ws, ctx, owner in (
+        (first, first_ctx, first_owner),
+        (bad, bad_ctx, bad_owner),
+        (good, good_ctx, good_owner),
+    ):
+        await _over_cap(db_session, ws, ctx, owner)
+    await db_session.commit()
+    real_state = capacity_purge.capacity_lock_state
+    bad_id = bad.id
+
+    async def state_or_fail(db, ws):
+        if ws.id == bad_id:
+            if failure == "raise":
+                raise RuntimeError("boom")
+            await db.execute(text("SELECT 1/0"))
+        return await real_state(db, ws)
+
+    t0 = utcnow().replace(microsecond=0)
+    with (
+        patch("services.capacity_purge.STAMP_COMMIT_EVERY", 10_000),
+        patch.object(capacity_purge, "capacity_lock_state", state_or_fail),
+        structlog.testing.capture_logs() as logs,
+    ):
+        counts = await stamp_capacity_locks(db_session, now=t0)
+
+    assert counts.failed >= 1
+    failed = [e for e in logs if e["event"] == "capacity_lock_stamp_failed"]
+    assert str(bad_id) in {e["workspace_id"] for e in failed}
+    for ws in (first, good):
+        await db_session.refresh(ws)
+        assert ws.capacity_locked_since == t0
+    await db_session.refresh(bad)
+    assert bad.capacity_locked_since is None
+
+
 # ---------------------------------------------------------------------------
 # ContextService.purge_workspace_data (Task 6)
 # ---------------------------------------------------------------------------
