@@ -833,3 +833,68 @@ async def test_purge_needs_a_first_notice_a_week_before(
     await db_session.refresh(ctx)
     assert (ctx.deleted_at is not None) is purged
     assert (len(await _live_memories(db_session, ws)) == 0) is purged
+
+
+class _RecordingMail:
+    """Every countdown / completion mail, with the day of the run that sent it."""
+
+    def __init__(self) -> None:
+        self.day = -1
+        self.notices: list[tuple[int, int]] = []  # (day, days_left)
+        self.completions: list[int] = []
+
+    async def send_capacity_purge_notice(self, **kwargs) -> bool:
+        self.notices.append((self.day, kwargs["days_left"]))
+        return True
+
+    async def send_capacity_purge_complete(self, **kwargs) -> bool:
+        self.completions.append(self.day)
+        return True
+
+
+@pytest.mark.asyncio
+async def test_capacity_purge_timeline_over_31_days(
+    db_session, free_ws, purge_side_effects, only_workspaces
+) -> None:
+    """The whole policy, one daily run at a time: an over-cap workspace gets
+    the countdown on calendar days 0/7/14/23/27/29, is purged on day 30 and not
+    before, gets one completion mail, and nothing happens after."""
+    from datetime import datetime, time
+
+    from config.settings import get_settings
+
+    ws, ctx, owner = free_ws
+    only_workspaces.add(ws.id)
+    await _over_cap(db_session, ws, ctx, owner)
+    await db_session.commit()
+    day0 = datetime.combine(utcnow().date() - timedelta(days=31), time(4, 0, 5))
+    mail, redis, settings = _RecordingMail(), _Redis(), get_settings()
+
+    with (
+        patch.object(settings, "capacity_purge_notice_enabled", True),
+        patch.object(settings, "capacity_purge_enabled", True),
+        patch.object(capacity_purge, "mail_provider_configured", return_value=True),
+        patch("db.redis.get_redis_client", return_value=redis),
+        patch("services.email_service.get_email_service", return_value=mail),
+    ):
+        for day in range(32):
+            mail.day = day
+            await capacity_purge.run_capacity_purge_sweep(
+                db_session, now=day0 + timedelta(days=day)
+            )
+            live = len(await _live_memories(db_session, ws))
+            assert live == (MEMORY_LIMIT + 1 if day < 30 else 0), f"day {day}"
+            await db_session.refresh(ws)
+            if day == 0:
+                assert ws.capacity_purge_first_notice_at == day0
+            if day == 29:
+                assert ws.capacity_purge_final_notice_at == day0 + timedelta(days=29)
+            if day < 30:
+                assert ws.capacity_locked_since == day0, f"day {day}"
+
+    assert mail.notices == [(0, 30), (7, 23), (14, 16), (23, 7), (27, 3), (29, 1)]
+    assert mail.completions == [30]
+    assert ws.capacity_locked_since is None
+    assert ws.capacity_purge_first_notice_at is None
+    assert ws.capacity_purge_final_notice_at is None
+    assert len(await _audit_rows(db_session, ws)) == 1
