@@ -507,8 +507,10 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
         if contact is None:
             logger.warning("capacity_purge_complete_no_owner_email", workspace_id=str(ws_id))
             continue
+        # Best-effort: the outcome is logged under the workspace (the provider's
+        # own log carries only a recipient hash), so a lost mail can be alerted on.
         try:
-            await email.send_capacity_purge_complete(
+            delivered = await email.send_capacity_purge_complete(
                 to_email=contact[0],
                 workspace_name=ws_name,
                 locale=contact[1],
@@ -524,6 +526,11 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
                 workspace_id=str(ws_id),
                 error_type=type(exc).__name__,
             )
+            continue
+        if delivered:
+            logger.info("capacity_purge_complete_mail_sent", workspace_id=str(ws_id))
+        else:
+            logger.warning("capacity_purge_complete_mail_failed", workspace_id=str(ws_id))
     counts = PurgeCounts(
         due=len(all_due),
         purged=purged,

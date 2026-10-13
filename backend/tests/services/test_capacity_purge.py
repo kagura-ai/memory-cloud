@@ -610,6 +610,27 @@ async def test_completion_mail_failure_does_not_undo_the_purge() -> None:
     assert ws.capacity_locked_since is None
 
 
+@pytest.mark.parametrize(
+    ("send", "event"),
+    [
+        (AsyncMock(return_value=True), "capacity_purge_complete_mail_sent"),
+        (AsyncMock(return_value=False), "capacity_purge_complete_mail_failed"),
+        (AsyncMock(side_effect=TimeoutError()), "capacity_purge_complete_send_raised"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_completion_mail_outcome_is_logged_per_workspace(send, event) -> None:
+    """The provider log carries no workspace id: the purge logs the mail's
+    outcome under the workspace, so a lost completion mail can be alerted on."""
+    import structlog
+
+    ws = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    with structlog.testing.capture_logs() as logs:
+        await _run_purge([ws], now=_NOW, email=MagicMock(send_capacity_purge_complete=send))
+    mail_logs = [e for e in logs if e["event"].startswith("capacity_purge_complete_")]
+    assert [(e["event"], e["workspace_id"]) for e in mail_logs] == [(event, str(ws.id))]
+
+
 @pytest.mark.asyncio
 async def test_no_owner_email_still_purges_without_mail() -> None:
     ws = _purge_ws(datetime(2026, 9, 1, 4, 0))
