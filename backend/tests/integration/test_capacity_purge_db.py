@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import timedelta
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.auth import (
     ENTITLEMENT_SOURCE_ADMIN_GRANT,
     ENTITLEMENT_SOURCE_EXTERNAL_BILLING,
+    AuditLog,
     Context,
     Workspace,
     WorkspaceMember,
@@ -27,7 +28,8 @@ from models.auth import (
 )
 from models.file_objects import FileObject
 from models.memory import Memory
-from services.capacity_purge import stamp_capacity_locks
+from services import capacity_purge
+from services.capacity_purge import purge_expired_workspaces, stamp_capacity_locks
 from services.context_service import CAPACITY_PURGE_ACTOR, ContextService
 from utils.datetime import utcnow
 
@@ -360,3 +362,163 @@ async def test_purge_workspace_data_stops_when_told_to(
     live = await _live_contexts(db_session, ws)
     assert len(live) == 1 and live[0].id in {ctx.id, second.id}
     assert len(await _live_files(db_session, ws)) == 1  # workspace-scoped file untouched
+
+
+# ---------------------------------------------------------------------------
+# purge_expired_workspaces (Task 7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def only_workspaces():
+    """Restrict the purge to this test's workspaces.
+
+    The shared database keeps stamped workspaces from other tests; the purge's
+    per-run cap (oldest stamp first) would otherwise let them crowd this
+    test's workspace out — and this test must never purge theirs.
+    """
+    real = capacity_purge._stamped_workspaces
+    keep: set = set()
+
+    async def mine(db):
+        return [ws for ws in await real(db) if ws.id in keep]
+
+    with patch.object(capacity_purge, "_stamped_workspaces", mine):
+        yield keep
+
+
+def _mail():
+    return MagicMock(send_capacity_purge_complete=AsyncMock(return_value=True))
+
+
+async def _audit_rows(db_session: AsyncSession, ws) -> list[AuditLog]:
+    rows = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "capacity_purge", AuditLog.resource == f"workspace:{ws.id}"
+        )
+    )
+    return list(rows.scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_purge_after_thirty_days(
+    db_session, free_ws, purge_side_effects, only_workspaces
+) -> None:
+    ws, ctx, owner = free_ws
+    only_workspaces.add(ws.id)
+    await _over_cap(db_session, ws, ctx, owner)
+    now = utcnow().replace(microsecond=0)
+    # Calendar day 30, a few seconds later in the day than this run.
+    since = now - timedelta(days=30) + timedelta(seconds=5)
+    if since.date() != (now - timedelta(days=30)).date():  # run near midnight
+        since = now - timedelta(days=30)
+    ws.capacity_locked_since = since
+    await db_session.flush()
+    email = _mail()
+
+    counts = await purge_expired_workspaces(db_session, now=now, email=email)
+
+    assert (counts.due, counts.purged, counts.aborted) == (1, 1, 0)
+    await db_session.refresh(ws)
+    assert ws.capacity_locked_since is None
+    await db_session.refresh(ctx)
+    assert ctx.deleted_at is not None and ctx.deleted_by == CAPACITY_PURGE_ACTOR
+    assert await _live_memories(db_session, ws) == []
+    kwargs = email.send_capacity_purge_complete.call_args.kwargs
+    assert kwargs["memories_deleted"] == MEMORY_LIMIT + 1 and kwargs["contexts_deleted"] == 1
+    assert kwargs["to_email"] == owner.email
+    audit = await _audit_rows(db_session, ws)
+    assert len(audit) == 1
+    assert audit[0].user_id == CAPACITY_PURGE_ACTOR
+    assert audit[0].user_metadata["memories_deleted"] == MEMORY_LIMIT + 1
+    assert audit[0].user_metadata["locked_since"] == since.isoformat()
+    assert audit[0].user_metadata["aborted"] is False
+
+
+@pytest.mark.asyncio
+async def test_purge_not_before_thirty_days(db_session, free_ws, only_workspaces) -> None:
+    """Calendar day 29 is not due, however late in the day."""
+    ws, ctx, owner = free_ws
+    only_workspaces.add(ws.id)
+    await _over_cap(db_session, ws, ctx, owner)
+    now = utcnow().replace(microsecond=0)
+    ws.capacity_locked_since = now - timedelta(days=29)
+    await db_session.flush()
+    email = _mail()
+    counts = await purge_expired_workspaces(db_session, now=now, email=email)
+    assert counts.due == 0
+    await db_session.refresh(ctx)
+    assert ctx.deleted_at is None
+    await db_session.refresh(ws)
+    assert ws.capacity_locked_since is not None
+    email.send_capacity_purge_complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_purge_skips_workspace_now_within_capacity(
+    db_session, free_ws, only_workspaces
+) -> None:
+    """Stale stamp, cleaned up since: nothing deleted, stamp cleared."""
+    ws, ctx, owner = free_ws
+    only_workspaces.add(ws.id)
+    db_session.add(_memory(ws, ctx, owner.user_id))  # within the limit of 2
+    now = utcnow()
+    ws.capacity_locked_since = now - timedelta(days=31)
+    await db_session.flush()
+    email = _mail()
+    counts = await purge_expired_workspaces(db_session, now=now, email=email)
+    assert (counts.due, counts.skipped_within, counts.purged) == (1, 1, 0)
+    await db_session.refresh(ws)
+    assert ws.capacity_locked_since is None
+    await db_session.refresh(ctx)
+    assert ctx.deleted_at is None
+    assert len(await _live_memories(db_session, ws)) == 1
+    email.send_capacity_purge_complete.assert_not_awaited()
+    assert await _audit_rows(db_session, ws) == []
+
+
+@pytest.mark.asyncio
+async def test_purge_aborts_when_resubscribed_mid_run(
+    db_session, free_ws, purge_side_effects, only_workspaces
+) -> None:
+    """Re-subscribed while the purge runs: the context not yet reached stays,
+    the stamp is cleared, the audit row says aborted, no completion mail."""
+    ws, ctx, owner = free_ws
+    only_workspaces.add(ws.id)
+    second = make_context(workspace_id=ws.id, created_by=owner.user_id)
+    db_session.add(second)
+    await db_session.flush()
+    await _over_cap(db_session, ws, ctx, owner)
+    db_session.add(_memory(ws, second, owner.user_id))
+    now = utcnow()
+    ws.capacity_locked_since = now - timedelta(days=30)
+    await db_session.flush()
+    await db_session.commit()
+
+    # The first context is purged; the owner re-subscribes before the second.
+    real_tombstone = ContextService._tombstone_memories_chunked
+    first_done: list = []
+
+    async def tombstone_then_resubscribe(self, context, **kwargs):
+        total = await real_tombstone(self, context, **kwargs)
+        if not first_done:
+            first_done.append(context.id)
+            await self.db.execute(
+                Workspace.__table__.update().where(Workspace.id == ws.id).values(plan_name="pro")
+            )
+        return total
+
+    email = _mail()
+    with patch.object(ContextService, "_tombstone_memories_chunked", tombstone_then_resubscribe):
+        counts = await purge_expired_workspaces(db_session, now=now, email=email)
+
+    assert (counts.aborted, counts.purged) == (1, 0)
+    live = await _live_contexts(db_session, ws)
+    assert len(live) == 1 and live[0].id != first_done[0]
+    assert len(await _live_memories(db_session, ws)) >= 1
+    await db_session.refresh(ws)
+    assert ws.capacity_locked_since is None
+    assert ws.plan_name == "pro"
+    email.send_capacity_purge_complete.assert_not_awaited()
+    audit = await _audit_rows(db_session, ws)
+    assert len(audit) == 1 and audit[0].user_metadata["aborted"] is True

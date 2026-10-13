@@ -11,11 +11,18 @@ from services.capacity_purge import (
     NOTICE_DAYS,
     NOTICE_KEY_TTL_SECONDS,
     PURGE_AFTER,
+    PURGE_MAX_WORKSPACES_PER_RUN,
+    NoticeCounts,
+    PurgeCounts,
+    StampCounts,
     notice_key,
     notice_stage,
     purge_at,
+    purge_expired_workspaces,
+    run_capacity_purge_sweep,
     send_due_purge_notices,
 )
+from services.context_service import CAPACITY_PURGE_ACTOR, WorkspacePurgeReport
 
 
 def test_purge_at_is_thirty_days_after_lock_start() -> None:
@@ -303,3 +310,284 @@ async def test_skips_workspace_without_owner_email() -> None:
         )
     assert (counts.sent, counts.skipped) == (0, 1)
     assert redis.keys == {}
+
+
+# ---------------------------------------------------------------------------
+# Purge (stubbed DB, ContextService and lock state)
+# ---------------------------------------------------------------------------
+
+_REPORT = WorkspacePurgeReport(
+    contexts_deleted=2,
+    contexts_emptied=1,
+    memories_deleted=12,
+    files_deleted=3,
+    bytes_released=300,
+)
+
+
+def _purge_ws(since: datetime | None, *, plan: str = "free"):
+    ws = _ws(since, plan=plan)
+    ws.deleted_at = None
+    return ws
+
+
+def _purge_db():
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    db.refresh = AsyncMock()
+    db.add = MagicMock()
+    return db
+
+
+def _purge_patches(workspaces, *, lock=_LOCK, purge=None, contact=("owner@example.test", "ja")):
+    service = MagicMock()
+    service.purge_workspace_data = purge or AsyncMock(return_value=_REPORT)
+    return (
+        patch(
+            "services.capacity_purge._stamped_workspaces", AsyncMock(return_value=list(workspaces))
+        ),
+        patch("services.capacity_purge.capacity_lock_state", AsyncMock(return_value=lock)),
+        patch("services.capacity_purge._owner_contact", AsyncMock(return_value=contact)),
+        patch("services.capacity_purge.ContextService", MagicMock(return_value=service)),
+        service,
+    )
+
+
+async def _run_purge(workspaces, *, now, email=None, db=None, **kwargs):
+    stamped, locked, owner, ctx_service, service = _purge_patches(workspaces, **kwargs)
+    email = email or MagicMock(send_capacity_purge_complete=AsyncMock(return_value=True))
+    db = db or _purge_db()
+    with stamped, locked, owner, ctx_service:
+        counts = await purge_expired_workspaces(db, now=now, email=email)
+    return counts, service, email, db
+
+
+_NOW = datetime(2026, 10, 31, 4, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_purge_is_due_on_calendar_day_thirty() -> None:
+    """Stamped a few seconds into the day-0 run; the day-30 run starts at 04:00:00
+    sharp — 29 days 23:59:55 of elapsed time, but calendar day 30: due."""
+    ws = _purge_ws(datetime(2026, 10, 1, 4, 0, 5))
+    counts, service, _, _ = await _run_purge([ws], now=_NOW)
+    assert (counts.due, counts.purged) == (1, 1)
+    service.purge_workspace_data.assert_awaited_once()
+    assert service.purge_workspace_data.call_args.args == (ws.id,)
+    assert service.purge_workspace_data.call_args.kwargs["actor"] == CAPACITY_PURGE_ACTOR
+
+
+@pytest.mark.asyncio
+async def test_purge_is_not_due_on_calendar_day_twenty_nine() -> None:
+    """29 days and 23 hours of elapsed time, but calendar day 29: not due."""
+    ws = _purge_ws(datetime(2026, 10, 2, 0, 30, 0))
+    counts, service, email, _ = await _run_purge([ws], now=datetime(2026, 10, 31, 23, 30, 0))
+    assert counts == PurgeCounts(due=0, purged=0, skipped_within=0, failed=0, aborted=0)
+    service.purge_workspace_data.assert_not_awaited()
+    email.send_capacity_purge_complete.assert_not_awaited()
+    assert ws.capacity_locked_since is not None
+
+
+@pytest.mark.asyncio
+async def test_purge_caps_each_run_oldest_stamp_first() -> None:
+    """7 due: the 5 oldest go this run, the 2 newest stay stamped; ``due`` says 7."""
+    stamps = [datetime(2026, 9, 1 + i, 4, 0) for i in range(7)]
+    workspaces = [_purge_ws(s) for s in reversed(stamps)]  # listed newest first
+    by_id = {ws.id: ws for ws in workspaces}
+    counts, service, _, _ = await _run_purge(workspaces, now=_NOW)
+    assert PURGE_MAX_WORKSPACES_PER_RUN == 5
+    assert (counts.due, counts.purged) == (7, 5)
+    purged = [by_id[c.args[0]] for c in service.purge_workspace_data.call_args_list]
+    assert [w for w in workspaces if w not in purged] == workspaces[:2]  # the two newest
+    assert all(w.capacity_locked_since is None for w in purged)
+    assert all(w.capacity_locked_since is not None for w in workspaces[:2])
+
+
+@pytest.mark.asyncio
+async def test_completion_mail_and_audit_row() -> None:
+    since = datetime(2026, 9, 30, 4, 0)
+    ws = _purge_ws(since)
+    counts, _, email, db = await _run_purge([ws], now=_NOW)
+    assert counts.purged == 1
+    assert ws.capacity_locked_since is None
+    kwargs = email.send_capacity_purge_complete.call_args.kwargs
+    assert kwargs == {
+        "to_email": "owner@example.test",
+        "workspace_name": "Research",
+        "locale": "ja",
+        "purged_at": _NOW,
+        "contexts_deleted": 2,
+        "memories_deleted": 12,
+        "files_deleted": 3,
+        "cleanup_url": _LOCK.cleanup_url,
+    }
+    audit = db.add.call_args.args[0]
+    assert audit.action == "capacity_purge"
+    assert audit.user_id == CAPACITY_PURGE_ACTOR
+    assert audit.resource == f"workspace:{ws.id}"
+    assert audit.user_metadata == {
+        "locked_since": since.isoformat(),
+        "over_memories": 2,
+        "over_bytes": 0,
+        "contexts_deleted": 2,
+        "contexts_emptied": 1,
+        "memories_deleted": 12,
+        "files_deleted": 3,
+        "bytes_released": 300,
+        "aborted": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_purge_skips_workspace_within_capacity_now() -> None:
+    ws = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    counts, service, email, _ = await _run_purge([ws], now=_NOW, lock=None)
+    assert (counts.due, counts.skipped_within, counts.purged) == (1, 1, 0)
+    assert ws.capacity_locked_since is None
+    service.purge_workspace_data.assert_not_awaited()
+    email.send_capacity_purge_complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_purge_skips_workspace_resubscribed_before_the_run() -> None:
+    ws = _purge_ws(datetime(2026, 9, 1, 4, 0), plan="pro")
+    counts, service, _, _ = await _run_purge([ws], now=_NOW)
+    assert (counts.skipped_within, counts.purged) == (1, 0)
+    service.purge_workspace_data.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_purge_failure_keeps_the_stamp_and_moves_on() -> None:
+    first = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    second = _purge_ws(datetime(2026, 9, 2, 4, 0))
+    purge = AsyncMock(side_effect=[RuntimeError("db gone"), _REPORT])
+    counts, _, email, db = await _run_purge([first, second], now=_NOW, purge=purge)
+    assert (counts.failed, counts.purged) == (1, 1)
+    db.rollback.assert_awaited()
+    assert first.capacity_locked_since is not None  # retried tomorrow
+    assert second.capacity_locked_since is None
+    assert email.send_capacity_purge_complete.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_aborted_purge_clears_stamp_audits_and_sends_no_mail() -> None:
+    ws = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    aborted = WorkspacePurgeReport(
+        contexts_deleted=1,
+        contexts_emptied=0,
+        memories_deleted=4,
+        files_deleted=0,
+        bytes_released=0,
+        aborted=True,
+    )
+    counts, _, email, db = await _run_purge([ws], now=_NOW, purge=AsyncMock(return_value=aborted))
+    assert (counts.aborted, counts.purged) == (1, 0)
+    assert ws.capacity_locked_since is None
+    email.send_capacity_purge_complete.assert_not_awaited()
+    assert db.add.call_args.args[0].user_metadata["aborted"] is True
+
+
+@pytest.mark.asyncio
+async def test_should_continue_follows_the_workspace_row() -> None:
+    """The callback handed to the purge re-reads the row: re-subscribed or
+    soft-deleted (erasure) mid-run means stop."""
+    ws = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    answers: list[bool] = []
+
+    async def purge(_ws_id, *, actor, should_continue):
+        answers.append(await should_continue())
+        ws.plan_name = "pro"
+        answers.append(await should_continue())
+        ws.plan_name = "free"
+        ws.deleted_at = _NOW
+        answers.append(await should_continue())
+        return _REPORT
+
+    await _run_purge([ws], now=_NOW, purge=AsyncMock(side_effect=purge))
+    assert answers == [True, False, False]
+
+
+@pytest.mark.asyncio
+async def test_workspace_erased_mid_run_aborts_without_touching_the_row() -> None:
+    """The row vanished (hard-deleted by an erasure) while the purge ran: stop,
+    audit it as aborted, and leave the expired instance alone."""
+    from sqlalchemy.exc import InvalidRequestError
+
+    since = datetime(2026, 9, 1, 4, 0)
+    ws = _purge_ws(since)
+    db = _purge_db()
+    db.refresh = AsyncMock(side_effect=[None, InvalidRequestError("gone")])
+    aborted = WorkspacePurgeReport(
+        contexts_deleted=0,
+        contexts_emptied=0,
+        memories_deleted=0,
+        files_deleted=0,
+        bytes_released=0,
+        aborted=True,
+    )
+
+    async def purge(_ws_id, *, actor, should_continue):
+        assert await should_continue() is False
+        return aborted
+
+    counts, _, email, db = await _run_purge(
+        [ws], now=_NOW, db=db, purge=AsyncMock(side_effect=purge)
+    )
+    assert counts.aborted == 1
+    assert ws.capacity_locked_since == since  # not written: the row is gone
+    email.send_capacity_purge_complete.assert_not_awaited()
+    assert db.add.call_args.args[0].user_metadata["aborted"] is True
+
+
+@pytest.mark.asyncio
+async def test_completion_mail_failure_does_not_undo_the_purge() -> None:
+    ws = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    email = MagicMock(send_capacity_purge_complete=AsyncMock(side_effect=RuntimeError("smtp")))
+    counts, _, _, _ = await _run_purge([ws], now=_NOW, email=email)
+    assert counts.purged == 1
+    assert ws.capacity_locked_since is None
+
+
+@pytest.mark.asyncio
+async def test_no_owner_email_still_purges_without_mail() -> None:
+    ws = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    counts, _, email, db = await _run_purge([ws], now=_NOW, contact=None)
+    assert counts.purged == 1
+    email.send_capacity_purge_complete.assert_not_awaited()
+    assert db.add.call_args.args[0].user_email == ""
+
+
+# ---------------------------------------------------------------------------
+# The sweep: stamp, then notices and purge behind their flags
+# ---------------------------------------------------------------------------
+
+_STAMP = StampCounts(evaluated=1, stamped=0, cleared=0, kept=1)
+_NOTICES = NoticeCounts(considered=1, sent=1, already_sent=0, skipped=0, failed=0)
+_PURGED = PurgeCounts(due=1, purged=1, skipped_within=0, failed=0, aborted=0)
+
+
+@pytest.mark.parametrize(
+    ("notice_on", "purge_on"), [(False, False), (True, False), (False, True), (True, True)]
+)
+@pytest.mark.asyncio
+async def test_sweep_gates_notices_and_purge_on_their_flags(notice_on, purge_on) -> None:
+    settings = MagicMock(capacity_purge_notice_enabled=notice_on, capacity_purge_enabled=purge_on)
+    stamp = AsyncMock(return_value=_STAMP)
+    notices = AsyncMock(return_value=_NOTICES)
+    purge = AsyncMock(return_value=_PURGED)
+    with (
+        patch("config.settings.get_settings", return_value=settings),
+        patch("db.redis.get_redis_client", return_value=MagicMock()),
+        patch("services.email_service.get_email_service", return_value=MagicMock()),
+        patch("services.capacity_purge.stamp_capacity_locks", stamp),
+        patch("services.capacity_purge.send_due_purge_notices", notices),
+        patch("services.capacity_purge.purge_expired_workspaces", purge),
+    ):
+        result = await run_capacity_purge_sweep(MagicMock(), now=_NOW)
+    stamp.assert_awaited_once()
+    assert result.stamp == _STAMP
+    assert result.notices == (_NOTICES if notice_on else None)
+    assert result.purge == (_PURGED if purge_on else None)
+    assert notices.await_count == int(notice_on)
+    assert purge.await_count == int(purge_on)

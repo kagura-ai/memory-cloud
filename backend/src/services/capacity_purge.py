@@ -30,10 +30,12 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import or_, select
+from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import User, Workspace
+from models.auth import AuditLog, User, Workspace
 from services.capacity_lock import capacity_lock_state, is_lock_candidate, lock_candidate_predicate
+from services.context_service import CAPACITY_PURGE_ACTOR, ContextService
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -315,3 +317,230 @@ async def send_due_purge_notices(
     return NoticeCounts(
         considered=considered, sent=sent, already_sent=already, skipped=skipped, failed=failed
     )
+
+
+def purge_due(locked_since: datetime | None, now: datetime) -> bool:
+    """Whether a lock stamped at ``locked_since`` is due for the purge at ``now``.
+
+    Calendar days (:func:`_days_between`), like the notices: the stamp lands a
+    few seconds into the 04:00 run, so the day-30 run starts a few seconds
+    short of 30 x 24 hours and would otherwise purge a day late — after the
+    "1 day left" mail of day 29 promised otherwise.
+    """
+    return locked_since is not None and _days_between(locked_since, now) >= PURGE_AFTER.days
+
+
+@dataclass(frozen=True)
+class PurgeCounts:
+    """What one purge pass did.
+
+    ``due`` counts every workspace due this run, including the ones past
+    :data:`PURGE_MAX_WORKSPACES_PER_RUN` that wait for tomorrow.
+    ``skipped_within``: within capacity / no longer a candidate at purge time
+    (un-stamped). ``failed``: the purge raised (stays stamped, retried next
+    run). ``aborted``: stopped mid-way by a re-subscribe or an erasure.
+    """
+
+    due: int
+    purged: int
+    skipped_within: int
+    failed: int
+    aborted: int
+
+
+async def _workspace_state(db: AsyncSession, ws: Workspace) -> str:
+    """Re-read the workspace row: ``"purgeable"``, ``"left"`` or ``"gone"``.
+
+    ``"left"``: re-subscribed (no longer Free + billing-managed) or
+    soft-deleted. ``"gone"``: the row no longer exists (hard-deleted by an
+    erasure) — the instance must not be touched again, its attributes are
+    expired.
+    """
+    try:
+        await db.refresh(ws)
+    except InvalidRequestError:
+        return "gone"
+    return "purgeable" if ws.deleted_at is None and is_lock_candidate(ws) else "left"
+
+
+async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: Any) -> PurgeCounts:
+    """Delete the data of every workspace stamped :data:`PURGE_AFTER` ago or more.
+
+    Due on calendar day 30 of the stamp (:func:`purge_due`). At most
+    :data:`PURGE_MAX_WORKSPACES_PER_RUN` workspaces per run, oldest stamp
+    first; the rest stay stamped and go on a later run.
+
+    Each workspace row is re-read first, then the lock: a workspace that left
+    the candidate set or is within capacity now is un-stamped and left alone
+    (the stamp sweep runs before this in the same run, so this is a second
+    guard). The purge itself (``ContextService.purge_workspace_data``) asks
+    before each context whether the row is still live and a candidate, and
+    stops if not (re-subscribe / erasure mid-run): the stamp is cleared, the
+    audit row says ``aborted``, and no completion mail goes out.
+
+    Each workspace is purged and audited on its own; a failure is logged and
+    rolled back (contexts already committed stay deleted), the workspace stays
+    stamped and is retried next run, and the next workspace proceeds. The
+    completion mail is sent once, after the commit that clears the stamp and
+    writes the audit row — best-effort, with no Redis claim: the cleared stamp
+    means the workspace is not selected again for this lock.
+
+    Args:
+        db: Session to read and write with; committed by this function.
+        now: The sweep's clock (naive UTC).
+        email: An ``EmailService``.
+
+    Returns:
+        The per-outcome counts of this pass.
+    """
+    all_due = sorted(
+        (ws for ws in await _stamped_workspaces(db) if purge_due(ws.capacity_locked_since, now)),
+        key=lambda w: (w.capacity_locked_since, str(w.id)),
+    )
+    purged = skipped = failed = aborted = 0
+    for ws in all_due[:PURGE_MAX_WORKSPACES_PER_RUN]:
+        # Fresh row: a rollback on an earlier workspace expired it, and it may
+        # have re-subscribed or been cleaned up since the list was read.
+        ws_id = ws.id  # before the refresh: a vanished row leaves it expired
+        state = await _workspace_state(db, ws)
+        if state != "purgeable":
+            if state == "left" and ws.capacity_locked_since is not None:
+                ws.capacity_locked_since = None
+                await db.commit()
+            skipped += 1
+            logger.info(
+                "capacity_purge_skipped_not_candidate", workspace_id=str(ws_id), state=state
+            )
+            continue
+        ws_name, since = ws.name, ws.capacity_locked_since
+        if since is None or not purge_due(since, now):
+            skipped += 1
+            continue
+        lock = await capacity_lock_state(db, ws)
+        if lock is None:
+            ws.capacity_locked_since = None
+            await db.commit()
+            skipped += 1
+            logger.info("capacity_purge_skipped_within_capacity", workspace_id=str(ws_id))
+            continue
+        contact = await _owner_contact(db, ws)
+        last_state = ["purgeable"]
+
+        async def should_continue(ws: Workspace = ws, last_state: list[str] = last_state) -> bool:
+            last_state[0] = await _workspace_state(db, ws)
+            return last_state[0] == "purgeable"
+
+        try:
+            report = await ContextService(db).purge_workspace_data(
+                ws_id, actor=CAPACITY_PURGE_ACTOR, should_continue=should_continue
+            )
+        except Exception:  # noqa: BLE001 — one workspace must not stop the sweep
+            logger.exception("capacity_purge_failed", workspace_id=str(ws_id))
+            await db.rollback()
+            failed += 1
+            continue
+        if last_state[0] != "gone":
+            ws.capacity_locked_since = None
+        db.add(
+            AuditLog(
+                user_email=contact[0] if contact else "",
+                user_id=CAPACITY_PURGE_ACTOR,
+                action="capacity_purge",
+                resource=f"workspace:{ws_id}",
+                user_metadata={
+                    "locked_since": since.isoformat(),
+                    "over_memories": lock.over_memories,
+                    "over_bytes": lock.over_bytes,
+                    "contexts_deleted": report.contexts_deleted,
+                    "contexts_emptied": report.contexts_emptied,
+                    "memories_deleted": report.memories_deleted,
+                    "files_deleted": report.files_deleted,
+                    "bytes_released": report.bytes_released,
+                    "aborted": report.aborted,
+                },
+            )
+        )
+        await db.commit()
+        if report.aborted:
+            aborted += 1
+            logger.warning(
+                "capacity_purge_aborted",
+                workspace_id=str(ws_id),
+                contexts_deleted=report.contexts_deleted,
+                memories_deleted=report.memories_deleted,
+            )
+            continue
+        purged += 1
+        logger.info(
+            "capacity_purge_completed",
+            workspace_id=str(ws_id),
+            contexts_deleted=report.contexts_deleted,
+            memories_deleted=report.memories_deleted,
+            files_deleted=report.files_deleted,
+            bytes_released=report.bytes_released,
+        )
+        if contact is None:
+            logger.warning("capacity_purge_complete_no_owner_email", workspace_id=str(ws_id))
+            continue
+        try:
+            await email.send_capacity_purge_complete(
+                to_email=contact[0],
+                workspace_name=ws_name,
+                locale=contact[1],
+                purged_at=now,
+                contexts_deleted=report.contexts_deleted,
+                memories_deleted=report.memories_deleted,
+                files_deleted=report.files_deleted,
+                cleanup_url=lock.cleanup_url,
+            )
+        except Exception as exc:  # noqa: BLE001 — the purge is done; the mail is best-effort
+            logger.warning(
+                "capacity_purge_complete_send_raised",
+                workspace_id=str(ws_id),
+                error_type=type(exc).__name__,
+            )
+    counts = PurgeCounts(
+        due=len(all_due), purged=purged, skipped_within=skipped, failed=failed, aborted=aborted
+    )
+    logger.info(
+        "capacity_purge_pass",
+        due=counts.due,
+        purged=purged,
+        skipped_within=skipped,
+        failed=failed,
+        aborted=aborted,
+    )
+    return counts
+
+
+@dataclass(frozen=True)
+class SweepCounts:
+    """One daily run: the stamp pass always; notices / purge ``None`` when flagged off."""
+
+    stamp: StampCounts
+    notices: NoticeCounts | None
+    purge: PurgeCounts | None
+
+
+async def run_capacity_purge_sweep(db: AsyncSession, *, now: datetime) -> SweepCounts:
+    """Stamp, then notify, then purge — each later stage behind its flag.
+
+    ``CAPACITY_PURGE_NOTICE_ENABLED`` gates the countdown mails and
+    ``CAPACITY_PURGE_ENABLED`` the deletion; stamping always runs, so the clock
+    is correct the day either flag is turned on.
+    """
+    from config.settings import get_settings
+    from db.redis import get_redis_client
+    from services.email_service import get_email_service
+
+    settings = get_settings()
+    stamp = await stamp_capacity_locks(db, now=now)
+    notices = None
+    if settings.capacity_purge_notice_enabled:
+        notices = await send_due_purge_notices(
+            db, now=now, redis=get_redis_client(), email=get_email_service()
+        )
+    purge = None
+    if settings.capacity_purge_enabled:
+        purge = await purge_expired_workspaces(db, now=now, email=get_email_service())
+    return SweepCounts(stamp=stamp, notices=notices, purge=purge)
