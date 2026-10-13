@@ -135,16 +135,20 @@ class TestContextRbac:
         seat.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_a_creator_with_no_membership_row_keeps_the_historical_pass(
+    async def test_a_creator_with_no_membership_row_is_refused_like_a_non_member(
         self, service
     ) -> None:
         """Not expected (removing a member hands their contexts to the owner,
-        #275); kept as before, but now observable in the log."""
+        #275). Refused — as ``ContextService.get_context`` and MCP already do
+        for the same caller — and logged so a real occurrence is visible."""
         service.db.execute.return_value.scalar_one_or_none.return_value = _context(is_private=True)
         service.workspace_service.get_member = AsyncMock(return_value=None)
-        with _seat(_refused()) as seat, structlog.testing.capture_logs() as logs:
-            _, role = await service._check_context_access_rbac(USER, CTX, ContextRole.OWNER)
-        assert role is ContextRole.OWNER
+        with (
+            _seat(_refused()) as seat,
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(AuthorizationError),
+        ):
+            await service._check_context_access_rbac(USER, CTX, ContextRole.OWNER)
         seat.assert_not_awaited()
         warned = [e for e in logs if e.get("event") == "private_context_creator_without_membership"]
         assert len(warned) == 1 and warned[0]["workspace_id"] == str(WS)

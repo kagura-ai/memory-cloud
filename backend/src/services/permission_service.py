@@ -628,6 +628,22 @@ class PermissionService:
 
         return context, effective_role
 
+    async def _seated_member(self, workspace_id: UUID, user_id: str) -> WorkspaceMember | None:
+        """The caller's membership row once their plan seat is confirmed.
+
+        One place for the "membership → ``ensure_member_seated``" pair the
+        seat gates share (#1943, #1957): ``None`` when there is no membership
+        row (the caller decides what that means), otherwise the row after the
+        seat check, which raises ``FeatureNotAvailableError`` for a member
+        without a seat.
+        """
+        member = await self.workspace_service.get_member(
+            workspace_id, user_id, raise_if_not_found=False
+        )
+        if member is not None:
+            await ensure_member_seated(self.db, workspace_id, member)
+        return member
+
     async def _check_context_access_rbac(
         self,
         user_id: str,
@@ -667,25 +683,23 @@ class PermissionService:
         if context.is_private:
             if context.created_by == user_id:
                 # Creator has full access to their private context — once they
-                # hold a seat (#1957). The seat is read only after the caller is
-                # known to be the creator, so a non-creator still learns nothing
-                # here (#394 ordering). A creator with no membership row is not
-                # expected (removing a member hands their contexts to the
-                # owner, #275); it keeps the historical pass, logged. The
-                # shortcut still skips the role and whitelist rules below —
-                # that is #165's contract for the creator, not part of #1957.
-                creator_member = await self.workspace_service.get_member(
-                    context.workspace_id, user_id, raise_if_not_found=False
-                )
-                if creator_member is not None:
-                    await ensure_member_seated(self.db, context.workspace_id, creator_member)
-                else:
+                # are a seated member (#1957). Membership and the seat are read
+                # only after the caller is known to be the creator, so a
+                # non-creator still learns nothing here (#394 ordering). A
+                # creator with no membership row is not expected (removing a
+                # member hands their contexts to the owner, #275); it is logged
+                # and refused like any non-member, as ``ContextService.get_context``
+                # and the MCP resolver already do. The shortcut still skips the
+                # role and whitelist rules below — that is #165's contract for
+                # the creator, not part of #1957.
+                if await self._seated_member(context.workspace_id, user_id) is None:
                     logger.warning(
                         "private_context_creator_without_membership",
                         context_id=str(context_id),
                         workspace_id=str(context.workspace_id),
                         user_id=user_id,
                     )
+                    raise AuthorizationError("Insufficient permissions")
                 return context, ContextRole.OWNER
             # #1784: an account linked to the creator is the same person. The
             # link widens ownership only: the caller still passes the
@@ -1144,12 +1158,9 @@ class PermissionService:
             # #1943: a member without a seat on the plan is refused here too —
             # the REST memory-id routes (reference / patch / explore) authorize
             # through this method alone. A caller with no membership row (an
-            # author who left) keeps the pre-existing semantics.
-            member = await self.workspace_service.get_member(
-                workspace_id, user_id, raise_if_not_found=False
-            )
-            if member is not None:
-                await ensure_member_seated(self.db, workspace_id, member)
+            # author who left) keeps the pre-existing semantics; the private
+            # context path (#1957) refuses that case instead.
+            await self._seated_member(workspace_id, user_id)
 
         if user_id == memory_user_id:
             await _seat_held()
