@@ -420,11 +420,14 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
         (ws for ws in await _stamped_workspaces(db) if purge_due(ws.capacity_locked_since, now)),
         key=lambda w: (w.capacity_locked_since, str(w.id)),
     )
+    # Ids read now, while the rows are loaded: a rollback on an earlier
+    # workspace expires every instance, and reading ``ws.id`` after it would
+    # lazy-load outside any try (MissingGreenlet on AsyncSession) and end the pass.
+    batch = [(ws, ws.id) for ws in all_due[:PURGE_MAX_WORKSPACES_PER_RUN]]
     purged = skipped = failed = aborted = nothing = 0
-    for ws in all_due[:PURGE_MAX_WORKSPACES_PER_RUN]:
+    for ws, ws_id in batch:
         # Fresh row: a rollback on an earlier workspace expired it, and it may
         # have re-subscribed or been cleaned up since the list was read.
-        ws_id = ws.id  # before the refresh: a vanished row leaves it expired
         state = await _workspace_state(db, ws)
         if state != "purgeable":
             if state == "left" and ws.capacity_locked_since is not None:

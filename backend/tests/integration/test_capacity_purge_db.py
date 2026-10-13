@@ -67,6 +67,10 @@ def _memory(ws, ctx, owner: str) -> Memory:
 @pytest_asyncio.fixture
 async def free_ws(db_session: AsyncSession):
     """A Free, billing-managed workspace with its owner as a member and one context."""
+    return await _make_free_ws(db_session)
+
+
+async def _make_free_ws(db_session: AsyncSession):
     owner = make_user()
     db_session.add(owner)
     await db_session.flush()
@@ -586,3 +590,44 @@ async def test_purge_aborts_when_resubscribed_mid_run(
     email.send_capacity_purge_complete.assert_not_awaited()
     audit = await _audit_rows(db_session, ws)
     assert len(audit) == 1 and audit[0].user_metadata["aborted"] is True
+
+
+@pytest.mark.asyncio
+async def test_purge_continues_after_one_workspace_fails(
+    db_session, free_ws, purge_side_effects, only_workspaces
+) -> None:
+    """The oldest due workspace's purge raises: the rollback expires every
+    loaded row, yet the next workspace is still purged (no lazy load of an
+    expired attribute outside the try)."""
+    bad, bad_ctx, bad_owner = free_ws
+    good, good_ctx, good_owner = await _make_free_ws(db_session)
+    only_workspaces.update({bad.id, good.id})
+    await _over_cap(db_session, bad, bad_ctx, bad_owner)
+    await _over_cap(db_session, good, good_ctx, good_owner)
+    now = utcnow().replace(microsecond=0)
+    bad.capacity_locked_since = now - timedelta(days=32)  # oldest: goes first
+    good.capacity_locked_since = now - timedelta(days=31)
+    await db_session.flush()
+    await db_session.commit()
+
+    real_purge = ContextService.purge_workspace_data
+    bad_id = bad.id  # the rollback expires ``bad``
+
+    async def purge_or_raise(self, workspace_id, **kwargs):
+        if workspace_id == bad_id:
+            raise RuntimeError("boom")
+        return await real_purge(self, workspace_id, **kwargs)
+
+    email = _mail()
+    with patch.object(ContextService, "purge_workspace_data", purge_or_raise):
+        counts = await purge_expired_workspaces(db_session, now=now, email=email)
+
+    assert (counts.due, counts.failed, counts.purged) == (2, 1, 1)
+    await db_session.refresh(bad)
+    assert bad.capacity_locked_since is not None  # retried next run
+    await db_session.refresh(bad_ctx)
+    assert bad_ctx.deleted_at is None
+    await db_session.refresh(good)
+    assert good.capacity_locked_since is None
+    assert await _live_memories(db_session, good) == []
+    assert email.send_capacity_purge_complete.await_count == 1
