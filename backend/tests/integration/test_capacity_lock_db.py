@@ -28,6 +28,7 @@ from services.capacity_lock import (
     ensure_context_not_capacity_locked,
     ensure_contexts_not_capacity_locked,
 )
+from services.downgrade_eligibility_service import DowngradeEligibilityService
 from utils.datetime import utcnow
 from utils.exceptions import CapacityLockedError
 
@@ -128,6 +129,10 @@ async def test_files_of_a_deleted_context_do_not_hold_the_lock(db_session, free_
     gone.deleted_at = utcnow()
     await db_session.commit()
     assert await capacity_lock_state(db_session, ws) is None
+    # #1961: the downgrade-eligibility read reports the same figure (the 100
+    # visible bytes, not the counter's 300), so billing and the lock agree.
+    usage = await DowngradeEligibilityService(db_session).current_usage(ws.id)
+    assert usage.storage_bytes == 100
 
 
 @pytest.mark.asyncio

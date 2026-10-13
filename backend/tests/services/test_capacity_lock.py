@@ -37,12 +37,15 @@ def _ws(
 
 
 def _db(
-    memory_count: int | None, used_bytes: int | None, hidden_bytes: int | None = 0
+    memory_count: int | None, used_bytes: int | None, reducible_bytes: int | None = None
 ) -> MagicMock:
     """Scripted reads: memory count, storage counter, then — only when the
-    counter is over the limit — the bytes of files in soft-deleted contexts."""
+    counter is over the limit — the shared reducible-storage figure (#1961:
+    uploaded files the owner can still delete; the counter minus files left
+    in soft-deleted contexts). Defaults to the counter itself."""
     db = MagicMock()
-    db.scalar = AsyncMock(side_effect=[memory_count, used_bytes, hidden_bytes])
+    third = used_bytes if reducible_bytes is None else reducible_bytes
+    db.scalar = AsyncMock(side_effect=[memory_count, used_bytes, third])
     return db
 
 
@@ -98,12 +101,13 @@ class TestThePredicate:
     @pytest.mark.asyncio
     async def test_files_of_deleted_contexts_do_not_hold_the_lock(self) -> None:
         """They are invisible in list_files and the storage page, so the owner
-        could never delete them away: the lock's figure leaves them out."""
-        assert await cl.capacity_lock_state(_db(3, 120 * MB, 30 * MB), _ws()) is None
+        could never delete them away: the reducible figure leaves them out
+        (counter 120 MB, 30 MB of it in deleted contexts → 90 MB)."""
+        assert await cl.capacity_lock_state(_db(3, 120 * MB, 90 * MB), _ws()) is None
 
     @pytest.mark.asyncio
     async def test_visible_bytes_still_lock_after_the_deduction(self) -> None:
-        lock = await cl.capacity_lock_state(_db(3, 120 * MB, 10 * MB), _ws())
+        lock = await cl.capacity_lock_state(_db(3, 120 * MB, 110 * MB), _ws())
         assert lock is not None
         assert lock.used_bytes == 110 * MB
         assert lock.over_bytes == 10 * MB
@@ -322,7 +326,7 @@ class TestProjectedFreeCapacity:
         ws = self._paid(memory_addon=10, referral=5, storage_mb=1)
         lock = await cl.projected_free_capacity(_db(free.memory_limit + 15, 0), ws)
         assert lock is None
-        lock = await cl.projected_free_capacity(_db(0, free.storage_limit_bytes + MB + 1, 0), ws)
+        lock = await cl.projected_free_capacity(_db(0, free.storage_limit_bytes + MB + 1), ws)
         assert lock is not None
         assert lock.storage_limit_bytes == free.storage_limit_bytes + MB
         assert lock.over_bytes == 1
@@ -333,6 +337,6 @@ class TestProjectedFreeCapacity:
 
         free = PLAN_TIERS["free"]
         lock = await cl.projected_free_capacity(
-            _db(0, free.storage_limit_bytes + 10 * MB, 10 * MB), self._paid()
+            _db(0, free.storage_limit_bytes + 10 * MB, free.storage_limit_bytes), self._paid()
         )
         assert lock is None

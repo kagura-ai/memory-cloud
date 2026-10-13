@@ -32,9 +32,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.resource_tokens import workspace_regular_active_tokens
 from config.plan_tiers import PLAN_ORDER, PLAN_TIERS, PlanTier, plan_rank
 from models.auth import Context, Workspace, WorkspaceMember, _zero_floor
-from models.file_objects import FileObject
 from models.resource import ResourceToken, WorkspaceConnector
 from services.memory_counts import live_memory_count_stmt
+from services.storage_counts import reducible_storage_bytes_stmt
 
 # A downgrade target is any tier strictly below the workspace's current tier in
 # ``PLAN_ORDER`` (lowest → highest, derived from the registry — #1548).
@@ -183,17 +183,14 @@ class DowngradeEligibilityService:
                 Context.sleep_mode != "skip",
             )
         )
-        # Committed file storage in bytes (#485): only "uploaded" (not reserved/
-        # failed) and not soft-deleted, matching storage_quota_service's DB
-        # aggregate. A direct aggregate (not the Redis-cached value) keeps the
-        # eligibility verdict authoritative.
-        storage_bytes = await self._scalar(
-            select(func.coalesce(func.sum(FileObject.size_bytes), 0)).where(
-                FileObject.workspace_id == workspace_id,
-                FileObject.status == "uploaded",
-                FileObject.deleted_at.is_(None),
-            )
-        )
+        # File storage the owner can still reduce (#1961): uploaded, not
+        # soft-deleted, workspace-scoped or in a live context — the capacity
+        # lock's figure, so "eligible after cleanup" and "locked until cleanup"
+        # never disagree. Deliberately NOT the upload quota's aggregate
+        # (storage_quota_service), which also counts files left in deleted
+        # contexts that no UI lets the owner remove. A direct aggregate (not
+        # the Redis-cached counter) keeps the verdict authoritative.
+        storage_bytes = await self._scalar(reducible_storage_bytes_stmt(workspace_id))
         return WorkspaceUsage(
             members=members,
             contexts=contexts,

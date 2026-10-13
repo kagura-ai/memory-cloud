@@ -413,7 +413,7 @@ rest do not.
     "memory_count": 1200,          // live (not soft-deleted) memories in the workspace
     "memory_limit": 1000,          // effective_memory_limit (plan + addons + referral)
     "over_memories": 200,          // 0 when the memory axis is within the limit
-    "used_bytes": 157286400,       // workspace_storage_usage.used_bytes (0 when no row), less files of soft-deleted contexts
+    "used_bytes": 157286400,       // bytes the owner can still delete: uploaded, not soft-deleted files that are workspace-scoped or in a live context (#1961) — the same figure downgrade-eligibility reports; files left in a deleted context are not counted
     "storage_limit_bytes": 104857600,
     "over_bytes": 52428800,        // 0 when the storage axis is within the limit
     "cleanup_url": "<frontend_url>/workspace/settings/plan"
