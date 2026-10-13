@@ -322,6 +322,38 @@ describe("StoragePage", () => {
     expect(mockListFiles).toHaveBeenCalledTimes(2);
   });
 
+  it("shows a bulk-delete failure inside the dialog, which stays open (#1960)", async () => {
+    mockCurrentWorkspace = { id: "ws-1", current_user_role: "owner" };
+    mockListFiles.mockResolvedValue([file({ context_id: "ctx-1" })]);
+    mockDeleteContextFiles.mockRejectedValue(new Error("Context is locked"));
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "list.actions.deleteContextFiles" }),
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "list.deleteContextDialog.confirm" }),
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "list.deleteContextDialog.confirm" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("Context is locked");
+    });
+    // The dialog is still open and the file list was not refetched.
+    expect(
+      screen.getByRole("button", { name: "list.deleteContextDialog.confirm" }),
+    ).toBeInTheDocument();
+    expect(mockListFiles).toHaveBeenCalledTimes(1);
+  });
+
   it("offers the context-wide delete only for context-bound files", async () => {
     mockCurrentWorkspace = { id: "ws-1", current_user_role: "owner" };
     mockListFiles.mockResolvedValue([file()]); // workspace-scoped: context_id null

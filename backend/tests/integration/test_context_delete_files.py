@@ -200,9 +200,11 @@ async def test_a_rolled_back_delete_releases_nothing_later(
 
 
 @pytest.mark.asyncio
-async def test_merging_away_the_source_frees_its_files(
+async def test_merging_away_the_source_moves_its_files_to_the_target(
     db_session, seeded: Seeded, side_effects
 ) -> None:
+    """Folding a context into another carries its files along (review round 2):
+    nothing is purged, the quota is unchanged, Redis has nothing to release."""
     release, _bump = side_effects
     with patch("services.context_service.ContextService._remove_context_points", AsyncMock()):
         await ContextService(db_session).merge_contexts(
@@ -210,9 +212,11 @@ async def test_merging_away_the_source_frees_its_files(
         )
 
     assert (await _context(db_session, seeded.doomed_id)).deleted_at is not None
-    assert await _files(db_session, seeded.doomed_id, live_only=True) == []
-    assert (await _usage(db_session, seeded.workspace_id)).used_bytes == 100
-    release.assert_awaited_once_with(workspace_id=seeded.workspace_id, size_bytes=190)
+    assert await _files(db_session, seeded.doomed_id) == []  # moved, not deleted
+    moved = await _files(db_session, seeded.keep_id, live_only=True)
+    assert sorted(f.size_bytes for f in moved) == [40, 100, 150]
+    assert (await _usage(db_session, seeded.workspace_id)).used_bytes == 250
+    release.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -224,8 +228,9 @@ async def test_restore_brings_the_files_back_with_their_bytes(
 
     dry = await _restore(db_session, seeded.doomed_id, dry_run=True)
     assert (dry.files_restored, dry.file_bytes_restored) == (1, 150)
-    # 100 live + 150 back = 250 > the 200 limit: the admin is told.
-    assert any("capacity-locked" in w for w in dry.warnings)
+    # 100 live + 150 back = 250 > the 200 limit: the admin is told, and that this
+    # Free, billing-managed workspace is a capacity-lock candidate.
+    assert any("uploads are refused" in w and "capacity-lock candidate" in w for w in dry.warnings)
 
     result = await _restore(db_session, seeded.doomed_id)
     assert (result.files_restored, result.file_bytes_restored) == (1, 150)
@@ -351,9 +356,10 @@ async def test_purging_a_live_contexts_files_keeps_the_context(
 
     files, released = await FileStorageService(db_session).purge_context_files(seeded.doomed_id)
     await db_session.commit()
-    # Two visible rows went (the upload and the cancelled reservation); both release
-    # Redis bytes. The failed row is soft-deleted too but reported by neither number.
-    assert (files, released) == (2, 190)
+    # The upload is the one file the list showed; the cancelled reservation releases
+    # its Redis bytes but is not counted, the failed row is soft-deleted and counted by
+    # neither number.
+    assert (files, released) == (1, 190)
     usage = await _usage(db_session, seeded.workspace_id)
     assert (usage.used_bytes, usage.file_count) == (100, 1)
     assert (await _context(db_session, seeded.doomed_id)).deleted_at is None

@@ -178,7 +178,10 @@ def _merge_harness(memories, *, upsert=None, live_count=None):
     live_result.scalar_one.return_value = (
         live_count if live_count is not None else len(mem_result.scalars.return_value.all())
     )
-    mock_db.execute.side_effect = [cfg_result, mem_result, live_result]
+    # #1960: with delete_source a fourth statement moves the source's live
+    # files to the target before the source is deleted.
+    move_files_result = MagicMock()
+    mock_db.execute.side_effect = [cfg_result, mem_result, live_result, move_files_result]
     mock_db.add = MagicMock()
 
     service = ContextService(mock_db)

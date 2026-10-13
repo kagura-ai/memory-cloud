@@ -12,7 +12,7 @@ import re
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from uuid import UUID
 
-from sqlalchemy import and_, delete, func, select
+from sqlalchemy import and_, delete, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import ObjectDeletedError
@@ -1185,6 +1185,20 @@ class ContextService:
 
         # Optional: delete source (_commit=False for atomic transaction)
         if delete_source:
+            # #1960: the source's files fold into the target with its memories
+            # instead of being purged with the source. Dedup is per workspace,
+            # so re-binding cannot collide; the quota does not move.
+            from models.file_objects import FileObject
+
+            await self.db.execute(
+                update(FileObject)
+                .where(
+                    FileObject.context_id == source_context_id,
+                    FileObject.deleted_at.is_(None),
+                )
+                .values(context_id=target_context_id)
+                .execution_options(synchronize_session=False)
+            )
             await self.delete_context(user_id, source_context_id, _commit=False)
 
         try:
@@ -1196,7 +1210,8 @@ class ContextService:
 
         # #1798: the source's own points go once the merge is durable — the
         # copies above carry the target's context_id and are not touched.
-        # #1960: so does the storage the source's files held.
+        # #1960: the files moved to the target, so nothing is normally pending
+        # here; a reservation that slipped in between is released all the same.
         if delete_source:
             await self._remove_context_points(str(source.workspace_id), str(source_context_id))
             await self._release_pending_storage()

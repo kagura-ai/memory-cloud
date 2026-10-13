@@ -46,10 +46,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import AuditLog, Context, Workspace
+from models.file_objects import WorkspaceStorageUsage
 from models.memory import Memory
 from models.resource import Resource, ResourceSchema
+from services import storage_quota_service
+from services.capacity_lock import is_lock_candidate
 from services.context_service import CONTEXT_NAME_PATTERN, DEFAULT_CONTEXT_NAME
-from services.file_storage_service import ContextFilesRestore
+from services.file_storage_service import (
+    FILE_RESTORE_WINDOW,
+    ContextFilesRestore,
+    FileStorageService,
+)
 from services.resource_indexer import resource_point_id
 from utils.datetime import to_utc_iso
 from utils.exceptions import ConflictError, NotFoundException, ValidationError
@@ -341,10 +348,9 @@ async def restore_deleted_context(
             "again as a newer version."
         )
 
-    # #1960: files the deletion purged, inside the restore window and not re-uploaded.
-    from services.file_storage_service import FileStorageService
-
     if dry_run:
+        # #1960: files the deletion purged, inside the restore window and not
+        # re-uploaded — counted without touching a row.
         await _report_files(
             db,
             result,
@@ -352,8 +358,6 @@ async def restore_deleted_context(
             context,
             await FileStorageService(db).count_restorable_context_files(context),
         )
-
-    if dry_run:
         # Ends the read transaction; the CLI holds the session open while the
         # operator answers its prompt.
         await db.rollback()
@@ -414,8 +418,6 @@ async def restore_deleted_context(
 
     if result.file_bytes_restored:
         # Redis follows the durable DB state (R5), as the purge did in reverse.
-        from services import storage_quota_service
-
         await storage_quota_service.bump_committed_storage_bytes(
             workspace_id=context.workspace_id, size_bytes=result.file_bytes_restored
         )
@@ -442,9 +444,6 @@ async def _report_files(
 ) -> None:
     """Put the file outcome (#1960) on the result: the counts, and a warning for
     every way files stay deleted or the restore crowds the storage limit."""
-    from models.file_objects import WorkspaceStorageUsage
-    from services.file_storage_service import FILE_RESTORE_WINDOW
-
     result.files_restored = files.restored
     result.file_bytes_restored = files.bytes_restored
     if files.left_past_window:
@@ -472,8 +471,13 @@ async def _report_files(
         after = used if not result.dry_run else used + files.bytes_restored
         storage_limit = workspace.effective_storage_limit_bytes
         if 0 <= storage_limit < after:
+            lock = (
+                " The workspace is a capacity-lock candidate (#1941): the lock applies if the "
+                "bytes it counts are over the limit too."
+                if is_lock_candidate(workspace)
+                else ""
+            )
             result.warnings.append(
                 f"The restore puts stored files at {after} bytes against the plan's "
-                f"{storage_limit}: uploads are refused and a Free workspace from billing is "
-                "capacity-locked (#1941) until it is cleaned up."
+                f"{storage_limit}: uploads are refused until files are deleted.{lock}"
             )

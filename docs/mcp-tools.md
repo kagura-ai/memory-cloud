@@ -374,7 +374,7 @@ The v0.49.0 control plane builds on existing workspace RBAC: agents are registry
 | `create_context` | Create a new context | Owner/Admin |
 | `update_context` | Update context settings (summary, usage guide, resource_id, is_public). Changing `resource_id` revokes the resource tokens the caller issued for the old slug | Editor+ |
 | `delete_context` | Delete a context, all its memories and its files (storage released at once; files restorable by an admin for 6 days) | Owner/Admin |
-| `merge_contexts` | Merge memories from source context into target context; `delete_source=true` deletes the source with its files | Owner/Admin |
+| `merge_contexts` | Merge memories from source context into target context; `delete_source=true` deletes the source and moves its files to the target | Owner/Admin |
 | `update_search_config` | Tune hybrid search weights, reranker settings, and query-intent routing (`routing_mode`) per context | Editor+ |
 
 ### `list_contexts` response shape

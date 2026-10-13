@@ -952,9 +952,9 @@ class FileStorageService:
 
         Same rows and accounting as :meth:`purge_files_for_contexts`, reported for
         the one context: ``(files soft-deleted, Redis bytes to release)``. The count
-        is the purged set itself (uploaded files and cancelled reservations — the
-        rows a file list shows; lingering ``failed`` rows go too but are not
-        counted), not a separate read that a concurrent upload could make disagree.
+        is the purged set's uploaded rows — the files a list shows; cancelled
+        reservations and lingering ``failed`` rows go too, release their bytes, but
+        are not counted — not a separate read a concurrent upload could make disagree.
         """
         _, visible, released = await self._purge_live_files([context_id], deleted_at)
         return visible, sum(released.values())
@@ -979,7 +979,7 @@ class FileStorageService:
             .with_for_update()
         )
         files = list(result.scalars().all())
-        visible = sum(1 for f in files if f.status in ("uploaded", "reserved"))
+        visible = sum(1 for f in files if f.status == "uploaded")
         released: dict[UUID, int] = {}
         # Accumulate the workspace_storage_usage delta per workspace and apply it
         # in ONE upsert per workspace after the loop — a bulk purge otherwise

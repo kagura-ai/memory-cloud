@@ -1114,7 +1114,10 @@ class ContextFilesDeleteResponse(BaseModel):
     deleted: int = Field(
         ...,
         ge=0,
-        description="Live files soft-deleted (uploaded files and cancelled in-flight uploads)",
+        description=(
+            "Uploaded files soft-deleted — what the file list showed; cancelled in-flight "
+            "uploads release their bytes but are not counted"
+        ),
     )
     released_bytes: int = Field(
         ...,

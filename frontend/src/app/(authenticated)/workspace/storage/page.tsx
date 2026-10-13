@@ -18,6 +18,7 @@ import { PageHeader } from "@/components/common/PageHeader";
 import { TableLoadingState } from "@/components/common/LoadingState";
 import { ErrorBanner } from "@/components/common/ErrorBanner";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -82,6 +83,8 @@ export default function StoragePage() {
     name: string;
   } | null>(null);
   const [clearing, setClearing] = useState(false);
+  // Shown inside the bulk-delete dialog: a toast behind the modal is easy to miss.
+  const [clearError, setClearError] = useState<string | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
 
   // member+ can delete; viewer is read-only (mirrors backend authz).
@@ -230,6 +233,7 @@ export default function StoragePage() {
     if (!contextToClear) return;
     try {
       setClearing(true);
+      setClearError(null);
       const result = await deleteContextFiles(contextToClear.id);
       toast({
         title: t("list.deleteContextDialog.success", { count: result.deleted }),
@@ -238,11 +242,7 @@ export default function StoragePage() {
       setContextToClear(null);
       await loadFiles(limit, "refresh");
     } catch (e) {
-      toast({
-        variant: "destructive",
-        title: t("list.deleteContextDialog.failed"),
-        description: e instanceof Error ? e.message : t("list.fetchError"),
-      });
+      setClearError(e instanceof Error ? e.message : t("list.fetchError"));
     } finally {
       setClearing(false);
     }
@@ -439,7 +439,10 @@ export default function StoragePage() {
       <AlertDialog
         open={contextToClear !== null}
         onOpenChange={(open) => {
-          if (!open) setContextToClear(null);
+          if (!open) {
+            setContextToClear(null);
+            setClearError(null);
+          }
         }}
       >
         <AlertDialogContent>
@@ -453,6 +456,13 @@ export default function StoragePage() {
               })}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          {clearError && (
+            <Alert variant="destructive" role="alert">
+              <AlertDescription>
+                {t("list.deleteContextDialog.failed")} {clearError}
+              </AlertDescription>
+            </Alert>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel disabled={clearing}>
               {tCommon("cancel")}

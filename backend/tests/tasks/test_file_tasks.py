@@ -40,7 +40,9 @@ def _make_file(
     return file
 
 
-def _patch_get_db(rows, *, delete_rowcount: int = 1, stamp_rowcount: int = 0):
+def _patch_get_db(
+    rows, *, delete_rowcount: int = 1, stamp_rowcount: int = 0, shared_key_holders: int = 0
+):
     """``async for db in get_db()`` yields one mock that returns ``rows``.
 
     The mock ``db.execute`` is **statement-type aware** (robust to call
@@ -56,6 +58,8 @@ def _patch_get_db(rows, *, delete_rowcount: int = 1, stamp_rowcount: int = 0):
     db = MagicMock()
     db.commit = AsyncMock()
     db.delete = AsyncMock()  # legacy compat: orphan sweeper does not use it
+    # The GC's "is this key still held by a live row?" count (#1960).
+    db.scalar = AsyncMock(return_value=shared_key_holders)
 
     list_result = MagicMock()
     list_result.scalars = MagicMock(return_value=MagicMock(all=MagicMock(return_value=rows)))
@@ -226,7 +230,13 @@ class TestSweepSoftDeletedFiles:
         fake_storage.delete_object = AsyncMock()
         with get_db_patch, _patch_storage(fake_storage):
             counts = await file_tasks.sweep_soft_deleted_files()
-        assert counts == {"swept": 0, "r2_deleted": 0, "r2_failed": 0, "hard_deleted_no_r2": 0}
+        assert counts == {
+            "swept": 0,
+            "r2_deleted": 0,
+            "r2_failed": 0,
+            "hard_deleted_no_r2": 0,
+            "object_kept_shared": 0,
+        }
         db.delete.assert_not_awaited()
         fake_storage.delete_object.assert_not_awaited()
 
@@ -241,7 +251,13 @@ class TestSweepSoftDeletedFiles:
         # ever calling get_db.
         with _patch_storage(None):
             counts = await file_tasks.sweep_soft_deleted_files()
-        assert counts == {"swept": 0, "r2_deleted": 0, "r2_failed": 0, "hard_deleted_no_r2": 0}
+        assert counts == {
+            "swept": 0,
+            "r2_deleted": 0,
+            "r2_failed": 0,
+            "hard_deleted_no_r2": 0,
+            "object_kept_shared": 0,
+        }
 
     @pytest.mark.asyncio
     async def test_hard_deletes_past_retention(self):
@@ -264,6 +280,24 @@ class TestSweepSoftDeletedFiles:
         fake_storage.delete_object.assert_awaited_once_with("ws/aa/key")
         # 2 db.execute calls: 1 SELECT + 1 DELETE (per-row).
         assert db.execute.await_count == 2
+        db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_key_held_by_a_live_row_keeps_its_object(self):
+        """Content-addressed keys: a re-upload of the same bytes shares the R2
+        object with the soft-deleted row, so the row goes and the object stays."""
+        old = _make_file(status="uploaded", deleted_at=utcnow() - timedelta(days=8))
+        get_db_patch, db = _patch_get_db([old], shared_key_holders=1)
+
+        fake_storage = MagicMock()
+        fake_storage.delete_object = AsyncMock()
+        with get_db_patch, _patch_storage(fake_storage):
+            counts = await file_tasks.sweep_soft_deleted_files()
+
+        fake_storage.delete_object.assert_not_awaited()
+        assert counts["object_kept_shared"] == 1
+        assert counts["r2_deleted"] == 0
+        assert counts["swept"] == 1  # the row is still hard-deleted
         db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
