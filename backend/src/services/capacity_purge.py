@@ -463,6 +463,8 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
     again for this lock. A purge that removed nothing (no context, memory or
     file — typically the retry after a lost audit commit) is un-stamped and
     audited but sends no mail, so the owner never gets a zero-count message.
+    After a purge that was not aborted the lock is measured once more; still
+    over is logged (``capacity_purge_still_over``), not retried.
 
     Args:
         db: Session to read and write with; committed by this function.
@@ -561,6 +563,7 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
                 memories_deleted=report.memories_deleted,
             )
             continue
+        await _log_if_still_over(db, ws, ws_id=ws_id)
         if not (report.contexts_deleted or report.memories_deleted or report.files_deleted):
             nothing += 1
             logger.info(
@@ -625,6 +628,33 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
         nothing_to_delete=nothing,
     )
     return counts
+
+
+async def _log_if_still_over(db: AsyncSession, ws: Workspace, *, ws_id: UUID) -> None:
+    """Measure the lock once more after a completed purge; warn if still over.
+
+    The purge should leave nothing the lock counts. If it is still on (data
+    the purge cannot reach), the next stamp run restarts the clock — this log
+    is the alert for it. No second purge here: the next cycle handles it.
+    """
+    try:
+        lock = await capacity_lock_state(db, ws)
+    except Exception as exc:  # noqa: BLE001 — diagnostics only; the purge is done
+        logger.warning(
+            "capacity_purge_recheck_failed", workspace_id=str(ws_id), error_type=type(exc).__name__
+        )
+        return
+    if lock is not None:
+        logger.warning(
+            "capacity_purge_still_over",
+            workspace_id=str(ws_id),
+            memory_count=lock.memory_count,
+            memory_limit=lock.memory_limit,
+            over_memories=lock.over_memories,
+            used_bytes=lock.used_bytes,
+            storage_limit_bytes=lock.storage_limit_bytes,
+            over_bytes=lock.over_bytes,
+        )
 
 
 async def _clear_stamp_and_audit(

@@ -29,6 +29,7 @@ from models.auth import (
 from models.file_objects import FileObject
 from models.memory import Memory
 from services import capacity_purge
+from services.capacity_lock import capacity_lock_state
 from services.capacity_purge import purge_expired_workspaces, stamp_capacity_locks
 from services.context_service import CAPACITY_PURGE_ACTOR, ContextService
 from utils.datetime import utcnow
@@ -408,6 +409,39 @@ async def test_purge_stops_between_memory_chunks(db_session, free_ws, purge_side
     assert ctx.deleted_at is None
     assert len(await _live_memories(db_session, ws)) == 3
     assert len(await _live_files(db_session, ws)) == 1
+
+
+@pytest.mark.asyncio
+async def test_purge_takes_memories_outside_live_contexts(
+    db_session, free_ws, purge_side_effects
+) -> None:
+    """The lock counts every live memory of the workspace, wherever it sits:
+    one with no context and one still live under an already-deleted context
+    are tombstoned too, so the workspace ends within capacity."""
+    ws, ctx, owner = free_ws
+    dead = make_context(workspace_id=ws.id, created_by=owner.user_id)
+    dead.deleted_at = utcnow() - timedelta(days=3)
+    db_session.add(dead)
+    await db_session.flush()
+    no_context = _memory(ws, ctx, owner.user_id)
+    no_context.context_id = None
+    under_dead = _memory(ws, dead, owner.user_id)
+    db_session.add_all([no_context, under_dead])
+    await _over_cap(db_session, ws, ctx, owner)
+    assert await capacity_lock_state(db_session, ws) is not None
+
+    with patch("services.context_service.PURGE_MEMORY_CHUNK", 1):
+        report = await ContextService(db_session).purge_workspace_data(
+            ws.id, actor=CAPACITY_PURGE_ACTOR
+        )
+
+    assert report.aborted is False
+    assert report.memories_deleted == MEMORY_LIMIT + 1 + 2
+    assert await _live_memories(db_session, ws) == []
+    for m in (no_context, under_dead):
+        await db_session.refresh(m)
+        assert m.deleted_at is not None and m.deleted_by == CAPACITY_PURGE_ACTOR
+    assert await capacity_lock_state(db_session, ws) is None
 
 
 @pytest.mark.asyncio

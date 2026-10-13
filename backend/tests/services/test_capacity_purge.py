@@ -579,6 +579,40 @@ async def test_completion_mail_and_audit_row() -> None:
     }
 
 
+@pytest.mark.parametrize(("after", "logged"), [(_LOCK, True), (None, False)])
+@pytest.mark.asyncio
+async def test_purge_re_measures_the_lock_once(after, logged) -> None:
+    """After the purge the lock is measured again: still over (data the purge
+    cannot reach) is logged with its counts — once, no second purge."""
+    import structlog
+
+    ws = _purge_ws(datetime(2026, 9, 30, 4, 0))
+    stamped, _, owner, ctx_service, service = _purge_patches([ws])
+    state = AsyncMock(side_effect=[_LOCK, after])
+    with (
+        stamped,
+        owner,
+        ctx_service,
+        patch("services.capacity_purge.capacity_lock_state", state),
+        structlog.testing.capture_logs() as logs,
+    ):
+        counts = await purge_expired_workspaces(
+            _purge_db(),
+            now=_NOW,
+            email=MagicMock(send_capacity_purge_complete=AsyncMock(return_value=True)),
+        )
+    assert counts.purged == 1
+    assert state.await_count == 2
+    service.purge_workspace_data.assert_awaited_once()
+    over = [e for e in logs if e["event"] == "capacity_purge_still_over"]
+    if logged:
+        assert len(over) == 1 and over[0]["log_level"] == "warning"
+        assert over[0]["workspace_id"] == str(ws.id)
+        assert (over[0]["over_memories"], over[0]["over_bytes"]) == (2, 0)
+    else:
+        assert over == []
+
+
 @pytest.mark.asyncio
 async def test_purge_skips_workspace_within_capacity_now() -> None:
     ws = _purge_ws(datetime(2026, 9, 1, 4, 0))

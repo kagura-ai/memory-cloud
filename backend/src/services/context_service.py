@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from uuid import UUID
 
-from sqlalchemy import and_, delete, func, select, update
+from sqlalchemy import ColumnElement, and_, delete, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import ObjectDeletedError
@@ -1411,6 +1411,32 @@ class ContextService:
         """
         from models.memory import Memory
 
+        return await self._tombstone_chunked(
+            [
+                Memory.workspace_id == context.workspace_id,
+                Memory.context_id == context.id,
+            ],
+            actor=actor,
+            deleted_at=deleted_at,
+            chunk=chunk,
+            should_continue=should_continue,
+        )
+
+    async def _tombstone_chunked(
+        self,
+        where: list[ColumnElement[bool]],
+        *,
+        actor: str,
+        deleted_at: datetime,
+        chunk: int | None = None,
+        should_continue: Callable[[], Awaitable[bool]] | None = None,
+    ) -> tuple[int, bool]:
+        """The chunked tombstone loop over the live memories matching ``where``.
+
+        See :meth:`_tombstone_memories_chunked` for the contract.
+        """
+        from models.memory import Memory
+
         chunk = PURGE_MEMORY_CHUNK if chunk is None else chunk
         total = 0
         while True:
@@ -1418,11 +1444,7 @@ class ContextService:
                 return total, True
             ids = (
                 select(Memory.id)
-                .where(
-                    Memory.workspace_id == context.workspace_id,
-                    Memory.context_id == context.id,
-                    Memory.deleted_at.is_(None),
-                )
+                .where(*where, Memory.deleted_at.is_(None))
                 .limit(chunk)
                 .scalar_subquery()
             )
@@ -1573,8 +1595,10 @@ class ContextService:
         commit its vectors are removed and its Redis bytes released. The
         default context stays, empty, so the workspace is usable on Free.
         Non-default contexts go first and the default one last, so an abort
-        leaves the default context's memories intact. Workspace-scoped files
-        (no context) are purged last.
+        leaves the default context's memories intact. Then every memory of the
+        workspace still live outside those contexts (no context, or under a
+        context deleted earlier) is tombstoned the same way, and the
+        workspace-scoped files (no context) are purged last.
 
         ``should_continue`` is awaited before each context, after every memory
         chunk and before the workspace-scoped files; when it returns False (the
@@ -1649,6 +1673,24 @@ class ContextService:
 
         if not aborted and should_continue is not None and not await should_continue():
             aborted = True
+        if not aborted:
+            # The lock counts every live memory of the workspace, but the loop
+            # above only reached those in live contexts. ``context_id`` is
+            # nullable, and a memory can still be live under a context that was
+            # deleted earlier: tombstone those too, or the workspace stays over
+            # the cap after the purge. Their vectors are left to the orphan
+            # vector sweep (services/orphan_vector_sweep.py) — there is no cheap
+            # per-memory delete without knowing each point's collection, and
+            # hits are hydrated from live rows, so none of them is readable.
+            from models.memory import Memory
+
+            leftover, aborted = await self._tombstone_chunked(
+                [Memory.workspace_id == workspace_id],
+                actor=actor,
+                deleted_at=utcnow(),
+                should_continue=should_continue,
+            )
+            memories += leftover
         if not aborted:
             self._storage_release_pending = {}
             ws_files, ws_bytes = await FileStorageService(self.db).purge_workspace_scoped_files(
