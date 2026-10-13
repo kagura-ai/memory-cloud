@@ -203,7 +203,8 @@ class CapacityLockInfo(BaseModel):
         description=(
             "When the workspace's memories, contexts and files are deleted if it is still "
             "over capacity (#1969): the 04:00 UTC daily sweep 30 days after that sweep first "
-            "saw it over, ISO-8601 UTC. Null until that sweep has run."
+            "saw it over, ISO-8601 UTC. Null until that sweep has run, and while the purge is "
+            "disabled on this deployment (CAPACITY_PURGE_ENABLED)."
         ),
     )
 

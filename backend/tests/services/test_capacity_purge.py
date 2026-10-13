@@ -46,8 +46,22 @@ def test_purge_at_is_the_sweep_that_purges(since) -> None:
     the run ``purge_due`` first says yes to — not stamp + 30 x 24 hours."""
     deadline = purge_at(since)
     assert deadline == datetime(2026, 10, 31, SWEEP_HOUR_UTC, 0)
-    assert purge_due(since, deadline)
-    assert not purge_due(since, deadline - timedelta(days=1))
+    final = deadline - timedelta(days=1)  # the day-29 "1 day left" mail
+    assert purge_due(since, deadline, final_notice_at=final)
+    assert not purge_due(since, deadline - timedelta(days=1), final_notice_at=final)
+
+
+@pytest.mark.parametrize(
+    ("final_notice_at", "due"),
+    [
+        (None, False),  # never warned: never deleted
+        (datetime(2026, 10, 31, 4, 0, 3), False),  # warned this very run
+        (datetime(2026, 10, 30, 23, 59), True),  # warned the previous calendar day
+    ],
+)
+def test_purge_needs_the_final_notice_a_day_earlier(final_notice_at, due) -> None:
+    since = datetime(2026, 10, 1, 4, 0, 5)
+    assert purge_due(since, datetime(2026, 10, 31, 4, 0), final_notice_at=final_notice_at) is due
 
 
 def test_purge_at_none_when_not_locked() -> None:
@@ -97,6 +111,7 @@ def _ws(since: datetime | None, *, plan: str = "free"):
     ws.plan_name = plan
     ws.entitlement_source = "external_billing"
     ws.capacity_locked_since = since
+    ws.capacity_purge_final_notice_at = None
     return ws
 
 
@@ -216,6 +231,47 @@ async def test_last_notice_says_one_day_left() -> None:
             _db([ws]), now=datetime(2026, 10, 30, 4, 0, 0), redis=_Redis(), email=email
         )
     assert email.send_capacity_purge_notice.call_args.kwargs["days_left"] == 1
+
+
+@pytest.mark.parametrize(
+    ("send", "stamped"),
+    [
+        (AsyncMock(return_value=True), True),
+        (AsyncMock(side_effect=TimeoutError()), True),  # may have been delivered
+        (AsyncMock(return_value=False), False),
+        (AsyncMock(side_effect=RuntimeError("smtp")), False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_final_notice_is_recorded_on_the_workspace(send, stamped) -> None:
+    """The day-29 mail is what lets the purge run: sent (or possibly sent)
+    stamps ``capacity_purge_final_notice_at`` with the run's clock and commits."""
+    since = datetime(2026, 10, 1, 4, 0, 30)
+    now = datetime(2026, 10, 30, 4, 0, 0)
+    ws = _ws(since)
+    db = _db([ws])
+    with _locked():
+        await send_due_purge_notices(
+            db, now=now, redis=_Redis(), email=MagicMock(send_capacity_purge_notice=send)
+        )
+    assert ws.capacity_purge_final_notice_at == (now if stamped else None)
+    assert db.commit.await_count == int(stamped)
+
+
+@pytest.mark.asyncio
+async def test_earlier_notices_do_not_record_the_final_notice() -> None:
+    since = datetime(2026, 10, 1, 4, 0, 30)
+    ws = _ws(since)
+    db = _db([ws])
+    email = _email(return_value=True)
+    with _locked():
+        counts = await send_due_purge_notices(
+            db, now=datetime(2026, 10, 28, 4, 0, 0), redis=_Redis(), email=email
+        )
+    assert counts.sent == 1
+    assert email.send_capacity_purge_notice.call_args.kwargs["days_left"] == 3  # stage 27
+    assert ws.capacity_purge_final_notice_at is None
+    db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -349,9 +405,16 @@ _REPORT = WorkspacePurgeReport(
 )
 
 
-def _purge_ws(since: datetime | None, *, plan: str = "free"):
+def _purge_ws(
+    since: datetime | None,
+    *,
+    plan: str = "free",
+    final_notice_at: datetime | None = datetime(2026, 10, 30, 4, 0, 2),
+):
+    """A stamped workspace; by default warned by the day-29 run before ``_NOW``."""
     ws = _ws(since, plan=plan)
     ws.deleted_at = None
+    ws.capacity_purge_final_notice_at = final_notice_at
     return ws
 
 
@@ -400,6 +463,57 @@ async def test_purge_is_due_on_calendar_day_thirty() -> None:
     service.purge_workspace_data.assert_awaited_once()
     assert service.purge_workspace_data.call_args.args == (ws.id,)
     assert service.purge_workspace_data.call_args.kwargs["actor"] == CAPACITY_PURGE_ACTOR
+
+
+@pytest.mark.parametrize(
+    "final_notice_at",
+    [None, datetime(2026, 10, 31, 4, 0, 1)],  # never warned / warned this run
+)
+@pytest.mark.asyncio
+async def test_purge_waits_for_the_final_notice(final_notice_at) -> None:
+    """Day 30 or later but no day-29 mail a calendar day earlier: nothing is
+    deleted, the workspace stays stamped and is counted as awaiting notice."""
+    import structlog
+
+    ws = _purge_ws(datetime(2026, 9, 1, 4, 0), final_notice_at=final_notice_at)
+    with structlog.testing.capture_logs() as logs:
+        counts, service, email, _ = await _run_purge([ws], now=_NOW)
+    assert (counts.due, counts.awaiting_notice, counts.purged) == (1, 1, 0)
+    service.purge_workspace_data.assert_not_awaited()
+    email.send_capacity_purge_complete.assert_not_awaited()
+    assert ws.capacity_locked_since is not None
+    waiting = [e for e in logs if e["event"] == "capacity_purge_awaiting_final_notice"]
+    assert [e["workspace_id"] for e in waiting] == [str(ws.id)]
+
+
+@pytest.mark.asyncio
+async def test_awaiting_notice_does_not_take_a_purge_slot() -> None:
+    """Workspaces still waiting for their final notice do not crowd warned ones
+    out of the per-run cap."""
+    waiting = [
+        _purge_ws(datetime(2026, 8, 1 + i, 4, 0), final_notice_at=None)
+        for i in range(PURGE_MAX_WORKSPACES_PER_RUN)
+    ]
+    warned = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    counts, service, _, _ = await _run_purge([*waiting, warned], now=_NOW)
+    assert (counts.awaiting_notice, counts.purged) == (PURGE_MAX_WORKSPACES_PER_RUN, 1)
+    assert service.purge_workspace_data.call_args.args == (warned.id,)
+
+
+@pytest.mark.asyncio
+async def test_purge_clears_the_final_notice_with_the_stamp() -> None:
+    ws = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    counts, _, _, _ = await _run_purge([ws], now=_NOW)
+    assert counts.purged == 1
+    assert (ws.capacity_locked_since, ws.capacity_purge_final_notice_at) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_purge_skip_clears_the_final_notice_with_the_stamp() -> None:
+    ws = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    counts, _, _, _ = await _run_purge([ws], now=_NOW, lock=None)
+    assert counts.skipped_within == 1
+    assert (ws.capacity_locked_since, ws.capacity_purge_final_notice_at) == (None, None)
 
 
 @pytest.mark.asyncio

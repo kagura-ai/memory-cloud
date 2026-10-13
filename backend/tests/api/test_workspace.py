@@ -553,15 +553,21 @@ class TestWorkspaceUsageCurrent:
         assert response.capacity_lock.cleanup_url.endswith("/workspace/settings/plan")
         assert response.capacity_lock.purge_at is None  # not stamped by the sweep yet
 
+    @pytest.mark.parametrize("purge_enabled", [True, False])
     @pytest.mark.asyncio
     async def test_capacity_lock_carries_purge_at_when_stamped(
-        self, mock_db, mock_user, mock_workspace
+        self, mock_db, mock_user, mock_workspace, purge_enabled
     ):
         """#1969: the banner reads the deletion date from the lock payload — the
-        04:00 UTC sweep on calendar day 30 of the stamp, ISO-8601 with ``Z``."""
+        04:00 UTC sweep on calendar day 30 of the stamp, ISO-8601 with ``Z`` —
+        only once ``CAPACITY_PURGE_ENABLED`` is on: no date for a deletion that
+        will not happen."""
         from datetime import datetime
 
+        from config.settings import get_settings
         from services.capacity_lock import CapacityLock
+
+        settings = get_settings().model_copy(update={"capacity_purge_enabled": purge_enabled})
 
         lock = CapacityLock(
             memory_count=1012,
@@ -577,16 +583,16 @@ class TestWorkspaceUsageCurrent:
         with (
             patch("services.effective_quota_service.EffectiveQuotaService") as mock_quota,
             patch("services.capacity_lock.capacity_lock_state", new=AsyncMock(return_value=lock)),
+            patch("config.settings.get_settings", return_value=settings),
         ):
             mock_quota.return_value.get_effective_quotas = AsyncMock(
                 return_value=self._make_effective_quotas()
             )
             response = await get_workspace_usage_current(user=mock_user, db=mock_db)
         assert response.capacity_lock is not None
-        assert response.capacity_lock.purge_at == "2026-10-31T04:00:00Z"
-        assert response.model_dump(mode="json")["capacity_lock"]["purge_at"] == (
-            "2026-10-31T04:00:00Z"
-        )
+        expected = "2026-10-31T04:00:00Z" if purge_enabled else None
+        assert response.capacity_lock.purge_at == expected
+        assert response.model_dump(mode="json")["capacity_lock"]["purge_at"] == expected
 
     @pytest.mark.asyncio
     async def test_no_member_ids_query(self, mock_db, mock_user, mock_workspace):

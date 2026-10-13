@@ -15,8 +15,13 @@ memory-cloud owns the clock — ``workspaces.capacity_locked_since``:
 * ``send_due_purge_notices`` mails the owner on days 0/7/14/23/27/29 of the
   stamp (one claim per workspace × stamp × stage in Redis, like the
   pre-expiry notice in ``api/routes/internal_billing.py``).
+  The day-29 mail ("1 day left") is recorded in
+  ``workspaces.capacity_purge_final_notice_at``.
 * ``purge_expired_workspaces`` deletes the data of a workspace stamped 30
-  days ago or more, after re-checking the lock, and mails the completion.
+  days ago or more whose final notice went out on an earlier calendar day,
+  after re-checking the lock, and mails the completion. Without that notice
+  nothing is deleted — so the purge flag alone, with the notices off, never
+  deletes anything.
 
 ``run_capacity_purge_sweep`` runs the three in that order; the task in
 ``tasks/capacity_purge_tasks.py`` schedules it once a day under single-flight.
@@ -41,6 +46,7 @@ from services.capacity_lock import (
     lock_candidate_predicate,
 )
 from services.context_service import CAPACITY_PURGE_ACTOR, ContextService, WorkspacePurgeReport
+from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -52,6 +58,8 @@ PURGE_AFTER = timedelta(days=30)
 SWEEP_HOUR_UTC = 4
 #: Days after the stamp on which the owner gets a "N days left" mail (policy #13).
 NOTICE_DAYS: tuple[int, ...] = (0, 7, 14, 23, 27, 29)
+#: The last of them; the purge waits until a calendar day after it went out.
+FINAL_NOTICE_DAY = NOTICE_DAYS[-1]
 #: Stamp sweep commits every this many workspaces (load: no long transaction).
 STAMP_COMMIT_EVERY = 100
 #: Workspaces purged per run at most; the rest stay stamped and go tomorrow (load).
@@ -95,7 +103,9 @@ async def stamp_capacity_locks(db: AsyncSession, *, now: datetime) -> StampCount
     that left the candidate set while stamped is cleared. Commits every
     :data:`STAMP_COMMIT_EVERY` workspaces and once at the end, so no single
     transaction spans the whole sweep (sessions are ``expire_on_commit=False``,
-    so the rows loaded up front stay usable across those commits).
+    so the rows loaded up front stay usable across those commits). Clearing
+    the stamp also clears ``capacity_purge_final_notice_at``: the next lock
+    needs its own final notice.
 
     Args:
         db: Session to read and write with; committed by this function.
@@ -121,7 +131,7 @@ async def stamp_capacity_locks(db: AsyncSession, *, now: datetime) -> StampCount
         lock = await capacity_lock_state(db, ws) if is_lock_candidate(ws) else None
         if lock is None:
             if ws.capacity_locked_since is not None:
-                ws.capacity_locked_since = None
+                _clear_stamp(ws)
                 cleared += 1
                 logger.info("capacity_lock_cleared", workspace_id=str(ws.id))
         elif ws.capacity_locked_since is None:
@@ -144,6 +154,12 @@ async def stamp_capacity_locks(db: AsyncSession, *, now: datetime) -> StampCount
         kept=kept,
     )
     return StampCounts(evaluated=evaluated, stamped=stamped, cleared=cleared, kept=kept)
+
+
+def _clear_stamp(ws: Workspace) -> None:
+    """End the lock clock: no stamp, and no final notice for it."""
+    ws.capacity_locked_since = None
+    ws.capacity_purge_final_notice_at = None
 
 
 def notice_stage(elapsed_days: int) -> int | None:
@@ -238,8 +254,12 @@ async def send_due_purge_notices(
     releases the claim; an uncertain one (``TimeoutError``) keeps it — at
     most once. Redis unavailable fails closed (no mail, counted as failed).
 
+    A day-29 mail sent, or possibly sent, sets the workspace's
+    ``capacity_purge_final_notice_at`` to ``now`` and commits: the purge waits
+    for it. A failed one does not, so the purge waits for the retry.
+
     Args:
-        db: Session to read with; nothing is written.
+        db: Session to read with; commits once per recorded final notice.
         now: The sweep's clock (naive UTC).
         redis: Async Redis client (``set(nx, ex)`` / ``delete``).
         email: An ``EmailService``.
@@ -303,6 +323,7 @@ async def send_due_purge_notices(
             # The provider may have accepted it: keep the claim (at most once).
             logger.warning("capacity_purge_notice_delivery_uncertain", workspace_id=str(ws.id))
             sent += 1
+            await _record_final_notice(db, ws, stage=stage, now=now)
             continue
         except Exception as exc:  # noqa: BLE001 — implementations must not raise; be safe
             logger.warning(
@@ -322,6 +343,7 @@ async def send_due_purge_notices(
             stage=stage,
             purge_at=deadline.isoformat(),
         )
+        await _record_final_notice(db, ws, stage=stage, now=now)
     logger.info(
         "capacity_purge_notice_pass",
         considered=considered,
@@ -335,23 +357,54 @@ async def send_due_purge_notices(
     )
 
 
-def purge_due(locked_since: datetime | None, now: datetime) -> bool:
-    """Whether a lock stamped at ``locked_since`` is due for the purge at ``now``.
+async def _record_final_notice(
+    db: AsyncSession, ws: Workspace, *, stage: int, now: datetime
+) -> None:
+    """After the day-29 mail went out (or may have): let the purge run tomorrow."""
+    if stage != FINAL_NOTICE_DAY:
+        return
+    ws.capacity_purge_final_notice_at = now
+    await db.commit()
 
-    Calendar days (:func:`_days_between`), like the notices: the stamp lands a
-    few seconds into the 04:00 run, so the day-30 run starts a few seconds
-    short of 30 x 24 hours and would otherwise purge a day late — after the
-    "1 day left" mail of day 29 promised otherwise.
+
+def _lock_expired(locked_since: datetime | None, now: datetime) -> bool:
+    """Calendar day 30 or later of the lock (:func:`_days_between`).
+
+    Calendar days, like the notices: the stamp lands a few seconds into the
+    04:00 run, so the day-30 run starts a few seconds short of 30 x 24 hours
+    and would otherwise purge a day late — after the "1 day left" mail of day
+    29 promised otherwise.
     """
     return locked_since is not None and _days_between(locked_since, now) >= PURGE_AFTER.days
+
+
+def _final_notice_given(final_notice_at: datetime | None, now: datetime) -> bool:
+    """The day-29 mail went out on an earlier calendar day than ``now``."""
+    return final_notice_at is not None and _days_between(final_notice_at, now) >= 1
+
+
+def purge_due(
+    locked_since: datetime | None, now: datetime, *, final_notice_at: datetime | None
+) -> bool:
+    """Whether a lock stamped at ``locked_since`` is due for the purge at ``now``.
+
+    Calendar day 30 of the lock or later, AND the final ("1 day left") notice
+    recorded at ``final_notice_at`` went out on an earlier calendar day: no
+    data is deleted without that warning — a missed or failed day-29 mail
+    postpones the purge to the day after it finally goes out.
+    """
+    return _lock_expired(locked_since, now) and _final_notice_given(final_notice_at, now)
 
 
 @dataclass(frozen=True)
 class PurgeCounts:
     """What one purge pass did.
 
-    ``due`` counts every workspace due this run, including the ones past
-    :data:`PURGE_MAX_WORKSPACES_PER_RUN` that wait for tomorrow.
+    ``due`` counts every workspace on calendar day 30 or later this run,
+    including the ones past :data:`PURGE_MAX_WORKSPACES_PER_RUN` that wait for
+    tomorrow and the ``awaiting_notice`` ones. ``awaiting_notice``: day 30 or
+    later, but the final notice has not gone out on an earlier calendar day
+    (notices off, or the day-29 mail failed) — nothing deleted, still stamped.
     ``skipped_within``: within capacity / no longer a candidate at purge time
     (un-stamped). ``failed``: the purge or its audit commit raised (stays
     stamped, retried next run). ``aborted``: stopped mid-way by a re-subscribe
@@ -366,6 +419,7 @@ class PurgeCounts:
     failed: int
     aborted: int
     nothing_to_delete: int = 0
+    awaiting_notice: int = 0
 
 
 async def _workspace_state(db: AsyncSession, ws: Workspace) -> str:
@@ -386,7 +440,9 @@ async def _workspace_state(db: AsyncSession, ws: Workspace) -> str:
 async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: Any) -> PurgeCounts:
     """Delete the data of every workspace stamped :data:`PURGE_AFTER` ago or more.
 
-    Due on calendar day 30 of the stamp (:func:`purge_due`). At most
+    Due on calendar day 30 of the stamp once the final notice went out on an
+    earlier calendar day (:func:`purge_due`); a workspace past day 30 without
+    it is counted as ``awaiting_notice``, logged and left alone. At most
     :data:`PURGE_MAX_WORKSPACES_PER_RUN` workspaces per run, oldest stamp
     first; the rest stay stamped and go on a later run.
 
@@ -416,8 +472,21 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
     Returns:
         The per-outcome counts of this pass.
     """
+    expired = [
+        ws for ws in await _stamped_workspaces(db) if _lock_expired(ws.capacity_locked_since, now)
+    ]
+    awaiting = [
+        ws for ws in expired if not _final_notice_given(ws.capacity_purge_final_notice_at, now)
+    ]
+    for ws in awaiting:
+        logger.warning(
+            "capacity_purge_awaiting_final_notice",
+            workspace_id=str(ws.id),
+            locked_since=to_utc_iso(ws.capacity_locked_since),
+            final_notice_at=to_utc_iso(ws.capacity_purge_final_notice_at),
+        )
     all_due = sorted(
-        (ws for ws in await _stamped_workspaces(db) if purge_due(ws.capacity_locked_since, now)),
+        (ws for ws in expired if ws not in awaiting),
         key=lambda w: (w.capacity_locked_since, str(w.id)),
     )
     # Ids read now, while the rows are loaded: a rollback on an earlier
@@ -431,7 +500,7 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
         state = await _workspace_state(db, ws)
         if state != "purgeable":
             if state == "left" and ws.capacity_locked_since is not None:
-                ws.capacity_locked_since = None
+                _clear_stamp(ws)
                 await db.commit()
             skipped += 1
             logger.info(
@@ -439,12 +508,14 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
             )
             continue
         ws_name, since = ws.name, ws.capacity_locked_since
-        if since is None or not purge_due(since, now):
+        if since is None or not purge_due(
+            since, now, final_notice_at=ws.capacity_purge_final_notice_at
+        ):
             skipped += 1
             continue
         lock = await capacity_lock_state(db, ws)
         if lock is None:
-            ws.capacity_locked_since = None
+            _clear_stamp(ws)
             await db.commit()
             skipped += 1
             logger.info("capacity_purge_skipped_within_capacity", workspace_id=str(ws_id))
@@ -535,16 +606,18 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
         else:
             logger.warning("capacity_purge_complete_mail_failed", workspace_id=str(ws_id))
     counts = PurgeCounts(
-        due=len(all_due),
+        due=len(expired),
         purged=purged,
         skipped_within=skipped,
         failed=failed,
         aborted=aborted,
         nothing_to_delete=nothing,
+        awaiting_notice=len(awaiting),
     )
     logger.info(
         "capacity_purge_pass",
         due=counts.due,
+        awaiting_notice=counts.awaiting_notice,
         purged=purged,
         skipped_within=skipped,
         failed=failed,
@@ -565,9 +638,10 @@ async def _clear_stamp_and_audit(
     lock: CapacityLock,
     report: WorkspacePurgeReport,
 ) -> None:
-    """Clear the stamp (unless the row is gone) and write the purge's audit row; commits."""
+    """Clear the stamp and its final notice (unless the row is gone) and write
+    the purge's audit row; commits."""
     if clear:
-        ws.capacity_locked_since = None
+        _clear_stamp(ws)
     db.add(
         AuditLog(
             user_email=user_email,

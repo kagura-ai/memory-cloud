@@ -6,6 +6,10 @@ that clock. The daily sweep (``services/capacity_purge.py``) stamps this column
 when the lock is on and clears it when the lock is off; the purge selects
 ``capacity_locked_since <= now - 30 days``.
 
+``workspaces.capacity_purge_final_notice_at``: when the day-29 "1 day left"
+mail of the current lock went out. The purge requires it on an earlier calendar
+day, so nothing is deleted without the final warning; cleared with the stamp.
+
 Partial index: the sweep's two reads are "stamped rows" (notices, purge) and
 the candidate scan; both are tiny next to the table, and the partial index
 keeps the stamped-row read an index scan whatever the table size.
@@ -30,6 +34,10 @@ def upgrade() -> None:
         "workspaces",
         sa.Column("capacity_locked_since", sa.DateTime(), nullable=True),
     )
+    op.add_column(
+        "workspaces",
+        sa.Column("capacity_purge_final_notice_at", sa.DateTime(), nullable=True),
+    )
     op.create_index(
         "ix_workspaces_capacity_locked_since",
         "workspaces",
@@ -41,4 +49,5 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("ix_workspaces_capacity_locked_since", table_name="workspaces")
+    op.drop_column("workspaces", "capacity_purge_final_notice_at")
     op.drop_column("workspaces", "capacity_locked_since")

@@ -1824,6 +1824,11 @@ class Workspace(Base):
     # 30-day purge clock restarts after a cleanup or a re-subscription. NULL
     # for every paid, admin-managed or self-hosted workspace.
     capacity_locked_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # #1969: when the day-29 "1 day left" mail of the current lock went out
+    # (or may have: delivery uncertain), naive UTC. The purge runs only on a
+    # later calendar day, so no data is deleted without that final warning.
+    # Cleared together with ``capacity_locked_since``.
+    capacity_purge_final_notice_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # Issue #709: Per-workspace embedding spend caps (USD, BYOK-only). NULL =
     # "inherit tier default from ``PlanTier.embedding_*_cap_usd``"; non-NULL =
