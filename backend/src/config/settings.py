@@ -1355,6 +1355,19 @@ class Settings(BaseSettings):
         default=False,
         description="Enable BM25 IDF drift cron in production (Issue #378)",
     )
+    # #1969: the capacity-over purge rolls out in three stages — stamping
+    # (always on, it only writes ``workspaces.capacity_locked_since``), the
+    # "N days left" mails, then the deletion itself. Turn the second on only
+    # once stamping has run in production, and the third only once the mails
+    # have gone out for a full cycle, so no workspace is deleted unwarned.
+    capacity_purge_notice_enabled: bool = Field(
+        default=False,
+        description="Send the capacity-over countdown and completion e-mails (#1969)",
+    )
+    capacity_purge_enabled: bool = Field(
+        default=False,
+        description="Delete the data of workspaces over the Free capacity for 30 days (#1969)",
+    )
     bm25_reveal_rate_limit_per_hour: int = Field(
         default=10,
         description="Max BM25 reveal-terms calls per user per hour (Issue #377)",
