@@ -1246,7 +1246,7 @@
           "sleep": "Sleep maintenance",
           "public": "Public search",
           "members": "Members beyond the plan's seats (the owner always keeps one)",
-          "contexts": "Contexts beyond the plan's writable slots (they stay readable). Private contexts other members created use slots too; removing that member from the workspace hands their contexts to the owner, who can then delete them."
+          "contexts": "Contexts beyond the plan's writable slots (they stay readable). Private contexts other members created use slots too; removing that member from the workspace hands their contexts to the owner, who can then delete them"
         },
         "resume": "Upgrade or re-subscribe to resume them — or bring the workspace back under the plan's limits (remove members, delete or merge older contexts).",
         "viewPlan": "View plan"

@@ -617,8 +617,9 @@ class PermissionService:
 
         # #1948: the capacity-over lock, after authorization (never an oracle);
         # only the enum member ALLOWED skips it (a stray value fails closed). ``user_id`` keeps the outsider
-        # redaction for the private-context creator shortcut, which reaches here
-        # without a membership row.
+        # redaction for the private-context creator shortcut, which since #1957
+        # reads membership too and reaches here without a row only in the
+        # logged, unexpected case.
         if capacity is not CapacityPolicy.ALLOWED:
             await ensure_not_capacity_locked(self.db, context.workspace_id, user_id=user_id)
             # #1943: a content write into a context without a writable slot.
@@ -683,6 +684,7 @@ class PermissionService:
                         "private_context_creator_without_membership",
                         context_id=str(context_id),
                         workspace_id=str(context.workspace_id),
+                        user_id=user_id,
                     )
                 return context, ContextRole.OWNER
             # #1784: an account linked to the creator is the same person. The
