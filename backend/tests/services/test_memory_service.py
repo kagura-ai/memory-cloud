@@ -1057,10 +1057,13 @@ class TestTagCooccurrenceSeeding:
         session.execute.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_missing_workspace_is_noop(self, base_memory, cfg):
+    async def test_missing_context_is_noop(self, base_memory, cfg):
+        """A row without a context cannot be placed, so seeding is skipped.
+        (workspace_id is NOT NULL since e95 / #1951, so that half of the old
+        guard is gone.)"""
         from services import memory_service as ms
 
-        base_memory.workspace_id = None
+        base_memory.context_id = None
         session = MagicMock()
         session.execute = AsyncMock()
         with patch(

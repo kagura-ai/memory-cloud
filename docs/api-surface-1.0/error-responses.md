@@ -413,7 +413,7 @@ rest do not.
     "memory_count": 1200,          // live (not soft-deleted) memories in the workspace
     "memory_limit": 1000,          // effective_memory_limit (plan + addons + referral)
     "over_memories": 200,          // 0 when the memory axis is within the limit
-    "used_bytes": 157286400,       // workspace_storage_usage.used_bytes (0 when no row), less files of soft-deleted contexts
+    "used_bytes": 157286400,       // bytes the owner can still delete: uploaded, not soft-deleted files that are workspace-scoped or in a live context (#1961) — the same figure downgrade-eligibility reports; files left in a deleted context are not counted
     "storage_limit_bytes": 104857600,
     "over_bytes": 52428800,        // 0 when the storage axis is within the limit
     "cleanup_url": "<frontend_url>/workspace/settings/plan"
@@ -438,9 +438,14 @@ workspace (a share-key or public-context reader) gets the refusal with every num
 `cleanup_url` set to `null`. Guardrails stay available while locked (MCP `load_guardrails`, REST `/memory/guardrails` and
 `/memory/guardrails/digest`, `get_context_info`'s guardrails, the session instructions): they are
 small, bounded safety rails, and blocking one door while the others serve the same entries would
-protect nothing. Files of a soft-deleted context stay in the storage counter (the
-context can be restored) but are not counted toward the lock: the owner can no longer see or
-delete them. `GET /api/v1/workspace/usage/current`
+protect nothing. The storage figure (`used_bytes`) is the one `services/storage_counts.py`
+defines and the downgrade-eligibility read shares ([#1961](https://github.com/kagura-ai/memory-cloud/issues/1961)):
+uploaded, not soft-deleted files that are workspace-scoped or bound to a live context —
+every live context, another member's private one included (the owner reaches those by
+removing the member, which hands the context over). Files of a soft-deleted context stay
+in the upload-quota counter (the context can be restored, and uploads keep honouring that
+counter) but are not counted toward the lock or eligibility: no listing shows them, so no
+one could delete them to lift a lock. `GET /api/v1/workspace/usage/current`
 reports the same numbers under `capacity_lock` (`null` when not locked), and MCP `get_usage`
 under `capacity_lock`.
 

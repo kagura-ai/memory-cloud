@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+import structlog
 
 from auth.workspace_roles import ContextRole, WorkspaceRole
 from services.capacity_lock import CapacityPolicy
@@ -109,15 +110,97 @@ class TestContextRbac:
         assert seat.await_args.args[1] == WS  # the workspace id; loaded inside the helper
 
     @pytest.mark.asyncio
-    async def test_a_private_context_of_the_creator_skips_membership_and_seat(
+    async def test_a_creator_without_a_seat_is_refused_on_their_private_context(
         self, service
     ) -> None:
-        """The creator shortcut has never read membership (#165); the seat does not change it."""
+        """#1957: the creator shortcut reads membership and the seat like every
+        other path, so REST ``check_context_access`` callers (feedback, graph)
+        answer the seat-less creator the same way the context resolvers and
+        MCP already did."""
         service.db.execute.return_value.scalar_one_or_none.return_value = _context(is_private=True)
-        with _seat(_refused()) as seat:
+        with _seat(_refused()) as seat, pytest.raises(FeatureNotAvailableError) as exc:
+            await service._check_context_access_rbac(USER, CTX, ContextRole.OWNER)
+        assert seat.await_args.args[1] == WS
+        assert seat.await_args.args[2].id == 7
+        assert (exc.value.details["gate"], exc.value.details["feature"]) == ("plan", "members")
+
+    @pytest.mark.asyncio
+    async def test_a_seated_creator_keeps_owner_access_to_their_private_context(
+        self, service
+    ) -> None:
+        service.db.execute.return_value.scalar_one_or_none.return_value = _context(is_private=True)
+        with _seat() as seat:
             context, role = await service._check_context_access_rbac(USER, CTX, ContextRole.OWNER)
         assert role is ContextRole.OWNER
+        seat.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_creator_with_no_membership_row_is_refused_like_a_non_member(
+        self, service
+    ) -> None:
+        """Not expected (removing a member hands their contexts to the owner,
+        #275). Refused — as ``ContextService.get_context`` and MCP already do
+        for the same caller — and logged so a real occurrence is visible."""
+        service.db.execute.return_value.scalar_one_or_none.return_value = _context(is_private=True)
+        service.workspace_service.get_member = AsyncMock(return_value=None)
+        service.db.get = AsyncMock(return_value=SimpleNamespace(owner_user_id="someone-else"))
+        with (
+            _seat(_refused()) as seat,
+            structlog.testing.capture_logs() as logs,
+            pytest.raises(AuthorizationError),
+        ):
+            await service._check_context_access_rbac(USER, CTX, ContextRole.OWNER)
         seat.assert_not_awaited()
+        warned = [e for e in logs if e.get("event") == "private_context_creator_without_membership"]
+        assert len(warned) == 1 and warned[0]["workspace_id"] == str(WS)
+
+    @pytest.mark.asyncio
+    async def test_the_owner_user_id_holder_passes_without_a_membership_row(self, service) -> None:
+        """A workspace whose owner has no OWNER row (#1108 desync) still lets
+        the owner into their own private context — the same exception
+        ``member_seat_suspended`` makes for ``owner_user_id``."""
+        service.db.execute.return_value.scalar_one_or_none.return_value = _context(is_private=True)
+        service.workspace_service.get_member = AsyncMock(return_value=None)
+        service.db.get = AsyncMock(return_value=SimpleNamespace(owner_user_id=USER))
+        with _seat(_refused()) as seat, structlog.testing.capture_logs() as logs:
+            _, role = await service._check_context_access_rbac(USER, CTX, ContextRole.OWNER)
+        assert role is ContextRole.OWNER
+        seat.assert_not_awaited()
+        assert not [
+            e for e in logs if e.get("event") == "private_context_creator_without_membership"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_non_creator_is_refused_before_membership_or_seat_is_read(
+        self, service
+    ) -> None:
+        """The #394 ordering holds: a stranger to a private context learns
+        nothing from the seat check, because it never runs for them."""
+        ctx = _context(is_private=True)
+        ctx.created_by = "someone-else"
+        service.db.execute.return_value.scalar_one_or_none.return_value = ctx
+        with _seat(_refused()) as seat, pytest.raises(AuthorizationError):
+            await service._check_context_access_rbac(USER, CTX, ContextRole.VIEWER)
+        seat.assert_not_awaited()
+        service.workspace_service.get_member.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_linked_account_of_the_creator_gets_the_same_seat_refusal(
+        self, service
+    ) -> None:
+        """#1784 linked accounts already went through membership and the seat;
+        the direct creator now takes the same road, so both answer alike."""
+        ctx = _context(is_private=True)
+        ctx.created_by = "the-creators-other-account"
+        service.db.execute.return_value.scalar_one_or_none.return_value = ctx
+        with (
+            patch("services.permission_service.is_same_owner", AsyncMock(return_value=True)),
+            _seat(_refused()),
+            pytest.raises(FeatureNotAvailableError) as exc,
+        ):
+            await service._check_context_access_rbac(USER, CTX, ContextRole.VIEWER)
+        # Identical envelope to the direct creator's refusal above.
+        assert (exc.value.details["gate"], exc.value.details["feature"]) == ("plan", "members")
 
 
 class TestWriteSlots:

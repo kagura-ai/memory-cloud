@@ -38,6 +38,7 @@ def _budget() -> MagicMock:
 
 def _tombstone(user: str, deleted_by: str | None, *, age_days: int) -> Memory:
     return Memory(
+        workspace_id=uuid4(),
         id=uuid4(),
         user_id=user,
         summary=f"tombstone {deleted_by}",
@@ -108,6 +109,7 @@ class TestArchiveRollbackRealDB:
 
         user = f"rb-user-{uuid4()}"
         row = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user,
             summary="archived then rolled back",
@@ -155,6 +157,7 @@ class TestArchiveRollbackRealDB:
         # A user's own forget() tombstone under an archive action (the fetch/stamp
         # race) must NOT be resurrected by a sleep rollback.
         forgotten = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user,
             summary="forgotten by the user",

@@ -58,10 +58,10 @@ def _seed_memory(conn: Connection, summary: str) -> None:
     conn.execute(
         text(
             "INSERT INTO memories "
-            "(id, user_id, summary, content, type, embedding_status, importance, "
+            "(id, user_id, workspace_id, summary, content, type, embedding_status, importance, "
             " confidence, scope, long_term, use_count, access_count, client, "
             " source, created_at) "
-            "VALUES (gen_random_uuid(), 'tester-818', :summary, 'body', 'note', "
+            "VALUES (gen_random_uuid(), 'tester-818', gen_random_uuid(), :summary, 'body', 'note', "
             "'success', 0.5, 1.0, 'working', false, 0, 0, 'test', "
             "'mcp_remember', now())"
         ),

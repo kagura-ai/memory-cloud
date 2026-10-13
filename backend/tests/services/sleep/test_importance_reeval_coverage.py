@@ -87,7 +87,8 @@ def _mem_kwargs(
         "client": "pytest",
         "updated_at": updated_at,
         "deleted_at": updated_at if deleted else None,
-        "workspace_id": workspace_id,
+        # #1951: the column is NOT NULL; a test that does not care gets a fresh one.
+        "workspace_id": workspace_id or uuid4(),
         "context_id": context_id,
     }
 

@@ -489,7 +489,7 @@ class TestForgetByQueryIsAllOrNothing:
         by_id = {good.id: good, legacy.id: legacy}
         service.memory_repo = MagicMock(get=AsyncMock(side_effect=lambda mid: by_id[mid]))
         service._soft_delete_memory = AsyncMock()  # type: ignore[method-assign]
-        with pytest.raises(ValueError, match="NULL workspace_id/context_id"):
+        with pytest.raises(ValueError, match="has no context_id"):
             await service.forget(ForgetRequest(query="old", k=5), "u1", CTX)
         service._soft_delete_memory.assert_not_awaited()
         service.db.commit.assert_not_awaited()

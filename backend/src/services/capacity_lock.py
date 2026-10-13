@@ -15,9 +15,10 @@ until it is cleaned up or re-subscribed:
 * **Still allowed**: listing, deleting (memories, contexts, files), export,
   usage and plan pages — everything the owner needs to get back under the cap.
 
-The state is computed at gate time from two cheap queries (an indexed COUNT
-and one primary-key row) and never stored, so deleting down to the cap or a
-plan push unlocks on the very next call with nothing to invalidate.
+The state is computed at gate time from two indexed aggregates (the live
+memory COUNT and the reducible-storage SUM of ``services/storage_counts.py``,
+#1961) and never stored, so deleting down to the cap or a plan push unlocks on
+the very next call with nothing to invalidate.
 """
 
 from __future__ import annotations
@@ -28,14 +29,14 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, and_, func, select
+from sqlalchemy import ColumnElement, and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.plan_tiers import PlanName
 from config.settings import get_settings
 from models.auth import ENTITLEMENT_SOURCE_EXTERNAL_BILLING, Context, Workspace, WorkspaceMember
-from models.file_objects import FileObject, WorkspaceStorageUsage
 from services.memory_counts import live_memory_count_stmt
+from services.storage_counts import reducible_storage_bytes
 from utils.exceptions import CapacityLockedError
 
 # The web page where the owner sees the plan, the usage and the way back.
@@ -103,32 +104,6 @@ def is_lock_candidate(workspace: Workspace) -> bool:
     )
 
 
-async def _bytes_in_deleted_contexts(db: AsyncSession, workspace_id: UUID) -> int:
-    """Bytes of live uploaded files bound to a soft-deleted context.
-
-    ``delete_context`` kept the context's files until #1960 (the context can be
-    restored from its rows, ``services/context_restore.py``), so legacy rows
-    still sit in ``workspace_storage_usage``. The owner can no longer see them —
-    ``list_files`` and the storage page only show files of live contexts — so
-    counting them would leave a storage lock the owner has no way to lift by
-    deleting. The lock's figure therefore excludes them; the counter itself
-    (and the upload quota) are unchanged.
-    """
-    deleted_contexts = select(Context.id).where(
-        Context.workspace_id == workspace_id,
-        Context.deleted_at.is_not(None),
-    )
-    total = await db.scalar(
-        select(func.coalesce(func.sum(FileObject.size_bytes), 0)).where(
-            FileObject.workspace_id == workspace_id,
-            FileObject.deleted_at.is_(None),
-            FileObject.status == "uploaded",
-            FileObject.context_id.in_(deleted_contexts),
-        )
-    )
-    return int(total or 0)
-
-
 async def capacity_lock_state(db: AsyncSession, workspace: Workspace) -> CapacityLock | None:
     """The lock on ``workspace``, or ``None`` when it is not locked.
 
@@ -158,8 +133,9 @@ async def projected_free_capacity(db: AsyncSession, workspace: Workspace) -> Cap
     own effective limits do not apply. The Free tier's limits are taken with
     the bonuses a downgrade keeps — the rule ``DowngradeEligibilityService``
     applies (addons and the referral bonus are retained, a zero-base tier
-    never stacks them). The counting is the lock's own, including the
-    deleted-context storage exclusion, so the notice and the lock agree.
+    never stacks them). The counting is the lock's own — the shared
+    reducible-storage figure (#1961) — so the notice, the lock and the
+    downgrade eligibility read all agree.
     """
     from config.plan_tiers import PLAN_TIERS
     from models.auth import stacked_limit
@@ -180,17 +156,14 @@ async def _measure(
 ) -> CapacityLock | None:
     """Count the workspace against the given limits; ``None`` when within both."""
     memory_count = int(await db.scalar(live_memory_count_stmt(workspace_id)) or 0)
-    used_bytes = int(
-        await db.scalar(
-            select(WorkspaceStorageUsage.used_bytes).where(
-                WorkspaceStorageUsage.workspace_id == workspace_id
-            )
-        )
-        or 0
-    )
-    if 0 <= storage_limit < used_bytes:
-        # Only on the over-storage path, so an unlocked workspace pays nothing.
-        used_bytes -= await _bytes_in_deleted_contexts(db, workspace_id)
+    # #1961: the one storage figure, shared with the downgrade-eligibility read,
+    # on every call. The upload counter (``workspace_storage_usage``) is not a
+    # sound short-cut: it is delta-maintained, floored at 0, never reseeded
+    # from the rows and read as 0 when its row is missing, so "counter within
+    # the limit → unlocked" can skip a lock that eligibility reports — and the
+    # lock payload must carry the same ``used_bytes`` eligibility does. The
+    # SUM is indexed by workspace and bounded by the Free storage limit.
+    used_bytes = await reducible_storage_bytes(db, workspace_id)
     # A negative limit would mean "unlimited"; Free has none today, but a
     # settings override must not lock a workspace against an unlimited cap.
     over_memories = max(0, memory_count - memory_limit) if memory_limit >= 0 else 0

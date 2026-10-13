@@ -16,7 +16,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import AuditLog, Context
+from models.auth import AuditLog
 from models.memory import Memory
 from models.retrieval_feedback import (
     _ALL_FEEDBACK_PROVENANCES,
@@ -69,10 +69,9 @@ class FeedbackService:
     ) -> tuple[RetrievalFeedback, UUID]:
         """Validate and stage one append-only event without committing it.
 
-        The returned workspace id is always resolved: ``Memory.workspace_id``
-        is nullable (legacy rows), so when it is NULL the owning Context's
-        ``workspace_id`` (NOT NULL by schema) is used instead — audit
-        attribution must never record a null workspace.
+        The returned workspace id is the memory's own: ``Memory.workspace_id``
+        is NOT NULL since e95 (#1951), so audit attribution never records a
+        null workspace.
         """
         if provenance not in _ALL_FEEDBACK_PROVENANCES:
             raise ValueError(
@@ -91,15 +90,9 @@ class FeedbackService:
         if existing is None:
             raise NotFoundException("Memory")
 
+        # NOT NULL by schema since e95 (#1951): the audit attribution below can
+        # take it as-is.
         workspace_id = existing.workspace_id
-        if workspace_id is None:
-            workspace_id = (
-                await self.db.execute(select(Context.workspace_id).where(Context.id == context_id))
-            ).scalar_one_or_none()
-            if workspace_id is None:
-                # Fail fast: attribution is part of the audit contract, and a
-                # memory whose context cannot be resolved is unexpected state.
-                raise NotFoundException("Context")
 
         row = RetrievalFeedback(
             context_id=context_id,

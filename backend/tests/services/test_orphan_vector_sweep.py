@@ -29,6 +29,7 @@ def _memory(**overrides) -> Memory:
     fields = {
         "id": uuid4(),
         "user_id": "sweep_user",
+        "workspace_id": uuid4(),
         "summary": "a summary long enough",
         "content": "c",
         "type": "note",

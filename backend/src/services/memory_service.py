@@ -917,9 +917,7 @@ class MemoryService:
         memory = Memory(
             id=memory_id,
             user_id=user_id,
-            workspace_id=UUID(workspace_id_str)
-            if workspace_id_str
-            else None,  # Migration 063: 3-level isolation
+            workspace_id=UUID(workspace_id_str),  # NOT NULL since e95 (#1951); guarded above
             context_id=UUID(context_id_str)
             if context_id_str
             else None,  # Migration 063: 3-level isolation
@@ -2138,10 +2136,11 @@ class MemoryService:
         re-run the permission check, bump access-stats (a write — wrong for
         PATCH) and issue a second commit. The declared_link refs still come from
         ``_fetch_declared_link_refs``, which has none of those side effects.
-        NULL workspace_id/context_id rows skip the link fetch and return empty
-        link arrays (the helper's signature requires non-null FKs).
+        A row without a context_id skips the link fetch and returns empty link
+        arrays (the helper's signature requires non-null FKs; workspace_id is
+        NOT NULL since e95, #1951).
         """
-        if memory.workspace_id and memory.context_id:
+        if memory.context_id:
             (
                 outgoing_links,
                 outgoing_has_more,
@@ -2273,7 +2272,7 @@ class MemoryService:
             memory, request, provided_fields, normalized_summary
         )
 
-        memory_workspace_id = str(memory.workspace_id) if memory.workspace_id else None
+        memory_workspace_id = str(memory.workspace_id)
         memory_context_id = str(memory.context_id) if memory.context_id else None
 
         if needs_reembed:
@@ -5849,11 +5848,11 @@ class MemoryService:
                 if not await self._may_delete_guardrail(user_id, memory):
                     return ForgetResponse(deleted_count=0, memory_ids=[])
                 # Migration 063: Get workspace_id/context_id from memory directly
-                # CRITICAL: Validate workspace_id/context_id are not NULL (data integrity)
-                if not memory.workspace_id or not memory.context_id:
+                # CRITICAL: a row without a context cannot be placed (workspace_id is NOT NULL, e95)
+                if not memory.context_id:
                     raise ValueError(
-                        f"Memory {memory.id} has NULL workspace_id/context_id. "
-                        "This indicates data migration issue. Run Migration 063."
+                        f"Memory {memory.id} has no context_id (workspace_id is NOT NULL "
+                        "since e95, #1951); the row cannot be placed in a collection."
                     )
 
                 memory_workspace_id = str(memory.workspace_id)
@@ -5936,10 +5935,10 @@ class MemoryService:
                 # not delete one by one. Skipped rows are simply not counted.
                 if not await self._may_delete_guardrail(user_id, memory):
                     continue
-                if not memory.workspace_id or not memory.context_id:
+                if not memory.context_id:
                     raise ValueError(
-                        f"Memory {memory.id} has NULL workspace_id/context_id. "
-                        "This indicates data migration issue. Run Migration 063."
+                        f"Memory {memory.id} has no context_id (workspace_id is NOT NULL "
+                        "since e95, #1951); the row cannot be placed in a collection."
                     )
                 victims.append(memory)
 
@@ -6149,11 +6148,11 @@ class MemoryService:
         await self._ensure_capacity(user_id, workspace_id=seed_memory.workspace_id)
 
         # Migration 063: Get workspace_id and context_id directly from seed memory
-        # CRITICAL: Validate seed memory has workspace_id/context_id (data integrity)
-        if not seed_memory.workspace_id or not seed_memory.context_id:
+        # CRITICAL: the seed needs a context to be placed (workspace_id is NOT NULL, e95)
+        if not seed_memory.context_id:
             raise ValueError(
-                f"Seed memory {seed_memory.id} has NULL workspace_id/context_id. "
-                "This indicates data migration issue. Run Migration 063."
+                f"Seed memory {seed_memory.id} has no context_id (workspace_id is NOT NULL "
+                "since e95, #1951); the row cannot be placed in a collection."
             )
 
         if not current_context_id:
@@ -6688,7 +6687,7 @@ async def _create_knn_seed_edges(
         if not config.knn_seed_enabled:
             return
 
-        if not memory.workspace_id or not memory.context_id:
+        if not memory.context_id:
             # Defensive: 3-level isolation requires both
             return
 
@@ -6996,7 +6995,7 @@ async def _create_tag_cooccurrence_seed_edges(
         if not config.tag_cooccurrence_enabled:
             return
 
-        if not memory.workspace_id or not memory.context_id:
+        if not memory.context_id:
             # Defensive: 3-level isolation requires both
             return
 

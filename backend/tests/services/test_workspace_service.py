@@ -682,9 +682,9 @@ class TestGetWorkspaceStats:
 
     @pytest.mark.asyncio
     async def test_counts_by_workspace_not_by_member(self, db_session) -> None:
-        """#1946: a member's memories in another workspace, soft-deleted rows
-        and legacy rows without a workspace stay out; a departed author's row
-        in this workspace stays in."""
+        """#1946: a member's memories in another workspace and soft-deleted rows
+        stay out; a departed author's row in this workspace stays in. (A row
+        without a workspace cannot exist since e95 / #1951.)"""
         service = WorkspaceService(db_session)
         ws = Workspace(id=uuid4(), name="W14", owner_user_id="u22", plan_name="free")
         other = Workspace(id=uuid4(), name="W15", owner_user_id="u22", plan_name="free")
@@ -715,7 +715,6 @@ class TestGetWorkspaceStats:
                 _mem("left-the-workspace", ws.id),  # counted: not a member any more
                 _mem("u22", other.id),  # other workspace
                 _mem("u22", ws.id, deleted_at=utcnow()),  # soft-deleted
-                _mem("u22", None),  # legacy row without a workspace
             ]
         )
         await db_session.flush()

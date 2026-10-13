@@ -617,8 +617,9 @@ class PermissionService:
 
         # #1948: the capacity-over lock, after authorization (never an oracle);
         # only the enum member ALLOWED skips it (a stray value fails closed). ``user_id`` keeps the outsider
-        # redaction for the private-context creator shortcut, which reaches here
-        # without a membership row.
+        # redaction for the private-context creator shortcut, which since #1957
+        # reads membership too and reaches here without a row only in the
+        # logged, unexpected case.
         if capacity is not CapacityPolicy.ALLOWED:
             await ensure_not_capacity_locked(self.db, context.workspace_id, user_id=user_id)
             # #1943: a content write into a context without a writable slot.
@@ -626,6 +627,22 @@ class PermissionService:
                 await ensure_context_writable(self.db, context)
 
         return context, effective_role
+
+    async def _seated_member(self, workspace_id: UUID, user_id: str) -> WorkspaceMember | None:
+        """The caller's membership row once their plan seat is confirmed.
+
+        One place for the "membership → ``ensure_member_seated``" pair the
+        seat gates share (#1943, #1957): ``None`` when there is no membership
+        row (the caller decides what that means), otherwise the row after the
+        seat check, which raises ``FeatureNotAvailableError`` for a member
+        without a seat.
+        """
+        member = await self.workspace_service.get_member(
+            workspace_id, user_id, raise_if_not_found=False
+        )
+        if member is not None:
+            await ensure_member_seated(self.db, workspace_id, member)
+        return member
 
     async def _check_context_access_rbac(
         self,
@@ -665,7 +682,29 @@ class PermissionService:
         linked_owner = False
         if context.is_private:
             if context.created_by == user_id:
-                # Creator has full access to their private context
+                # Creator has full access to their private context — once they
+                # are a seated member (#1957). Membership and the seat are read
+                # only after the caller is known to be the creator, so a
+                # non-creator still learns nothing here (#394 ordering). A
+                # creator with no membership row is not expected (removing a
+                # member hands their contexts to the owner, #275); it is logged
+                # and refused like any non-member, as ``ContextService.get_context``
+                # and the MCP resolver already do. The shortcut still skips the
+                # role and whitelist rules below — that is #165's contract for
+                # the creator, not part of #1957.
+                if await self._seated_member(context.workspace_id, user_id) is None:
+                    # The workspace's owner_user_id holder always has a seat
+                    # (plan_suspension.member_seat_suspended makes the same
+                    # exception), even through a missing OWNER row (#1108).
+                    workspace = await self.db.get(Workspace, context.workspace_id)
+                    if workspace is None or workspace.owner_user_id != user_id:
+                        logger.warning(
+                            "private_context_creator_without_membership",
+                            context_id=str(context_id),
+                            workspace_id=str(context.workspace_id),
+                            user_id=user_id,
+                        )
+                        raise AuthorizationError("Insufficient permissions")
                 return context, ContextRole.OWNER
             # #1784: an account linked to the creator is the same person. The
             # link widens ownership only: the caller still passes the
@@ -675,19 +714,12 @@ class PermissionService:
                 raise AuthorizationError("Insufficient permissions")
             linked_owner = True
 
-        # Shared context, or a linked account's private one: workspace membership
-        workspace_member = await self.workspace_service.get_member(
-            context.workspace_id,
-            user_id,
-            raise_if_not_found=False,
-        )
-
+        # Shared context, or a linked account's private one: workspace membership,
+        # then the seat (#1943) — right after the membership row, before the
+        # owner/admin bypass (the owner always has a seat; no query for them).
+        workspace_member = await self._seated_member(context.workspace_id, user_id)
         if not workspace_member:
             raise AuthorizationError("Insufficient permissions")
-
-        # #1943: the seat check sits right after the membership row, before the
-        # owner/admin bypass (the owner always has a seat; no query for them).
-        await ensure_member_seated(self.db, context.workspace_id, workspace_member)
 
         # Workspace owner/admin → bypass context checks (full access)
         # Note: allowed_context_ids is ignored for owner/admin
@@ -1123,13 +1155,11 @@ class PermissionService:
         async def _seat_held() -> None:
             # #1943: a member without a seat on the plan is refused here too —
             # the REST memory-id routes (reference / patch / explore) authorize
-            # through this method alone. A caller with no membership row (an
-            # author who left) keeps the pre-existing semantics.
-            member = await self.workspace_service.get_member(
-                workspace_id, user_id, raise_if_not_found=False
-            )
-            if member is not None:
-                await ensure_member_seated(self.db, workspace_id, member)
+            # through this method alone. An author with no membership row keeps
+            # the pre-existing pass on their own memories; the context-level
+            # paths (#1957) refuse that caller, so the two surfaces differ here
+            # by design, not by accident.
+            await self._seated_member(workspace_id, user_id)
 
         if user_id == memory_user_id:
             await _seat_held()
@@ -1161,12 +1191,8 @@ class PermissionService:
             await _emit_rbac_denied()
             return False
 
-        # Shared context: check workspace membership, then the binding.
-        shared_member = await self.workspace_service.get_member(
-            workspace_id, user_id, raise_if_not_found=False
-        )
-        if shared_member is None:
+        # Shared context: workspace membership and the seat (#1943), then the binding.
+        if await self._seated_member(workspace_id, user_id) is None:
             await _emit_rbac_denied()
             return False
-        await ensure_member_seated(self.db, workspace_id, shared_member)  # #1943
         return await _binding_ok()

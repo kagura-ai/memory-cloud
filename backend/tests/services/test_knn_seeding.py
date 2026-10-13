@@ -679,10 +679,12 @@ class TestKnnSeeding:
         db.commit.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_missing_workspace_or_context_skips(self):
-        """If memory lacks workspace_id or context_id, seeding is skipped (defensive)."""
+    async def test_missing_context_skips(self):
+        """A memory without a context_id cannot be placed, so seeding is skipped.
+        (workspace_id is NOT NULL since e95 / #1951; only the context half of the
+        old guard remains.)"""
         memory = _make_memory()
-        memory.workspace_id = None
+        memory.context_id = None
         db = _make_db()
 
         with (

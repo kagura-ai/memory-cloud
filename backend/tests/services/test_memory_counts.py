@@ -62,11 +62,11 @@ async def test_counts_only_this_workspaces_live_rows(db_session):
     # the count is by workspace, not by membership).
     await _memory(db_session, member, ws_a.id)
     await _memory(db_session, f"departed-{uuid4().hex[:8]}", ws_a.id)
-    # Noise that must not count toward A: the same member's row in B, a
-    # soft-deleted row in A, and a legacy row without a workspace.
+    # Noise that must not count toward A: the same member's row in B and a
+    # soft-deleted row in A. (A row without a workspace cannot exist since
+    # e95 / #1951 made the column NOT NULL.)
     await _memory(db_session, member, ws_b.id)
     await _memory(db_session, member, ws_a.id, deleted_at=utcnow())
-    await _memory(db_session, member, None)
 
     assert await count_live_memories(db_session, ws_a.id) == 2
     assert await count_live_memories(db_session, ws_b.id) == 1

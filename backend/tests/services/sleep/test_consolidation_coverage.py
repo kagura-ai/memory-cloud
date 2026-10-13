@@ -673,6 +673,7 @@ def _persist_memory(**overrides):
     fields = {
         "id": uuid4(),
         "user_id": "fetch-user",
+        "workspace_id": uuid4(),
         "summary": "real working memory",
         "content": "body",
         "type": "note",
@@ -807,8 +808,7 @@ class TestFetchWorkingMemories:
         ws_id = uuid4()
         match = _persist_memory(user_id=user, scope="working", workspace_id=ws_id)
         wrong_ws = _persist_memory(user_id=user, scope="working", workspace_id=uuid4())
-        no_ws = _persist_memory(user_id=user, scope="working", workspace_id=None)
-        for row in (match, wrong_ws, no_ws):
+        for row in (match, wrong_ws):
             db_session.add(row)
         await db_session.flush()
 
@@ -819,7 +819,6 @@ class TestFetchWorkingMemories:
         ids = {r.id for r in rows}
         assert match.id in ids
         assert wrong_ws.id not in ids
-        assert no_ws.id not in ids
 
     @pytest.mark.asyncio
     async def test_context_filter_branch_executes(self, db_session):
