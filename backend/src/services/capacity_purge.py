@@ -673,12 +673,32 @@ class SweepCounts:
     purge: PurgeCounts | None
 
 
+#: ``EMAIL_PROVIDER`` values that actually deliver mail. The default
+#: ``logging`` stub reports every send as delivered without sending anything.
+REAL_MAIL_PROVIDERS: frozenset[str] = frozenset({"resend"})
+
+
+def mail_provider_configured(settings: Any) -> bool:
+    """Whether ``settings.email_provider`` delivers mail to a human.
+
+    Fail closed: only the providers in :data:`REAL_MAIL_PROVIDERS` count, so a
+    provider added later gates the notices and the purge until listed here.
+    """
+    return settings.email_provider in REAL_MAIL_PROVIDERS
+
+
 async def run_capacity_purge_sweep(db: AsyncSession, *, now: datetime) -> SweepCounts:
     """Stamp, then notify, then purge — each later stage behind its flag.
 
     ``CAPACITY_PURGE_NOTICE_ENABLED`` gates the countdown mails and
     ``CAPACITY_PURGE_ENABLED`` the deletion; stamping always runs, so the clock
     is correct the day either flag is turned on.
+
+    Both later stages also need a mail provider that really delivers
+    (:func:`mail_provider_configured`). With the default logging stub every
+    "send" succeeds, so the final notice would be recorded and the purge would
+    follow without anyone having been warned: the run logs
+    ``capacity_purge_no_mail_provider`` once and skips both stages.
     """
     from config.settings import get_settings
     from db.redis import get_redis_client
@@ -686,12 +706,22 @@ async def run_capacity_purge_sweep(db: AsyncSession, *, now: datetime) -> SweepC
 
     settings = get_settings()
     stamp = await stamp_capacity_locks(db, now=now)
+    notice_on = bool(settings.capacity_purge_notice_enabled)
+    purge_on = bool(settings.capacity_purge_enabled)
+    if (notice_on or purge_on) and not mail_provider_configured(settings):
+        logger.warning(
+            "capacity_purge_no_mail_provider",
+            email_provider=str(settings.email_provider),
+            notice_enabled=notice_on,
+            purge_enabled=purge_on,
+        )
+        return SweepCounts(stamp=stamp, notices=None, purge=None)
     notices = None
-    if settings.capacity_purge_notice_enabled:
+    if notice_on:
         notices = await send_due_purge_notices(
             db, now=now, redis=get_redis_client(), email=get_email_service()
         )
     purge = None
-    if settings.capacity_purge_enabled:
+    if purge_on:
         purge = await purge_expired_workspaces(db, now=now, email=get_email_service())
     return SweepCounts(stamp=stamp, notices=notices, purge=purge)

@@ -16,6 +16,8 @@ from services.capacity_purge import (
     NoticeCounts,
     PurgeCounts,
     StampCounts,
+    SweepCounts,
+    mail_provider_configured,
     notice_key,
     notice_stage,
     purge_at,
@@ -768,7 +770,11 @@ _PURGED = PurgeCounts(due=1, purged=1, skipped_within=0, failed=0, aborted=0)
 )
 @pytest.mark.asyncio
 async def test_sweep_gates_notices_and_purge_on_their_flags(notice_on, purge_on) -> None:
-    settings = MagicMock(capacity_purge_notice_enabled=notice_on, capacity_purge_enabled=purge_on)
+    settings = MagicMock(
+        capacity_purge_notice_enabled=notice_on,
+        capacity_purge_enabled=purge_on,
+        email_provider="resend",
+    )
     stamp = AsyncMock(return_value=_STAMP)
     notices = AsyncMock(return_value=_NOTICES)
     purge = AsyncMock(return_value=_PURGED)
@@ -787,3 +793,47 @@ async def test_sweep_gates_notices_and_purge_on_their_flags(notice_on, purge_on)
     assert result.purge == (_PURGED if purge_on else None)
     assert notices.await_count == int(notice_on)
     assert purge.await_count == int(purge_on)
+
+
+@pytest.mark.parametrize("provider", ["logging", "smtp-not-wired"])
+@pytest.mark.asyncio
+async def test_sweep_without_a_real_mail_provider_sends_nothing_and_deletes_nothing(
+    provider,
+) -> None:
+    """Both flags on, but no provider that actually delivers mail: the logging
+    stub would report every notice as sent, so the final notice would be
+    recorded and the purge would follow without anyone being told. The notice
+    and purge stages are skipped (one warning per run); stamping still runs."""
+    import structlog
+
+    settings = MagicMock(
+        capacity_purge_notice_enabled=True,
+        capacity_purge_enabled=True,
+        email_provider=provider,
+    )
+    stamp = AsyncMock(return_value=_STAMP)
+    notices = AsyncMock(return_value=_NOTICES)
+    purge = AsyncMock(return_value=_PURGED)
+    get_email = MagicMock()
+    with (
+        patch("config.settings.get_settings", return_value=settings),
+        patch("db.redis.get_redis_client", return_value=MagicMock()),
+        patch("services.email_service.get_email_service", get_email),
+        patch("services.capacity_purge.stamp_capacity_locks", stamp),
+        patch("services.capacity_purge.send_due_purge_notices", notices),
+        patch("services.capacity_purge.purge_expired_workspaces", purge),
+        structlog.testing.capture_logs() as logs,
+    ):
+        result = await run_capacity_purge_sweep(MagicMock(), now=_NOW)
+    stamp.assert_awaited_once()
+    assert result == SweepCounts(stamp=_STAMP, notices=None, purge=None)
+    notices.assert_not_awaited()
+    purge.assert_not_awaited()
+    get_email.assert_not_called()
+    gated = [e for e in logs if e["event"] == "capacity_purge_no_mail_provider"]
+    assert len(gated) == 1 and gated[0]["log_level"] == "warning"
+
+
+@pytest.mark.parametrize(("provider", "real"), [("resend", True), ("logging", False)])
+def test_mail_provider_configured(provider, real) -> None:
+    assert mail_provider_configured(MagicMock(email_provider=provider)) is real
