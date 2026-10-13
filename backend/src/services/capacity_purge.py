@@ -34,8 +34,13 @@ from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.auth import AuditLog, User, Workspace
-from services.capacity_lock import capacity_lock_state, is_lock_candidate, lock_candidate_predicate
-from services.context_service import CAPACITY_PURGE_ACTOR, ContextService
+from services.capacity_lock import (
+    CapacityLock,
+    capacity_lock_state,
+    is_lock_candidate,
+    lock_candidate_predicate,
+)
+from services.context_service import CAPACITY_PURGE_ACTOR, ContextService, WorkspacePurgeReport
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -337,8 +342,11 @@ class PurgeCounts:
     ``due`` counts every workspace due this run, including the ones past
     :data:`PURGE_MAX_WORKSPACES_PER_RUN` that wait for tomorrow.
     ``skipped_within``: within capacity / no longer a candidate at purge time
-    (un-stamped). ``failed``: the purge raised (stays stamped, retried next
-    run). ``aborted``: stopped mid-way by a re-subscribe or an erasure.
+    (un-stamped). ``failed``: the purge or its audit commit raised (stays
+    stamped, retried next run). ``aborted``: stopped mid-way by a re-subscribe
+    or an erasure. ``nothing_to_delete``: due and over, but the purge removed
+    no context, memory or file (e.g. the retry after a lost audit commit) —
+    un-stamped and audited, no completion mail.
     """
 
     due: int
@@ -346,6 +354,7 @@ class PurgeCounts:
     skipped_within: int
     failed: int
     aborted: int
+    nothing_to_delete: int = 0
 
 
 async def _workspace_state(db: AsyncSession, ws: Workspace) -> str:
@@ -378,12 +387,15 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
     stops if not (re-subscribe / erasure mid-run): the stamp is cleared, the
     audit row says ``aborted``, and no completion mail goes out.
 
-    Each workspace is purged and audited on its own; a failure is logged and
-    rolled back (contexts already committed stay deleted), the workspace stays
-    stamped and is retried next run, and the next workspace proceeds. The
-    completion mail is sent once, after the commit that clears the stamp and
-    writes the audit row — best-effort, with no Redis claim: the cleared stamp
-    means the workspace is not selected again for this lock.
+    Each workspace is purged and audited on its own; a failure of the purge
+    or of the commit that clears the stamp and writes the audit row is logged
+    and rolled back (contexts already committed stay deleted), the workspace
+    stays stamped and is retried next run, and the next workspace proceeds.
+    The completion mail is sent once, after that commit — best-effort, with
+    no Redis claim: the cleared stamp means the workspace is not selected
+    again for this lock. A purge that removed nothing (no context, memory or
+    file — typically the retry after a lost audit commit) is un-stamped and
+    audited but sends no mail, so the owner never gets a zero-count message.
 
     Args:
         db: Session to read and write with; committed by this function.
@@ -397,7 +409,7 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
         (ws for ws in await _stamped_workspaces(db) if purge_due(ws.capacity_locked_since, now)),
         key=lambda w: (w.capacity_locked_since, str(w.id)),
     )
-    purged = skipped = failed = aborted = 0
+    purged = skipped = failed = aborted = nothing = 0
     for ws in all_due[:PURGE_MAX_WORKSPACES_PER_RUN]:
         # Fresh row: a rollback on an earlier workspace expired it, and it may
         # have re-subscribed or been cleaned up since the list was read.
@@ -439,28 +451,22 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
             await db.rollback()
             failed += 1
             continue
-        if last_state[0] != "gone":
-            ws.capacity_locked_since = None
-        db.add(
-            AuditLog(
+        try:
+            await _clear_stamp_and_audit(
+                db,
+                ws,
+                ws_id=ws_id,
+                clear=last_state[0] != "gone",
                 user_email=contact[0] if contact else "",
-                user_id=CAPACITY_PURGE_ACTOR,
-                action="capacity_purge",
-                resource=f"workspace:{ws_id}",
-                user_metadata={
-                    "locked_since": since.isoformat(),
-                    "over_memories": lock.over_memories,
-                    "over_bytes": lock.over_bytes,
-                    "contexts_deleted": report.contexts_deleted,
-                    "contexts_emptied": report.contexts_emptied,
-                    "memories_deleted": report.memories_deleted,
-                    "files_deleted": report.files_deleted,
-                    "bytes_released": report.bytes_released,
-                    "aborted": report.aborted,
-                },
+                since=since,
+                lock=lock,
+                report=report,
             )
-        )
-        await db.commit()
+        except Exception:  # noqa: BLE001 — one workspace must not stop the sweep
+            logger.exception("capacity_purge_audit_failed", workspace_id=str(ws_id))
+            await db.rollback()
+            failed += 1
+            continue
         if report.aborted:
             aborted += 1
             logger.warning(
@@ -468,6 +474,14 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
                 workspace_id=str(ws_id),
                 contexts_deleted=report.contexts_deleted,
                 memories_deleted=report.memories_deleted,
+            )
+            continue
+        if not (report.contexts_deleted or report.memories_deleted or report.files_deleted):
+            nothing += 1
+            logger.info(
+                "capacity_purge_nothing_to_delete",
+                workspace_id=str(ws_id),
+                bytes_released=report.bytes_released,
             )
             continue
         purged += 1
@@ -500,7 +514,12 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
                 error_type=type(exc).__name__,
             )
     counts = PurgeCounts(
-        due=len(all_due), purged=purged, skipped_within=skipped, failed=failed, aborted=aborted
+        due=len(all_due),
+        purged=purged,
+        skipped_within=skipped,
+        failed=failed,
+        aborted=aborted,
+        nothing_to_delete=nothing,
     )
     logger.info(
         "capacity_purge_pass",
@@ -509,8 +528,45 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
         skipped_within=skipped,
         failed=failed,
         aborted=aborted,
+        nothing_to_delete=nothing,
     )
     return counts
+
+
+async def _clear_stamp_and_audit(
+    db: AsyncSession,
+    ws: Workspace,
+    *,
+    ws_id: UUID,
+    clear: bool,
+    user_email: str,
+    since: datetime,
+    lock: CapacityLock,
+    report: WorkspacePurgeReport,
+) -> None:
+    """Clear the stamp (unless the row is gone) and write the purge's audit row; commits."""
+    if clear:
+        ws.capacity_locked_since = None
+    db.add(
+        AuditLog(
+            user_email=user_email,
+            user_id=CAPACITY_PURGE_ACTOR,
+            action="capacity_purge",
+            resource=f"workspace:{ws_id}",
+            user_metadata={
+                "locked_since": since.isoformat(),
+                "over_memories": lock.over_memories,
+                "over_bytes": lock.over_bytes,
+                "contexts_deleted": report.contexts_deleted,
+                "contexts_emptied": report.contexts_emptied,
+                "memories_deleted": report.memories_deleted,
+                "files_deleted": report.files_deleted,
+                "bytes_released": report.bytes_released,
+                "aborted": report.aborted,
+            },
+        )
+    )
+    await db.commit()
 
 
 @dataclass(frozen=True)

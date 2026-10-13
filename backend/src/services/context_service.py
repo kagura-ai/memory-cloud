@@ -1391,19 +1391,31 @@ class ContextService:
         *,
         actor: str,
         deleted_at: datetime,
-        chunk: int = PURGE_MEMORY_CHUNK,
-    ) -> int:
+        chunk: int | None = None,
+        should_continue: Callable[[], Awaitable[bool]] | None = None,
+    ) -> tuple[int, bool]:
         """Soft-delete the context's live memories in bulk UPDATEs of ``chunk`` rows (#1969).
 
         Commits after each chunk, so no transaction spans a large context and no
         row is loaded as an ORM object (``synchronize_session=False``: objects
         already in the session are not updated — callers read counts, not
-        instances). Loops until a chunk updates nothing. Returns the total.
+        instances). Loops until a chunk updates nothing. ``chunk`` defaults to
+        :data:`PURGE_MEMORY_CHUNK`.
+
+        ``should_continue`` is awaited after every committed chunk, so a
+        re-subscribe during one huge context stops the purge within one chunk.
+
+        Returns:
+            ``(total tombstoned, aborted)`` — ``aborted`` when ``should_continue``
+            said stop; the chunks committed before that stay tombstoned.
         """
         from models.memory import Memory
 
+        chunk = PURGE_MEMORY_CHUNK if chunk is None else chunk
         total = 0
         while True:
+            if total and should_continue is not None and not await should_continue():
+                return total, True
             ids = (
                 select(Memory.id)
                 .where(
@@ -1425,7 +1437,7 @@ class ContextService:
             )
             done = result.rowcount or 0
             if done == 0:
-                return total
+                return total, False
             await self.db.commit()
             total += done
 
@@ -1560,12 +1572,16 @@ class ContextService:
         is detached and soft-deleted, in one short transaction. After that
         commit its vectors are removed and its Redis bytes released. The
         default context stays, empty, so the workspace is usable on Free.
-        Workspace-scoped files (no context) are purged last.
+        Non-default contexts go first and the default one last, so an abort
+        leaves the default context's memories intact. Workspace-scoped files
+        (no context) are purged last.
 
-        ``should_continue`` is awaited before each context and before the
-        workspace-scoped files; when it returns False (the workspace
-        re-subscribed or was erased meanwhile) the purge stops and the
-        partial report comes back with ``aborted=True``.
+        ``should_continue`` is awaited before each context, after every memory
+        chunk and before the workspace-scoped files; when it returns False (the
+        workspace re-subscribed or was erased meanwhile) the purge stops and
+        the partial report comes back with ``aborted=True``. A stop between
+        chunks leaves that context live (not detached, files untouched) with
+        the chunks already committed tombstoned.
 
         Soft deletes: the tombstone sweep hard-deletes memories after
         ``CLEANUP_DELETED_MEMORIES_RETENTION_DAYS`` and the file GC after
@@ -1605,6 +1621,7 @@ class ContextService:
             .scalars()
             .all()
         )
+        contexts.sort(key=lambda c: c.is_default)  # stable: default last, rest by age
         deleted = emptied = memories = files = released_total = 0
         aborted = False
         for context in contexts:
@@ -1613,9 +1630,12 @@ class ContextService:
                 break
             self._storage_release_pending = {}
             deleted_at = utcnow()
-            memories += await self._tombstone_memories_chunked(
-                context, actor=actor, deleted_at=deleted_at
+            tombstoned, aborted = await self._tombstone_memories_chunked(
+                context, actor=actor, deleted_at=deleted_at, should_continue=should_continue
             )
+            memories += tombstoned
+            if aborted:
+                break
             files += await self._purge_context_files_and_edges(context, deleted_at=deleted_at)
             if context.is_default:
                 emptied += 1

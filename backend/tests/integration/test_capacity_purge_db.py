@@ -290,11 +290,11 @@ async def test_purge_chunks_memories(db_session, free_ws) -> None:
         await real_commit()
 
     with patch.object(db_session, "commit", counting_commit):
-        total = await ContextService(db_session)._tombstone_memories_chunked(
+        total, aborted = await ContextService(db_session)._tombstone_memories_chunked(
             ctx, actor=CAPACITY_PURGE_ACTOR, deleted_at=t, chunk=2
         )
 
-    assert total == 5
+    assert (total, aborted) == (5, False)
     assert commits == 3  # 2 + 2 + 1
     rows = (
         (await db_session.execute(select(Memory).where(Memory.context_id == ctx.id)))
@@ -362,6 +362,70 @@ async def test_purge_workspace_data_stops_when_told_to(
     live = await _live_contexts(db_session, ws)
     assert len(live) == 1 and live[0].id in {ctx.id, second.id}
     assert len(await _live_files(db_session, ws)) == 1  # workspace-scoped file untouched
+
+
+@pytest.mark.asyncio
+async def test_purge_stops_between_memory_chunks(db_session, free_ws, purge_side_effects) -> None:
+    """A re-subscribe during one huge context stops the purge within one chunk:
+    ``should_continue`` is asked after every committed chunk, and the context
+    itself is neither detached nor soft-deleted."""
+    ws, ctx, owner = free_ws
+    for _ in range(5):
+        db_session.add(_memory(ws, ctx, owner.user_id))
+    db_session.add(_file(ws, ctx, owner.user_id, size=50))
+    await db_session.flush()
+    answers = iter([True, False])  # before the context; after the first chunk
+
+    async def should_continue() -> bool:
+        return next(answers)
+
+    with patch("services.context_service.PURGE_MEMORY_CHUNK", 2):
+        report = await ContextService(db_session).purge_workspace_data(
+            ws.id, actor=CAPACITY_PURGE_ACTOR, should_continue=should_continue
+        )
+
+    assert report.aborted is True
+    assert report.memories_deleted == 2
+    assert (report.contexts_deleted, report.contexts_emptied, report.files_deleted) == (0, 0, 0)
+    await db_session.refresh(ctx)
+    assert ctx.deleted_at is None
+    assert len(await _live_memories(db_session, ws)) == 3
+    assert len(await _live_files(db_session, ws)) == 1
+
+
+@pytest.mark.asyncio
+async def test_purge_takes_the_default_context_last(
+    db_session, free_ws, purge_side_effects
+) -> None:
+    """Non-default contexts go first, the default one last — even when it is
+    the oldest — so an abort leaves the default context's memories intact."""
+    ws, ctx, owner = free_ws
+    default = Context(
+        workspace_id=ws.id,
+        name="default",
+        created_by=owner.user_id,
+        created_at=utcnow() - timedelta(days=365),
+    )
+    db_session.add(default)
+    await db_session.flush()
+    db_session.add(_memory(ws, default, owner.user_id))
+    db_session.add(_memory(ws, ctx, owner.user_id))
+    await db_session.flush()
+
+    async def should_continue() -> bool:
+        # Re-subscribed as soon as the non-default context is gone.
+        return ctx.deleted_at is None
+
+    report = await ContextService(db_session).purge_workspace_data(
+        ws.id, actor=CAPACITY_PURGE_ACTOR, should_continue=should_continue
+    )
+
+    assert report.aborted is True
+    assert (report.contexts_deleted, report.contexts_emptied) == (1, 0)
+    await db_session.refresh(ctx)
+    assert ctx.deleted_at is not None
+    live = await _live_memories(db_session, ws)
+    assert [m.context_id for m in live] == [default.id]
 
 
 # ---------------------------------------------------------------------------

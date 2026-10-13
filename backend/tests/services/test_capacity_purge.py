@@ -471,6 +471,43 @@ async def test_purge_failure_keeps_the_stamp_and_moves_on() -> None:
 
 
 @pytest.mark.asyncio
+async def test_audit_commit_failure_counts_failed_and_moves_on() -> None:
+    """The purge succeeded but the audit-row commit raised: logged, rolled back,
+    counted as failed, no completion mail — and the next workspace proceeds."""
+    first = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    second = _purge_ws(datetime(2026, 9, 2, 4, 0))
+    db = _purge_db()
+    db.commit = AsyncMock(side_effect=[RuntimeError("db gone"), None])
+    counts, service, email, db = await _run_purge([first, second], now=_NOW, db=db)
+    assert (counts.failed, counts.purged) == (1, 1)
+    assert service.purge_workspace_data.await_count == 2
+    db.rollback.assert_awaited_once()
+    assert email.send_capacity_purge_complete.await_count == 1
+    assert second.capacity_locked_since is None
+
+
+@pytest.mark.asyncio
+async def test_nothing_to_delete_clears_stamp_audits_and_sends_no_mail() -> None:
+    """A due workspace whose purge removed nothing (e.g. the retry after a lost
+    audit commit) is un-stamped and audited, but gets no zero-count mail."""
+    ws = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    empty = WorkspacePurgeReport(
+        contexts_deleted=0,
+        contexts_emptied=1,
+        memories_deleted=0,
+        files_deleted=0,
+        bytes_released=0,
+    )
+    counts, _, email, db = await _run_purge([ws], now=_NOW, purge=AsyncMock(return_value=empty))
+    assert (counts.nothing_to_delete, counts.purged, counts.failed) == (1, 0, 0)
+    assert ws.capacity_locked_since is None
+    email.send_capacity_purge_complete.assert_not_awaited()
+    audit = db.add.call_args.args[0]
+    assert audit.user_metadata["memories_deleted"] == 0
+    assert audit.user_metadata["aborted"] is False
+
+
+@pytest.mark.asyncio
 async def test_aborted_purge_clears_stamp_audits_and_sends_no_mail() -> None:
     ws = _purge_ws(datetime(2026, 9, 1, 4, 0))
     aborted = WorkspacePurgeReport(
