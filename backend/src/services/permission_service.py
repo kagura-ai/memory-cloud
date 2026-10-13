@@ -665,7 +665,23 @@ class PermissionService:
         linked_owner = False
         if context.is_private:
             if context.created_by == user_id:
-                # Creator has full access to their private context
+                # Creator has full access to their private context — once they
+                # hold a seat (#1957). The seat is read only after the caller is
+                # known to be the creator, so a non-creator still learns nothing
+                # here (#394 ordering). A creator with no membership row is not
+                # expected (removing a member hands their contexts to the
+                # owner, #275); it keeps the historical pass, logged.
+                creator_member = await self.workspace_service.get_member(
+                    context.workspace_id, user_id, raise_if_not_found=False
+                )
+                if creator_member is not None:
+                    await ensure_member_seated(self.db, context.workspace_id, creator_member)
+                else:
+                    logger.warning(
+                        "private_context_creator_without_membership",
+                        context_id=str(context_id),
+                        workspace_id=str(context.workspace_id),
+                    )
                 return context, ContextRole.OWNER
             # #1784: an account linked to the creator is the same person. The
             # link widens ownership only: the caller still passes the
