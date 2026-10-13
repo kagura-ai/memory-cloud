@@ -626,3 +626,130 @@ class ResendEmailService:
             # email raises, and the caller keeps its idempotency claim.
             raise_if_uncertain=True,
         )
+
+    async def send_capacity_purge_notice(
+        self,
+        *,
+        to_email: str,
+        workspace_name: str,
+        locale: str,
+        purge_at: datetime,
+        days_left: int,
+        over_memories: int,
+        over_bytes: int,
+        cleanup_url: str,
+        contexts_url: str,
+    ) -> bool:
+        from utils.exceptions import capacity_overage_text, capacity_overage_text_ja
+
+        if purge_at.tzinfo is not None:
+            purge_at = purge_at.astimezone(UTC)
+        day = purge_at.strftime("%Y-%m-%d")
+        # The name is user-chosen: no CR/LF into a header, and a bounded length.
+        workspace_name = _header_safe(workspace_name)
+        if locale == "ja":
+            overage = capacity_overage_text_ja(over_memories, over_bytes)
+            subject = f"【残り {days_left} 日】{workspace_name} のデータは {day} に削除されます"
+            text = (
+                f"ワークスペース「{workspace_name}」は Free プランの上限を {overage} 超えています。\n"
+                f"{day}(UTC)まで超過したままの場合、このワークスペースの記憶・コンテキスト・\n"
+                "ファイルはすべて削除されます。アカウントは残り、空の状態で Free プランを\n"
+                "引き続き使えます。\n"
+                "\n"
+                "削除を避けるには、その日までに次のどちらかを行ってください。\n"
+                f"- {overage} を減らす(各コンテキストの「メモリー」タブからフィルタ削除):\n"
+                f"  {contexts_url}\n"
+                "- または再契約する:\n"
+                f"  {cleanup_url}\n"
+                "\n"
+                "必要なデータは、削除の前に各コンテキストのページから JSON でエクスポートできます。\n"
+            )
+        else:
+            overage = capacity_overage_text(over_memories, over_bytes)
+            days = f"{days_left} day" if days_left == 1 else f"{days_left} days"
+            subject = f"{days} left: data in {workspace_name} will be deleted on {day}"
+            text = (
+                f'Your workspace "{workspace_name}" is over the Free plan\'s capacity by {overage}.\n'
+                f"If it is still over on {day} (UTC), all memories, contexts and files in\n"
+                "this workspace will be deleted. Your account stays, and you can keep using\n"
+                "the Free plan with an empty workspace.\n"
+                "\n"
+                "To avoid the deletion, before that date either:\n"
+                f"- remove {overage} (delete by filter on a context's Memories tab):\n"
+                f"  {contexts_url}\n"
+                "- or re-subscribe:\n"
+                f"  {cleanup_url}\n"
+                "\n"
+                "You can export any context as JSON from its page before then.\n"
+            )
+        return await self._send(
+            to_email=to_email,
+            subject=subject,
+            text=text,
+            log_event="capacity_purge_notice_email",
+            log_context={
+                "recipient_hash": redact_recipient(to_email),
+                "days_left": days_left,
+                "over_memories": over_memories,
+                "over_bytes": over_bytes,
+                "locale": locale,
+                "template": "capacity_purge_notice",
+            },
+            # At most once: the caller keeps its claim on an uncertain send.
+            raise_if_uncertain=True,
+        )
+
+    async def send_capacity_purge_complete(
+        self,
+        *,
+        to_email: str,
+        workspace_name: str,
+        locale: str,
+        purged_at: datetime,
+        contexts_deleted: int,
+        memories_deleted: int,
+        files_deleted: int,
+        cleanup_url: str,
+    ) -> bool:
+        if purged_at.tzinfo is not None:
+            purged_at = purged_at.astimezone(UTC)
+        day = purged_at.strftime("%Y-%m-%d")
+        workspace_name = _header_safe(workspace_name)
+        if locale == "ja":
+            subject = f"{workspace_name} のデータを削除しました"
+            text = (
+                f"ワークスペース「{workspace_name}」は Free プランの上限を 30 日間超えていたため、\n"
+                f"{day}(UTC)にデータを削除しました。\n"
+                f"削除したもの: コンテキスト {contexts_deleted} 件、記憶 {memories_deleted} 件、"
+                f"ファイル {files_deleted} 件\n"
+                "\n"
+                "アカウントはそのまま残っています。空の状態で Free プランを引き続き使えます。\n"
+                f"プランの確認と再契約: {cleanup_url}\n"
+            )
+        else:
+            subject = f"Data in {workspace_name} has been deleted"
+            text = (
+                f'Your workspace "{workspace_name}" stayed over the Free plan\'s capacity for\n'
+                f"30 days, so its data was deleted on {day} (UTC).\n"
+                f"Deleted: {contexts_deleted} contexts, {memories_deleted} memories, "
+                f"{files_deleted} files\n"
+                "\n"
+                "Your account is unchanged. You can keep using the Free plan with an empty\n"
+                "workspace.\n"
+                f"Plan and re-subscribe: {cleanup_url}\n"
+            )
+        return await self._send(
+            to_email=to_email,
+            subject=subject,
+            text=text,
+            log_event="capacity_purge_complete_email",
+            log_context={
+                "recipient_hash": redact_recipient(to_email),
+                "contexts_deleted": contexts_deleted,
+                "memories_deleted": memories_deleted,
+                "files_deleted": files_deleted,
+                "locale": locale,
+                "template": "capacity_purge_complete",
+            },
+            raise_if_uncertain=True,
+        )

@@ -389,6 +389,78 @@ class EmailService(Protocol):
         """
         ...
 
+    async def send_capacity_purge_notice(
+        self,
+        *,
+        to_email: str,
+        workspace_name: str,
+        locale: str,
+        purge_at: datetime,
+        days_left: int,
+        over_memories: int,
+        over_bytes: int,
+        cleanup_url: str,
+        contexts_url: str,
+    ) -> bool:
+        """The "N days left" mail before a capacity-over workspace's data is deleted (#1969).
+
+        Sent on days 0/7/14/23/27/29 of the lock. Names the deletion date,
+        how much is over, that every memory, context and file goes and the
+        account stays, and links to cleanup / re-subscribe. Never carries
+        memory content.
+
+        Args:
+            to_email: The workspace owner's address.
+            workspace_name: Display name for the subject and body.
+            locale: ``User.locale``; ``"ja"`` → Japanese, anything else → English.
+            purge_at: When the data is deleted if still over (aware or naive UTC).
+            days_left: Whole days until ``purge_at``.
+            over_memories: Memories over the Free limit (0 when within).
+            over_bytes: File bytes over the Free limit (0 when within).
+            cleanup_url: The plan / usage page (re-subscribe).
+            contexts_url: The contexts page (delete by filter, export).
+
+        Returns:
+            True on delivery (or logging fallback), False on hard failure.
+
+        Raises:
+            TimeoutError: Delivery uncertain — the caller keeps its claim
+                and does not resend (at most once).
+        """
+        ...
+
+    async def send_capacity_purge_complete(
+        self,
+        *,
+        to_email: str,
+        workspace_name: str,
+        locale: str,
+        purged_at: datetime,
+        contexts_deleted: int,
+        memories_deleted: int,
+        files_deleted: int,
+        cleanup_url: str,
+    ) -> bool:
+        """The workspace's data was deleted after 30 days over capacity (#1969).
+
+        Args:
+            to_email: The workspace owner's address.
+            workspace_name: Display name for the subject and body.
+            locale: ``User.locale``; ``"ja"`` → Japanese, anything else → English.
+            purged_at: When the purge ran (aware or naive UTC).
+            contexts_deleted: Contexts deleted (the emptied default one excluded).
+            memories_deleted: Memories deleted.
+            files_deleted: Files deleted.
+            cleanup_url: The plan page (re-subscribe).
+
+        Returns:
+            True on delivery (or logging fallback), False on hard failure.
+
+        Raises:
+            TimeoutError: Delivery uncertain — the caller keeps its claim.
+        """
+        ...
+
 
 class LoggingEmailService:
     """Default stub implementation: structured logs only, no SMTP.
@@ -620,6 +692,61 @@ class LoggingEmailService:
             over_bytes=over_bytes,
             email_dispatch_required=True,
             template="capacity_lock_notice",
+        )
+        return True
+
+    async def send_capacity_purge_notice(
+        self,
+        *,
+        to_email: str,
+        workspace_name: str,
+        locale: str,
+        purge_at: datetime,
+        days_left: int,
+        over_memories: int,
+        over_bytes: int,
+        cleanup_url: str,
+        contexts_url: str,
+    ) -> bool:
+        del cleanup_url, contexts_url
+        logger.info(
+            "capacity_purge_notice_email",
+            recipient_hash=redact_recipient(to_email),
+            workspace_name=workspace_name,
+            locale=locale,
+            purge_at=purge_at.isoformat(),
+            days_left=days_left,
+            over_memories=over_memories,
+            over_bytes=over_bytes,
+            email_dispatch_required=True,
+            template="capacity_purge_notice",
+        )
+        return True
+
+    async def send_capacity_purge_complete(
+        self,
+        *,
+        to_email: str,
+        workspace_name: str,
+        locale: str,
+        purged_at: datetime,
+        contexts_deleted: int,
+        memories_deleted: int,
+        files_deleted: int,
+        cleanup_url: str,
+    ) -> bool:
+        del cleanup_url
+        logger.info(
+            "capacity_purge_complete_email",
+            recipient_hash=redact_recipient(to_email),
+            workspace_name=workspace_name,
+            locale=locale,
+            purged_at=purged_at.isoformat(),
+            contexts_deleted=contexts_deleted,
+            memories_deleted=memories_deleted,
+            files_deleted=files_deleted,
+            email_dispatch_required=True,
+            template="capacity_purge_complete",
         )
         return True
 

@@ -489,3 +489,66 @@ async def test_logging_capacity_lock_notice_redacts_the_recipient(caplog) -> Non
     assert kwargs["template"] == "capacity_lock_notice"
     assert kwargs["over_memories"] == 12
     assert "owner@example.test" not in repr(log.info.call_args)
+
+
+# ---------------------------------------------------------------------------
+# #1969: capacity purge countdown + completion (logging stub)
+# ---------------------------------------------------------------------------
+
+
+def test_protocol_has_the_capacity_purge_mails() -> None:
+    from services.email_service import EmailService
+
+    protocol = _send_methods(EmailService)
+    assert {"send_capacity_purge_notice", "send_capacity_purge_complete"} <= protocol
+
+
+@pytest.mark.asyncio
+async def test_logging_capacity_purge_notice_redacts_the_recipient() -> None:
+    from datetime import UTC, datetime
+
+    from services.email_service import LoggingEmailService
+
+    with patch("services.email_service.logger") as log:
+        ok = await LoggingEmailService().send_capacity_purge_notice(
+            to_email="owner@example.test",
+            workspace_name="Research",
+            locale="ja",
+            purge_at=datetime(2026, 11, 13, tzinfo=UTC),
+            days_left=7,
+            over_memories=12,
+            over_bytes=0,
+            cleanup_url="https://app.example.test/workspace/settings/plan",
+            contexts_url="https://app.example.test/workspace/contexts",
+        )
+    assert ok is True
+    kwargs = log.info.call_args.kwargs
+    assert kwargs["template"] == "capacity_purge_notice"
+    assert kwargs["email_dispatch_required"] is True
+    assert kwargs["days_left"] == 7
+    assert "owner@example.test" not in repr(log.info.call_args)
+
+
+@pytest.mark.asyncio
+async def test_logging_capacity_purge_complete_redacts_the_recipient() -> None:
+    from datetime import UTC, datetime
+
+    from services.email_service import LoggingEmailService
+
+    with patch("services.email_service.logger") as log:
+        ok = await LoggingEmailService().send_capacity_purge_complete(
+            to_email="owner@example.test",
+            workspace_name="Research",
+            locale="en",
+            purged_at=datetime(2026, 11, 13, tzinfo=UTC),
+            contexts_deleted=3,
+            memories_deleted=1200,
+            files_deleted=4,
+            cleanup_url="https://app.example.test/workspace/settings/plan",
+        )
+    assert ok is True
+    kwargs = log.info.call_args.kwargs
+    assert kwargs["template"] == "capacity_purge_complete"
+    assert kwargs["email_dispatch_required"] is True
+    assert kwargs["memories_deleted"] == 1200
+    assert "owner@example.test" not in repr(log.info.call_args)

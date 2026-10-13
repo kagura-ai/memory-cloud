@@ -709,3 +709,208 @@ async def test_capacity_lock_notice_subject_is_header_safe() -> None:
     name_part = params["subject"].split(": ", 1)[1].split(" is over")[0]
     assert len(name_part) <= 80
     assert name_part.endswith("…")
+
+
+# ---------------------------------------------------------------------------
+# #1969: capacity purge countdown + completion
+# ---------------------------------------------------------------------------
+
+_PLAN_URL = "https://app.example.test/workspace/settings/plan"
+_CONTEXTS_URL = "https://app.example.test/workspace/contexts"
+
+
+@pytest.mark.asyncio
+async def test_send_capacity_purge_notice_payload_en() -> None:
+    """#1969: the countdown names the date, what is deleted, what stays, and the links."""
+    from datetime import UTC, datetime
+
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    with patch.object(
+        resend_module.resend.Emails, "send", return_value={"id": "re_msg_purge"}
+    ) as mock_send:
+        ok = await svc.send_capacity_purge_notice(
+            to_email="owner@example.test",
+            workspace_name="Research",
+            locale="en",
+            purge_at=datetime(2026, 11, 13, 4, tzinfo=UTC),
+            days_left=7,
+            over_memories=200,
+            over_bytes=3 * 1024 * 1024,
+            cleanup_url=_PLAN_URL,
+            contexts_url=_CONTEXTS_URL,
+        )
+    assert ok is True
+    (params,), _ = mock_send.call_args
+    assert params["to"] == ["owner@example.test"]
+    assert "7 days" in params["subject"] and "Research" in params["subject"]
+    text = params["text"]
+    for fragment in (
+        "2026-11-13",
+        "200 memories and 3 MB",
+        "all memories, contexts and files",
+        "account stays",
+        _CONTEXTS_URL,
+        _PLAN_URL,
+        "export",
+    ):
+        assert fragment in text, fragment
+    assert "html" not in params
+
+
+@pytest.mark.asyncio
+async def test_send_capacity_purge_notice_one_day_is_singular() -> None:
+    from datetime import UTC, datetime
+
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    with patch.object(resend_module.resend.Emails, "send", return_value={"id": "x"}) as m:
+        await svc.send_capacity_purge_notice(
+            to_email="owner@example.test",
+            workspace_name="Research",
+            locale="en",
+            purge_at=datetime(2026, 11, 13, 4, tzinfo=UTC),
+            days_left=1,
+            over_memories=1,
+            over_bytes=0,
+            cleanup_url=_PLAN_URL,
+            contexts_url=_CONTEXTS_URL,
+        )
+    (params,), _ = m.call_args
+    assert params["subject"].startswith("1 day left:")
+
+
+@pytest.mark.asyncio
+async def test_send_capacity_purge_notice_payload_ja() -> None:
+    from datetime import UTC, datetime
+
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    with patch.object(resend_module.resend.Emails, "send", return_value={"id": "x"}) as m:
+        await svc.send_capacity_purge_notice(
+            to_email="owner@example.test",
+            workspace_name="Research",
+            locale="ja",
+            purge_at=datetime(2026, 11, 13, 4, tzinfo=UTC),
+            days_left=1,
+            over_memories=1,
+            over_bytes=3 * 1024 * 1024,
+            cleanup_url=_PLAN_URL,
+            contexts_url=_CONTEXTS_URL,
+        )
+    (params,), _ = m.call_args
+    assert "残り 1 日" in params["subject"]
+    text = params["text"]
+    assert "2026-11-13" in text
+    assert "アカウントは残り" in text
+    assert "記憶 1 件と 3 MB" in text
+    assert "memory" not in text
+    assert _CONTEXTS_URL in text and _PLAN_URL in text
+
+
+@pytest.mark.asyncio
+async def test_capacity_purge_notice_subject_is_header_safe() -> None:
+    from datetime import UTC, datetime
+
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    evil = "Team\r\nBcc: attacker@example.test " + "x" * 200
+    with patch.object(resend_module.resend.Emails, "send", return_value={"id": "m"}) as m:
+        await svc.send_capacity_purge_notice(
+            to_email="owner@example.test",
+            workspace_name=evil,
+            locale="en",
+            purge_at=datetime(2026, 11, 13, tzinfo=UTC),
+            days_left=7,
+            over_memories=1,
+            over_bytes=0,
+            cleanup_url=_PLAN_URL,
+            contexts_url=_CONTEXTS_URL,
+        )
+    (params,), _ = m.call_args
+    assert "\r" not in params["subject"] and "\n" not in params["subject"]
+    assert "Team Bcc: attacker@example.test" in params["subject"]
+
+
+@pytest.mark.asyncio
+async def test_send_capacity_purge_complete_payload() -> None:
+    from datetime import UTC, datetime
+
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    with patch.object(resend_module.resend.Emails, "send", return_value={"id": "x"}) as m:
+        ok = await svc.send_capacity_purge_complete(
+            to_email="owner@example.test",
+            workspace_name="Research",
+            locale="en",
+            purged_at=datetime(2026, 11, 13, 4, tzinfo=UTC),
+            contexts_deleted=3,
+            memories_deleted=1200,
+            files_deleted=4,
+            cleanup_url=_PLAN_URL,
+        )
+    assert ok is True
+    (params,), _ = m.call_args
+    assert "Research" in params["subject"] and "deleted" in params["subject"]
+    text = params["text"]
+    for fragment in (
+        "2026-11-13",
+        "3 contexts",
+        "1200 memories",
+        "4 files",
+        "Free plan",
+        _PLAN_URL,
+    ):
+        assert fragment in text, fragment
+
+
+@pytest.mark.asyncio
+async def test_send_capacity_purge_complete_payload_ja() -> None:
+    from datetime import UTC, datetime
+
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    with patch.object(resend_module.resend.Emails, "send", return_value={"id": "x"}) as m:
+        await svc.send_capacity_purge_complete(
+            to_email="owner@example.test",
+            workspace_name="Research",
+            locale="ja",
+            purged_at=datetime(2026, 11, 13, 4, tzinfo=UTC),
+            contexts_deleted=3,
+            memories_deleted=1200,
+            files_deleted=4,
+            cleanup_url=_PLAN_URL,
+        )
+    (params,), _ = m.call_args
+    assert "削除しました" in params["subject"]
+    text = params["text"]
+    for fragment in ("2026-11-13", "コンテキスト 3 件", "記憶 1200 件", "ファイル 4 件", _PLAN_URL):
+        assert fragment in text, fragment
+
+
+@pytest.mark.asyncio
+async def test_send_capacity_purge_mails_raise_when_delivery_is_uncertain() -> None:
+    from datetime import UTC, datetime
+
+    svc = ResendEmailService(api_key="re_test", from_email="noreply@example.com")
+    with (
+        patch.object(resend_module, "_may_have_been_delivered", return_value=True),
+        patch.object(resend_module.resend.Emails, "send", side_effect=RuntimeError("timeout")),
+    ):
+        with pytest.raises(TimeoutError):
+            await svc.send_capacity_purge_notice(
+                to_email="owner@example.test",
+                workspace_name="Research",
+                locale="en",
+                purge_at=datetime(2026, 11, 13, tzinfo=UTC),
+                days_left=0,
+                over_memories=1,
+                over_bytes=0,
+                cleanup_url=_PLAN_URL,
+                contexts_url=_CONTEXTS_URL,
+            )
+        with pytest.raises(TimeoutError):
+            await svc.send_capacity_purge_complete(
+                to_email="owner@example.test",
+                workspace_name="Research",
+                locale="en",
+                purged_at=datetime(2026, 11, 13, tzinfo=UTC),
+                contexts_deleted=1,
+                memories_deleted=1,
+                files_deleted=0,
+                cleanup_url=_PLAN_URL,
+            )
