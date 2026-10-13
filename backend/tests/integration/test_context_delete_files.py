@@ -36,7 +36,7 @@ from models.auth import (
 from models.file_objects import FileObject, WorkspaceStorageUsage
 from services.capacity_lock import capacity_lock_state
 from services.context_restore import restore_deleted_context
-from services.context_service import ContextService
+from services.context_service import DEFAULT_CONTEXT_NAME, ContextService
 from services.file_storage_service import FILE_SOFT_DELETE_RETENTION, FileStorageService
 
 from ._admin_helpers import make_context, make_user, make_workspace
@@ -302,7 +302,7 @@ async def test_the_default_contexts_files_can_be_purged(
     """The issue's case: the default context cannot be deleted, so this is the
     only bulk road for its files."""
     await db_session.execute(
-        update(Context).where(Context.id == seeded.keep_id).values(is_default=True)
+        update(Context).where(Context.id == seeded.keep_id).values(name=DEFAULT_CONTEXT_NAME)
     )
     await db_session.commit()
 
