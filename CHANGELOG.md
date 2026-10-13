@@ -4,6 +4,24 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.101.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.101.0) — 2026-10-13
+
+The storage side of the plan-change work: deleting a context frees its files, the capacity-over lock and the downgrade-eligibility check read one storage figure, and two gaps in the plan-seat and memory-row invariants are closed.
+
+### Added
+- **Deleting a context frees its files, and a context's files can be cleared in bulk** ([#1960](https://github.com/kagura-ai/memory-cloud/issues/1960)): `delete_context` soft-deletes the context's files with it and releases their storage at once, so an owner under the capacity-over lock no longer has to delete files one by one; `merge_contexts(delete_source=true)` moves the source's files to the target. The admin context restore brings the files back within 6 days (one day short of the file GC) unless the same content was uploaded again, and reports what it did. New owner-only `DELETE /api/v1/contexts/{id}/files` and a storage-page action clear a context's files without deleting it — the way to clear the undeletable default context. The file GC keeps an R2 object that a live re-upload of the same content still points at.
+
+### Changed
+- **One storage figure for the lock and eligibility** ([#1961](https://github.com/kagura-ai/memory-cloud/issues/1961)): the capacity-over lock and the downgrade-eligibility read both count the files a workspace can still shed (uploaded, not deleted, in a live context or workspace-scoped), so "eligible after cleanup" and "locked until cleanup" can no longer disagree; the upload quota keeps its own counter.
+
+### Fixed
+- **A seat-less creator is refused on their own private context** ([#1957](https://github.com/kagura-ai/memory-cloud/issues/1957)): the plan-seat gate of v0.100.0 applies to a private context's creator too; the workspace owner (by `owner_user_id`, even without a membership row) still passes, and the plan page says the owner can delete such contexts.
+- **`memories.workspace_id` is NOT NULL** ([#1951](https://github.com/kagura-ai/memory-cloud/issues/1951)): migration `e95_1951_memories_ws_not_null` backfills the column from the memory's context (and re-queues those rows for embedding), purges soft-deleted rows that have neither workspace nor context, and refuses to run while a live memory has neither — see the pre-check in `docs/deployment.md`.
+
+### Notes
+- Migration `e95_1951_memories_ws_not_null` runs on upgrade (backfill + `SET NOT NULL`, `lock_timeout` 10s); run the pre-check SQL from `docs/deployment.md` first on a large `memories` table. No new environment variables. Operators: the context restore window for files is 6 days; the GC retention stays 7.
+- Follow-ups filed for v1.0.0: #1963 (compound FK for `memories (workspace_id, context_id)`), #1966 (backfill files left in contexts deleted before #1960, then move the upload counter onto the shared figure).
+
 ## [v0.100.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.100.0) — 2026-10-13
 
 The plan-change work of v0.99.0 completed: a workspace that drops below what it holds keeps everything, and the plan's seats and writable context slots are decided at use time; the capacity-over lock moved into the context resolvers; two gaps in the paused-feature set are closed.
