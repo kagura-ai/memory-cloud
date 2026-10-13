@@ -2273,7 +2273,7 @@ class MemoryService:
             memory, request, provided_fields, normalized_summary
         )
 
-        memory_workspace_id = str(memory.workspace_id) if memory.workspace_id else None
+        memory_workspace_id = str(memory.workspace_id)
         memory_context_id = str(memory.context_id) if memory.context_id else None
 
         if needs_reembed:

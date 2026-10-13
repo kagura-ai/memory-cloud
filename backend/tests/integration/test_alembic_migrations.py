@@ -715,20 +715,23 @@ class TestE95MemoriesWorkspaceIdNotNull:
             self._upgrade_head()
 
         engine = _sync_engine()
-        with engine.begin() as conn:
-            # Rolled back: the row is still there and nothing was enforced.
-            assert (
-                conn.execute(
-                    text("SELECT count(*) FROM memories WHERE id = :id"), {"id": mem_id}
-                ).scalar_one()
-                == 1
-            )
-            assert self._workspace_id_is_nullable(conn)
-            # Operator resolves it (here: deletes the row) and re-runs.
-            conn.execute(text("DELETE FROM memories WHERE id = :id"), {"id": mem_id})
-        engine.dispose()
-
-        self._upgrade_head()
+        try:
+            with engine.begin() as conn:
+                # Rolled back: the row is still there and nothing was enforced.
+                assert (
+                    conn.execute(
+                        text("SELECT count(*) FROM memories WHERE id = :id"), {"id": mem_id}
+                    ).scalar_one()
+                    == 1
+                )
+                assert self._workspace_id_is_nullable(conn)
+        finally:
+            # Operator resolves it (here: deletes the row) and re-runs — also on
+            # an assertion failure, so later tests still find the DB at head.
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM memories WHERE id = :id"), {"id": mem_id})
+            engine.dispose()
+            self._upgrade_head()
 
     def test_existing_workspace_is_not_rewritten(self):
         """A row whose workspace disagrees with its context's keeps its value.
@@ -766,9 +769,10 @@ class TestE95MemoriesWorkspaceIdNotNull:
             command.downgrade(_get_alembic_config(), E94_REV)
 
         engine = _sync_engine()
-        with engine.begin() as conn:
-            assert self._workspace_id_is_nullable(conn)
-        engine.dispose()
-
-        # Leave the DB at head for the rest of the session.
-        self._upgrade_head()
+        try:
+            with engine.begin() as conn:
+                assert self._workspace_id_is_nullable(conn)
+        finally:
+            engine.dispose()
+            # Leave the DB at head for the rest of the session, pass or fail.
+            self._upgrade_head()

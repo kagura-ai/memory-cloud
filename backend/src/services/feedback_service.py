@@ -69,10 +69,11 @@ class FeedbackService:
     ) -> tuple[RetrievalFeedback, UUID]:
         """Validate and stage one append-only event without committing it.
 
-        The returned workspace id is always resolved: ``Memory.workspace_id``
-        is nullable (legacy rows), so when it is NULL the owning Context's
-        ``workspace_id`` (NOT NULL by schema) is used instead — audit
-        attribution must never record a null workspace.
+        The returned workspace id is always resolved. ``Memory.workspace_id``
+        is NOT NULL since e95 (#1951); the fallback to the owning Context's
+        ``workspace_id`` is kept as a defensive path for an ORM object that
+        was built without one — audit attribution must never record a null
+        workspace.
         """
         if provenance not in _ALL_FEEDBACK_PROVENANCES:
             raise ValueError(

@@ -4,6 +4,11 @@
 legacy row with a NULL workspace would have been duplicated as another NULL,
 and a cross-workspace merge would have filed the copy under the wrong tenant.
 The copy is created in the target context, so its workspace is the target's.
+
+Pinned at the AST level, like ``test_context_merge_slot.py``: ``merge_contexts``
+also copies Qdrant points and search configs, so a behavioural run needs the
+vector store, and the one fact under test is which workspace the ``Memory(...)``
+copy is built with.
 """
 
 from __future__ import annotations

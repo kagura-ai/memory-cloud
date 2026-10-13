@@ -1626,9 +1626,11 @@ SELECT id, user_id, created_at FROM memories
 WHERE workspace_id IS NULL AND context_id IS NULL;
 ```
 
-Restore the rows' context (`services/context_restore.py`, #1804) or delete them,
-then run the migration again. The `SET NOT NULL` step uses a validated `CHECK`
-as proof, so it does not scan or lock the table for long.
+Such a row has no context to restore from: give it a `workspace_id` (and a
+`context_id`) by hand after checking its `user_id`, or delete it, then run the
+migration again. The upgrade is one transaction, so `memories` is locked from
+the `ALTER` to the commit — the backfill touches legacy rows only and the
+`SET NOT NULL` scan is a single pass over the table.
 
 Override via environment variables (`PLAN_<KEY>_<FIELD>`, key upper-cased):
 

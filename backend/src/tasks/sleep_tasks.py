@@ -240,7 +240,6 @@ async def _sleep_maintenance_run() -> None:
                 )
                 .distinct()
                 .where(Memory.deleted_at.is_(None))
-                .where(Memory.workspace_id.isnot(None))
                 .where(Memory.context_id.isnot(None))
             )
 

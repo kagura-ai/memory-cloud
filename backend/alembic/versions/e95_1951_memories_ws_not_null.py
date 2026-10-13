@@ -13,19 +13,23 @@ Three steps, in the shape of ``b03_396`` (the same change on ``neural_memory_edg
 1. **Refuse to run while an unrecoverable row exists.** A row with neither
    ``workspace_id`` nor ``context_id`` cannot be filled from anywhere. Edges were
    orphan-deleted in b03_396; a memory is user content, so this migration stops
-   with the count and sample ids instead and leaves the decision (restore a
-   context, or delete the rows) to the operator. With ``context_id`` present the
-   context row exists — ``memories.context_id`` is ``ON DELETE CASCADE`` — so
-   every other NULL is fillable.
+   with the count and sample ids instead and leaves the decision (set the ids by
+   hand after looking at ``user_id``, or delete the rows) to the operator. With
+   ``context_id`` present the context row exists — ``memories.context_id`` is
+   ``ON DELETE CASCADE`` — so every other NULL is fillable.
 2. **Backfill only NULLs.** ``UPDATE ... WHERE m.workspace_id IS NULL`` — a row that
    already carries a workspace is never rewritten, even when it disagrees with
    its context's (no ``COALESCE`` over existing values; see the b03_396 lesson).
    Such disagreements are counted into the migration log for a later audit.
-3. **Enforce without a long lock.** ``CHECK ... NOT VALID`` → ``VALIDATE CONSTRAINT``
-   (``SHARE UPDATE EXCLUSIVE``, does not block reads or writes) → ``SET NOT NULL``
-   (PG 12+ uses the validated CHECK as proof and skips the table scan). The
-   scaffolding CHECK is dropped afterwards: the column constraint is the
-   invariant, and ``MemoryService`` guards the write path.
+3. **Enforce.** ``SET NOT NULL`` scans the table once to prove there is no NULL.
+
+Locking: ``alembic/env.py`` runs the whole upgrade in one transaction, so the
+``ACCESS EXCLUSIVE`` lock the ``ALTER`` takes is held from that statement to
+commit, and a ``CHECK ... NOT VALID`` / ``VALIDATE`` detour would not shorten it
+(the b03_396 docstring overstates that). The backfill touches legacy rows only,
+and the scan is a single pass over ``memories``; expect the table to be
+unavailable for about the duration of that pass. A refusal in step 1 rolls the
+transaction back, so nothing is written.
 
 Revision ID: e95_1951_memories_ws_not_null
 Revises: e94_1869_summary_emb_idx
@@ -48,8 +52,6 @@ branch_labels: str | None = None
 depends_on: str | None = None
 
 logger = logging.getLogger("alembic.runtime.migration")
-
-_CHECK_CONSTRAINT = "ck_memories_workspace_id_not_null"
 
 # Rows nothing can fill: no workspace and no context to read one from.
 ORPHAN_COUNT_SQL = "SELECT count(*) FROM memories WHERE workspace_id IS NULL AND context_id IS NULL"
@@ -80,8 +82,9 @@ def upgrade() -> None:
         sample = [str(row) for row in conn.execute(sa.text(ORPHAN_SAMPLE_SQL)).scalars()]
         raise RuntimeError(
             f"#1951: {orphans} memories have neither workspace_id nor context_id and "
-            "cannot be backfilled; resolve them (restore their context or delete the rows) "
-            f"before applying this migration. Sample ids: {sample}"
+            "cannot be backfilled. Give each a workspace_id (and context_id) by hand after "
+            "checking its user_id, or delete the rows, then run the migration again. "
+            f"Sample ids: {sample}"
         )
 
     mismatched = conn.execute(sa.text(MISMATCH_COUNT_SQL)).scalar_one()
@@ -95,23 +98,17 @@ def upgrade() -> None:
     result = conn.execute(sa.text(BACKFILL_SQL))
     logger.info("#1951: backfilled workspace_id on %d memories from contexts", result.rowcount)
 
-    op.execute(
-        sa.text(
-            f"ALTER TABLE memories ADD CONSTRAINT {_CHECK_CONSTRAINT} "
-            "CHECK (workspace_id IS NOT NULL) NOT VALID"
-        )
-    )
-    op.execute(sa.text(f"ALTER TABLE memories VALIDATE CONSTRAINT {_CHECK_CONSTRAINT}"))
     op.alter_column(
         "memories",
         "workspace_id",
         existing_type=postgresql.UUID(as_uuid=True),
         nullable=False,
     )
-    op.drop_constraint(_CHECK_CONSTRAINT, "memories", type_="check")
 
 
 def downgrade() -> None:
+    # The column becomes nullable again; the values the backfill wrote stay
+    # (they are correct data, not something to undo — same as b03_396).
     op.alter_column(
         "memories",
         "workspace_id",
