@@ -1188,8 +1188,10 @@ class ContextService:
 
         # #1798: the source's own points go once the merge is durable — the
         # copies above carry the target's context_id and are not touched.
+        # #1960: so does the storage the source's files held.
         if delete_source:
             await self._remove_context_points(str(source.workspace_id), str(source_context_id))
+            await self._release_pending_storage()
 
         # `merged` counts ROWS transferred, which is what the caller can see in
         # the context's memory count. It used to count Qdrant points, so a
@@ -1235,6 +1237,13 @@ class ContextService:
         purge; ``services/context_restore.py`` (#1804) brings the context back
         from them and the embedding sweep rebuilds the vectors.
 
+        #1960: the context's files are soft-deleted with it (same timestamp)
+        and their bytes leave the storage quota, so deleting a context frees
+        storage — the capacity-over lock (#1941) lifts without deleting files
+        one by one. The Redis counter is released after the commit
+        (``_release_pending_storage``); a ``_commit=False`` caller does that
+        itself. A restore within the file GC window brings the files back.
+
         Args:
             user_id: User ID (for access verification and audit trail)
             context_id: Context UUID
@@ -1278,6 +1287,14 @@ class ContextService:
         for memory in memories_to_delete:
             memory.deleted_at = deleted_at
             memory.deleted_by = user_id
+
+        # #1960: the context's files go with it, stamped alike so a restore
+        # within the GC window finds them (FileStorageService.restore_context_files).
+        from services.file_storage_service import FileStorageService
+
+        self._storage_release_pending = await FileStorageService(self.db).purge_files_for_contexts(
+            [context.id], deleted_at=deleted_at
+        )
 
         # Hard-delete neural edges (no soft-delete needed, reconstructable)
         await self.db.execute(
@@ -1387,8 +1404,29 @@ class ContextService:
 
         if _commit:
             await self._remove_context_points(str(context.workspace_id), str(context_id))
+            await self._release_pending_storage()
 
         return context
+
+    async def _release_pending_storage(self) -> None:
+        """Release the Redis storage counter for the files a delete purged (#1960).
+
+        Runs after the commit that made the soft-deletes durable, so Redis
+        follows the database (the R5 contract ``delete_file`` keeps). A
+        failure here leaves the counter high until the next DB sweep, never
+        low. Clears the pending map so a second call is a no-op.
+        """
+        pending: dict[UUID, int] = getattr(self, "_storage_release_pending", None) or {}
+        self._storage_release_pending = {}
+        if not pending:
+            return
+        from services import storage_quota_service
+
+        for workspace_id, size_bytes in pending.items():
+            if size_bytes > 0:
+                await storage_quota_service.release_storage_bytes(
+                    workspace_id=workspace_id, size_bytes=size_bytes
+                )
 
     async def _remove_context_points(self, workspace_id: str, context_id: str) -> None:
         """Remove a deleted context's points from the vector store (#1798).

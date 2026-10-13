@@ -246,7 +246,8 @@
       "actions": {
         "download": "Download",
         "downloadFailed": "Failed to start download.",
-        "delete": "Delete"
+        "delete": "Delete",
+        "deleteContextFiles": "Delete all files in this context"
       },
       "deleteDialog": {
         "title": "Delete file?",
@@ -255,6 +256,14 @@
         "deleting": "Deleting…",
         "success": "File deleted",
         "failed": "Failed to delete file."
+      },
+      "deleteContextDialog": {
+        "title": "Delete all files in this context?",
+        "description": "Every file of “{context}” will be removed from this workspace and its storage released. The context itself stays. This cannot be undone.",
+        "confirm": "Delete all",
+        "deleting": "Deleting…",
+        "success": "{count} files deleted",
+        "failed": "Failed to delete the context's files."
       }
     }
   },

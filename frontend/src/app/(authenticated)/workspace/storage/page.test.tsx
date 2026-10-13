@@ -30,6 +30,7 @@ import type { FileObject } from "@/lib/api/files";
 const mockListFiles = vi.fn();
 const mockGetDownloadUrl = vi.fn();
 const mockDeleteFile = vi.fn();
+const mockDeleteContextFiles = vi.fn();
 const mockGetContexts = vi.fn();
 
 let mockCurrentWorkspace: {
@@ -45,6 +46,7 @@ vi.mock("@/lib/api/files", async () => {
     listFiles: (...args: unknown[]) => mockListFiles(...args),
     getDownloadUrl: (...args: unknown[]) => mockGetDownloadUrl(...args),
     deleteFile: (...args: unknown[]) => mockDeleteFile(...args),
+    deleteContextFiles: (...args: unknown[]) => mockDeleteContextFiles(...args),
   };
 });
 
@@ -104,6 +106,7 @@ beforeEach(() => {
   mockListFiles.mockReset();
   mockGetDownloadUrl.mockReset();
   mockDeleteFile.mockReset();
+  mockDeleteContextFiles.mockReset();
   mockGetContexts.mockReset();
   mockGetContexts.mockResolvedValue({ contexts: [], total: 0 });
   mockToast.mockReset();
@@ -280,6 +283,55 @@ describe("StoragePage", () => {
       expect(mockDeleteFile).toHaveBeenCalledWith("ws-1", "file-1");
     });
     expect(mockListFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it("deletes every file of a context after confirmation and refetches (#1960)", async () => {
+    mockListFiles
+      .mockResolvedValueOnce([file({ context_id: "ctx-1" })])
+      .mockResolvedValueOnce([]);
+    mockDeleteContextFiles.mockResolvedValue({
+      deleted: 1,
+      released_bytes: 2048,
+    });
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "list.actions.deleteContextFiles" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", {
+          name: "list.deleteContextDialog.confirm",
+        }),
+      ).toBeInTheDocument();
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "list.deleteContextDialog.confirm" }),
+    );
+
+    await waitFor(() => {
+      expect(mockDeleteContextFiles).toHaveBeenCalledWith("ctx-1");
+    });
+    expect(mockDeleteFile).not.toHaveBeenCalled();
+    expect(mockListFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it("offers the context-wide delete only for context-bound files", async () => {
+    mockListFiles.mockResolvedValue([file()]); // workspace-scoped: context_id null
+
+    render(<StoragePage />);
+
+    await waitFor(() => {
+      expect(screen.getByText("report.pdf")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByRole("button", { name: "list.actions.deleteContextFiles" }),
+    ).not.toBeInTheDocument();
   });
 
   it("loads more by bumping the limit when the page is full", async () => {

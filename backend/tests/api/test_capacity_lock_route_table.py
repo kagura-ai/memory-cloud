@@ -97,6 +97,7 @@ ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/contexts/{context_id}"): ALLOWED,
     ("PUT", "/api/v1/contexts/{context_id}"): ALLOWED,
     ("DELETE", "/api/v1/contexts/{context_id}"): ALLOWED,
+    ("DELETE", "/api/v1/contexts/{context_id}/files"): ALLOWED,
     ("GET", "/api/v1/contexts/{context_id}/duplicates"): ALLOWED,
     ("GET", "/api/v1/contexts/{context_id}/export"): ALLOWED,
     ("GET", "/api/v1/contexts/{context_id}/members"): ALLOWED,

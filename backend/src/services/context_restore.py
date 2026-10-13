@@ -21,6 +21,9 @@ memory carries the context's timestamp the restore takes those up to
 ``DELETION_WINDOW`` before it. A memory forgotten earlier, or tombstoned by
 Sleep, stays deleted.
 
+Files the deletion purged (#1960) come back while the soft-delete GC has not
+removed them (7 days); after that they are gone, and the restore reports it.
+
 Not restored: what the deletion hard-deleted or rewrote — the context's
 neural edges, its entries in members' ``allowed_context_ids``, revoked
 resource tokens — and memories the purge already removed.
@@ -73,6 +76,10 @@ class ContextRestoreResult:
     dry_run: bool
     # Memories the deletion tombstoned that are (or would be) live again.
     memories_restored: int = 0
+    # Files the deletion purged (#1960) that the soft-delete GC has not yet
+    # removed: brought back with their bytes.
+    files_restored: int = 0
+    file_bytes_restored: int = 0
     # Tombstoned memories of the context the deletion did not tombstone:
     # forgotten earlier, or archived/merged by Sleep. They stay deleted.
     memories_left_deleted: int = 0
@@ -332,6 +339,22 @@ async def restore_deleted_context(
             "again as a newer version."
         )
 
+    # #1960: files the deletion purged and the 7-day GC has not reached.
+    from models.file_objects import FileObject
+
+    file_counts = (
+        await db.execute(
+            select(func.count(), func.coalesce(func.sum(FileObject.size_bytes), 0)).where(
+                FileObject.workspace_id == context.workspace_id,
+                FileObject.context_id == context.id,
+                FileObject.deleted_at == context.deleted_at,
+                FileObject.status == "uploaded",
+            )
+        )
+    ).one()
+    result.files_restored = int(file_counts[0])
+    result.file_bytes_restored = int(file_counts[1])
+
     if dry_run:
         # Ends the read transaction; the CLI holds the session open while the
         # operator answers its prompt.
@@ -354,6 +377,12 @@ async def restore_deleted_context(
     # removed rows, and those cannot come back.
     result.memories_restored = int(cast(CursorResult[Any], restored).rowcount or 0)
 
+    from services.file_storage_service import FileStorageService
+
+    result.files_restored, result.file_bytes_restored = await FileStorageService(
+        db
+    ).restore_context_files(context)
+
     context.deleted_at = None
     context.deleted_by = None
     context.name = name
@@ -371,6 +400,8 @@ async def restore_deleted_context(
                 "deleted_by": result.deleted_by,
                 "memories_restored": result.memories_restored,
                 "memories_left_deleted": result.memories_left_deleted,
+                "files_restored": result.files_restored,
+                "file_bytes_restored": result.file_bytes_restored,
             },
         )
     )
@@ -382,6 +413,14 @@ async def restore_deleted_context(
         raise ConflictError(
             f"Context {context_id} could not be restored: its name or resource is now taken"
         ) from e
+
+    if result.file_bytes_restored:
+        # Redis follows the durable DB state (R5), as the purge did in reverse.
+        from services import storage_quota_service
+
+        await storage_quota_service.bump_committed_storage_bytes(
+            workspace_id=context.workspace_id, size_bytes=result.file_bytes_restored
+        )
 
     logger.info(
         "context_restored",

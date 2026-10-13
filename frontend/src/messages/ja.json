@@ -246,7 +246,8 @@
       "actions": {
         "download": "ダウンロード",
         "downloadFailed": "ダウンロードを開始できませんでした。",
-        "delete": "削除"
+        "delete": "削除",
+        "deleteContextFiles": "このコンテキストのファイルをすべて削除"
       },
       "deleteDialog": {
         "title": "ファイルを削除しますか？",
@@ -255,6 +256,14 @@
         "deleting": "削除中…",
         "success": "ファイルを削除しました",
         "failed": "ファイルの削除に失敗しました。"
+      },
+      "deleteContextDialog": {
+        "title": "このコンテキストのファイルをすべて削除しますか？",
+        "description": "「{context}」のファイルはすべてこのワークスペースから削除され、容量が解放されます。コンテキスト自体は残ります。この操作は取り消せません。",
+        "confirm": "すべて削除",
+        "deleting": "削除中…",
+        "success": "{count} 件のファイルを削除しました",
+        "failed": "コンテキストのファイルの削除に失敗しました。"
       }
     }
   },

@@ -106,9 +106,9 @@ def is_lock_candidate(workspace: Workspace) -> bool:
 async def _bytes_in_deleted_contexts(db: AsyncSession, workspace_id: UUID) -> int:
     """Bytes of live uploaded files bound to a soft-deleted context.
 
-    ``delete_context`` keeps the context's files (the context can be restored
-    from its rows, ``services/context_restore.py``), so they stay in
-    ``workspace_storage_usage``. But the owner can no longer see them —
+    ``delete_context`` kept the context's files until #1960 (the context can be
+    restored from its rows, ``services/context_restore.py``), so legacy rows
+    still sit in ``workspace_storage_usage``. The owner can no longer see them —
     ``list_files`` and the storage page only show files of live contexts — so
     counting them would leave a storage lock the owner has no way to lift by
     deleting. The lock's figure therefore excludes them; the counter itself

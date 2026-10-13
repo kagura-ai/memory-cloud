@@ -427,7 +427,9 @@ admin-managed Free workspace is never locked. It is computed on every gated call
 stored, so deleting down to the cap unlocks the next call. No `feature` and no `quota_type`:
 the refusal is not one feature or one cap. On MCP the dispatcher refuses every blocked tool
 with `error: "capacity_locked"`, the same keys as top-level fields, and a `help` naming how
-much to remove, what still works (`list`, `forget`, `delete_context`, `delete_file`,
+much to remove, what still works (`list`, `forget`, `delete_context` — which since
+[#1960](https://github.com/kagura-ai/memory-cloud/issues/1960) also frees the context's files —
+`delete_file`, `DELETE /contexts/{id}/files`,
 `get_usage`, export from the web UI) and the `cleanup_url`. On REST the refusal comes from the memory
 service (recall, reference, explore, pinned loads, remember, edits), uploads, context
 creation, and the graph, analysis (all but cancel), agent-state (all but delete), feedback, workspace

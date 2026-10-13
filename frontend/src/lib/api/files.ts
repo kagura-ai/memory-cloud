@@ -74,6 +74,25 @@ export async function getDownloadUrl(
   return res.download_url;
 }
 
+export interface ContextFilesDeleteResult {
+  deleted: number;
+  released_bytes: number;
+}
+
+/**
+ * Soft-delete every file of a context and release their quota (context owner).
+ *
+ * #1960: the way an owner clears a context's files in bulk — the default
+ * context cannot be deleted, and the capacity lock counts file bytes.
+ */
+export async function deleteContextFiles(
+  contextId: string,
+): Promise<ContextFilesDeleteResult> {
+  return apiClient.delete<ContextFilesDeleteResult>(
+    `/api/v1/contexts/${contextId}/files`,
+  );
+}
+
 /**
  * Soft-delete a file and release its quota (member+).
  */

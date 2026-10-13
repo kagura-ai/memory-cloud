@@ -29,6 +29,7 @@ from config.constants import (
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
 from models.auth import Workspace
+from models.file_objects import FileObject
 from models.schemas import ContextExportResponse, RelatedTagItem
 from models.sleep import SleepMode
 from services.capacity_lock import CapacityPolicy
@@ -1106,6 +1107,67 @@ async def update_context(
 
 
 # Issue #246: PUT /{context_id}/activate endpoint removed (context always explicit)
+
+
+class ContextFilesDeleteResponse(BaseModel):
+    """What ``DELETE /contexts/{id}/files`` removed (#1960)."""
+
+    deleted: int = Field(..., ge=0, description="Files soft-deleted")
+    released_bytes: int = Field(..., ge=0, description="Bytes released from the storage quota")
+
+
+@router.delete("/{context_id}/files", response_model=ContextFilesDeleteResponse)
+async def delete_context_files(
+    context_id: UUID,
+    user: SessionUser,
+    db: AsyncSession = Depends(get_db),
+) -> ContextFilesDeleteResponse:
+    """Soft-delete every file of the context and release their quota (#1960).
+
+    Owner only. Allowed while the workspace is capacity-locked (#1941): it is
+    cleanup, the way an owner gets back under the storage limit — and the
+    default context cannot be deleted, so this is how its files are cleared in
+    bulk. The files take the same road as a single ``DELETE /files/{id}``: the
+    rows are soft-deleted now, the R2 objects go with the 7-day GC.
+
+    Raises:
+        403: Not the context owner.
+        404: Context not found.
+    """
+    user_id = user.get("user_id")
+    from services import storage_quota_service
+    from services.file_storage_service import FileStorageService
+    from services.permission_service import PermissionService
+
+    context = await PermissionService(db).check_context_owner(
+        user_id, context_id, capacity=CapacityPolicy.ALLOWED
+    )
+    count = int(
+        await db.scalar(
+            select(func.count()).where(
+                FileObject.workspace_id == context.workspace_id,
+                FileObject.context_id == context.id,
+                FileObject.deleted_at.is_(None),
+            )
+        )
+        or 0
+    )
+    released = await FileStorageService(db).purge_files_for_contexts([context.id])
+    await db.commit()
+    released_bytes = int(released.get(context.workspace_id, 0))
+    if released_bytes:
+        # After the commit: Redis follows the durable rows (R5).
+        await storage_quota_service.release_storage_bytes(
+            workspace_id=context.workspace_id, size_bytes=released_bytes
+        )
+    logger.info(
+        "context_files_deleted_api",
+        user_id=user_id,
+        context_id=str(context_id),
+        files=count,
+        released_bytes=released_bytes,
+    )
+    return ContextFilesDeleteResponse(deleted=count, released_bytes=released_bytes)
 
 
 @router.delete("/{context_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)

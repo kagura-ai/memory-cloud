@@ -2211,6 +2211,23 @@
         ],
         "type": "object"
       },
+      "ContextFilesDeleteResponse": {
+        "properties": {
+          "deleted": {
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "released_bytes": {
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deleted",
+          "released_bytes"
+        ],
+        "type": "object"
+      },
       "ContextListResponse": {
         "properties": {
           "contexts": {
@@ -18608,6 +18625,60 @@
         },
         "tags": [
           "retrieval-feedback"
+        ]
+      }
+    },
+    "/api/v1/contexts/{context_id}/files": {
+      "delete": {
+        "operationId": "delete_context_files_api_v1_contexts__context_id__files_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "context_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContextFilesDeleteResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "tags": [
+          "contexts"
         ]
       }
     },

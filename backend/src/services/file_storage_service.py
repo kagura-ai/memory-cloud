@@ -870,8 +870,15 @@ class FileStorageService:
             size_bytes=size,
         )
 
-    async def purge_files_for_contexts(self, context_ids: Sequence[UUID]) -> dict[UUID, int]:
+    async def purge_files_for_contexts(
+        self, context_ids: Sequence[UUID], *, deleted_at: datetime | None = None
+    ) -> dict[UUID, int]:
         """Soft-delete every live file bound to ``context_ids`` (all statuses).
+
+        ``deleted_at`` lets ``ContextService.delete_context`` (#1960) stamp the
+        files with the context's own timestamp, which is how
+        :meth:`restore_context_files` later tells them from files deleted on
+        their own. Defaults to now.
 
         Admin user-erasure hard-deletes the target's contexts, which would
         fire ``file_objects.context_id``'s ``ON DELETE SET NULL`` and silently
@@ -924,7 +931,7 @@ class FileStorageService:
         # in ONE upsert per workspace after the loop — a bulk purge otherwise
         # issued one UPSERT round-trip per uploaded file (v0.42 review #30).
         usage_delta: dict[UUID, list[int]] = {}  # ws -> [delta_bytes, delta_files]
-        now = utcnow()
+        now = deleted_at or utcnow()
         for file in files:
             file.deleted_at = now
             if file.status == "uploaded":
@@ -952,6 +959,42 @@ class FileStorageService:
                 workspaces=[str(w) for w in released],
             )
         return released
+
+    async def restore_context_files(self, context: Context) -> tuple[int, int]:
+        """Bring back the files a context deletion purged (#1960), if still here.
+
+        A file stamped with the context's own ``deleted_at`` and still
+        ``uploaded`` was soft-deleted by ``delete_context`` and has not been
+        reached by the soft-delete GC (``tasks/file_tasks.py``, 7 days), which
+        would have marked it ``failed`` and removed the R2 object. Those rows
+        get ``deleted_at`` cleared and their bytes added back to
+        ``workspace_storage_usage``; GC'd files stay gone. Does not commit;
+        the caller bumps the Redis counter after its commit
+        (``storage_quota_service.bump_committed_storage_bytes``).
+
+        Returns:
+            ``(files_restored, bytes_restored)``.
+        """
+        assert context.deleted_at is not None
+        result = await self.db.execute(
+            select(FileObject)
+            .where(
+                FileObject.workspace_id == context.workspace_id,
+                FileObject.context_id == context.id,
+                FileObject.deleted_at == context.deleted_at,
+                FileObject.status == "uploaded",
+            )
+            .with_for_update()
+        )
+        files = list(result.scalars().all())
+        total = sum(f.size_bytes for f in files)
+        for file in files:
+            file.deleted_at = None
+        if files:
+            await self._upsert_workspace_usage(
+                context.workspace_id, delta_bytes=total, delta_files=len(files)
+            )
+        return len(files), total
 
     # ------------------------------------------------------------------
     # Counter helper (UPSERT pattern)

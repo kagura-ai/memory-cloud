@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useTranslations, useLocale } from "next-intl";
-import { Download, HardDrive, Trash2 } from "lucide-react";
+import { Download, FolderMinus, HardDrive, Trash2 } from "lucide-react";
 import { PageContainer } from "@/components/common/PageContainer";
 import { PageHeader } from "@/components/common/PageHeader";
 import { TableLoadingState } from "@/components/common/LoadingState";
@@ -43,6 +43,7 @@ import { formatBytes } from "@/lib/utils/format";
 import {
   listFiles,
   getDownloadUrl,
+  deleteContextFiles,
   deleteFile,
   type FileObject,
 } from "@/lib/api/files";
@@ -74,6 +75,13 @@ export default function StoragePage() {
   // Delete-confirmation state
   const [fileToDelete, setFileToDelete] = useState<FileObject | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // #1960: "delete every file of this context" (the default context cannot be
+  // deleted, and the capacity lock counts file bytes).
+  const [contextToClear, setContextToClear] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  const [clearing, setClearing] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
 
   // member+ can delete; viewer is read-only (mirrors backend authz).
@@ -211,6 +219,28 @@ export default function StoragePage() {
     }
   };
 
+  const handleConfirmClearContext = async () => {
+    if (!contextToClear) return;
+    try {
+      setClearing(true);
+      const result = await deleteContextFiles(contextToClear.id);
+      toast({
+        title: t("list.deleteContextDialog.success", { count: result.deleted }),
+        description: contextToClear.name,
+      });
+      setContextToClear(null);
+      await loadFiles(limit, "refresh");
+    } catch (e) {
+      toast({
+        variant: "destructive",
+        title: t("list.deleteContextDialog.failed"),
+        description: e instanceof Error ? e.message : t("list.fetchError"),
+      });
+    } finally {
+      setClearing(false);
+    }
+  };
+
   // The backend returns no total count; offer "load more" only while the
   // page came back full and we have room under the server cap.
   const canLoadMore = files.length >= limit && limit < MAX_LIMIT;
@@ -314,6 +344,30 @@ export default function StoragePage() {
                             <Trash2 className="h-4 w-4" aria-hidden="true" />
                           </Button>
                         )}
+                        {canDelete && f.context_id && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              const ctxId = f.context_id;
+                              if (!ctxId) return;
+                              setContextToClear({
+                                id: ctxId,
+                                name:
+                                  contextNames[ctxId] ??
+                                  `${ctxId.slice(0, 8)}…`,
+                              });
+                            }}
+                            aria-label={t("list.actions.deleteContextFiles")}
+                            title={t("list.actions.deleteContextFiles")}
+                            className="text-destructive hover:text-destructive"
+                          >
+                            <FolderMinus
+                              className="h-4 w-4"
+                              aria-hidden="true"
+                            />
+                          </Button>
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -370,6 +424,43 @@ export default function StoragePage() {
               {deleting
                 ? t("list.deleteDialog.deleting")
                 : t("list.deleteDialog.confirm")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={contextToClear !== null}
+        onOpenChange={(open) => {
+          if (!open) setContextToClear(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("list.deleteContextDialog.title")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("list.deleteContextDialog.description", {
+                context: contextToClear?.name ?? "",
+              })}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={clearing}>
+              {tCommon("cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                handleConfirmClearContext();
+              }}
+              disabled={clearing}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {clearing
+                ? t("list.deleteContextDialog.deleting")
+                : t("list.deleteContextDialog.confirm")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
