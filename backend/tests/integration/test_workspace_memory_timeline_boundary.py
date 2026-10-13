@@ -22,10 +22,13 @@ would change the count and fail the test:
   * ``m_outsider`` — authored by a NON-member, rooted in a ws_a context: must
                      be counted. Catches a regression that re-adds the dropped
                      ``Memory.user_id.in_(member_ids)`` filter (#822 finding 2).
-  * ``m_null_ws``  — ``Memory.workspace_id IS NULL``, rooted in a ws_a context:
-                     must be counted. Catches a regression that scopes by the
-                     nullable ``Memory.workspace_id`` instead of
-                     ``Context.workspace_id`` (#822 finding 1).
+  * ``m_cross_ws`` — stamped ``Memory.workspace_id == ws_b`` but rooted in a
+                     ws_a context: must be counted. Catches a regression that
+                     scopes by ``Memory.workspace_id`` instead of
+                     ``Context.workspace_id`` (#822 finding 1). It used to be a
+                     NULL-workspace row; e95 (#1951) made the column NOT NULL,
+                     and ``memories`` has no compound FK, so a cross-rooted row
+                     is the remaining way to tell the two scopes apart.
   * ``m_deleted_ctx`` — rooted in a *soft-deleted* ws_a context: must NOT be
                      counted. Catches dropping ``Context.deleted_at.is_(None)``.
   * ``m_other_ws`` — the cross-rooted leak case (#614/#383): authored by
@@ -122,7 +125,9 @@ async def cross_rooted_scenario(db_session):
         [
             _make_memory(multi_user, ws_a.id, ctx_a.id),  # m_member   → counts
             _make_memory(outsider, ws_a.id, ctx_a.id),  # m_outsider → counts (no member filter)
-            _make_memory(multi_user, None, ctx_a.id),  # m_null_ws  → counts (ctx scope, not ws_id)
+            _make_memory(
+                multi_user, ws_b.id, ctx_a.id
+            ),  # m_cross_ws → counts (ctx scope, not ws_id)
             _make_memory(multi_user, ws_a.id, ctx_a_deleted.id),  # m_deleted_ctx → excluded
             _make_memory(multi_user, ws_b.id, ctx_b.id),  # m_other_ws → must NOT leak
         ]
@@ -138,7 +143,7 @@ async def test_timeline_counts_only_live_workspace_contexts(cross_rooted_scenari
 
     The single count of 3 (not 2, not 4, not 5) simultaneously pins: the
     cross-workspace memory is excluded, the non-member memory is included, the
-    NULL-``Memory.workspace_id`` memory is included, and the soft-deleted
+    cross-rooted (``ws_b``-stamped) memory is included, and the soft-deleted
     context's memory is excluded. A regression to membership scoping,
     ``Memory.workspace_id`` scoping, or dropping the deleted-context filter all
     move this number.

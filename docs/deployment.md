@@ -1613,6 +1613,23 @@ removed. Nothing is deleted either way. `GET /api/v1/workspaces/{id}/plan` lists
 (only features the workspace still has something for), and the web UI shows
 the owner a banner.
 
+**Migration `e95_1951_memories_ws_not_null` (#1951)** makes `memories.workspace_id`
+`NOT NULL`, so every memory counts toward its workspace's limits (a row written
+before migration 063 could still carry a NULL and escape them). It fills the NULL
+from the memory's context and never rewrites a value that is already set. It
+**refuses to run** — and leaves the schema untouched — while a memory has neither a
+workspace nor a context, because nothing can place such a row; the error names
+the count and up to ten ids. Check before upgrading:
+
+```sql
+SELECT id, user_id, created_at FROM memories
+WHERE workspace_id IS NULL AND context_id IS NULL;
+```
+
+Restore the rows' context (`services/context_restore.py`, #1804) or delete them,
+then run the migration again. The `SET NOT NULL` step uses a validated `CHECK`
+as proof, so it does not scan or lock the table for long.
+
 Override via environment variables (`PLAN_<KEY>_<FIELD>`, key upper-cased):
 
 ```bash

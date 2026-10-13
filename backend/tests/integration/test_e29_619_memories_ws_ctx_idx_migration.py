@@ -42,10 +42,10 @@ def _seed_memories(conn: Connection, n: int = 5) -> None:
         conn.execute(
             text(
                 "INSERT INTO memories "
-                "(id, user_id, summary, content, type, embedding_status, "
+                "(id, user_id, workspace_id, summary, content, type, embedding_status, "
                 " importance, confidence, scope, long_term, use_count, "
                 " access_count, client, source, created_at) "
-                "VALUES (gen_random_uuid(), 'tester-619', 'scope scan seed', "
+                "VALUES (gen_random_uuid(), 'tester-619', gen_random_uuid(), 'scope scan seed', "
                 "'body', 'note', 'success', 0.5, 1.0, 'working', false, "
                 "0, 0, 'test', 'mcp_remember', now())"
             )

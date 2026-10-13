@@ -31,6 +31,7 @@ def _tombstone(
     user: str, deleted_by: str | None, *, age_days: int, context_id: UUID | None = None
 ) -> Memory:
     return Memory(
+        workspace_id=uuid4(),
         id=uuid4(),
         user_id=user,
         summary=f"tombstone {deleted_by}",
@@ -116,6 +117,7 @@ class TestDefaultWindow:
             _tombstone(user, "some-user-sub", age_days=inside, context_id=dead_id),
         ]
         live = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user,
             summary="live",

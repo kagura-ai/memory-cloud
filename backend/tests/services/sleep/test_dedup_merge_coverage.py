@@ -100,6 +100,7 @@ def _make_llm_response(parsed):
 async def _make_db_memory(db_session, *, summary="m", tags=None, importance=0.5):
     """Persist a minimal active Memory row and return it."""
     mem = Memory(
+        workspace_id=uuid4(),
         id=uuid4(),
         user_id="dedup-user",
         summary=summary,
@@ -640,6 +641,7 @@ class TestFetchActiveMemoriesOrdering:
     async def _add(db_session, user_id, *, created_days_ago, updated_days_ago=None):
         now = utcnow()
         mem = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user_id,
             summary="m",
@@ -685,6 +687,7 @@ class TestFetchActiveMemoriesOrdering:
         ids = []
         for _ in range(6):
             mem = Memory(
+                workspace_id=uuid4(),
                 id=uuid4(),
                 user_id=user_id,
                 summary="m",
@@ -1160,6 +1163,7 @@ class TestFetchActiveMemoriesRealDB:
     async def test_excludes_soft_deleted_and_other_users(self, db_session):
         user = f"fetch-user-{uuid4()}"
         active = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user,
             summary="active",
@@ -1169,6 +1173,7 @@ class TestFetchActiveMemoriesRealDB:
             scope="working",
         )
         deleted = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user,
             summary="deleted",
@@ -1180,6 +1185,7 @@ class TestFetchActiveMemoriesRealDB:
             deleted_by="someone",
         )
         other = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=f"other-{uuid4()}",
             summary="other user",
@@ -1252,6 +1258,7 @@ class TestFetchActiveMemoriesRealDB:
         """#1519: delivery_mode='always' rows never enter dedup candidacy."""
         user = f"fetch-user-{uuid4()}"
         plain = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user,
             summary="plain",
@@ -1261,6 +1268,7 @@ class TestFetchActiveMemoriesRealDB:
             scope="working",
         )
         pinned = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user,
             summary="pinned",
@@ -1287,6 +1295,7 @@ class TestFetchActiveMemoriesRealDB:
         details object does not."""
         user = f"fetch-user-{uuid4()}"
         plain = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user,
             summary="plain",
@@ -1297,6 +1306,7 @@ class TestFetchActiveMemoriesRealDB:
             details={"other": 1},
         )
         guardrail = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user,
             summary="guardrail",
@@ -1328,6 +1338,7 @@ class TestFetchActiveMemoriesRealDB:
         candidacy, even when a same-summary note would."""
         user = f"fetch-user-{uuid4()}"
         note = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user,
             summary="standup 09:00",
@@ -1337,6 +1348,7 @@ class TestFetchActiveMemoriesRealDB:
             scope="working",
         )
         occurrence = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user,
             summary="standup 09:00",
@@ -1372,6 +1384,7 @@ class TestFetchActiveMemoriesRealDB:
         user = f"fetch-user-{uuid4()}"
         rows = [
             Memory(
+                workspace_id=uuid4(),
                 id=uuid4(),
                 user_id=user,
                 summary="p1",
@@ -1382,6 +1395,7 @@ class TestFetchActiveMemoriesRealDB:
                 delivery_mode="always",
             ),
             Memory(
+                workspace_id=uuid4(),
                 id=uuid4(),
                 user_id=user,
                 summary="p2",
@@ -1392,6 +1406,7 @@ class TestFetchActiveMemoriesRealDB:
                 delivery_mode="always",
             ),
             Memory(
+                workspace_id=uuid4(),
                 id=uuid4(),
                 user_id=user,
                 summary="gone",
@@ -1403,6 +1418,7 @@ class TestFetchActiveMemoriesRealDB:
                 deleted_at=utcnow(),
             ),
             Memory(
+                workspace_id=uuid4(),
                 id=uuid4(),
                 user_id=user,
                 summary="plain",
@@ -1412,6 +1428,7 @@ class TestFetchActiveMemoriesRealDB:
                 scope="working",
             ),
             Memory(
+                workspace_id=uuid4(),
                 id=uuid4(),
                 user_id=f"other-{uuid4()}",
                 summary="theirs",
@@ -1435,6 +1452,7 @@ class TestFetchActiveMemoriesRealDB:
         user = f"fetch-user-{uuid4()}"
         rows = [
             Memory(
+                workspace_id=uuid4(),
                 id=uuid4(),
                 user_id=user,
                 summary="pinned",
@@ -1445,6 +1463,7 @@ class TestFetchActiveMemoriesRealDB:
                 delivery_mode="always",
             ),
             Memory(
+                workspace_id=uuid4(),
                 id=uuid4(),
                 user_id=user,
                 summary="guardrail",
@@ -1462,6 +1481,7 @@ class TestFetchActiveMemoriesRealDB:
                 },
             ),
             Memory(
+                workspace_id=uuid4(),
                 id=uuid4(),
                 user_id=user,
                 summary="both",
@@ -1480,6 +1500,7 @@ class TestFetchActiveMemoriesRealDB:
                 },
             ),
             Memory(
+                workspace_id=uuid4(),
                 id=uuid4(),
                 user_id=user,
                 summary="plain",
@@ -1509,6 +1530,7 @@ class TestSoftDeleteRealDB:
 
         user = f"sd-user-{uuid4()}"
         pinned = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user,
             summary="pinned since fetch",
@@ -1519,6 +1541,7 @@ class TestSoftDeleteRealDB:
             delivery_mode="always",
         )
         plain = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user,
             summary="plain",
@@ -1551,6 +1574,7 @@ class TestSoftDeleteRealDB:
 
         user = f"sd-user-{uuid4()}"
         row = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id=user,
             summary="to archive",

@@ -13,12 +13,10 @@ from sqlalchemy import text
 # memories columns at head (post-e41): no ``use_count``; ``reference_count`` is
 # omitted so the server DEFAULT backfill is exercised.
 _MEM_COLS = (
-    "id, user_id, summary, content, type, importance, confidence, scope, "
+    "id, user_id, workspace_id, summary, content, type, importance, confidence, scope, "
     "embedding_status, client, source, long_term, access_count"
 )
-_MEM_VALS = (
-    ":id, 'u1', 's', 'c', 'note', 0.5, 1.0, 'working', 'success', 'test', 'mcp_remember', false, 0"
-)
+_MEM_VALS = ":id, 'u1', gen_random_uuid(), 's', 'c', 'note', 0.5, 1.0, 'working', 'success', 'test', 'mcp_remember', false, 0"
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ import os
 import uuid
 from contextlib import contextmanager
 
+import pytest
 from alembic.config import Config
 from sqlalchemy import create_engine, text
 
@@ -147,6 +148,7 @@ class TestAlembicMigrations:
 # on neural_memory_edges are still nullable, so we can seed pre-062 NULL rows
 # and then upgrade over b03_396 to exercise the backfill + orphan-delete paths.
 B02_REV = "b02_383_edges_ws_ctx_idx"
+B03_REV = "b03_396_edges_ws_ctx_not_null"
 
 
 class TestB03NeuralEdgesBackfillMigration:
@@ -195,7 +197,22 @@ class TestB03NeuralEdgesBackfillMigration:
 
     @staticmethod
     def _upgrade_head_with_test_db():
-        """Run ``alembic upgrade head`` aimed at the test DB."""
+        """Run ``alembic upgrade head`` aimed at the test DB.
+
+        Stops at b03 first: the NULL/NULL memories some tests seed as edge
+        endpoints model pre-063 rows that nothing can place in a workspace, and
+        e95 (#1951) refuses to enforce ``memories.workspace_id NOT NULL`` while
+        such rows exist. They have served their purpose once b03 has run, so
+        they are removed before the upgrade continues to head.
+        """
+        with _alembic_at_test_db():
+            command.upgrade(_get_alembic_config(), B03_REV)
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM memories WHERE workspace_id IS NULL AND context_id IS NULL")
+            )
+        engine.dispose()
         with _alembic_at_test_db():
             command.upgrade(_get_alembic_config(), "head")
 
@@ -584,3 +601,174 @@ class TestE05SleepModeDefaultMigration:
         # Re-apply to leave DB at head for subsequent tests in the same session.
         with _alembic_at_test_db():
             command.upgrade(_get_alembic_config(), "head")
+
+
+E94_REV = "e94_1869_summary_emb_idx"
+
+
+class TestE95MemoriesWorkspaceIdNotNull:
+    """Seeded-state tests for e95_1951_memories_ws_not_null (#1951).
+
+    Each test drops the schema and upgrades to e94 (one step before e95) so the
+    seeded INSERT still sees a nullable ``memories.workspace_id``, then runs the
+    migration and inspects the outcome:
+
+      * NULL workspace, context present   → filled from ``contexts.workspace_id``
+      * NULL workspace AND NULL context   → the migration refuses (RuntimeError),
+                                            nothing is enforced, data is intact
+      * workspace already set, disagreeing
+        with the context's                → untouched (``IS NULL`` guard)
+      * downgrade                         → column nullable again
+    """
+
+    _seed_workspace_and_context = staticmethod(
+        TestB03NeuralEdgesBackfillMigration._seed_workspace_and_context
+    )
+
+    @staticmethod
+    def _seed_memory(
+        conn,
+        mem_id: str,
+        owner_id: str,
+        workspace_id: str | None,
+        context_id: str | None,
+    ) -> None:
+        """Insert a memory as the e94 schema requires (``use_count`` is gone by then)."""
+        conn.execute(
+            text(
+                "INSERT INTO memories "
+                "(id, user_id, workspace_id, context_id, summary, content, type, "
+                " embedding_status, importance, confidence, scope, long_term, "
+                " access_count, client, source) "
+                "VALUES (:id, :u, :ws, :ctx, 'm', 'x', 'note', 'pending', "
+                " 0.5, 1.0, 'working', false, 0, 'test', 'test')"
+            ),
+            {"id": mem_id, "u": owner_id, "ws": workspace_id, "ctx": context_id},
+        )
+
+    @staticmethod
+    def _reset_and_upgrade_to_e94():
+        test_url = os.getenv("TEST_DATABASE_URL", _DEFAULT_TEST_URL)
+        db_name = test_url.rsplit("/", 1)[-1].split("?")[0]
+        if not db_name.endswith("_test"):
+            raise RuntimeError(f"Refusing to reset non-test database: {db_name}")
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            conn.execute(text("DROP SCHEMA public CASCADE"))
+            conn.execute(text("CREATE SCHEMA public"))
+        engine.dispose()
+
+        with _alembic_at_test_db():
+            command.upgrade(_get_alembic_config(), E94_REV)
+
+    @staticmethod
+    def _upgrade_head():
+        with _alembic_at_test_db():
+            command.upgrade(_get_alembic_config(), "head")
+
+    @staticmethod
+    def _workspace_id_is_nullable(conn) -> bool:
+        return (
+            conn.execute(
+                text(
+                    "SELECT is_nullable FROM information_schema.columns "
+                    "WHERE table_name = 'memories' AND column_name = 'workspace_id'"
+                )
+            ).scalar_one()
+            == "YES"
+        )
+
+    def test_null_workspace_is_filled_from_the_context(self):
+        self._reset_and_upgrade_to_e94()
+        owner = "owner-1951-fill"
+        mem_id = str(uuid.uuid4())
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            ws_id, ctx_id = self._seed_workspace_and_context(conn, owner)
+            self._seed_memory(conn, mem_id, owner, None, ctx_id)
+        engine.dispose()
+
+        self._upgrade_head()
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT workspace_id FROM memories WHERE id = :id"), {"id": mem_id}
+            ).one()
+            assert str(row.workspace_id) == ws_id
+            assert not self._workspace_id_is_nullable(conn)
+        engine.dispose()
+
+    def test_unrecoverable_row_stops_the_migration(self):
+        self._reset_and_upgrade_to_e94()
+        owner = "owner-1951-orphan"
+        mem_id = str(uuid.uuid4())
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            self._seed_memory(conn, mem_id, owner, None, None)
+        engine.dispose()
+
+        with pytest.raises(RuntimeError, match="neither workspace_id nor context_id"):
+            self._upgrade_head()
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            # Rolled back: the row is still there and nothing was enforced.
+            assert (
+                conn.execute(
+                    text("SELECT count(*) FROM memories WHERE id = :id"), {"id": mem_id}
+                ).scalar_one()
+                == 1
+            )
+            assert self._workspace_id_is_nullable(conn)
+            # Operator resolves it (here: deletes the row) and re-runs.
+            conn.execute(text("DELETE FROM memories WHERE id = :id"), {"id": mem_id})
+        engine.dispose()
+
+        self._upgrade_head()
+
+    def test_existing_workspace_is_not_rewritten(self):
+        """A row whose workspace disagrees with its context's keeps its value.
+
+        Cross-rooted rows are possible because ``memories`` has no compound FK
+        on (workspace_id, context_id); the migration counts them for the log
+        and must not "repair" them.
+        """
+        self._reset_and_upgrade_to_e94()
+        owner = "owner-1951-cross"
+        mem_id = str(uuid.uuid4())
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            _ws_a, ctx_a = self._seed_workspace_and_context(conn, owner)
+            ws_b, _ctx_b = self._seed_workspace_and_context(conn, owner)
+            self._seed_memory(conn, mem_id, owner, ws_b, ctx_a)
+        engine.dispose()
+
+        self._upgrade_head()
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT workspace_id FROM memories WHERE id = :id"), {"id": mem_id}
+            ).one()
+            assert str(row.workspace_id) == ws_b
+        engine.dispose()
+
+    def test_downgrade_restores_nullable(self):
+        self._reset_and_upgrade_to_e94()
+        self._upgrade_head()
+
+        with _alembic_at_test_db():
+            command.downgrade(_get_alembic_config(), E94_REV)
+
+        engine = _sync_engine()
+        with engine.begin() as conn:
+            assert self._workspace_id_is_nullable(conn)
+        engine.dispose()
+
+        # Leave the DB at head for the rest of the session.
+        self._upgrade_head()

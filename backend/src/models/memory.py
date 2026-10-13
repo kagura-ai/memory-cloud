@@ -149,10 +149,10 @@ class Memory(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
 
-    # Migration 063: 3-level isolation (workspace, context, user)
-    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), nullable=True, index=True
-    )
+    # Migration 063: 3-level isolation (workspace, context, user).
+    # #1951 (e95): NOT NULL — the live memory count (services/memory_counts.py)
+    # is workspace-scoped, so a row without a workspace would escape every cap.
+    workspace_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     context_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("contexts.id", ondelete="CASCADE"),

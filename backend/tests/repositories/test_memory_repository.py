@@ -23,6 +23,7 @@ class TestMemoryRepository:
     async def sample_memory(self, db_session):
         """Create sample memory in DB."""
         memory = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id="test_user",
             summary="Test memory",
@@ -154,6 +155,7 @@ class TestMemoryRepository:
         # Create multiple memories
         for i in range(5):
             memory = Memory(
+                workspace_id=uuid4(),
                 id=uuid4(),
                 user_id="test_user",
                 summary=f"Memory {i}",
@@ -182,6 +184,7 @@ class TestMemoryRepository:
         """Test listing with user_id filter."""
         # Create memories for different users
         memory1 = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id="user1",
             summary="User1 memory",
@@ -192,6 +195,7 @@ class TestMemoryRepository:
             created_at=datetime.utcnow(),
         )
         memory2 = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id="user2",
             summary="User2 memory",
@@ -215,6 +219,7 @@ class TestMemoryRepository:
         """Test listing with scope filter."""
         # Create memories with different scopes
         working = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id="test_user",
             summary="Working memory",
@@ -225,6 +230,7 @@ class TestMemoryRepository:
             created_at=datetime.utcnow(),
         )
         persistent = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id="test_user",
             summary="Persistent memory",
@@ -247,6 +253,7 @@ class TestMemoryRepository:
         """Test listing with type filter."""
         # Create memories with different types
         code = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id="test_user",
             summary="Code memory",
@@ -257,6 +264,7 @@ class TestMemoryRepository:
             created_at=datetime.utcnow(),
         )
         note = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id="test_user",
             summary="Note memory",
@@ -288,6 +296,7 @@ class TestMemoryRepository:
     async def test_create(self, repository, db_session):
         """Test creating new memory."""
         new_memory = Memory(
+            workspace_id=uuid4(),
             id=uuid4(),
             user_id="test_user",
             summary="New memory",
@@ -342,6 +351,7 @@ class TestMemoryRepository:
         # Create known number of memories
         for i in range(3):
             memory = Memory(
+                workspace_id=uuid4(),
                 id=uuid4(),
                 user_id="count_user",
                 summary=f"Memory {i}",

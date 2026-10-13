@@ -1059,10 +1059,12 @@ class ContextService:
 
             # Copy all data fields; resource_id/resource_doc_id/resource_version
             # are Computed columns (auto-derived from details)
+            # #1951: the copy lives in the target context, so it belongs to the
+            # target's workspace — not to whatever the source row carried.
             new_mem = Memory(
                 id=new_id,
                 user_id=mem.user_id,
-                workspace_id=mem.workspace_id,
+                workspace_id=target.workspace_id,
                 context_id=target_context_id,
                 summary=mem.summary,
                 summary_embedding_id=new_id,

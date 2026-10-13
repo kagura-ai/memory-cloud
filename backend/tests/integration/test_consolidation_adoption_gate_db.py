@@ -22,6 +22,7 @@ from utils.datetime import utcnow
 
 def _working(uid, *, reference_count, access_count, summary):
     return Memory(
+        workspace_id=uuid4(),
         id=uuid4(),
         user_id=uid,
         summary=summary,

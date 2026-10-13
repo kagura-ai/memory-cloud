@@ -13,11 +13,11 @@ async def test_generated_trigger_columns_populate_from_details(db_session):
         text(
             """
             INSERT INTO memories
-              (id, user_id, summary, content, type, importance, confidence,
+              (id, user_id, workspace_id, summary, content, type, importance, confidence,
                scope, embedding_status, client, source, long_term,
                access_count, details)
             VALUES
-              (:id, 'u1', 'avoid', 'avoid', 'time', 0.5, 1.0,
+              (:id, 'u1', gen_random_uuid(), 'avoid', 'avoid', 'time', 0.5, 1.0,
                'working', 'success', 'test', 'mcp_remember', false, 0,
                CAST(:details AS JSONB))
             """
