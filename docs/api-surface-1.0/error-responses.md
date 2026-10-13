@@ -438,10 +438,12 @@ workspace (a share-key or public-context reader) gets the refusal with every num
 small, bounded safety rails, and blocking one door while the others serve the same entries would
 protect nothing. The storage figure (`used_bytes`) is the one `services/storage_counts.py`
 defines and the downgrade-eligibility read shares ([#1961](https://github.com/kagura-ai/memory-cloud/issues/1961)):
-uploaded, not soft-deleted files that are workspace-scoped or bound to a live context.
-Files of a soft-deleted context stay in the upload-quota counter (the context can be
-restored) but are not counted toward the lock or eligibility: the owner can no longer see
-them in the product. `GET /api/v1/workspace/usage/current`
+uploaded, not soft-deleted files that are workspace-scoped or bound to a live context —
+every live context, another member's private one included (the owner reaches those by
+removing the member, which hands the context over). Files of a soft-deleted context stay
+in the upload-quota counter (the context can be restored, and uploads keep honouring that
+counter) but are not counted toward the lock or eligibility: no listing shows them, so no
+one could delete them to lift a lock. `GET /api/v1/workspace/usage/current`
 reports the same numbers under `capacity_lock` (`null` when not locked), and MCP `get_usage`
 under `capacity_lock`.
 

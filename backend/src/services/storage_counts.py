@@ -4,14 +4,15 @@ Two gates compare a workspace's files against a plan's ``storage_limit_bytes``
 and both must see the same number: the capacity-over lock (#1941, lifted by
 deleting files) and the downgrade eligibility read the billing side uses
 (#1123, "could this workspace fit the lower tier after cleanup"). The figure
-is **the bytes the owner can still delete**: uploaded, not soft-deleted files
+is **the bytes the workspace can still shed**: uploaded, not soft-deleted files
 that are either workspace-scoped (``context_id IS NULL``) or bound to a live
-context — the owner's view of ``FileStorageService.list_files`` and the storage
-page (a member sees the subset of contexts they can access). Files left behind
-in a soft-deleted context (``delete_context`` leaves them until #1960 purges
-them with the context) are not
-listed anywhere in the UI, so counting them would describe a lock the owner
-cannot lift from the product and an eligibility they cannot earn.
+context. Every live context counts, another member's private one included —
+the owner cannot list those files, but removing that member hands the context
+to the owner (#275, #1957), so they are reachable. Files left behind in a
+soft-deleted context (``delete_context`` leaves them until #1960 purges them
+with the context) are reachable by nobody — no listing shows them — so
+counting them would describe a lock no one can lift and an eligibility no one
+can earn.
 
 This is deliberately *not* the upload quota's figure. The upload quota
 (``storage_quota_service``, the ``workspace_storage_usage`` counter) bounds the
