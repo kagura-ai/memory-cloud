@@ -106,6 +106,52 @@ describe("CapacityLockBannerView", () => {
   });
 });
 
+describe("CapacityLockBannerView deletion date (#1969)", () => {
+  it("names the deletion date when the purge is scheduled", () => {
+    renderIn(
+      "en",
+      <CapacityLockBannerView
+        lock={lock({ purge_at: "2026-10-31T04:00:00Z" })}
+      />,
+    );
+    expect(
+      screen.getByText(/still over the limit on Oct 31, 2026/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/all memories, contexts and files/),
+    ).toBeInTheDocument();
+  });
+
+  it("names the deletion date in Japanese", () => {
+    renderIn(
+      "ja",
+      <CapacityLockBannerView
+        lock={lock({ purge_at: "2026-10-31T04:00:00Z" })}
+      />,
+    );
+    expect(screen.getByTestId("capacity-lock-purge-at")).toHaveTextContent(
+      /2026\/10\/31/,
+    );
+    expect(screen.getByText(/すべて削除されます/)).toBeInTheDocument();
+  });
+
+  it("shows the UTC date, not the viewer's local one", () => {
+    renderIn(
+      "en",
+      <CapacityLockBannerView
+        lock={lock({ purge_at: "2026-10-31T00:30:00Z" })}
+      />,
+    );
+    expect(screen.getByText(/on Oct 31, 2026/)).toBeInTheDocument();
+  });
+
+  it("says nothing about deletion before the sweep has stamped", () => {
+    renderIn("en", <CapacityLockBannerView lock={lock({ purge_at: null })} />);
+    expect(screen.queryByText(/will be deleted/)).toBeNull();
+    expect(screen.queryByTestId("capacity-lock-purge-at")).toBeNull();
+  });
+});
+
 describe("CapacityLockBanner", () => {
   it("renders nothing when the workspace is not locked", async () => {
     getUsage.mockResolvedValue({ capacity_lock: null });

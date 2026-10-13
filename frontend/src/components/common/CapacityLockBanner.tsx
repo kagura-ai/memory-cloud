@@ -8,13 +8,15 @@
  * (`CAPACITY-001`) until it is cleaned up or re-subscribed. The banner says
  * how much to remove and links to the plan page. It reads `capacity_lock`
  * from `GET /workspace/usage/current` and renders nothing when it is null,
- * when the read fails, or before it lands.
+ * when the read fails, or before it lands. Once the daily sweep has stamped
+ * the lock it also names the date the data is deleted (`purge_at`, #1969),
+ * as a UTC calendar date — the day the 04:00 UTC purge runs.
  */
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 import { AlertTriangle } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -47,6 +49,13 @@ export function CapacityLockBannerView({ lock }: { lock: CapacityLock }) {
     memories && storage
       ? t("amountBoth", { memories, storage })
       : (memories ?? storage ?? "");
+  const locale = useLocale();
+  const purgeDate = lock.purge_at
+    ? new Intl.DateTimeFormat(locale, {
+        dateStyle: "medium",
+        timeZone: "UTC",
+      }).format(new Date(lock.purge_at))
+    : null;
 
   return (
     <Alert
@@ -58,6 +67,11 @@ export function CapacityLockBannerView({ lock }: { lock: CapacityLock }) {
       <AlertTitle>{t("title")}</AlertTitle>
       <AlertDescription className="flex flex-wrap items-center gap-3">
         <span>{t("body", { amount })}</span>
+        {purgeDate && (
+          <span className="font-medium" data-testid="capacity-lock-purge-at">
+            {t("purgeScheduled", { date: purgeDate })}
+          </span>
+        )}
         <Button asChild size="sm" variant="outline">
           <Link href={CLEANUP_PAGE_PATH}>{t("cleanUp")}</Link>
         </Button>

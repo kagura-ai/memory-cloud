@@ -2037,7 +2037,8 @@
     "amountStorage": "{mb} MB",
     "amountBoth": "{memories}と{storage}",
     "viewPlan": "プランを見る",
-    "cleanUp": "コンテキストを整理"
+    "cleanUp": "コンテキストを整理",
+    "purgeScheduled": "{date}(UTC)の時点で上限を超えたままの場合、このワークスペースのメモリー・コンテキスト・ファイルはすべて削除されます。必要なものは先にエクスポートしてください。"
   },
   "usageStats": {
     "failedToLoad": "使用状況統計の読み込みに失敗しました",

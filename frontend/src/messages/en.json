@@ -2037,7 +2037,8 @@
     "amountStorage": "{mb} MB",
     "amountBoth": "{memories} and {storage}",
     "viewPlan": "View plan",
-    "cleanUp": "Clean up contexts"
+    "cleanUp": "Clean up contexts",
+    "purgeScheduled": "If it is still over the limit on {date} (UTC), all memories, contexts and files in this workspace will be deleted. Export what you need first."
   },
   "usageStats": {
     "failedToLoad": "Failed to load usage statistics",

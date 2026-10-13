@@ -94,6 +94,8 @@ export interface CapacityLock {
   storage_limit_bytes: number;
   over_bytes: number;
   cleanup_url: string;
+  /** #1969: when the data is deleted if still over (ISO-8601 UTC) — null until the daily sweep stamped it. */
+  purge_at?: string | null;
 }
 
 export interface UsageCurrentResponse {
