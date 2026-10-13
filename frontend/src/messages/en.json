@@ -262,7 +262,7 @@
         "description": "Every file of “{context}” will be removed from this workspace and its storage released. The context itself stays. This cannot be undone.",
         "confirm": "Delete all",
         "deleting": "Deleting…",
-        "success": "{count} files deleted",
+        "success": "{count, plural, one {# file deleted} other {# files deleted}}",
         "failed": "Failed to delete the context's files."
       }
     }

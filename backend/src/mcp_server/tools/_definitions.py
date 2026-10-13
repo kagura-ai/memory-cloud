@@ -978,7 +978,7 @@ Returns: {status, message, updated_fields, context_id, context_name, context_dis
         # =================================================================
         {
             "name": "delete_context",
-            "description": """Soft-delete a context and ALL its memories and files: it disappears from list_contexts() and search, the files' bytes leave the storage quota at once; the data is retained for recovery (files for 7 days). DESTRUCTIVE — confirm with the user. Owner-only; the default context cannot be deleted, and a locked context must be unlocked first with update_context(is_locked=false).
+            "description": """Soft-delete a context and ALL its memories and files: it disappears from list_contexts() and search, the files' bytes leave the storage quota at once; the data is retained for recovery (files restorable by an admin for 6 days). DESTRUCTIVE — confirm with the user. Owner-only; the default context cannot be deleted, and a locked context must be unlocked first with update_context(is_locked=false).
 
 Returns: {status, message, context_id, context_name}.""",
             "inputSchema": {
@@ -998,7 +998,7 @@ Returns: {status, message, context_id, context_name}.""",
         # =================================================================
         {
             "name": "merge_contexts",
-            "description": """Copy every memory from a source context into a target context, e.g. to fold a test context into production. Copied, not moved: the source keeps its memories unless delete_source=true, which soft-deletes the source with its memories AND its files (their storage is released at once; an admin can restore within 7 days). Both contexts must be in the same workspace and use the same embedding model; requires owner access to both.
+            "description": """Copy every memory from a source context into a target context, e.g. to fold a test context into production. Copied, not moved: the source keeps its memories unless delete_source=true, which soft-deletes the source with its memories AND its files (their storage is released at once; an admin can restore within 6 days). Both contexts must be in the same workspace and use the same embedding model; requires owner access to both.
 
 Returns: {status, message, merged, source_id, target_id, delete_source}. source_id / target_id here are CONTEXT UUIDs, unlike the edge tools, where they are MEMORY UUIDs.""",
             "inputSchema": {

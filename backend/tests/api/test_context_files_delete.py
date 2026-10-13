@@ -48,7 +48,29 @@ def _context(ws_id):
     ctx = MagicMock()
     ctx.id = uuid4()
     ctx.workspace_id = ws_id
+    ctx.is_locked = False
     return ctx
+
+
+def test_a_locked_context_keeps_its_files(client, db) -> None:
+    """``is_locked`` protects the context's content as it does the context itself (#85)."""
+    ctx = _context(uuid4())
+    ctx.is_locked = True
+    with (
+        patch(
+            "services.permission_service.PermissionService.check_context_owner",
+            AsyncMock(return_value=ctx),
+        ),
+        patch(
+            "services.file_storage_service.FileStorageService.purge_context_files",
+            AsyncMock(),
+        ) as purge,
+    ):
+        r = client.delete(f"/api/v1/contexts/{ctx.id}/files")
+
+    assert r.status_code == 409
+    purge.assert_not_awaited()
+    db.commit.assert_not_awaited()
 
 
 def test_the_owner_purges_and_redis_follows_the_commit(client, db) -> None:

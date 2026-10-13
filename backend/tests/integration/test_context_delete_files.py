@@ -5,8 +5,8 @@ change an over-storage owner could only lift the lock file by file; the
 context's files survived ``delete_context`` (restorable, #1804) and sat in the
 storage counter. Now ``delete_context`` soft-deletes them with the context's
 own timestamp and frees their bytes, and ``restore_deleted_context`` revives
-the ones still inside the 7-day GC window whose content was not uploaded
-again in the meantime.
+the ones still inside the 6-day restore window (one day short of the GC's
+7-day retention) whose content was not uploaded again in the meantime.
 
 The fixture hands back ids, not ORM instances: the services commit, which
 expires the session's objects, and touching an expired attribute from a test
@@ -37,7 +37,8 @@ from models.file_objects import FileObject, WorkspaceStorageUsage
 from services.capacity_lock import capacity_lock_state
 from services.context_restore import restore_deleted_context
 from services.context_service import DEFAULT_CONTEXT_NAME, ContextService
-from services.file_storage_service import FILE_SOFT_DELETE_RETENTION, FileStorageService
+from services.file_storage_service import FILE_RESTORE_WINDOW, FileStorageService
+from utils.datetime import utcnow
 
 from ._admin_helpers import make_context, make_user, make_workspace
 
@@ -266,17 +267,39 @@ async def test_a_file_uploaded_again_since_the_deletion_blocks_its_restore(
 
 
 @pytest.mark.asyncio
-async def test_files_past_the_retention_window_are_not_restored(
+async def test_a_context_without_files_gets_no_file_warning(
     db_session, seeded: Seeded, side_effects
 ) -> None:
-    """The GC removes the R2 object before the row, so a row restored while the
-    sweep is on it would come back without its bytes: past the window the restore
-    leaves every file deleted."""
+    """A memory-only context deleted long ago must not be told its files are gone."""
+    owner = seeded.owner
+    empty = make_context(workspace_id=seeded.workspace_id, created_by=owner, is_private=True)
+    db_session.add(empty)
+    await db_session.commit()
+    empty_id = empty.id
+    await ContextService(db_session).delete_context(owner, empty_id)
+    long_ago = utcnow() - FILE_RESTORE_WINDOW - timedelta(days=1)
+    await db_session.execute(
+        update(Context).where(Context.id == empty_id).values(deleted_at=long_ago)
+    )
+    await db_session.commit()
+
+    result = await _restore(db_session, empty_id, dry_run=True)
+    assert (result.files_restored, result.file_bytes_restored) == (0, 0)
+    assert not any("file" in w for w in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_files_past_the_restore_window_are_not_restored(
+    db_session, seeded: Seeded, side_effects
+) -> None:
+    """The GC removes the R2 object before the row and takes no lock, so the
+    restore stops a day before the GC starts: past the window every file stays
+    deleted and the restore says how many."""
     _release, bump = side_effects
     await ContextService(db_session).delete_context(seeded.owner, seeded.doomed_id)
     doomed = await _context(db_session, seeded.doomed_id)
     assert doomed.deleted_at is not None
-    long_ago = doomed.deleted_at - FILE_SOFT_DELETE_RETENTION - timedelta(hours=1)
+    long_ago = doomed.deleted_at - FILE_RESTORE_WINDOW - timedelta(hours=1)
     await db_session.execute(
         update(FileObject)
         .where(FileObject.context_id == seeded.doomed_id)
@@ -289,7 +312,9 @@ async def test_files_past_the_retention_window_are_not_restored(
 
     result = await _restore(db_session, seeded.doomed_id)
     assert (result.files_restored, result.file_bytes_restored) == (0, 0)
-    assert any("retention window" in w for w in result.warnings)
+    assert any(
+        w.startswith("1 file(s) are not restored: the context was deleted") for w in result.warnings
+    )
     assert await _files(db_session, seeded.doomed_id, live_only=True) == []
     assert (await _usage(db_session, seeded.workspace_id)).used_bytes == 100
     bump.assert_not_awaited()
@@ -320,9 +345,14 @@ async def test_purging_a_live_contexts_files_keeps_the_context(
 ) -> None:
     """The service path ``DELETE /contexts/{id}/files`` takes (#1960): every live
     file of the context goes, the quota follows, the context stays."""
+    # A reservation the orphan sweeper already failed: never listed, never counted.
+    db_session.add(_file(seeded.workspace_id, seeded.doomed_id, seeded.owner, 7, status="failed"))
+    await db_session.commit()
+
     files, released = await FileStorageService(db_session).purge_context_files(seeded.doomed_id)
     await db_session.commit()
-    # Two live rows went (the upload and the cancelled reservation); both release Redis bytes.
+    # Two visible rows went (the upload and the cancelled reservation); both release
+    # Redis bytes. The failed row is soft-deleted too but reported by neither number.
     assert (files, released) == (2, 190)
     usage = await _usage(db_session, seeded.workspace_id)
     assert (usage.used_bytes, usage.file_count) == (100, 1)

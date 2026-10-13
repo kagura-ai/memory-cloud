@@ -1143,6 +1143,7 @@ async def delete_context_files(
     Raises:
         403: Not the context owner.
         404: Context not found.
+        409: The context is locked (``is_locked``), as for deleting it.
     """
     user_id = user.get("user_id")
     from services import storage_quota_service
@@ -1152,6 +1153,12 @@ async def delete_context_files(
     context = await PermissionService(db).check_context_owner(
         user_id, context_id, capacity=CapacityPolicy.ALLOWED
     )
+    if context.is_locked:
+        # Issue #85: the lock protects the context's content, its files included.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Context is locked. Unlock it before deleting its files.",
+        )
     count, released_bytes = await FileStorageService(db).purge_context_files(context.id)
     await db.commit()
     if released_bytes:
@@ -1180,7 +1187,7 @@ async def delete_context(
 
     Only context owner can delete their context. The context, its memories and
     its files are soft-deleted together and the files' bytes leave the storage
-    quota at once (#1960); an admin restore within 7 days brings the files back
+    quota at once (#1960); an admin restore within 6 days brings the files back
     unless the same content was uploaded again in the meantime.
 
     Args:
