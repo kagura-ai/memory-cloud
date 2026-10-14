@@ -594,11 +594,14 @@ def _purge_patches(workspaces, *, lock=_LOCK, purge=None, contact=("owner@exampl
     )
 
 
-async def _run_purge(workspaces, *, now, email=None, db=None, **kwargs):
+async def _run_purge(workspaces, *, now, email=None, db=None, cleaned_up=False, **kwargs):
     stamped, locked, owner, ctx_service, service = _purge_patches(workspaces, **kwargs)
     email = email or MagicMock(send_capacity_purge_complete=AsyncMock(return_value=True))
     db = db or _purge_db()
-    with stamped, locked, owner, ctx_service:
+    if not isinstance(cleaned_up, AsyncMock):
+        cleaned_up = AsyncMock(return_value=cleaned_up)
+    cleanup = patch("services.capacity_purge._owner_cleaned_up", cleaned_up)
+    with stamped, locked, owner, ctx_service, cleanup:
         counts = await purge_expired_workspaces(db, now=now, email=email)
     return counts, service, email, db
 
@@ -746,6 +749,7 @@ async def test_completion_mail_and_audit_row() -> None:
         "files_deleted": 3,
         "bytes_released": 300,
         "aborted": False,
+        "aborted_reason": None,
     }
 
 
@@ -764,6 +768,7 @@ async def test_purge_re_measures_the_lock_once(after, logged) -> None:
         owner,
         ctx_service,
         patch("services.capacity_purge.capacity_lock_state", state),
+        patch("services.capacity_purge._owner_cleaned_up", AsyncMock(return_value=False)),
         structlog.testing.capture_logs() as logs,
     ):
         counts = await purge_expired_workspaces(
@@ -887,6 +892,72 @@ async def test_should_continue_follows_the_workspace_row() -> None:
 
     await _run_purge([ws], now=_NOW, purge=AsyncMock(side_effect=purge))
     assert answers == [True, False, False]
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [("plan", "resubscribed"), ("deleted", "erased"), ("cleanup", "owner_cleanup")],
+)
+@pytest.mark.asyncio
+async def test_aborted_purge_records_why(change, reason) -> None:
+    """The callback stops on a re-subscribe, an erasure, or the owner's own
+    cleanup since the purge started; the audit row and the log say which."""
+    import structlog
+
+    ws = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    aborted = WorkspacePurgeReport(
+        contexts_deleted=1,
+        contexts_emptied=0,
+        memories_deleted=4,
+        files_deleted=0,
+        bytes_released=0,
+        aborted=True,
+    )
+
+    async def purge(_ws_id, *, actor, should_continue):
+        assert await should_continue() is True
+        if change == "plan":
+            ws.plan_name = "pro"
+        elif change == "deleted":
+            ws.deleted_at = _NOW
+        assert await should_continue() is False
+        return aborted
+
+    cleaned = AsyncMock(side_effect=[False, change == "cleanup"])
+    with structlog.testing.capture_logs() as logs:
+        counts, _, email, db = await _run_purge(
+            [ws], now=_NOW, purge=AsyncMock(side_effect=purge), cleaned_up=cleaned
+        )
+    assert counts.aborted == 1
+    assert db.add.call_args.args[0].user_metadata["aborted_reason"] == reason
+    event = next(e for e in logs if e["event"] == "capacity_purge_aborted")
+    assert event["aborted_reason"] == reason
+    email.send_capacity_purge_complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_owner_cleanup_check_is_scoped_to_the_purge() -> None:
+    """The callback asks about this workspace, since the purge started."""
+    ws = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    cleaned = AsyncMock(return_value=False)
+
+    async def purge(_ws_id, *, actor, should_continue):
+        await should_continue()
+        return _REPORT
+
+    with patch("services.capacity_purge._owner_cleaned_up", cleaned):
+        stamped, locked, owner, ctx_service, _ = _purge_patches(
+            [ws], purge=AsyncMock(side_effect=purge)
+        )
+        with stamped, locked, owner, ctx_service:
+            await purge_expired_workspaces(
+                _purge_db(),
+                now=_NOW,
+                email=MagicMock(send_capacity_purge_complete=AsyncMock(return_value=True)),
+            )
+    args, kwargs = cleaned.call_args
+    assert args[1] == ws.id
+    assert isinstance(kwargs["since"], datetime)
 
 
 @pytest.mark.asyncio

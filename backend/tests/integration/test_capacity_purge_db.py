@@ -696,6 +696,80 @@ async def test_purge_aborts_when_resubscribed_mid_run(
 
 
 @pytest.mark.asyncio
+async def test_purge_aborts_when_the_owner_cleans_up_mid_run(
+    db_session, free_ws, purge_side_effects, only_workspaces
+) -> None:
+    """The owner soft-deletes a memory themselves while the purge runs: the
+    context not yet reached stays, the audit row says owner_cleanup."""
+    ws, ctx, owner = free_ws
+    only_workspaces.add(ws.id)
+    second = make_context(workspace_id=ws.id, created_by=owner.user_id)
+    second.created_at = utcnow() + timedelta(minutes=1)  # purged after ``ctx``
+    db_session.add(second)
+    await db_session.flush()
+    await _over_cap(db_session, ws, ctx, owner)
+    kept = _memory(ws, second, owner.user_id)
+    mine = _memory(ws, second, owner.user_id)
+    db_session.add_all([kept, mine])
+    now = utcnow()
+    ws.capacity_locked_since = now - timedelta(days=30)
+    ws.capacity_purge_final_notice_at = now - timedelta(days=1)
+    ws.capacity_purge_first_notice_at = now - timedelta(days=30)
+    await db_session.flush()
+    await db_session.commit()
+
+    real_tombstone = ContextService._tombstone_memories_chunked
+    first_done: list = []
+
+    async def tombstone_then_owner_deletes(self, context, **kwargs):
+        total = await real_tombstone(self, context, **kwargs)
+        if not first_done:
+            first_done.append(context.id)
+            await self.db.execute(
+                Memory.__table__.update()
+                .where(Memory.id == mine.id)
+                .values(deleted_at=utcnow(), deleted_by=owner.user_id)
+            )
+            await self.db.commit()
+        return total
+
+    email = _mail()
+    with patch.object(ContextService, "_tombstone_memories_chunked", tombstone_then_owner_deletes):
+        counts = await purge_expired_workspaces(db_session, now=now, email=email)
+
+    assert (counts.aborted, counts.purged) == (1, 0)
+    live = await _live_contexts(db_session, ws)
+    assert [c.id for c in live] == [second.id] and first_done[0] == ctx.id
+    assert [m.id for m in await _live_memories(db_session, ws)] == [kept.id]
+    email.send_capacity_purge_complete.assert_not_awaited()
+    audit = await _audit_rows(db_session, ws)
+    assert len(audit) == 1
+    assert audit[0].user_metadata["aborted"] is True
+    assert audit[0].user_metadata["aborted_reason"] == "owner_cleanup"
+
+
+@pytest.mark.asyncio
+async def test_owner_cleaned_up_ignores_the_purge_and_older_deletes(db_session, free_ws) -> None:
+    """Only a delete since ``since`` by someone other than the purge counts —
+    a memory or a context."""
+    ws, ctx, owner = free_ws
+    since = utcnow()
+    old = _memory(ws, ctx, owner.user_id)
+    old.deleted_at, old.deleted_by = since - timedelta(minutes=1), owner.user_id
+    by_purge = _memory(ws, ctx, owner.user_id)
+    by_purge.deleted_at, by_purge.deleted_by = since, CAPACITY_PURGE_ACTOR
+    db_session.add_all([old, by_purge])
+    await db_session.flush()
+    assert await capacity_purge._owner_cleaned_up(db_session, ws.id, since=since) is False
+
+    other = make_context(workspace_id=ws.id, created_by=owner.user_id)
+    other.deleted_at, other.deleted_by = since + timedelta(seconds=1), None
+    db_session.add(other)
+    await db_session.flush()
+    assert await capacity_purge._owner_cleaned_up(db_session, ws.id, since=since) is True
+
+
+@pytest.mark.asyncio
 async def test_purge_continues_after_one_workspace_fails(
     db_session, free_ws, purge_side_effects, only_workspaces
 ) -> None:
