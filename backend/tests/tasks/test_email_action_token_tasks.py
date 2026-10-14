@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import timedelta
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -183,5 +182,11 @@ class TestSchedulerRegistration:
         assert kwargs["replace_existing"] is True
 
     def test_registered_at_app_startup(self) -> None:
-        main_src = (Path(__file__).resolve().parents[2] / "src" / "api" / "main.py").read_text()
-        assert "schedule_email_action_token_tasks(scheduler)" in main_src
+        # The lifespan's scheduler leader (#1979) registers jobs through
+        # ``register_scheduled_jobs``; it must include this family.
+        import tasks
+
+        scheduler = MagicMock()
+        with patch.object(tasks, "schedule_email_action_token_tasks") as schedule:
+            tasks.register_scheduled_jobs(scheduler)
+        schedule.assert_called_once_with(scheduler)

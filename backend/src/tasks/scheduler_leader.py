@@ -1,0 +1,188 @@
+"""Run the in-process APScheduler in exactly one process (Issue #1979).
+
+Every uvicorn worker runs the FastAPI lifespan, and the lifespan used to start
+APScheduler unconditionally — so with ``UVICORN_WORKERS=N`` each of the ~15
+cron families would fire N times per tick (only the Sleep, neural and capacity
+purge tasks guard themselves with :mod:`tasks.single_flight`). This module
+elects one leader per deployment with a Postgres session-level advisory lock,
+reusing the design of :mod:`tasks.single_flight`:
+
+- ``pg_try_advisory_lock(hashtextextended('apscheduler_leader', 0))`` on a
+  dedicated ``engine.connect()`` connection, committed right after the
+  try-lock so no idle-in-transaction snapshot is pinned (the session lock
+  survives COMMIT).
+- The leader holds that connection for its lifetime. When the process dies
+  Postgres drops the session and the lock with it, and a standby takes over.
+- Standby processes keep no connection: each retry checks one out, tries the
+  lock, and returns it to the pool on failure.
+- On release, an unlock that does not provably succeed ends in
+  ``invalidate()`` so a still-locked backend never rides back into the pool.
+
+The background loop, every ``SCHEDULER_LEADER_RETRY_SECONDS``, either retries
+the lock (standby) or checks that the held connection is alive (leader). A
+leader whose connection died has lost the lock to Postgres, so it stops its
+scheduler and goes back to standby instead of running every cron twice next to
+the new leader.
+
+Single-process deployments acquire the lock at startup and behave as before.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from collections.abc import Callable
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from db.base import _get_engine
+from tasks.scheduler import get_scheduler, shutdown_scheduler, start_scheduler
+from tasks.single_flight import _release
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+LOCK_KEY = "apscheduler_leader"
+
+_TRY_LOCK_SQL = text("SELECT pg_try_advisory_lock(hashtextextended(:key, 0))")
+_PING_SQL = text("SELECT 1")
+
+# Upper bound on one lock attempt (connect + try-lock) so an unreachable
+# Postgres cannot stall the lifespan startup for asyncpg's 60s connect timeout.
+_ATTEMPT_TIMEOUT_SECONDS = 15.0
+
+
+async def _discard(conn: AsyncConnection) -> None:
+    """Invalidate and close ``conn`` without raising.
+
+    Used when it is unknown whether the backend holds the lock (the try-lock or
+    its commit failed), so the connection must not return to the pool.
+    """
+    try:
+        await conn.invalidate()
+    except Exception:
+        logger.warning("scheduler_leader_invalidate_failed", exc_info=True)
+    try:
+        await conn.close()
+    except Exception:
+        logger.warning("scheduler_leader_close_failed", exc_info=True)
+
+
+class SchedulerLeader:
+    """Leader election for the in-process APScheduler.
+
+    Args:
+        register_jobs: Adds every cron job to the given scheduler. Called each
+            time this process becomes leader, on a fresh scheduler.
+        retry_seconds: Interval of the background loop (standby retry and
+            leader liveness check).
+    """
+
+    def __init__(
+        self,
+        *,
+        register_jobs: Callable[[AsyncIOScheduler], None],
+        retry_seconds: float,
+    ) -> None:
+        self._register_jobs = register_jobs
+        self._retry_seconds = retry_seconds
+        self._conn: AsyncConnection | None = None
+        self.retry_task: asyncio.Task[None] | None = None
+
+    @property
+    def is_leader(self) -> bool:
+        """Whether this process holds the lock and runs the scheduler."""
+        return self._conn is not None
+
+    async def start(self) -> None:
+        """Try the lock once, then start the background loop.
+
+        Never raises for a database problem: the API keeps serving and the loop
+        retries.
+        """
+        await self._attempt()
+        if not self.is_leader:
+            logger.info("scheduler_leader_standby", pid=os.getpid())
+        self.retry_task = asyncio.create_task(self._loop(), name="scheduler_leader_loop")
+
+    async def stop(self) -> None:
+        """Stop the loop and the scheduler, then release the lock."""
+        task, self.retry_task = self.retry_task, None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if self._conn is not None:
+            shutdown_scheduler()
+            conn, self._conn = self._conn, None
+            await _release(conn, LOCK_KEY)
+            try:
+                await conn.close()
+            except Exception:
+                logger.warning("scheduler_leader_close_failed", exc_info=True)
+            logger.info("scheduler_leader_released", pid=os.getpid())
+
+    async def tick(self) -> None:
+        """One loop iteration: liveness check when leader, lock retry otherwise."""
+        if self.is_leader:
+            await self._check_alive()
+        else:
+            await self._attempt()
+
+    async def _loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._retry_seconds)
+            try:
+                await self.tick()
+            except Exception:
+                # A bug in job registration must not kill the loop for good.
+                logger.exception("scheduler_leader_loop_error")
+
+    async def _attempt(self) -> None:
+        """Try the lock; on success register the jobs and start the scheduler."""
+        try:
+            conn = await asyncio.wait_for(self._try_acquire(), timeout=_ATTEMPT_TIMEOUT_SECONDS)
+        except Exception as e:  # noqa: BLE001 — DB down must not crash the worker
+            logger.warning("scheduler_leader_check_failed", error=str(e), pid=os.getpid())
+            return
+        if conn is None:
+            return
+        self._conn = conn
+        self._register_jobs(get_scheduler())
+        start_scheduler()
+        logger.info("scheduler_leader_acquired", pid=os.getpid())
+
+    async def _try_acquire(self) -> AsyncConnection | None:
+        """Return the lock-holding connection, or ``None`` when held elsewhere."""
+        conn = _get_engine().connect()
+        await conn.start()
+        try:
+            acquired = bool(await conn.scalar(_TRY_LOCK_SQL, {"key": LOCK_KEY}))
+            await conn.commit()
+        except BaseException:
+            # Unknown whether the backend took the lock — never pool it.
+            await _discard(conn)
+            raise
+        if not acquired:
+            await conn.close()
+            return None
+        return conn
+
+    async def _check_alive(self) -> None:
+        """Verify the held connection; on failure stop the scheduler and stand by."""
+        conn = self._conn
+        if conn is None:
+            return
+        try:
+            await conn.scalar(_PING_SQL)
+            await conn.commit()
+            return
+        except Exception as e:  # noqa: BLE001 — handled by stepping down
+            logger.warning("scheduler_leader_lost", error=str(e), pid=os.getpid())
+        self._conn = None
+        shutdown_scheduler()
+        await _discard(conn)

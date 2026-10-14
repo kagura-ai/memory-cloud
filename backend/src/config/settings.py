@@ -225,6 +225,18 @@ class Settings(BaseSettings):
         ),
     )
 
+    scheduler_leader_retry_seconds: int = Field(
+        default=60,
+        ge=5,
+        description=(
+            "How often a standby API worker retries the APScheduler leader lock, "
+            "and how often the leader checks that its lock connection is alive "
+            "(#1979). Only the lock holder runs the background cron jobs, so "
+            "after the leader process dies another worker takes over within "
+            "this interval."
+        ),
+    )
+
     # OAuth2 - Google
     google_client_id: str = Field(default="", description="Google OAuth2 Client ID")
     google_client_secret: str = Field(default="", description="Google OAuth2 Client Secret")

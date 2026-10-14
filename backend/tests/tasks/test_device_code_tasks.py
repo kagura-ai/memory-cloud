@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -169,5 +168,11 @@ class TestSchedulerRegistration:
         assert kwargs["replace_existing"] is True
 
     def test_registered_at_app_startup(self) -> None:
-        main_src = (Path(__file__).resolve().parents[2] / "src" / "api" / "main.py").read_text()
-        assert "schedule_device_code_tasks(scheduler)" in main_src
+        # The lifespan's scheduler leader (#1979) registers jobs through
+        # ``register_scheduled_jobs``; it must include this family.
+        import tasks
+
+        scheduler = MagicMock()
+        with patch.object(tasks, "schedule_device_code_tasks") as schedule:
+            tasks.register_scheduled_jobs(scheduler)
+        schedule.assert_called_once_with(scheduler)

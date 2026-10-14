@@ -12,7 +12,12 @@ Implements scheduled tasks for:
 - Security notice digests (every minute) — Issue #1752
 - Used/expired email action token cleanup (hourly) — Issue #1738
 - Capacity-over purge sweep (daily 04:00 UTC) — Issue #1969
+
+Only one process of the deployment runs the scheduler (``scheduler_leader``,
+Issue #1979); it adds the jobs with :func:`register_scheduled_jobs`.
 """
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from .bm25_drift_tasks import schedule_bm25_drift_tasks
 from .capacity_purge_tasks import schedule_capacity_purge_tasks
@@ -31,7 +36,35 @@ from .security_notification_tasks import schedule_security_notification_tasks
 from .semantic_edge_reverify import schedule_semantic_edge_reverify_tasks
 from .sleep_tasks import schedule_sleep_tasks
 
+
+def register_scheduled_jobs(scheduler: AsyncIOScheduler) -> None:
+    """Add every background cron job to ``scheduler``.
+
+    Called by the scheduler leader (Issue #1979) each time this process takes
+    the leader lock — at startup or on takeover — before the scheduler starts.
+
+    Args:
+        scheduler: The (not yet started) process scheduler.
+    """
+    schedule_neural_tasks(scheduler)
+    schedule_mcp_tasks(scheduler)
+    schedule_credentials_tasks(scheduler)
+    schedule_device_code_tasks(scheduler)
+    schedule_security_notification_tasks(scheduler)
+    schedule_email_action_token_tasks(scheduler)
+    schedule_known_device_tasks(scheduler)
+    schedule_embedding_tasks(scheduler)
+    schedule_resource_indexer_jobs(scheduler)
+    schedule_sleep_tasks(scheduler)
+    schedule_bm25_drift_tasks(scheduler)
+    schedule_erasure_tasks(scheduler)
+    schedule_file_tasks(scheduler)
+    schedule_capacity_purge_tasks(scheduler)
+    schedule_semantic_edge_reverify_tasks(scheduler)
+
+
 __all__ = [
+    "register_scheduled_jobs",
     "get_scheduler",
     "start_scheduler",
     "shutdown_scheduler",
