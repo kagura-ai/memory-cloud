@@ -44,6 +44,10 @@ services:
       # .claude/rules/backend.md for the three-layer policy.
       TZ: UTC
       PGTZ: UTC
+    # POSTGRES_MAX_CONNECTIONS (#1979): default 100 is the image's own default.
+    # Raise it before raising UVICORN_WORKERS — docs/deployment.md "Multiple
+    # API workers and Postgres connections". Changing it restarts Postgres.
+    command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-100}"]
     volumes:
       - postgres_data_18:/var/lib/postgresql
     healthcheck:

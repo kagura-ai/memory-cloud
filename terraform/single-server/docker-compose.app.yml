@@ -88,7 +88,12 @@ x-api-common: &api-common
     timeout: 5s
     retries: 3
     start_period: 15s
-  command: uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level info
+  # UVICORN_WORKERS (#1979): API worker processes per container, default 1.
+  # Each worker has its own DB/Redis pools; only one process in the deployment
+  # runs the APScheduler (Postgres leader lock). Size it against Postgres
+  # max_connections — docs/deployment.md "Multiple API workers and Postgres
+  # connections".
+  command: uvicorn src.api.main:app --host 0.0.0.0 --port 8080 --log-level info --workers ${UVICORN_WORKERS:-1}
 
 services:
   # ==========================================================================
