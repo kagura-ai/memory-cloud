@@ -4,6 +4,20 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.103.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.103.0) — 2026-10-14
+
+Context lifecycle tools on the default MCP URL, and a per-workspace add-on for the daily memory-creation limit.
+
+### Added
+- **`extra_memories_per_day` add-on** ([#1975](https://github.com/kagura-ai/memory-cloud/issues/1975)): the per-day memory creation limit (#1549) was tier-fixed. Admins can now grant extra daily capacity to one workspace (+100 memories/day per unit) from **Admin → Plans → Workspaces**, through `PUT /api/v1/admin/plans/workspaces/{id}/quotas` (`addon_memories_per_day_bonus`) or the internal billing push (`memories_per_day`). The quota panel shows the base, add-on and effective daily limit.
+
+### Changed
+- **Core MCP tool profile lists `create_context`, `update_context` and `delete_context`** ([#1973](https://github.com/kagura-ai/memory-cloud/issues/1973)): a client on the default `/mcp` URL can create, rename and delete contexts without reconnecting with `?profile=full`. The core profile is now 21 tools (≈40k characters); `merge_contexts` and `update_search_config` stay full-only. The empty-account hint from `list_contexts` now points at a `?tools=` allowlist as the reason `create_context` might be missing.
+
+### Notes
+- Migration `e97_1975_memories_per_day_addon` adds `workspaces.addon_memories_per_day_bonus` (default 0) and extends the `workspace_addons.addon_type` CHECK. No new environment variables, no operator action.
+- Clients that cache `tools/list` (ChatGPT until Refresh, Codex per `initialize`) see the three context tools at their next read.
+
 ## [v0.102.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.102.0) — 2026-10-14
 
 The last piece of the cancel policy: a Free workspace that stays over the Free capacity for 30 days has its data deleted by a daily sweep, with countdown mails before and a completion mail after. Only the clock starts on upgrade; the mails and the deletion ship switched off.
