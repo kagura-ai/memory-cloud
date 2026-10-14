@@ -2475,7 +2475,8 @@
         "base": "ベース",
         "addon": "アドオン",
         "usageEffective": "使用量 / 有効値",
-        "connector": "コネクタ"
+        "connector": "コネクタ",
+        "memoriesPerDay": "メモリー作成数/日"
       },
       "addonDialog": {
         "title": "アドオン編集",
@@ -2505,7 +2506,8 @@
           "connectorsFeatureMissing": "追加コネクタ枠を付与しましたが、このワークスペースのプランにはコネクタ機能がないため、新規コネクタの作成は引き続き拒否されます。コネクタ機能を含むプランへアップグレードすると枠が有効になります。",
           "generic": "警告付きでアドオンを付与しました: {code}"
         },
-        "connector": "コネクタ"
+        "connector": "コネクタ",
+        "memoriesPerDay": "メモリー作成数/日ボーナス"
       },
       "spendCapDialog": {
         "title": "上限額を編集",

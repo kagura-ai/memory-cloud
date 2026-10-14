@@ -60,7 +60,7 @@ class EffectiveQuotaService:
                 "storage_bytes_limit": int,  # Issue #485
                 "sleep_enabled_contexts_limit": int,  # Issue #560
                 "max_resource_tokens": int,  # Issue #663 (tier-fixed, no addon)
-                "memories_per_day": int  # Issue #1549 (tier-fixed, no addon yet)
+                "memories_per_day": int  # Issue #1549; + extra_memories_per_day addon (#1975)
             }
 
         Raises:

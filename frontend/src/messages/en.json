@@ -2475,7 +2475,8 @@
         "base": "Base",
         "addon": "Addon",
         "usageEffective": "Usage / Effective",
-        "connector": "Connectors"
+        "connector": "Connectors",
+        "memoriesPerDay": "Memories Created/day"
       },
       "addonDialog": {
         "title": "Edit Addons",
@@ -2505,7 +2506,8 @@
           "connectorsFeatureMissing": "Extra connector seats were granted, but this workspace's plan lacks the connectors feature, so creating new connectors is still refused. The seats take effect once the workspace is upgraded to a plan that includes connectors.",
           "generic": "Addon granted with a warning: {code}"
         },
-        "connector": "Connectors"
+        "connector": "Connectors",
+        "memoriesPerDay": "Memories Created/day Bonus"
       },
       "spendCapDialog": {
         "title": "Edit Spend Cap",

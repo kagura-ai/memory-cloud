@@ -139,8 +139,9 @@ class TestZeroBaseBypassClosed:
 
 
 class TestEffectiveMemoriesPerDay:
-    """#1549: daily memory-creation quota is plan-tier base only (no addon
-    column yet) and follows the zero-floor rule like every other quota."""
+    """#1549: daily memory-creation quota is plan-tier base + the
+    ``extra_memories_per_day`` addon (#1975) and follows the zero-floor rule
+    like every other quota."""
 
     @pytest.mark.parametrize(
         ("plan_name", "expected"),
@@ -151,6 +152,7 @@ class TestEffectiveMemoriesPerDay:
 
         ws = MagicMock()
         ws._plan_tier = get_plan_tier(plan_name)
+        ws.addon_memories_per_day_bonus = 0
         assert Workspace.effective_memories_per_day.fget(ws) == expected
 
     def test_zero_base_is_zero(self):
@@ -158,6 +160,26 @@ class TestEffectiveMemoriesPerDay:
         tier.memories_per_day = 0
         ws = MagicMock()
         ws._plan_tier = tier
+        ws.addon_memories_per_day_bonus = 0
+        assert Workspace.effective_memories_per_day.fget(ws) == 0
+
+    def test_addon_stacks_on_tier_base(self):
+        """#1975: the extra_memories_per_day addon adds to the tier base."""
+        from config.plan_tiers import get_plan_tier
+
+        ws = MagicMock()
+        ws._plan_tier = get_plan_tier("pro")  # base 2,000
+        ws.addon_memories_per_day_bonus = 300
+        assert Workspace.effective_memories_per_day.fget(ws) == 2_300
+
+    def test_addon_on_zero_base_stays_zero(self):
+        """Zero-floor rule: a tier with no daily allowance stays at 0 even
+        with an addon (mirrors the other ``_zero_floor`` quotas)."""
+        tier = MagicMock()
+        tier.memories_per_day = 0
+        ws = MagicMock()
+        ws._plan_tier = tier
+        ws.addon_memories_per_day_bonus = 500
         assert Workspace.effective_memories_per_day.fget(ws) == 0
 
 

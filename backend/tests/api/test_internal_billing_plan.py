@@ -37,6 +37,7 @@ def _make_ws():
         "addon_storage_bonus_mb",
         "addon_sleep_contexts_bonus",
         "addon_connector_bonus",
+        "addon_memories_per_day_bonus",
     ):
         setattr(ws, col, 0)
     # #1095: the protective default; a push flips it to external_billing. Set it

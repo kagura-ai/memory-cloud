@@ -193,3 +193,34 @@ class TestAddonCalculatorConnectorBonus:
         assert bonuses["addon_connector_bonus"] == 4
         assert workspace.addon_connector_bonus == 4
         mock_db.commit.assert_awaited_once()
+
+
+class TestAddonCalculatorMemoriesPerDayBonus:
+    """#1975: extra_memories_per_day addon → addon_memories_per_day_bonus column."""
+
+    @pytest.fixture
+    def mock_db(self):
+        db = MagicMock()
+        db.execute = AsyncMock()
+        db.commit = AsyncMock()
+        return db
+
+    @pytest.fixture
+    def service(self, mock_db):
+        return AddonCalculatorService(mock_db)
+
+    @pytest.mark.asyncio
+    async def test_extra_memories_per_day_addon_bonus_is_persisted(self, service, mock_db):
+        """extra_memories_per_day (qty=3, unit=100) → addon_memories_per_day_bonus = 300."""
+        assert ADDON_UNIT_VALUES["extra_memories_per_day"] == 100
+        workspace_id = uuid4()
+        addons = [_make_addon("extra_memories_per_day", quantity=3)]
+        workspace = _make_workspace(workspace_id)
+        workspace.addon_memories_per_day_bonus = 0
+        mock_db.execute.side_effect = _make_side_effects(addons, workspace)
+
+        bonuses = await service.recalculate_workspace_bonuses(workspace_id)
+
+        assert bonuses["addon_memories_per_day_bonus"] == 300
+        assert workspace.addon_memories_per_day_bonus == 300
+        mock_db.commit.assert_awaited_once()

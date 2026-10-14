@@ -34,6 +34,7 @@ ADDON_UNIT_VALUES = {
     "extra_analysis_runs": 1,  # Issue #494: +1 Memory Analysis run/day per unit
     "extra_sleep_contexts": 1,  # Issue #560: +1 sleep-enabled context per unit (PRO-only)
     "extra_connectors": 1,  # Spec 2026-06-02: +1 ai-worker connector seat per unit
+    "extra_memories_per_day": 100,  # #1975: +100 memories created per UTC day per unit
 }
 
 
@@ -131,6 +132,7 @@ class AddonCalculatorService:
             "addon_analysis_bonus": 0,
             "addon_sleep_contexts_bonus": 0,  # Issue #560
             "addon_connector_bonus": 0,  # Spec 2026-06-02
+            "addon_memories_per_day_bonus": 0,  # #1975
         }
 
         for addon in active_addons:
@@ -159,6 +161,8 @@ class AddonCalculatorService:
                 bonuses["addon_sleep_contexts_bonus"] += total_bonus  # Issue #560
             elif addon_type == "extra_connectors":
                 bonuses["addon_connector_bonus"] += total_bonus  # Spec 2026-06-02
+            elif addon_type == "extra_memories_per_day":
+                bonuses["addon_memories_per_day_bonus"] += total_bonus  # #1975
             else:
                 # Issue #665 review-finding #3: a WorkspaceAddon row exists
                 # for an addon_type that has no corresponding cache-column
@@ -209,6 +213,7 @@ class AddonCalculatorService:
         workspace.addon_analysis_bonus = bonuses["addon_analysis_bonus"]
         workspace.addon_sleep_contexts_bonus = bonuses["addon_sleep_contexts_bonus"]  # Issue #560
         workspace.addon_connector_bonus = bonuses["addon_connector_bonus"]  # Spec 2026-06-02
+        workspace.addon_memories_per_day_bonus = bonuses["addon_memories_per_day_bonus"]  # #1975
 
         await self.db.commit()
 

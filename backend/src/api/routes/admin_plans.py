@@ -110,6 +110,7 @@ class QuotaBreakdown(BaseModel):
     sleep_enabled_contexts_limit: int = 0
     max_resource_tokens: int = 0  # Issue #663: tier-fixed (no addon), surfaced read-only
     max_connectors: int = 0  # Spec 2026-06-02: tier base for the extra_connectors addon
+    memories_per_day: int = 0  # #1975: tier base for the extra_memories_per_day addon
 
 
 class AddonValues(BaseModel):
@@ -130,6 +131,7 @@ class AddonValues(BaseModel):
     storage_bonus_mb: int = 0
     sleep_contexts_bonus: int = 0
     connector_bonus: int = 0
+    memories_per_day_bonus: int = 0  # #1975
 
 
 class UsageValues(BaseModel):
@@ -207,6 +209,7 @@ class UpdateAddonRequest(BaseModel):
     addon_storage_bonus_mb: int | None = Field(None, ge=0, le=2_000_000_000)
     addon_sleep_contexts_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
     addon_connector_bonus: int | None = Field(None, ge=0, le=2_000_000_000)
+    addon_memories_per_day_bonus: int | None = Field(None, ge=0, le=2_000_000_000)  # #1975
 
 
 class UpdateSpendCapRequest(BaseModel):
@@ -802,6 +805,7 @@ async def get_workspace_quotas(
                 sleep_enabled_contexts_limit=plan_tier.sleep_enabled_contexts_limit,
                 max_resource_tokens=plan_tier.max_resource_tokens,
                 max_connectors=plan_tier.max_connectors,
+                memories_per_day=plan_tier.memories_per_day,
             ),
             addon=AddonValues(
                 memory_bonus=workspace.addon_memory_bonus,
@@ -814,6 +818,7 @@ async def get_workspace_quotas(
                 storage_bonus_mb=workspace.addon_storage_bonus_mb,
                 sleep_contexts_bonus=workspace.addon_sleep_contexts_bonus,
                 connector_bonus=workspace.addon_connector_bonus,
+                memories_per_day_bonus=workspace.addon_memories_per_day_bonus,
             ),
             effective=QuotaBreakdown(
                 memory_limit=effective["memory_limit"],
@@ -827,6 +832,7 @@ async def get_workspace_quotas(
                 sleep_enabled_contexts_limit=effective["sleep_enabled_contexts_limit"],
                 max_resource_tokens=effective["max_resource_tokens"],
                 max_connectors=workspace.effective_max_connectors,
+                memories_per_day=effective["memories_per_day"],
             ),
             usage=UsageValues(
                 memories=memory_count,
@@ -933,6 +939,12 @@ _ADDON_FIELD_SPECS: tuple[_AddonFieldSpec, ...] = (
         ADDON_UNIT_VALUES["extra_connectors"],
         None,  # Spec 2026-06-02: no usage-clamp guard (cap enforced at create time)
         required_feature="connectors",  # #1551: seats are inert below XL
+    ),
+    _AddonFieldSpec(
+        "addon_memories_per_day_bonus",
+        "extra_memories_per_day",
+        ADDON_UNIT_VALUES["extra_memories_per_day"],
+        None,  # #1975: daily Redis-reset counter; admin reduction mid-day is acceptable
     ),
 )
 

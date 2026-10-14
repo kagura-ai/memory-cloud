@@ -34,7 +34,8 @@ export type AddonKey =
   | "analysis"
   | "storage"
   | "sleep"
-  | "connector";
+  | "connector"
+  | "memoriesPerDay";
 
 export type AddonValuesByKey = Record<AddonKey, number>;
 
@@ -162,6 +163,15 @@ export const ADDON_TYPES: readonly AddonTypeMeta[] = [
     addonField: "connector_bonus",
     updateField: "addon_connector_bonus",
   },
+  {
+    // #1975: memories created per UTC day; +100 per unit.
+    key: "memoriesPerDay",
+    perUnit: 100,
+    unitSuffix: "",
+    baseField: "memories_per_day",
+    addonField: "memories_per_day_bonus",
+    updateField: "addon_memories_per_day_bonus",
+  },
 ];
 
 /**
@@ -195,6 +205,7 @@ export const EMPTY_ADDON_VALUES: AddonValuesByKey = {
   storage: 0,
   sleep: 0,
   connector: 0,
+  memoriesPerDay: 0,
 };
 
 /**

@@ -232,6 +232,10 @@
             "default": 0,
             "type": "integer"
           },
+          "memories_per_day_bonus": {
+            "default": 0,
+            "type": "integer"
+          },
           "memory_bonus": {
             "default": 0,
             "type": "integer"
@@ -7465,6 +7469,10 @@
           "mcp_calls_per_day": {
             "type": "integer"
           },
+          "memories_per_day": {
+            "default": 0,
+            "type": "integer"
+          },
           "memory_limit": {
             "type": "integer"
           },
@@ -9793,6 +9801,18 @@
             ]
           },
           "addon_member_bonus": {
+            "anyOf": [
+              {
+                "maximum": 2000000000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "addon_memories_per_day_bonus": {
             "anyOf": [
               {
                 "maximum": 2000000000.0,

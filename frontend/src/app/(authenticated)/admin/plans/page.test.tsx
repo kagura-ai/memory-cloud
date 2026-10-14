@@ -248,6 +248,7 @@ const QUOTA_DETAIL_PRO = {
     sleep_enabled_contexts_limit: 3,
     max_connectors: 10,
     max_resource_tokens: 30,
+    memories_per_day: 2_000,
   },
   addon: {
     memory_bonus: 10_000,
@@ -260,6 +261,7 @@ const QUOTA_DETAIL_PRO = {
     storage_bonus_mb: 0,
     sleep_contexts_bonus: 0,
     connector_bonus: 0,
+    memories_per_day_bonus: 0,
   },
   effective: {
     memory_limit: 110_000,
@@ -273,6 +275,7 @@ const QUOTA_DETAIL_PRO = {
     sleep_enabled_contexts_limit: 3,
     max_connectors: 10,
     max_resource_tokens: 30,
+    memories_per_day: 2_000,
   },
   usage: { memories: 50_000, contexts: 5, members: 3 },
   spend_cap: null,
@@ -601,7 +604,7 @@ describe("AdminPlansPage — workspaces tab addon dialog (Issue #663)", () => {
     expect(memoryRow).not.toHaveTextContent("110,000 / 50,000");
   });
 
-  it("renders all 10 addon inputs with values pre-populated from quota detail", async () => {
+  it("renders all 11 addon inputs with values pre-populated from quota detail", async () => {
     await openAddonDialog();
 
     // Every ADDON_TYPES entry has a stable input id of "addon-<key>".
@@ -632,7 +635,7 @@ describe("AdminPlansPage — workspaces tab addon dialog (Issue #663)", () => {
     expect(memoryInput.value).toBe("10000");
   });
 
-  it("submits all 10 fields to updateWorkspaceAddons on save", async () => {
+  it("submits all 11 fields to updateWorkspaceAddons on save", async () => {
     await openAddonDialog();
 
     // Mutate one input so the request body is verifiable against a
@@ -645,7 +648,7 @@ describe("AdminPlansPage — workspaces tab addon dialog (Issue #663)", () => {
     const saveButton = screen.getByText("admin.plans.addonDialog.save");
     fireEvent.click(saveButton);
 
-    // The PUT body must include all 10 addon_* fields so the backend's
+    // The PUT body must include all 11 addon_* fields so the backend's
     // no-touch contract (#665 review-fix #2) treats the request as
     // "send absolute values, no implicit deletes". The dialog is a
     // full-form submission, not a delta.
@@ -663,6 +666,7 @@ describe("AdminPlansPage — workspaces tab addon dialog (Issue #663)", () => {
       addon_storage_bonus_mb: 0,
       addon_sleep_contexts_bonus: 0,
       addon_connector_bonus: 0,
+      addon_memories_per_day_bonus: 0,
     });
   });
 

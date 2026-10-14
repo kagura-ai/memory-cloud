@@ -176,6 +176,8 @@ export interface QuotaBreakdown {
   max_resource_tokens: number;
   // Spec 2026-06-02: tier base for the extra_connectors addon.
   max_connectors: number;
+  // #1975: tier base for the extra_memories_per_day addon.
+  memories_per_day: number;
 }
 
 export interface WorkspaceQuotaDetail {
@@ -199,6 +201,7 @@ export interface WorkspaceQuotaDetail {
     storage_bonus_mb: number;
     sleep_contexts_bonus: number;
     connector_bonus: number;
+    memories_per_day_bonus: number; // #1975
   };
   effective: QuotaBreakdown;
   usage: { memories: number; contexts: number; members: number };
@@ -227,6 +230,7 @@ export interface UpdateAddonRequest {
   addon_storage_bonus_mb?: number;
   addon_sleep_contexts_bonus?: number;
   addon_connector_bonus?: number;
+  addon_memories_per_day_bonus?: number; // #1975
 }
 
 /**

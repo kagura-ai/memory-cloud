@@ -87,6 +87,7 @@ _ADDON_COLUMNS: dict[str, str] = {
     "storage_mb": "addon_storage_bonus_mb",
     "sleep_contexts": "addon_sleep_contexts_bonus",  # Issue #560
     "connector": "addon_connector_bonus",
+    "memories_per_day": "addon_memories_per_day_bonus",  # #1975
 }
 
 # Upper bound on any addon bonus, matching the admin quota endpoint's

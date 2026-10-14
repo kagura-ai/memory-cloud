@@ -1779,6 +1779,9 @@ class Workspace(Base):
     addon_connector_bonus: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )  # Spec 2026-06-02: extra ai-worker connector seats addon
+    addon_memories_per_day_bonus: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )  # #1975: extra memories created per UTC day addon
 
     # Issue #1470: memory-quota bonus earned through the referral program.
     #
@@ -1906,12 +1909,13 @@ class Workspace(Base):
 
     @property
     def effective_memories_per_day(self) -> int:
-        """Memories that may be created per UTC day: plan tier base (#1549).
+        """Memories that may be created per UTC day: plan tier base (#1549) +
+        the ``extra_memories_per_day`` addon (#1975).
 
-        No addon column yet — an ``extra_memories_per_day`` addon would be
-        summed in here as the ``_zero_floor`` addon operand; no migration now.
+        ``AddonCalculatorService`` accumulates the addon into
+        ``addon_memories_per_day_bonus`` (mirrors ``effective_max_connectors``).
         """
-        return _zero_floor(self._plan_tier.memories_per_day, 0)
+        return _zero_floor(self._plan_tier.memories_per_day, self.addon_memories_per_day_bonus)
 
     @property
     def effective_mcp_calls_per_day(self) -> int:
