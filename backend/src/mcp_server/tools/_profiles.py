@@ -29,9 +29,12 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 # The memory read/write loop plus what it needs to find its way around:
-# contexts, tags, pinned and upcoming memories, feedback. Registry order (the
-# order ``tools/list`` answers in), pinned by ``tests/mcp_server/test_tool_profiles.py``
+# contexts (including their lifecycle — create, update, delete; #1973), tags,
+# pinned and upcoming memories, feedback. Registry order (the order
+# ``tools/list`` answers in), pinned by ``tests/mcp_server/test_tool_profiles.py``
 # together with a character budget — adding a tool here costs every ``core`` client.
+# ``merge_contexts`` and ``update_search_config`` stay out: rare, and the former
+# is destructive to the source context.
 CORE_TOOLS: tuple[str, ...] = (
     "remember",
     "remember_batch",
@@ -45,6 +48,9 @@ CORE_TOOLS: tuple[str, ...] = (
     "get_context_info",
     "list_contexts",
     "list_tags",
+    "create_context",
+    "update_context",
+    "delete_context",
     "feedback",
     "guide",
     "describe_tools",

@@ -32,8 +32,9 @@ Use this after deployments, tool description changes, or MCP server updates.
 **Prerequisites:**
 
 - The MCP server is running and connected.
-- **The connection lists every tool.** `tools/list` defaults to the 18-tool core profile, and most
-  clients let the model call listed tools only — `create_context` in step 1 is already outside it.
+- **The connection lists every tool.** `tools/list` defaults to the 21-tool core profile, and most
+  clients let the model call listed tools only — `merge_contexts` and the Sleep, file, edge and
+  resource rows are outside it.
   Connect with the full list: put `?profile=full` on the endpoint URL
   (`https://<your-domain>/mcp/w/<workspace-id>?profile=full`, or `&profile=full` when the URL
   already has a query), or pass `--tool-profile full` to the `kagura-mcp` stdio bridge. A profile
@@ -58,7 +59,7 @@ describe_tools()
 -> Verify: len(listed) + count == 70 on any connection — the registry total this runbook is built
    for. A different sum means a tool was added or removed: reconcile the Coverage cross-check
    (section 8) before trusting the run
--> ABORT when count > 0 (a default connection answers count=52 with the 18 core tools in
+-> ABORT when count > 0 (a default connection answers count=49 with the 21 core tools in
    `listed`): create nothing, report step 0 as FAIL and tell the user to reconnect with the full
    tool list — `?profile=full` on the MCP endpoint URL, or `--tool-profile full` for the
    `kagura-mcp` stdio bridge — then run the smoke test again. The reply's `url` block says the same

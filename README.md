@@ -241,7 +241,7 @@ cp .mcp.json.example .mcp.json
 
 An OAuth client (Claude.ai, Claude Desktop, ChatGPT, Cursor, `claude mcp add`) uses the same `/mcp` URL and connects to the workspace selected in the web UI; `/mcp/w/{workspace_id}` pins such a connector to one workspace when you belong to several.
 
-The default URL lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — they are just not listed — `describe_tools` names them from inside a session, and most clients let the model call listed tools only, so a task that needs them reconnects with the URL below. Add `?profile=full` when your client should see every tool schema up front (the list is about 2.9 times larger). See [Tool Profiles](docs/mcp-tools.md#tool-profiles).
+The default URL lists the core memory and context tools (the exact set is under Tool Profiles) and leaves out Sleep, analyses, files, edges, secrets, resources and the agent control plane — they are just not listed — `describe_tools` names them from inside a session, and most clients let the model call listed tools only, so a task that needs them reconnects with the URL below. Add `?profile=full` when your client should see every tool schema up front (the list is about 2.6 times larger). See [Tool Profiles](docs/mcp-tools.md#tool-profiles).
 
 3. Restart Claude Code and verify:
 
@@ -263,7 +263,7 @@ Full setup guide — every client, the memory-sync hook, the ready-to-use `.clau
 
 Tool-by-tool reference with required roles: **[MCP Tools Reference](docs/mcp-tools.md)**
 
-A client does not have to list all 70: the default URL [above](#connect-an-mcp-client) lists the 18 core tools (`?profile=full` lists everything), and `?tools=remember,recall` lists exactly the tools you name — see [Tool Profiles](docs/mcp-tools.md#tool-profiles).
+A client does not have to list all 70: the default URL [above](#connect-an-mcp-client) lists the 21 core tools (`?profile=full` lists everything), and `?tools=remember,recall` lists exactly the tools you name — see [Tool Profiles](docs/mcp-tools.md#tool-profiles).
 
 ## REST API
 

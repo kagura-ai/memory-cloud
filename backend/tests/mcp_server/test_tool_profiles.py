@@ -35,7 +35,8 @@ from mcp_server.tools._profiles import (
 # parameters) took it to 32,999; a tool joining ``CORE_TOOLS`` still overshoots.
 # #1743 (paging / max_chars parameters on the bounded tools) took it to 34,203.
 # #1850 moved the manual into ``guide`` and trimmed every core description: 25,590.
-CORE_CHAR_BUDGET = 38_300  # (#1853) 18 core tools
+# #1973 added create_context / update_context / delete_context: 41,088 (from 36,617).
+CORE_CHAR_BUDGET = 43_100  # (#1973) 21 core tools
 
 REGISTRY = [tool["name"] for tool in get_tool_definitions()]
 
@@ -84,6 +85,9 @@ def test_core_tools_are_the_documented_set():
         "get_context_info",
         "list_contexts",
         "list_tags",
+        "create_context",
+        "update_context",
+        "delete_context",
         "feedback",
         "guide",
         "describe_tools",
@@ -91,6 +95,16 @@ def test_core_tools_are_the_documented_set():
         "changes_since",
         "bootstrap",
     }
+
+
+def test_context_lifecycle_is_in_core_but_merge_and_search_config_are_not():
+    """#1973: a client on the default URL can create, rename and delete a
+    context without reconnecting with ``?profile=full`` (the server
+    instructions tell it to call ``create_context``). ``merge_contexts`` and
+    ``update_search_config`` are rare and stay behind ``describe_tools``."""
+    assert {"create_context", "update_context", "delete_context"} <= set(CORE_TOOLS)
+    assert "merge_contexts" in REGISTRY and "merge_contexts" not in CORE_TOOLS
+    assert "update_search_config" in REGISTRY and "update_search_config" not in CORE_TOOLS
 
 
 def test_load_guardrails_stays_out_of_core():

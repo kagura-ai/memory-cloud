@@ -772,10 +772,11 @@ _LIST_CONTEXTS_ENVELOPE_RESERVE = 1_500
 
 # #1658: a new account has a workspace but no context, and every memory tool
 # needs a context_id. Sent only when the caller can see no context at all
-# (``name_contains`` matching nothing is not that case). Static text, so it
-# stays right under the default core profile (#1849), whose tools/list leaves
-# out create_context, without passing the URL query into the handler. Worded for a
-# member with no access as well as for an owner of an empty workspace.
+# (``name_contains`` matching nothing is not that case). Static text — the URL
+# query is not passed into the handler — so it also covers a ``?tools=``
+# allowlist (#1849) that left create_context out; the default core profile
+# lists it since #1973. Worded for a member with no access as well as for an
+# owner of an empty workspace.
 # create_context defaults to is_private=true, which only an owner may create
 # (ContextService.create_context), so an admin is told to pass
 # is_private=false. A failed access lookup gets no hint (see
@@ -784,9 +785,9 @@ _EMPTY_CONTEXTS_HINT = (
     "No contexts are visible to you yet. A workspace owner can create one with "
     'create_context(name="my-project"); an admin must add is_private=false. '
     "Otherwise ask an owner or admin to create a context or give you access. If "
-    "create_context is not in your tool list (the default core profile leaves it "
-    "out), create the context in the web UI, or reconnect with ?profile=full on the "
-    "MCP URL (describe_tools() names the tools the URL left out)."
+    "create_context is not in your tool list (a ?tools= allowlist on the MCP URL "
+    "left it out), create the context in the web UI, or reconnect with ?profile=core "
+    "or ?profile=full on the MCP URL (describe_tools() names the tools the URL left out)."
 )
 # Without a workspace create_context refuses with ``workspace_required``, so
 # this variant never suggests calling it. The workspace is resolved on every

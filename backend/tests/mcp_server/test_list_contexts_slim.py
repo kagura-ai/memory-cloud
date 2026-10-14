@@ -531,7 +531,8 @@ def test_stringified_flags_are_coerced_before_validation():
 async def test_no_visible_context_adds_a_hint_naming_create_context():
     """A new account (or a member with no access) sees an empty list; the hint
     says to create a context and what to do when create_context is not in the
-    client's tool list (the default core profile leaves it out, #1849)."""
+    client's tool list (a ``?tools=`` allowlist left it out, #1849; the default
+    core profile lists it since #1973)."""
     harness = _Harness([], workspace_count=0)
 
     payload = await _payload(harness, {}, workspace_id="ws-1")
@@ -548,7 +549,8 @@ async def test_no_visible_context_adds_a_hint_naming_create_context():
     # The way forward when tools/list has no create_context.
     assert "create_context is not in your tool list" in hint
     assert "web UI" in hint
-    assert "describe_tools" in hint and "?profile=full" in hint
+    assert "describe_tools" in hint and "?profile=core" in hint and "?profile=full" in hint
+    assert "default core profile leaves it out" not in hint
 
 
 @pytest.mark.asyncio
