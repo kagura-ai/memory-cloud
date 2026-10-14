@@ -2118,6 +2118,79 @@ With it set, Sleep's judge calls on the managed lane also pass
 not deleted for you: each workspace owner can still list and delete their own
 stored keys (#1613).
 
+## Multiple API workers and Postgres connections — Issue #1979
+
+By default each API container (`api-blue` / `api-green` in the single-server
+compose files) runs **one** uvicorn process. `UVICORN_WORKERS` in `.env.prod`
+starts that many worker processes per container instead (the compose files pass
+`--workers ${UVICORN_WORKERS:-1}`). Unset, nothing changes.
+
+Each worker is a full, independent process:
+
+- **Its own connection pools.** Every worker opens its own async SQLAlchemy
+  pool, its own sync pool (OAuth2 only) and its own Redis pool
+  (`REDIS_MAX_CONNECTIONS` is per worker, see below). The DB pool size per
+  engine is `DB_POOL_SIZE + DB_MAX_OVERFLOW` (Issue #1978).
+- **Its own in-process caches.** The LLM price cache (`llm_pricing_service`),
+  the tag vocabulary `TTLCache` (`tag_resolution`) and the MCP rate-limit
+  settings cache (`_RATE_LIMIT_CACHE`) are per process. They are caches over
+  Postgres / Redis, which stay the source of truth, so N copies only lower the
+  hit rate; nothing becomes inconsistent.
+- **The background scheduler runs on exactly one process of the deployment.**
+  Every worker runs the app lifespan, but only the one that takes the Postgres
+  advisory lock `apscheduler_leader` registers the cron jobs and starts
+  APScheduler (log line `scheduler_leader_acquired`, with its `pid`). The
+  others log `scheduler_leader_standby` and retry every
+  `SCHEDULER_LEADER_RETRY_SECONDS` (default `60`, minimum `5`). When the leader
+  process exits — a worker restart, or `deploy.sh` stopping the old color after
+  a blue/green switch — Postgres drops its lock and a standby in either color
+  takes over within that interval; a cron tick that falls in that gap is
+  skipped. A leader whose lock connection breaks (e.g. Postgres restarted)
+  stops its scheduler (`scheduler_leader_lost`) and competes again. If
+  Postgres is unreachable at startup the worker logs
+  `scheduler_leader_check_failed`, keeps serving requests and retries.
+
+### Sizing `POSTGRES_MAX_CONNECTIONS`
+
+Every connection the workers can open must fit under Postgres'
+`max_connections`, which the compose files set from `POSTGRES_MAX_CONNECTIONS`
+(default `100`, the image's own default). Per color:
+
+```
+UVICORN_WORKERS × 2 × (DB_POOL_SIZE + DB_MAX_OVERFLOW)   # async + sync engine per worker
++ 1                                                       # scheduler leader lock
+```
+
+During a blue/green switch both colors run, so double it. Then add every
+other client of the same Postgres — co-resident workers, Sleep or CLI runs
+started with `docker compose exec` / `run`, an operator's `psql` — and keep
+the total below `POSTGRES_MAX_CONNECTIONS` with some headroom. Example with the pool defaults (5 + 10)
+and `UVICORN_WORKERS=2`: `2 × 2 × 15 + 1 = 61` per color, `122` during a
+switch — above the default `100`, so raise `POSTGRES_MAX_CONNECTIONS` first.
+Every Postgres connection costs memory on the data host, so prefer a smaller
+pool over an enormous `max_connections`.
+
+### How many workers
+
+Start from the CPU, not from the pool: a 4-core host is typically served well
+by 2–4 workers. Before adding workers, check under load that the API process
+is actually CPU-bound; if it is waiting on a full DB pool (`503 DB-002`,
+timeouts while CPU is idle), tune the pool (Issue #1978) first. Each worker
+also holds its own copy of the application in memory.
+
+### Rolling it out
+
+1. Set `POSTGRES_MAX_CONNECTIONS` in `.env.prod` and recreate the Postgres
+   container — it reads `max_connections` only at start, so this is a short
+   database restart. Check with `SHOW max_connections;`.
+2. Set `UVICORN_WORKERS` and deploy as usual; confirm exactly one
+   `scheduler_leader_acquired` line across both colors.
+
+On a split host the Postgres service is defined in `docker-compose.data.yml`
+on the data host. That host does not `git fetch` this repository, so the
+`command:` line for `max_connections` has to be carried over to its copy of
+the file by hand — follow your ops runbook for changing the data host.
+
 ## Redis Connection Pool (rate limits and daily quotas) — Issue #1556
 
 Per-minute rate limits and the daily MCP / REST / Public API quotas above are counters in Redis, incremented by `RateLimitMiddleware` on every authenticated request. The singleton client (`backend/src/db/redis.py`) uses a `BlockingConnectionPool`: when all pooled connections are checked out, a request waits up to `REDIS_POOL_TIMEOUT_SECONDS` (default `2.0`) for one to free up instead of failing immediately. Size the pool with `REDIS_MAX_CONNECTIONS` (default `50`, per API worker process). Quota checks are **fail-open** by design — if Redis is down, or the pool wait times out, the request is allowed and the counter update is lost (or, if Redis fails between the `INCR` and the `EXPIRE` that follows it, only partially applied). Each such miss logs exactly one `quota_check_failed_open` warning with `quota` (`per_minute`, `daily_mcp`, `daily_public`, `daily_rest`), `key_prefix` and `error_class` fields. Alert on that event: a sustained stream of it means quotas are not being enforced and either Redis or the pool size needs attention.
