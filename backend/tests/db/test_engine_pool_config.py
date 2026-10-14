@@ -82,3 +82,26 @@ def test_zero_timeout_fails_fast(fresh_engines: pytest.MonkeyPatch) -> None:
     not unlimited, so it is a legitimate setting."""
     fresh_engines.setenv("DB_POOL_TIMEOUT", "0")
     assert _pool_values(db_base._get_engine())[2] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("pool_size", "max_overflow", "warns"),
+    [(5, 10, False), (5, 9, True), (15, 0, False), (1, 0, True)],
+)
+def test_fanout_floor_warning(
+    monkeypatch: pytest.MonkeyPatch, pool_size: int, max_overflow: int, warns: bool
+) -> None:
+    """``database_pool_below_fanout`` fires only when size + overflow < 15 (#1978)."""
+    from unittest.mock import MagicMock
+
+    log = MagicMock()
+    monkeypatch.setattr(db_base, "logger", log)
+
+    db_base._warn_if_pool_below_fanout(pool_size, max_overflow)
+
+    if warns:
+        log.warning.assert_called_once()
+        assert log.warning.call_args.args == ("database_pool_below_fanout",)
+        assert log.warning.call_args.kwargs["total"] == pool_size + max_overflow
+    else:
+        log.warning.assert_not_called()
