@@ -58,6 +58,9 @@ def _get_engine():
 
     if engine is None:
         from config.database import DATABASE_URL, to_async_database_url
+        from config.settings import get_settings
+
+        settings = get_settings()
 
         # Name asyncpg explicitly: a bare ``postgresql://`` would resolve to
         # SQLAlchemy's default driver (#1695).
@@ -73,8 +76,10 @@ def _get_engine():
             # statement text still surfaces for debugging.
             hide_parameters=True,
             pool_pre_ping=True,
-            pool_size=5,
-            max_overflow=10,
+            # #1978: sized by DB_POOL_SIZE / DB_MAX_OVERFLOW / DB_POOL_TIMEOUT.
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout,
             # Belt-and-braces against container TZ/PGTZ being dropped in
             # a future deploy — see .claude/rules/backend.md for the
             # three-layer UTC policy.
@@ -110,6 +115,9 @@ def _get_sync_engine():
 
     if sync_engine is None:
         from config.database import DATABASE_URL, to_sync_database_url
+        from config.settings import get_settings
+
+        settings = get_settings()
 
         # Name psycopg2 explicitly: SQLAlchemy 2.1 maps a bare ``postgresql://``
         # to psycopg (v3), which is not installed (#1695).
@@ -119,8 +127,10 @@ def _get_sync_engine():
             # #1331: same bound-parameter log hygiene as the async engine.
             hide_parameters=True,
             pool_pre_ping=True,
-            pool_size=5,
-            max_overflow=10,
+            # #1978: sized by DB_POOL_SIZE / DB_MAX_OVERFLOW / DB_POOL_TIMEOUT.
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout,
             # psycopg2 equivalent — see async engine above.
             connect_args={"options": "-c timezone=utc"},
         )
