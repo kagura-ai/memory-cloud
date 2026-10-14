@@ -52,6 +52,32 @@ sync_engine = None
 sync_session_factory = None
 
 
+# The largest in-process fan-out that borrows pooled connections concurrently:
+# ``services/analysis/labeler.py`` runs ``Semaphore(8)`` labeling tasks, each
+# holding a connection across its LLM call, next to the orchestrator's own
+# session (#1247 waiver). The former fixed pool (5 + 10 = 15) absorbed that.
+_POOL_FANOUT_FLOOR = 15
+
+
+def _warn_if_pool_below_fanout(pool_size: int, max_overflow: int) -> None:
+    """Log once per engine when ``DB_POOL_SIZE + DB_MAX_OVERFLOW`` cannot cover the fan-out (#1978).
+
+    Args:
+        pool_size: Configured ``DB_POOL_SIZE``.
+        max_overflow: Configured ``DB_MAX_OVERFLOW``.
+    """
+    total = pool_size + max_overflow
+    if total < _POOL_FANOUT_FLOOR:
+        logger.warning(
+            "database_pool_below_fanout",
+            pool_size=pool_size,
+            max_overflow=max_overflow,
+            total=total,
+            floor=_POOL_FANOUT_FLOOR,
+            hint="analysis labeling (8 concurrent) and admin sleep runs may time out on checkout",
+        )
+
+
 def _get_engine():
     """Get or create async engine (lazy initialization)."""
     global engine
@@ -61,6 +87,7 @@ def _get_engine():
         from config.settings import get_settings
 
         settings = get_settings()
+        _warn_if_pool_below_fanout(settings.db_pool_size, settings.db_max_overflow)
 
         # Name asyncpg explicitly: a bare ``postgresql://`` would resolve to
         # SQLAlchemy's default driver (#1695).

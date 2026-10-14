@@ -39,9 +39,9 @@ frame.
 
 **#1247 pooled-connection hold — WAIVED (documented rationale).** The
 per-task session's pooled connection stays borrowed across the LLM HTTP
-round-trip, so at ``Semaphore(8)`` up to 8 of the pool's 15 connections
-(``pool_size=5 + max_overflow=10``) are held for the duration of the
-labeling call. Releasing the connection before the HTTP call is NOT
+round-trip, so at ``Semaphore(8)`` up to 8 of the pool's connections
+(``DB_POOL_SIZE + DB_MAX_OVERFLOW``, 5 + 10 = 15 by default, #1978) are held
+for the duration of the labeling call. Releasing the connection before the HTTP call is NOT
 safely achievable within the analysis subsystem: the ONLY DB access in
 this coroutine is the BYOK key SELECT, and it happens *inside* the shared
 ``LLMService.complete_json`` (via ``_get_provider`` → ``_get_user_api_key``),
@@ -54,7 +54,9 @@ cross-cutting ``LLMService`` (out of scope — it also serves the sleep
 subsystem) to expose pre-resolved-key / connection-releasing call paths,
 or reimplementing its provider-call + retry/JSON-parse/usage logic inside
 this module (risky duplication for a low-severity finding). The hold is
-bounded: at most 8 concurrent borrows (< 15-connection capacity), each
+bounded: at most 8 concurrent borrows (below the default 15-connection
+capacity; ``db.base`` logs ``database_pool_below_fanout`` when an operator
+configures less), each
 lasting one labeling call (seconds, ``max_tokens=1024``), not the whole
 run. Tracked with the v1.5 ``LLMService`` ``fallback_chain`` work already
 noted in ``llm_caller.py``.
@@ -254,8 +256,8 @@ async def _label_one_cluster(
     async with sem:
         # Per-task session — each LLMService gets its own AsyncSession
         # so concurrent BYOK lookups don't race the orchestrator's
-        # shared session. The connection pool (size=5 + max_overflow=10)
-        # comfortably absorbs 8 concurrent borrowed connections.
+        # shared session. The default connection pool (DB_POOL_SIZE 5 +
+        # DB_MAX_OVERFLOW 10, #1978) absorbs 8 concurrent borrowed connections.
         #
         # #1247 (WAIVED): this connection stays borrowed across the LLM
         # HTTP call. Releasing it first is not safely in-scope here — the
