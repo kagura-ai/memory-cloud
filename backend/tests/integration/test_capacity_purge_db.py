@@ -811,6 +811,66 @@ async def test_final_notice_is_persisted_by_the_day_29_mail(
     assert ws.capacity_purge_first_notice_at == now  # the first mail of this lock
 
 
+@pytest.mark.asyncio
+async def test_notice_persist_failure_skips_the_mail_and_moves_on(
+    db_session, free_ws, only_workspaces
+) -> None:
+    """The record's commit raises for the first workspace: no mail for it,
+    its claim released, nothing recorded — and after the rollback (which
+    expires every loaded row) the second workspace still gets its mail."""
+    bad, bad_ctx, bad_owner = free_ws
+    good, good_ctx, good_owner = await _make_free_ws(db_session)
+    only_workspaces.update({bad.id, good.id})
+    await _over_cap(db_session, bad, bad_ctx, bad_owner)
+    await _over_cap(db_session, good, good_ctx, good_owner)
+    now = utcnow().replace(microsecond=0)
+    bad.capacity_locked_since = good.capacity_locked_since = now - timedelta(days=29)
+    await db_session.flush()
+    await db_session.commit()
+    bad_id, good_id, since = bad.id, good.id, bad.capacity_locked_since
+
+    # _stamped_workspaces has no ORDER BY: fail whichever commit comes first.
+    real_commit = db_session.commit
+    calls: list[int] = []
+
+    async def commit_once_failing() -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("db gone")
+        await real_commit()
+
+    recipients: list[str] = []
+
+    async def send(**kwargs) -> bool:
+        recipients.append(kwargs["to_email"])
+        return True
+
+    redis = _Redis()
+    with patch.object(db_session, "commit", commit_once_failing):
+        counts = await capacity_purge.send_due_purge_notices(
+            db_session, now=now, redis=redis, email=MagicMock(send_capacity_purge_notice=send)
+        )
+
+    assert (counts.sent, counts.failed) == (1, 1)
+    rows = {
+        w.id: w
+        for w in (
+            await db_session.execute(select(Workspace).where(Workspace.id.in_([bad_id, good_id])))
+        )
+        .scalars()
+        .all()
+    }
+    for w in rows.values():
+        await db_session.refresh(w)
+    recorded = [w for w in rows.values() if w.capacity_purge_final_notice_at == now]
+    unrecorded = [w for w in rows.values() if w.capacity_purge_final_notice_at is None]
+    assert len(recorded) == 1 and len(unrecorded) == 1
+    assert unrecorded[0].capacity_purge_first_notice_at is None
+    assert capacity_purge.notice_key(unrecorded[0].id, since, 29) not in redis.keys
+    assert capacity_purge.notice_key(recorded[0].id, since, 29) in redis.keys
+    assert len(recipients) == 1
+
+
 @pytest.mark.parametrize(("first_notice_days_ago", "purged"), [(3, False), (7, True)])
 @pytest.mark.asyncio
 async def test_purge_needs_a_first_notice_a_week_before(

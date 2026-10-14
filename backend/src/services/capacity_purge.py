@@ -291,14 +291,20 @@ async def send_due_purge_notices(
     releases the claim; an uncertain one (``TimeoutError``) keeps it — at
     most once. Redis unavailable fails closed (no mail, counted as failed).
 
-    A mail sent, or possibly sent, sets the workspace's
-    ``capacity_purge_first_notice_at`` to ``now`` if this lock had none yet,
-    and a day-29 one ``capacity_purge_final_notice_at``; either commits. The
-    purge waits for both. A failed one records nothing, so the purge waits
-    for the retry.
+    The record comes first: after the claim, ``capacity_purge_first_notice_at``
+    is set to ``now`` if this lock had none yet, and for the day-29 mail
+    ``capacity_purge_final_notice_at``, and that is COMMITTED before the mail
+    goes out. A commit that fails is rolled back, the claim released, nothing
+    sent (``capacity_purge_notice_persist_failed``, counted failed), and the
+    next workspace proceeds — a mail out with no record would hold the claim
+    while the purge never became eligible. A hard delivery failure puts both
+    columns back to their previous values (committed) and releases the claim,
+    so the purge waits for the retry; an uncertain one (``TimeoutError``)
+    keeps both. The purge waits for both columns.
 
     Args:
-        db: Session to read with; commits once per mail that records a notice.
+        db: Session to read and write with; commits the record of each mail
+            (and its revert on a failed delivery).
         now: The sweep's clock (naive UTC).
         redis: Async Redis client (``set(nx, ex)`` / ``delete``).
         email: An ``EmailService``.
@@ -311,8 +317,19 @@ async def send_due_purge_notices(
     base_url = get_settings().frontend_url.strip().rstrip("/")
     contexts_url = f"{base_url}/workspace/contexts"
     considered = sent = already = skipped = failed = 0
-    for ws in await _stamped_workspaces(db):
+    # Ids read now, while the rows are loaded: a rollback expires every
+    # instance, and a lazy load outside a try (MissingGreenlet on AsyncSession)
+    # would end the pass. After one, each later row is refreshed first.
+    batch = [(ws, ws.id) for ws in await _stamped_workspaces(db)]
+    expired = False
+    for ws, ws_id in batch:
         considered += 1
+        if expired:
+            try:
+                await db.refresh(ws)
+            except InvalidRequestError:  # hard-deleted meanwhile
+                skipped += 1
+                continue
         since = ws.capacity_locked_since
         deadline = purge_at(since)
         if since is None or deadline is None:
@@ -328,17 +345,19 @@ async def send_due_purge_notices(
             continue
         contact = await _owner_contact(db, ws)
         if contact is None:
-            logger.warning("capacity_purge_notice_no_owner_email", workspace_id=str(ws.id))
+            logger.warning("capacity_purge_notice_no_owner_email", workspace_id=str(ws_id))
             skipped += 1
             continue
         to_email, locale = contact
-        key = notice_key(ws.id, since, stage)
+        ws_name = ws.name
+        previous = (ws.capacity_purge_first_notice_at, ws.capacity_purge_final_notice_at)
+        key = notice_key(ws_id, since, stage)
         try:
             claimed = await redis.set(key, "1", nx=True, ex=NOTICE_KEY_TTL_SECONDS)
         except Exception as exc:  # noqa: BLE001 — fail closed: never risk a duplicate
             logger.warning(
                 "capacity_purge_notice_dedup_unavailable",
-                workspace_id=str(ws.id),
+                workspace_id=str(ws_id),
                 error_type=type(exc).__name__,
             )
             failed += 1
@@ -347,9 +366,22 @@ async def send_due_purge_notices(
             already += 1
             continue
         try:
+            recorded = await _record_notice(db, ws, stage=stage, now=now)
+        except Exception as exc:  # noqa: BLE001 — one workspace must not stop the pass
+            logger.warning(
+                "capacity_purge_notice_persist_failed",
+                workspace_id=str(ws_id),
+                error_type=type(exc).__name__,
+            )
+            await db.rollback()
+            expired = True
+            await _release_claim(redis, key, ws_id)
+            failed += 1
+            continue
+        try:
             delivered = await email.send_capacity_purge_notice(
                 to_email=to_email,
-                workspace_name=ws.name,
+                workspace_name=ws_name,
                 locale=locale,
                 purge_at=deadline,
                 days_left=max(_days_between(now, deadline), 0),
@@ -359,30 +391,31 @@ async def send_due_purge_notices(
                 contexts_url=contexts_url,
             )
         except TimeoutError:
-            # The provider may have accepted it: keep the claim (at most once).
-            logger.warning("capacity_purge_notice_delivery_uncertain", workspace_id=str(ws.id))
+            # The provider may have accepted it: keep the claim and the record
+            # (at most once).
+            logger.warning("capacity_purge_notice_delivery_uncertain", workspace_id=str(ws_id))
             sent += 1
-            await _record_notice(db, ws, stage=stage, now=now)
             continue
         except Exception as exc:  # noqa: BLE001 — implementations must not raise; be safe
             logger.warning(
                 "capacity_purge_notice_send_raised",
-                workspace_id=str(ws.id),
+                workspace_id=str(ws_id),
                 error_type=type(exc).__name__,
             )
             delivered = False
         if not delivered:
-            await _release_claim(redis, key, ws.id)
+            if recorded and not await _revert_notice(db, ws, ws_id=ws_id, previous=previous):
+                expired = True
+            await _release_claim(redis, key, ws_id)
             failed += 1
             continue
         sent += 1
         logger.info(
             "capacity_purge_notice_sent",
-            workspace_id=str(ws.id),
+            workspace_id=str(ws_id),
             stage=stage,
             purge_at=deadline.isoformat(),
         )
-        await _record_notice(db, ws, stage=stage, now=now)
     logger.info(
         "capacity_purge_notice_pass",
         considered=considered,
@@ -396,9 +429,9 @@ async def send_due_purge_notices(
     )
 
 
-async def _record_notice(db: AsyncSession, ws: Workspace, *, stage: int, now: datetime) -> None:
-    """After a mail went out (or may have): record the lock's first notice
-    (once) and, for the day-29 mail, the final one; commit if either changed."""
+async def _record_notice(db: AsyncSession, ws: Workspace, *, stage: int, now: datetime) -> bool:
+    """Before a mail goes out: record the lock's first notice (once) and, for
+    the day-29 mail, the final one; commit if either changed (returned)."""
     changed = False
     if ws.capacity_purge_first_notice_at is None:
         ws.capacity_purge_first_notice_at = now
@@ -408,6 +441,31 @@ async def _record_notice(db: AsyncSession, ws: Workspace, *, stage: int, now: da
         changed = True
     if changed:
         await db.commit()
+    return changed
+
+
+async def _revert_notice(
+    db: AsyncSession,
+    ws: Workspace,
+    *,
+    ws_id: UUID,
+    previous: tuple[datetime | None, datetime | None],
+) -> bool:
+    """The mail failed: put the first / final notice back to ``previous`` and
+    commit. ``False`` when that commit raised (rolled back, logged) — the
+    session's instances are expired then."""
+    ws.capacity_purge_first_notice_at, ws.capacity_purge_final_notice_at = previous
+    try:
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001 — one workspace must not stop the pass
+        logger.warning(
+            "capacity_purge_notice_revert_failed",
+            workspace_id=str(ws_id),
+            error_type=type(exc).__name__,
+        )
+        await db.rollback()
+        return False
+    return True
 
 
 def _lock_expired(locked_since: datetime | None, now: datetime) -> bool:

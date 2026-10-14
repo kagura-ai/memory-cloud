@@ -157,6 +157,8 @@ def _db(workspaces, *, owner=("owner@example.test", "en")):
     owner_result.one_or_none = MagicMock(return_value=owner)
     db.execute = AsyncMock(side_effect=[ws_result] + [owner_result] * len(workspaces))
     db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    db.refresh = AsyncMock()
     return db
 
 
@@ -287,7 +289,8 @@ async def test_final_notice_is_recorded_on_the_workspace(send, stamped) -> None:
             db, now=now, redis=_Redis(), email=MagicMock(send_capacity_purge_notice=send)
         )
     assert ws.capacity_purge_final_notice_at == (now if stamped else None)
-    assert db.commit.await_count == int(stamped)
+    # Recorded (committed) before the send; a hard failure commits the revert.
+    assert db.commit.await_count == (1 if stamped else 2)
 
 
 @pytest.mark.asyncio
@@ -329,7 +332,7 @@ async def test_first_notice_is_recorded_once_per_lock(send, recorded) -> None:
             db, now=day0, redis=redis, email=MagicMock(send_capacity_purge_notice=send)
         )
     assert ws.capacity_purge_first_notice_at == (day0 if recorded else None)
-    assert db.commit.await_count == int(recorded)
+    assert db.commit.await_count == (1 if recorded else 2)  # record, then revert
     if not recorded:
         return
     db = _db([ws])
@@ -340,6 +343,85 @@ async def test_first_notice_is_recorded_once_per_lock(send, recorded) -> None:
     assert counts.sent == 1
     assert ws.capacity_purge_first_notice_at == day0  # unchanged by the day-7 mail
     db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_notice_is_committed_before_the_mail_goes_out() -> None:
+    """The record is durable before the send: a commit that fails after the
+    mail went out would leave the stage claimed but the purge never eligible."""
+    since = datetime(2026, 10, 1, 4, 0, 30)
+    now = datetime(2026, 10, 30, 4, 0, 0)
+    ws = _ws(since)
+    db = _db([ws])
+    seen: list[tuple] = []
+
+    async def send(**_kwargs):
+        seen.append(
+            (
+                ws.capacity_purge_first_notice_at,
+                ws.capacity_purge_final_notice_at,
+                db.commit.await_count,
+            )
+        )
+        return True
+
+    with _locked():
+        counts = await send_due_purge_notices(
+            db, now=now, redis=_Redis(), email=MagicMock(send_capacity_purge_notice=send)
+        )
+    assert counts.sent == 1
+    assert seen == [(now, now, 1)]
+    assert db.commit.await_count == 1  # no second commit after the send
+
+
+@pytest.mark.asyncio
+async def test_notice_persist_failure_sends_nothing_and_moves_on() -> None:
+    """The record's commit raises: rolled back, claim released, no mail for
+    that workspace, counted failed — and the next workspace still gets its mail."""
+    import structlog
+
+    since = datetime(2026, 10, 1, 4, 0, 30)
+    now = datetime(2026, 10, 30, 4, 0, 0)
+    first, second = _ws(since), _ws(since)
+    db = _db([first, second])
+    db.commit = AsyncMock(side_effect=[RuntimeError("db gone"), None])
+    redis = _Redis()
+    email = _email(return_value=True)
+    with _locked(), structlog.testing.capture_logs() as logs:
+        counts = await send_due_purge_notices(db, now=now, redis=redis, email=email)
+    assert (counts.sent, counts.failed) == (1, 1)
+    assert email.send_capacity_purge_notice.await_count == 1
+    db.rollback.assert_awaited_once()
+    assert notice_key(first.id, since, 29) not in redis.keys  # released: retried tomorrow
+    assert notice_key(first.id, since, 29) in redis.deleted
+    assert notice_key(second.id, since, 29) in redis.keys
+    db.refresh.assert_awaited_once_with(second)  # the rollback expired it
+    failed = [e for e in logs if e["event"] == "capacity_purge_notice_persist_failed"]
+    assert [e["workspace_id"] for e in failed] == [str(first.id)]
+
+
+@pytest.mark.parametrize(
+    "send", [AsyncMock(return_value=False), AsyncMock(side_effect=RuntimeError("smtp"))]
+)
+@pytest.mark.asyncio
+async def test_failed_delivery_reverts_the_recorded_notice(send) -> None:
+    """A hard delivery failure puts both columns back to what they were
+    (a first notice of an earlier mail is kept) and commits the revert."""
+    since = datetime(2026, 10, 1, 4, 0, 30)
+    now = datetime(2026, 10, 30, 4, 0, 0)
+    ws = _ws(since)
+    ws.capacity_purge_first_notice_at = since
+    db = _db([ws])
+    redis = _Redis()
+    with _locked():
+        counts = await send_due_purge_notices(
+            db, now=now, redis=redis, email=MagicMock(send_capacity_purge_notice=send)
+        )
+    assert counts.failed == 1
+    assert ws.capacity_purge_first_notice_at == since
+    assert ws.capacity_purge_final_notice_at is None
+    assert db.commit.await_count == 2
+    assert notice_key(ws.id, since, 29) not in redis.keys
 
 
 @pytest.mark.asyncio
