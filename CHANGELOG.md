@@ -4,6 +4,16 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.102.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.102.0) — 2026-10-14
+
+The last piece of the cancel policy: a Free workspace that stays over the Free capacity for 30 days has its data deleted by a daily sweep, with countdown mails before and a completion mail after. Every stage ships switched off.
+
+### Added
+- **30-day purge of workspaces over the Free capacity** ([#1969](https://github.com/kagura-ai/memory-cloud/issues/1969)): a daily sweep (04:00 UTC, after the file GC) stamps `workspaces.capacity_locked_since` while the capacity-over lock is on and clears it when it is off, so a cleanup or a re-subscription restarts the clock. On the 30th calendar day it soft-deletes every memory, context and file of the workspace (the default context is kept, emptied) in 1000-row chunks, at most five workspaces per run, oldest first; the account stays and Free remains usable. The owner gets "N days left" mails on days 0/7/14/23/27/29 (ja/en) and a completion mail; the lock payload of `GET /api/v1/workspace/usage/current` gains `purge_at`, and the lock banner shows the date once purging is enabled. Safety rules: no deletion without a real mail provider, a first notice at least 7 days earlier and the final notice on an earlier day; the lock is re-checked before every context and chunk, and a re-subscription, an erasure or the owner's own cleanup mid-run aborts the purge; a `capacity_purge_started` audit row is committed before any deletion and a `capacity_purge` row after it.
+
+### Notes
+- Migration `e96_1969_ws_cap_locked_since` adds three nullable columns and a partial index to `workspaces`; no backfill. New environment variables `CAPACITY_PURGE_NOTICE_ENABLED` and `CAPACITY_PURGE_ENABLED`, both default `false`. Operators: stamping runs on upgrade; enable the mails, then the deletion, one deploy apart, following the rollout section of `docs/deployment.md`. Follow-ups filed as backlog #1971.
+
 ## [v0.101.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.101.0) — 2026-10-13
 
 The storage side of the plan-change work: deleting a context frees its files, the capacity-over lock and the downgrade-eligibility check read one storage figure, and two gaps in the plan-seat and memory-row invariants are closed.
