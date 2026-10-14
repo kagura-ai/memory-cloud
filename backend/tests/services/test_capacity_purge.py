@@ -826,13 +826,56 @@ async def test_audit_commit_failure_counts_failed_and_moves_on() -> None:
     first = _purge_ws(datetime(2026, 9, 1, 4, 0))
     second = _purge_ws(datetime(2026, 9, 2, 4, 0))
     db = _purge_db()
-    db.commit = AsyncMock(side_effect=[RuntimeError("db gone"), None])
+    # intent (first), result (first: raises), intent (second), result (second)
+    db.commit = AsyncMock(side_effect=[None, RuntimeError("db gone"), None, None])
     counts, service, email, db = await _run_purge([first, second], now=_NOW, db=db)
     assert (counts.failed, counts.purged) == (1, 1)
     assert service.purge_workspace_data.await_count == 2
     db.rollback.assert_awaited_once()
     assert email.send_capacity_purge_complete.await_count == 1
     assert second.capacity_locked_since is None
+
+
+@pytest.mark.asyncio
+async def test_intent_row_is_committed_before_the_purge() -> None:
+    """A ``capacity_purge_started`` row is added and committed before any
+    deletion, so a purge whose result row is lost still left a trace."""
+    since = datetime(2026, 9, 30, 4, 0)
+    ws = _purge_ws(since)
+    db = _purge_db()
+    seen: list[tuple] = []
+
+    async def purge(_ws_id, *, actor, should_continue):
+        seen.append((db.add.call_count, db.commit.await_count))
+        return _REPORT
+
+    counts, _, _, db = await _run_purge([ws], now=_NOW, db=db, purge=AsyncMock(side_effect=purge))
+    assert counts.purged == 1
+    assert seen == [(1, 1)]
+    intent = db.add.call_args_list[0].args[0]
+    assert intent.action == "capacity_purge_started"
+    assert intent.user_id == CAPACITY_PURGE_ACTOR
+    assert intent.user_email == "owner@example.test"
+    assert intent.resource == f"workspace:{ws.id}"
+    assert intent.user_metadata["locked_since"] == since.isoformat()
+    assert (intent.user_metadata["over_memories"], intent.user_metadata["over_bytes"]) == (2, 0)
+    assert isinstance(intent.user_metadata["purge_started_at"], str)
+    assert db.add.call_args_list[1].args[0].action == "capacity_purge"
+
+
+@pytest.mark.asyncio
+async def test_intent_commit_failure_deletes_nothing_and_moves_on() -> None:
+    first = _purge_ws(datetime(2026, 9, 1, 4, 0))
+    second = _purge_ws(datetime(2026, 9, 2, 4, 0))
+    db = _purge_db()
+    db.commit = AsyncMock(side_effect=[RuntimeError("db gone"), None, None])
+    counts, service, email, db = await _run_purge([first, second], now=_NOW, db=db)
+    assert (counts.failed, counts.purged) == (1, 1)
+    assert service.purge_workspace_data.await_count == 1
+    assert service.purge_workspace_data.call_args.args[0] == second.id
+    db.rollback.assert_awaited_once()
+    assert first.capacity_locked_since is not None  # retried tomorrow
+    assert email.send_capacity_purge_complete.await_count == 1
 
 
 @pytest.mark.asyncio

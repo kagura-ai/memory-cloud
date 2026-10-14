@@ -529,10 +529,12 @@ class PurgeCounts:
     stamped.
     ``skipped_within``: within capacity / no longer a candidate at purge time
     (un-stamped). ``failed``: the purge or its audit commit raised (stays
-    stamped, retried next run). ``aborted``: stopped mid-way by a re-subscribe,
-    an erasure or the owner's own cleanup. ``nothing_to_delete``: due and over, but the purge removed
-    no context, memory or file (e.g. the retry after a lost audit commit) —
-    un-stamped and audited, no completion mail.
+    stamped, retried next run), or the commit of its ``capacity_purge_started``
+    row did (nothing deleted). ``aborted``: stopped mid-way by a
+    re-subscribe, an erasure or the owner's own cleanup.
+    ``nothing_to_delete``: due and over, but the purge removed no context,
+    memory or file (e.g. the retry after a lost audit commit) — un-stamped
+    and audited, no completion mail.
     """
 
     due: int
@@ -616,6 +618,11 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
     stamp is cleared, the audit row says ``aborted`` with its
     ``aborted_reason`` (``resubscribed`` / ``erased`` / ``owner_cleanup``),
     and no completion mail goes out.
+
+    Before any deletion a ``capacity_purge_started`` audit row (lock start,
+    over counts, purge start) is written and committed; if that commit fails
+    the workspace is skipped — nothing deleted, counted failed, retried next
+    run. The ``capacity_purge`` result row follows the purge.
 
     Each workspace is purged and audited on its own; a failure of the purge
     or of the commit that clears the stamp and writes the audit row is logged
@@ -716,6 +723,20 @@ async def purge_expired_workspaces(db: AsyncSession, *, now: datetime, email: An
                 return False
             return True
 
+        try:
+            await _commit_purge_intent(
+                db,
+                ws_id=ws_id,
+                user_email=contact[0] if contact else "",
+                since=since,
+                lock=lock,
+                started=purge_started_at,
+            )
+        except Exception:  # noqa: BLE001 — no durable trace, no deletion
+            logger.exception("capacity_purge_intent_failed", workspace_id=str(ws_id))
+            await db.rollback()
+            failed += 1
+            continue
         try:
             report = await ContextService(db).purge_workspace_data(
                 ws_id, actor=CAPACITY_PURGE_ACTOR, should_continue=should_continue
@@ -844,6 +865,34 @@ async def _log_if_still_over(db: AsyncSession, ws: Workspace, *, ws_id: UUID) ->
             storage_limit_bytes=lock.storage_limit_bytes,
             over_bytes=lock.over_bytes,
         )
+
+
+async def _commit_purge_intent(
+    db: AsyncSession,
+    *,
+    ws_id: UUID,
+    user_email: str,
+    since: datetime,
+    lock: CapacityLock,
+    started: datetime,
+) -> None:
+    """Write and commit the ``capacity_purge_started`` audit row before any
+    deletion: if the result row is lost later, the purge still left a trace."""
+    db.add(
+        AuditLog(
+            user_email=user_email,
+            user_id=CAPACITY_PURGE_ACTOR,
+            action="capacity_purge_started",
+            resource=f"workspace:{ws_id}",
+            user_metadata={
+                "locked_since": since.isoformat(),
+                "over_memories": lock.over_memories,
+                "over_bytes": lock.over_bytes,
+                "purge_started_at": started.isoformat(),
+            },
+        )
+    )
+    await db.commit()
 
 
 async def _clear_stamp_and_audit(

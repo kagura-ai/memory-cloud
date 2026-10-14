@@ -816,6 +816,83 @@ async def test_purge_continues_after_one_workspace_fails(
     assert email.send_capacity_purge_complete.await_count == 1
 
 
+async def _intent_rows(db_session: AsyncSession, ws_id) -> list[AuditLog]:
+    rows = await db_session.execute(
+        select(AuditLog).where(
+            AuditLog.action == "capacity_purge_started", AuditLog.resource == f"workspace:{ws_id}"
+        )
+    )
+    return list(rows.scalars().all())
+
+
+async def _due_ws(db_session: AsyncSession, free_ws, only_workspaces):
+    ws, ctx, owner = free_ws
+    only_workspaces.add(ws.id)
+    await _over_cap(db_session, ws, ctx, owner)
+    now = utcnow().replace(microsecond=0)
+    ws.capacity_locked_since = now - timedelta(days=30)
+    ws.capacity_purge_final_notice_at = now - timedelta(days=1)
+    ws.capacity_purge_first_notice_at = now - timedelta(days=30)
+    await db_session.flush()
+    await db_session.commit()
+    return ws, ctx, now
+
+
+@pytest.mark.asyncio
+async def test_intent_row_survives_a_lost_result_row(
+    db_session, free_ws, purge_side_effects, only_workspaces
+) -> None:
+    """The result row's commit fails after the purge: the data is gone and the
+    ``capacity_purge_started`` row committed before it still records the purge."""
+    ws, ctx, now = await _due_ws(db_session, free_ws, only_workspaces)
+    ws_id, since = ws.id, ws.capacity_locked_since
+
+    with patch.object(
+        capacity_purge, "_clear_stamp_and_audit", AsyncMock(side_effect=RuntimeError("db gone"))
+    ):
+        counts = await purge_expired_workspaces(db_session, now=now, email=_mail())
+
+    assert (counts.failed, counts.purged) == (1, 0)
+    assert await _live_memories(db_session, ws) == []
+    assert await _audit_rows(db_session, ws) == []
+    intent = await _intent_rows(db_session, ws_id)
+    assert len(intent) == 1
+    assert intent[0].user_id == CAPACITY_PURGE_ACTOR
+    assert intent[0].user_metadata["locked_since"] == since.isoformat()
+    assert intent[0].user_metadata["over_memories"] == 1
+    assert intent[0].user_metadata["purge_started_at"]
+
+
+@pytest.mark.asyncio
+async def test_intent_commit_failure_deletes_nothing(
+    db_session, free_ws, purge_side_effects, only_workspaces
+) -> None:
+    """No durable intent row, no deletion: the workspace stays stamped for tomorrow."""
+    ws, ctx, now = await _due_ws(db_session, free_ws, only_workspaces)
+    ws_id = ws.id
+    real_commit = db_session.commit
+    calls: list[int] = []
+
+    async def first_commit_fails() -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("db gone")
+        await real_commit()
+
+    email = _mail()
+    with patch.object(db_session, "commit", first_commit_fails):
+        counts = await purge_expired_workspaces(db_session, now=now, email=email)
+
+    assert (counts.failed, counts.purged) == (1, 0)
+    await db_session.refresh(ws)  # the rollback expired it
+    assert ws.capacity_locked_since is not None
+    assert len(await _live_memories(db_session, ws)) == MEMORY_LIMIT + 1
+    await db_session.refresh(ctx)
+    assert ctx.deleted_at is None
+    assert await _intent_rows(db_session, ws_id) == []
+    email.send_capacity_purge_complete.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     "final_notice_days_ago",
     [None, 0],  # never warned / warned by this very run
