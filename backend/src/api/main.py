@@ -7,12 +7,14 @@ import asyncio
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -587,19 +589,35 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
     )
 
 
-def _database_unavailable_response(request: Request, exc: Exception) -> JSONResponse:
+DatabaseUnavailableReason = Literal["pool_exhausted", "connection_refused", "database_error"]
+
+
+def _database_unavailable_response(
+    request: Request, exc: Exception, reason: DatabaseUnavailableReason
+) -> JSONResponse:
     """Shared 503 response for any DB-backend failure (#193).
 
     Reuses the ``DatabaseConnectionError`` exception class so that the
     status code, error code, and message stay in one place and match the
     shape emitted by ``memory_cloud_exception_handler`` for any code path
     that raises it directly.
+
+    Args:
+        request: The failing request.
+        exc: The exception that reached the handler.
+        reason: Cause reported as ``details.reason`` and in the log (#1978),
+            so pool exhaustion is told apart from the database being down
+            without changing the frozen ``DB-002`` code, status or message.
+
+    Returns:
+        503 ``DB-002`` response with ``Retry-After: 5``.
     """
     wrapped = DatabaseConnectionError()
     logger.error(
         "database_error",
         error_code=wrapped.error_code,
         error_type=type(exc).__name__,
+        reason=reason,
         path=request.url.path,
         exc_info=True,
     )
@@ -608,7 +626,7 @@ def _database_unavailable_response(request: Request, exc: Exception) -> JSONResp
         content={
             "error": wrapped.error_code,
             "message": wrapped.message,
-            "details": wrapped.details,
+            "details": {**wrapped.details, "reason": reason},
         },
         headers={"Retry-After": "5"},
     )
@@ -616,7 +634,15 @@ def _database_unavailable_response(request: Request, exc: Exception) -> JSONResp
 
 @app.exception_handler(SQLAlchemyError)
 async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError) -> JSONResponse:
-    return _database_unavailable_response(request, exc)
+    """Handle SQLAlchemy failures as 503 ``DB-002`` (#193).
+
+    A ``QueuePool`` checkout timeout (``sqlalchemy.exc.TimeoutError``) is
+    reported as ``pool_exhausted``; anything else as ``database_error``.
+    """
+    reason: DatabaseUnavailableReason = (
+        "pool_exhausted" if isinstance(exc, PoolTimeoutError) else "database_error"
+    )
+    return _database_unavailable_response(request, exc, reason)
 
 
 async def connection_error_handler(request: Request, exc: ConnectionError) -> JSONResponse:
@@ -637,7 +663,7 @@ async def connection_error_handler(request: Request, exc: ConnectionError) -> JS
     ``auth/session.py``, which is a Redis-specific failure that should not
     be reported as a database outage.
     """
-    return _database_unavailable_response(request, exc)
+    return _database_unavailable_response(request, exc, "connection_refused")
 
 
 # Register on specific OSError subclasses raised by asyncpg / low-level

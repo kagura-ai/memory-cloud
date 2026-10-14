@@ -14,6 +14,7 @@ that the smoke test scans.
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from api.main import connection_error_handler, sqlalchemy_exception_handler
 
@@ -40,6 +41,11 @@ def _build_isolated_app() -> FastAPI:
     async def _raise_sqlalchemy() -> dict:
         raise OperationalError("SELECT 1", {}, Exception("simulated connection drop"))
 
+    @app.get("/raise-pool-timeout")
+    async def _raise_pool_timeout() -> dict:
+        # QueuePool checkout timeout (#1978).
+        raise PoolTimeoutError("QueuePool limit of size 5 overflow 10 reached")
+
     @app.get("/raise-connection")
     async def _raise_connection() -> dict:
         raise ConnectionRefusedError(111, "Connect call failed")
@@ -56,27 +62,36 @@ def _build_isolated_app() -> FastAPI:
     return app
 
 
-def _assert_database_unavailable_response(response) -> None:
+def _assert_database_unavailable_response(response, reason: str) -> None:
     assert response.status_code == 503
     assert response.headers.get("Retry-After") == "5"
     body = response.json()
     # DatabaseConnectionError error_code (see utils/exceptions.py)
     assert body["error"] == "DB-002"
     assert body["message"] == "Database connection failed"
+    # #1978: the cause is told apart without changing the frozen code/status.
+    assert body["details"] == {"reason": reason}
 
 
 class TestDatabaseErrorHandlers:
     def test_sqlalchemy_error_returns_503(self):
         with TestClient(_build_isolated_app(), raise_server_exceptions=False) as client:
             response = client.get("/raise-sqlalchemy")
-        _assert_database_unavailable_response(response)
+        _assert_database_unavailable_response(response, "database_error")
 
     def test_connection_refused_returns_503(self):
         """Regression for #193: raw asyncpg ConnectionRefusedError was
         unwrapped by SQLAlchemy and reached Starlette as a bare 500."""
         with TestClient(_build_isolated_app(), raise_server_exceptions=False) as client:
             response = client.get("/raise-connection")
-        _assert_database_unavailable_response(response)
+        _assert_database_unavailable_response(response, "connection_refused")
+
+    def test_pool_timeout_reports_pool_exhausted(self):
+        """#1978: a QueuePool checkout timeout is still 503 DB-002, but
+        ``details.reason`` says the pool ran out rather than the DB being down."""
+        with TestClient(_build_isolated_app(), raise_server_exceptions=False) as client:
+            response = client.get("/raise-pool-timeout")
+        _assert_database_unavailable_response(response, "pool_exhausted")
 
     def test_non_db_errors_are_not_caught(self):
         """ConnectionError handler must not swallow ValueError or other
