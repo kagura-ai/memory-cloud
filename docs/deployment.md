@@ -1429,7 +1429,12 @@ deploy apart, in this order:
    (delivery timed out), is recorded in
    `workspaces.capacity_purge_first_notice_at`, and the day-29 mail
    ("1 day left") in `workspaces.capacity_purge_final_notice_at`; the stamp
-   stage clears both together with the stamp.
+   stage clears both together with the stamp. The record is committed
+   before the mail goes out. If that commit fails, no mail is sent, the
+   claim is released and the next run retries
+   (`capacity_purge_notice_persist_failed`). A mail that fails outright puts
+   both columns back as they were (`capacity_purge_notice_revert_failed` if
+   that commit fails too).
 
    **Stages 2 and 3 need a real mail provider** (`EMAIL_PROVIDER=resend`).
    The default logging stub reports every mail as sent without sending
@@ -1446,9 +1451,15 @@ deploy apart, in this order:
    while the flag is off). Because of the stamp stage, the first purge
    happens no earlier than 30 days after stage 1 ran. At most 5 workspaces
    are purged per run, oldest stamp first; the rest wait for the next run.
-   The lock is checked again just before the purge. Each purge writes an
-   `audit_logs` row (`action = capacity_purge`, `resource = workspace:<id>`)
-   with the counts and bytes.
+   The lock is checked again just before the purge. Before deleting
+   anything, the purge commits an `audit_logs` row
+   (`action = capacity_purge_started`, `resource = workspace:<id>`) with the
+   lock start, the over counts and `purge_started_at`. If that commit fails,
+   nothing is deleted (`capacity_purge_intent_failed`) and the next run
+   retries. After the purge, a second row (`action = capacity_purge`) records
+   the counts and bytes. A `capacity_purge_started` row with no
+   `capacity_purge` row for the same workspace means a purge whose result
+   was not recorded.
 
    **No deletion without a real warning.** A workspace on day 30 or later
    whose day-29 mail has not gone out on an earlier calendar day, or whose
@@ -1486,11 +1497,17 @@ A row whose `purge_date` is on or before a run's date (UTC), whose
 `capacity_purge_first_notice_at` is at least 7 days before that date is purged
 on that run, unless it is within capacity by then.
 
-**Re-subscribe during a purge.** Before each context and after every
-1,000-memory chunk, the purge reads the workspace row again. If the workspace
-re-subscribed or was erased in the meantime, the purge stops. The stamp is
-cleared, the audit row has `"aborted": true`, `capacity_purge_aborted` is
-logged and no completion mail is sent. Non-default contexts are purged first
+**Re-subscribe or owner cleanup during a purge.** Before each context and
+after every 1,000-memory chunk, the purge reads the workspace row again and
+checks whether anyone other than the purge deleted a memory or a context of
+the workspace since the purge started. The purge stops if the workspace
+re-subscribed, was erased, or the owner started cleaning up themselves. A
+file deleted on its own does not count, because `file_objects` has no
+`deleted_by`. The stamp is cleared, the audit row has `"aborted": true` and
+`"aborted_reason"` (`resubscribed`, `erased` or `owner_cleanup`),
+`capacity_purge_aborted` is logged with the same reason, and no completion
+mail is sent. If the workspace is still over the cap, the next stamp run
+starts a new 30 days. Non-default contexts are purged first
 and the default context last, so an abort leaves the default context's
 memories alone. A context the purge stopped in is not deleted, but the chunks
 of its memories that were already committed stay tombstoned.
@@ -1524,8 +1541,11 @@ did not get the mail (`capacity_purge_complete_no_owner_email`: no address on
 file). Alert on it and follow up by hand.
 
 Other events: `capacity_purge_audit_failed` (the purge ran but its audit
-commit failed; the stamp stays and the next run retries. That run usually finds
-the workspace within capacity and only clears the stamp),
+commit failed; the `capacity_purge_started` row is the only record, the stamp
+stays and the next run retries. That run usually finds the workspace within
+capacity and only clears the stamp), `capacity_purge_intent_failed` (the
+`capacity_purge_started` row could not be committed; nothing deleted, retried
+next run),
 `capacity_purge_nothing_to_delete` (due, but the purge removed nothing:
 stamp cleared, audit row written, no mail) and `capacity_purge_failed` (the
 purge raised; the stamp stays and the next run retries). The run summary is

@@ -1602,7 +1602,8 @@ class ContextService:
 
         ``should_continue`` is awaited before each context, after every memory
         chunk and before the workspace-scoped files; when it returns False (the
-        workspace re-subscribed or was erased meanwhile) the purge stops and
+        workspace re-subscribed or was erased meanwhile, or the owner started
+        deleting data themselves) the purge stops and
         the partial report comes back with ``aborted=True``. A stop between
         chunks leaves that context live (not detached, files untouched) with
         the chunks already committed tombstoned.
