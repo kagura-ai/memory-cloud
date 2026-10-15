@@ -241,9 +241,12 @@ class HebbianLearner:
                     record.pending_weight if record is not None else 0.0
                 )
 
-        # Apply updates to graph (Issue #84: async SQL operations)
+        # Apply updates to graph (Issue #84: async SQL operations).
+        # #1985: in sorted (src, dst) order, so two concurrent passes that touch
+        # the same edges lock the edge rows in the same order (a wait, never a
+        # deadlock).
         edges_updated = 0
-        for (src_id, dst_id), delta_w in edge_deltas.items():
+        for (src_id, dst_id), delta_w in sorted(edge_deltas.items()):
             new_weight = await self._apply_update_to_edge(
                 user_id,
                 src_id,
@@ -254,8 +257,8 @@ class HebbianLearner:
             if new_weight is not None:
                 edges_updated += 1
 
-        # Note: Transaction committed by MemoryService for atomic operations
-        # (edges + access_stats + promotions in single transaction)
+        # Note: the caller commits. MemoryService runs this pass in its own
+        # session after the recall commits (#1985).
 
         # Issue #150: Prune weak edges to maintain top_m_edges limit
         # Collect unique source nodes that were updated
@@ -267,7 +270,7 @@ class HebbianLearner:
 
         # Prune weak edges from each updated node
         total_pruned = 0
-        for node_id in updated_nodes:
+        for node_id in sorted(updated_nodes):  # #1985: same lock order as above
             try:
                 pruned_count = await self.prune_weak_edges(user_id, node_id)
                 if pruned_count > 0:
