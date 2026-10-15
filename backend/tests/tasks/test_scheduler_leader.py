@@ -1,7 +1,7 @@
 """Tests for the APScheduler leader lock (Issue #1979).
 
 With ``UVICORN_WORKERS > 1`` every worker runs the FastAPI lifespan, so the
-in-process APScheduler must run in exactly one process of the deployment.
+in-process APScheduler must run in at most one process of the deployment.
 ``SchedulerLeader`` holds a Postgres session-level advisory lock on a dedicated
 connection; the holder registers the jobs and starts the scheduler, the others
 stand by and retry. Postgres is faked here (no DB / Redis needed).
@@ -58,15 +58,22 @@ def _leader(register: MagicMock, retry_seconds: float = 60) -> sl.SchedulerLeade
     return sl.SchedulerLeader(register_jobs=register, retry_seconds=retry_seconds)
 
 
+async def _until(predicate, steps: int = 200) -> None:
+    for _ in range(steps):
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+
+
 @pytest.mark.asyncio
 async def test_acquired_starts_scheduler_and_registers_jobs_once(sched):
-    """Lock acquired at startup → jobs registered once, scheduler started once."""
+    """Lock acquired → jobs registered once, scheduler started once, conn held."""
     conn = _conn(True, True)  # try-lock True, unlock True
     register = MagicMock()
     leader = _leader(register)
 
     with patch.object(sl, "_get_engine", return_value=_engine(conn)):
-        await leader.start()
+        await leader.tick()
         try:
             assert leader.is_leader is True
             register.assert_called_once_with(sched.scheduler)
@@ -81,39 +88,56 @@ async def test_acquired_starts_scheduler_and_registers_jobs_once(sched):
 
 
 @pytest.mark.asyncio
-async def test_not_acquired_stands_by_and_creates_retry_task(sched):
-    """Another process holds the lock → no scheduler, a retry task is running."""
-    conn = _conn(False)
+async def test_start_does_not_touch_postgres_and_first_tick_runs_at_once(sched):
+    """start() only creates the loop; the loop's first tick acquires without waiting."""
+    engine = _engine(_conn(True, True))
+    leader = _leader(MagicMock(), retry_seconds=3600)
+
+    with patch.object(sl, "_get_engine", return_value=engine):
+        await leader.start()
+        engine.connect.assert_not_called()  # startup never waits on Postgres
+        assert leader.retry_task is not None
+        await _until(lambda: leader.is_leader)
+        assert leader.is_leader is True  # no retry_seconds sleep before tick one
+        sched.start.assert_called_once_with()
+        await leader.stop()
+    assert leader.retry_task is None
+
+
+@pytest.mark.asyncio
+async def test_not_acquired_stands_by_and_logs_standby_once(sched):
+    """Another process holds the lock → no scheduler, no held conn, one info line."""
+    conns = [_conn(False), _conn(False), _conn(False)]
     register = MagicMock()
     leader = _leader(register)
 
-    with patch.object(sl, "_get_engine", return_value=_engine(conn)):
-        await leader.start()
-        try:
-            assert leader.is_leader is False
-            register.assert_not_called()
-            sched.start.assert_not_called()
-            assert leader.retry_task is not None
-            assert not leader.retry_task.done()
-            # Standby keeps no connection: the probe connection went back to the pool.
-            conn.close.assert_awaited_once()
-        finally:
-            await leader.stop()
-    assert leader.retry_task is None or leader.retry_task.done()
+    with (
+        patch.object(sl, "_get_engine", return_value=_engine(*conns)),
+        patch.object(sl, "logger") as logger,
+    ):
+        for _ in conns:
+            await leader.tick()
+        assert leader.is_leader is False
+        register.assert_not_called()
+        sched.start.assert_not_called()
+        # Standby keeps no connection: each probe went back to the pool.
+        for c in conns:
+            c.close.assert_awaited_once()
+        info_events = [c.args[0] for c in logger.info.call_args_list]
+        assert info_events.count("scheduler_leader_standby") == 1
+        await leader.stop()
 
 
 @pytest.mark.asyncio
 async def test_retry_acquires_later_and_starts_scheduler_once(sched):
     """The leader dies → a standby's retry takes the lock and starts the scheduler."""
-    first = _conn(False)
-    second = _conn(False)
-    third = _conn(True, True)
     register = MagicMock()
     leader = _leader(register)
 
-    with patch.object(sl, "_get_engine", return_value=_engine(first, second, third)):
-        await leader.start()
-        assert leader.is_leader is False
+    with patch.object(
+        sl, "_get_engine", return_value=_engine(_conn(False), _conn(False), _conn(True, True))
+    ):
+        await leader.tick()
         await leader.tick()  # still held elsewhere
         assert leader.is_leader is False
         sched.start.assert_not_called()
@@ -127,15 +151,11 @@ async def test_retry_acquires_later_and_starts_scheduler_once(sched):
 @pytest.mark.asyncio
 async def test_retry_loop_takes_over_on_its_own(sched):
     """The background loop (not just ``tick``) performs the takeover."""
-    register = MagicMock()
-    leader = _leader(register, retry_seconds=0.01)
+    leader = _leader(MagicMock(), retry_seconds=0.01)
 
     with patch.object(sl, "_get_engine", return_value=_engine(_conn(False), _conn(True, True))):
         await leader.start()
-        for _ in range(200):
-            if leader.is_leader:
-                break
-            await asyncio.sleep(0.01)
+        await _until(lambda: leader.is_leader)
         assert leader.is_leader is True
         sched.start.assert_called_once_with()
         await leader.stop()
@@ -143,25 +163,23 @@ async def test_retry_loop_takes_over_on_its_own(sched):
 
 @pytest.mark.asyncio
 async def test_lock_check_failure_goes_standby_without_crashing(sched):
-    """Postgres unreachable at startup → logged, standby + retry, no exception."""
+    """Postgres unreachable → logged, standby, no exception; the loop keeps going."""
     engine = MagicMock()
     engine.connect = MagicMock(
         side_effect=OperationalError("SELECT 1", {}, Exception("connection refused"))
     )
     register = MagicMock()
-    leader = _leader(register)
+    leader = _leader(register, retry_seconds=0.01)
 
     with patch.object(sl, "_get_engine", return_value=engine):
-        await leader.start()  # must not raise
-        try:
-            assert leader.is_leader is False
-            register.assert_not_called()
-            sched.start.assert_not_called()
-            assert leader.retry_task is not None and not leader.retry_task.done()
-            await leader.tick()  # retry failing again is also swallowed
-            assert leader.is_leader is False
-        finally:
-            await leader.stop()
+        await leader.tick()  # must not raise
+        assert leader.is_leader is False
+        register.assert_not_called()
+        sched.start.assert_not_called()
+        await leader.start()
+        await _until(lambda: engine.connect.call_count >= 3)
+        assert leader.retry_task is not None and not leader.retry_task.done()
+        await leader.stop()
 
 
 @pytest.mark.asyncio
@@ -171,12 +189,37 @@ async def test_try_lock_query_failure_discards_connection(sched):
     leader = _leader(MagicMock())
 
     with patch.object(sl, "_get_engine", return_value=_engine(conn)):
-        await leader.start()
+        await leader.tick()
+        assert leader.is_leader is False
+        conn.invalidate.assert_awaited_once()
+        await leader.stop()
+
+
+@pytest.mark.asyncio
+async def test_registration_failure_releases_the_lock(sched):
+    """Registering the jobs raises → lock released, no scheduler, not leader.
+
+    Keeping the lock without a scheduler would leave every worker in standby
+    while no cron runs at all.
+    """
+    conn = _conn(True, True)  # try-lock True, unlock True
+    register = MagicMock(side_effect=RuntimeError("bad job"))
+    leader = _leader(register)
+
+    raised = None
+    with patch.object(sl, "_get_engine", return_value=_engine(conn)):
         try:
-            assert leader.is_leader is False
-            conn.invalidate.assert_awaited_once()
-        finally:
-            await leader.stop()
+            await leader.tick()
+        except RuntimeError as exc:
+            raised = exc
+
+    assert isinstance(raised, RuntimeError)
+    assert leader.is_leader is False
+    sched.start.assert_not_called()
+    sched.shutdown.assert_called_once_with()
+    assert conn.scalar.await_count == 2  # try-lock + unlock
+    conn.invalidate.assert_not_awaited()
+    conn.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -186,7 +229,7 @@ async def test_shutdown_unlock_true_does_not_invalidate(sched):
     leader = _leader(MagicMock())
 
     with patch.object(sl, "_get_engine", return_value=_engine(conn)):
-        await leader.start()
+        await leader.tick()
         await leader.stop()
 
     sched.shutdown.assert_called_once_with()
@@ -203,7 +246,7 @@ async def test_shutdown_unlock_false_invalidates(sched):
     leader = _leader(MagicMock())
 
     with patch.object(sl, "_get_engine", return_value=_engine(conn)):
-        await leader.start()
+        await leader.tick()
         await leader.stop()
 
     sched.shutdown.assert_called_once_with()
@@ -219,11 +262,10 @@ async def test_leader_that_loses_its_connection_stops_the_scheduler(sched):
     over; keeping our scheduler running would run every cron twice.
     """
     conn = _conn(True, OperationalError("SELECT 1", {}, Exception("terminated")))
-    register = MagicMock()
-    leader = _leader(register)
+    leader = _leader(MagicMock())
 
     with patch.object(sl, "_get_engine", return_value=_engine(conn, _conn(False))):
-        await leader.start()
+        await leader.tick()
         assert leader.is_leader is True
         await leader.tick()  # liveness probe fails
         assert leader.is_leader is False
@@ -234,6 +276,34 @@ async def test_leader_that_loses_its_connection_stops_the_scheduler(sched):
         await leader.stop()
     # Not leader at stop → the scheduler is not shut down a second time.
     sched.shutdown.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_leader_whose_ping_hangs_steps_down(sched):
+    """A ping that never answers (dead TCP peer) times out → treated as lost."""
+    calls = 0
+
+    async def scalar(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return True  # try-lock
+        await asyncio.Event().wait()  # the ping hangs forever
+
+    conn = _conn()
+    conn.scalar = AsyncMock(side_effect=scalar)
+    leader = _leader(MagicMock())
+
+    with (
+        patch.object(sl, "_get_engine", return_value=_engine(conn)),
+        patch.object(sl, "_ATTEMPT_TIMEOUT_SECONDS", 0.05),
+    ):
+        await leader.tick()
+        assert leader.is_leader is True
+        await asyncio.wait_for(leader.tick(), timeout=5)
+    assert leader.is_leader is False
+    sched.shutdown.assert_called_once_with()
+    conn.invalidate.assert_awaited_once()
 
 
 def test_lifespan_registers_jobs_through_the_leader():

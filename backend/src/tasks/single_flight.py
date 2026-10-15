@@ -55,11 +55,11 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_TRY_LOCK_SQL = text("SELECT pg_try_advisory_lock(hashtextextended(:key, 0))")
+TRY_LOCK_SQL = text("SELECT pg_try_advisory_lock(hashtextextended(:key, 0))")
 _UNLOCK_SQL = text("SELECT pg_advisory_unlock(hashtextextended(:key, 0))")
 
 
-async def _release(conn: AsyncConnection, lock_key: str) -> None:
+async def release_session_lock(conn: AsyncConnection, lock_key: str) -> None:
     """Release the advisory lock; safe to call from a ``finally`` (never raises).
 
     Critical invariant: the connection must NOT return to the pool while still
@@ -70,6 +70,10 @@ async def _release(conn: AsyncConnection, lock_key: str) -> None:
     cross-process guard. So whenever the unlock does not *provably* succeed we
     ``invalidate()`` the connection: the physical backend is closed and Postgres
     drops the lock on session end.
+
+    Args:
+        conn: The connection that took the lock with :data:`TRY_LOCK_SQL`.
+        lock_key: The key the lock was taken with.
     """
     try:
         released = bool(await conn.scalar(_UNLOCK_SQL, {"key": lock_key}))
@@ -89,6 +93,10 @@ async def _release(conn: AsyncConnection, lock_key: str) -> None:
         await conn.invalidate()
     except Exception:
         logger.warning("single_flight_invalidate_failed", lock_key=lock_key, exc_info=True)
+
+
+# Pre-#1979 private name, kept for existing callers and tests.
+_release = release_session_lock
 
 
 @asynccontextmanager
@@ -112,7 +120,7 @@ async def single_flight(lock_key: str) -> AsyncIterator[bool]:
     """
     engine = _get_engine()
     async with engine.connect() as conn:
-        acquired = bool(await conn.scalar(_TRY_LOCK_SQL, {"key": lock_key}))
+        acquired = bool(await conn.scalar(TRY_LOCK_SQL, {"key": lock_key}))
         if not acquired:
             # debug, not info: the sole caller already logs a domain-level skip
             # (e.g. sleep_maintenance_task_skipped), so an info line here just
@@ -129,7 +137,7 @@ async def single_flight(lock_key: str) -> AsyncIterator[bool]:
         try:
             yield True
         finally:
-            # ``_release`` never raises, so the body's exception (if any) still
+            # ``release_session_lock`` never raises, so the body's exception (if any) still
             # propagates, and it guarantees the lock is dropped (unlock or, on any
             # non-success, connection invalidation) rather than leaked to the pool.
-            await _release(conn, lock_key)
+            await release_session_lock(conn, lock_key)

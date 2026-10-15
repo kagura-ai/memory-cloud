@@ -95,9 +95,10 @@ async def lifespan(app: FastAPI):
     # Start background task scheduler — in ONE process of the deployment
     # (#1979). With UVICORN_WORKERS > 1 every worker runs this lifespan; the
     # Postgres advisory-lock leader registers the jobs and starts APScheduler,
-    # the other workers stand by and take over when the leader dies. Never
-    # raises for a DB problem: the API serves regardless. The leader object
-    # (and through it the retry task) is held strongly on app.state.
+    # the other workers stand by and take over when the leader dies. start()
+    # only creates the background loop (its first tick tries the lock), so
+    # startup never waits on Postgres. The leader object (and through it the
+    # loop task) is held strongly on app.state.
     from tasks import register_scheduled_jobs
     from tasks.scheduler_leader import SchedulerLeader
 
@@ -107,7 +108,7 @@ async def lifespan(app: FastAPI):
     )
     app.state.scheduler_leader = scheduler_leader
     await scheduler_leader.start()
-    logger.info("background_tasks_scheduled", scheduler_leader=scheduler_leader.is_leader)
+    logger.info("background_tasks_scheduled", scheduler_leader="pending")
 
     # WHERE axis (#1332): one-shot geo payload backfill for points embedded
     # before the location payload existed. Best-effort — but hold a strong
