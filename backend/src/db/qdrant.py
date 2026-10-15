@@ -183,7 +183,9 @@ def _read_dense_state(info: Any) -> DenseVectorState | None:
         return None
     dense = vectors[KAGURA_MEMORIES_VECTOR_NAME]
     quantization = getattr(config, "quantization_config", None)
-    if quantization is None and getattr(dense, "quantization_config", None) is not None:
+    if getattr(dense, "quantization_config", None) is not None:
+        # A per-vector setting overrides the collection-level one in Qdrant;
+        # the service never writes one, so it was set by hand: leave it alone.
         kind = "other"
     elif quantization is None:
         kind = "none"
@@ -273,20 +275,26 @@ async def apply_dense_vector_config(collection_name: str) -> bool:
         raise QdrantError(f"Failed to apply dense vector config to '{collection_name}': {e}") from e
 
 
-async def apply_dense_vector_config_to_all() -> dict[str, bool]:
+async def apply_dense_vector_config_to_all(
+    collection_names: Sequence[str] | None = None,
+) -> dict[str, bool]:
     """Startup pass (#1990): reconcile every ``kagura_memories*`` collection.
 
     Sequential on purpose — each change makes the optimizer rebuild that
     collection's segments, and the old and new segments coexist until the
     swap, so one collection at a time bounds the transient RAM and disk
     peak. A collection that fails is logged and skipped; the others still
-    get their turn. Returns ``{collection: changed}``. Raises when the
-    collection list itself cannot be read.
+    get their turn. Returns ``{collection: changed}``. Raises QdrantError
+    when the collection list itself cannot be read.
 
-    Across API workers the pass is serialised by
+    Args:
+        collection_names: Restrict the pass to these collections (tests,
+            tooling). Default: :func:`list_memory_collections`.
+
+    Across API workers the pass is guarded by
     :func:`tasks.dense_vector_config.run_dense_vector_config_reconcile`
-    (Postgres advisory lock), so a multi-worker deployment converts each
-    collection once; call this directly only from one process.
+    (single-flight advisory lock), so a multi-worker deployment converts
+    each collection once; call this directly only from one process.
     """
     config = DenseVectorConfig.from_settings()
     if _active_store() is not None:
@@ -300,12 +308,11 @@ async def apply_dense_vector_config_to_all() -> dict[str, bool]:
         return {}
 
     client = get_qdrant_client()
-    collections = await client.get_collections()
+    names = (
+        list(collection_names) if collection_names is not None else await list_memory_collections()
+    )
     results: dict[str, bool] = {}
-    for collection in collections.collections:
-        name = collection.name
-        if not name.startswith(KAGURA_MEMORIES_COLLECTION):
-            continue
+    for name in names:
         try:
             results[name] = await _apply_dense_vector_config(client, name, config)
         except Exception as e:  # noqa: BLE001 — one collection must not stop the pass
@@ -1120,20 +1127,10 @@ async def ensure_kagura_memories_collection(
             has_sparse = sparse_cfg is not None and KAGURA_MEMORIES_BM25_VECTOR_NAME in sparse_cfg
 
             if has_sparse:
-                # #1990: reconcile the dense vector layout (quantization,
-                # on_disk) with the settings before the index retrofits.
-                # Best-effort: the collection is usable as it is, and the
-                # startup pass retries the layout on the next boot.
-                try:
-                    await _apply_dense_vector_config(
-                        client, collection_name, DenseVectorConfig.from_settings(), info=info
-                    )
-                except Exception as e:  # noqa: BLE001 — layout is not a reason to fail create
-                    logger.warning(
-                        "collection_dense_config_apply_failed",
-                        collection=collection_name,
-                        error=str(e),
-                    )
+                # The dense layout (#1990) of an existing collection is NOT
+                # reconciled here: this runs on the request path in every
+                # worker, and update_collection must be sent once per
+                # deployment — the startup pass owns that.
                 # Collection is up-to-date, ensure late-added indexes
                 existing_fields = set(info.payload_schema.keys()) if info.payload_schema else set()
                 if "tags" not in existing_fields:

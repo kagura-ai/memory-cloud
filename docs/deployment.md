@@ -1229,15 +1229,17 @@ Example: 100,000 memories at 2560 dimensions are 1.0 GiB as fp32 and
   with the changed keys). A collection that already matches is left alone, so
   a restart with unchanged settings sends nothing. Setting the values back to
   `none` / `false` is applied the same way. With `UVICORN_WORKERS > 1` the
-  workers take a Postgres advisory lock for the pass, so they run it one
-  after another: the first converts, the others then read the converted
-  state and send nothing. A collection whose quantization was set by hand to
-  something other than scalar int8 kept in RAM is skipped with
+  pass is single-flight across the workers (Postgres advisory lock, the same
+  guard the scheduled tasks use): the first worker converts every
+  collection, the others skip (`dense_vector_config_skipped_busy`); a worker
+  that starts later finds nothing to do. A collection whose quantization was
+  set by hand to something other than scalar int8 kept in RAM is skipped with
   `collection_dense_config_skipped`; an int8 config with `always_ram=false`
   is treated as a mismatch and converted.
-- The same reconciliation runs when a context creates its collection
-  (`ensure_kagura_memories_collection`), which also covers the target
-  collection of an [embedding model migration](#embedding-model-migration--issue-1525).
+- A collection that a context creates later (including the target of an
+  [embedding model migration](#embedding-model-migration--issue-1525)) is
+  created with the layout; an existing collection is only ever converted by
+  the startup pass, never on a request path.
 - The LanceDB backend (`KAGURA_VECTOR_BACKEND=lance`) ignores both settings
   and logs `dense_vector_config_ignored` once when they are not default.
 - Qdrant ignores the rescore block on an unquantized collection, so the

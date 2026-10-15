@@ -1,7 +1,10 @@
-"""#1990: the startup pass takes the advisory lock, runs the reconcile, never raises."""
+"""#1990: the startup pass runs in one worker under single_flight and never raises."""
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -14,14 +17,17 @@ from tasks.dense_vector_config import (
 
 
 @pytest.fixture
-def db(monkeypatch):
-    session = AsyncMock()
+def guard(monkeypatch):
+    """Replace single_flight with a fake that records the key and yields `acquired`."""
+    seen: dict[str, Any] = {"acquired": True, "keys": []}
 
-    async def _get_db():
-        yield session
+    @asynccontextmanager
+    async def _single_flight(lock_key: str) -> AsyncGenerator[bool]:
+        seen["keys"].append(lock_key)
+        yield bool(seen["acquired"])
 
-    monkeypatch.setattr(task_module, "get_db", _get_db)
-    return session
+    monkeypatch.setattr(task_module, "single_flight", _single_flight)
+    return seen
 
 
 @pytest.fixture
@@ -31,42 +37,57 @@ def apply_all(monkeypatch):
     return fake
 
 
-async def test_lock_then_apply_then_release(db, apply_all):
+@pytest.fixture
+def events(monkeypatch):
+    seen: list[dict] = []
+    for level in ("info", "warning"):
+        monkeypatch.setattr(
+            task_module.logger,
+            level,
+            lambda event, _level=level, **kw: seen.append({"level": _level, "event": event, **kw}),
+        )
+    return seen
+
+
+async def test_leader_runs_the_pass_under_the_lock(guard, apply_all, events):
     results = await run_dense_vector_config_reconcile()
 
     assert results == {"kagura_memories": True, "kagura_memories_x_8": False}
-    db.execute.assert_awaited_once()
-    sql, params = db.execute.await_args.args
-    assert "pg_advisory_xact_lock" in str(sql)
-    assert params == {"key": DENSE_VECTOR_CONFIG_LOCK_KEY}
+    assert guard["keys"] == [DENSE_VECTOR_CONFIG_LOCK_KEY]
     apply_all.assert_awaited_once()
-    db.rollback.assert_awaited_once()
+    assert [e["event"] for e in events] == ["dense_vector_config_reconciled"]
+    assert events[0]["changed"] == ["kagura_memories"]
 
 
-async def test_lock_is_released_when_the_pass_fails(db, apply_all, monkeypatch):
-    apply_all.side_effect = RuntimeError("qdrant down")
-    warnings: list[dict] = []
-    monkeypatch.setattr(
-        task_module.logger, "warning", lambda event, **kw: warnings.append({"event": event, **kw})
-    )
-
-    assert await run_dense_vector_config_reconcile() == {}
-
-    db.rollback.assert_awaited_once()
-    assert [w["event"] for w in warnings] == ["dense_vector_config_apply_failed"]
-    assert "qdrant down" in warnings[0]["error"]
-
-
-async def test_database_failure_is_logged_not_raised(apply_all, monkeypatch):
-    async def _broken():
-        raise RuntimeError("pool exhausted")
-        yield  # pragma: no cover — makes this an async generator
-
-    monkeypatch.setattr(task_module, "get_db", _broken)
-    warnings: list[str] = []
-    monkeypatch.setattr(task_module.logger, "warning", lambda event, **kw: warnings.append(event))
+async def test_other_workers_skip_when_the_lock_is_held(guard, apply_all, events):
+    guard["acquired"] = False
 
     assert await run_dense_vector_config_reconcile() == {}
 
     apply_all.assert_not_awaited()
-    assert warnings == ["dense_vector_config_apply_failed"]
+    assert [e["event"] for e in events] == ["dense_vector_config_skipped_busy"]
+
+
+async def test_pass_failure_is_logged_not_raised(guard, apply_all, events):
+    apply_all.side_effect = RuntimeError("qdrant down")
+
+    assert await run_dense_vector_config_reconcile() == {}
+
+    assert [(e["level"], e["event"]) for e in events] == [
+        ("warning", "dense_vector_config_apply_failed")
+    ]
+    assert "qdrant down" in events[0]["error"]
+
+
+async def test_lock_failure_is_logged_not_raised(apply_all, events, monkeypatch):
+    @asynccontextmanager
+    async def _broken(lock_key: str) -> AsyncGenerator[bool]:
+        raise RuntimeError("pool exhausted")
+        yield True  # pragma: no cover — makes this an async generator
+
+    monkeypatch.setattr(task_module, "single_flight", _broken)
+
+    assert await run_dense_vector_config_reconcile() == {}
+
+    apply_all.assert_not_awaited()
+    assert [e["event"] for e in events] == ["dense_vector_config_apply_failed"]

@@ -118,6 +118,14 @@ class TestDenseVectorConfig:
         assert settings.qdrant_dense_quantization == "int8"
         assert settings.qdrant_dense_on_disk is True
 
+    @pytest.mark.parametrize("raw", ["", "  "])
+    def test_settings_empty_passthrough_is_none(self, monkeypatch, raw):
+        """`${QDRANT_DENSE_QUANTIZATION}` with the variable unset must not refuse boot."""
+        from config.settings import Settings
+
+        monkeypatch.setenv("QDRANT_DENSE_QUANTIZATION", raw)
+        assert Settings().qdrant_dense_quantization == "none"
+
     @pytest.mark.parametrize("raw", ["INT8", " int8 ", "Int8\n"])
     def test_settings_normalise_case_and_whitespace(self, monkeypatch, raw):
         """A compose .env line must not keep the API from booting (code review)."""
@@ -142,6 +150,11 @@ class TestReadDenseState:
     def test_other_quantization_kinds(self):
         assert qmod._read_dense_state(_info(quantization=BINARY)).quantization == "other"
         assert qmod._read_dense_state(_info(dense_quantization=INT8)).quantization == "other"
+        # A per-vector setting overrides the collection-level one in Qdrant.
+        assert (
+            qmod._read_dense_state(_info(quantization=INT8, dense_quantization=BINARY)).quantization
+            == "other"
+        )
 
     def test_int8_with_always_ram_false_is_its_own_kind(self):
         """always_ram is a bool and is compared; only the quantile float is not."""
@@ -302,44 +315,18 @@ class TestReconcile:
 
 
 class TestEnsureExistingCollection:
-    async def test_existing_collection_is_reconciled_before_index_retrofit(
+    async def test_existing_collection_is_not_reconciled_on_the_request_path(
         self, mock_client, dense_settings
     ):
+        """ensure() runs in every worker on context creation; the startup pass owns the retrofit."""
         dense_settings("int8", True)
         _existing(mock_client, _info())
 
         await ensure_kagura_memories_collection()
 
-        mock_client.create_collection.assert_not_awaited()
-        mock_client.update_collection.assert_awaited_once()
-        assert isinstance(
-            mock_client.update_collection.await_args.kwargs["quantization_config"],
-            ScalarQuantization,
-        )
-
-    async def test_existing_matching_collection_is_untouched(self, mock_client, dense_settings):
-        _existing(mock_client, _info())
-        await ensure_kagura_memories_collection()
         mock_client.create_collection.assert_not_awaited()
         mock_client.update_collection.assert_not_awaited()
         mock_client.create_payload_index.assert_not_awaited()
-
-    async def test_layout_update_failure_does_not_fail_ensure(
-        self, mock_client, dense_settings, monkeypatch
-    ):
-        """A usable collection stays usable: context creation must not fail on the layout (code review)."""
-        dense_settings("int8", True)
-        _existing(mock_client, _info())
-        mock_client.update_collection.side_effect = RuntimeError("403 read-only key")
-        warnings: list[dict] = []
-        monkeypatch.setattr(
-            qmod.logger, "warning", lambda event, **kw: warnings.append({"event": event, **kw})
-        )
-
-        await ensure_kagura_memories_collection()
-
-        assert [w["event"] for w in warnings] == ["collection_dense_config_apply_failed"]
-        mock_client.create_collection.assert_not_awaited()
 
 
 class TestStartupPass:
@@ -351,10 +338,10 @@ class TestStartupPass:
         broken = KAGURA_MEMORIES_COLLECTION + "_broken"
         mock_client.get_collections.return_value = SimpleNamespace(
             collections=[
-                SimpleNamespace(name=KAGURA_MEMORIES_COLLECTION),
+                SimpleNamespace(name=variant),
                 SimpleNamespace(name=broken),
                 SimpleNamespace(name="other_collection"),
-                SimpleNamespace(name=variant),
+                SimpleNamespace(name=KAGURA_MEMORIES_COLLECTION),
             ]
         )
 
@@ -379,8 +366,19 @@ class TestStartupPass:
 
     async def test_collection_list_failure_propagates(self, mock_client, dense_settings):
         mock_client.get_collections.side_effect = RuntimeError("conn refused")
-        with pytest.raises(RuntimeError, match="conn refused"):
+        with pytest.raises(QdrantError, match="Failed to list collections"):
             await apply_dense_vector_config_to_all()
+
+    async def test_explicit_collection_names_skip_the_listing(self, mock_client, dense_settings):
+        """Tests and tooling scope the pass; the shared server's other collections are untouched."""
+        dense_settings("int8", False)
+        mock_client.get_collection.return_value = _info()
+        name = KAGURA_MEMORIES_COLLECTION + "_it_abc"
+
+        assert await apply_dense_vector_config_to_all([name]) == {name: True}
+
+        mock_client.get_collections.assert_not_awaited()
+        assert mock_client.update_collection.await_args.kwargs["collection_name"] == name
 
     async def test_lance_backend_skips_and_warns_on_non_default(
         self, mock_client, dense_settings, monkeypatch

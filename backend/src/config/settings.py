@@ -634,10 +634,13 @@ class Settings(BaseSettings):
     def _normalize_dense_quantization(cls, v: object) -> object:
         """Trim and lower-case the value; the ``Literal`` does the refusing.
 
-        ``INT8`` or ``int8 `` from a compose ``.env`` line must not keep the
-        API from booting over a storage-layout knob.
+        ``INT8``, ``int8 `` or an empty passthrough (``${QDRANT_DENSE_QUANTIZATION}``
+        with the variable unset) from a compose file must not keep the API from
+        booting over a storage-layout knob.
         """
-        return v.strip().lower() if isinstance(v, str) else v
+        if isinstance(v, str):
+            return v.strip().lower() or "none"
+        return v
 
     # Vector backend selection ("Kagura Lite" — embedded LanceDB backend).
     # Default "qdrant" preserves the server behavior exactly. "lance" routes

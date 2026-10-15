@@ -87,8 +87,8 @@ class TestReconcileRoundTrip:
 
             # A second pass with the same settings sends nothing.
             assert await apply_dense_vector_config(name) is False
-            # ensure() on the existing collection reconciles through the same
-            # path and must not fail on an already-converted collection.
+            # ensure() on the converted collection (context creation path)
+            # must keep working and must not touch the layout.
             await ensure_kagura_memories_collection(_DIM, name)
             assert await _state(qdrant, name) == DenseVectorState("int8", True)
 
@@ -109,7 +109,9 @@ class TestReconcileRoundTrip:
             await ensure_kagura_memories_collection(_DIM, already)
             assert await _state(qdrant, already) == DenseVectorState("int8", False)
 
-            results = await apply_dense_vector_config_to_all()
+            # Scoped to the throwaway collections: the default listing would
+            # convert every kagura_memories* collection on the shared server.
+            results = await apply_dense_vector_config_to_all([fp32, already])
 
             assert results[fp32] is True
             assert results[already] is False
