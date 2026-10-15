@@ -66,18 +66,21 @@ _ATTEMPT_TIMEOUT_SECONDS = 15.0
 
 
 async def _discard(conn: AsyncConnection) -> None:
-    """Invalidate and close ``conn`` without raising.
+    """Invalidate and close ``conn`` without raising and without hanging.
 
     Used when it is unknown whether the backend holds the lock (the try-lock or
-    its commit failed), so the connection must not return to the pool.
+    its commit failed) or the connection is dead, so it must not return to the
+    pool. asyncpg's close waits for the peer to acknowledge the Terminate
+    message, which on a half-open socket never comes, so each step is bounded
+    by ``_ATTEMPT_TIMEOUT_SECONDS``; a timed-out step is logged and skipped.
     """
     try:
-        await conn.invalidate()
-    except Exception:
+        await asyncio.wait_for(conn.invalidate(), timeout=_ATTEMPT_TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001 — incl. TimeoutError; best effort
         logger.warning("scheduler_leader_invalidate_failed", exc_info=True)
     try:
-        await conn.close()
-    except Exception:
+        await asyncio.wait_for(conn.close(), timeout=_ATTEMPT_TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001 — incl. TimeoutError; best effort
         logger.warning("scheduler_leader_close_failed", exc_info=True)
 
 
