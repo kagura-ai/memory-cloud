@@ -195,16 +195,26 @@ class TestRecordAccess:
         repo.bulk_promote_to_persistent.assert_awaited_once_with([memory.id])
 
     @pytest.mark.asyncio
-    async def test_database_failure_is_logged_not_raised(self, service):
+    @pytest.mark.parametrize(
+        "error",
+        [
+            OperationalError("UPDATE memories", {}, Exception("deadlock detected")),
+            ConnectionRefusedError(111, "refused"),
+            RuntimeError("a bug"),
+        ],
+        ids=["database", "connection", "bug"],
+    )
+    async def test_any_failure_is_logged_not_raised(self, service, error):
+        """The page is already committed: nothing in this step may fail it."""
         memory = _memory(created_at=datetime.utcnow() - timedelta(days=30))
         responses = [_response(memory)]
         session = _isolated(service)
 
-        async def deadlock(*args, **kwargs):
-            raise OperationalError("UPDATE memories", {}, Exception("deadlock detected"))
+        async def fail(*args, **kwargs):
+            raise error
 
         repo = MagicMock()
-        repo.bulk_update_access_stats = AsyncMock(side_effect=deadlock)
+        repo.bulk_update_access_stats = AsyncMock(side_effect=fail)
         repo.bulk_promote_to_persistent = AsyncMock()
 
         with (
@@ -218,7 +228,8 @@ class TestRecordAccess:
         assert responses[0].scope == "working"
         logger.warning.assert_called_once()
         assert logger.warning.call_args.args == ("access_stats_update_failed",)
-        assert logger.warning.call_args.kwargs["error_type"] == "OperationalError"
+        assert logger.warning.call_args.kwargs["error_type"] == type(error).__name__
+        assert logger.warning.call_args.kwargs["exc_info"] is True
 
     @pytest.mark.asyncio
     async def test_empty_page_opens_no_session(self, service):

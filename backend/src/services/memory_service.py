@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import ColumnElement, and_, exists, func, or_, select, tuple_
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from config.retention import should_promote_to_persistent
@@ -4398,8 +4397,9 @@ class MemoryService:
         Issue #1985: runs after the recall commit in an isolated session. The
         bump is one lock-ordered statement over the page and promotion is
         another, so two recalls over overlapping pages queue instead of
-        deadlocking. Best-effort: a database failure is logged as
-        ``access_stats_update_failed`` and the recall still returns its page.
+        deadlocking. Best-effort: any failure is logged as
+        ``access_stats_update_failed`` (with traceback) and the recall still
+        returns its page.
         A promoted row's response shows ``scope="persistent"``.
 
         Args:
@@ -4422,14 +4422,15 @@ class MemoryService:
                 ]
                 promoted = set(await repo.bulk_promote_to_persistent(due))
                 await stats_db.commit()
-        except (SQLAlchemyError, OSError) as exc:
-            # OSError covers a refused or timed-out connection, which asyncpg
-            # raises before SQLAlchemy can wrap it.
+        except Exception as exc:  # noqa: BLE001 — the page is committed; never fail it
+            # Any failure here (database, refused connection, or a bug) is
+            # logged with its traceback and the recall still returns its page.
             logger.warning(
                 "access_stats_update_failed",
                 error=str(exc),
                 error_type=type(exc).__name__,
                 memory_count=len(page_ids),
+                exc_info=True,
             )
             return
         for response in responses:
