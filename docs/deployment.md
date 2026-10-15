@@ -2182,15 +2182,28 @@ Each worker is a full, independent process:
   process exits — a worker restart, or `deploy.sh` stopping the old color after
   a blue/green switch — Postgres drops its lock and a standby in either color
   takes over within that interval; a cron tick that falls in that gap is
-  skipped. The lock guarantees at most one *scheduler* at a time, not one
-  execution of each job: the old leader's scheduler stops without waiting for
-  running jobs, so a job already running on the old leader can overlap the
-  new leader's first tick of the same job during a handover. The Sleep,
-  neural and capacity purge jobs keep their own `single_flight` lock against
-  that. A leader whose lock connection breaks (e.g. Postgres restarted)
-  stops its scheduler (`scheduler_leader_lost`) and competes again. If
-  Postgres is unreachable at startup the worker logs
-  `scheduler_leader_check_failed`, keeps serving requests and retries.
+  skipped. The leader checks its lock connection every
+  `SCHEDULER_LEADER_PING_SECONDS` (default `10`, minimum `1`); when it breaks
+  or stops answering (e.g. Postgres restarted) the leader stops its scheduler
+  (`scheduler_leader_lost`) and competes again. If Postgres is unreachable at
+  startup the worker logs `scheduler_leader_check_failed`, keeps serving
+  requests and retries.
+
+  The lock serialises schedulers, not job executions, and has two bounded
+  overlaps:
+  - **Handover:** the old leader's scheduler stops without waiting for running
+    jobs, so a job already running on the old leader can overlap the new
+    leader's first tick of the same job.
+  - **Postgres restart:** after a Postgres restart the old leader keeps
+    dispatching for at most `SCHEDULER_LEADER_PING_SECONDS` + 15 s while a
+    standby may already hold the lock.
+
+  The Sleep, neural and capacity purge jobs stay `single_flight` guarded
+  against both.
+- **Every worker still runs its own MCP session cleanup.** It cleans that
+  process's session table (the known limit above), so it is a per-worker loop
+  every `MCP_SESSION_CLEANUP_INTERVAL` seconds (default `600`), not a
+  scheduler job.
 
 ### Sizing `POSTGRES_MAX_CONNECTIONS`
 
