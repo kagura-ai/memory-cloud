@@ -2126,9 +2126,9 @@ Each API process opens PostgreSQL connections through SQLAlchemy's `QueuePool` (
 |---|---|---|
 | `DB_POOL_SIZE` | `5` | Connections the pool keeps open (minimum `1`). |
 | `DB_MAX_OVERFLOW` | `10` | Extra connections opened under load and closed again when returned (minimum `0`). |
-| `DB_POOL_TIMEOUT` | `30` | Seconds a request waits for a free connection once `DB_POOL_SIZE + DB_MAX_OVERFLOW` are checked out. `0` fails at once instead of waiting. |
+| `DB_POOL_TIMEOUT` | `30` | Seconds a request waits for a free connection once `DB_POOL_SIZE + DB_MAX_OVERFLOW` are checked out (must be greater than `0`). |
 
-`DB_POOL_SIZE=0` and `DB_MAX_OVERFLOW=-1`, which SQLAlchemy reads as "unlimited", are refused at startup. Keep `DB_POOL_SIZE + DB_MAX_OVERFLOW` at `15` or more: the analysis labeler borrows up to 8 connections at once next to its orchestrator session, and the API logs `database_pool_below_fanout` at startup when the configured pool is smaller than that.
+`DB_POOL_SIZE=0` and `DB_MAX_OVERFLOW=-1`, which SQLAlchemy reads as "unlimited", are refused at startup, and so is `DB_POOL_TIMEOUT=0`: the async pool's timed checkout cancels a zero-second wait before it can take an idle connection, so every request would read as `pool_exhausted`. For fail-fast behaviour use a small positive value such as `1`. Keep `DB_POOL_SIZE + DB_MAX_OVERFLOW` at `15` or more: the analysis labeler borrows up to 8 connections at once next to its orchestrator session, and the API logs `database_pool_below_fanout` at startup when the configured pool is smaller than that.
 
 **Sizing.** The sync engine used by the OAuth2 server shares the same three values, so one process can hold up to `2 × (DB_POOL_SIZE + DB_MAX_OVERFLOW)` connections. Across the deployment, `uvicorn workers × 2 × (DB_POOL_SIZE + DB_MAX_OVERFLOW)`, plus the connections the Sleep and background-worker jobs open, plus the operators' `psql` sessions, must stay below PostgreSQL's `max_connections`. Raise `max_connections` first if the sum does not fit.
 

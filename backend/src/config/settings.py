@@ -509,10 +509,12 @@ class Settings(BaseSettings):
     # so one process can hold up to ``2 * (db_pool_size + db_max_overflow)``
     # connections. A request waits up to ``db_pool_timeout`` seconds for a
     # free connection; past it SQLAlchemy raises ``TimeoutError`` and the API
-    # answers 503 DB-002 with ``details.reason="pool_exhausted"``. ``0``
-    # fails at once when the pool is saturated (SQLAlchemy's queue raises
-    # Empty on a zero timeout); the bounds forbid a pool_size of 0 and a
-    # max_overflow of -1, which SQLAlchemy reads as "unlimited". In-process
+    # answers 503 DB-002 with ``details.reason="pool_exhausted"``. The bounds
+    # forbid a pool_size of 0 and a max_overflow of -1, which SQLAlchemy reads
+    # as "unlimited", and a zero timeout: the async pool's timed checkout is
+    # ``asyncio.wait_for(queue.get(), timeout)``, which at 0 cancels before it
+    # can take an idle connection, so every checkout would read as exhausted.
+    # Fail-fast deployments use a small positive value (e.g. 1). In-process
     # fan-out (``services/analysis/labeler.py`` holds up to 8 connections at
     # once) assumes at least the former fixed 15; ``db.base`` warns below it.
     db_pool_size: int = Field(
@@ -527,8 +529,8 @@ class Settings(BaseSettings):
     )
     db_pool_timeout: float = Field(
         default=30.0,
-        ge=0,
-        description="Seconds a request waits for a free pooled PostgreSQL connection; 0 fails at once (Issue #1978)",
+        gt=0,
+        description="Seconds a request waits for a free pooled PostgreSQL connection (Issue #1978)",
     )
 
     # API Settings
