@@ -22,7 +22,9 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from models.memory import Memory
+from models.schemas import MemoryResponse
 from repositories.memory import MemoryRepository
+from services.memory_service import MemoryService
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -149,3 +151,45 @@ async def test_reversed_pages_on_two_sessions_never_deadlock(
     async with factory() as probe:
         assert await _row(probe, low) == (2 * _PAIRS, ["api"])
         assert await _row(probe, high) == (2 * _PAIRS, ["api"])
+
+
+async def test_recall_access_write_commits_on_an_isolated_session(
+    db_session: AsyncSession, memory_pair: tuple[UUID, UUID]
+) -> None:
+    """The post-commit write lands in the database without touching the
+    request session's transaction, and promotes a row that now qualifies."""
+    low, high = memory_pair
+    rows = {
+        row.id: row
+        for row in (await db_session.execute(select(Memory).where(Memory.id.in_([low, high]))))
+        .scalars()
+        .all()
+    }
+    rows[low].importance = 0.9  # qualifies for promotion on its next surfacing
+    await db_session.commit()
+    responses = [
+        MemoryResponse(
+            memory_id=row.id,
+            summary=row.summary,
+            context_summary=None,
+            type=row.type,
+            importance=row.importance,
+            scope=row.scope,
+            created_at=row.created_at,
+            client=row.client,
+            tags=[],
+            context=None,
+        )
+        for row in rows.values()
+    ]
+
+    await MemoryService(db_session)._recall_record_access(
+        responses, {str(k): v for k, v in rows.items()}, client="api"
+    )
+
+    assert {r.memory_id: r.scope for r in responses} == {low: "persistent", high: "working"}
+    async with async_sessionmaker(db_session.bind, class_=AsyncSession)() as probe:
+        assert await _row(probe, low) == (1, ["api"])
+        assert await _row(probe, high) == (1, ["api"])
+        scope = await probe.scalar(select(Memory.scope).where(Memory.id == low))
+        assert scope == "persistent"

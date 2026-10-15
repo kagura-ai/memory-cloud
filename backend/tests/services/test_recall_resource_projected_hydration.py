@@ -59,7 +59,6 @@ def _make_service(memories_returned):
     svc.memory_repo = MagicMock()
     svc.memory_repo.update_access_stats = AsyncMock()
     # Skip the auto-promotion side-effect (writes); not under test here.
-    svc._check_and_promote = AsyncMock()
     return svc, db
 
 

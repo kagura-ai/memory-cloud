@@ -98,7 +98,6 @@ class TestRecall:
         service.db.commit = AsyncMock()
 
         service.memory_repo.update_access_stats = AsyncMock()
-        service._check_and_promote = AsyncMock()
 
         response = await service.recall(
             request=request,
@@ -1484,8 +1483,7 @@ class TestExploreHints:
         mock_result.scalars.return_value = mock_scalars
         service.db.execute = AsyncMock(return_value=mock_result)
         service.db.commit = AsyncMock()
-        service.memory_repo.update_access_stats = AsyncMock()
-        service._check_and_promote = AsyncMock()
+        service._recall_record_access = AsyncMock()
 
         response = await service.recall(
             request=request,
@@ -1503,12 +1501,11 @@ class TestExploreHints:
         assert response.confidence.result_count == 1
         assert response.results[0].updated_at is not None
 
-        # Issue #1046: recall is *surfacing*, not adoption — it bumps access_count
-        # but MUST NOT record the adoption signal. No call may set
-        # count_as_adoption=True (the default False keeps reference_count untouched).
-        assert service.memory_repo.update_access_stats.await_count >= 1
-        for call in service.memory_repo.update_access_stats.await_args_list:
-            assert call.kwargs.get("count_as_adoption") is not True
+        # Issue #1046 / #1985: recall records the shipped page as *surfacing*
+        # after its commit (the adoption flag is pinned in
+        # tests/services/test_recall_post_commit_writes.py).
+        service._recall_record_access.assert_awaited_once()
+        assert service._recall_record_access.await_args.kwargs == {"client": "api"}
 
     @pytest.mark.asyncio
     async def test_recall_hints_with_opt_in(self, service, context_id, workspace_id):
@@ -1527,7 +1524,6 @@ class TestExploreHints:
         service.db.execute = AsyncMock(return_value=mock_result)
         service.db.commit = AsyncMock()
         service.memory_repo.update_access_stats = AsyncMock()
-        service._check_and_promote = AsyncMock()
 
         with patch.dict("os.environ", {"ENABLE_NEURAL_MEMORY": "true"}):
             with patch("repositories.neural_edge.NeuralEdgeRepository") as MockEdgeRepo:
@@ -1588,7 +1584,6 @@ class TestExploreHints:
         service.db.execute = AsyncMock(return_value=mock_result)
         service.db.commit = AsyncMock()
         service.memory_repo.update_access_stats = AsyncMock()
-        service._check_and_promote = AsyncMock()
 
         with patch.dict("os.environ", {"ENABLE_NEURAL_MEMORY": "true"}):
             with patch("repositories.neural_edge.NeuralEdgeRepository") as MockEdgeRepo:

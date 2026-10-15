@@ -61,6 +61,28 @@ def _capacity_gate_needs_a_session(monkeypatch):
     monkeypatch.setattr(MemoryService, "_ensure_capacity", _gated)
 
 
+@pytest.fixture(autouse=True)
+def _recall_access_write_needs_a_session(monkeypatch):
+    """Run ``MemoryService._recall_record_access`` only against a session (#1985).
+
+    The post-commit access-stat write opens its own session on the request
+    session's engine. Under a bare ``MagicMock`` session there is no engine,
+    and the fallback would connect to whatever ``DATABASE_URL`` names, so the
+    write runs only when ``self.db`` is an ``AsyncSession`` (real or
+    ``MagicMock(spec=AsyncSession)``). Tests that pin the write call the
+    original through ``MemoryService.__dict__`` or patch ``_isolated_session``.
+    """
+    from services.memory_service import MemoryService
+
+    real = MemoryService._recall_record_access
+
+    async def _gated(self, *args, **kwargs):
+        if isinstance(self.db, AsyncSession):
+            await real(self, *args, **kwargs)
+
+    monkeypatch.setattr(MemoryService, "_recall_record_access", _gated)
+
+
 # Modules that call the capacity lock directly, and the name each binds. The
 # context resolvers carry it for every context-addressed route (#1948); the
 # workspace-addressed routes that resolve no context keep their own call

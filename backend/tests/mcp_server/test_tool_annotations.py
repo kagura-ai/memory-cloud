@@ -232,7 +232,7 @@ def test_clear_reads_are_read_only(name):
 def test_recall_is_destructive_because_it_learns(name):
     """recall persists Hebbian graph updates and promotes working memories it
     returns (``MemoryService._recall_run_hebbian_learning`` /
-    ``_check_and_promote``); both change later results, so it is not read-only.
+    ``_recall_record_access``); both change later results, so it is not read-only.
     The learning pass also overwrites and removes existing edges
     (``HebbianLearner.apply_updates``): it rewrites the weight of an edge it
     touches, a declared one included, deletes one that decays below

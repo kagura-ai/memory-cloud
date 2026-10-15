@@ -20,7 +20,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import ColumnElement, and_, exists, func, or_, select, tuple_
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from config.retention import should_promote_to_persistent
 from db.qdrant import (
@@ -4284,7 +4285,10 @@ class MemoryService:
         contradiction_map: dict[UUID, list[UUID]],
         user_id: str,
     ) -> list[MemoryResponse]:
-        """Build the page that ships: supersede hints, access stats, response rows.
+        """Build the page that ships: supersede hints and response rows.
+
+        Read-only (#1985): the access-stat bump and auto-promotion run after the
+        recall commits, in :meth:`_recall_record_access`.
 
         Args:
             request: The recall request (``k`` is the page size).
@@ -4308,7 +4312,6 @@ class MemoryService:
             page_memories, user_id=user_id, operation="recall"
         )
 
-        client = request.filters.get("client", "api") if request.filters else "api"
         responses: list[MemoryResponse] = []
         for search_result in page:
             memory = memories.get(search_result["id"])
@@ -4316,18 +4319,11 @@ class MemoryService:
             if not memory:
                 continue
 
-            # Issue #1047: snapshot updated_at BEFORE update_access_stats.
-            # #1317 removed the column's onupdate, so the access-stats flush
-            # no longer touches (or expires) updated_at — the DB value is now
-            # correct by construction; the snapshot stays as a cheap guard
-            # against any future in-session dirtying of the row.
+            # Issue #1047: snapshot updated_at as read. #1317 removed the
+            # column's onupdate and #1985 moved the access-stats write to a
+            # separate session after the commit, so nothing dirties the row
+            # here; the snapshot stays as a cheap guard.
             snapshot_updated_at = memory.updated_at
-
-            # Update access stats
-            await self.memory_repo.update_access_stats(memory.id, client=client)
-
-            # Check for auto-promotion
-            await self._check_and_promote(memory)
 
             responses.append(
                 MemoryResponse(
@@ -4356,6 +4352,92 @@ class MemoryService:
             )
         return responses
 
+    def _isolated_session(self) -> AsyncSession:
+        """A fresh session on the request session's engine (#1985).
+
+        Post-commit statistics writes use it so that their row locks and any
+        failure stay out of the request transaction. The caller commits.
+        """
+        bind = getattr(self.db, "bind", None)
+        if isinstance(bind, AsyncEngine):
+            return AsyncSession(bind=bind, expire_on_commit=False)
+        from db.base import _get_session_factory
+
+        return _get_session_factory()()
+
+    @staticmethod
+    def _promotion_due(memory: Memory, access_count: int, client: str) -> bool:
+        """Whether a just-surfaced working memory qualifies for persistent scope.
+
+        Args:
+            memory: The row as the recall read it.
+            access_count: Its ``access_count`` after this recall's bump.
+            client: The client this recall recorded.
+        """
+        if memory.scope == "persistent":
+            return False
+        clients = list(memory.accessed_by_clients or [])
+        if client not in clients:
+            clients.append(client)
+        return should_promote_to_persistent(
+            access_count=access_count,
+            age_days=(utcnow() - memory.created_at).days,
+            importance=memory.importance,
+            accessed_by_clients=clients,
+        )
+
+    async def _recall_record_access(
+        self,
+        responses: list[MemoryResponse],
+        memories: dict[str, Memory],
+        *,
+        client: str,
+    ) -> None:
+        """Bump access stats for the shipped page and promote what qualifies.
+
+        Issue #1985: runs after the recall commit in an isolated session. The
+        bump is one lock-ordered statement over the page and promotion is
+        another, so two recalls over overlapping pages queue instead of
+        deadlocking. Best-effort: a database failure is logged as
+        ``access_stats_update_failed`` and the recall still returns its page.
+        A promoted row's response shows ``scope="persistent"``.
+
+        Args:
+            responses: The page being returned (mutated for promoted rows).
+            memories: Hydrated point-id → Memory map (read state).
+            client: Client name recorded in ``accessed_by_clients``.
+        """
+        if not responses:
+            return
+        rows = {memory.id: memory for memory in memories.values()}
+        page_ids = [response.memory_id for response in responses]
+        try:
+            async with self._isolated_session() as stats_db:
+                repo = MemoryRepository(stats_db)
+                counts = await repo.bulk_update_access_stats(page_ids, client)
+                due = [
+                    memory_id
+                    for memory_id, count in counts.items()
+                    if memory_id in rows and self._promotion_due(rows[memory_id], count, client)
+                ]
+                promoted = set(await repo.bulk_promote_to_persistent(due))
+                await stats_db.commit()
+        except (SQLAlchemyError, OSError) as exc:
+            # OSError covers a refused or timed-out connection, which asyncpg
+            # raises before SQLAlchemy can wrap it.
+            logger.warning(
+                "access_stats_update_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                memory_count=len(page_ids),
+            )
+            return
+        for response in responses:
+            if response.memory_id in promoted:
+                response.scope = "persistent"
+        if promoted:
+            logger.info("memories_promoted", memory_ids=[str(mid) for mid in sorted(promoted)])
+
     async def _recall_run_hebbian_learning(
         self,
         request: RecallRequest,
@@ -4374,7 +4456,10 @@ class MemoryService:
         evidence from real queries.
 
         Fail-open: any error is logged and swallowed — a graph problem must never
-        break a recall.
+        break a recall. Issue #1985: runs after the recall commit in its own
+        session (committed here), so a failed edge write cannot abort the
+        recall's transaction, and edge rows are locked in (src, dst) order by
+        ``HebbianLearner.apply_updates``.
 
         Args:
             request: The recall request (``query`` keys the #983 event dedup).
@@ -4385,186 +4470,218 @@ class MemoryService:
             effective_workspace_id: #708-aware workspace for graph mutations.
         """
         try:
-            from neural.co_activation import CoActivationTracker
-            from neural.config import NeuralMemoryConfig
-            from neural.hebbian import HebbianLearner
-            from neural.models import ActivationState, NeuralMemoryNode
-            from repositories.graph import GraphRepository
-            from services.graph_service import GraphService
-
-            config = await NeuralMemoryConfig.from_db(self.db)
-            graph_repo = GraphRepository(self.db)
-            await graph_repo.get_or_create(user_id)
-
-            graph_service = GraphService(
-                user_id=user_id,
-                db=self.db,
-                workspace_id=str(effective_workspace_id) if effective_workspace_id else None,
-                context_id=str(current_context_id) if current_context_id else None,
-            )
-
-            co_activation_tracker = CoActivationTracker(config)
-            await co_activation_tracker.load_from_redis(user_id)
-            # #983: the learner reads/writes the cliff pending_weight on the
-            # tracker's records so it survives this per-recall instance.
-            hebbian_learner = HebbianLearner(graph_service, config, co_activation_tracker)
-
-            # Only co-activate top-k results for higher-quality edges
-            coactivation_k = min(config.top_k_coactivation, request.k, len(search_results))
-            top_results = search_results[:coactivation_k]
-
-            # Build NeuralMemoryNode list and score map from top results
-            nodes_dict: dict[str, NeuralMemoryNode] = {}
-            score_map: dict[str, float] = {}
-            for search_result in top_results:
-                memory = memories.get(search_result["id"])
-                if not memory:
-                    continue
-                mid = str(memory.id)
-                embedding = search_result.get("embedding", [])
-                score_map[mid] = search_result.get("hybrid_score", search_result["score"])
-                nodes_dict[mid] = NeuralMemoryNode(
-                    id=mid,
+            async with self._isolated_session() as graph_db:
+                await self._recall_learn_on_session(
+                    graph_db,
+                    request,
+                    search_results,
+                    memories,
                     user_id=user_id,
-                    kind=memory.type,
-                    text=memory.summary,
-                    embedding=embedding,
-                    created_at=memory.created_at,
-                    last_used_at=memory.last_used_at,
-                    use_count=memory.access_count or 0,
-                    importance=memory.importance,
-                    confidence=memory.confidence,
-                    long_term=(memory.scope == "persistent"),
+                    current_context_id=current_context_id,
+                    effective_workspace_id=effective_workspace_id,
                 )
-
-            # Score-weighted activation: clamp to [0, 1] for Hebbian stability
-            activated_nodes = [
-                ActivationState(node_id=nid, activation=min(1.0, max(0.0, score_map.get(nid, 0.0))))
-                for nid in nodes_dict
-            ]
-
-            # Co-activation tracking with semantic gating
-            embedding_map = {
-                nid: node.embedding for nid, node in nodes_dict.items() if node.embedding
-            }
-            # Resolve the calibrated edge-gate threshold (#982). The gate is
-            # keyed on the context's embedding (model, dimensions); both the
-            # co-activation tracker and the Hebbian learner use the same
-            # resolved value so they agree on which pairs may form edges.
-            # Best-effort: on any failure (or no edge_gate calibration row)
-            # this stays None and the gate falls back to the config absolute
-            # ``min_similarity_for_edge`` inside record_activation/queue_update.
-            edge_threshold: float | None = None
-            edge_dims = next((len(e) for e in embedding_map.values() if e), None)
-            if edge_dims and current_context_id is not None:
-                # Resolve in an ISOLATED session: a transient DB error here
-                # must not abort the recall's own transaction (which still
-                # has the neural graph writes below to commit). The lookup
-                # is READ-ONLY (get_by_context, never create_or_get) so the
-                # recall hot path never writes a config row. Missing config
-                # or any failure leaves edge_threshold=None → the gate falls
-                # back to the absolute config value in the gating calls.
-                from db.base import get_db
-                from neural.calibration import resolve_edge_threshold
-                from repositories.config_repository import (
-                    ContextSearchConfigRepository,
-                )
-
-                try:
-                    async for edge_db in get_db():
-                        ctx_search_cfg = await ContextSearchConfigRepository(
-                            edge_db
-                        ).get_by_context(current_context_id)
-                        if ctx_search_cfg is not None:
-                            edge_threshold = await resolve_edge_threshold(
-                                db=edge_db,
-                                config=config,
-                                model_name=ctx_search_cfg.embedding_model,
-                                dimensions=edge_dims,
-                            )
-                        break
-                except Exception:  # noqa: BLE001 — best-effort; never break recall
-                    logger.debug("edge_threshold_resolve_failed", exc_info=True)
-                    edge_threshold = None
-
-            # 2D edge gate (#983): when enabled, lower the recording gate
-            # to the floor so band pairs accumulate same-event evidence,
-            # and hand those counts to the Hebbian gate below. The floor
-            # is clamped to the effective threshold so it can only widen
-            # the band downward, never tighten the 1-D gate.
-            edge_floor: float | None = None
-            if config.edge_gate_repetition_enabled:
-                effective_threshold = (
-                    edge_threshold if edge_threshold is not None else config.min_similarity_for_edge
-                )
-                edge_floor = min(config.min_similarity_for_edge_floor, effective_threshold)
-
-            # Distinct-query evidence dedup (#983): the same query
-            # replayed N times re-produces its top-k — one ranking
-            # accident is one observation, however often it repeats.
-            query_event_key = hashlib.sha256(request.query.encode("utf-8")).hexdigest()[:16]
-
-            updated_records = co_activation_tracker.record_activation(
-                user_id,
-                activated_nodes,
-                embeddings=embedding_map,
-                similarity_threshold=edge_threshold,
-                floor_threshold=edge_floor,
-                event_key=query_event_key,
-            )
-            co_activation_counts = (
-                {(r.node_id_1, r.node_id_2): r.same_event_count for r in updated_records}
-                if edge_floor is not None
-                else None
-            )
-            # NOTE: save_to_redis is deferred until AFTER apply_updates so
-            # the persisted records also capture the cliff pending_weight
-            # the Hebbian pass writes (#983).
-
-            # Add nodes to graph
-            nodes_added = 0
-            for node_id, node in nodes_dict.items():
-                if not await graph_service.has_node(node_id):
-                    await graph_service.add_node(
-                        node_id=node_id,
-                        node_type="memory",
-                        data={
-                            "user_id": user_id,
-                            "kind": node.kind,
-                            "text": node.text,
-                            "created_at": node.created_at,
-                            "importance": node.importance,
-                            "confidence": node.confidence,
-                            "long_term": node.long_term,
-                        },
-                    )
-                    nodes_added += 1
-
-            # Hebbian updates (same calibrated gate as co-activation above;
-            # band pairs may be admitted by repetition evidence, #983)
-            await hebbian_learner.queue_update(
-                user_id,
-                activated_nodes,
-                nodes_dict,
-                similarity_threshold=edge_threshold,
-                floor_threshold=edge_floor,
-                co_activation_counts=co_activation_counts,
-            )
-            edges_updated = await hebbian_learner.apply_updates(user_id)
-
-            # #983: persist co-activation records now — this captures both
-            # the same-event evidence (record_activation) and the cliff
-            # pending_weight (apply_updates) in a single round-trip.
-            await co_activation_tracker.save_to_redis(user_id)
-
-            logger.info(
-                "graph_updated",
-                user_id=user_id,
-                nodes_added=nodes_added,
-                edges_updated=edges_updated,
-            )
+                await graph_db.commit()
         except Exception as exc:
             logger.warning("hebbian_update_failed", error=str(exc))
+
+    async def _recall_learn_on_session(
+        self,
+        graph_db: AsyncSession,
+        request: RecallRequest,
+        search_results: list[dict],
+        memories: dict[str, Memory],
+        *,
+        user_id: str,
+        current_context_id: UUID,
+        effective_workspace_id: UUID,
+    ) -> None:
+        """The Hebbian pass of :meth:`_recall_run_hebbian_learning` on ``graph_db``.
+
+        Args:
+            graph_db: The isolated session every graph read and write uses.
+            request: The recall request.
+            search_results: Ranked candidate pool.
+            memories: Hydrated point-id → Memory map.
+            user_id: Graph owner.
+            current_context_id: Context whose embedding keys the #982 edge gate.
+            effective_workspace_id: #708-aware workspace for graph mutations.
+        """
+        from neural.co_activation import CoActivationTracker
+        from neural.config import NeuralMemoryConfig
+        from neural.hebbian import HebbianLearner
+        from neural.models import ActivationState, NeuralMemoryNode
+        from repositories.graph import GraphRepository
+        from services.graph_service import GraphService
+
+        config = await NeuralMemoryConfig.from_db(graph_db)
+        graph_repo = GraphRepository(graph_db)
+        await graph_repo.get_or_create(user_id)
+
+        graph_service = GraphService(
+            user_id=user_id,
+            db=graph_db,
+            workspace_id=str(effective_workspace_id) if effective_workspace_id else None,
+            context_id=str(current_context_id) if current_context_id else None,
+        )
+
+        co_activation_tracker = CoActivationTracker(config)
+        await co_activation_tracker.load_from_redis(user_id)
+        # #983: the learner reads/writes the cliff pending_weight on the
+        # tracker's records so it survives this per-recall instance.
+        hebbian_learner = HebbianLearner(graph_service, config, co_activation_tracker)
+
+        # Only co-activate top-k results for higher-quality edges
+        coactivation_k = min(config.top_k_coactivation, request.k, len(search_results))
+        top_results = search_results[:coactivation_k]
+
+        # Build NeuralMemoryNode list and score map from top results
+        nodes_dict: dict[str, NeuralMemoryNode] = {}
+        score_map: dict[str, float] = {}
+        for search_result in top_results:
+            memory = memories.get(search_result["id"])
+            if not memory:
+                continue
+            mid = str(memory.id)
+            embedding = search_result.get("embedding", [])
+            score_map[mid] = search_result.get("hybrid_score", search_result["score"])
+            nodes_dict[mid] = NeuralMemoryNode(
+                id=mid,
+                user_id=user_id,
+                kind=memory.type,
+                text=memory.summary,
+                embedding=embedding,
+                created_at=memory.created_at,
+                last_used_at=memory.last_used_at,
+                use_count=memory.access_count or 0,
+                importance=memory.importance,
+                confidence=memory.confidence,
+                long_term=(memory.scope == "persistent"),
+            )
+
+        # Score-weighted activation: clamp to [0, 1] for Hebbian stability
+        activated_nodes = [
+            ActivationState(node_id=nid, activation=min(1.0, max(0.0, score_map.get(nid, 0.0))))
+            for nid in nodes_dict
+        ]
+
+        # Co-activation tracking with semantic gating
+        embedding_map = {nid: node.embedding for nid, node in nodes_dict.items() if node.embedding}
+        # Resolve the calibrated edge-gate threshold (#982). The gate is
+        # keyed on the context's embedding (model, dimensions); both the
+        # co-activation tracker and the Hebbian learner use the same
+        # resolved value so they agree on which pairs may form edges.
+        # Best-effort: on any failure (or no edge_gate calibration row)
+        # this stays None and the gate falls back to the config absolute
+        # ``min_similarity_for_edge`` inside record_activation/queue_update.
+        edge_threshold: float | None = None
+        edge_dims = next((len(e) for e in embedding_map.values() if e), None)
+        if edge_dims and current_context_id is not None:
+            # Resolve in an ISOLATED session: a transient DB error here
+            # must not abort the Hebbian session's transaction (which
+            # still has the neural graph writes below to commit). The lookup
+            # is READ-ONLY (get_by_context, never create_or_get) so the
+            # recall hot path never writes a config row. Missing config
+            # or any failure leaves edge_threshold=None → the gate falls
+            # back to the absolute config value in the gating calls.
+            from db.base import get_db
+            from neural.calibration import resolve_edge_threshold
+            from repositories.config_repository import (
+                ContextSearchConfigRepository,
+            )
+
+            try:
+                async for edge_db in get_db():
+                    ctx_search_cfg = await ContextSearchConfigRepository(edge_db).get_by_context(
+                        current_context_id
+                    )
+                    if ctx_search_cfg is not None:
+                        edge_threshold = await resolve_edge_threshold(
+                            db=edge_db,
+                            config=config,
+                            model_name=ctx_search_cfg.embedding_model,
+                            dimensions=edge_dims,
+                        )
+                    break
+            except Exception:  # noqa: BLE001 — best-effort; never break recall
+                logger.debug("edge_threshold_resolve_failed", exc_info=True)
+                edge_threshold = None
+
+        # 2D edge gate (#983): when enabled, lower the recording gate
+        # to the floor so band pairs accumulate same-event evidence,
+        # and hand those counts to the Hebbian gate below. The floor
+        # is clamped to the effective threshold so it can only widen
+        # the band downward, never tighten the 1-D gate.
+        edge_floor: float | None = None
+        if config.edge_gate_repetition_enabled:
+            effective_threshold = (
+                edge_threshold if edge_threshold is not None else config.min_similarity_for_edge
+            )
+            edge_floor = min(config.min_similarity_for_edge_floor, effective_threshold)
+
+        # Distinct-query evidence dedup (#983): the same query
+        # replayed N times re-produces its top-k — one ranking
+        # accident is one observation, however often it repeats.
+        query_event_key = hashlib.sha256(request.query.encode("utf-8")).hexdigest()[:16]
+
+        updated_records = co_activation_tracker.record_activation(
+            user_id,
+            activated_nodes,
+            embeddings=embedding_map,
+            similarity_threshold=edge_threshold,
+            floor_threshold=edge_floor,
+            event_key=query_event_key,
+        )
+        co_activation_counts = (
+            {(r.node_id_1, r.node_id_2): r.same_event_count for r in updated_records}
+            if edge_floor is not None
+            else None
+        )
+        # NOTE: save_to_redis is deferred until AFTER apply_updates so
+        # the persisted records also capture the cliff pending_weight
+        # the Hebbian pass writes (#983).
+
+        # Add nodes to graph
+        nodes_added = 0
+        for node_id, node in nodes_dict.items():
+            if not await graph_service.has_node(node_id):
+                await graph_service.add_node(
+                    node_id=node_id,
+                    node_type="memory",
+                    data={
+                        "user_id": user_id,
+                        "kind": node.kind,
+                        "text": node.text,
+                        "created_at": node.created_at,
+                        "importance": node.importance,
+                        "confidence": node.confidence,
+                        "long_term": node.long_term,
+                    },
+                )
+                nodes_added += 1
+
+        # Hebbian updates (same calibrated gate as co-activation above;
+        # band pairs may be admitted by repetition evidence, #983)
+        await hebbian_learner.queue_update(
+            user_id,
+            activated_nodes,
+            nodes_dict,
+            similarity_threshold=edge_threshold,
+            floor_threshold=edge_floor,
+            co_activation_counts=co_activation_counts,
+        )
+        edges_updated = await hebbian_learner.apply_updates(user_id)
+
+        # #983: persist co-activation records now — this captures both
+        # the same-event evidence (record_activation) and the cliff
+        # pending_weight (apply_updates) in a single round-trip.
+        await co_activation_tracker.save_to_redis(user_id)
+
+        logger.info(
+            "graph_updated",
+            user_id=user_id,
+            nodes_added=nodes_added,
+            edges_updated=edges_updated,
+        )
 
     async def _recall_finalize(
         self,
@@ -5079,6 +5196,15 @@ class MemoryService:
         # check (and with it the #983 repetition gate) when a node has no vector,
         # and a raw BM25 score clamps to full activation. The resulting edges are
         # written into the persistent graph and outlive the outage.
+        await self.db.commit()
+
+        # #1985: the statistics writes run AFTER the read commits, each in its
+        # own session, so a recall never holds memory or edge row locks while
+        # it waits for another one, and a failure there cannot undo or fail
+        # the page it already has.
+        client = request.filters.get("client", "api") if request.filters else "api"
+        await self._recall_record_access(responses, memories, client=client)
+
         if neural_enabled and request.search_mode != "keyword" and not degradation.get("degraded"):
             await self._recall_run_hebbian_learning(
                 request,
@@ -5088,8 +5214,6 @@ class MemoryService:
                 current_context_id=current_context_id,
                 effective_workspace_id=effective_workspace_id,
             )
-
-        await self.db.commit()
 
         return await self._recall_finalize(
             request,
@@ -5996,34 +6120,6 @@ class MemoryService:
 
         return ForgetResponse(deleted_count=len(deleted_ids), memory_ids=deleted_ids)
 
-    async def _check_and_promote(self, memory: Memory) -> None:
-        """Check and promote working memory to persistent.
-
-        Args:
-            memory: Memory entity
-        """
-        if memory.scope == "persistent":
-            return
-
-        age_days = (utcnow() - memory.created_at).days
-
-        if should_promote_to_persistent(
-            access_count=memory.access_count or 0,
-            age_days=age_days,
-            importance=memory.importance,
-            accessed_by_clients=memory.accessed_by_clients or [],
-        ):
-            await self.memory_repo.promote_to_persistent(memory.id)
-            await self.db.commit()
-
-            logger.info(
-                "memory_promoted",
-                memory_id=str(memory.id),
-                access_count=memory.access_count,
-                age_days=age_days,
-                importance=memory.importance,
-            )
-
     async def cleanup_old_working_memories(self, user_id: str, age_days: int = 30) -> int:
         """Cleanup old working memories (30+ days, not promoted).
 
@@ -6340,9 +6436,13 @@ class MemoryService:
             score=None,
         )
 
-        await self.memory_repo.update_access_stats(seed_memory.id, client="api")
-        for related in related_memories:
-            await self.memory_repo.update_access_stats(related.memory_id, client="api")
+        # #1985: one lock-ordered statement for the seed and the whole page, so
+        # concurrent explores (and recalls) over overlapping rows queue instead
+        # of deadlocking on per-row locks taken in activation order.
+        await self.memory_repo.bulk_update_access_stats(
+            [seed_memory.id, *(related.memory_id for related in related_memories)],
+            client="api",
+        )
         await self.db.commit()
 
         logger.info(
