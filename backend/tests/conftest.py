@@ -67,29 +67,35 @@ def _capacity_gate_needs_a_session(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _recall_access_write_needs_a_session(monkeypatch):
-    """Run ``MemoryService._recall_record_access`` only against a session (#1985).
+def _recall_post_commit_writes_need_a_session(monkeypatch):
+    """Run recall's post-commit writes only against a real session (#1985).
 
-    The post-commit access-stat write opens its own session on the request
-    session's engine. Under a bare ``MagicMock`` session there is no engine,
-    and the fallback would connect to whatever ``DATABASE_URL`` names, so the
-    write runs only when ``self.db`` is an ``AsyncSession`` bound to an
-    ``AsyncEngine`` (a real session, or a mock that sets ``db.bind`` to an
-    ``AsyncEngine`` spec). Tests that pin the write set that bind and patch
-    ``_isolated_session``, or call the original through
+    ``MemoryService._recall_record_access`` (access stats + promotion) and
+    ``MemoryService._recall_run_hebbian_learning`` each open their own session
+    on the request session's engine. Under a bare ``MagicMock`` session there
+    is no engine, and the fallback would connect to whatever ``DATABASE_URL``
+    names, so each write runs only when ``self.db`` is an ``AsyncSession``
+    bound to an ``AsyncEngine`` (a real session, or a mock that sets
+    ``db.bind`` to an ``AsyncEngine`` spec). Tests that pin a write set that
+    bind and patch ``_isolated_session``, or call the original through
     ``MemoryService.__dict__``.
     """
     from services.memory_service import MemoryService
 
-    real = MemoryService._recall_record_access
+    def _gate(name: str):
+        real = getattr(MemoryService, name)
 
-    async def _gated(self, *args, **kwargs):
-        if isinstance(self.db, AsyncSession) and isinstance(
-            getattr(self.db, "bind", None), AsyncEngine
-        ):
-            await real(self, *args, **kwargs)
+        async def _gated(self, *args, **kwargs):
+            if isinstance(self.db, AsyncSession) and isinstance(
+                getattr(self.db, "bind", None), AsyncEngine
+            ):
+                return await real(self, *args, **kwargs)
+            return None
 
-    monkeypatch.setattr(MemoryService, "_recall_record_access", _gated)
+        monkeypatch.setattr(MemoryService, name, _gated)
+
+    _gate("_recall_record_access")
+    _gate("_recall_run_hebbian_learning")
 
 
 # Modules that call the capacity lock directly, and the name each binds. The
