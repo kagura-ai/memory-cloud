@@ -25,7 +25,7 @@ class TestSchedulerRegistration:
         assert str(trigger.fields[trigger.FIELD_NAMES.index("minute")]) == "*"
 
     def test_registered_at_app_startup(self) -> None:
-        # The lifespan's scheduler leader (#1979) registers jobs through
+        # The lifespan's scheduler leader (#1980) registers jobs through
         # ``register_scheduled_jobs``; it must include this family.
         import tasks
 

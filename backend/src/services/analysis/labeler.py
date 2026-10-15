@@ -40,7 +40,7 @@ frame.
 **#1247 pooled-connection hold — WAIVED (documented rationale).** The
 per-task session's pooled connection stays borrowed across the LLM HTTP
 round-trip, so at ``Semaphore(8)`` up to 8 of the pool's connections
-(``DB_POOL_SIZE + DB_MAX_OVERFLOW``, 5 + 10 = 15 by default, #1978) are held
+(``DB_POOL_SIZE + DB_MAX_OVERFLOW``, 5 + 10 = 15 by default, #1980) are held
 for the duration of the labeling call. Releasing the connection before the HTTP call is NOT
 safely achievable within the analysis subsystem: the ONLY DB access in
 this coroutine is the BYOK key SELECT, and it happens *inside* the shared
@@ -257,7 +257,7 @@ async def _label_one_cluster(
         # Per-task session — each LLMService gets its own AsyncSession
         # so concurrent BYOK lookups don't race the orchestrator's
         # shared session. The default connection pool (DB_POOL_SIZE 5 +
-        # DB_MAX_OVERFLOW 10, #1978) absorbs 8 concurrent borrowed connections.
+        # DB_MAX_OVERFLOW 10, #1980) absorbs 8 concurrent borrowed connections.
         #
         # #1247 (WAIVED): this connection stays borrowed across the LLM
         # HTTP call. Releasing it first is not safely in-scope here — the

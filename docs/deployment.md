@@ -2118,7 +2118,7 @@ With it set, Sleep's judge calls on the managed lane also pass
 not deleted for you: each workspace owner can still list and delete their own
 stored keys (#1613).
 
-## Database Connection Pool — Issue #1978
+## Database Connection Pool — Issue #1980
 
 Each API process opens PostgreSQL connections through SQLAlchemy's `QueuePool` (`backend/src/db/base.py`). Three variables size it:
 
@@ -2136,7 +2136,7 @@ Each API process opens PostgreSQL connections through SQLAlchemy's `QueuePool` (
 
 Two lanes do not carry `details.reason`: MCP tool calls report the same failure as the envelope error `service_unavailable` (`backend/src/mcp_server/tools/_errors.py` classifies the pool timeout with the other dependency failures), and a REST request authenticated with an OAuth Bearer token whose token lookup itself hits the exhausted pool answers `401` because that lookup keeps the silent-failure contract of #1742. In both cases the server log still names the exception type.
 
-## Multiple API workers and Postgres connections — Issue #1979
+## Multiple API workers and Postgres connections — Issue #1980
 
 By default each API container (`api-blue` / `api-green` in the single-server
 compose files) runs **one** uvicorn process. `UVICORN_WORKERS` in `.env.prod`
@@ -2148,7 +2148,7 @@ Each worker is a full, independent process:
 - **Its own connection pools.** Every worker opens its own async SQLAlchemy
   pool, its own sync pool (OAuth2 only) and its own Redis pool
   (`REDIS_MAX_CONNECTIONS` is per worker, see below). The DB pool size per
-  engine is `DB_POOL_SIZE + DB_MAX_OVERFLOW` (Issue #1978).
+  engine is `DB_POOL_SIZE + DB_MAX_OVERFLOW` (Issue #1980).
 - **Its own in-process caches.** The LLM price cache (`llm_pricing_service`),
   the tag vocabulary `TTLCache` (`tag_resolution`), the MCP rate-limit
   settings cache (`_RATE_LIMIT_CACHE`, 60 s) and the MCP capacity-gate
@@ -2219,7 +2219,7 @@ pool over an enormous `max_connections`.
 Start from the CPU, not from the pool: a 4-core host is typically served well
 by 2–4 workers. Before adding workers, check under load that the API process
 is actually CPU-bound; if it is waiting on a full DB pool (`503 DB-002`,
-timeouts while CPU is idle), tune the pool (Issue #1978) first. Each worker
+timeouts while CPU is idle), tune the pool (Issue #1980) first. Each worker
 also holds its own copy of the application in memory.
 
 ### Rolling it out

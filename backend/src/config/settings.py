@@ -231,7 +231,7 @@ class Settings(BaseSettings):
         description=(
             "How often a standby API worker retries the APScheduler leader lock, "
             "and how often the leader checks that its lock connection is alive "
-            "(#1979). Only the lock holder runs the background cron jobs, so "
+            "(#1980). Only the lock holder runs the background cron jobs, so "
             "after the leader process dies another worker takes over within "
             "this interval."
         ),
@@ -516,7 +516,7 @@ class Settings(BaseSettings):
         description="Seconds a caller waits for a free pooled Redis connection (Issue #1556)",
     )
 
-    # PostgreSQL connection pool (Issue #1978). Both ``db.base`` engines — the
+    # PostgreSQL connection pool (Issue #1980). Both ``db.base`` engines — the
     # async application engine and the sync OAuth2 engine — use these values,
     # so one process can hold up to ``2 * (db_pool_size + db_max_overflow)``
     # connections. A request waits up to ``db_pool_timeout`` seconds for a
@@ -532,17 +532,17 @@ class Settings(BaseSettings):
     db_pool_size: int = Field(
         default=5,
         ge=1,
-        description="Persistent pooled PostgreSQL connections per engine (Issue #1978)",
+        description="Persistent pooled PostgreSQL connections per engine (Issue #1980)",
     )
     db_max_overflow: int = Field(
         default=10,
         ge=0,
-        description="Extra PostgreSQL connections per engine beyond db_pool_size (Issue #1978)",
+        description="Extra PostgreSQL connections per engine beyond db_pool_size (Issue #1980)",
     )
     db_pool_timeout: float = Field(
         default=30.0,
         gt=0,
-        description="Seconds a request waits for a free pooled PostgreSQL connection (Issue #1978)",
+        description="Seconds a request waits for a free pooled PostgreSQL connection (Issue #1980)",
     )
 
     # API Settings

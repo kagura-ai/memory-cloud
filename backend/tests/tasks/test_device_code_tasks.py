@@ -168,7 +168,7 @@ class TestSchedulerRegistration:
         assert kwargs["replace_existing"] is True
 
     def test_registered_at_app_startup(self) -> None:
-        # The lifespan's scheduler leader (#1979) registers jobs through
+        # The lifespan's scheduler leader (#1980) registers jobs through
         # ``register_scheduled_jobs``; it must include this family.
         import tasks
 

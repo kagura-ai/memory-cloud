@@ -95,7 +95,7 @@ async def lifespan(app: FastAPI):
             logger.error("llm_pricing_overrides_sync_failed", error=str(e))
 
     # Start background task scheduler — in ONE process of the deployment
-    # (#1979). With UVICORN_WORKERS > 1 every worker runs this lifespan; the
+    # (#1980). With UVICORN_WORKERS > 1 every worker runs this lifespan; the
     # Postgres advisory-lock leader registers the jobs and starts APScheduler,
     # the other workers stand by and take over when the leader dies. start()
     # only creates the background loop (its first tick tries the lock), so
@@ -138,7 +138,7 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             logger.info("geo_payload_backfill_cancelled_on_shutdown")
 
-    # Stop the leader loop and scheduler, release the leader lock (#1979).
+    # Stop the leader loop and scheduler, release the leader lock (#1980).
     # Before close_db(): the lock connection belongs to the engine's pool.
     scheduler_leader = getattr(app.state, "scheduler_leader", None)
     if scheduler_leader is not None:
@@ -584,7 +584,7 @@ def _database_unavailable_response(
     Args:
         request: The failing request.
         exc: The exception that reached the handler.
-        reason: Cause reported as ``details.reason`` and in the log (#1978),
+        reason: Cause reported as ``details.reason`` and in the log (#1980),
             so pool exhaustion is told apart from the database being down
             without changing the frozen ``DB-002`` code, status or message.
 

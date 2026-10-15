@@ -43,7 +43,7 @@ def _build_isolated_app() -> FastAPI:
 
     @app.get("/raise-pool-timeout")
     async def _raise_pool_timeout() -> dict:
-        # QueuePool checkout timeout (#1978).
+        # QueuePool checkout timeout (#1980).
         raise PoolTimeoutError("QueuePool limit of size 5 overflow 10 reached")
 
     @app.get("/raise-connection")
@@ -69,7 +69,7 @@ def _assert_database_unavailable_response(response, reason: str) -> None:
     # DatabaseConnectionError error_code (see utils/exceptions.py)
     assert body["error"] == "DB-002"
     assert body["message"] == "Database connection failed"
-    # #1978: the cause is told apart without changing the frozen code/status.
+    # #1980: the cause is told apart without changing the frozen code/status.
     assert body["details"] == {"reason": reason}
 
 
@@ -87,7 +87,7 @@ class TestDatabaseErrorHandlers:
         _assert_database_unavailable_response(response, "connection_refused")
 
     def test_pool_timeout_reports_pool_exhausted(self):
-        """#1978: a QueuePool checkout timeout is still 503 DB-002, but
+        """#1980: a QueuePool checkout timeout is still 503 DB-002, but
         ``details.reason`` says the pool ran out rather than the DB being down."""
         with TestClient(_build_isolated_app(), raise_server_exceptions=False) as client:
             response = client.get("/raise-pool-timeout")

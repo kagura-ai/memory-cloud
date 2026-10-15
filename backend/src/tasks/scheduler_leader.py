@@ -1,4 +1,4 @@
-"""Run the in-process APScheduler in at most one process (Issue #1979).
+"""Run the in-process APScheduler in at most one process (Issue #1980).
 
 Every uvicorn worker runs the FastAPI lifespan, and the lifespan used to start
 APScheduler unconditionally — so with ``UVICORN_WORKERS=N`` each of the ~15

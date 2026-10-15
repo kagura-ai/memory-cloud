@@ -95,7 +95,7 @@ async def release_session_lock(conn: AsyncConnection, lock_key: str) -> None:
         logger.warning("single_flight_invalidate_failed", lock_key=lock_key, exc_info=True)
 
 
-# Pre-#1979 private name, kept for existing callers and tests.
+# Pre-#1980 private name, kept for existing callers and tests.
 _release = release_session_lock
 
 

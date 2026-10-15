@@ -1,4 +1,4 @@
-"""``db.base`` engines read their pool sizing from Settings (#1978).
+"""``db.base`` engines read their pool sizing from Settings (#1980).
 
 A production bench exhausted the hardcoded 5 + 10 pool at concurrency 8, so
 ``DB_POOL_SIZE`` / ``DB_MAX_OVERFLOW`` / ``DB_POOL_TIMEOUT`` size both the
@@ -86,7 +86,7 @@ def test_unlimited_values_are_rejected(
 def test_fanout_floor_warning(
     monkeypatch: pytest.MonkeyPatch, pool_size: int, max_overflow: int, warns: bool
 ) -> None:
-    """``database_pool_below_fanout`` fires only when size + overflow < 15 (#1978)."""
+    """``database_pool_below_fanout`` fires only when size + overflow < 15 (#1980)."""
     from unittest.mock import MagicMock
 
     log = MagicMock()

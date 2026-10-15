@@ -14,7 +14,7 @@ Implements scheduled tasks for:
 - Capacity-over purge sweep (daily 04:00 UTC) — Issue #1969
 
 Only one process of the deployment runs the scheduler (``scheduler_leader``,
-Issue #1979); it adds the jobs with :func:`register_scheduled_jobs`.
+Issue #1980); it adds the jobs with :func:`register_scheduled_jobs`.
 """
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -40,7 +40,7 @@ from .sleep_tasks import schedule_sleep_tasks
 def register_scheduled_jobs(scheduler: AsyncIOScheduler) -> None:
     """Add every background cron job to ``scheduler``.
 
-    Called by the scheduler leader (Issue #1979) each time this process takes
+    Called by the scheduler leader (Issue #1980) each time this process takes
     the leader lock — at startup or on takeover — before the scheduler starts.
 
     Args:

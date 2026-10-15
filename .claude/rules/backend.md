@@ -22,7 +22,7 @@ paths:
 ## Database
 - Use async SQLAlchemy (`AsyncSession`) for all DB operations
 - Synchronous engine only for OAuth2 server (Authlib requirement)
-- Pool config: `pool_pre_ping=True`; size and wait come from Settings `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_POOL_TIMEOUT` (defaults 5 / 10 / 30), shared by the async and the sync OAuth2 engine (#1978)
+- Pool config: `pool_pre_ping=True`; size and wait come from Settings `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_POOL_TIMEOUT` (defaults 5 / 10 / 30), shared by the async and the sync OAuth2 engine (#1980)
 
 ## Datetime / UTC
 

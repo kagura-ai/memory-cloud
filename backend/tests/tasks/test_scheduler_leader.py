@@ -1,4 +1,4 @@
-"""Tests for the APScheduler leader lock (Issue #1979).
+"""Tests for the APScheduler leader lock (Issue #1980).
 
 With ``UVICORN_WORKERS > 1`` every worker runs the FastAPI lifespan, so the
 in-process APScheduler must run in at most one process of the deployment.

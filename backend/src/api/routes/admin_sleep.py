@@ -149,7 +149,7 @@ async def _run_sleep_batch(
     Serialized on purpose: each job opens its own DB session, and running
     jobs in parallel when an admin triggers "run all" would let a handful
     of contexts saturate the connection pool (``DB_POOL_SIZE`` +
-    ``DB_MAX_OVERFLOW``, 15 connections by default, #1978) and starve the
+    ``DB_MAX_OVERFLOW``, 15 connections by default, #1980) and starve the
     rest of the API.
     """
     for report_id, workspace_id, context_id in jobs:

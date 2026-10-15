@@ -81,7 +81,7 @@ x-api-common: &api-common
     timeout: 5s
     retries: 3
     start_period: 15s
-  # UVICORN_WORKERS (#1979): API worker processes per container, default 1.
+  # UVICORN_WORKERS (#1980): API worker processes per container, default 1.
   # Each worker has its own DB/Redis pools; only one process in the deployment
   # runs the APScheduler (Postgres leader lock). Size it against Postgres
   # max_connections — docs/deployment.md "Multiple API workers and Postgres
@@ -111,7 +111,7 @@ services:
       # .claude/rules/backend.md for the three-layer policy.
       TZ: UTC
       PGTZ: UTC
-    # POSTGRES_MAX_CONNECTIONS (#1979): default 100 is the image's own default.
+    # POSTGRES_MAX_CONNECTIONS (#1980): default 100 is the image's own default.
     # Raise it before raising UVICORN_WORKERS — docs/deployment.md "Multiple
     # API workers and Postgres connections". Changing it restarts Postgres.
     command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-100}"]

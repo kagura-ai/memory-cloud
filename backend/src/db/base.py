@@ -60,7 +60,7 @@ _POOL_FANOUT_FLOOR = 15
 
 
 def _warn_if_pool_below_fanout(pool_size: int, max_overflow: int) -> None:
-    """Log once per engine when ``DB_POOL_SIZE + DB_MAX_OVERFLOW`` cannot cover the fan-out (#1978).
+    """Log once per engine when ``DB_POOL_SIZE + DB_MAX_OVERFLOW`` cannot cover the fan-out (#1980).
 
     Args:
         pool_size: Configured ``DB_POOL_SIZE``.
@@ -103,7 +103,7 @@ def _get_engine():
             # statement text still surfaces for debugging.
             hide_parameters=True,
             pool_pre_ping=True,
-            # #1978: sized by DB_POOL_SIZE / DB_MAX_OVERFLOW / DB_POOL_TIMEOUT.
+            # #1980: sized by DB_POOL_SIZE / DB_MAX_OVERFLOW / DB_POOL_TIMEOUT.
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,
             pool_timeout=settings.db_pool_timeout,
@@ -154,7 +154,7 @@ def _get_sync_engine():
             # #1331: same bound-parameter log hygiene as the async engine.
             hide_parameters=True,
             pool_pre_ping=True,
-            # #1978: sized by DB_POOL_SIZE / DB_MAX_OVERFLOW / DB_POOL_TIMEOUT.
+            # #1980: sized by DB_POOL_SIZE / DB_MAX_OVERFLOW / DB_POOL_TIMEOUT.
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,
             pool_timeout=settings.db_pool_timeout,
