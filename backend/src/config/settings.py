@@ -229,11 +229,20 @@ class Settings(BaseSettings):
         default=60,
         ge=5,
         description=(
-            "How often a standby API worker retries the APScheduler leader lock, "
-            "and how often the leader checks that its lock connection is alive "
+            "How often a standby API worker retries the APScheduler leader lock "
             "(#1980). Only the lock holder runs the background cron jobs, so "
             "after the leader process dies another worker takes over within "
             "this interval."
+        ),
+    )
+    scheduler_leader_ping_seconds: int = Field(
+        default=10,
+        ge=1,
+        description=(
+            "How often the APScheduler leader checks that its lock connection is "
+            "alive (#1980). After a Postgres restart the old leader keeps "
+            "dispatching jobs for at most this long plus 15 s while a standby "
+            "may already hold the lock."
         ),
     )
 

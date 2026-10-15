@@ -20,18 +20,26 @@ reusing the design and helpers of :mod:`tasks.single_flight`:
   ``invalidate()`` so a still-locked backend never rides back into the pool.
 
 Startup never waits on Postgres: :meth:`SchedulerLeader.start` only creates
-the background loop. Its first tick tries the lock immediately; after that,
-every ``SCHEDULER_LEADER_RETRY_SECONDS``, it either retries the lock (standby)
-or checks that the held connection is alive (leader). A leader whose
-connection died or stopped answering has lost the lock to Postgres, so it
-stops its scheduler and goes back to standby instead of running every cron
-twice next to the new leader.
+the background loop. Its first tick tries the lock immediately; after that
+it retries the lock every ``SCHEDULER_LEADER_RETRY_SECONDS`` (standby) or
+checks that the held connection is alive every
+``SCHEDULER_LEADER_PING_SECONDS`` (leader). A leader whose connection died or
+stopped answering has lost the lock to Postgres, so it stops its scheduler and
+goes back to standby instead of running every cron twice next to the new
+leader.
 
-What the lock does and does not guarantee: **at most one scheduler at a
-time**, not one execution of each job. :func:`tasks.scheduler.shutdown_scheduler`
-does not wait for running jobs (``shutdown(wait=False)``), so a job already
-running on the old leader can overlap the new leader's first tick of the same
-job during a handover. Jobs that must never overlap keep their own
+What the lock does and does not guarantee — one scheduler at a time, with two
+bounded exceptions, and never one execution of each job:
+
+- **Handover overlap.** :func:`tasks.scheduler.shutdown_scheduler` does not
+  wait for running jobs (``shutdown(wait=False)``), so a job already running
+  on the old leader can overlap the new leader's first tick of the same job.
+- **Postgres restart window.** Postgres drops the lock the moment it
+  restarts, but the old leader only notices at its next liveness check. For at
+  most ``SCHEDULER_LEADER_PING_SECONDS`` + 15 s (the ping timeout) it keeps
+  dispatching while a standby may already hold the lock and dispatch too.
+
+Jobs that must never overlap — Sleep, neural, capacity purge — keep their own
 ``single_flight`` guard.
 
 Single-process deployments acquire the lock on the first tick and behave as
@@ -85,12 +93,21 @@ async def _discard(conn: AsyncConnection) -> None:
 
 
 async def _release_and_close(conn: AsyncConnection) -> None:
-    """Release the leader lock (unlock, else invalidate) and close ``conn``."""
-    await release_session_lock(conn, LOCK_KEY)
+    """Release the leader lock (unlock, else invalidate) and close ``conn``.
+
+    Never hangs: unlock and close are each bounded by
+    ``_ATTEMPT_TIMEOUT_SECONDS``. On a timeout (e.g. a half-open socket) the
+    connection is discarded instead — closing the backend drops the lock.
+    """
     try:
-        await conn.close()
-    except Exception:
-        logger.warning("scheduler_leader_close_failed", exc_info=True)
+        await asyncio.wait_for(
+            release_session_lock(conn, LOCK_KEY), timeout=_ATTEMPT_TIMEOUT_SECONDS
+        )
+        await asyncio.wait_for(conn.close(), timeout=_ATTEMPT_TIMEOUT_SECONDS)
+        return
+    except Exception:  # noqa: BLE001 — incl. TimeoutError; fall back to discard
+        logger.warning("scheduler_leader_release_failed", exc_info=True)
+    await _discard(conn)
 
 
 class SchedulerLeader:
@@ -99,8 +116,10 @@ class SchedulerLeader:
     Args:
         register_jobs: Adds every cron job to the given scheduler. Called each
             time this process becomes leader, on a fresh scheduler.
-        retry_seconds: Interval of the background loop (standby retry and
-            leader liveness check).
+        retry_seconds: Interval between lock attempts while standing by.
+        ping_seconds: Interval between liveness checks of the held lock
+            connection while leader. Bounds how long an old leader keeps
+            dispatching after Postgres dropped its lock.
     """
 
     def __init__(
@@ -108,9 +127,11 @@ class SchedulerLeader:
         *,
         register_jobs: Callable[[AsyncIOScheduler], None],
         retry_seconds: float,
+        ping_seconds: float = 10,
     ) -> None:
         self._register_jobs = register_jobs
         self._retry_seconds = retry_seconds
+        self._ping_seconds = ping_seconds
         self._conn: AsyncConnection | None = None
         self._standby_logged = False
         self.retry_task: asyncio.Task[None] | None = None
@@ -137,7 +158,7 @@ class SchedulerLeader:
             try:
                 await task
             except asyncio.CancelledError:
-                pass
+                pass  # expected: we cancelled it ourselves
         if self._conn is not None:
             shutdown_scheduler()
             conn, self._conn = self._conn, None
@@ -159,7 +180,7 @@ class SchedulerLeader:
                 # E.g. job registration failed: logged, the lock was released,
                 # and the next tick tries again.
                 logger.exception("scheduler_leader_loop_error")
-            await asyncio.sleep(self._retry_seconds)
+            await asyncio.sleep(self._ping_seconds if self.is_leader else self._retry_seconds)
 
     def _note_standby(self) -> None:
         if self._standby_logged:

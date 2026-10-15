@@ -54,8 +54,12 @@ def sched():
         )
 
 
-def _leader(register: MagicMock, retry_seconds: float = 60) -> sl.SchedulerLeader:
-    return sl.SchedulerLeader(register_jobs=register, retry_seconds=retry_seconds)
+def _leader(
+    register: MagicMock, retry_seconds: float = 60, ping_seconds: float = 60
+) -> sl.SchedulerLeader:
+    return sl.SchedulerLeader(
+        register_jobs=register, retry_seconds=retry_seconds, ping_seconds=ping_seconds
+    )
 
 
 async def _until(predicate, steps: int = 200) -> None:
@@ -288,7 +292,7 @@ async def test_leader_whose_ping_hangs_steps_down(sched):
         calls += 1
         if calls == 1:
             return True  # try-lock
-        await asyncio.Event().wait()  # the ping hangs forever
+        return await asyncio.Event().wait()  # the ping hangs forever
 
     conn = _conn()
     conn.scalar = AsyncMock(side_effect=scalar)
@@ -320,9 +324,13 @@ def test_lifespan_registers_jobs_through_the_leader():
 async def test_discard_is_bounded_when_the_peer_never_answers(monkeypatch):
     """A half-open socket must not hang the loop: invalidate/close time out and are skipped."""
     monkeypatch.setattr(sl, "_ATTEMPT_TIMEOUT_SECONDS", 0.05)
+
+    async def _hang(*_args, **_kwargs):
+        return await asyncio.Event().wait()
+
     conn = _conn()
-    conn.invalidate = AsyncMock(side_effect=lambda: asyncio.Event().wait())
-    conn.close = AsyncMock(side_effect=lambda: asyncio.Event().wait())
+    conn.invalidate = AsyncMock(side_effect=_hang)
+    conn.close = AsyncMock(side_effect=_hang)
 
     await asyncio.wait_for(sl._discard(conn), timeout=2)
 
@@ -335,9 +343,79 @@ def test_register_scheduled_jobs_calls_every_schedule_function():
     import tasks
 
     names = [n for n in tasks.__all__ if n.startswith("schedule_")]
-    assert len(names) >= 15
+    assert len(names) >= 14
+    # MCP session cleanup is per worker, never a leader-only job (#1980).
+    assert "schedule_mcp_tasks" not in names
     scheduler = MagicMock(name="scheduler")
     with patch.multiple(tasks, **{n: MagicMock(name=n) for n in names}):
         tasks.register_scheduled_jobs(scheduler)
         for n in names:
             getattr(tasks, n).assert_called_once_with(scheduler)
+
+
+@pytest.mark.asyncio
+async def test_stop_is_bounded_when_unlock_hangs(sched):
+    """An unlock that never answers must not hang the lifespan shutdown."""
+    calls = 0
+
+    async def scalar(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return True  # try-lock
+        return await asyncio.Event().wait()  # the unlock hangs forever
+
+    conn = _conn()
+    conn.scalar = AsyncMock(side_effect=scalar)
+    leader = _leader(MagicMock())
+
+    with (
+        patch.object(sl, "_get_engine", return_value=_engine(conn)),
+        patch.object(sl, "_ATTEMPT_TIMEOUT_SECONDS", 0.05),
+    ):
+        await leader.tick()
+        assert leader.is_leader is True
+        await asyncio.wait_for(leader.stop(), timeout=5)
+
+    assert leader.is_leader is False
+    sched.shutdown.assert_called_once_with()
+    # Not provably unlocked → the backend is discarded, which drops the lock.
+    conn.invalidate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_loop_pings_on_the_ping_cadence_while_leader(sched):
+    """The leader checks liveness every ping_seconds, not every retry_seconds.
+
+    A short ping cadence bounds how long an old leader keeps dispatching after
+    a Postgres restart while a standby may already hold the lock.
+    """
+    conn = _conn(True, *([1] * 50), True)  # try-lock, pings, unlock
+    leader = _leader(MagicMock(), retry_seconds=3600, ping_seconds=0.01)
+
+    with patch.object(sl, "_get_engine", return_value=_engine(conn)):
+        await leader.start()
+        await _until(lambda: conn.scalar.await_count >= 4)  # try-lock + 3 pings
+        assert leader.is_leader is True
+        await leader.stop()
+    assert conn.scalar.await_count >= 4
+
+
+@pytest.mark.asyncio
+async def test_loop_retries_on_the_retry_cadence_while_standby(sched):
+    """A standby retries every retry_seconds; the short ping cadence does not apply."""
+    engine = _engine(*[_conn(False) for _ in range(5)])
+    leader = _leader(MagicMock(), retry_seconds=3600, ping_seconds=0.01)
+
+    with patch.object(sl, "_get_engine", return_value=engine):
+        await leader.start()
+        await _until(lambda: engine.connect.call_count >= 1)
+        await asyncio.sleep(0.1)  # ten ping intervals
+        assert engine.connect.call_count == 1  # only the first, immediate tick
+        await leader.stop()
+
+
+def test_lifespan_passes_the_ping_cadence():
+    """The lifespan wires SCHEDULER_LEADER_PING_SECONDS into the leader."""
+    main_src = (Path(__file__).resolve().parents[2] / "src" / "api" / "main.py").read_text()
+    assert "ping_seconds=get_settings().scheduler_leader_ping_seconds" in main_src
