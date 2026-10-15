@@ -225,7 +225,7 @@ class TestConsolidationTask:
         frequent_memory = _make_memory(access_count=5, importance=0.1, age_days=1)
         mock_memory_repo = MagicMock()
         mock_memory_repo.list = AsyncMock(return_value=[frequent_memory])
-        mock_memory_repo.promote_to_persistent = AsyncMock()
+        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
         mock_memory_repo.delete = AsyncMock()
 
         with (
@@ -235,7 +235,7 @@ class TestConsolidationTask:
         ):
             await consolidation_task()
 
-        mock_memory_repo.promote_to_persistent.assert_called_once_with(frequent_memory.id)
+        mock_memory_repo.bulk_promote_to_persistent.assert_awaited_once_with([frequent_memory.id])
         mock_memory_repo.delete.assert_not_called()
 
     @pytest.mark.asyncio
@@ -251,7 +251,7 @@ class TestConsolidationTask:
         old_memory = _make_memory(access_count=0, importance=0.0, age_days=45)
         mock_memory_repo = MagicMock()
         mock_memory_repo.list = AsyncMock(return_value=[old_memory])
-        mock_memory_repo.promote_to_persistent = AsyncMock()
+        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
         mock_memory_repo.delete = AsyncMock()
 
         with (
@@ -264,7 +264,7 @@ class TestConsolidationTask:
 
         mock_qdrant_delete.assert_called_once_with(old_memory.user_id, old_memory.id)
         mock_memory_repo.delete.assert_called_once_with(old_memory.id)
-        mock_memory_repo.promote_to_persistent.assert_not_called()
+        mock_memory_repo.bulk_promote_to_persistent.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_never_deletes_a_pinned_memory(self):
@@ -282,7 +282,7 @@ class TestConsolidationTask:
         pinned.is_pinned = True
         mock_memory_repo = MagicMock()
         mock_memory_repo.list = AsyncMock(return_value=[pinned])
-        mock_memory_repo.promote_to_persistent = AsyncMock()
+        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
         mock_memory_repo.delete = AsyncMock()
 
         with (
@@ -295,7 +295,7 @@ class TestConsolidationTask:
 
         mock_qdrant_delete.assert_not_called()
         mock_memory_repo.delete.assert_not_called()
-        mock_memory_repo.promote_to_persistent.assert_not_called()
+        mock_memory_repo.bulk_promote_to_persistent.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_never_deletes_a_tool_triggered_memory(self):
@@ -313,7 +313,7 @@ class TestConsolidationTask:
         guardrail.is_tool_triggered = True
         mock_memory_repo = MagicMock()
         mock_memory_repo.list = AsyncMock(return_value=[guardrail])
-        mock_memory_repo.promote_to_persistent = AsyncMock()
+        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
         mock_memory_repo.delete = AsyncMock()
 
         with (
@@ -326,7 +326,7 @@ class TestConsolidationTask:
 
         mock_qdrant_delete.assert_not_called()
         mock_memory_repo.delete.assert_not_called()
-        mock_memory_repo.promote_to_persistent.assert_not_called()
+        mock_memory_repo.bulk_promote_to_persistent.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_leaves_recent_unused_memory_alone(self):
@@ -341,7 +341,7 @@ class TestConsolidationTask:
         idle_memory = _make_memory(access_count=0, importance=0.0, age_days=1)
         mock_memory_repo = MagicMock()
         mock_memory_repo.list = AsyncMock(return_value=[idle_memory])
-        mock_memory_repo.promote_to_persistent = AsyncMock()
+        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
         mock_memory_repo.delete = AsyncMock()
 
         with (
@@ -351,5 +351,5 @@ class TestConsolidationTask:
         ):
             await consolidation_task()
 
-        mock_memory_repo.promote_to_persistent.assert_not_called()
+        mock_memory_repo.bulk_promote_to_persistent.assert_not_called()
         mock_memory_repo.delete.assert_not_called()

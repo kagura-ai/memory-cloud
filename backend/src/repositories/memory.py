@@ -409,23 +409,15 @@ class MemoryRepository(BaseRepository[Memory]):
         return promoted
 
     async def promote_to_persistent(self, memory_id: UUID) -> None:
-        """Promote working memory to persistent.
+        """Promote one working memory to persistent.
+
+        Delegates to :meth:`bulk_promote_to_persistent` so promotion has one
+        lock-ordered write path (#1985).
 
         Args:
             memory_id: Memory ID
         """
-        memory = await self.get(memory_id)
-        if not memory:
-            return
-
-        if memory.scope == "persistent":
-            return  # Already persistent
-
-        memory.scope = "persistent"
-        memory.promoted_at = utcnow()
-        await self.db.flush()
-
-        logger.info("memory_promoted_to_persistent", memory_id=str(memory_id))
+        await self.bulk_promote_to_persistent([memory_id])
 
     async def get_by_resource_id(
         self,

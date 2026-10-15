@@ -322,7 +322,12 @@ class TestSleepConsolidationIsExcluded:
             result = await _run_execute(phase, mems)
 
         assert result.details["rule_promoted"] == 1
-        assert phase.memory_repo.promote_to_persistent.await_count == 1
+        assert (
+            sum(
+                len(c.args[0]) for c in phase.memory_repo.bulk_promote_to_persistent.await_args_list
+            )
+            == 1
+        )
 
 
 # Paths that construct ``Memory`` rows but are deliberately NOT charged (see

@@ -163,6 +163,9 @@ async def consolidation_task():
                     filters={"user_id": user_id, "scope": "working"}
                 )
 
+                # #1985: promotions are written in one id-ordered statement
+                # after the loop (no row locks taken against recall's order).
+                to_promote: dict[Any, tuple[Any, int]] = {}
                 for memory in working_memories:
                     age_days = (utcnow() - memory.created_at).days
 
@@ -179,18 +182,7 @@ async def consolidation_task():
                     )
 
                     if should_promote:
-                        # Promote to persistent
-                        await memory_repo.promote_to_persistent(memory.id)
-                        total_promoted += 1
-
-                        logger.info(
-                            "memory_promoted",
-                            memory_id=str(memory.id),
-                            user_id=user_id,
-                            access_count=memory.access_count,
-                            age_days=age_days,
-                            importance=memory.importance,
-                        )
+                        to_promote[memory.id] = (memory, age_days)
 
                     # #1523: a pinned row (delivery_mode='always') is never an
                     # automated-delete candidate — same exemption as the Sleep
@@ -239,6 +231,23 @@ async def consolidation_task():
                             user_id=user_id,
                             age_days=age_days,
                         )
+
+                promoted = (
+                    await memory_repo.bulk_promote_to_persistent(list(to_promote))
+                    if to_promote
+                    else []
+                )
+                for memory_id in promoted:
+                    memory, age_days = to_promote[memory_id]
+                    total_promoted += 1
+                    logger.info(
+                        "memory_promoted",
+                        memory_id=str(memory_id),
+                        user_id=user_id,
+                        access_count=memory.access_count,
+                        age_days=age_days,
+                        importance=memory.importance,
+                    )
 
             await db.commit()
 

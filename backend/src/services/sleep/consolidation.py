@@ -223,6 +223,10 @@ class ConsolidationPhase:
             these, and only these.
         """
         borderline: list[Memory] = []
+        # #1985: promotions are collected and written in one id-ordered
+        # statement after the loop, so this transaction cannot lock rows in an
+        # order opposite to a concurrent recall's access-stat write.
+        to_promote: dict[UUID, tuple[Memory, int]] = {}
         for memory in working:
             age_days = (utcnow() - memory.created_at).days
 
@@ -235,20 +239,7 @@ class ConsolidationPhase:
             )
 
             if self._should_promote(memory, age_days, neural_metrics, thresholds):
-                await self.memory_repo.promote_to_persistent(memory.id)
-                tally.promoted += 1
-                result.changed_memory_ids.add(memory.id)
-                await self._record_action(
-                    reporter,
-                    report_id,
-                    "promote",
-                    memory.id,
-                    "rule",
-                    memory.importance,
-                    memory.access_count,
-                    age_days,
-                    memory.reference_count or 0,
-                )
+                to_promote[memory.id] = (memory, age_days)
             elif should_delete:
                 try:
                     if not await self._archive_tombstone(user_id, memory.id):
@@ -274,7 +265,54 @@ class ConsolidationPhase:
                     )
             else:
                 borderline.append(memory)
+        tally.promoted += await self._promote_and_record(
+            to_promote, "rule", result=result, reporter=reporter, report_id=report_id
+        )
         return borderline
+
+    async def _promote_and_record(
+        self,
+        to_promote: dict[UUID, tuple[Memory, int]],
+        reason: str,
+        *,
+        result: PhaseResult,
+        reporter: SleepReporter | None,
+        report_id: UUID | None,
+    ) -> int:
+        """Promote the collected memories in one id-ordered statement (#1985).
+
+        Records a ``promote`` action for each id the statement actually
+        promoted. A row promoted, forgotten or archived since the candidate
+        fetch is skipped by the statement and recorded as nothing.
+
+        Args:
+            to_promote: Memory id → (memory as read, age in days).
+            reason: ``rule`` or ``llm``.
+            result: Phase result whose ``changed_memory_ids`` gains the ids.
+            reporter: Sleep reporter, or None.
+            report_id: Sleep report id, or None.
+
+        Returns:
+            How many memories were promoted.
+        """
+        if not to_promote:
+            return 0
+        promoted = await self.memory_repo.bulk_promote_to_persistent(list(to_promote))
+        for memory_id in promoted:
+            memory, age_days = to_promote[memory_id]
+            result.changed_memory_ids.add(memory_id)
+            await self._record_action(
+                reporter,
+                report_id,
+                "promote",
+                memory_id,
+                reason,
+                memory.importance,
+                memory.access_count,
+                age_days,
+                memory.reference_count or 0,
+            )
+        return len(promoted)
 
     async def _llm_pass(
         self,
@@ -304,6 +342,7 @@ class ConsolidationPhase:
             )
 
             batch_map = {m.id: m for m in batch}
+            to_promote: dict[UUID, tuple[Memory, int]] = {}
             for memory_id, action in decisions.items():
                 mem = batch_map.get(memory_id)
                 if not mem:
@@ -314,20 +353,7 @@ class ConsolidationPhase:
                     continue
                 mem_age_days = (utcnow() - mem.created_at).days
                 if action == "promote":
-                    await self.memory_repo.promote_to_persistent(memory_id)
-                    tally.llm_promoted += 1
-                    result.changed_memory_ids.add(memory_id)
-                    await self._record_action(
-                        reporter,
-                        report_id,
-                        "promote",
-                        memory_id,
-                        "llm",
-                        mem.importance,
-                        mem.access_count,
-                        mem_age_days,
-                        mem.reference_count or 0,
-                    )
+                    to_promote[memory_id] = (mem, mem_age_days)
                 elif action == "archive":
                     # #1233: unreachable via _llm_judge_batch (the prompt no
                     # longer offers "archive" and the parser rejects it) — kept
@@ -365,6 +391,10 @@ class ConsolidationPhase:
                             mem.reference_count or 0,
                             mode="tombstone",
                         )
+            # #1985: one id-ordered promotion per batch (see _rule_pass).
+            tally.llm_promoted += await self._promote_and_record(
+                to_promote, "llm", result=result, reporter=reporter, report_id=report_id
+            )
 
     async def execute(
         self,

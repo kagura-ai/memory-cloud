@@ -79,7 +79,7 @@ async def _run_execute(
     assert absolute promote/delete rates via result.details + promote/delete calls.
     """
     phase._fetch_working_memories = AsyncMock(return_value=memories)
-    phase.memory_repo.promote_to_persistent = AsyncMock()
+    phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
     phase.memory_repo.soft_delete = AsyncMock(return_value=soft_delete_rows)
     config = _make_config(provider="")  # LLM off → borderline memories stay put
     budget = SleepBudget()
@@ -141,7 +141,10 @@ class TestAdoptionPromotionGate:
 
         assert result.details["rule_promoted"] == len(mems)
         assert result.details["rule_deleted"] == 0
-        assert consolidation_phase.memory_repo.promote_to_persistent.await_count == len(mems)
+        # #1985: one id-ordered statement for the whole rule pass.
+        consolidation_phase.memory_repo.bulk_promote_to_persistent.assert_awaited_once_with(
+            [m.id for m in mems]
+        )
         consolidation_phase.memory_repo.soft_delete.assert_not_called()
 
     @pytest.mark.asyncio
@@ -157,7 +160,7 @@ class TestAdoptionPromotionGate:
 
         assert result.details["rule_promoted"] == 0
         assert result.details["rule_deleted"] == 0  # young → not deleted either
-        consolidation_phase.memory_repo.promote_to_persistent.assert_not_called()
+        consolidation_phase.memory_repo.bulk_promote_to_persistent.assert_not_called()
 
 
 class TestPromotionBoundary:
@@ -440,7 +443,7 @@ class TestNeuralMetricsUnderIsolation:
         _assert_graph_service_isolation(mock_graph_service)
         phase.memory_repo.soft_delete.assert_not_called()
         del_qdrant.assert_not_called()
-        phase.memory_repo.promote_to_persistent.assert_not_called()
+        phase.memory_repo.bulk_promote_to_persistent.assert_not_called()
         assert result.details["rule_deleted"] == 0
 
     @pytest.mark.asyncio
@@ -467,11 +470,13 @@ class TestNeuralMetricsUnderIsolation:
         ):
             phase = ConsolidationPhase(mock_db, mock_llm)
             phase.memory_repo = AsyncMock()
+            # #1985: the bulk statement returns the ids it promoted.
+            phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: ids)
             phase._fetch_working_memories = AsyncMock(return_value=[mem])
             result = await phase.execute(_make_config(provider=""), "u", "ws", "ctx", SleepBudget())
 
         _assert_graph_service_isolation(mock_graph_service)
-        phase.memory_repo.promote_to_persistent.assert_awaited_once_with(mem.id)
+        phase.memory_repo.bulk_promote_to_persistent.assert_awaited_once_with([mem.id])
         assert result.details["rule_promoted"] == 1
 
     @pytest.mark.asyncio
@@ -520,7 +525,7 @@ class TestLLMArchivalEligibilityGuard:
 
     async def _run_llm_archive(self, phase, memory, *, cutoff):
         phase._fetch_working_memories = AsyncMock(return_value=[memory])
-        phase.memory_repo.promote_to_persistent = AsyncMock()
+        phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
         phase.memory_repo.soft_delete = AsyncMock(return_value=1)
         phase._llm_judge_batch = AsyncMock(return_value={memory.id: "archive"})
         config = _make_config()  # LLM on

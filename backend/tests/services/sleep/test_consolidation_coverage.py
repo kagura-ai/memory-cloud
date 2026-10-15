@@ -90,7 +90,7 @@ def _build_phase(memories):
     with patch("services.sleep.consolidation.MemoryRepository"):
         phase = ConsolidationPhase(db, llm)
     phase.memory_repo = AsyncMock()
-    phase.memory_repo.promote_to_persistent = AsyncMock()
+    phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
     phase.memory_repo.soft_delete = AsyncMock(return_value=1)
     phase._fetch_working_memories = AsyncMock(return_value=memories)
     return phase, llm
@@ -161,7 +161,7 @@ class TestLLMBorderlinePath:
         assert result.details["borderline"] == 1
         assert result.details["llm_promoted"] == 0
         assert result.details["llm_archived"] == 0
-        phase.memory_repo.promote_to_persistent.assert_not_called()
+        phase.memory_repo.bulk_promote_to_persistent.assert_not_called()
         phase.memory_repo.soft_delete.assert_not_called()
         # complete_json must never be reached when the provider is empty.
         llm.complete_json.assert_not_called()
@@ -178,7 +178,7 @@ class TestLLMBorderlinePath:
 
         assert result.details["llm_promoted"] == 1
         assert result.details["llm_archived"] == 0
-        phase.memory_repo.promote_to_persistent.assert_awaited_once_with(mem.id)
+        phase.memory_repo.bulk_promote_to_persistent.assert_awaited_once_with([mem.id])
         assert mem.id in result.changed_memory_ids
         # tokens + budget consumed by the single batch call.
         assert result.tokens_used == 42
@@ -295,7 +295,7 @@ class TestLLMBorderlinePath:
 
         assert result.details["llm_promoted"] == 0
         assert result.details["llm_archived"] == 0
-        phase.memory_repo.promote_to_persistent.assert_not_called()
+        phase.memory_repo.bulk_promote_to_persistent.assert_not_called()
         phase.memory_repo.soft_delete.assert_not_called()
 
     @pytest.mark.asyncio
@@ -332,7 +332,7 @@ class TestLLMBorderlinePath:
         result, _, _ = await _run_with_graph(phase, config=_make_config())
 
         assert result.details["llm_promoted"] == 0
-        phase.memory_repo.promote_to_persistent.assert_not_called()
+        phase.memory_repo.bulk_promote_to_persistent.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_two_batches_processed(self):
@@ -350,7 +350,12 @@ class TestLLMBorderlinePath:
         assert result.details["borderline"] == n
         assert result.details["llm_promoted"] == n
         assert budget.llm_calls_used == 2  # ceil(7 / 5)
-        assert phase.memory_repo.promote_to_persistent.await_count == n
+        assert (
+            sum(
+                len(c.args[0]) for c in phase.memory_repo.bulk_promote_to_persistent.await_args_list
+            )
+            == n
+        )
 
 
 # --------------------------------------------------------------------------- #
