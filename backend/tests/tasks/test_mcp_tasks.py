@@ -54,7 +54,7 @@ async def test_local_cleanup_survives_a_failing_run():
 @pytest.mark.asyncio
 async def test_interval_defaults_to_the_env_var(monkeypatch):
     monkeypatch.setenv("MCP_SESSION_CLEANUP_INTERVAL", "3600")
-    loop = AsyncMock()
+    loop = AsyncMock(return_value=None)
     with patch.object(mcp_tasks, "_session_cleanup_loop", loop):
         task = mcp_tasks.start_local_session_cleanup()
         assert await task is None
