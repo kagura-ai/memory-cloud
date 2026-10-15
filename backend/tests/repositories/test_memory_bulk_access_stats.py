@@ -15,9 +15,10 @@ import pytest
 
 from models.memory import Memory
 from repositories.memory import (
+    ACCESS_STATS_STATEMENT,
+    ADOPTION_ACCESS_STATS_STATEMENT,
+    PROMOTE_STATEMENT,
     MemoryRepository,
-    bulk_access_stats_statement,
-    bulk_promote_statement,
 )
 
 _async = pytest.mark.asyncio(loop_scope="session")
@@ -42,26 +43,32 @@ def _memory(**overrides) -> Memory:
 class TestStatementShape:
     """The lock order lives in the SQL text, so pin it."""
 
-    @pytest.mark.parametrize("count_as_adoption", [False, True])
-    def test_access_stats_locks_rows_in_id_order(self, count_as_adoption):
-        sql = " ".join(str(bulk_access_stats_statement(count_as_adoption)).split())
+    @pytest.mark.parametrize(
+        ("statement", "count_as_adoption"),
+        [(ACCESS_STATS_STATEMENT, False), (ADOPTION_ACCESS_STATS_STATEMENT, True)],
+    )
+    def test_access_stats_locks_rows_in_id_order(self, statement, count_as_adoption):
+        sql = " ".join(str(statement).split())
 
         assert "ORDER BY id FOR UPDATE" in sql
         assert "id = ANY(:ids)" in sql
         assert "deleted_at IS NULL" in sql
         assert "WHERE m.id = locked.id" in sql
-        assert "RETURNING m.id, m.access_count" in sql
+        assert (
+            "RETURNING m.id, m.access_count, m.reference_count, m.last_used_at, "
+            "m.accessed_by_clients" in sql
+        )
         assert ("reference_count = m.reference_count + 1" in sql) is count_as_adoption
         # #457: the client append is a CASE, never a WHERE filter, so a row the
         # client already touched still gets its access_count bump.
         assert "CASE WHEN" in sql and "array_append" in sql
 
     def test_promotion_locks_rows_in_id_order(self):
-        sql = " ".join(str(bulk_promote_statement()).split())
+        sql = " ".join(str(PROMOTE_STATEMENT).split())
 
         assert "ORDER BY id FOR UPDATE" in sql
         assert "scope <> 'persistent'" in sql
-        assert "RETURNING m.id" in sql
+        assert "RETURNING m.id, m.promoted_at" in sql
 
     @_async
     async def test_empty_ids_run_no_query(self):
@@ -154,3 +161,43 @@ class TestBulkPromote:
         assert working.scope == "persistent"
         assert working.promoted_at is not None
         assert persistent.promoted_at is None
+
+
+@_async
+class TestIdentityMapStaysCurrent:
+    """The set-based UPDATE bypasses the ORM, so a row already loaded in the
+    session is brought up to date without being marked dirty."""
+
+    async def test_loaded_row_shows_the_bump_without_a_pending_update(self, db_session):
+        memory = _memory(accessed_by_clients=["claude"])
+        db_session.add(memory)
+        await db_session.commit()
+        repo = MemoryRepository(db_session)
+
+        await repo.bulk_update_access_stats([memory.id], client="api", count_as_adoption=True)
+
+        assert memory.access_count == 1
+        assert memory.reference_count == 1
+        assert memory.last_used_at is not None
+        assert memory.accessed_by_clients == ["claude", "api"]
+        assert memory not in db_session.dirty
+        await db_session.commit()
+
+        # Nothing was re-written on flush: a second bump still counts from 1.
+        await repo.bulk_update_access_stats([memory.id], client="api")
+        await db_session.commit()
+        await db_session.refresh(memory)
+        assert (memory.access_count, memory.reference_count) == (2, 1)
+        assert memory.accessed_by_clients == ["claude", "api"]
+
+    async def test_loaded_row_shows_its_promotion(self, db_session):
+        memory = _memory()
+        db_session.add(memory)
+        await db_session.commit()
+
+        await MemoryRepository(db_session).bulk_promote_to_persistent([memory.id])
+
+        assert memory.scope == "persistent"
+        assert memory.promoted_at is not None
+        assert memory not in db_session.dirty
+        await db_session.commit()

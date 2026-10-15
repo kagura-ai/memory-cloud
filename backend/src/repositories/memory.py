@@ -11,6 +11,8 @@ from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.sql.elements import ColumnElement
 
 from models.auth import CONTEXT_TRUST_TIER_TRUSTED, Context
@@ -36,50 +38,56 @@ logger = get_logger(__name__)
 _IDS_PARAM = bindparam("ids", type_=PG_ARRAY(PG_UUID(as_uuid=True)))
 
 
-def bulk_access_stats_statement(count_as_adoption: bool) -> TextClause:
-    """The lock-ordered access-stat UPDATE (bound parameters ``ids``, ``client``, ``now``).
+# The client append is a CASE, not a WHERE filter (#457): a row the client
+# already touched still has its access_count bumped. The statements are built
+# once from literal fragments; every value is a bound parameter (``ids``,
+# ``client``, ``now``).
+_ACCESS_STATS_HEAD = "UPDATE memories AS m SET access_count = m.access_count + 1, "
+_ADOPTION_SET = "reference_count = m.reference_count + 1, "
+_ACCESS_STATS_TAIL = (
+    "last_used_at = :now, "
+    "accessed_by_clients = CASE "
+    "WHEN CAST(:client AS VARCHAR) = ANY(COALESCE(m.accessed_by_clients, CAST('{}' AS VARCHAR[]))) "
+    "THEN m.accessed_by_clients "
+    "ELSE array_append(COALESCE(m.accessed_by_clients, CAST('{}' AS VARCHAR[])), "
+    "CAST(:client AS VARCHAR)) END "
+    "FROM (SELECT id FROM memories WHERE id = ANY(:ids) AND deleted_at IS NULL "
+    "ORDER BY id FOR UPDATE) AS locked "
+    "WHERE m.id = locked.id "
+    "RETURNING m.id, m.access_count, m.reference_count, m.last_used_at, m.accessed_by_clients"
+)
 
-    Args:
-        count_as_adoption: Also bump ``reference_count`` (#1046, ``reference()``).
+# Surfacing access (recall, explore): access_count only.
+ACCESS_STATS_STATEMENT: TextClause = text(_ACCESS_STATS_HEAD + _ACCESS_STATS_TAIL).bindparams(
+    _IDS_PARAM
+)
+# Adoption access (reference(), #1046): access_count and reference_count.
+ADOPTION_ACCESS_STATS_STATEMENT: TextClause = text(
+    _ACCESS_STATS_HEAD + _ADOPTION_SET + _ACCESS_STATS_TAIL
+).bindparams(_IDS_PARAM)
 
-    Returns:
-        A ``text()`` statement returning ``(id, access_count)`` per updated row.
+# Working → persistent promotion (bound ``ids``, ``now``).
+PROMOTE_STATEMENT: TextClause = text(
+    "UPDATE memories AS m SET scope = 'persistent', promoted_at = :now "
+    "FROM (SELECT id FROM memories WHERE id = ANY(:ids) AND deleted_at IS NULL "
+    "AND scope <> 'persistent' ORDER BY id FOR UPDATE) AS locked "
+    "WHERE m.id = locked.id "
+    "RETURNING m.id, m.promoted_at"
+).bindparams(_IDS_PARAM)
+
+
+def _loaded_memory(db: AsyncSession, memory_id: UUID) -> Memory | None:
+    """The ``Memory`` already in ``db``'s identity map for ``memory_id``, if any.
+
+    A set-based UPDATE bypasses the ORM, so the caller copies the returned
+    values onto this object with ``set_committed_value`` (current, not dirty).
+    Mock sessions have no real identity map and yield None.
     """
-    reference_clause = "reference_count = m.reference_count + 1, " if count_as_adoption else ""
-    # The client append is a CASE, not a WHERE filter (#457): a row the client
-    # already touched still has its access_count bumped. Only constant SQL is
-    # spliced in; every value is a bound parameter.
-    sql = (
-        "UPDATE memories AS m SET "
-        "access_count = m.access_count + 1, "
-        f"{reference_clause}"
-        "last_used_at = :now, "
-        "accessed_by_clients = CASE "
-        "WHEN CAST(:client AS VARCHAR) = ANY(COALESCE(m.accessed_by_clients, CAST('{}' AS VARCHAR[]))) "
-        "THEN m.accessed_by_clients "
-        "ELSE array_append(COALESCE(m.accessed_by_clients, CAST('{}' AS VARCHAR[])), "
-        "CAST(:client AS VARCHAR)) END "
-        "FROM (SELECT id FROM memories WHERE id = ANY(:ids) AND deleted_at IS NULL "
-        "ORDER BY id FOR UPDATE) AS locked "
-        "WHERE m.id = locked.id "
-        "RETURNING m.id, m.access_count"
-    )
-    return text(sql).bindparams(_IDS_PARAM)
-
-
-def bulk_promote_statement() -> TextClause:
-    """The lock-ordered working → persistent promotion (bound ``ids``, ``now``).
-
-    Returns:
-        A ``text()`` statement returning the id of each promoted row.
-    """
-    return text(
-        "UPDATE memories AS m SET scope = 'persistent', promoted_at = :now "
-        "FROM (SELECT id FROM memories WHERE id = ANY(:ids) AND deleted_at IS NULL "
-        "AND scope <> 'persistent' ORDER BY id FOR UPDATE) AS locked "
-        "WHERE m.id = locked.id "
-        "RETURNING m.id"
-    ).bindparams(_IDS_PARAM)
+    sync_session = getattr(db, "sync_session", None)
+    if not isinstance(sync_session, Session):
+        return None
+    obj = sync_session.identity_map.get(sync_session.identity_key(Memory, memory_id))
+    return obj if isinstance(obj, Memory) else None
 
 
 class MemoryRepository(BaseRepository[Memory]):
@@ -362,7 +370,8 @@ class MemoryRepository(BaseRepository[Memory]):
             - last_used_at = now
             - client appended to accessed_by_clients (once)
 
-        The ORM objects already loaded in the session are not refreshed.
+        A ``Memory`` already loaded in this session gets the new values as
+        committed state (no second UPDATE on the next flush).
 
         Args:
             memory_ids: Memories to bump (order and duplicates do not matter).
@@ -375,11 +384,17 @@ class MemoryRepository(BaseRepository[Memory]):
         ids = sorted(set(memory_ids))
         if not ids:
             return {}
-        result = await self.db.execute(
-            bulk_access_stats_statement(count_as_adoption),
-            {"ids": ids, "client": client, "now": utcnow()},
-        )
-        counts = {row[0]: row[1] for row in result.all()}
+        statement = ADOPTION_ACCESS_STATS_STATEMENT if count_as_adoption else ACCESS_STATS_STATEMENT
+        result = await self.db.execute(statement, {"ids": ids, "client": client, "now": utcnow()})
+        counts: dict[UUID, int] = {}
+        for memory_id, access_count, reference_count, last_used_at, clients in result.all():
+            counts[memory_id] = access_count
+            loaded = _loaded_memory(self.db, memory_id)
+            if loaded is not None:
+                set_committed_value(loaded, "access_count", access_count)
+                set_committed_value(loaded, "reference_count", reference_count)
+                set_committed_value(loaded, "last_used_at", last_used_at)
+                set_committed_value(loaded, "accessed_by_clients", clients)
         logger.debug(
             "access_stats_updated",
             memory_count=len(counts),
@@ -391,7 +406,9 @@ class MemoryRepository(BaseRepository[Memory]):
         """Promote several working memories to persistent, locking rows in id order.
 
         Rows already persistent, soft-deleted or unknown are skipped. Runs in
-        the caller's transaction; the caller commits.
+        the caller's transaction; the caller commits and logs the promotion. A
+        ``Memory`` already loaded in this session gets the new scope as
+        committed state.
 
         Args:
             memory_ids: Candidate memories.
@@ -402,10 +419,16 @@ class MemoryRepository(BaseRepository[Memory]):
         ids = sorted(set(memory_ids))
         if not ids:
             return []
-        result = await self.db.execute(bulk_promote_statement(), {"ids": ids, "now": utcnow()})
-        promoted = sorted(row[0] for row in result.all())
-        for memory_id in promoted:
-            logger.info("memory_promoted_to_persistent", memory_id=str(memory_id))
+        result = await self.db.execute(PROMOTE_STATEMENT, {"ids": ids, "now": utcnow()})
+        promoted: list[UUID] = []
+        for memory_id, promoted_at in result.all():
+            promoted.append(memory_id)
+            loaded = _loaded_memory(self.db, memory_id)
+            if loaded is not None:
+                set_committed_value(loaded, "scope", "persistent")
+                set_committed_value(loaded, "promoted_at", promoted_at)
+        promoted.sort()
+        logger.debug("memories_promoted_to_persistent", memory_count=len(promoted))
         return promoted
 
     async def promote_to_persistent(self, memory_id: UUID) -> None:
