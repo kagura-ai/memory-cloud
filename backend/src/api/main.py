@@ -95,6 +95,17 @@ async def lifespan(app: FastAPI):
         except Exception as e:  # noqa: BLE001 — startup must not die on a pricing sync
             logger.error("llm_pricing_overrides_sync_failed", error=str(e))
 
+    # #1990: reconcile every kagura_memories* collection with the configured
+    # dense vector layout (int8 quantization, on-disk originals). Idempotent
+    # and sequential; a Qdrant that is down is the readiness probe's business,
+    # not a reason to refuse to boot.
+    from db.qdrant import apply_dense_vector_config_to_all
+
+    try:
+        await apply_dense_vector_config_to_all()
+    except Exception as e:  # noqa: BLE001 — startup must not die on the vector store
+        logger.warning("dense_vector_config_apply_failed", error=str(e))
+
     # Start background task scheduler — in ONE process of the deployment
     # (#1980). With UVICORN_WORKERS > 1 every worker runs this lifespan; the
     # Postgres advisory-lock leader registers the jobs and starts APScheduler,

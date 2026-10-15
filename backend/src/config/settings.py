@@ -607,6 +607,28 @@ class Settings(BaseSettings):
         default="", description="Qdrant API key (REQUIRED in production, empty for local dev)"
     )
 
+    # Dense vector storage layout (#1990). Both default to the historical
+    # behaviour (fp32, RAM-resident). "int8" turns on Qdrant scalar
+    # quantization for the ``dense`` named vector (about a quarter of the fp32
+    # footprint; searches rescore the candidates with the originals), and
+    # ``qdrant_dense_on_disk`` moves the fp32 originals to mmap so only the
+    # int8 copy and the HNSW graph stay in RAM. Applied to every
+    # ``kagura_memories*`` collection at startup and on creation, idempotently.
+    qdrant_dense_quantization: Literal["none", "int8"] = Field(
+        default="none",
+        description=(
+            "Scalar quantization of the dense vector: 'none' (fp32, default) or 'int8' "
+            "(quantized copy in RAM, rescored against the originals)."
+        ),
+    )
+    qdrant_dense_on_disk: bool = Field(
+        default=False,
+        description=(
+            "Store the fp32 dense vectors on disk (mmap) instead of RAM. Combine with "
+            "qdrant_dense_quantization=int8 so searches read the int8 copy from RAM."
+        ),
+    )
+
     # Vector backend selection ("Kagura Lite" — embedded LanceDB backend).
     # Default "qdrant" preserves the server behavior exactly. "lance" routes
     # all vector ops through the in-process LanceDB store (db/lance_store.py),

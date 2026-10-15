@@ -19,6 +19,7 @@ from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
     Condition,
     DatetimeRange,
+    Disabled,
     Distance,
     FieldCondition,
     Filter,
@@ -31,12 +32,18 @@ from qdrant_client.models import (
     Modifier,
     PointIdsList,
     PointStruct,
+    QuantizationSearchParams,
     Range,
+    ScalarQuantization,
+    ScalarQuantizationConfig,
+    ScalarType,
+    SearchParams,
     SparseVector,
     SparseVectorParams,
     TextIndexParams,
     TokenizerType,
     VectorParams,
+    VectorParamsDiff,
 )
 
 from config.database import QDRANT_URL
@@ -63,6 +70,234 @@ KAGURA_MEMORIES_COLLECTION = "kagura_memories"
 # vectors will fail with "Not existing vector name error".
 KAGURA_MEMORIES_VECTOR_NAME = "dense"
 KAGURA_MEMORIES_BM25_VECTOR_NAME = "bm25"
+
+# ============================================================================
+# Dense vector storage layout (#1990)
+# ============================================================================
+
+#: Scalar-quantization quantile: the 1% tails are clipped so one outlier does
+#: not stretch the int8 range for every other vector (Qdrant's recommended value).
+DENSE_QUANTIZATION_QUANTILE = 0.99
+
+#: Candidates read from the int8 index per requested result before the fp32
+#: rescore. 2.0 keeps the top-k order within Qdrant's documented <1% recall
+#: loss for scalar quantization; a module constant until a deployment needs
+#: to tune it.
+DENSE_RESCORE_OVERSAMPLING = 2.0
+
+
+@dataclass(frozen=True)
+class DenseVectorConfig:
+    """Operator-chosen layout of the ``dense`` named vector (#1990).
+
+    ``quantization`` is ``"none"`` (fp32 index, the historical layout) or
+    ``"int8"`` (scalar-quantized copy kept in RAM, searches rescored against
+    the fp32 originals). ``on_disk`` stores the fp32 originals as mmap instead
+    of RAM. Read from ``QDRANT_DENSE_QUANTIZATION`` / ``QDRANT_DENSE_ON_DISK``.
+    """
+
+    quantization: str = "none"
+    on_disk: bool = False
+
+    @classmethod
+    def from_settings(cls) -> "DenseVectorConfig":
+        """Build the config from the process settings."""
+        from config.settings import get_settings
+
+        settings = get_settings()
+        return cls(
+            quantization=settings.qdrant_dense_quantization,
+            on_disk=bool(settings.qdrant_dense_on_disk),
+        )
+
+    @property
+    def is_default(self) -> bool:
+        """True when the config asks for the historical fp32-in-RAM layout."""
+        return self.quantization == "none" and not self.on_disk
+
+
+@dataclass(frozen=True)
+class DenseVectorState:
+    """What the server reports for a collection's ``dense`` vector.
+
+    ``quantization`` is ``"none"``, ``"int8"`` or ``"other"`` (a product,
+    binary or per-vector quantization set outside this service, which the
+    reconciler leaves alone).
+    """
+
+    quantization: str
+    on_disk: bool
+
+
+def _dense_vector_params(embedding_dim: int, config: DenseVectorConfig) -> VectorParams:
+    """VectorParams for a new collection's ``dense`` vector."""
+    return VectorParams(
+        size=embedding_dim,
+        distance=Distance.COSINE,
+        on_disk=True if config.on_disk else None,
+    )
+
+
+def _dense_quantization_config(config: DenseVectorConfig) -> ScalarQuantization | None:
+    """Collection-level quantization for ``config``, None for fp32."""
+    if config.quantization != "int8":
+        return None
+    return ScalarQuantization(
+        scalar=ScalarQuantizationConfig(
+            type=ScalarType.INT8,
+            quantile=DENSE_QUANTIZATION_QUANTILE,
+            always_ram=True,
+        )
+    )
+
+
+def _dense_search_params() -> SearchParams:
+    """Search params for the dense query: rescore int8 candidates with fp32.
+
+    Harmless on an unquantized collection (the server ignores the block), so
+    the search path does not need to know the collection's layout.
+    """
+    return SearchParams(
+        quantization=QuantizationSearchParams(
+            ignore=False,
+            rescore=True,
+            oversampling=DENSE_RESCORE_OVERSAMPLING,
+        )
+    )
+
+
+def _read_dense_state(info: Any) -> DenseVectorState | None:
+    """Parse ``get_collection()`` output; None when the layout is not ours.
+
+    Only the named-vector layout (``{"dense": VectorParams}``) is reconciled.
+    Quantization is compared by kind only: ``quantile`` is a float the server
+    may normalise, and an equality test on it would re-send the same config
+    at every startup and kick the optimizer each time.
+    """
+    config = getattr(info, "config", None)
+    params = getattr(config, "params", None)
+    vectors = getattr(params, "vectors", None)
+    if not isinstance(vectors, dict) or KAGURA_MEMORIES_VECTOR_NAME not in vectors:
+        return None
+    dense = vectors[KAGURA_MEMORIES_VECTOR_NAME]
+    quantization = getattr(config, "quantization_config", None)
+    if quantization is None and getattr(dense, "quantization_config", None) is not None:
+        kind = "other"
+    elif quantization is None:
+        kind = "none"
+    else:
+        scalar_type = getattr(getattr(quantization, "scalar", None), "type", None)
+        kind = "int8" if str(getattr(scalar_type, "value", scalar_type)) == "int8" else "other"
+    return DenseVectorState(quantization=kind, on_disk=bool(getattr(dense, "on_disk", None)))
+
+
+async def _apply_dense_vector_config(
+    client: AsyncQdrantClient,
+    collection_name: str,
+    config: DenseVectorConfig,
+    *,
+    info: Any | None = None,
+) -> bool:
+    """Reconcile an existing collection with ``config``; True when it was changed.
+
+    Sends one ``update_collection`` carrying only the parts that differ
+    (quantization and/or the dense vector's ``on_disk``), so a collection
+    that already matches costs one ``get_collection`` and nothing else.
+    Going back to ``"none"`` sends ``Disabled`` only when the server reports
+    a quantization. The optimizer then rebuilds the segments in the
+    background; searches keep using the old segments meanwhile.
+    """
+    if info is None:
+        info = await client.get_collection(collection_name)
+    state = _read_dense_state(info)
+    if state is None:
+        logger.warning(
+            "collection_dense_config_skipped",
+            collection=collection_name,
+            reason="no named dense vector",
+        )
+        return False
+    if state.quantization == "other":
+        logger.warning(
+            "collection_dense_config_skipped",
+            collection=collection_name,
+            reason="quantization configured outside this service",
+        )
+        return False
+
+    changes: dict[str, Any] = {}
+    if state.quantization != config.quantization:
+        changes["quantization_config"] = _dense_quantization_config(config) or Disabled.DISABLED
+    if state.on_disk != config.on_disk:
+        changes["vectors_config"] = {
+            KAGURA_MEMORIES_VECTOR_NAME: VectorParamsDiff(on_disk=config.on_disk),
+        }
+    if not changes:
+        return False
+
+    await client.update_collection(collection_name=collection_name, **changes)
+    logger.info(
+        "collection_quantization_updated",
+        collection=collection_name,
+        quantization=config.quantization,
+        on_disk=config.on_disk,
+        previous_quantization=state.quantization,
+        previous_on_disk=state.on_disk,
+    )
+    return True
+
+
+async def apply_dense_vector_config(collection_name: str) -> bool:
+    """Reconcile one collection with the configured dense layout (#1990).
+
+    Returns True when ``update_collection`` was sent. Raises QdrantError when
+    the server cannot be read or updated.
+    """
+    if _active_store() is not None:
+        return False
+    client = get_qdrant_client()
+    try:
+        return await _apply_dense_vector_config(
+            client, collection_name, DenseVectorConfig.from_settings()
+        )
+    except Exception as e:
+        raise QdrantError(f"Failed to apply dense vector config to '{collection_name}': {e}") from e
+
+
+async def apply_dense_vector_config_to_all() -> dict[str, bool]:
+    """Startup pass (#1990): reconcile every ``kagura_memories*`` collection.
+
+    Sequential on purpose — each change makes the optimizer rebuild that
+    collection's segments, and the old and new segments coexist until the
+    swap, so one collection at a time bounds the transient RAM and disk
+    peak. A collection that fails is logged and skipped; the others still
+    get their turn. Returns ``{collection: changed}``. Raises when the
+    collection list itself cannot be read.
+    """
+    config = DenseVectorConfig.from_settings()
+    if _active_store() is not None:
+        if not config.is_default:
+            logger.warning(
+                "dense_vector_config_ignored",
+                backend="lance",
+                quantization=config.quantization,
+                on_disk=config.on_disk,
+            )
+        return {}
+
+    client = get_qdrant_client()
+    collections = await client.get_collections()
+    results: dict[str, bool] = {}
+    for collection in collections.collections:
+        name = collection.name
+        if not name.startswith(KAGURA_MEMORIES_COLLECTION):
+            continue
+        try:
+            results[name] = await _apply_dense_vector_config(client, name, config)
+        except Exception as e:  # noqa: BLE001 — one collection must not stop the pass
+            logger.warning("collection_dense_config_apply_failed", collection=name, error=str(e))
+            results[name] = False
+    return results
 
 
 def get_collection_name(model: str, dimensions: int) -> str:
@@ -587,6 +822,9 @@ async def search_memories_qdrant(
             query_filter=qdrant_filter,
             score_threshold=score_threshold,
             with_vectors=[KAGURA_MEMORIES_VECTOR_NAME] if include_vectors else False,
+            # #1990: rescore int8 candidates against the fp32 originals;
+            # ignored by the server when the collection is not quantized.
+            search_params=_dense_search_params(),
         )
 
         return [
@@ -868,6 +1106,11 @@ async def ensure_kagura_memories_collection(
             has_sparse = sparse_cfg is not None and KAGURA_MEMORIES_BM25_VECTOR_NAME in sparse_cfg
 
             if has_sparse:
+                # #1990: reconcile the dense vector layout (quantization,
+                # on_disk) with the settings before the index retrofits.
+                await _apply_dense_vector_config(
+                    client, collection_name, DenseVectorConfig.from_settings(), info=info
+                )
                 # Collection is up-to-date, ensure late-added indexes
                 existing_fields = set(info.payload_schema.keys()) if info.payload_schema else set()
                 if "tags" not in existing_fields:
@@ -904,26 +1147,28 @@ async def ensure_kagura_memories_collection(
             )
             await client.delete_collection(collection_name)
 
-        # Create collection with dense + sparse vector config (Issue #16)
+        # Create collection with dense + sparse vector config (Issue #16);
+        # the dense layout (quantization, on_disk) follows the settings (#1990).
+        dense_config = DenseVectorConfig.from_settings()
         await client.create_collection(
             collection_name=collection_name,
             vectors_config={
-                KAGURA_MEMORIES_VECTOR_NAME: VectorParams(
-                    size=embedding_dim,
-                    distance=Distance.COSINE,
-                ),
+                KAGURA_MEMORIES_VECTOR_NAME: _dense_vector_params(embedding_dim, dense_config),
             },
             sparse_vectors_config={
                 KAGURA_MEMORIES_BM25_VECTOR_NAME: SparseVectorParams(
                     modifier=Modifier.IDF,
                 ),
             },
+            quantization_config=_dense_quantization_config(dense_config),
         )
 
         logger.info(
             "single_collection_created",
             collection=collection_name,
             dim=embedding_dim,
+            quantization=dense_config.quantization,
+            on_disk=dense_config.on_disk,
         )
 
         # Create isolation indexes (CRITICAL)
