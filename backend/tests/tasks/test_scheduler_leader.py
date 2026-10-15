@@ -315,3 +315,29 @@ def test_lifespan_registers_jobs_through_the_leader():
     main_src = (Path(__file__).resolve().parents[2] / "src" / "api" / "main.py").read_text()
     assert "register_jobs=register_scheduled_jobs" in main_src
     assert "start_scheduler()" not in main_src  # only the leader starts it
+
+
+async def test_discard_is_bounded_when_the_peer_never_answers(monkeypatch):
+    """A half-open socket must not hang the loop: invalidate/close time out and are skipped."""
+    monkeypatch.setattr(sl, "_ATTEMPT_TIMEOUT_SECONDS", 0.05)
+    conn = _conn()
+    conn.invalidate = AsyncMock(side_effect=lambda: asyncio.Event().wait())
+    conn.close = AsyncMock(side_effect=lambda: asyncio.Event().wait())
+
+    await asyncio.wait_for(sl._discard(conn), timeout=2)
+
+    conn.invalidate.assert_awaited_once()
+    conn.close.assert_awaited_once()
+
+
+def test_register_scheduled_jobs_calls_every_schedule_function():
+    """Every exported ``schedule_*`` is registered exactly once: dropping one must fail here."""
+    import tasks
+
+    names = [n for n in tasks.__all__ if n.startswith("schedule_")]
+    assert len(names) >= 15
+    scheduler = MagicMock(name="scheduler")
+    with patch.multiple(tasks, **{n: MagicMock(name=n) for n in names}):
+        tasks.register_scheduled_jobs(scheduler)
+        for n in names:
+            getattr(tasks, n).assert_called_once_with(scheduler)
