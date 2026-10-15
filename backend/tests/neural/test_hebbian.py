@@ -705,3 +705,24 @@ async def test_apply_updates_writes_and_prunes_edges_in_sorted_order(mock_graph)
     assert await learner.apply_updates("u") == len(queued)
     assert written == sorted(queued)
     assert pruned == ["a", "b", "c"]
+
+
+@pytest.mark.asyncio
+async def test_prune_weak_edges_deletes_in_dst_order(mock_graph):
+    """#1985: the weakest edges are chosen by weight but deleted in dst order,
+    so two concurrent passes pruning the same node lock its edge rows in the
+    same order."""
+    learner = HebbianLearner(mock_graph, NeuralMemoryConfig(top_m_edges=1))
+    dsts = sorted(str(uuid4()) for _ in range(4))
+    # Weights rise against dst order: the weight order is the reverse of dst order.
+    edges = [
+        SimpleNamespace(dst_id=dst, weight=w, origin=EDGE_ORIGIN_HEBBIAN)
+        for dst, w in zip(dsts, (0.1, 0.2, 0.3, 0.9), strict=True)
+    ]
+    mock_graph.edge_repo.get_outgoing_edges = AsyncMock(return_value=edges)
+    mock_graph.remove_edge = AsyncMock()
+
+    assert await learner.prune_weak_edges("u", str(uuid4())) == 3
+
+    removed = [call.args[1] for call in mock_graph.remove_edge.await_args_list]
+    assert removed == dsts[:3]  # the strongest (dsts[3]) is kept

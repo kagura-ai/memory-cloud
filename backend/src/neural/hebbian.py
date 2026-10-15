@@ -534,8 +534,10 @@ class HebbianLearner:
         edge_weights = [(str(edge.dst_id), edge.weight) for edge in outgoing_edges]
         edge_weights.sort(key=lambda x: x[1], reverse=True)
 
-        # Remove weakest edges
-        to_remove = edge_weights[self.config.top_m_edges :]
+        # Remove weakest edges, chosen by weight but deleted in dst order
+        # (#1985): the source is fixed, so concurrent passes pruning the same
+        # node lock its (src, dst) edge rows in the same order.
+        to_remove = sorted(edge_weights[self.config.top_m_edges :])
         removed_count = 0
         for dst_id, weight in to_remove:
             try:
