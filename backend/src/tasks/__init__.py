@@ -4,7 +4,6 @@ Implements scheduled tasks for:
 - Neural Memory weight decay (hourly)
 - Memory consolidation (daily)
 - Cleanup of old memories (daily)
-- MCP session cleanup (every 10 minutes)
 - Auto-hide expired credentials (hourly) - Migration 034
 - Resource indexer (every 5 minutes) - Issue #238
 - Semantic edge dead-endpoint sweep (monthly) — Issue #722
@@ -13,8 +12,15 @@ Implements scheduled tasks for:
 - Used/expired email action token cleanup (hourly) — Issue #1738
 - Capacity-over purge sweep (daily 04:00 UTC) — Issue #1969
 
-Only one process of the deployment runs the scheduler (``scheduler_leader``,
-Issue #1980); it adds the jobs with :func:`register_scheduled_jobs`.
+Every job above is leader-only: one process of the deployment runs the
+scheduler (``scheduler_leader``, Issue #1980) and adds them with
+:func:`register_scheduled_jobs`. They work on Postgres / Qdrant / Redis state,
+so where they run does not matter.
+
+MCP session cleanup (every 10 minutes) is NOT a scheduler job: it cleans the
+process-local session table, so every worker runs its own loop
+(:func:`tasks.mcp_tasks.start_local_session_cleanup`, started from the app
+lifespan).
 """
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -28,7 +34,6 @@ from .embedding_tasks import schedule_embedding_tasks
 from .erasure_tasks import schedule_erasure_tasks
 from .file_tasks import schedule_file_tasks
 from .known_device_tasks import schedule_known_device_tasks
-from .mcp_tasks import schedule_mcp_tasks
 from .neural_tasks import schedule_neural_tasks
 from .resource_indexer_job import schedule_resource_indexer_jobs
 from .scheduler import get_scheduler, shutdown_scheduler, start_scheduler
@@ -47,7 +52,6 @@ def register_scheduled_jobs(scheduler: AsyncIOScheduler) -> None:
         scheduler: The (not yet started) process scheduler.
     """
     schedule_neural_tasks(scheduler)
-    schedule_mcp_tasks(scheduler)
     schedule_credentials_tasks(scheduler)
     schedule_device_code_tasks(scheduler)
     schedule_security_notification_tasks(scheduler)
@@ -69,7 +73,6 @@ __all__ = [
     "start_scheduler",
     "shutdown_scheduler",
     "schedule_neural_tasks",
-    "schedule_mcp_tasks",
     "schedule_credentials_tasks",
     "schedule_device_code_tasks",
     "schedule_security_notification_tasks",

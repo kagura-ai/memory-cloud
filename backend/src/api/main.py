@@ -107,10 +107,18 @@ async def lifespan(app: FastAPI):
     scheduler_leader = SchedulerLeader(
         register_jobs=register_scheduled_jobs,
         retry_seconds=get_settings().scheduler_leader_retry_seconds,
+        ping_seconds=get_settings().scheduler_leader_ping_seconds,
     )
     app.state.scheduler_leader = scheduler_leader
     await scheduler_leader.start()
     logger.info("background_tasks_scheduled", scheduler_leader="pending")
+
+    # MCP session cleanup runs in EVERY worker (#1980): it cleans this
+    # process's own session table, which the scheduler leader cannot reach.
+    # Strong reference on app.state (the loop holds tasks only weakly).
+    from tasks.mcp_tasks import start_local_session_cleanup
+
+    app.state.mcp_session_cleanup_task = start_local_session_cleanup()
 
     # WHERE axis (#1332): one-shot geo payload backfill for points embedded
     # before the location payload existed. Best-effort — but hold a strong
@@ -137,6 +145,15 @@ async def lifespan(app: FastAPI):
             await backfill_task
         except asyncio.CancelledError:
             logger.info("geo_payload_backfill_cancelled_on_shutdown")
+
+    # Stop this worker's MCP session cleanup loop (#1980).
+    cleanup_task = getattr(app.state, "mcp_session_cleanup_task", None)
+    if cleanup_task is not None and not cleanup_task.done():
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass  # expected: we cancelled it ourselves
 
     # Stop the leader loop and scheduler, release the leader lock (#1980).
     # Before close_db(): the lock connection belongs to the engine's pool.
