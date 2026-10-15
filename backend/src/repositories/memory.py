@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import and_, desc, func, select, update
+from sqlalchemy import TextClause, and_, bindparam, desc, func, select, text, update
+from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -23,6 +26,60 @@ from utils.exceptions import NotFoundException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# Issue #1985: every multi-row write to ``memories`` from a read path takes its
+# row locks in ``id`` order through an ordered ``FOR UPDATE`` subquery. A plain
+# ``UPDATE ... WHERE id = ANY(:ids)`` locks rows in whatever order the plan
+# visits them, so two concurrent recalls over overlapping pages could still
+# lock the same rows in opposite orders and deadlock (SQLSTATE 40P01).
+_IDS_PARAM = bindparam("ids", type_=PG_ARRAY(PG_UUID(as_uuid=True)))
+
+
+def bulk_access_stats_statement(count_as_adoption: bool) -> TextClause:
+    """The lock-ordered access-stat UPDATE (bound parameters ``ids``, ``client``, ``now``).
+
+    Args:
+        count_as_adoption: Also bump ``reference_count`` (#1046, ``reference()``).
+
+    Returns:
+        A ``text()`` statement returning ``(id, access_count)`` per updated row.
+    """
+    reference_clause = "reference_count = m.reference_count + 1, " if count_as_adoption else ""
+    # The client append is a CASE, not a WHERE filter (#457): a row the client
+    # already touched still has its access_count bumped. Only constant SQL is
+    # spliced in; every value is a bound parameter.
+    sql = (
+        "UPDATE memories AS m SET "
+        "access_count = m.access_count + 1, "
+        f"{reference_clause}"
+        "last_used_at = :now, "
+        "accessed_by_clients = CASE "
+        "WHEN CAST(:client AS VARCHAR) = ANY(COALESCE(m.accessed_by_clients, CAST('{}' AS VARCHAR[]))) "
+        "THEN m.accessed_by_clients "
+        "ELSE array_append(COALESCE(m.accessed_by_clients, CAST('{}' AS VARCHAR[])), "
+        "CAST(:client AS VARCHAR)) END "
+        "FROM (SELECT id FROM memories WHERE id = ANY(:ids) AND deleted_at IS NULL "
+        "ORDER BY id FOR UPDATE) AS locked "
+        "WHERE m.id = locked.id "
+        "RETURNING m.id, m.access_count"
+    )
+    return text(sql).bindparams(_IDS_PARAM)
+
+
+def bulk_promote_statement() -> TextClause:
+    """The lock-ordered working → persistent promotion (bound ``ids``, ``now``).
+
+    Returns:
+        A ``text()`` statement returning the id of each promoted row.
+    """
+    return text(
+        "UPDATE memories AS m SET scope = 'persistent', promoted_at = :now "
+        "FROM (SELECT id FROM memories WHERE id = ANY(:ids) AND deleted_at IS NULL "
+        "AND scope <> 'persistent' ORDER BY id FOR UPDATE) AS locked "
+        "WHERE m.id = locked.id "
+        "RETURNING m.id"
+    ).bindparams(_IDS_PARAM)
 
 
 class MemoryRepository(BaseRepository[Memory]):
@@ -265,7 +322,10 @@ class MemoryRepository(BaseRepository[Memory]):
     async def update_access_stats(
         self, memory_id: UUID, client: str, *, count_as_adoption: bool = False
     ) -> None:
-        """Update access statistics.
+        """Update access statistics for one memory.
+
+        Delegates to :meth:`bulk_update_access_stats` so the lock-ordered
+        statement is the only write path for access stats (#1985).
 
         Args:
             memory_id: Memory ID
@@ -277,38 +337,76 @@ class MemoryRepository(BaseRepository[Memory]):
                 activation) leave this False so adoption stays distinguishable
                 from mere surfacing. ``access_count`` is bumped either way, so the
                 invariant ``access_count >= reference_count`` always holds.
+        """
+        await self.bulk_update_access_stats(
+            [memory_id], client, count_as_adoption=count_as_adoption
+        )
 
-        Updates:
+    async def bulk_update_access_stats(
+        self,
+        memory_ids: Sequence[UUID],
+        client: str,
+        *,
+        count_as_adoption: bool = False,
+    ) -> dict[UUID, int]:
+        """Bump access statistics for several memories in one lock-ordered UPDATE.
+
+        Issue #1985: the rows are locked in ``id`` order (ordered ``FOR UPDATE``
+        subquery), so concurrent callers with overlapping id sets queue on the
+        lowest shared row instead of deadlocking. Soft-deleted and unknown ids
+        are skipped. Runs in the caller's transaction; the caller commits.
+
+        Updates per row:
             - access_count += 1
             - reference_count += 1 (only when count_as_adoption=True)
             - last_used_at = now
-            - accessed_by_clients append client
+            - client appended to accessed_by_clients (once)
+
+        The ORM objects already loaded in the session are not refreshed.
+
+        Args:
+            memory_ids: Memories to bump (order and duplicates do not matter).
+            client: Client name to record.
+            count_as_adoption: Also bump ``reference_count`` (#1046).
+
+        Returns:
+            The new ``access_count`` of each updated memory, keyed by id.
         """
-        memory = await self.get(memory_id)
-        if not memory:
-            return
-
-        memory.access_count = (memory.access_count or 0) + 1
-        if count_as_adoption:
-            memory.reference_count = (memory.reference_count or 0) + 1
-        memory.last_used_at = utcnow()
-
-        # Add client to accessed_by_clients
-        if not memory.accessed_by_clients:
-            memory.accessed_by_clients = []
-
-        if client not in memory.accessed_by_clients:
-            memory.accessed_by_clients.append(client)
-
-        await self.db.flush()
-
+        ids = sorted(set(memory_ids))
+        if not ids:
+            return {}
+        result = await self.db.execute(
+            bulk_access_stats_statement(count_as_adoption),
+            {"ids": ids, "client": client, "now": utcnow()},
+        )
+        counts = {row[0]: row[1] for row in result.all()}
         logger.debug(
             "access_stats_updated",
-            memory_id=str(memory_id),
-            access_count=memory.access_count,
-            reference_count=memory.reference_count,
+            memory_count=len(counts),
             count_as_adoption=count_as_adoption,
         )
+        return counts
+
+    async def bulk_promote_to_persistent(self, memory_ids: Sequence[UUID]) -> list[UUID]:
+        """Promote several working memories to persistent, locking rows in id order.
+
+        Rows already persistent, soft-deleted or unknown are skipped. Runs in
+        the caller's transaction; the caller commits.
+
+        Args:
+            memory_ids: Candidate memories.
+
+        Returns:
+            The ids that were promoted, in id order.
+        """
+        ids = sorted(set(memory_ids))
+        if not ids:
+            return []
+        result = await self.db.execute(bulk_promote_statement(), {"ids": ids, "now": utcnow()})
+        promoted = sorted(row[0] for row in result.all())
+        for memory_id in promoted:
+            logger.info("memory_promoted_to_persistent", memory_id=str(memory_id))
+        return promoted
 
     async def promote_to_persistent(self, memory_id: UUID) -> None:
         """Promote working memory to persistent.
