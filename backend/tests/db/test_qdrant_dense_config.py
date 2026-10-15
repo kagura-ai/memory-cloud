@@ -309,7 +309,7 @@ class TestReconcile:
 
     async def test_lance_backend_is_a_no_op(self, mock_client, dense_settings, monkeypatch):
         dense_settings("int8", True)
-        monkeypatch.setattr(qmod, "_active_store", lambda: object())
+        monkeypatch.setattr(qmod, "_active_store", object)
         assert await apply_dense_vector_config(KAGURA_MEMORIES_COLLECTION) is False
         mock_client.get_collection.assert_not_awaited()
 
@@ -384,7 +384,7 @@ class TestStartupPass:
         self, mock_client, dense_settings, monkeypatch
     ):
         dense_settings("int8", True)
-        monkeypatch.setattr(qmod, "_active_store", lambda: object())
+        monkeypatch.setattr(qmod, "_active_store", object)
         warnings: list[dict] = []
         monkeypatch.setattr(
             qmod.logger, "warning", lambda event, **kw: warnings.append({"event": event, **kw})
@@ -398,7 +398,7 @@ class TestStartupPass:
     async def test_lance_backend_with_default_settings_is_silent(
         self, mock_client, dense_settings, monkeypatch
     ):
-        monkeypatch.setattr(qmod, "_active_store", lambda: object())
+        monkeypatch.setattr(qmod, "_active_store", object)
         warnings: list[str] = []
         monkeypatch.setattr(qmod.logger, "warning", lambda event, **kw: warnings.append(event))
         assert await apply_dense_vector_config_to_all() == {}
