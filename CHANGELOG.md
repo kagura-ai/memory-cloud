@@ -4,6 +4,20 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.105.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.105.0) — 2026-10-15
+
+Concurrent recalls no longer deadlock: the access statistics and the Hebbian learning a recall records are written after the read commits, in id-ordered statements that never wait on another transaction's row.
+
+### Fixed
+- **Concurrent recalls deadlocked on their own statistics** ([#1985](https://github.com/kagura-ai/memory-cloud/issues/1985)): two recalls whose pages overlapped bumped `access_count` row by row in ranking order inside the read transaction, then upserted `neural_memory_edges` edge by edge, so each could hold a row the other wanted; Postgres aborted one with `DeadlockDetectedError` (`503 DB-002`), and at concurrency 32 every request timed out. A recall now returns its page from a committed read, then records the page's access statistics (and any promotion to persistent) in one statement that locks rows in `id` order through an ordered `FOR UPDATE SKIP LOCKED` subquery, and runs the Hebbian pass in its own transaction under a per-user advisory lock (`hebbian:<user_id>`), skipping the pass when another transaction holds it. Sleep and the neural batch tasks take the same lock for their run, and promote through the same id-ordered statement. A failure in either post-commit step is logged (`access_stats_update_failed`, `hebbian_update_failed`) and never fails the recall.
+
+### Changed
+- **`503 DB-002` reason `deadlock`** ([#1985](https://github.com/kagura-ai/memory-cloud/issues/1985)): a transaction Postgres aborted to break a lock cycle (SQLSTATE `40P01`) is reported with `details.reason: "deadlock"` (REST) and `cause: service_unavailable` (MCP); code, status, message and `Retry-After: 5` are unchanged. A retry normally succeeds.
+- **`access_count` is a lower bound** ([#1985](https://github.com/kagura-ai/memory-cloud/issues/1985)): a statistics write skips a row another transaction holds at that moment instead of waiting, so a bump can be lost under contention. Promotion to persistent is decided from the row as the statistics write left it, so concurrent recalls by different clients add up. Sleep report counters (`rule_promoted`, `llm_promoted`, `total_promoted`) count rows actually promoted rather than attempts.
+
+### Notes
+- No migration, no new environment variables, no operator action. New log events: `hebbian_update_skipped_busy` (a learning pass skipped because another transaction, or that user's Sleep run, holds the graph lock) and `access_stats_update_failed`. Follow-ups (backlog): Sleep's archive tombstones and the legacy delete still write rows one at a time; the statistics write could move to a background task.
+
 ## [v0.104.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.104.0) — 2026-10-15
 
 Scaling the API past one process: the PostgreSQL pool is configurable and tells pool exhaustion apart from an outage, the single-server deployment can run several uvicorn workers with a right-sized Postgres, and the background scheduler runs on exactly one of them.
