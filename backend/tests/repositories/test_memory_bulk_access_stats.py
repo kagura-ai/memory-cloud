@@ -99,7 +99,9 @@ class TestBulkAccessStats:
         counts = await repo.bulk_update_access_stats([first.id, second.id], client="api")
         await db_session.commit()
 
-        assert counts == {first.id: 2, second.id: 2}
+        assert {k: v.access_count for k, v in counts.items()} == {first.id: 2, second.id: 2}
+        assert counts[second.id].accessed_by_clients == ["claude", "api"]
+        assert counts[first.id].scope == "working"
         await db_session.refresh(first)
         await db_session.refresh(second)
         assert first.accessed_by_clients == ["api"]
@@ -131,7 +133,7 @@ class TestBulkAccessStats:
         await db_session.commit()
         await db_session.refresh(gone)
 
-        assert counts == {live.id: 1}
+        assert {k: v.access_count for k, v in counts.items()} == {live.id: 1}
         assert gone.access_count == 0
 
     async def test_does_not_touch_updated_at(self, db_session):

@@ -19,6 +19,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from models.schemas import MemoryResponse, RecallRequest
+from repositories.memory import AccessStats
 from services.memory_service import MemoryService
 
 
@@ -59,6 +60,13 @@ def _response(memory: SimpleNamespace) -> MemoryResponse:
         created_at=memory.created_at,
         client=memory.client,
     )
+
+
+def _stats(
+    access_count: int = 1, clients: list[str] | None = None, scope: str = "working"
+) -> AccessStats:
+    """A row as the access-stat statement returns it."""
+    return AccessStats(access_count, 0, datetime.utcnow(), clients or ["api"], scope)
 
 
 def _isolated(service: MemoryService) -> MagicMock:
@@ -159,7 +167,11 @@ class TestRecordAccess:
         session = _isolated(service)
         repo = MagicMock()
         repo.bulk_update_access_stats = AsyncMock(
-            return_value={old.id: 1, fresh.id: 1, already.id: 9}
+            return_value={
+                old.id: _stats(clients=["claude"]),
+                fresh.id: _stats(clients=["claude"]),
+                already.id: _stats(9, ["claude"], scope="persistent"),
+            }
         )
         repo.bulk_promote_to_persistent = AsyncMock(return_value=[old.id])
 
@@ -182,17 +194,68 @@ class TestRecordAccess:
         service.db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_a_second_client_counts_toward_promotion(self, service):
-        memory = _memory(accessed_by_clients=["api"])
+    async def test_a_concurrent_second_client_counts_toward_promotion(self, service):
+        """#1985: the snapshot saw no client at all; the locked row shows a
+        concurrent recall's client too, and two clients make promotion due."""
+        memory = _memory(accessed_by_clients=None)
         _isolated(service)
         repo = MagicMock()
-        repo.bulk_update_access_stats = AsyncMock(return_value={memory.id: 1})
+        repo.bulk_update_access_stats = AsyncMock(
+            return_value={memory.id: _stats(2, ["api", "claude"])}
+        )
         repo.bulk_promote_to_persistent = AsyncMock(return_value=[])
 
         with patch("services.memory_service.MemoryRepository", return_value=repo):
             await service._recall_record_access([_response(memory)], {"a": memory}, client="claude")
 
         repo.bulk_promote_to_persistent.assert_awaited_once_with([memory.id], skip_locked=True)
+
+    @pytest.mark.asyncio
+    async def test_one_client_alone_does_not_promote(self, service):
+        memory = _memory(accessed_by_clients=None)
+        _isolated(service)
+        repo = MagicMock()
+        repo.bulk_update_access_stats = AsyncMock(return_value={memory.id: _stats(2, ["api"])})
+        repo.bulk_promote_to_persistent = AsyncMock(return_value=[])
+
+        with patch("services.memory_service.MemoryRepository", return_value=repo):
+            await service._recall_record_access([_response(memory)], {"a": memory}, client="api")
+
+        repo.bulk_promote_to_persistent.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_concurrently_promoted_row_reports_persistent(self, service):
+        """#1985: the snapshot says working, the locked row says persistent:
+        the response follows the row and no promotion is attempted."""
+        memory = _memory(importance=0.9)  # due by importance, were it working
+        responses = [_response(memory)]
+        _isolated(service)
+        repo = MagicMock()
+        repo.bulk_update_access_stats = AsyncMock(
+            return_value={memory.id: _stats(scope="persistent")}
+        )
+        repo.bulk_promote_to_persistent = AsyncMock(return_value=[])
+
+        with patch("services.memory_service.MemoryRepository", return_value=repo):
+            await service._recall_record_access(responses, {"a": memory}, client="api")
+
+        repo.bulk_promote_to_persistent.assert_not_awaited()
+        assert responses[0].scope == "persistent"
+
+    @pytest.mark.asyncio
+    async def test_row_skipped_as_locked_keeps_its_snapshot(self, service):
+        memory = _memory(importance=0.9)
+        responses = [_response(memory)]
+        _isolated(service)
+        repo = MagicMock()
+        repo.bulk_update_access_stats = AsyncMock(return_value={})
+        repo.bulk_promote_to_persistent = AsyncMock(return_value=[])
+
+        with patch("services.memory_service.MemoryRepository", return_value=repo):
+            await service._recall_record_access(responses, {"a": memory}, client="api")
+
+        repo.bulk_promote_to_persistent.assert_not_awaited()
+        assert responses[0].scope == "working"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

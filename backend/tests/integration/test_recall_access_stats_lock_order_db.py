@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from models.memory import Memory
 from models.schemas import MemoryResponse
-from repositories.memory import MemoryRepository
+from repositories.memory import AccessStats, MemoryRepository
 from services.memory_service import MemoryService
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -107,14 +107,13 @@ async def test_access_stats_skip_a_held_row_instead_of_waiting(
         finally:
             await holder.commit()
 
-        assert counts == {high: 1}
+        assert {k: v.access_count for k, v in counts.items()} == {high: 1}
         assert await _row(probe, low) == (0, None)
 
         # Released: the next call bumps both. Same client again: the count
         # moves, the client list does not grow.
-        assert await MemoryRepository(writer).bulk_update_access_stats(
-            [low, high], client="api"
-        ) == {low: 1, high: 2}
+        again = await MemoryRepository(writer).bulk_update_access_stats([low, high], client="api")
+        assert {k: v.access_count for k, v in again.items()} == {low: 1, high: 2}
         await writer.commit()
         assert await _row(probe, low) == (1, ["api"])
         assert await _row(probe, high) == (2, ["api"])
@@ -160,7 +159,7 @@ async def test_reversed_pages_on_two_sessions_never_deadlock(
     low, high = memory_pair
     factory = async_sessionmaker(async_engine, class_=AsyncSession, expire_on_commit=False)
 
-    async def bump(ids: list[UUID]) -> dict[UUID, int]:
+    async def bump(ids: list[UUID]) -> dict[UUID, AccessStats]:
         async with factory() as session:
             counts = await MemoryRepository(session).bulk_update_access_stats(ids, client="api")
             # Hold the locks across a scheduling point so the two sessions

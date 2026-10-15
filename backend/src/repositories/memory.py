@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, cast
+from datetime import datetime
+from typing import Any, NamedTuple, cast
 from uuid import UUID
 
 from sqlalchemy import TextClause, and_, bindparam, desc, func, select, text, update
@@ -61,7 +62,8 @@ _ACCESS_STATS_TAIL = (
     "FROM (SELECT id FROM memories WHERE id = ANY(:ids) AND deleted_at IS NULL "
     "ORDER BY id FOR UPDATE SKIP LOCKED) AS locked "
     "WHERE m.id = locked.id "
-    "RETURNING m.id, m.access_count, m.reference_count, m.last_used_at, m.accessed_by_clients"
+    "RETURNING m.id, m.access_count, m.reference_count, m.last_used_at, "
+    "m.accessed_by_clients, m.scope"
 )
 
 # Surfacing access (recall, explore): access_count only.
@@ -87,6 +89,20 @@ PROMOTE_STATEMENT: TextClause = text(_PROMOTE_HEAD + _PROMOTE_TAIL).bindparams(_
 PROMOTE_SKIP_LOCKED_STATEMENT: TextClause = text(
     _PROMOTE_HEAD + " SKIP LOCKED" + _PROMOTE_TAIL
 ).bindparams(_IDS_PARAM)
+
+
+class AccessStats(NamedTuple):
+    """A memory's statistics as the access-stat statement left them (#1985).
+
+    Read from the locked, updated row, so a caller deciding promotion sees
+    every client and count, including a concurrent recall's.
+    """
+
+    access_count: int
+    reference_count: int
+    last_used_at: datetime | None
+    accessed_by_clients: list[str] | None
+    scope: str
 
 
 def _loaded_memory(db: AsyncSession, memory_id: UUID) -> Memory | None:
@@ -369,7 +385,7 @@ class MemoryRepository(BaseRepository[Memory]):
         client: str,
         *,
         count_as_adoption: bool = False,
-    ) -> dict[UUID, int]:
+    ) -> dict[UUID, AccessStats]:
         """Bump access statistics for several memories in one lock-ordered UPDATE.
 
         Issue #1985: the rows are locked in ``id`` order through an ordered
@@ -395,29 +411,30 @@ class MemoryRepository(BaseRepository[Memory]):
             count_as_adoption: Also bump ``reference_count`` (#1046).
 
         Returns:
-            The new ``access_count`` of each updated memory, keyed by id
-            (rows skipped as locked, deleted or unknown are absent).
+            Each updated memory's statistics after the bump, keyed by id (rows
+            skipped as locked, deleted or unknown are absent).
         """
         ids = sorted(set(memory_ids))
         if not ids:
             return {}
         statement = ADOPTION_ACCESS_STATS_STATEMENT if count_as_adoption else ACCESS_STATS_STATEMENT
         result = await self.db.execute(statement, {"ids": ids, "client": client, "now": utcnow()})
-        counts: dict[UUID, int] = {}
-        for memory_id, access_count, reference_count, last_used_at, clients in result.all():
-            counts[memory_id] = access_count
+        updated: dict[UUID, AccessStats] = {}
+        for memory_id, *values in result.all():
+            stats = AccessStats(*values)
+            updated[memory_id] = stats
             loaded = _loaded_memory(self.db, memory_id)
             if loaded is not None:
-                set_committed_value(loaded, "access_count", access_count)
-                set_committed_value(loaded, "reference_count", reference_count)
-                set_committed_value(loaded, "last_used_at", last_used_at)
-                set_committed_value(loaded, "accessed_by_clients", clients)
+                set_committed_value(loaded, "access_count", stats.access_count)
+                set_committed_value(loaded, "reference_count", stats.reference_count)
+                set_committed_value(loaded, "last_used_at", stats.last_used_at)
+                set_committed_value(loaded, "accessed_by_clients", stats.accessed_by_clients)
         logger.debug(
             "access_stats_updated",
-            memory_count=len(counts),
+            memory_count=len(updated),
             count_as_adoption=count_as_adoption,
         )
-        return counts
+        return updated
 
     async def bulk_promote_to_persistent(
         self, memory_ids: Sequence[UUID], *, skip_locked: bool = False

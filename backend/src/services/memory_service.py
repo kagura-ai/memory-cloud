@@ -69,7 +69,7 @@ from models.schemas import (
     UpdateMemoryResponse,
     WriteLintHint,
 )
-from repositories.memory import MemoryRepository
+from repositories.memory import AccessStats, MemoryRepository
 from services.capacity_lock import CapacityPolicy
 from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
@@ -4366,24 +4366,24 @@ class MemoryService:
         return _get_session_factory()()
 
     @staticmethod
-    def _promotion_due(memory: Memory, access_count: int, client: str) -> bool:
-        """Whether a just-surfaced working memory qualifies for persistent scope.
+    def _promotion_due(memory: Memory, stats: AccessStats) -> bool:
+        """Whether a just-surfaced memory qualifies for persistent scope.
+
+        Count, clients and scope come from the locked, updated row (#1985), so
+        concurrent recalls by different clients add up; importance and age
+        come from the row as read (no read path writes them).
 
         Args:
             memory: The row as the recall read it.
-            access_count: Its ``access_count`` after this recall's bump.
-            client: The client this recall recorded.
+            stats: The row as this recall's access-stat write left it.
         """
-        if memory.scope == "persistent":
+        if stats.scope == "persistent":
             return False
-        clients = list(memory.accessed_by_clients or [])
-        if client not in clients:
-            clients.append(client)
         return should_promote_to_persistent(
-            access_count=access_count,
+            access_count=stats.access_count,
             age_days=(utcnow() - memory.created_at).days,
             importance=memory.importance,
-            accessed_by_clients=clients,
+            accessed_by_clients=list(stats.accessed_by_clients or []),
         )
 
     async def _recall_record_access(
@@ -4401,7 +4401,8 @@ class MemoryService:
         deadlocking. Best-effort: any failure is logged as
         ``access_stats_update_failed`` (with traceback) and the recall still
         returns its page.
-        A promoted row's response shows ``scope="persistent"``.
+        Each bumped row's response shows the scope the locked row has, and a
+        row this call promoted shows ``scope="persistent"`` (#1985).
 
         Args:
             responses: The page being returned (mutated for promoted rows).
@@ -4415,13 +4416,17 @@ class MemoryService:
         try:
             async with self._isolated_session() as stats_db:
                 repo = MemoryRepository(stats_db)
-                counts = await repo.bulk_update_access_stats(page_ids, client)
+                updated = await repo.bulk_update_access_stats(page_ids, client)
                 due = [
                     memory_id
-                    for memory_id, count in counts.items()
-                    if memory_id in rows and self._promotion_due(rows[memory_id], count, client)
+                    for memory_id, stats in updated.items()
+                    if memory_id in rows and self._promotion_due(rows[memory_id], stats)
                 ]
-                promoted = set(await repo.bulk_promote_to_persistent(due, skip_locked=True))
+                promoted = (
+                    set(await repo.bulk_promote_to_persistent(due, skip_locked=True))
+                    if due
+                    else set()
+                )
                 await stats_db.commit()
         except Exception as exc:  # noqa: BLE001 — the page is committed; never fail it
             # Any failure here (database, refused connection, or a bug) is
@@ -4434,9 +4439,14 @@ class MemoryService:
                 exc_info=True,
             )
             return
+        # The scope as the locked row has it (a concurrent promotion shows),
+        # then this call's own promotions. Rows the write skipped as locked
+        # keep the scope the recall read.
         for response in responses:
             if response.memory_id in promoted:
                 response.scope = "persistent"
+            elif response.memory_id in updated:
+                response.scope = updated[response.memory_id].scope
         if promoted:
             logger.info("memories_promoted", memory_ids=[str(mid) for mid in sorted(promoted)])
 
