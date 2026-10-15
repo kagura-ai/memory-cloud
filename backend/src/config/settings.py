@@ -516,6 +516,35 @@ class Settings(BaseSettings):
         description="Seconds a caller waits for a free pooled Redis connection (Issue #1556)",
     )
 
+    # PostgreSQL connection pool (Issue #1978). Both ``db.base`` engines — the
+    # async application engine and the sync OAuth2 engine — use these values,
+    # so one process can hold up to ``2 * (db_pool_size + db_max_overflow)``
+    # connections. A request waits up to ``db_pool_timeout`` seconds for a
+    # free connection; past it SQLAlchemy raises ``TimeoutError`` and the API
+    # answers 503 DB-002 with ``details.reason="pool_exhausted"``. The bounds
+    # forbid a pool_size of 0 and a max_overflow of -1, which SQLAlchemy reads
+    # as "unlimited", and a zero timeout: the async pool's timed checkout is
+    # ``asyncio.wait_for(queue.get(), timeout)``, which at 0 cancels before it
+    # can take an idle connection, so every checkout would read as exhausted.
+    # Fail-fast deployments use a small positive value (e.g. 1). In-process
+    # fan-out (``services/analysis/labeler.py`` holds up to 8 connections at
+    # once) assumes at least the former fixed 15; ``db.base`` warns below it.
+    db_pool_size: int = Field(
+        default=5,
+        ge=1,
+        description="Persistent pooled PostgreSQL connections per engine (Issue #1978)",
+    )
+    db_max_overflow: int = Field(
+        default=10,
+        ge=0,
+        description="Extra PostgreSQL connections per engine beyond db_pool_size (Issue #1978)",
+    )
+    db_pool_timeout: float = Field(
+        default=30.0,
+        gt=0,
+        description="Seconds a request waits for a free pooled PostgreSQL connection (Issue #1978)",
+    )
+
     # API Settings
     api_host: str = Field(default="0.0.0.0", description="API host")
     api_port: int = Field(default=8080, description="API port")

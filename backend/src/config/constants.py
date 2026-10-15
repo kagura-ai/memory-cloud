@@ -111,10 +111,6 @@ MAX_EXPLORE_LIMIT = 100
 # Prevents memory exhaustion during large graph traversals.
 MAX_BFS_QUEUE_SIZE = 10_000
 
-# Connection pool size for database (used in database.py)
-DB_POOL_SIZE = 20
-DB_MAX_OVERFLOW = 10
-
 # ============================================================================
 # Migration & Validation
 # ============================================================================

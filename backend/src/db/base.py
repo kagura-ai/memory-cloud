@@ -52,12 +52,42 @@ sync_engine = None
 sync_session_factory = None
 
 
+# The largest in-process fan-out that borrows pooled connections concurrently:
+# ``services/analysis/labeler.py`` runs ``Semaphore(8)`` labeling tasks, each
+# holding a connection across its LLM call, next to the orchestrator's own
+# session (#1247 waiver). The former fixed pool (5 + 10 = 15) absorbed that.
+_POOL_FANOUT_FLOOR = 15
+
+
+def _warn_if_pool_below_fanout(pool_size: int, max_overflow: int) -> None:
+    """Log once per engine when ``DB_POOL_SIZE + DB_MAX_OVERFLOW`` cannot cover the fan-out (#1978).
+
+    Args:
+        pool_size: Configured ``DB_POOL_SIZE``.
+        max_overflow: Configured ``DB_MAX_OVERFLOW``.
+    """
+    total = pool_size + max_overflow
+    if total < _POOL_FANOUT_FLOOR:
+        logger.warning(
+            "database_pool_below_fanout",
+            pool_size=pool_size,
+            max_overflow=max_overflow,
+            total=total,
+            floor=_POOL_FANOUT_FLOOR,
+            hint="analysis labeling (8 concurrent) and admin sleep runs may time out on checkout",
+        )
+
+
 def _get_engine():
     """Get or create async engine (lazy initialization)."""
     global engine
 
     if engine is None:
         from config.database import DATABASE_URL, to_async_database_url
+        from config.settings import get_settings
+
+        settings = get_settings()
+        _warn_if_pool_below_fanout(settings.db_pool_size, settings.db_max_overflow)
 
         # Name asyncpg explicitly: a bare ``postgresql://`` would resolve to
         # SQLAlchemy's default driver (#1695).
@@ -73,8 +103,10 @@ def _get_engine():
             # statement text still surfaces for debugging.
             hide_parameters=True,
             pool_pre_ping=True,
-            pool_size=5,
-            max_overflow=10,
+            # #1978: sized by DB_POOL_SIZE / DB_MAX_OVERFLOW / DB_POOL_TIMEOUT.
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout,
             # Belt-and-braces against container TZ/PGTZ being dropped in
             # a future deploy — see .claude/rules/backend.md for the
             # three-layer UTC policy.
@@ -110,6 +142,9 @@ def _get_sync_engine():
 
     if sync_engine is None:
         from config.database import DATABASE_URL, to_sync_database_url
+        from config.settings import get_settings
+
+        settings = get_settings()
 
         # Name psycopg2 explicitly: SQLAlchemy 2.1 maps a bare ``postgresql://``
         # to psycopg (v3), which is not installed (#1695).
@@ -119,8 +154,10 @@ def _get_sync_engine():
             # #1331: same bound-parameter log hygiene as the async engine.
             hide_parameters=True,
             pool_pre_ping=True,
-            pool_size=5,
-            max_overflow=10,
+            # #1978: sized by DB_POOL_SIZE / DB_MAX_OVERFLOW / DB_POOL_TIMEOUT.
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout,
             # psycopg2 equivalent — see async engine above.
             connect_args={"options": "-c timezone=utc"},
         )
