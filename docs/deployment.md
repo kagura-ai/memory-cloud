@@ -2136,16 +2136,36 @@ Each worker is a full, independent process:
   settings cache (`_RATE_LIMIT_CACHE`) are per process. They are caches over
   Postgres / Redis, which stay the source of truth, so N copies only lower the
   hit rate; nothing becomes inconsistent.
-- **The background scheduler runs on exactly one process of the deployment.**
-  Every worker runs the app lifespan, but only the one that takes the Postgres
-  advisory lock `apscheduler_leader` registers the cron jobs and starts
-  APScheduler (log line `scheduler_leader_acquired`, with its `pid`). The
-  others log `scheduler_leader_standby` and retry every
+- **Known limit: legacy MCP sessions are per process.** The session table of
+  the legacy MCP era (`backend/src/mcp_server/session.py`, `MCPSessionManager`
+  — clients that still open with the `initialize` handshake) and its `DELETE`
+  tombstones (#1740) live in each worker's memory. With several workers a
+  legacy client's next request can land on another worker, which re-adopts
+  its server-minted session id as it would after a restart: the negotiated
+  `protocol_version` is unknown there, so the revision `initialize` agreed on
+  is lost. A `DELETE` tombstone is only honoured by the worker that received
+  the `DELETE`; another worker may re-adopt that id. Clients on the current
+  stateless revision (2026-07-28, `mcp_server/transport_stateless`) carry no
+  session and are unaffected. This holds for `UVICORN_WORKERS > 1` until
+  legacy sessions move to a shared store.
+- **The background scheduler runs on one process of the deployment at a
+  time.** Every worker runs the app lifespan, but only the one that takes the
+  Postgres advisory lock `apscheduler_leader` registers the cron jobs and
+  starts APScheduler (log line `scheduler_leader_acquired`, with its `pid`).
+  Startup does not wait for this: the first attempt runs in the background
+  right after boot. The leader keeps the lock on one connection of its own
+  async pool, so that worker's effective DB pool is one connection smaller.
+  The others log `scheduler_leader_standby` once and retry every
   `SCHEDULER_LEADER_RETRY_SECONDS` (default `60`, minimum `5`). When the leader
   process exits — a worker restart, or `deploy.sh` stopping the old color after
   a blue/green switch — Postgres drops its lock and a standby in either color
   takes over within that interval; a cron tick that falls in that gap is
-  skipped. A leader whose lock connection breaks (e.g. Postgres restarted)
+  skipped. The lock guarantees at most one *scheduler* at a time, not one
+  execution of each job: the old leader's scheduler stops without waiting for
+  running jobs, so a job already running on the old leader can overlap the
+  new leader's first tick of the same job during a handover. The Sleep,
+  neural and capacity purge jobs keep their own `single_flight` lock against
+  that. A leader whose lock connection breaks (e.g. Postgres restarted)
   stops its scheduler (`scheduler_leader_lost`) and competes again. If
   Postgres is unreachable at startup the worker logs
   `scheduler_leader_check_failed`, keeps serving requests and retries.
@@ -2158,14 +2178,16 @@ Every connection the workers can open must fit under Postgres'
 
 ```
 UVICORN_WORKERS × 2 × (DB_POOL_SIZE + DB_MAX_OVERFLOW)   # async + sync engine per worker
-+ 1                                                       # scheduler leader lock
 ```
+
+The scheduler leader's lock connection is checked out of that worker's own
+async pool, so it does not add to this ceiling.
 
 During a blue/green switch both colors run, so double it. Then add every
 other client of the same Postgres — co-resident workers, Sleep or CLI runs
 started with `docker compose exec` / `run`, an operator's `psql` — and keep
 the total below `POSTGRES_MAX_CONNECTIONS` with some headroom. Example with the pool defaults (5 + 10)
-and `UVICORN_WORKERS=2`: `2 × 2 × 15 + 1 = 61` per color, `122` during a
+and `UVICORN_WORKERS=2`: `2 × 2 × 15 = 60` per color, `120` during a
 switch — above the default `100`, so raise `POSTGRES_MAX_CONNECTIONS` first.
 Every Postgres connection costs memory on the data host, so prefer a smaller
 pool over an enormous `max_connections`.
