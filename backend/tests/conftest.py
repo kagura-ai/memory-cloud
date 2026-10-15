@@ -7,7 +7,12 @@ from typing import NoReturn
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.pool import NullPool
 
 from models.auth import Base as AuthBase
@@ -68,16 +73,20 @@ def _recall_access_write_needs_a_session(monkeypatch):
     The post-commit access-stat write opens its own session on the request
     session's engine. Under a bare ``MagicMock`` session there is no engine,
     and the fallback would connect to whatever ``DATABASE_URL`` names, so the
-    write runs only when ``self.db`` is an ``AsyncSession`` (real or
-    ``MagicMock(spec=AsyncSession)``). Tests that pin the write call the
-    original through ``MemoryService.__dict__`` or patch ``_isolated_session``.
+    write runs only when ``self.db`` is an ``AsyncSession`` bound to an
+    ``AsyncEngine`` (a real session, or a mock that sets ``db.bind`` to an
+    ``AsyncEngine`` spec). Tests that pin the write set that bind and patch
+    ``_isolated_session``, or call the original through
+    ``MemoryService.__dict__``.
     """
     from services.memory_service import MemoryService
 
     real = MemoryService._recall_record_access
 
     async def _gated(self, *args, **kwargs):
-        if isinstance(self.db, AsyncSession):
+        if isinstance(self.db, AsyncSession) and isinstance(
+            getattr(self.db, "bind", None), AsyncEngine
+        ):
             await real(self, *args, **kwargs)
 
     monkeypatch.setattr(MemoryService, "_recall_record_access", _gated)

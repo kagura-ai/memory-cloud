@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
 from models.schemas import MemoryResponse, RecallRequest
 from services.memory_service import MemoryService
@@ -74,6 +74,9 @@ def _isolated(service: MemoryService) -> MagicMock:
 @pytest.fixture
 def service() -> MemoryService:
     db = MagicMock(spec=AsyncSession)
+    # The conftest gate runs the post-commit write only for a session bound to
+    # an AsyncEngine; ``_isolated`` below replaces the session it would open.
+    db.bind = MagicMock(spec=AsyncEngine)
     db.commit = AsyncMock()
     db.rollback = AsyncMock()
     return MemoryService(db)
