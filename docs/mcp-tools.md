@@ -500,7 +500,7 @@ An argument the tool's `inputSchema` does not declare is refused with `invalid_a
 
 | Field | Meaning |
 |-------|---------|
-| `cause` | `timeout` (the tool did not finish within its time limit), `service_unavailable` (the database, search index, file storage or model provider could not be reached) or `internal_error` (anything else) |
+| `cause` | `timeout` (the tool did not finish within its time limit), `service_unavailable` (the database, search index, file storage or model provider could not be reached, or the database aborted the call to break a deadlock) or `internal_error` (anything else) |
 | `correlation_id` | Identifies the failure in the server log: the request's W3C trace id when the client sent `traceparent`, otherwise a random id. Quote it when reporting a problem |
 | `retryable` | `true` when repeating the call is safe: read-only tools, and the few writes listed below |
 | `retry_after_seconds` | Suggested wait (5) before retrying a `retryable` call after a `timeout` or `service_unavailable` |

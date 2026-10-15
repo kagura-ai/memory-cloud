@@ -23,6 +23,7 @@ paths:
 - Use async SQLAlchemy (`AsyncSession`) for all DB operations
 - Synchronous engine only for OAuth2 server (Authlib requirement)
 - Pool config: `pool_pre_ping=True`; size and wait come from Settings `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_POOL_TIMEOUT` (defaults 5 / 10 / 30), shared by the async and the sync OAuth2 engine (#1980)
+- Multi-row UPDATEs lock rows in id order via an ordered `FOR UPDATE` subquery (`MemoryRepository.bulk_update_access_stats`); row writes that are statistics belong after the read transaction commits, in an isolated session (#1985)
 
 ## Datetime / UTC
 
