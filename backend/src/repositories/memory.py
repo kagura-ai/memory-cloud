@@ -35,6 +35,13 @@ logger = get_logger(__name__)
 # ``UPDATE ... WHERE id = ANY(:ids)`` locks rows in whatever order the plan
 # visits them, so two concurrent recalls over overlapping pages could still
 # lock the same rows in opposite orders and deadlock (SQLSTATE 40P01).
+#
+# The access-stat statements add ``SKIP LOCKED``: statistics are best-effort,
+# so a row another transaction holds (a concurrent recall, or a Sleep run that
+# keeps its transaction open across passes) is simply not bumped this time. A
+# statement that never waits cannot be part of a deadlock cycle. The cost is
+# that ``access_count`` / ``last_used_at`` / ``accessed_by_clients`` can miss a
+# surfacing under contention.
 _IDS_PARAM = bindparam("ids", type_=PG_ARRAY(PG_UUID(as_uuid=True)))
 
 
@@ -52,7 +59,7 @@ _ACCESS_STATS_TAIL = (
     "ELSE array_append(COALESCE(m.accessed_by_clients, CAST('{}' AS VARCHAR[])), "
     "CAST(:client AS VARCHAR)) END "
     "FROM (SELECT id FROM memories WHERE id = ANY(:ids) AND deleted_at IS NULL "
-    "ORDER BY id FOR UPDATE) AS locked "
+    "ORDER BY id FOR UPDATE SKIP LOCKED) AS locked "
     "WHERE m.id = locked.id "
     "RETURNING m.id, m.access_count, m.reference_count, m.last_used_at, m.accessed_by_clients"
 )
@@ -66,13 +73,19 @@ ADOPTION_ACCESS_STATS_STATEMENT: TextClause = text(
     _ACCESS_STATS_HEAD + _ADOPTION_SET + _ACCESS_STATS_TAIL
 ).bindparams(_IDS_PARAM)
 
-# Working → persistent promotion (bound ``ids``, ``now``).
-PROMOTE_STATEMENT: TextClause = text(
+# Working → persistent promotion (bound ``ids``, ``now``). Sleep and the
+# legacy consolidation task are the authority and wait for their rows
+# (PROMOTE_STATEMENT); recall's opportunistic promotion never waits and leaves
+# a held row for a later recall or the next Sleep run (PROMOTE_SKIP_LOCKED).
+_PROMOTE_HEAD = (
     "UPDATE memories AS m SET scope = 'persistent', promoted_at = :now "
     "FROM (SELECT id FROM memories WHERE id = ANY(:ids) AND deleted_at IS NULL "
-    "AND scope <> 'persistent' ORDER BY id FOR UPDATE) AS locked "
-    "WHERE m.id = locked.id "
-    "RETURNING m.id, m.promoted_at"
+    "AND scope <> 'persistent' ORDER BY id FOR UPDATE"
+)
+_PROMOTE_TAIL = ") AS locked WHERE m.id = locked.id RETURNING m.id, m.promoted_at"
+PROMOTE_STATEMENT: TextClause = text(_PROMOTE_HEAD + _PROMOTE_TAIL).bindparams(_IDS_PARAM)
+PROMOTE_SKIP_LOCKED_STATEMENT: TextClause = text(
+    _PROMOTE_HEAD + " SKIP LOCKED" + _PROMOTE_TAIL
 ).bindparams(_IDS_PARAM)
 
 
@@ -359,10 +372,13 @@ class MemoryRepository(BaseRepository[Memory]):
     ) -> dict[UUID, int]:
         """Bump access statistics for several memories in one lock-ordered UPDATE.
 
-        Issue #1985: the rows are locked in ``id`` order (ordered ``FOR UPDATE``
-        subquery), so concurrent callers with overlapping id sets queue on the
-        lowest shared row instead of deadlocking. Soft-deleted and unknown ids
-        are skipped. Runs in the caller's transaction; the caller commits.
+        Issue #1985: the rows are locked in ``id`` order through an ordered
+        ``FOR UPDATE SKIP LOCKED`` subquery, so the statement never waits: a
+        row another transaction holds is left out (not bumped this time) and
+        missing from the result. Statistics are best-effort; never waiting is
+        what keeps this write out of every deadlock cycle. Soft-deleted and
+        unknown ids are skipped too. Runs in the caller's transaction; the
+        caller commits.
 
         Updates per row:
             - access_count += 1
@@ -379,7 +395,8 @@ class MemoryRepository(BaseRepository[Memory]):
             count_as_adoption: Also bump ``reference_count`` (#1046).
 
         Returns:
-            The new ``access_count`` of each updated memory, keyed by id.
+            The new ``access_count`` of each updated memory, keyed by id
+            (rows skipped as locked, deleted or unknown are absent).
         """
         ids = sorted(set(memory_ids))
         if not ids:
@@ -402,8 +419,16 @@ class MemoryRepository(BaseRepository[Memory]):
         )
         return counts
 
-    async def bulk_promote_to_persistent(self, memory_ids: Sequence[UUID]) -> list[UUID]:
+    async def bulk_promote_to_persistent(
+        self, memory_ids: Sequence[UUID], *, skip_locked: bool = False
+    ) -> list[UUID]:
         """Promote several working memories to persistent, locking rows in id order.
+
+        By default the statement waits for each row (Sleep and the legacy
+        consolidation task must not silently skip a promotion). With
+        ``skip_locked=True`` (recall's opportunistic promotion) a row another
+        transaction holds is left as is and absent from the result, so the
+        call never waits (#1985).
 
         Rows already persistent, soft-deleted or unknown are skipped. Runs in
         the caller's transaction; the caller commits and logs the promotion. A
@@ -412,6 +437,7 @@ class MemoryRepository(BaseRepository[Memory]):
 
         Args:
             memory_ids: Candidate memories.
+            skip_locked: Leave rows another transaction holds instead of waiting.
 
         Returns:
             The ids that were promoted, in id order.
@@ -419,7 +445,8 @@ class MemoryRepository(BaseRepository[Memory]):
         ids = sorted(set(memory_ids))
         if not ids:
             return []
-        result = await self.db.execute(PROMOTE_STATEMENT, {"ids": ids, "now": utcnow()})
+        statement = PROMOTE_SKIP_LOCKED_STATEMENT if skip_locked else PROMOTE_STATEMENT
+        result = await self.db.execute(statement, {"ids": ids, "now": utcnow()})
         promoted: list[UUID] = []
         for memory_id, promoted_at in result.all():
             promoted.append(memory_id)

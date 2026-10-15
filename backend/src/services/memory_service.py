@@ -4421,7 +4421,7 @@ class MemoryService:
                     for memory_id, count in counts.items()
                     if memory_id in rows and self._promotion_due(rows[memory_id], count, client)
                 ]
-                promoted = set(await repo.bulk_promote_to_persistent(due))
+                promoted = set(await repo.bulk_promote_to_persistent(due, skip_locked=True))
                 await stats_db.commit()
         except Exception as exc:  # noqa: BLE001 — the page is committed; never fail it
             # Any failure here (database, refused connection, or a bug) is

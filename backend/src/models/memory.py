@@ -225,6 +225,10 @@ class Memory(Base):
     # ``access_count`` counts *surfacing*: every recall top-k return + explore
     # spreading-activation hit + reference(). It is the signal Sleep
     # consolidation gates on today (unchanged by #1046).
+    # #1985: the bump (with last_used_at / accessed_by_clients, and
+    # reference_count for reference()) is best-effort — written with
+    # ``FOR UPDATE SKIP LOCKED``, so a surfacing that meets a row another
+    # transaction holds is not counted. Treat it as a lower bound.
     access_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Issue #1046: adoption signal — bumped ONLY by reference() (a deliberate
     # Layer-3 fetch), distinct from the surfacing-inflated ``access_count``. The

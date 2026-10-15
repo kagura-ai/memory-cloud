@@ -17,6 +17,7 @@ from models.memory import Memory
 from repositories.memory import (
     ACCESS_STATS_STATEMENT,
     ADOPTION_ACCESS_STATS_STATEMENT,
+    PROMOTE_SKIP_LOCKED_STATEMENT,
     PROMOTE_STATEMENT,
     MemoryRepository,
 )
@@ -50,7 +51,8 @@ class TestStatementShape:
     def test_access_stats_locks_rows_in_id_order(self, statement, count_as_adoption):
         sql = " ".join(str(statement).split())
 
-        assert "ORDER BY id FOR UPDATE" in sql
+        # #1985: ordered and never waiting — a held row is skipped.
+        assert "ORDER BY id FOR UPDATE SKIP LOCKED" in sql
         assert "id = ANY(:ids)" in sql
         assert "deleted_at IS NULL" in sql
         assert "WHERE m.id = locked.id" in sql
@@ -65,8 +67,12 @@ class TestStatementShape:
 
     def test_promotion_locks_rows_in_id_order(self):
         sql = " ".join(str(PROMOTE_STATEMENT).split())
+        skip_sql = " ".join(str(PROMOTE_SKIP_LOCKED_STATEMENT).split())
 
-        assert "ORDER BY id FOR UPDATE" in sql
+        # Sleep's promotion waits; recall's skips a held row.
+        assert "ORDER BY id FOR UPDATE)" in sql and "SKIP LOCKED" not in sql
+        assert "ORDER BY id FOR UPDATE SKIP LOCKED)" in skip_sql
+        assert skip_sql.replace(" SKIP LOCKED", "") == sql
         assert "scope <> 'persistent'" in sql
         assert "RETURNING m.id, m.promoted_at" in sql
 

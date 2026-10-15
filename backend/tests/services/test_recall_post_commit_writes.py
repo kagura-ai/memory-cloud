@@ -176,7 +176,7 @@ class TestRecordAccess:
         )
         # #1046: recall is surfacing, never adoption.
         assert repo.bulk_update_access_stats.await_args.kwargs == {}
-        repo.bulk_promote_to_persistent.assert_awaited_once_with([old.id])
+        repo.bulk_promote_to_persistent.assert_awaited_once_with([old.id], skip_locked=True)
         session.commit.assert_awaited_once()
         assert [r.scope for r in responses] == ["persistent", "working", "persistent"]
         service.db.commit.assert_not_awaited()
@@ -192,7 +192,7 @@ class TestRecordAccess:
         with patch("services.memory_service.MemoryRepository", return_value=repo):
             await service._recall_record_access([_response(memory)], {"a": memory}, client="claude")
 
-        repo.bulk_promote_to_persistent.assert_awaited_once_with([memory.id])
+        repo.bulk_promote_to_persistent.assert_awaited_once_with([memory.id], skip_locked=True)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
