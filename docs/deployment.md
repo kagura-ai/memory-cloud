@@ -1222,15 +1222,19 @@ Example: 100,000 memories at 2560 dimensions are 1.0 GiB as fp32 and
 ### How it is applied
 
 - A new collection is created with the configured layout.
-- At startup the API reconciles every existing `kagura_memories*` collection,
-  one at a time: it reads the collection config and sends one
-  `update_collection` only when the quantization or `on_disk` differ (log
-  line `collection_quantization_updated`). A collection that already matches
-  is left alone, so a restart with unchanged settings sends nothing. Setting
-  the values back to `none` / `false` is applied the same way. With
-  `UVICORN_WORKERS > 1` every worker runs the check; only the first finds a
-  difference. A collection whose quantization was set by hand to something
-  other than scalar int8 is skipped with `collection_dense_config_skipped`.
+- Right after startup the API reconciles every existing `kagura_memories*`
+  collection in a background task, one collection at a time: it reads the
+  collection config and sends one `update_collection` only when the
+  quantization or `on_disk` differ (log line `collection_dense_config_updated`
+  with the changed keys). A collection that already matches is left alone, so
+  a restart with unchanged settings sends nothing. Setting the values back to
+  `none` / `false` is applied the same way. With `UVICORN_WORKERS > 1` the
+  workers take a Postgres advisory lock for the pass, so they run it one
+  after another: the first converts, the others then read the converted
+  state and send nothing. A collection whose quantization was set by hand to
+  something other than scalar int8 kept in RAM is skipped with
+  `collection_dense_config_skipped`; an int8 config with `always_ram=false`
+  is treated as a mismatch and converted.
 - The same reconciliation runs when a context creates its collection
   (`ensure_kagura_memories_collection`), which also covers the target
   collection of an [embedding model migration](#embedding-model-migration--issue-1525).
@@ -1254,11 +1258,11 @@ QDRANT_DENSE_QUANTIZATION=int8
 QDRANT_DENSE_ON_DISK=true
 
 # 2. One log line per converted collection
-docker compose logs api | grep collection_quantization_updated
+docker compose logs api | grep collection_dense_config_updated
 
 # 3. Wait until every collection is green again (the optimizer is done)
 cd backend && uv run python scripts/check_qdrant_collections.py
-#   kagura_memories  status=green  points=...  dense: dims=2560 on_disk=True  quantization=int8
+#   kagura_memories  status=green  points=...  indexed=...  dense: dims=2560 on_disk=True  quantization=int8
 ```
 
 Rolling back: set the values back (or remove them) and restart. The

@@ -118,6 +118,14 @@ class TestDenseVectorConfig:
         assert settings.qdrant_dense_quantization == "int8"
         assert settings.qdrant_dense_on_disk is True
 
+    @pytest.mark.parametrize("raw", ["INT8", " int8 ", "Int8\n"])
+    def test_settings_normalise_case_and_whitespace(self, monkeypatch, raw):
+        """A compose .env line must not keep the API from booting (code review)."""
+        from config.settings import Settings
+
+        monkeypatch.setenv("QDRANT_DENSE_QUANTIZATION", raw)
+        assert Settings().qdrant_dense_quantization == "int8"
+
 
 class TestReadDenseState:
     def test_unset_collection(self):
@@ -134,6 +142,13 @@ class TestReadDenseState:
     def test_other_quantization_kinds(self):
         assert qmod._read_dense_state(_info(quantization=BINARY)).quantization == "other"
         assert qmod._read_dense_state(_info(dense_quantization=INT8)).quantization == "other"
+
+    def test_int8_with_always_ram_false_is_its_own_kind(self):
+        """always_ram is a bool and is compared; only the quantile float is not."""
+        served = ScalarQuantization(
+            scalar=ScalarQuantizationConfig(type=ScalarType.INT8, quantile=0.99, always_ram=False)
+        )
+        assert qmod._read_dense_state(_info(quantization=served)).quantization == "int8_on_disk"
 
     def test_anonymous_vectors_are_not_ours(self):
         assert qmod._read_dense_state(_info(named=False)) is None
@@ -232,6 +247,35 @@ class TestReconcile:
         assert await apply_dense_vector_config(KAGURA_MEMORIES_COLLECTION) is False
         mock_client.update_collection.assert_not_awaited()
 
+    async def test_int8_copy_on_disk_is_moved_back_to_ram(self, mock_client, dense_settings):
+        """Scalar int8 with always_ram=False does not match the layout the service promises."""
+        dense_settings("int8", True)
+        served = ScalarQuantization(
+            scalar=ScalarQuantizationConfig(type=ScalarType.INT8, quantile=0.99, always_ram=False)
+        )
+        mock_client.get_collection.return_value = _info(quantization=served, on_disk=True)
+
+        assert await apply_dense_vector_config(KAGURA_MEMORIES_COLLECTION) is True
+
+        kwargs = mock_client.update_collection.await_args.kwargs
+        assert kwargs["quantization_config"].scalar.always_ram is True
+        assert "vectors_config" not in kwargs
+
+    async def test_update_log_names_the_changed_keys(
+        self, mock_client, dense_settings, monkeypatch
+    ):
+        dense_settings("none", True)
+        mock_client.get_collection.return_value = _info()
+        events: list[dict] = []
+        monkeypatch.setattr(
+            qmod.logger, "info", lambda event, **kw: events.append({"event": event, **kw})
+        )
+
+        await apply_dense_vector_config(KAGURA_MEMORIES_COLLECTION)
+
+        assert events[-1]["event"] == "collection_dense_config_updated"
+        assert events[-1]["changed"] == ["vectors_config"]
+
     @pytest.mark.parametrize(
         "info",
         [_info(quantization=BINARY), _info(dense_quantization=INT8), _info(named=False)],
@@ -279,6 +323,23 @@ class TestEnsureExistingCollection:
         mock_client.create_collection.assert_not_awaited()
         mock_client.update_collection.assert_not_awaited()
         mock_client.create_payload_index.assert_not_awaited()
+
+    async def test_layout_update_failure_does_not_fail_ensure(
+        self, mock_client, dense_settings, monkeypatch
+    ):
+        """A usable collection stays usable: context creation must not fail on the layout (code review)."""
+        dense_settings("int8", True)
+        _existing(mock_client, _info())
+        mock_client.update_collection.side_effect = RuntimeError("403 read-only key")
+        warnings: list[dict] = []
+        monkeypatch.setattr(
+            qmod.logger, "warning", lambda event, **kw: warnings.append({"event": event, **kw})
+        )
+
+        await ensure_kagura_memories_collection()
+
+        assert [w["event"] for w in warnings] == ["collection_dense_config_apply_failed"]
+        mock_client.create_collection.assert_not_awaited()
 
 
 class TestStartupPass:

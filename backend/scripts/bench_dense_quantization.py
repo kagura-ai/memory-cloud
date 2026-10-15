@@ -157,6 +157,10 @@ async def main() -> None:
     parser.add_argument("--spread", type=float, default=0.5, help="noise around a cluster centre")
     parser.add_argument("--timeout", type=float, default=600.0, help="seconds to wait for green")
     args = parser.parse_args()
+    if args.queries < 1 or args.points < 1 or args.k < 1:
+        parser.error("--points, --queries and --k must be at least 1")
+    if args.k > args.points:
+        parser.error("--k must not exceed --points (overlap@k divides by k)")
 
     rng = np.random.default_rng(args.seed)
     vectors = _corpus(rng, args.points, args.dims, args.clusters, args.spread)

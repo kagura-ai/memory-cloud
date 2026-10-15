@@ -629,6 +629,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    @field_validator("qdrant_dense_quantization", mode="before")
+    @classmethod
+    def _normalize_dense_quantization(cls, v: object) -> object:
+        """Trim and lower-case the value; the ``Literal`` does the refusing.
+
+        ``INT8`` or ``int8 `` from a compose ``.env`` line must not keep the
+        API from booting over a storage-layout knob.
+        """
+        return v.strip().lower() if isinstance(v, str) else v
+
     # Vector backend selection ("Kagura Lite" — embedded LanceDB backend).
     # Default "qdrant" preserves the server behavior exactly. "lance" routes
     # all vector ops through the in-process LanceDB store (db/lance_store.py),

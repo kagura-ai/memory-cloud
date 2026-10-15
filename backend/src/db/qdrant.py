@@ -120,9 +120,11 @@ class DenseVectorConfig:
 class DenseVectorState:
     """What the server reports for a collection's ``dense`` vector.
 
-    ``quantization`` is ``"none"``, ``"int8"`` or ``"other"`` (a product,
-    binary or per-vector quantization set outside this service, which the
-    reconciler leaves alone).
+    ``quantization`` is ``"none"``, ``"int8"`` (scalar int8 kept in RAM, the
+    layout this service writes), ``"int8_on_disk"`` (scalar int8 with
+    ``always_ram=False``, reconciled like a mismatch) or ``"other"`` (a
+    product, binary or per-vector quantization set outside this service,
+    which the reconciler leaves alone).
     """
 
     quantization: str
@@ -186,8 +188,14 @@ def _read_dense_state(info: Any) -> DenseVectorState | None:
     elif quantization is None:
         kind = "none"
     else:
-        scalar_type = getattr(getattr(quantization, "scalar", None), "type", None)
-        kind = "int8" if str(getattr(scalar_type, "value", scalar_type)) == "int8" else "other"
+        scalar = getattr(quantization, "scalar", None)
+        scalar_type = getattr(scalar, "type", None)
+        if str(getattr(scalar_type, "value", scalar_type)) != "int8":
+            kind = "other"
+        elif getattr(scalar, "always_ram", None):
+            kind = "int8"
+        else:
+            kind = "int8_on_disk"
     return DenseVectorState(quantization=kind, on_disk=bool(getattr(dense, "on_disk", None)))
 
 
@@ -237,8 +245,9 @@ async def _apply_dense_vector_config(
 
     await client.update_collection(collection_name=collection_name, **changes)
     logger.info(
-        "collection_quantization_updated",
+        "collection_dense_config_updated",
         collection=collection_name,
+        changed=sorted(changes),
         quantization=config.quantization,
         on_disk=config.on_disk,
         previous_quantization=state.quantization,
@@ -273,6 +282,11 @@ async def apply_dense_vector_config_to_all() -> dict[str, bool]:
     peak. A collection that fails is logged and skipped; the others still
     get their turn. Returns ``{collection: changed}``. Raises when the
     collection list itself cannot be read.
+
+    Across API workers the pass is serialised by
+    :func:`tasks.dense_vector_config.run_dense_vector_config_reconcile`
+    (Postgres advisory lock), so a multi-worker deployment converts each
+    collection once; call this directly only from one process.
     """
     config = DenseVectorConfig.from_settings()
     if _active_store() is not None:
@@ -1108,9 +1122,18 @@ async def ensure_kagura_memories_collection(
             if has_sparse:
                 # #1990: reconcile the dense vector layout (quantization,
                 # on_disk) with the settings before the index retrofits.
-                await _apply_dense_vector_config(
-                    client, collection_name, DenseVectorConfig.from_settings(), info=info
-                )
+                # Best-effort: the collection is usable as it is, and the
+                # startup pass retries the layout on the next boot.
+                try:
+                    await _apply_dense_vector_config(
+                        client, collection_name, DenseVectorConfig.from_settings(), info=info
+                    )
+                except Exception as e:  # noqa: BLE001 — layout is not a reason to fail create
+                    logger.warning(
+                        "collection_dense_config_apply_failed",
+                        collection=collection_name,
+                        error=str(e),
+                    )
                 # Collection is up-to-date, ensure late-added indexes
                 existing_fields = set(info.payload_schema.keys()) if info.payload_schema else set()
                 if "tags" not in existing_fields:

@@ -95,17 +95,6 @@ async def lifespan(app: FastAPI):
         except Exception as e:  # noqa: BLE001 — startup must not die on a pricing sync
             logger.error("llm_pricing_overrides_sync_failed", error=str(e))
 
-    # #1990: reconcile every kagura_memories* collection with the configured
-    # dense vector layout (int8 quantization, on-disk originals). Idempotent
-    # and sequential; a Qdrant that is down is the readiness probe's business,
-    # not a reason to refuse to boot.
-    from db.qdrant import apply_dense_vector_config_to_all
-
-    try:
-        await apply_dense_vector_config_to_all()
-    except Exception as e:  # noqa: BLE001 — startup must not die on the vector store
-        logger.warning("dense_vector_config_apply_failed", error=str(e))
-
     # Start background task scheduler — in ONE process of the deployment
     # (#1980). With UVICORN_WORKERS > 1 every worker runs this lifespan; the
     # Postgres advisory-lock leader registers the jobs and starts APScheduler,
@@ -140,6 +129,14 @@ async def lifespan(app: FastAPI):
 
     app.state.geo_backfill_task = asyncio.create_task(run_location_payload_backfill())
 
+    # #1990: reconcile every kagura_memories* collection with the configured
+    # dense vector layout (int8 quantization, on-disk originals). Background
+    # task so a slow Qdrant delays nothing at boot; one worker at a time
+    # under a Postgres advisory lock so N workers send one update, not N.
+    from tasks.dense_vector_config import run_dense_vector_config_reconcile
+
+    app.state.dense_vector_config_task = asyncio.create_task(run_dense_vector_config_reconcile())
+
     logger.info("application_started")
 
     yield
@@ -157,6 +154,16 @@ async def lifespan(app: FastAPI):
             await backfill_task
         except asyncio.CancelledError:
             logger.info("geo_payload_backfill_cancelled_on_shutdown")
+
+    # Stop the dense layout reconcile pass if it is still waiting on the
+    # lock or on Qdrant (#1990): it holds a pooled DB session.
+    dense_task = getattr(app.state, "dense_vector_config_task", None)
+    if dense_task is not None and not dense_task.done():
+        dense_task.cancel()
+        try:
+            await dense_task
+        except asyncio.CancelledError:
+            logger.info("dense_vector_config_cancelled_on_shutdown")
 
     # Stop this worker's MCP session cleanup loop (#1980).
     cleanup_task = getattr(app.state, "mcp_session_cleanup_task", None)
