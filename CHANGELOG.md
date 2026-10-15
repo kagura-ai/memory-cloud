@@ -4,6 +4,16 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.106.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.106.0) — 2026-10-15
+
+The dense vectors in Qdrant can be stored as int8 with the fp32 originals on disk, cutting the RAM a single-server deployment needs per memory to about a quarter; existing collections are converted in place at startup.
+
+### Added
+- **Dense vector quantization and on-disk storage** ([#1990](https://github.com/kagura-ai/memory-cloud/issues/1990)): `QDRANT_DENSE_QUANTIZATION=int8` keeps a scalar-quantized (1 byte per dimension) copy of each memory's dense vector in RAM for the search and rescores the candidates against the fp32 originals (oversampling 2.0), so the ranking stays within Qdrant's documented <1% recall loss; `QDRANT_DENSE_ON_DISK=true` stores those originals as memory-mapped files instead of RAM. Both default to the historical fp32-in-RAM layout. A new collection is created with the configured layout; right after startup the API reconciles every existing `kagura_memories*` collection in a background task, one at a time and one worker at a time (Postgres advisory lock), sending one `update_collection` only where the layout differs (`collection_dense_config_updated`) — nothing is re-embedded or re-created, in either direction. `docs/deployment.md` has the RAM formula (`points × dimensions × 4 B` fp32, `× 1 B` int8), the conversion's transient RAM and disk peak while the optimizer rebuilds segments, and the rollback; `backend/scripts/check_qdrant_collections.py` prints each collection's status and layout, `backend/scripts/bench_dense_quantization.py` measures the effect on a throwaway collection (on a 20,000 × 2560 clustered corpus int8 with rescore returned the fp32 top-10 exactly, at about +3 ms p50).
+
+### Notes
+- No migration. New environment variables, both optional with unchanged defaults: `QDRANT_DENSE_QUANTIZATION` (`none` | `int8`) and `QDRANT_DENSE_ON_DISK`. Operators turning int8 on for an existing deployment should do so while the host still has free RAM and in a maintenance window: until the optimizer swaps the rebuilt segments, old and new coexist. The LanceDB backend ignores both settings (`dense_vector_config_ignored`). New log events: `collection_dense_config_updated`, `collection_dense_config_skipped` (a collection quantized outside the service is left alone), `collection_dense_config_apply_failed`, `dense_vector_config_reconciled`.
+
 ## [v0.105.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.105.0) — 2026-10-15
 
 Concurrent recalls no longer deadlock: the access statistics and the Hebbian learning a recall records are written after the read commits, in id-ordered statements that never wait on another transaction's row.
