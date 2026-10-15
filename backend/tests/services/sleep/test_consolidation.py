@@ -79,7 +79,7 @@ async def _run_execute(
     assert absolute promote/delete rates via result.details + promote/delete calls.
     """
     phase._fetch_working_memories = AsyncMock(return_value=memories)
-    phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
+    phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
     phase.memory_repo.soft_delete = AsyncMock(return_value=soft_delete_rows)
     config = _make_config(provider="")  # LLM off → borderline memories stay put
     budget = SleepBudget()
@@ -525,7 +525,7 @@ class TestLLMArchivalEligibilityGuard:
 
     async def _run_llm_archive(self, phase, memory, *, cutoff):
         phase._fetch_working_memories = AsyncMock(return_value=[memory])
-        phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
+        phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         phase.memory_repo.soft_delete = AsyncMock(return_value=1)
         phase._llm_judge_batch = AsyncMock(return_value={memory.id: "archive"})
         config = _make_config()  # LLM on

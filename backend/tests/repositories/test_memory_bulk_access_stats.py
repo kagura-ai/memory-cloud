@@ -89,7 +89,7 @@ class TestBulkAccessStats:
         await db_session.commit()
         repo = MemoryRepository(db_session)
 
-        counts = await repo.bulk_update_access_stats([second.id, first.id], client="api")
+        await repo.bulk_update_access_stats([second.id, first.id], client="api")
         counts = await repo.bulk_update_access_stats([first.id, second.id], client="api")
         await db_session.commit()
 

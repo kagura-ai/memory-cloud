@@ -90,7 +90,7 @@ def _build_phase(memories):
     with patch("services.sleep.consolidation.MemoryRepository"):
         phase = ConsolidationPhase(db, llm)
     phase.memory_repo = AsyncMock()
-    phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
+    phase.memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
     phase.memory_repo.soft_delete = AsyncMock(return_value=1)
     phase._fetch_working_memories = AsyncMock(return_value=memories)
     return phase, llm

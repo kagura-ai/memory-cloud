@@ -225,7 +225,7 @@ class TestConsolidationTask:
         frequent_memory = _make_memory(access_count=5, importance=0.1, age_days=1)
         mock_memory_repo = MagicMock()
         mock_memory_repo.list = AsyncMock(return_value=[frequent_memory])
-        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
+        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         mock_memory_repo.delete = AsyncMock()
 
         with (
@@ -251,7 +251,7 @@ class TestConsolidationTask:
         old_memory = _make_memory(access_count=0, importance=0.0, age_days=45)
         mock_memory_repo = MagicMock()
         mock_memory_repo.list = AsyncMock(return_value=[old_memory])
-        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
+        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         mock_memory_repo.delete = AsyncMock()
 
         with (
@@ -282,7 +282,7 @@ class TestConsolidationTask:
         pinned.is_pinned = True
         mock_memory_repo = MagicMock()
         mock_memory_repo.list = AsyncMock(return_value=[pinned])
-        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
+        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         mock_memory_repo.delete = AsyncMock()
 
         with (
@@ -313,7 +313,7 @@ class TestConsolidationTask:
         guardrail.is_tool_triggered = True
         mock_memory_repo = MagicMock()
         mock_memory_repo.list = AsyncMock(return_value=[guardrail])
-        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
+        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         mock_memory_repo.delete = AsyncMock()
 
         with (
@@ -341,7 +341,7 @@ class TestConsolidationTask:
         idle_memory = _make_memory(access_count=0, importance=0.0, age_days=1)
         mock_memory_repo = MagicMock()
         mock_memory_repo.list = AsyncMock(return_value=[idle_memory])
-        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=lambda ids: list(ids))
+        mock_memory_repo.bulk_promote_to_persistent = AsyncMock(side_effect=list)
         mock_memory_repo.delete = AsyncMock()
 
         with (
