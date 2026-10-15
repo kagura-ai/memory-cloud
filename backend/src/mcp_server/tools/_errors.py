@@ -38,6 +38,7 @@ from qdrant_client.http.exceptions import ResponseHandlingException
 from sqlalchemy import exc as sa_exc
 
 from mcp_server.tools._helpers import ToolErrorContent, _ContextNotFoundError, _error_response
+from utils.db_helpers import is_deadlock
 from utils.exceptions import (
     AdminProtectionError,
     AuthorizationError,
@@ -49,7 +50,6 @@ from utils.exceptions import (
     QuotaExceededError,
     RateLimitError,
 )
-from utils.db_helpers import is_deadlock
 from utils.geo_location import LocationValidationError
 from utils.logger import get_logger
 from utils.time_trigger import TriggerValidationError
