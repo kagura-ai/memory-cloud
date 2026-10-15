@@ -2132,8 +2132,12 @@ Each worker is a full, independent process:
   (`REDIS_MAX_CONNECTIONS` is per worker, see below). The DB pool size per
   engine is `DB_POOL_SIZE + DB_MAX_OVERFLOW` (Issue #1978).
 - **Its own in-process caches.** The LLM price cache (`llm_pricing_service`),
-  the tag vocabulary `TTLCache` (`tag_resolution`) and the MCP rate-limit
-  settings cache (`_RATE_LIMIT_CACHE`) are per process. They are caches over
+  the tag vocabulary `TTLCache` (`tag_resolution`), the MCP rate-limit
+  settings cache (`_RATE_LIMIT_CACHE`, 60 s) and the MCP capacity-gate
+  "not a candidate" cache (`_NOT_CANDIDATE_CACHE`, 30 s) are per process.
+  The two MCP caches are judgement caches: a workspace that has just hit
+  its limit can pass on each worker until that worker's cached entry
+  expires, so the admit window after a limit grows with the worker count. They are caches over
   Postgres / Redis, which stay the source of truth, so N copies only lower the
   hit rate; nothing becomes inconsistent.
 - **Known limit: legacy MCP sessions are per process.** The session table of
