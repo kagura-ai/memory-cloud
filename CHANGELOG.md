@@ -4,6 +4,21 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.104.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.104.0) — 2026-10-15
+
+Scaling the API past one process: the PostgreSQL pool is configurable and tells pool exhaustion apart from an outage, the single-server deployment can run several uvicorn workers with a right-sized Postgres, and the background scheduler runs on exactly one of them.
+
+### Added
+- **Configurable PostgreSQL connection pool** ([#1980](https://github.com/kagura-ai/memory-cloud/issues/1980)): `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_POOL_TIMEOUT` size both SQLAlchemy engines (the async application engine and the sync OAuth2 engine); the defaults stay 5 / 10 / 30. A production bench had exhausted the fixed 15-connection pool at concurrency 8. The API logs `database_pool_below_fanout` when the configured pool is smaller than the 15 connections the analysis labeler assumes.
+- **Several API workers per container and a Postgres `max_connections` knob** ([#1980](https://github.com/kagura-ai/memory-cloud/issues/1980)): the single-server compose files start the API with `--workers ${UVICORN_WORKERS:-1}` and Postgres with `max_connections=${POSTGRES_MAX_CONNECTIONS:-100}`; both default to today's values. `docs/deployment.md` "Multiple API workers and Postgres connections" has the sizing rule (`UVICORN_WORKERS × 2 × (DB_POOL_SIZE + DB_MAX_OVERFLOW)` per color, doubled during a blue/green switch), the rollout order and the known limits with several workers.
+- **One scheduler per deployment** ([#1980](https://github.com/kagura-ai/memory-cloud/issues/1980)): every API process used to start its own APScheduler, so several workers would have run the cron jobs several times. The process that holds the Postgres advisory lock `apscheduler_leader` now runs the scheduler (`scheduler_leader_acquired`); the others stand by (`scheduler_leader_standby`) and take over within `SCHEDULER_LEADER_RETRY_SECONDS` (default 60) when it exits. Startup no longer waits on Postgres for the scheduler.
+
+### Changed
+- **`503 DB-002` carries `details.reason`** ([#1980](https://github.com/kagura-ai/memory-cloud/issues/1980)): `pool_exhausted` (the pool checkout timed out), `connection_refused` (the database did not accept the connection) or `database_error` (any other SQLAlchemy failure). Code, status, message and `Retry-After: 5` are unchanged; the `database_error` log event carries the same `reason`. The MCP envelope and a REST request whose OAuth Bearer lookup itself hits the exhausted pool (#1981) do not carry it.
+
+### Notes
+- No migration. New environment variables, all optional with unchanged defaults: `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT`, `SCHEDULER_LEADER_RETRY_SECONDS` (application) and `UVICORN_WORKERS`, `POSTGRES_MAX_CONNECTIONS` (single-server compose). Operators: raise `POSTGRES_MAX_CONNECTIONS` (a Postgres restart) before `UVICORN_WORKERS`; on a split host the Postgres `command:` line is carried to the data host by hand. With `UVICORN_WORKERS > 1`, legacy-era MCP sessions (the `initialize` handshake) and the MCP judgement caches are per worker; the stateless protocol revision is unaffected.
+
 ## [v0.103.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.103.0) — 2026-10-14
 
 Context lifecycle tools on the default MCP URL, and a per-workspace add-on for the daily memory-creation limit.
