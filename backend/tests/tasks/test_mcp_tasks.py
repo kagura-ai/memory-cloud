@@ -32,7 +32,7 @@ async def test_local_cleanup_runs_on_its_interval_and_stops_on_cancel():
         assert cleanup.await_count >= 3
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            assert await task is None
         count = cleanup.await_count
         await asyncio.sleep(0.05)
     assert task.cancelled()
@@ -48,7 +48,7 @@ async def test_local_cleanup_survives_a_failing_run():
         assert not task.done()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            assert await task is None
 
 
 @pytest.mark.asyncio
@@ -57,7 +57,7 @@ async def test_interval_defaults_to_the_env_var(monkeypatch):
     loop = AsyncMock()
     with patch.object(mcp_tasks, "_session_cleanup_loop", loop):
         task = mcp_tasks.start_local_session_cleanup()
-        await task
+        assert await task is None
     loop.assert_awaited_once_with(3600)
 
 

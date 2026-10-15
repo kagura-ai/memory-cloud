@@ -554,6 +554,22 @@ class Settings(BaseSettings):
         description="Seconds a request waits for a free pooled PostgreSQL connection (Issue #1980)",
     )
 
+    @model_validator(mode="after")
+    def _db_pool_leaves_a_request_connection(self) -> "Settings":
+        """Refuse a pool the scheduler leader would fill on its own (#1980).
+
+        The leader holds one pooled connection for the process lifetime, so a
+        pool of exactly one connection (``DB_POOL_SIZE=1``, ``DB_MAX_OVERFLOW=0``)
+        would leave requests and ``/readiness`` waiting on it forever once this
+        process becomes leader.
+        """
+        if self.db_pool_size + self.db_max_overflow < 2:
+            raise ValueError(
+                "DB_POOL_SIZE + DB_MAX_OVERFLOW must be at least 2: the scheduler "
+                "leader keeps one pooled connection, requests need another"
+            )
+        return self
+
     # API Settings
     api_host: str = Field(default="0.0.0.0", description="API host")
     api_port: int = Field(default=8080, description="API port")
