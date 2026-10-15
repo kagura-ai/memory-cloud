@@ -23,7 +23,7 @@ paths:
 - Use async SQLAlchemy (`AsyncSession`) for all DB operations
 - Synchronous engine only for OAuth2 server (Authlib requirement)
 - Pool config: `pool_pre_ping=True`; size and wait come from Settings `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_POOL_TIMEOUT` (defaults 5 / 10 / 30), shared by the async and the sync OAuth2 engine (#1980)
-- Multi-row UPDATEs lock rows in id order via an ordered `FOR UPDATE` subquery (`MemoryRepository.bulk_update_access_stats`); row writes that are statistics belong after the read transaction commits, in an isolated session, and use `SKIP LOCKED` so they never wait (a bump can be skipped under contention). Writes to a user's `neural_memory_edges` take the `hebbian:<user_id>` transaction advisory lock first (`db/graph_learning_lock.py`) (#1985)
+- Multi-row UPDATEs lock rows in id order via an ordered `FOR UPDATE` subquery (`MemoryRepository.bulk_update_access_stats`); row writes that are statistics belong after the read transaction commits, in an isolated session, and use `SKIP LOCKED` so they never wait (a bump can be skipped under contention). Writes to a user's `neural_memory_edges` take the `hebbian:<user_id>` transaction advisory lock first (`db/graph_learning_lock.py`; recall try-locks and skips, the batch tasks and the Sleep orchestrator wait and hold it for their run) (#1985)
 
 ## Datetime / UTC
 

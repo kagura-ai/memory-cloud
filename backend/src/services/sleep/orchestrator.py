@@ -19,6 +19,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from db.graph_learning_lock import lock_graph_learning
 from models.auth import Context, Workspace
 from models.sleep import SleepReport
 from neural.config import NeuralMemoryConfig
@@ -115,6 +116,12 @@ class SleepOrchestrator:
             allowed_phases = RETENTION_PHASES
         else:
             allowed_phases = FULL_PHASES
+
+        # #1985: no learning while asleep. The phases share this transaction
+        # (the caller commits after run()), so the graph learning lock taken
+        # here holds until then: a live recall learning pass for this user is
+        # skipped, and this waits only for a pass already running.
+        await lock_graph_learning(self.db, user_id)
 
         # Get context's embedding model and Qdrant collection name
         embedding_model, collection_name = await self._get_context_embedding_info(context_id)

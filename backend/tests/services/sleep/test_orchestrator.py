@@ -103,6 +103,43 @@ class TestSleepOrchestrator:
         reporter.complete_report.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_takes_the_graph_learning_lock_before_the_first_phase(self, mock_db):
+        """#1985: Sleep holds the user's graph learning lock for its whole
+        transaction, taken before any phase runs."""
+        config = _make_config()
+        events: list[str] = []
+
+        async def lock(db, user_id):
+            events.append(f"lock:{user_id}")
+
+        with (
+            patch("services.sleep.orchestrator.LLMService"),
+            patch("services.sleep.orchestrator.SleepReporter") as MockReporter,
+            patch("services.sleep.orchestrator.EdgeDiscoveryPhase") as MockED,
+            patch("services.sleep.orchestrator.DedupMergePhase"),
+            patch("services.sleep.orchestrator.ImportanceReevalPhase"),
+            patch("services.sleep.orchestrator.ConsolidationPhase"),
+            patch("services.sleep.orchestrator.ReindexPhase"),
+            patch("services.sleep.orchestrator.lock_graph_learning", side_effect=lock) as locked,
+        ):
+            reporter = AsyncMock()
+            reporter.create_report = AsyncMock(return_value=MagicMock(id=uuid4()))
+            MockReporter.return_value = reporter
+
+            async def first_phase(*args, **kwargs):
+                events.append("edge_discovery")
+                return PhaseResult(phase_name="edge_discovery")
+
+            MockED.return_value.execute = first_phase
+
+            orchestrator = SleepOrchestrator(mock_db)
+            orchestrator._get_sleep_mode = AsyncMock(return_value="edges_only")
+            await orchestrator.run("user-1", "ws-1", "ctx-1", config=config)
+
+        locked.assert_awaited_once_with(mock_db, "user-1")
+        assert events[:2] == ["lock:user-1", "edge_discovery"]
+
+    @pytest.mark.asyncio
     async def test_phase_failure_doesnt_stop_others(self, mock_db):
         """If one phase fails, subsequent phases still execute."""
         config = _make_config()
