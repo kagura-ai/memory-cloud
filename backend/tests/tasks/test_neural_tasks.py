@@ -90,6 +90,7 @@ class TestWeightDecayTask:
 
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
+        mock_db.execute = AsyncMock()  # #1985 graph learning lock
 
         graph = _make_graph()
         mock_graph_repo = MagicMock()
@@ -126,6 +127,7 @@ class TestWeightDecayTask:
 
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
+        mock_db.execute = AsyncMock()  # #1985 graph learning lock
 
         graph = _make_graph()
         mock_graph_repo = MagicMock()
@@ -152,6 +154,40 @@ class TestWeightDecayTask:
         assert graph.updated_at is not None
 
     @pytest.mark.asyncio
+    async def test_takes_each_graph_lock_in_user_order(self, monkeypatch):
+        """#1985: each user's edge writes run under the graph learning lock,
+        taken in user_id order so two batch tasks cannot lock users in opposite
+        orders."""
+        monkeypatch.setenv("ENABLE_NEURAL_MEMORY", "true")
+        monkeypatch.setenv("ENABLE_DECAY", "true")
+        mock_db = MagicMock()
+        mock_db.commit = AsyncMock()
+        mock_graph_repo = MagicMock()
+        mock_graph_repo.list = AsyncMock(
+            return_value=[_make_graph("user-b"), _make_graph("user-a")]
+        )
+        mock_decay_manager = MagicMock()
+        mock_decay_manager.apply_decay = AsyncMock(return_value={"edges_decayed": 0})
+        lock = AsyncMock()
+
+        with (
+            patch("tasks.neural_tasks.get_db", mock_get_db_factory(mock_db)),
+            patch("tasks.neural_tasks.GraphRepository", return_value=mock_graph_repo),
+            patch(
+                "tasks.neural_tasks.NeuralMemoryConfig.from_db", AsyncMock(return_value=MagicMock())
+            ),
+            patch("tasks.neural_tasks.GraphService", return_value=MagicMock()),
+            patch("tasks.neural_tasks.DecayManager", return_value=mock_decay_manager),
+            patch("tasks.neural_tasks.lock_graph_learning", lock),
+        ):
+            await weight_decay_task()
+
+        assert [c.args for c in lock.await_args_list] == [
+            (mock_db, "user-a"),
+            (mock_db, "user-b"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_skips_timestamp_update_when_no_edges_decayed(self, monkeypatch):
         """When edges_decayed == 0, last_decay_at is not refreshed."""
         monkeypatch.setenv("ENABLE_NEURAL_MEMORY", "true")
@@ -159,6 +195,7 @@ class TestWeightDecayTask:
 
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
+        mock_db.execute = AsyncMock()  # #1985 graph learning lock
 
         graph = _make_graph()
         mock_graph_repo = MagicMock()
@@ -195,6 +232,7 @@ class TestConsolidationTask:
         the methods are not called."""
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
+        mock_db.execute = AsyncMock()  # #1985 graph learning lock
 
         mock_graph_repo = MagicMock()
         mock_graph_repo.list = AsyncMock(return_value=[_make_graph()])
@@ -216,6 +254,7 @@ class TestConsolidationTask:
         """Promotion criteria still fire on memory-only signals (Issue #1 patterns)."""
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
+        mock_db.execute = AsyncMock()  # #1985 graph learning lock
 
         graph = _make_graph()
         mock_graph_repo = MagicMock()
@@ -243,6 +282,7 @@ class TestConsolidationTask:
         """Deletion criteria still fire on memory-only signals (age>=30 + access_count==0)."""
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
+        mock_db.execute = AsyncMock()  # #1985 graph learning lock
 
         graph = _make_graph()
         mock_graph_repo = MagicMock()
@@ -273,6 +313,7 @@ class TestConsolidationTask:
         deletion is skipped — same exemption as the Sleep phases."""
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
+        mock_db.execute = AsyncMock()  # #1985 graph learning lock
 
         graph = _make_graph()
         mock_graph_repo = MagicMock()
@@ -304,6 +345,7 @@ class TestConsolidationTask:
         qualifies for deletion is skipped."""
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
+        mock_db.execute = AsyncMock()  # #1985 graph learning lock
 
         graph = _make_graph()
         mock_graph_repo = MagicMock()
@@ -333,6 +375,7 @@ class TestConsolidationTask:
         """A young, unused, unimportant memory is neither promoted nor deleted."""
         mock_db = MagicMock()
         mock_db.commit = AsyncMock()
+        mock_db.execute = AsyncMock()  # #1985 graph learning lock
 
         graph = _make_graph()
         mock_graph_repo = MagicMock()

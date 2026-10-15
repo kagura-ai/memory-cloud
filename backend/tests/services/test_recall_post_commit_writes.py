@@ -279,3 +279,57 @@ class TestIsolatedSession:
             await isolated.close()
         finally:
             await engine.dispose()
+
+
+class TestHebbianLearningLock:
+    """#1985: one learning pass per graph owner; a busy owner is skipped."""
+
+    async def _learn(self, service: MemoryService, graph_db: MagicMock) -> None:
+        await service._recall_learn_on_session(
+            graph_db,
+            RecallRequest(query="q", k=5),
+            [],
+            {},
+            user_id="u",
+            current_context_id=uuid4(),
+            effective_workspace_id=uuid4(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_busy_owner_skips_without_touching_the_graph(self, service):
+        graph_db = MagicMock(spec=AsyncSession)
+        config = AsyncMock()
+        with (
+            patch(
+                "services.memory_service.try_lock_graph_learning",
+                AsyncMock(return_value=False),
+            ) as lock,
+            patch("neural.config.NeuralMemoryConfig.from_db", config),
+            patch("services.memory_service.logger") as logger,
+        ):
+            await self._learn(service, graph_db)
+
+        lock.assert_awaited_once_with(graph_db, "u")
+        config.assert_not_awaited()
+        graph_db.execute.assert_not_called()
+        logger.info.assert_called_once_with("hebbian_update_skipped_busy", user_id="u")
+
+    @pytest.mark.asyncio
+    async def test_free_owner_runs_the_pass(self, service):
+        graph_db = MagicMock(spec=AsyncSession)
+
+        class _Reached(Exception):
+            pass
+
+        async def stop(*args, **kwargs):
+            raise _Reached
+
+        with (
+            patch(
+                "services.memory_service.try_lock_graph_learning",
+                AsyncMock(return_value=True),
+            ),
+            patch("neural.config.NeuralMemoryConfig.from_db", AsyncMock(side_effect=stop)),
+            pytest.raises(_Reached),
+        ):
+            await self._learn(service, graph_db)

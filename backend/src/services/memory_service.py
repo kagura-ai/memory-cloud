@@ -23,6 +23,7 @@ from sqlalchemy import ColumnElement, and_, exists, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from config.retention import should_promote_to_persistent
+from db.graph_learning_lock import try_lock_graph_learning
 from db.qdrant import (
     add_memory_to_qdrant,
     delete_memory_from_qdrant,
@@ -4513,6 +4514,13 @@ class MemoryService:
         from neural.models import ActivationState, NeuralMemoryNode
         from repositories.graph import GraphRepository
         from services.graph_service import GraphService
+
+        # #1985: one learning pass per graph owner at a time. Apply and prune
+        # are two phases, so no per-phase sort gives concurrent passes one lock
+        # order; a pass that finds another running is skipped, not queued.
+        if not await try_lock_graph_learning(graph_db, user_id):
+            logger.info("hebbian_update_skipped_busy", user_id=user_id)
+            return
 
         config = await NeuralMemoryConfig.from_db(graph_db)
         graph_repo = GraphRepository(graph_db)

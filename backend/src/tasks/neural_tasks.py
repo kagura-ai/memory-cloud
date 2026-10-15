@@ -17,6 +17,7 @@ from config.constants import (
     CLEANUP_TOMBSTONE_RETENTION_DAYS_ENV,
 )
 from db.base import get_db
+from db.graph_learning_lock import lock_graph_learning
 from neural.config import NeuralMemoryConfig
 from neural.decay import DecayManager
 from repositories.graph import GraphRepository
@@ -65,8 +66,11 @@ async def weight_decay_task():
             graphs = await graph_repo.list(skip=0, limit=1000)
             total_updated = 0
 
-            for graph_model in graphs:
+            # #1985: users in a fixed order, each graph's edge writes under the
+            # graph learning lock so a live recall pass never interleaves.
+            for graph_model in sorted(graphs, key=lambda g: g.user_id):
                 user_id = graph_model.user_id
+                await lock_graph_learning(db, user_id)
 
                 graph_service = GraphService(user_id, db)
 
@@ -157,7 +161,10 @@ async def consolidation_task():
             total_promoted = 0
             total_deleted = 0
 
-            for user_id in user_ids:
+            for user_id in sorted(user_ids):
+                # #1985: deleting a memory cascades to its edge rows; take the
+                # graph learning lock first (users in a fixed order).
+                await lock_graph_learning(db, user_id)
                 # Get working memories
                 working_memories = await memory_repo.list(
                     filters={"user_id": user_id, "scope": "working"}
