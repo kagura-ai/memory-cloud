@@ -79,10 +79,6 @@ def test_unlimited_values_are_rejected(
         settings_module.Settings()
 
 
-@pytest.mark.parametrize(
-    ("pool_size", "max_overflow", "warns"),
-    [(5, 10, False), (5, 9, True), (15, 0, False), (1, 0, True)],
-)
 def test_single_connection_pool_is_rejected(fresh_engines: pytest.MonkeyPatch) -> None:
     """The scheduler leader holds one pooled connection for life (#1980); a pool of
     one would starve every request once this process leads."""
@@ -97,6 +93,10 @@ def test_single_connection_pool_is_rejected(fresh_engines: pytest.MonkeyPatch) -
     assert _pool_values(db_base._get_engine()) == (1, 1, 30.0)
 
 
+@pytest.mark.parametrize(
+    ("pool_size", "max_overflow", "warns"),
+    [(5, 10, False), (5, 9, True), (15, 0, False), (1, 0, True)],
+)
 def test_fanout_floor_warning(
     monkeypatch: pytest.MonkeyPatch, pool_size: int, max_overflow: int, warns: bool
 ) -> None:
