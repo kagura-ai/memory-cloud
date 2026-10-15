@@ -1194,6 +1194,88 @@ instance from the global `STORAGE_*` settings; per-workspace BYO would move
 construction behind a workspace-scoped credential lookup. Recorded here as a
 seam only — no implementation in #994.
 
+## Qdrant dense vector quantization and on-disk storage — Issue #1990
+
+The `dense` named vector of every `kagura_memories*` collection is stored as
+fp32 in RAM by default. On a single-server deployment that makes the number
+of memories the first ceiling: a 2560-dimension self-hosted embedding costs
+about 10 KB per point before the HNSW graph and the payload indexes.
+
+Two settings change the layout. Both default to the historical behaviour.
+
+| Variable | Values | Effect |
+|---|---|---|
+| `QDRANT_DENSE_QUANTIZATION` | `none` (default), `int8` | Scalar quantization: a 1-byte-per-dimension copy of the dense vector is kept in RAM and used for the HNSW search. The candidates are rescored against the fp32 originals (`rescore=true`, oversampling 2.0), which keeps the ranking within Qdrant's documented <1% recall loss. |
+| `QDRANT_DENSE_ON_DISK` | `false` (default), `true` | Store the fp32 originals as memory-mapped files instead of RAM. Combine it with `int8`: searches then read the int8 copy from RAM and touch the disk only to rescore the top candidates. |
+
+RAM estimate per collection for the dense vector alone (add the HNSW graph,
+roughly `points × 16 × 2 × 4 B` with the default `m = 16`, and the payload
+indexes):
+
+- fp32: `points × dimensions × 4 B`
+- int8: `points × dimensions × 1 B`, plus the fp32 copy — on disk with
+  `QDRANT_DENSE_ON_DISK=true`, otherwise also in RAM
+
+Example: 100,000 memories at 2560 dimensions are 1.0 GiB as fp32 and
+256 MiB as int8.
+
+### How it is applied
+
+- A new collection is created with the configured layout.
+- At startup the API reconciles every existing `kagura_memories*` collection,
+  one at a time: it reads the collection config and sends one
+  `update_collection` only when the quantization or `on_disk` differ (log
+  line `collection_quantization_updated`). A collection that already matches
+  is left alone, so a restart with unchanged settings sends nothing. Setting
+  the values back to `none` / `false` is applied the same way. With
+  `UVICORN_WORKERS > 1` every worker runs the check; only the first finds a
+  difference. A collection whose quantization was set by hand to something
+  other than scalar int8 is skipped with `collection_dense_config_skipped`.
+- The same reconciliation runs when a context creates its collection
+  (`ensure_kagura_memories_collection`), which also covers the target
+  collection of an [embedding model migration](#embedding-model-migration--issue-1525).
+- The LanceDB backend (`KAGURA_VECTOR_BACKEND=lance`) ignores both settings
+  and logs `dense_vector_config_ignored` once when they are not default.
+- Qdrant ignores the rescore block on an unquantized collection, so the
+  search path is the same in both layouts.
+
+### Turning it on for an existing deployment
+
+The setting is cheap; the conversion is not. After `update_collection` the
+Qdrant optimizer rebuilds every segment of the collection in the background.
+Searches keep working on the old segments, but until the swap the old and
+the new segments coexist, so **disk and RAM grow temporarily** and CPU and IO
+are busy. Make the first switch while the host still has free RAM, in a
+maintenance window, and watch it finish:
+
+```bash
+# 1. Set in the environment and restart the API
+QDRANT_DENSE_QUANTIZATION=int8
+QDRANT_DENSE_ON_DISK=true
+
+# 2. One log line per converted collection
+docker compose logs api | grep collection_quantization_updated
+
+# 3. Wait until every collection is green again (the optimizer is done)
+cd backend && uv run python scripts/check_qdrant_collections.py
+#   kagura_memories  status=green  points=...  dense: dims=2560 on_disk=True  quantization=int8
+```
+
+Rolling back: set the values back (or remove them) and restart. The
+reconciler sends `Disabled` / `on_disk=false` and the optimizer rebuilds once
+more. Nothing is re-embedded or re-created in either direction.
+
+`backend/scripts/bench_dense_quantization.py` measures the effect on a
+throwaway collection of random vectors (overlap of the fp32 top-k with and
+without rescore, p50 / p95), independent of the embedding model. The
+search-quality benchmark with real queries
+(`docs/search-quality-benchmark.md`) is the check to run on a deployment
+before the switch goes to production.
+
+Not covered: binary quantization, HNSW `m` / `ef_construct`, and the LanceDB
+backend. Production values and the rollout belong to the operations
+repository.
+
 ## Embedded Vector Backend: Kagura Lite (preview)
 
 By default the backend stores vectors in **Qdrant** (the `QDRANT_URL` service).
