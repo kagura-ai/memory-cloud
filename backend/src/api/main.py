@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.constants import APP_VERSION
 from config.settings import get_settings
+from utils.db_helpers import is_deadlock
 from utils.exceptions import (
     AdminProtectionError,
     AuthorizationError,
@@ -585,7 +586,9 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
     )
 
 
-DatabaseUnavailableReason = Literal["pool_exhausted", "connection_refused", "database_error"]
+DatabaseUnavailableReason = Literal[
+    "pool_exhausted", "connection_refused", "deadlock", "database_error"
+]
 
 
 def _database_unavailable_response(
@@ -633,11 +636,16 @@ async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError) -
     """Handle SQLAlchemy failures as 503 ``DB-002`` (#193).
 
     A ``QueuePool`` checkout timeout (``sqlalchemy.exc.TimeoutError``) is
-    reported as ``pool_exhausted``; anything else as ``database_error``.
+    reported as ``pool_exhausted``, a deadlock victim (SQLSTATE ``40P01``,
+    #1985) as ``deadlock``; anything else as ``database_error``.
     """
-    reason: DatabaseUnavailableReason = (
-        "pool_exhausted" if isinstance(exc, PoolTimeoutError) else "database_error"
-    )
+    reason: DatabaseUnavailableReason
+    if isinstance(exc, PoolTimeoutError):
+        reason = "pool_exhausted"
+    elif is_deadlock(exc):
+        reason = "deadlock"
+    else:
+        reason = "database_error"
     return _database_unavailable_response(request, exc, reason)
 
 

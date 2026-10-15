@@ -21,7 +21,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 
 from mcp_server.tools import _build_registry
 from mcp_server.tools._errors import (
@@ -149,6 +149,15 @@ class TestClassifyCause:
     )
     def test_dependency_failures(self, exc):
         assert classify_cause(exc) == CAUSE_SERVICE_UNAVAILABLE
+
+    def test_deadlock_is_a_retryable_dependency_failure(self):
+        """#1985: a deadlock victim (SQLSTATE 40P01) arrives as a bare
+        DBAPIError; it is classified by its SQLSTATE, not by adding DBAPIError
+        (IntegrityError's base) to the dependency types."""
+        orig = Exception("deadlock detected")
+        orig.sqlstate = "40P01"  # type: ignore[attr-defined]
+        assert classify_cause(DBAPIError("UPDATE", {}, orig)) == CAUSE_SERVICE_UNAVAILABLE
+        assert classify_cause(DBAPIError("UPDATE", {}, Exception("other"))) == CAUSE_INTERNAL_ERROR
 
     @pytest.mark.parametrize(
         "exc",

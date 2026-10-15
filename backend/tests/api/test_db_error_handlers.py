@@ -13,10 +13,18 @@ that the smoke test scans.
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from api.main import connection_error_handler, sqlalchemy_exception_handler
+
+
+class _DriverError(Exception):
+    """Stand-in for the asyncpg adapter's error, which carries ``sqlstate``."""
+
+    def __init__(self, message: str, sqlstate: str) -> None:
+        super().__init__(message)
+        self.sqlstate = sqlstate
 
 
 def _build_isolated_app() -> FastAPI:
@@ -45,6 +53,16 @@ def _build_isolated_app() -> FastAPI:
     async def _raise_pool_timeout() -> dict:
         # QueuePool checkout timeout (#1980).
         raise PoolTimeoutError("QueuePool limit of size 5 overflow 10 reached")
+
+    @app.get("/raise-deadlock")
+    async def _raise_deadlock() -> dict:
+        # #1985: asyncpg's DeadlockDetectedError reaches the handler as a
+        # DBAPIError whose orig carries SQLSTATE 40P01.
+        raise DBAPIError("UPDATE memories", {}, _DriverError("deadlock detected", "40P01"))
+
+    @app.get("/raise-integrity")
+    async def _raise_integrity() -> dict:
+        raise IntegrityError("INSERT", {}, _DriverError("duplicate key", "23505"))
 
     @app.get("/raise-connection")
     async def _raise_connection() -> dict:
@@ -92,6 +110,18 @@ class TestDatabaseErrorHandlers:
         with TestClient(_build_isolated_app(), raise_server_exceptions=False) as client:
             response = client.get("/raise-pool-timeout")
         _assert_database_unavailable_response(response, "pool_exhausted")
+
+    def test_deadlock_reports_deadlock(self):
+        """#1985: a deadlock victim is still 503 DB-002 with ``Retry-After: 5``,
+        and ``details.reason`` says it was a deadlock (safe to retry)."""
+        with TestClient(_build_isolated_app(), raise_server_exceptions=False) as client:
+            response = client.get("/raise-deadlock")
+        _assert_database_unavailable_response(response, "deadlock")
+
+    def test_other_sqlstates_stay_database_error(self):
+        with TestClient(_build_isolated_app(), raise_server_exceptions=False) as client:
+            response = client.get("/raise-integrity")
+        _assert_database_unavailable_response(response, "database_error")
 
     def test_non_db_errors_are_not_caught(self):
         """ConnectionError handler must not swallow ValueError or other

@@ -49,6 +49,7 @@ from utils.exceptions import (
     QuotaExceededError,
     RateLimitError,
 )
+from utils.db_helpers import is_deadlock
 from utils.geo_location import LocationValidationError
 from utils.logger import get_logger
 from utils.time_trigger import TriggerValidationError
@@ -263,6 +264,10 @@ def classify_cause(exc: BaseException) -> str:
     if isinstance(exc, _TIMEOUT_TYPES):
         return CAUSE_TIMEOUT
     if isinstance(exc, _DEPENDENCY_TYPES):
+        return CAUSE_SERVICE_UNAVAILABLE
+    # #1985: a deadlock victim is a bare DBAPIError; matched by SQLSTATE so
+    # DBAPIError's other subclasses (IntegrityError …) stay internal errors.
+    if is_deadlock(exc):
         return CAUSE_SERVICE_UNAVAILABLE
     return CAUSE_INTERNAL_ERROR
 

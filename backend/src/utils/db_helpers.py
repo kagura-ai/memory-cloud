@@ -15,11 +15,42 @@ from functools import lru_cache, wraps
 from typing import Any, ParamSpec, TypeVar
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# SQLSTATE of the transaction Postgres aborts to break a lock cycle (#1985).
+PG_DEADLOCK_DETECTED = "40P01"
+
+
+def is_deadlock(exc: BaseException) -> bool:
+    """Whether ``exc`` is a Postgres deadlock victim (SQLSTATE ``40P01``).
+
+    asyncpg's ``DeadlockDetectedError`` reaches callers as a bare
+    ``DBAPIError`` whose ``orig`` (the asyncpg adapter's error) carries
+    ``sqlstate``; psycopg exposes ``pgcode``. The driver exception chained
+    under ``orig`` is checked too. The aborted transaction is safe to retry.
+
+    Args:
+        exc: Any exception.
+
+    Returns:
+        True for a deadlock victim, False otherwise.
+    """
+    if not isinstance(exc, DBAPIError):
+        return False
+    orig = exc.orig
+    for candidate in (orig, getattr(orig, "__cause__", None)):
+        if candidate is None:
+            continue
+        sqlstate = getattr(candidate, "sqlstate", None) or getattr(candidate, "pgcode", None)
+        if sqlstate == PG_DEADLOCK_DETECTED:
+            return True
+    return False
+
 
 P = ParamSpec("P")
 T = TypeVar("T")
