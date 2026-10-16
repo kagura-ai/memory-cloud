@@ -10,9 +10,12 @@ never exceeds 1,200 characters with the worst-case fixture.
 The tool definitions are NOT touched by #1621: ``test_tool_definition_budget``
 and ``test_tool_profiles`` pass without regenerating the skeleton fixture.
 
-#1682 reworded the base text (233 characters) so it describes what
-get_context_info returns instead of sending the model there for "rules and
-guardrails"; ``test_directory_instruction_boundary`` guards that wording.
+#1682 reworded the base text so it describes what the session-start call
+returns instead of sending the model there for "rules and guardrails";
+``test_directory_instruction_boundary`` guards that wording. The entry call is
+``bootstrap(context_id)`` (context block + pinned + recent changes in one
+call); ``changes_since`` is named for "what changed and when" so that question
+does not go to ``recall``, whose ranking carries no recency.
 """
 
 from __future__ import annotations
@@ -52,10 +55,18 @@ def _worst_case(context_id: UUID) -> DigestEntries:
     )
 
 
-def test_base_text_is_at_most_240_characters_and_points_at_get_context_info():
+def test_base_text_is_at_most_240_characters_and_points_at_bootstrap():
     assert len(SERVER_INSTRUCTIONS_BASE) <= BASE_BUDGET
-    assert "get_context_info(context_id) describes it" in SERVER_INSTRUCTIONS_BASE
     assert "list_contexts" in SERVER_INSTRUCTIONS_BASE
+    # Session start is one call: the context block, the pinned set and the
+    # recent changes together. get_context_info alone is no longer the entry.
+    assert "bootstrap(context_id)" in SERVER_INSTRUCTIONS_BASE
+    assert "get_context_info" not in SERVER_INSTRUCTIONS_BASE
+    # A write and a read tool are both named; what changed and when is listed,
+    # not searched.
+    assert "remember" in SERVER_INSTRUCTIONS_BASE
+    assert "recall" in SERVER_INSTRUCTIONS_BASE
+    assert "changes_since" in SERVER_INSTRUCTIONS_BASE
     assert "rules and guardrails" not in SERVER_INSTRUCTIONS_BASE  # #1682
     assert SERVER_INSTRUCTIONS == SERVER_INSTRUCTIONS_BASE  # legacy import name
 

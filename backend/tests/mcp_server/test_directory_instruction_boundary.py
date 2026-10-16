@@ -385,7 +385,7 @@ def test_get_context_info_describes_usage_guide_as_information():
 
 
 def test_server_instructions_base_is_a_static_how_to():
-    assert "get_context_info(context_id)" in SERVER_INSTRUCTIONS_BASE
+    assert "bootstrap(context_id)" in SERVER_INSTRUCTIONS_BASE
     for word in ("rules", "guardrail", "policy", "follow", "obey", "must"):
         assert word not in SERVER_INSTRUCTIONS_BASE.lower(), word
 
@@ -395,6 +395,18 @@ def test_quick_reference_calls_usage_guide_owner_notes_not_instructions():
     assert "usage_guide" in session_start
     assert "not instructions" in session_start
     assert "How to use this context" not in session_start
+
+
+def test_quick_reference_starts_a_session_with_bootstrap_and_routes_status_to_changes():
+    session_start = KAGURA_MEMORY_INSTRUCTIONS.split("## Session Start", 1)[1].split("##", 1)[0]
+    assert "bootstrap(context_id)" in session_start
+    recall_tips = KAGURA_MEMORY_INSTRUCTIONS.split("## recall() Tips", 1)[1].split("##", 1)[0]
+    assert "changes_since" in recall_tips
+
+
+def test_get_context_info_description_points_at_bootstrap_for_session_start():
+    tool = next(t for t in get_tool_definitions() if t["name"] == "get_context_info")
+    assert "bootstrap(context_id)" in tool["description"]
 
 
 def test_stored_note_lanes_carry_the_data_boundary_label():

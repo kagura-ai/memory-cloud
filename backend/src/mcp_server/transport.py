@@ -328,10 +328,10 @@ SERVER_CAPABILITIES: dict[str, dict] = {"tools": {}}
 # context's members stored is data, returned by the tools the model calls.
 # ``tests/mcp_server/test_directory_instruction_boundary.py`` guards the wording.
 SERVER_INSTRUCTIONS_BASE = (
-    "Kagura Memory Cloud: persistent memory for AI agents. Call list_contexts "
-    "to discover context IDs, then work within one context: "
-    "get_context_info(context_id) describes it, and remember / recall / explore "
-    "store and search its memories."
+    "Kagura Memory Cloud: persistent memory for AI agents. list_contexts gives "
+    "context IDs; bootstrap(context_id) opens a session (context, pinned notes, "
+    "recent changes). remember stores, recall searches; changes_since lists what "
+    "changed, when."
 )
 # Kept as a module attribute for imports that still read the old name.
 SERVER_INSTRUCTIONS = SERVER_INSTRUCTIONS_BASE
