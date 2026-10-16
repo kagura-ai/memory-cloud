@@ -364,6 +364,11 @@ class SupersedeCandidate(TZAwareBaseModel):
     summary: str
     similarity: float
     detected_at: datetime | None = None
+    # #2016: True when the deployment's judge (SUPERSEDE_VERIFY_MODE=llm)
+    # confirmed, at or above its confidence floor, that this memory replaces
+    # the candidate — the signal a client may auto-accept on. Absent (None)
+    # when unverified; a candidate judged a parallel fact is never surfaced.
+    verified: bool | None = None
 
 
 class MemoryResponse(TZAwareBaseModel):

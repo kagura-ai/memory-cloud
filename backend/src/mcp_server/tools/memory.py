@@ -1092,7 +1092,11 @@ def _add_recall_annotations(item: dict[str, Any], r: Any) -> None:
     # #1403: liveness-guarded near-duplicate this memory may supersede — a
     # client can offer confirm→create_edge.
     if r.supersede_candidate:
-        item["supersede_candidate"] = r.supersede_candidate.model_dump(mode="json")
+        # exclude_none: ``verified`` (#2016) and ``detected_at`` are keys only
+        # when they have a value — "absent, never null".
+        item["supersede_candidate"] = r.supersede_candidate.model_dump(
+            mode="json", exclude_none=True
+        )
 
 
 def _recall_result_item(r: Any, verbosity: str = "full") -> dict[str, Any]:
@@ -1942,7 +1946,7 @@ async def handle_reference(
                 # #1403: liveness-guarded supersede suggestion (from the
                 # server-only supersede_candidate column, not the details blob).
                 "supersede_candidate": (
-                    result.supersede_candidate.model_dump(mode="json")
+                    result.supersede_candidate.model_dump(mode="json", exclude_none=True)
                     if result.supersede_candidate
                     else None
                 ),

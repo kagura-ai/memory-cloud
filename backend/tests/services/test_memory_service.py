@@ -868,6 +868,42 @@ class TestSupersedeCandidateExposure:
         assert cand.detected_at is not None
 
     @pytest.mark.asyncio
+    async def test_resolve_skips_parallel_verdict(self, service):
+        """#2016: a candidate the judge called a parallel fact stays in the
+        column (no re-judge) but is never surfaced, and costs no liveness query."""
+        target_id = uuid4()
+        cand = self._candidate(target_id)
+        cand["verification"] = {"verdict": "parallel", "confidence": 0.9, "verified": False}
+        source = self._mem(cand)
+        service.db.execute = AsyncMock()
+
+        resolved = await service._resolve_supersede_candidates(
+            {str(source.id): source}, user_id="u1", operation="recall"
+        )
+
+        assert resolved == {}
+        service.db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resolve_surfaces_verified_flag(self, service):
+        """#2016: a confirming verdict surfaces as ``verified=True``; an
+        ``unclear`` or low-confidence one leaves ``verified`` None."""
+        confirmed, unclear = uuid4(), uuid4()
+        c1 = self._candidate(confirmed)
+        c1["verification"] = {"verdict": "supersedes", "confidence": 0.95, "verified": True}
+        c2 = self._candidate(unclear)
+        c2["verification"] = {"verdict": "unclear", "confidence": 0.4, "verified": False}
+        s1, s2 = self._mem(c1), self._mem(c2)
+        self._mock_rows(service, [self._target_row(confirmed), self._target_row(unclear)])
+
+        resolved = await service._resolve_supersede_candidates(
+            {str(s1.id): s1, str(s2.id): s2}, user_id="u1", operation="recall"
+        )
+
+        assert resolved[s1.id].verified is True
+        assert resolved[s2.id].verified is None
+
+    @pytest.mark.asyncio
     async def test_resolve_drops_dead_target(self, service):
         """Self-healing: a candidate pointing at a deleted/missing memory (not in
         the live set) is dropped — the suggestion silently stops surfacing."""

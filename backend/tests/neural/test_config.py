@@ -664,3 +664,34 @@ class TestForgetRetentionConfigPlumbing:
 
         with _pytest.raises(ValueError, match="sleep_forget_retention_days"):
             NeuralMemoryConfig(sleep_forget_retention_days=-1)
+
+
+class TestSupersedeVerifyConfig:
+    """#2016: judge switches are env-only with validated ranges."""
+
+    def test_defaults(self):
+        config = NeuralMemoryConfig()
+        assert config.supersede_verify_mode == "off"
+        assert config.supersede_verify_min_confidence == 0.7
+        assert config.supersede_verify_max_calls_per_day == 200
+
+    def test_env(self, monkeypatch):
+        monkeypatch.setenv("SUPERSEDE_VERIFY_MODE", "LLM")
+        monkeypatch.setenv("SUPERSEDE_VERIFY_MIN_CONFIDENCE", "0.85")
+        monkeypatch.setenv("SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY", "50")
+        config = NeuralMemoryConfig.from_env()
+        assert config.supersede_verify_mode == "llm"
+        assert config.supersede_verify_min_confidence == 0.85
+        assert config.supersede_verify_max_calls_per_day == 50
+
+    @pytest.mark.parametrize(
+        "field, value, match",
+        [
+            ("supersede_verify_mode", "auto", "supersede_verify_mode"),
+            ("supersede_verify_min_confidence", 1.5, "supersede_verify_min_confidence"),
+            ("supersede_verify_max_calls_per_day", 0, "supersede_verify_max_calls_per_day"),
+        ],
+    )
+    def test_invalid_values_rejected(self, field, value, match):
+        with pytest.raises(ValueError, match=match):
+            NeuralMemoryConfig(**{field: value})

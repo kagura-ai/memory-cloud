@@ -142,9 +142,11 @@ class TestResultItems:
         assert item["context_summary"] == memory.context_summary
         assert item["superseded_by"] == str(newer)
         assert item["contradicts"] == [str(opposing)]
-        # Same projection the envelope used before #1599.
-        assert item["supersede_candidate"] == candidate.model_dump(mode="json")
+        # Same projection the envelope used before #1599; #2016: keys only
+        # when they have a value (an unverified candidate has no ``verified``).
+        assert item["supersede_candidate"] == candidate.model_dump(mode="json", exclude_none=True)
         assert item["supersede_candidate"]["memory_id"] == str(candidate_id)
+        assert "verified" not in item["supersede_candidate"]
 
     def test_unconditional_fields_are_unchanged(self):
         memory = _memory(updated_at=None)
@@ -532,7 +534,7 @@ class TestCompact:
         item = _compact(RecallResponse(results=[memory]))["results"][0]
         assert item["superseded_by"] == str(newer)
         assert item["contradicts"] == [str(opposing)]
-        assert item["supersede_candidate"] == candidate.model_dump(mode="json")
+        assert item["supersede_candidate"] == candidate.model_dump(mode="json", exclude_none=True)
 
     def test_short_summary_is_whole_and_unflagged(self):
         memory = _memory()
@@ -784,3 +786,24 @@ async def test_recall_refuses_a_bad_max_chars_before_any_read():
         {"query": "x", "context_id": str(uuid4()), "max_chars": 5}, "u", None
     )
     assert json.loads(result[0].text)["error"] == "validation_error"
+
+
+class TestVerifiedCandidate:
+    """#2016: ``verified: true`` rides along in both shapes; it is never null."""
+
+    def test_verified_true_is_a_key_in_compact_and_full(self):
+        candidate = SupersedeCandidate(
+            memory_id=uuid4(), summary="older", similarity=0.97, detected_at=CREATED, verified=True
+        )
+        memory = _memory(supersede_candidate=candidate)
+        for verbosity in ("compact", "full"):
+            item = _envelope(RecallResponse(results=[memory]), verbosity=verbosity)["results"][0]
+            assert item["supersede_candidate"]["verified"] is True
+
+    def test_detected_at_none_is_absent_not_null(self):
+        candidate = SupersedeCandidate(memory_id=uuid4(), summary="older", similarity=0.97)
+        item = _envelope(RecallResponse(results=[_memory(supersede_candidate=candidate)]))[
+            "results"
+        ][0]
+        assert "detected_at" not in item["supersede_candidate"]
+        assert "verified" not in item["supersede_candidate"]

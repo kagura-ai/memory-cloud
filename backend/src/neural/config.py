@@ -228,6 +228,16 @@ class NeuralMemoryConfig:
     # the query. Env-only (SUPERSEDE_SUGGEST_ENABLED): there is no seeded
     # neural_config row, and a hand-inserted string row would read as truthy.
     supersede_suggest_enabled: bool = True
+    # #2016: verification of a detected supersede_candidate before it is
+    # surfaced. "off" (default) stores it as before; "llm" asks the Sleep
+    # judge (sleep_llm_provider / sleep_llm_model) whether the new memory
+    # replaces the old one — a "parallel" verdict is never surfaced, a
+    # "supersedes" verdict at or above the confidence floor is surfaced with
+    # verified=true. Calls are capped per workspace per UTC day. Env-only,
+    # like supersede_suggest_enabled.
+    supersede_verify_mode: str = "off"
+    supersede_verify_min_confidence: float = 0.7
+    supersede_verify_max_calls_per_day: int = 200
     # Cosine threshold override. None (default) → use `embedding_calibrations`
     # percentile path; non-None → raw operator override (D6). Prior to #406,
     # this was hardcoded 0.4, which is over-permissive for text-embedding-3-
@@ -510,6 +520,20 @@ class NeuralMemoryConfig:
                 "sleep_llm_provider must be 'openai', 'anthropic', 'gemini', 'self_hosted', "
                 f"or '', got '{self.sleep_llm_provider}'"
             )
+        if self.supersede_verify_mode not in ("off", "llm"):
+            raise ValueError(
+                f"supersede_verify_mode must be 'off' or 'llm', got '{self.supersede_verify_mode}'"
+            )
+        if not (0.0 <= self.supersede_verify_min_confidence <= 1.0):
+            raise ValueError(
+                "supersede_verify_min_confidence must be in [0, 1], "
+                f"got {self.supersede_verify_min_confidence}"
+            )
+        if not self.supersede_verify_max_calls_per_day > 0:
+            raise ValueError(
+                "supersede_verify_max_calls_per_day must be positive, "
+                f"got {self.supersede_verify_max_calls_per_day}"
+            )
         if not self.sleep_max_memories_per_run > 0:
             raise ValueError(
                 f"sleep_max_memories_per_run must be positive, "
@@ -654,6 +678,9 @@ class NeuralMemoryConfig:
             # k-NN Cold-Start Seeding (Issue #221, #406)
             knn_seed_enabled=get_bool("KNN_SEED_ENABLED", True),
             supersede_suggest_enabled=get_bool("SUPERSEDE_SUGGEST_ENABLED", True),
+            supersede_verify_mode=os.getenv("SUPERSEDE_VERIFY_MODE", "off").strip().lower(),
+            supersede_verify_min_confidence=get_float("SUPERSEDE_VERIFY_MIN_CONFIDENCE", 0.7),
+            supersede_verify_max_calls_per_day=get_int("SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY", 200),
             knn_seed_k=get_int("KNN_SEED_K", 5),
             knn_seed_min_similarity=get_float_or_none("KNN_SEED_MIN_SIMILARITY"),
             knn_seed_min_percentile=get_float("KNN_SEED_MIN_PERCENTILE", 90.0),
@@ -894,6 +921,9 @@ class NeuralMemoryConfig:
             # k-NN Cold-Start Seeding (Issue #221, #406) — DB-overridable
             knn_seed_enabled=configs.get("knn_seed_enabled", base_config.knn_seed_enabled),
             supersede_suggest_enabled=base_config.supersede_suggest_enabled,  # env-only (#2010)
+            supersede_verify_mode=base_config.supersede_verify_mode,  # env-only (#2016)
+            supersede_verify_min_confidence=base_config.supersede_verify_min_confidence,
+            supersede_verify_max_calls_per_day=base_config.supersede_verify_max_calls_per_day,
             knn_seed_k=configs.get("knn_seed_k", base_config.knn_seed_k),
             # A DB row for knn_seed_min_similarity is an operator override that
             # wins over calibration (D6). Post-#406 migration deletes rows with
