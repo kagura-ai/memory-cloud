@@ -310,7 +310,7 @@ async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | Non
         user_id = result.user_id
         workspace_id = result.workspace_id
         context_id = None  # Issue #245: context_id is now in tool args
-        _mcp_connector_credential.set(bool(getattr(result, "is_connector_key", False)))
+        _mcp_connector_credential.set(result.is_connector_key)
         logger.debug(f"API key valid: user={user_id}, workspace={workspace_id}")
         return (user_id, context_id, workspace_id)
     logger.debug("API key invalid")

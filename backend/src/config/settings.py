@@ -782,9 +782,9 @@ class Settings(BaseSettings):
         ),
     )
     # Opt-in: with neither ``?guardrails=`` nor an agent binding, a user
-    # credential's handshake carries the digest of the context it used last
-    # (the pick from the permission-scoped listing; one bounded read,
-    # fail-open). A connector's shared key never gets it. Off (the default)
+    # credential's handshake carries the digest of the context its own last
+    # tool call touched (one narrow usage_stats read; a fresh account's sole
+    # context; bounded, fail-open). A connector's shared key never gets it. Off (the default)
     # keeps the static, DB-free, publicly cacheable base text for every
     # unselected user credential — the Directory position in
     # docs/remote-mcp-directory-scope.md; a deployment that wants its users'

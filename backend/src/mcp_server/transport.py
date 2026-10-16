@@ -448,7 +448,7 @@ async def build_instructions(
     when the endpoint URL selects it (``?guardrails=<context_id>``) or, with
     the parameter absent, when the request's credential is an agent-bound key
     whose default (or sole) binding names one — or, for any other user
-    credential, the context it used last (``select_last_used_context``; the
+    credential, the context its own last tool call touched (``select_last_used_context``; the
     fallback a connector's shared key never gets, and
     ``mcp_guardrail_digest_last_used_fallback`` switches off).
     ``?guardrails=off`` and a value that is neither ``off`` nor a UUID

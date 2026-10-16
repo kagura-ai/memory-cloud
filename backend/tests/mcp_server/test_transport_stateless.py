@@ -1227,19 +1227,20 @@ def _no_ambient_agent_scope():
 
 @pytest.mark.asyncio
 async def test_discover_without_selection_is_the_base_text_public_one_hour_and_db_free(
-    digest_source, last_used
+    digest_source, last_used, monkeypatch
 ):
     """The default: a user credential with no ``?guardrails=`` and no agent
     binding gets the static base text, publicly cacheable, with no database
     session — the last-used fallback below is opt-in."""
     from uuid import uuid4
 
-    from config.settings import Settings
+    from config.settings import Settings, get_settings
     from mcp_server.transport import DISCOVER_TTL_MS, SERVER_INSTRUCTIONS_BASE
 
     # The switch is off by default (the Directory position) — a shell that
     # exports MCP_GUARDRAIL_DIGEST_LAST_USED_FALLBACK=true must not change it.
     assert Settings.model_fields["mcp_guardrail_digest_last_used_fallback"].default is False
+    monkeypatch.setattr(get_settings(), "mcp_guardrail_digest_last_used_fallback", False)
     last_used.context_id = uuid4()
     digest_source.entries = _digest_entries(last_used.context_id, "would have appeared")
 

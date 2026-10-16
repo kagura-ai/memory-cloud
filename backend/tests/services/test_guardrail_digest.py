@@ -637,96 +637,80 @@ def test_entries_from_rows_version_rows_default_to_the_rendered_rows():
 
 # ---------------------------------------------------------------------------
 # The last-used fallback's candidate (a user credential with no ``?guardrails=``
-# and no agent binding): the most recently used context the credential can
-# read, from the permission-scoped listing — never a raw ORDER BY.
+# and no agent binding): the context this user's own last tool call touched,
+# from usage_stats — never Context.last_used_at, which any member bumps.
 # ---------------------------------------------------------------------------
 
 
-def _ctx(last_used_at):
+def _ctx(last_used_at=None):
     from types import SimpleNamespace
 
     return SimpleNamespace(id=uuid4(), last_used_at=last_used_at)
 
 
-@pytest.mark.asyncio
-async def test_select_last_used_context_picks_the_most_recently_used_accessible_context(
-    monkeypatch,
-):
-    from datetime import UTC, datetime
+def _db(picked):
+    """A session whose one ``execute`` answers the usage_stats pick with ``picked``."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
 
+    result = SimpleNamespace(scalar_one_or_none=lambda: picked)
+    return SimpleNamespace(execute=AsyncMock(return_value=result))
+
+
+def _sql(db) -> str:
+    return str(db.execute.await_args.args[0].compile())
+
+
+@pytest.mark.asyncio
+async def test_select_last_used_context_reads_this_users_newest_call(monkeypatch):
+    from services.guardrail_digest import select_last_used_context
+
+    picked = uuid4()
+    db = _db(picked)
+
+    assert await select_last_used_context(db, user_id="user-1", key_workspace_id=None) == picked
+    sql = _sql(db)
+    assert "usage_stats.user_id" in sql and "usage_stats.context_id IS NOT NULL" in sql
+    assert "usage_stats.date >=" in sql  # the 30-day window rides the (user_id, date) index
+    assert "ORDER BY usage_stats.created_at DESC" in sql and "LIMIT" in sql
+    assert "usage_stats.workspace_id" not in sql  # an unscoped credential: any workspace
+
+
+@pytest.mark.asyncio
+async def test_select_last_used_context_confines_a_workspace_scoped_key_to_its_workspace():
+    from services.guardrail_digest import select_last_used_context
+
+    ws, picked = uuid4(), uuid4()
+    db = _db(picked)
+
+    assert await select_last_used_context(db, user_id="user-1", key_workspace_id=ws) == picked
+    assert "usage_stats.workspace_id =" in _sql(db)
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_account_without_a_call_gets_its_sole_context(monkeypatch):
     from services import context_service as cs_mod
     from services.guardrail_digest import select_last_used_context
 
-    older = _ctx(datetime(2026, 10, 1, tzinfo=UTC))
-    newest = _ctx(datetime(2026, 10, 15, tzinfo=UTC))
-    never = _ctx(None)
+    only = _ctx()
     seen: dict = {}
 
     async def fake_list(self, user_id, *, raise_on_lookup_error=False):
-        seen["user_id"], seen["raise"] = user_id, raise_on_lookup_error
-        return [older, never, newest]
-
-    monkeypatch.setattr(cs_mod.ContextService, "list_contexts", fake_list)
-
-    picked = await select_last_used_context(object(), user_id="user-1", key_workspace_id=None)
-
-    assert picked == newest.id
-    # The listing that list_contexts (the tool) sorts — same permission scope,
-    # and a failed lookup raises so the caller's fail-open path logs it.
-    assert seen == {"user_id": "user-1", "raise": True}
-
-
-@pytest.mark.asyncio
-async def test_select_last_used_context_confines_a_workspace_scoped_key_to_its_workspace(
-    monkeypatch,
-):
-    from datetime import UTC, datetime
-
-    from services import context_service as cs_mod
-    from services import permission_service as ps_mod
-    from services.guardrail_digest import select_last_used_context
-
-    ws = uuid4()
-    inside = _ctx(datetime(2026, 10, 2, tzinfo=UTC))
-    seen: dict = {}
-
-    async def fake_accessible(self, user_id, workspace_id):
-        seen["args"] = (user_id, workspace_id)
-        return [inside]
-
-    async def never_called(self, *a, **k):  # pragma: no cover - the assertion below
-        raise AssertionError("the current-workspace listing must not run for a scoped key")
-
-    monkeypatch.setattr(ps_mod.PermissionService, "get_accessible_contexts", fake_accessible)
-    monkeypatch.setattr(cs_mod.ContextService, "list_contexts", never_called)
-
-    picked = await select_last_used_context(object(), user_id="user-1", key_workspace_id=ws)
-
-    assert picked == inside.id
-    assert seen["args"] == ("user-1", ws)
-
-
-@pytest.mark.asyncio
-async def test_select_last_used_context_takes_a_sole_context_even_before_first_use(monkeypatch):
-    from services import context_service as cs_mod
-    from services.guardrail_digest import select_last_used_context
-
-    only = _ctx(None)
-
-    async def fake_list(self, user_id, *, raise_on_lookup_error=False):
+        seen["args"] = (user_id, raise_on_lookup_error)
         return [only]
 
     monkeypatch.setattr(cs_mod.ContextService, "list_contexts", fake_list)
 
-    assert await select_last_used_context(object(), user_id="u", key_workspace_id=None) == only.id
+    assert await select_last_used_context(_db(None), user_id="u", key_workspace_id=None) == only.id
+    # The listing that list_contexts (the tool) uses; a failed lookup raises so
+    # the caller's fail-open path logs it as a warning.
+    assert seen["args"] == ("u", True)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("listing", [[], [None, None]])
-async def test_select_last_used_context_is_none_without_a_used_context_to_pick(
-    monkeypatch, listing
-):
-    """No context, or several that were never used: nothing to guess at."""
+async def test_no_call_and_no_sole_context_is_none(monkeypatch, listing):
+    """Several never-used contexts, or none: nothing to guess at."""
     from services import context_service as cs_mod
     from services.guardrail_digest import select_last_used_context
 
@@ -735,4 +719,18 @@ async def test_select_last_used_context_is_none_without_a_used_context_to_pick(
 
     monkeypatch.setattr(cs_mod.ContextService, "list_contexts", fake_list)
 
-    assert await select_last_used_context(object(), user_id="u", key_workspace_id=None) is None
+    assert await select_last_used_context(_db(None), user_id="u", key_workspace_id=None) is None
+
+
+@pytest.mark.asyncio
+async def test_a_scoped_key_outside_its_workspace_is_none_not_a_warning(monkeypatch):
+    from services import permission_service as ps_mod
+    from services.guardrail_digest import select_last_used_context
+    from utils.exceptions import AuthorizationError
+
+    async def denied(self, user_id, workspace_id):
+        raise AuthorizationError("not a member")
+
+    monkeypatch.setattr(ps_mod.PermissionService, "get_accessible_contexts", denied)
+
+    assert await select_last_used_context(_db(None), user_id="u", key_workspace_id=uuid4()) is None
