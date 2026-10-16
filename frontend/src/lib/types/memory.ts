@@ -59,6 +59,8 @@ export interface SupersedeCandidate {
   summary: string;
   similarity: number;
   detected_at: string | null;
+  // #2016: true when the deployment's judge confirmed the update; absent / null otherwise.
+  verified?: boolean | null;
 }
 
 // Exact mirror of backend `ReferenceResponse` (schemas.py:222) — returned by

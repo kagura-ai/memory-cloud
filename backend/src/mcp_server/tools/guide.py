@@ -195,7 +195,7 @@ GUIDE_TOPICS: dict[str, str] = {
         "retry later.\n"
         "• updated_at — last change to the fact (null if never edited); an old value "
         "may mean it is stale.\n"
-        "• supersede_candidate {memory_id, summary, similarity, detected_at, verified?} "
+        "• supersede_candidate {memory_id, summary, similarity, detected_at?, verified?} "
         "— an OLDER near-duplicate this result likely replaces. A suggestion, never "
         "auto-applied; verified: true means the deployment's judge confirmed it is "
         "an update of the same fact (safe to accept without reading both). Accept: create_edge(source_id=<this memory_id>, "

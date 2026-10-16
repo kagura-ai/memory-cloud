@@ -5,6 +5,7 @@ in `process_pending_embedding` to bootstrap the Neural Memory graph for
 new memories.
 """
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -27,6 +28,7 @@ def _make_memory(workspace_id=None, context_id=None, user_id="user1"):
     # #2016: the judge's pair fingerprint reads these as text.
     memory.summary = "new summary"
     memory.content = "new content"
+    memory.created_at = datetime(2026, 10, 2)
     return memory
 
 
@@ -1330,6 +1332,7 @@ class TestSupersedeVerification:
         old = MagicMock()
         old.id = dup_id
         old.summary, old.content = "old summary", "old content"
+        old.created_at = datetime(2026, 10, 1)
         row = MagicMock()
         row.scalar_one_or_none = MagicMock(return_value=old)
         db.execute = AsyncMock(return_value=row)
@@ -1606,6 +1609,36 @@ class TestSupersedeVerification:
         assert repo.get_edge.await_count == 2
         assert memory.supersede_candidate is None
         db.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_neighbour_written_later_is_not_judged(self):
+        """The top-1 neighbour was created AFTER this memory (its embedding
+        finished first): asking whether the earlier text supersedes the later
+        one inverts the question, so the candidate stays unverified."""
+        memory = _make_memory()
+        db = _make_db()
+        config = _make_config(enabled=False, verify_mode="llm")
+        judge = AsyncMock()
+        dup_id, candidates, _ = self._run(memory, db, config, judge)
+        db.execute.return_value.scalar_one_or_none.return_value.created_at = datetime(2026, 10, 3)
+
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=candidates)),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=_make_edge_repo()),
+            patch("services.supersede_verify.judge_pair", new=judge),
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        judge.assert_not_called()
+        assert memory.supersede_candidate["memory_id"] == dup_id
+        assert "verification" not in memory.supersede_candidate
 
     @pytest.mark.asyncio
     async def test_llm_mode_with_a_tombstone_never_calls_the_judge(self):

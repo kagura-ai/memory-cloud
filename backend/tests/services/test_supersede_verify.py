@@ -116,7 +116,7 @@ class TestParseJudgement:
 
 class TestVerificationRecord:
     def test_verified_needs_supersedes_at_or_above_the_floor(self):
-        kw = {"model": "m", "min_confidence": 0.7, "fingerprint": "f"}
+        kw = {"model": "m", "min_confidence": 0.7, "fingerprint": "f", "old_fingerprint": "o"}
         above = sv.verification_record("supersedes", 0.7, "r", **kw)
         below = sv.verification_record("supersedes", 0.69, "r", **kw)
         parallel = sv.verification_record("parallel", 1.0, "r", **kw)
@@ -125,7 +125,10 @@ class TestVerificationRecord:
         assert parallel["verified"] is False
         assert above["prompt_revision"] == sv.PROMPT_REVISION
         assert above["fingerprint"] == "f"
+        assert above["old_fingerprint"] == "o"
         assert above["at"].endswith("Z")
+        stamped = sv.verification_record("unclear", 0.5, "r", at="2026-10-01T00:00:00Z", **kw)
+        assert stamped["at"] == "2026-10-01T00:00:00Z"
 
     def test_predicates_read_the_stored_shape(self):
         cand = {"memory_id": "x", "similarity": 0.9, "verification": {"verdict": "parallel"}}
@@ -144,25 +147,34 @@ class TestVerificationRecord:
         assert sv.stored_verification({"verification": {"verdict": "bogus"}}) is None
         assert sv.stored_verification({"verification": {"verdict": ["parallel"]}}) is None
 
-    def test_stale_when_the_old_memory_changed_after_the_verdict(self):
+    def test_stale_when_the_old_text_is_not_what_the_judge_saw(self):
+        seen = sv.text_fingerprint("old summary", "old content")
         cand = {
             "memory_id": "x",
             "similarity": 0.9,
-            "verification": {"verdict": "parallel", "at": "2026-10-01T12:00:00Z"},
+            "verification": {"verdict": "parallel", "old_fingerprint": seen},
         }
-        assert sv.verification_stale(cand, target_updated_at=None) is False
-        assert sv.verification_stale(cand, target_updated_at=datetime(2026, 10, 1, 11)) is False
-        assert sv.verification_stale(cand, target_updated_at=datetime(2026, 10, 1, 13)) is True
+        stale = sv.verification_stale
+        assert stale(cand, old_summary="old summary", old_content_head="old content") is False
+        # Content past the head the judge never saw does not count.
         assert (
-            sv.verification_stale(cand, target_updated_at=datetime(2026, 10, 1, 13, tzinfo=UTC))
-            is True
-        )
-        cand["verification"] = {"verdict": "parallel"}
-        assert sv.verification_stale(cand, target_updated_at=datetime(2026, 1, 1)) is True
-        assert (
-            sv.verification_stale({"memory_id": "x"}, target_updated_at=datetime(2026, 1, 1))
+            stale(cand, old_summary="old summary", old_content_head="old content" + "x" * 0)
             is False
         )
+        assert stale(cand, old_summary="Old summary", old_content_head="old content") is True
+        assert stale(cand, old_summary="old summary", old_content_head="edited") is True
+        cand["verification"] = {"verdict": "parallel"}  # no fingerprint recorded
+        assert stale(cand, old_summary="old summary", old_content_head="old content") is True
+        assert stale({"memory_id": "x"}, old_summary="s", old_content_head="c") is False
+
+    def test_min_confidence_from_env_never_raises(self, monkeypatch):
+        monkeypatch.delenv("SUPERSEDE_VERIFY_MIN_CONFIDENCE", raising=False)
+        assert sv.min_confidence_from_env() == 0.7
+        monkeypatch.setenv("SUPERSEDE_VERIFY_MIN_CONFIDENCE", "0.85")
+        assert sv.min_confidence_from_env() == 0.85
+        for bad in ("high", "1.5", "-0.1", "nan", " "):
+            monkeypatch.setenv("SUPERSEDE_VERIFY_MIN_CONFIDENCE", bad)
+            assert sv.min_confidence_from_env() == 0.7
 
 
 class TestReuseVerification:
@@ -206,6 +218,7 @@ class TestJudgePair:
     def _fresh_once_flags(self):
         with (
             patch.object(sv, "_CAP_REPORTED", set()),
+            patch.object(sv, "_CAP_REPORTED_DAY", ""),
             patch.object(sv, "_NO_PROVIDER_REPORTED", False),
         ):
             yield
@@ -273,6 +286,7 @@ class TestJudgePair:
         assert record["verdict"] == "supersedes" and record["verified"] is True
         assert record["model"] == "gpt-5-nano"
         assert record["fingerprint"] == sv.pair_fingerprint(old, new)
+        assert record["old_fingerprint"] == sv.text_fingerprint(old.summary, old.content)
         call = llm.complete_json.await_args.kwargs
         assert call["system_prompt"] == sv.SUPERSEDE_VERIFY_SYSTEM
         assert "SECRET-OLD" in call["prompt"] and "SECRET-NEW" in call["prompt"]
@@ -305,6 +319,41 @@ class TestJudgePair:
         llm.complete_json.assert_not_called()
         warned = [c.args[0] for c in log.warning.call_args_list]
         assert warned.count("supersede_verify_cap_reached") == 1
+        # The reported set is per UTC day: a new day starts empty.
+        assert sv._CAP_REPORTED == {"w"}
+        with patch("services.supersede_verify.utcnow", return_value=datetime(2099, 1, 1)):
+            assert sv.counter_key("w").endswith("2099-01-01")
+            with patch("db.redis.incrby_counter", new=AsyncMock(return_value=5)):
+                assert await sv._under_daily_cap("other", 2) is False
+        assert sv._CAP_REPORTED == {"other"}
+
+    @pytest.mark.asyncio
+    async def test_verdict_is_stamped_before_the_call(self):
+        """An edit of OLD during the round trip must read as later than ``at``."""
+        llm = MagicMock()
+        llm.complete_json = AsyncMock(
+            return_value=self._response({"verdict": "parallel", "confidence": 0.8, "reason": "r"})
+        )
+        clock = [
+            datetime(2026, 10, 1, 0, 0, 0),  # counter_key (the day bucket)
+            datetime(2026, 10, 1, 0, 0, 1),  # the texts are read
+            datetime(2026, 10, 1, 0, 0, 9),  # a later default stamp, must not be used
+        ]
+        with (
+            patch("services.llm_service.LLMService", return_value=llm),
+            patch("db.redis.incrby_counter", new=AsyncMock(return_value=1)),
+            patch("services.supersede_verify.utcnow", side_effect=clock),
+        ):
+            record = await sv.judge_pair(
+                MagicMock(),
+                config=_config(),
+                user_id="u",
+                workspace_id="w",
+                context_id="c",
+                new=_memory(),
+                old=_memory(),
+            )
+        assert record is not None and record["at"] == "2026-10-01T00:00:01Z"
 
     @pytest.mark.asyncio
     async def test_redis_outage_skips_the_paid_call(self):

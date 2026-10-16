@@ -29,9 +29,12 @@ verdict is stored on the candidate under ``verification``:
   before, without ``verified``.
 
 A verdict is about two texts. It carries a ``fingerprint`` of both (summary
-and content head), so an edit of the new memory re-judges the pair instead of
-reusing the verdict, and the read path drops a verdict older than the old
-memory's ``updated_at`` (``verification_stale``).
+and content head) and an ``old_fingerprint`` of the old side alone, so an
+edit of either memory re-judges the pair instead of reusing the verdict, and
+the read path sets a verdict aside once the old memory's text no longer
+matches what the judge saw (``verification_stale``). Text, not
+``updated_at``: Sleep stamps ``updated_at`` for importance and tag changes
+that the judge never looked at.
 
 The judge never creates an edge: the #1208 over-supersede prevention keeps
 edge authorship with the user / agent. Memory text goes into the prompt only
@@ -42,7 +45,7 @@ between the untrusted-content markers Sleep uses (#919); trusted metadata
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime
+import os
 from typing import TYPE_CHECKING, Any
 
 from services.sleep.judge_lane import judge_platform_only
@@ -52,6 +55,8 @@ from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from neural.config import NeuralMemoryConfig
@@ -188,19 +193,41 @@ def parse_judgement(parsed: Any) -> tuple[str, float, str] | None:
     return verdict, confidence, reason_text
 
 
-def pair_fingerprint(old: Any, new: Any) -> str:
-    """A short digest of the two texts the judge saw.
+def text_fingerprint(summary: str | None, content_head: str | None) -> str:
+    """A short digest of one memory's text as the judge sees it.
 
-    Covers what :func:`build_prompt` sends (summary and content head of both
-    sides), so a verdict is reused only for the texts it was given.
+    Covers what :func:`build_prompt` sends for one side: the summary and the
+    first :data:`CONTENT_HEAD_CHARS` of the content. The read path computes
+    the same digest from ``summary`` and ``substr(content, 1, 600)``.
     """
-    parts = (
-        (old.summary or "")[:SUMMARY_CHARS],
-        (old.content or "")[:CONTENT_HEAD_CHARS],
-        (new.summary or "")[:SUMMARY_CHARS],
-        (new.content or "")[:CONTENT_HEAD_CHARS],
-    )
+    parts = ((summary or "")[:SUMMARY_CHARS], (content_head or "")[:CONTENT_HEAD_CHARS])
     return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def pair_fingerprint(old: Any, new: Any) -> str:
+    """A short digest of the two texts the judge saw (both sides)."""
+    joined = text_fingerprint(old.summary, old.content) + text_fingerprint(new.summary, new.content)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def min_confidence_from_env(default: float = 0.7) -> float:
+    """``SUPERSEDE_VERIFY_MIN_CONFIDENCE`` as the read path uses it.
+
+    A single-field read that never raises: the resolver runs on every recall
+    / reference and must not inherit ``NeuralMemoryConfig.from_env()``'s
+    validation of fifty unrelated knobs. An unparseable or out-of-range value
+    falls back to ``default``.
+    """
+    raw = os.getenv("SUPERSEDE_VERIFY_MIN_CONFIDENCE")
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if value != value or not (0.0 <= value <= 1.0):
+        return default
+    return value
 
 
 def verification_record(
@@ -211,11 +238,15 @@ def verification_record(
     model: str,
     min_confidence: float,
     fingerprint: str,
+    old_fingerprint: str,
+    at: str | None = None,
 ) -> dict[str, Any]:
     """The value stored under ``supersede_candidate.verification``.
 
     ``verified`` here is the floor at judge time, kept for audit; the read
     path recomputes it against the current floor (:func:`is_verified`).
+    ``at`` is when the texts were read (before the call), not when the
+    answer came back.
     """
     return {
         "verdict": verdict,
@@ -224,7 +255,8 @@ def verification_record(
         "model": model,
         "prompt_revision": PROMPT_REVISION,
         "fingerprint": fingerprint,
-        "at": to_utc_iso(utcnow()),
+        "old_fingerprint": old_fingerprint,
+        "at": at or to_utc_iso(utcnow()),
         "verified": verdict == VERDICT_SUPERSEDES and confidence >= min_confidence,
     }
 
@@ -260,37 +292,22 @@ def is_verified(candidate: Any, *, min_confidence: float) -> bool:
     return float(confidence) >= min_confidence
 
 
-def _verified_at(verification: dict[str, Any]) -> datetime | None:
-    raw = verification.get("at")
-    if not isinstance(raw, str):
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed
-    return parsed.astimezone(UTC).replace(tzinfo=None)
+def verification_stale(
+    candidate: Any, *, old_summary: str | None, old_content_head: str | None
+) -> bool:
+    """Whether the OLD memory's text is no longer what the judge saw.
 
-
-def verification_stale(candidate: Any, *, target_updated_at: datetime | None) -> bool:
-    """Whether the OLD memory changed after the verdict was given.
-
-    The judge saw the old memory's text as it was; an edit to it since then
-    (``updated_at`` later than the verdict's ``at``) means the verdict is about
-    text that no longer exists, so neither ``verified`` nor the parallel
-    suppression may rest on it. A verdict without a readable ``at`` is stale.
+    The verdict was given about a specific old text; once that text differs
+    (``old_fingerprint`` no longer matches), the verdict is about text that no
+    longer exists, so neither ``verified`` nor the parallel suppression may
+    rest on it. A verdict without an ``old_fingerprint`` is stale. The next
+    re-embed of the new memory re-judges the pair (its pair fingerprint moved
+    too).
     """
     verification = stored_verification(candidate)
-    if verification is None or target_updated_at is None:
+    if verification is None:
         return False
-    at = _verified_at(verification)
-    if at is None:
-        return True
-    updated = target_updated_at
-    if updated.tzinfo is not None:
-        updated = updated.astimezone(UTC).replace(tzinfo=None)
-    return updated > at
+    return verification.get("old_fingerprint") != text_fingerprint(old_summary, old_content_head)
 
 
 def reuse_verification(
@@ -327,8 +344,10 @@ def counter_key(workspace_id: str) -> str:
     return f"supersede_verify:{workspace_id}:{utcnow().strftime('%Y-%m-%d')}"
 
 
-# (workspace_id, UTC day) pairs whose cap was already reported this process.
-_CAP_REPORTED: set[tuple[str, str]] = set()
+# Workspaces whose cap was already reported today (reset when the UTC day
+# changes, so the set never grows past the day's capped workspaces).
+_CAP_REPORTED_DAY = ""
+_CAP_REPORTED: set[str] = set()
 _NO_PROVIDER_REPORTED = False
 
 
@@ -353,9 +372,13 @@ async def _under_daily_cap(workspace_id: str, max_calls: int) -> bool:
         return False
     if count <= max_calls:
         return True
-    key = (workspace_id, utcnow().strftime("%Y-%m-%d"))
-    if key not in _CAP_REPORTED:
-        _CAP_REPORTED.add(key)
+    global _CAP_REPORTED_DAY
+    today = utcnow().strftime("%Y-%m-%d")
+    if today != _CAP_REPORTED_DAY:
+        _CAP_REPORTED_DAY = today
+        _CAP_REPORTED.clear()
+    if workspace_id not in _CAP_REPORTED:
+        _CAP_REPORTED.add(workspace_id)
         logger.warning(
             "supersede_verify_cap_reached",
             workspace_id=workspace_id,
@@ -411,6 +434,9 @@ async def judge_pair(
     if not await _under_daily_cap(workspace_id, config.supersede_verify_max_calls_per_day):
         return None
 
+    # Stamp the verdict with the moment the texts were read, not the moment
+    # the answer came back: an edit during the round trip must read as later.
+    read_at = to_utc_iso(utcnow())
     prompt = build_prompt(
         old_summary=old.summary,
         old_content=old.content,
@@ -462,6 +488,8 @@ async def judge_pair(
         model=response.model,
         min_confidence=config.supersede_verify_min_confidence,
         fingerprint=pair_fingerprint(old, new),
+        old_fingerprint=text_fingerprint(old.summary, old.content),
+        at=read_at,
     )
     logger.info(
         "supersede_verify_judged",

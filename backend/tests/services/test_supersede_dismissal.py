@@ -165,6 +165,14 @@ class TestServiceApplication:
         assert returned is None
         assert memory.supersede_candidate == stored
 
+    def test_a_parallel_verdict_is_not_a_live_suggestion(self):
+        """#2016: the judge set the pair aside and the caller never saw it —
+        dismissing is a no-op and the verdict stays (no re-judge later)."""
+        stored = {**_live_candidate(), "verification": {"verdict": "parallel", "confidence": 0.9}}
+        memory, returned = self._apply(stored)
+        assert returned is None
+        assert memory.supersede_candidate == stored
+
     def test_dismissing_twice_is_idempotent(self):
         memory, first = self._apply(_live_candidate())
         tombstone = memory.supersede_candidate

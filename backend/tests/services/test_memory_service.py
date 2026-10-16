@@ -834,13 +834,20 @@ class TestSupersedeCandidateExposure:
 
     @classmethod
     def _target_row(
-        cls, target_id, summary="the older fact", *, workspace_id=None, context_id=None
+        cls,
+        target_id,
+        summary="the older fact",
+        *,
+        workspace_id=None,
+        context_id=None,
+        content_head="the older content",
     ):
         return SimpleNamespace(
             id=target_id,
             summary=summary,
             workspace_id=workspace_id or cls.WS,
             context_id=context_id or cls.CTX,
+            content_head=content_head,
         )
 
     def _mock_rows(self, service, rows):
@@ -868,8 +875,18 @@ class TestSupersedeCandidateExposure:
         assert cand.detected_at is not None
 
     @staticmethod
-    def _verification(verdict, confidence, at="2026-10-01T12:00:00Z"):
-        return {"verdict": verdict, "confidence": confidence, "verified": False, "at": at}
+    def _verification(verdict, confidence, *, old_fingerprint=None):
+        from services.supersede_verify import text_fingerprint
+
+        if old_fingerprint is None:  # matches _target_row's defaults
+            old_fingerprint = text_fingerprint("the older fact", "the older content")
+        return {
+            "verdict": verdict,
+            "confidence": confidence,
+            "verified": False,
+            "at": "2026-10-01T12:00:00Z",
+            "old_fingerprint": old_fingerprint,
+        }
 
     @pytest.mark.asyncio
     async def test_resolve_skips_parallel_verdict(self, service):
@@ -917,21 +934,20 @@ class TestSupersedeCandidateExposure:
         assert resolved[s3.id].verified is None
 
     @pytest.mark.asyncio
-    async def test_resolve_sets_a_verdict_aside_when_the_old_memory_changed(self, service):
-        """#2016: the judge saw the old text as it was; once the old memory is
-        edited after the verdict, a parallel verdict no longer hides the pair
-        and a supersedes verdict no longer verifies it."""
-        from datetime import datetime
-
+    async def test_resolve_sets_a_verdict_aside_when_the_old_text_changed(self, service):
+        """#2016: the judge saw the old text as it was; once the old memory's
+        summary or content head differs from that, a parallel verdict no
+        longer hides the pair and a supersedes verdict no longer verifies it."""
         parallel_t, verified_t = uuid4(), uuid4()
         c1 = self._candidate(parallel_t)
         c1["verification"] = self._verification("parallel", 0.9)
         c2 = self._candidate(verified_t)
         c2["verification"] = self._verification("supersedes", 0.99)
         s1, s2 = self._mem(c1), self._mem(c2)
-        edited = datetime(2026, 10, 2, 0, 0, 0)  # after the 2026-10-01 verdicts
-        rows = [self._target_row(parallel_t), self._target_row(verified_t)]
-        rows = [SimpleNamespace(**vars(r), updated_at=edited) for r in rows]
+        rows = [
+            self._target_row(parallel_t, content_head="edited since the verdict"),
+            self._target_row(verified_t, summary="the older fact, reworded"),
+        ]
         self._mock_rows(service, rows)
 
         resolved = await service._resolve_supersede_candidates(

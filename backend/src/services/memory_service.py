@@ -1642,12 +1642,19 @@ class MemoryService:
             return None
 
         from services.supersede_dismissal import build_tombstone, dismissed_entry
+        from services.supersede_verify import is_parallel
 
         stored = memory.supersede_candidate
         if not isinstance(stored, dict) or not stored.get("memory_id"):
             # Already a tombstone, or nothing pending.
             if dismissed_entry(stored) is None:
                 logger.info("supersede_dismiss_noop", memory_id=str(memory.id))
+            return None
+        if is_parallel(stored):
+            # #2016: the judge already set this pair aside and the caller was
+            # never shown it — nothing to reject, and the verdict stays so
+            # the pair is not re-judged.
+            logger.info("supersede_dismiss_noop", memory_id=str(memory.id), reason="parallel")
             return None
 
         target_id = str(stored["memory_id"])
@@ -3292,8 +3299,13 @@ class MemoryService:
         from services.agent_binding_service import filter_memory_rows_by_binding
 
         try:
-            from neural.config import NeuralMemoryConfig
-            from services.supersede_verify import is_parallel, is_verified, verification_stale
+            from services.supersede_verify import (
+                CONTENT_HEAD_CHARS,
+                is_parallel,
+                is_verified,
+                min_confidence_from_env,
+                verification_stale,
+            )
 
             pending: dict[UUID, dict] = {}
             for memory in memories.values():
@@ -3322,7 +3334,9 @@ class MemoryService:
                     Memory.context_id,
                     Memory.type,
                     Memory.source_type,
-                    Memory.updated_at,
+                    # #2016: the head of the text the judge saw, to tell a
+                    # stale verdict apart without reading whole contents.
+                    func.substr(Memory.content, 1, CONTENT_HEAD_CHARS).label("content_head"),
                 ).where(
                     Memory.id.in_(target_ids),
                     Memory.deleted_at.is_(None),
@@ -3337,8 +3351,9 @@ class MemoryService:
             live = {row.id: row for row in kept_rows}
 
             # #2016: the floor is env-only and applied here, at read time, so
-            # a raised floor applies to stored verdicts too.
-            min_confidence = NeuralMemoryConfig.from_env().supersede_verify_min_confidence
+            # a raised floor applies to stored verdicts too (a single-field
+            # read: the resolver must not inherit from_env()'s validation).
+            min_confidence = min_confidence_from_env()
 
             resolved: dict[UUID, SupersedeCandidate] = {}
             for source_id, p in pending.items():
@@ -3353,11 +3368,13 @@ class MemoryService:
                     continue  # never enrich across a context the caller isn't reading
                 cand = p["candidate"]
                 try:
-                    # #2016: a verdict given before the OLD memory was edited is
-                    # about text that no longer exists — neither the parallel
-                    # suppression nor ``verified`` may rest on it.
+                    # #2016: a verdict about an OLD text that has since been
+                    # edited is about text that no longer exists — neither the
+                    # parallel suppression nor ``verified`` may rest on it.
                     stale = verification_stale(
-                        cand, target_updated_at=getattr(target, "updated_at", None)
+                        cand,
+                        old_summary=target.summary,
+                        old_content_head=getattr(target, "content_head", None),
                     )
                     if not stale and is_parallel(cand):
                         # The judge said these are two facts, not an update —
@@ -7005,7 +7022,23 @@ async def _detect_supersede_candidate(
                 )
             ).scalar_one_or_none()
             verification = None
-            if old is not None:
+            newer_target = (
+                old is not None
+                and old.created_at is not None
+                and memory.created_at is not None
+                and old.created_at > memory.created_at
+            )
+            if newer_target:
+                # The neighbour was written AFTER this memory (its embedding
+                # just finished first). Asking whether the earlier text
+                # "supersedes" the later one would invert the question — the
+                # candidate stays unverified, exactly as before #2016.
+                logger.info(
+                    "supersede_verify_skipped_newer_target",
+                    memory_id=memory_id_str,
+                    candidate_memory_id=target_id_str,
+                )
+            elif old is not None:
                 verification = reuse_verification(
                     memory.supersede_candidate,
                     target_id=target_id_str,
