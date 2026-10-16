@@ -2233,16 +2233,17 @@ Every recall that completes logs one `recall_completed` line (also when the page
 | Field | Stage |
 |---|---|
 | `duration_ms` | From the start of `MemoryService.recall` to the log line (everything the caller waited for inside the service; authentication, the route handler and serialization are outside it). |
-| `embed_ms`, `embed_cache_hit` | Query embedding (`SearchService.hybrid_search`); `embed_cache_hit: true` means the vector came from the cache. A degraded embed records its time-to-failure here, next to `degraded` / `degraded_reason` in the response. |
-| `qdrant_ms`, `fulltext_ms` | The dense and the BM25 search. |
-| `rerank_ms` | The cross-encoder rerank; absent when no provider scored (none configured, nothing to score, or the rerank failed open — see `rerank_failed_open`), never `0` for a skipped one. |
+| `embed_ms`, `embed_cache_hit` | Query embedding (`SearchService.hybrid_search`); `embed_cache_hit: true` means the vector came from the cache, `false` a provider call (also one that failed). |
+| `qdrant_ms`, `fulltext_ms` | The dense and the BM25 search. When a recall is `degraded` (#1515), the failed arm carries its time-to-failure: `embed_ms` for `embedding_unavailable`, `qdrant_ms` for `vector_search_unavailable`; the rest of the recall ran keyword-only. |
+| `rerank_ms` | The cross-encoder rerank; absent when there was nothing to score or no active provider (never `0` for a skipped one). A rerank that failed open (`rerank_failed_open`) keeps its time-to-failure here. |
 | `hydrate_ms` | The Postgres row fetch. |
 | `finalize_ms` | Response build, explore hints, related tags, confidence and the `memory_access_events` row. |
+| `commit_ms` | The read transaction's commit, before the post-commit writes. |
 | `post_commit_ms` | The access-statistics and Hebbian writes that run after the read commits (#1985) and still delay the response. |
-| `other_ms` | `duration_ms` minus the stages above: preparation and config lookups, the `llm_call_log` write after a cold embed, the plan-tier check before a rerank, binding and supersede filters, reinforce and selection passes, and the read transaction's commit. |
-| `candidates`, `results`, `k`, `context_count`, `degraded` | Size context: candidate pool, returned page, requested page, contexts searched; `degraded: true` when the semantic arm was unavailable (#1515), which is why `qdrant_ms` is missing and `embed_ms` is a time-to-failure. |
+| `other_ms` | `duration_ms` minus the stages above: preparation and config lookups, the `llm_call_log` write after a cold embed, the plan-tier check before a rerank, and the binding, supersede, reinforce and selection passes between hydrate and the response build. |
+| `candidates`, `results`, `k`, `context_count`, `degraded` | Size context: candidate pool, returned page, requested page, contexts searched; `degraded: true` when the semantic arm was unavailable (#1515). |
 
-The stages run one after another, so `embed_ms + qdrant_ms + fulltext_ms + rerank_ms + hydrate_ms + finalize_ms + post_commit_ms + other_ms` equals `duration_ms` up to rounding. `memory_access_events.latency_ms` and `usage_stats` keep the total only; the breakdown lives in the log. A p50 / p95 per stage from the live color's JSON log (`LOG_COLORIZE=false`, the production default; the colored console renderer is not JSON):
+The stages run one after another, so `embed_ms + qdrant_ms + fulltext_ms + rerank_ms + hydrate_ms + finalize_ms + commit_ms + post_commit_ms + other_ms` equals `duration_ms` up to rounding. `memory_access_events.latency_ms` and `usage_stats` keep the total only; the breakdown lives in the log. A p50 / p95 per stage from the live color's JSON log (`LOG_COLORIZE=false`, the production default; the colored console renderer is not JSON):
 
 ```bash
 docker logs kagura-api-blue --since 1h 2>&1 | grep recall_completed | jq -s '
@@ -2250,10 +2251,11 @@ docker logs kagura-api-blue --since 1h 2>&1 | grep recall_completed | jq -s '
   def stage(f): {p50: (map(f // empty) | pct(0.5)), p95: (map(f // empty) | pct(0.95))};
   {duration: stage(.duration_ms), embed: stage(.embed_ms), qdrant: stage(.qdrant_ms),
    fulltext: stage(.fulltext_ms), rerank: stage(.rerank_ms), hydrate: stage(.hydrate_ms),
-   finalize: stage(.finalize_ms), post_commit: stage(.post_commit_ms), other: stage(.other_ms)}'
+   finalize: stage(.finalize_ms), commit: stage(.commit_ms), post_commit: stage(.post_commit_ms),
+   other: stage(.other_ms)}'
 ```
 
-To see the slow requests with their breakdown beside them: `... | grep recall_completed | jq -r '[.duration_ms, .embed_ms, .qdrant_ms, .fulltext_ms, .hydrate_ms, .finalize_ms, .post_commit_ms, .candidates] | @tsv' | sort -n | tail`.
+To see the slow requests with their breakdown beside them: `... | grep recall_completed | jq -r '[.duration_ms, .embed_ms, .qdrant_ms, .fulltext_ms, .hydrate_ms, .finalize_ms, .commit_ms, .post_commit_ms, .candidates] | @tsv' | sort -n | tail`.
 
 ## Multiple API workers and Postgres connections — Issue #1980
 

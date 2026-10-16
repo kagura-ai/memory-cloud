@@ -301,7 +301,7 @@ class TestRecallTimingsWiring:
             return ["page-item"]
 
         service._recall_build_responses = build
-        service.db.commit = advance(0.003)  # the read commit: unmeasured
+        service.db.commit = advance(0.003)  # the read commit: its own stage
         service._recall_record_access = advance(0.011)
         service._recall_run_hebbian_learning = advance(0.009)
 
@@ -330,8 +330,9 @@ class TestRecallTimingsWiring:
         assert "rerank_ms" not in kw
         assert kw["hydrate_ms"] == 25
         assert kw["finalize_ms"] == 20  # build (6) + finalize body (14)
+        assert kw["commit_ms"] == 3
         assert kw["post_commit_ms"] == 20  # record_access (11) + Hebbian (9)
-        assert kw["other_ms"] == 7  # config lookups (4) + the commit (3)
+        assert kw["other_ms"] == 4  # the config lookups inside hybrid_search
         assert kw["duration_ms"] == 232
         assert (
             kw["embed_ms"]
@@ -339,6 +340,7 @@ class TestRecallTimingsWiring:
             + kw["fulltext_ms"]
             + kw["hydrate_ms"]
             + kw["finalize_ms"]
+            + kw["commit_ms"]
             + kw["post_commit_ms"]
             + kw["other_ms"]
         ) == kw["duration_ms"]

@@ -24,6 +24,7 @@ STAGES: tuple[str, ...] = (
     "rerank",
     "hydrate",
     "finalize",
+    "commit",
     "post_commit",
 )
 """Stage names in log order; every ``<stage>_ms`` field comes from this list."""

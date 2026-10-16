@@ -803,6 +803,7 @@ class RerankerService:
         k: int,
         context_id: str | None = None,
         workspace_id: str | None = None,  # NEW: Workspace ID (Issue #146)
+        outcome: dict[str, Any] | None = None,
     ) -> list[dict]:
         """Rerank search results using active provider.
 
@@ -813,10 +814,16 @@ class RerankerService:
             k: Number of top results to return
             context_id: Optional context ID (Issue #82)
             workspace_id: Optional workspace ID (Issue #146)
+            outcome: Optional out-parameter; ``outcome["scored"]`` says whether
+                a provider actually scored the candidates (#1989). ``False``
+                when there was nothing to score or no active provider, in
+                which case the candidates come back untouched.
 
         Returns:
             Reranked results or original candidates if no reranker available
         """
+        if outcome is not None:
+            outcome["scored"] = False
         if not candidates:
             return candidates
 
@@ -834,6 +841,8 @@ class RerankerService:
         # Rerank
         results = await provider.rerank(query, documents, k)
 
+        if outcome is not None:
+            outcome["scored"] = True
         # Map reranked results back to candidates
         reranked = []
         for result in results:

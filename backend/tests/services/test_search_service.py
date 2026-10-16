@@ -818,7 +818,9 @@ class TestHybridSearchTimings:
 
         clock = {"now": 0.0}
 
-        async def failing_embed(*_args, **_kwargs):
+        async def failing_embed(*_args, outcome=None, **_kwargs):
+            if outcome is not None:
+                outcome["cache_hit"] = False
             clock["now"] += 0.9
             raise ExternalServiceError("provider down")
 
@@ -855,7 +857,9 @@ class TestHybridSearchTimings:
         fields = timings.log_fields()
         assert degradation.get("degraded") is True
         assert fields["embed_ms"] == 900
-        assert "embed_cache_hit" not in fields
+        # The service marked the miss before the provider call: the slowest
+        # embeds are the failed cold ones, and they must be attributable.
+        assert fields["embed_cache_hit"] is False
         assert "qdrant_ms" not in fields
         assert "fulltext_ms" in fields
 
@@ -880,15 +884,26 @@ class TestHybridSearchTimings:
         hits = [{"id": "m1", "score": 0.9, "payload": {"summary": "a"}}]
         clock = {"now": 0.0}
 
-        async def scoring_rerank(*, candidates, **_kwargs):
+        async def scoring_rerank(*, candidates, outcome=None, **_kwargs):
             clock["now"] += 0.05
-            return [dict(c, rerank_score=1.0) for c in candidates]  # a new list
+            outcome["scored"] = True
+            return [dict(c, rerank_score=1.0) for c in candidates]
 
-        async def no_provider_rerank(*, candidates, **_kwargs):
+        async def no_provider_rerank(*, candidates, outcome=None, **_kwargs):
             clock["now"] += 0.002  # the provider lookup
-            return candidates  # untouched, as RerankerService does with no provider
+            outcome["scored"] = False
+            return candidates
 
-        for rerank, expected in ((scoring_rerank, 50), (no_provider_rerank, None)):
+        async def failing_rerank(*, candidates, outcome=None, **_kwargs):
+            outcome["scored"] = False
+            clock["now"] += 0.4  # a provider that hangs, then raises: fails open
+            raise RuntimeError("cohere timeout")
+
+        for rerank, expected in (
+            (scoring_rerank, 50),
+            (no_provider_rerank, None),
+            (failing_rerank, 400),
+        ):
             service.reranker_service.rerank = AsyncMock(side_effect=rerank)
             service._get_search_config = AsyncMock(return_value=config)
             timings = RecallTimings(clock=lambda: clock["now"])

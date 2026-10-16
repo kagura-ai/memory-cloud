@@ -113,8 +113,9 @@ class SearchService:
                 fulltext / rerank stages are timed into it (``stage()``) and
                 ``embed_cache_hit`` is set from the embedding service's
                 ``outcome`` (never from the token count). ``rerank_ms`` is kept
-                only when a provider scored. A degraded embed records its
-                time-to-failure as ``embed_ms``.
+                when a provider scored or the rerank failed open, not when
+                there was nothing to score or no provider. A degraded embed or
+                vector search records its time-to-failure in its own stage.
 
         Returns:
             List of search results with scores
@@ -267,7 +268,7 @@ class SearchService:
         # -only (#1515).
         effective_search_mode: SearchMode = search_mode
         if timings is None:
-            timings = RecallTimings()  # unread; keeps the stage blocks unconditional
+            timings = RecallTimings()  # discarded; keeps the stage blocks unconditional
 
         if search_mode in ("hybrid", "semantic"):
             try:
@@ -286,19 +287,23 @@ class SearchService:
                 # probe in ``MemoryService.recall`` and this resolution could
                 # silently route to the uncapped platform key.
                 embed_outcome: dict[str, Any] = {}
-                with timings.stage("embed"):
-                    query_vector, embedding_tokens = await embed_svc.embed_with_usage(
-                        normalized_query,
-                        user_id,
-                        context_id=primary_context_id,
-                        workspace_id=workspace_id,
-                        disallow_env_fallback=is_shared_context_read,
-                        outcome=embed_outcome,
-                    )
-                # The service says whether the vector came from the cache; the
-                # token count cannot (providers without usage accounting, e.g.
-                # Ollama, report 0 for a cold embed too).
-                timings.embed_cache_hit = embed_outcome.get("cache_hit")
+                try:
+                    with timings.stage("embed"):
+                        query_vector, embedding_tokens = await embed_svc.embed_with_usage(
+                            normalized_query,
+                            user_id,
+                            context_id=primary_context_id,
+                            workspace_id=workspace_id,
+                            disallow_env_fallback=is_shared_context_read,
+                            outcome=embed_outcome,
+                        )
+                finally:
+                    # The service says whether the vector came from the cache;
+                    # the token count cannot (providers without usage
+                    # accounting, e.g. Ollama, report 0 for a cold embed too).
+                    # Read it on failure as well: a provider call that raised
+                    # was a miss, and the slowest embeds are those.
+                    timings.embed_cache_hit = embed_outcome.get("cache_hit")
                 if embedding_tokens > 0:
                     # Cache hits return 0 tokens and intentionally produce no
                     # llm_call_log row (B1 pin) — the table is "API was
@@ -432,30 +437,30 @@ class SearchService:
                     # Graceful degradation: Continue without reranking
 
             if plan_allows:
+                rerank_outcome: dict[str, Any] = {}
                 try:
-                    candidates = merged_results[:fetch_size]  # Dynamic fetch size (#130)
                     with timings.stage("rerank"):
-                        reranked = await self.reranker_service.rerank(
+                        merged_results = await self.reranker_service.rerank(
                             query=query,
-                            candidates=candidates,
+                            candidates=merged_results[:fetch_size],  # Dynamic fetch size (#130)
                             user_id=user_id,
                             k=k,
                             context_id=primary_context_id,
                             workspace_id=workspace_id,  # NEW: Issue #146
+                            outcome=rerank_outcome,
                         )
-                    if reranked is candidates:
-                        # No provider scored (none configured, or nothing to
-                        # score): the list came back untouched, so there was
-                        # no rerank to report (#1989 rerank_ms means one ran).
+                    if rerank_outcome.get("scored"):
+                        logger.debug("reranking_completed", results=len(merged_results))
+                    else:
+                        # Nothing to score or no active provider: no rerank to
+                        # report (#1989 rerank_ms means one ran). A rerank that
+                        # raised keeps its time-to-failure, like a failed embed.
                         timings.discard("rerank")
-                    merged_results = reranked
-                    logger.debug("reranking_completed", results=len(merged_results))
                 except Exception as e:
                     # Fail open to the un-reranked hybrid results — never fail
                     # the recall. ``rerank_failed_open`` is the stable event
                     # operators alert on (#1572; same shape as
                     # ``quota_check_failed_open`` in api/middleware/rate_limit.py).
-                    timings.discard("rerank")  # #1989: no rerank happened
                     logger.warning(
                         "rerank_failed_open",
                         provider=getattr(config, "reranker_provider", None),

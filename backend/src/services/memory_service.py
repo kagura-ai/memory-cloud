@@ -8,6 +8,7 @@ Issue #82: Context-based multi-collection support.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import hashlib
 import math
@@ -3919,15 +3920,38 @@ class MemoryService:
             degraded_reason=(degradation or {}).get("reason"),
         )
         if timings is not None:
-            logger.info(
-                "recall_completed",
+            self._log_recall_completed(
+                timings,
                 user_id=user_id,
-                degraded=(degradation or {}).get("degraded"),
-                **timings.log_fields(
-                    results=0, candidates=0, k=request.k, context_count=context_count
-                ),
+                degradation=degradation,
+                results=0,
+                candidates=0,
+                k=request.k,
+                context_count=context_count,
             )
         return response
+
+    @staticmethod
+    def _log_recall_completed(
+        timings: RecallTimings,
+        *,
+        user_id: str | None,
+        degradation: dict[str, Any] | None,
+        results: int,
+        candidates: int,
+        k: int,
+        context_count: int,
+    ) -> None:
+        """The one ``recall_completed`` line (#1989), shared by both exits so
+        the empty page and the full page log the same shape."""
+        logger.info(
+            "recall_completed",
+            user_id=user_id,
+            degraded=(degradation or {}).get("degraded"),
+            **timings.log_fields(
+                results=results, candidates=candidates, k=k, context_count=context_count
+            ),
+        )
 
     async def _recall_check_agent_bindings(
         self,
@@ -4764,8 +4788,7 @@ class MemoryService:
         Returns:
             The completed RecallResponse.
         """
-        clock = timings or RecallTimings()
-        with clock.stage("finalize"):
+        with timings.stage("finalize") if timings is not None else contextlib.nullcontext():
             response = await self._recall_finalize_response(
                 request,
                 search_results,
@@ -4781,16 +4804,14 @@ class MemoryService:
             )
         # #1989: one line per recall, after everything the caller waits for.
         if timings is not None:
-            logger.info(
-                "recall_completed",
+            self._log_recall_completed(
+                timings,
                 user_id=user_id,
-                degraded=(degradation or {}).get("degraded"),
-                **timings.log_fields(
-                    results=len(responses),
-                    candidates=len(search_results),
-                    k=request.k,
-                    context_count=context_count,
-                ),
+                degradation=degradation,
+                results=len(responses),
+                candidates=len(search_results),
+                k=request.k,
+                context_count=context_count,
             )
         return response
 
@@ -5308,7 +5329,8 @@ class MemoryService:
         # check (and with it the #983 repetition gate) when a node has no vector,
         # and a raw BM25 score clamps to full activation. The resulting edges are
         # written into the persistent graph and outlive the outage.
-        await self.db.commit()
+        with timings.stage("commit"):
+            await self.db.commit()
 
         # #1985: the statistics writes run AFTER the read commits, each in its
         # own session, so a recall never holds memory or edge row locks while

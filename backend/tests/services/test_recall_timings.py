@@ -73,7 +73,16 @@ def test_embed_cache_hit_is_reported_when_known() -> None:
 def test_field_order_is_stable_for_log_readers() -> None:
     clock = _Clock()
     t = RecallTimings(clock=clock)
-    for name in ("finalize", "hydrate", "rerank", "fulltext", "qdrant", "embed", "post_commit"):
+    for name in (
+        "finalize",
+        "commit",
+        "hydrate",
+        "rerank",
+        "fulltext",
+        "qdrant",
+        "embed",
+        "post_commit",
+    ):
         with t.stage(name):
             clock.advance(0.001)
     keys = [k for k in t.log_fields() if k.endswith("_ms")]
@@ -85,6 +94,7 @@ def test_field_order_is_stable_for_log_readers() -> None:
         "rerank_ms",
         "hydrate_ms",
         "finalize_ms",
+        "commit_ms",
         "post_commit_ms",
         "other_ms",
     ]
