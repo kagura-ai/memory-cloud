@@ -33,7 +33,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "If the input contains any, refuse and ask the user to redact it first. "
         "EXCEPTION — location: coordinates the user wants tied to a memory go in "
         "details.location = {lat, lon, label?, text?} (lat/lon as JSON numbers; "
-        "queryable via recall_nearby) and ONLY there, never in context. All other "
+        "queryable via recall_nearby, a tool outside the core profile whose schema "
+        'describe_tools(["recall_nearby"]) returns) and ONLY there, never in context. All other '
         "PII rules still apply. Applies to remember and update_memory alike."
     ),
     "ids": (
@@ -74,8 +75,9 @@ GUIDE_TOPICS: dict[str, str] = {
         "until then. Write the summary as the safe alternative, stated as a fact. "
         "'block' only when the call itself does the damage. Authoring needs the "
         "context editor role and a user credential; keep a context at 20 or fewer. "
-        "load_guardrails(context_id) is the deterministic read; get_context_info "
-        "returns the context's guardrails.items at session start."
+        "load_guardrails(context_id) is the deterministic read for hooks — outside the "
+        'core profile, describe_tools(["load_guardrails"]) has its schema; bootstrap and '
+        "get_context_info return the context's guardrails.items at session start."
     ),
     # ---------------------------------------------------------------- remember
     "remember.layers": (
@@ -98,8 +100,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "near-duplicate, which leaves stale and fresh facts competing. If you forget, "
         "the server detects the near-duplicate and surfaces a supersede_candidate on "
         "a later recall()/reference(): accept it with create_edge(edge_type="
-        "'supersedes'), or reject it with update_memory(dismiss_supersede_candidate="
-        "true)."
+        "'supersedes') — outside the core profile, describe_tools([\"create_edge\"]) has "
+        "its schema — or reject it with update_memory(dismiss_supersede_candidate=true)."
     ),
     "remember.delivery": (
         "delivery_mode is orthogonal to type. 'on_recall' (default): only via "
@@ -131,8 +133,9 @@ GUIDE_TOPICS: dict[str, str] = {
         "recall(query) finds candidates and returns Layers 1-2 (summary + "
         "context_summary); reference(memory_id) reads one memory in full; "
         "explore(memory_id) walks the graph to its neighbours; load_pinned() returns "
-        "the pinned set, unranked; recall_upcoming() / recall_nearby() are "
-        "deterministic time / place queries. Typical flow: recall → reference → "
+        "the pinned set, unranked; recall_upcoming() is the deterministic time query "
+        '(recall_nearby(), outside the core profile — describe_tools(["recall_nearby"]) '
+        "has its schema — the place query). Typical flow: recall → reference → "
         "explore. Searches may also strengthen associations (not keyword-only or "
         "degraded recalls) and promote returned memories."
     ),
@@ -187,7 +190,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "• supersede_candidate {memory_id, summary, similarity, detected_at} — an "
         "OLDER near-duplicate this result likely replaces. A suggestion, never "
         "auto-applied. Accept: create_edge(source_id=<this memory_id>, "
-        "target_id=<supersede_candidate.memory_id>, edge_type='supersedes') shadows "
+        "target_id=<supersede_candidate.memory_id>, edge_type='supersedes'), outside "
+        'the core profile (describe_tools(["create_edge"]) has its schema), shadows '
         "the old fact out of default recall. Reject a deliberately separate pair: "
         "update_memory(memory_id, dismiss_supersede_candidate=true). It disappears "
         "once accepted or once the candidate is deleted.\n"
@@ -302,7 +306,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "supersede_candidate (requires memory_id) — for two deliberately separate "
         "memories, so the suggestion stops resurfacing; nothing is deleted or "
         "shadowed, and detection resumes if their similarity changes materially. To "
-        "accept instead: create_edge(edge_type='supersedes')."
+        "accept instead: create_edge(edge_type='supersedes'), outside the core profile "
+        '(describe_tools(["create_edge"]) has its schema).'
     ),
     "update_memory.returns": (
         "Returns: {status, memory_id, operation: 'updated'|'created'|'replaced', "
@@ -328,7 +333,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "supersede_candidate is null, or {memory_id, summary, similarity, "
         "detected_at} of an OLDER near-duplicate this memory likely supersedes — a "
         "suggestion only. Accept it with create_edge(source_id=<this memory_id>, "
-        'target_id=<supersede_candidate.memory_id>, edge_type="supersedes"); reject '
+        'target_id=<supersede_candidate.memory_id>, edge_type="supersedes") — outside '
+        'the core profile, describe_tools(["create_edge"]) has its schema; reject '
         "a deliberate pair with update_memory(dismiss_supersede_candidate=true)."
     ),
     "reference.paging": (
@@ -441,7 +447,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "have the same JSON type (the string 'true' is not the boolean true, the "
         "string '2' is not the number 2) and a number the same spelling (2 is not "
         "2.0); null, objects and arrays never match. near / within are not "
-        "accepted — recall_nearby is the deterministic place query. total is the full "
+        "accepted — recall_nearby, outside the core profile (describe_tools("
+        '["recall_nearby"]) has its schema), is the deterministic place query. total is the full '
         "match count; include_details=true adds details and is dropped first "
         "(details_omitted) when the reply exceeds max_chars. In a private context "
         "only the owner's (identity-link set's) rows are listed; shared contexts list "
@@ -469,7 +476,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "ISO 8601 is UTC. next_cursor "
         "is a keyset token over (at, kind, id): pass it back unchanged, and a page is "
         "never shifted by rows written after you read it. Pair it with "
-        "set_state / get_state to remember the last since you processed."
+        'set_state / get_state — outside the core profile, describe_tools(["set_state", '
+        '"get_state"]) has their schemas — to remember the last since you processed.'
     ),
     # ----------------------------------------------------------- bootstrap
     "bootstrap.usage": (
