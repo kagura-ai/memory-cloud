@@ -22,8 +22,15 @@ verdict is stored on the candidate under ``verification``:
   re-embed does not re-judge the pair) but never surfaced.
 * ``supersedes`` with ``confidence >= supersede_verify_min_confidence`` —
   surfaced with ``verified: true``, the signal a client may auto-accept on.
+  The floor is applied when the candidate is READ, so raising it later
+  applies to stored verdicts too; the stored ``verified`` is audit only.
 * anything else (``unclear``, a low-confidence ``supersedes``, the judge off,
   over its daily cap, or failing) — surfaced as before, without ``verified``.
+
+A verdict is about two texts. It carries a ``fingerprint`` of both (summary
+and content head), so an edit of the new memory re-judges the pair instead of
+reusing the verdict, and the read path drops a verdict older than the old
+memory's ``updated_at`` (``verification_stale``).
 
 The judge never creates an edge: the #1208 over-supersede prevention keeps
 edge authorship with the user / agent. Memory text goes into the prompt only
@@ -33,6 +40,8 @@ between the untrusted-content markers Sleep uses (#919); trusted metadata
 
 from __future__ import annotations
 
+import hashlib
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from services.sleep.judge_lane import judge_platform_only
@@ -42,8 +51,6 @@ from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from neural.config import NeuralMemoryConfig
@@ -180,6 +187,21 @@ def parse_judgement(parsed: Any) -> tuple[str, float, str] | None:
     return verdict, confidence, reason_text
 
 
+def pair_fingerprint(old: Any, new: Any) -> str:
+    """A short digest of the two texts the judge saw.
+
+    Covers what :func:`build_prompt` sends (summary and content head of both
+    sides), so a verdict is reused only for the texts it was given.
+    """
+    parts = (
+        (old.summary or "")[:SUMMARY_CHARS],
+        (old.content or "")[:CONTENT_HEAD_CHARS],
+        (new.summary or "")[:SUMMARY_CHARS],
+        (new.content or "")[:CONTENT_HEAD_CHARS],
+    )
+    return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
 def verification_record(
     verdict: str,
     confidence: float,
@@ -187,14 +209,20 @@ def verification_record(
     *,
     model: str,
     min_confidence: float,
+    fingerprint: str,
 ) -> dict[str, Any]:
-    """The value stored under ``supersede_candidate.verification``."""
+    """The value stored under ``supersede_candidate.verification``.
+
+    ``verified`` here is the floor at judge time, kept for audit; the read
+    path recomputes it against the current floor (:func:`is_verified`).
+    """
     return {
         "verdict": verdict,
         "confidence": round(confidence, 4),
         "reason": reason,
         "model": model,
         "prompt_revision": PROMPT_REVISION,
+        "fingerprint": fingerprint,
         "at": to_utc_iso(utcnow()),
         "verified": verdict == VERDICT_SUPERSEDES and confidence >= min_confidence,
     }
@@ -205,7 +233,10 @@ def stored_verification(candidate: Any) -> dict[str, Any] | None:
     if not isinstance(candidate, dict):
         return None
     verification = candidate.get("verification")
-    if not isinstance(verification, dict) or verification.get("verdict") not in VERDICTS:
+    if not isinstance(verification, dict):
+        return None
+    verdict = verification.get("verdict")
+    if not isinstance(verdict, str) or verdict not in VERDICTS:
         return None
     return verification
 
@@ -216,26 +247,71 @@ def is_parallel(candidate: Any) -> bool:
     return verification is not None and verification.get("verdict") == VERDICT_PARALLEL
 
 
-def is_verified(candidate: Any) -> bool:
-    """Whether a stored candidate carries a confirming verdict a client may act on."""
+def is_verified(candidate: Any, *, min_confidence: float) -> bool:
+    """Whether a stored candidate carries a confirming verdict at or above
+    the CURRENT floor — the signal a client may act on without reading both."""
     verification = stored_verification(candidate)
-    return verification is not None and verification.get("verified") is True
+    if verification is None or verification.get("verdict") != VERDICT_SUPERSEDES:
+        return False
+    confidence = verification.get("confidence")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        return False
+    return float(confidence) >= min_confidence
 
 
-def reuse_verification(stored: Any, *, target_id: str, similarity: float) -> dict[str, Any] | None:
+def _verified_at(verification: dict[str, Any]) -> datetime | None:
+    raw = verification.get("at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone(UTC).replace(tzinfo=None)
+
+
+def verification_stale(candidate: Any, *, target_updated_at: datetime | None) -> bool:
+    """Whether the OLD memory changed after the verdict was given.
+
+    The judge saw the old memory's text as it was; an edit to it since then
+    (``updated_at`` later than the verdict's ``at``) means the verdict is about
+    text that no longer exists, so neither ``verified`` nor the parallel
+    suppression may rest on it. A verdict without a readable ``at`` is stale.
+    """
+    verification = stored_verification(candidate)
+    if verification is None or target_updated_at is None:
+        return False
+    at = _verified_at(verification)
+    if at is None:
+        return True
+    updated = target_updated_at
+    if updated.tzinfo is not None:
+        updated = updated.astimezone(UTC).replace(tzinfo=None)
+    return updated > at
+
+
+def reuse_verification(
+    stored: Any, *, target_id: str, similarity: float, fingerprint: str
+) -> dict[str, Any] | None:
     """An earlier verdict for the same pair, when the pair has not moved.
 
     ``process_pending_embedding`` also runs for Sleep reindexes and backfills,
     which recompute the same vector; re-judging on each of those would spend
     an LLM call to learn what the column already says. The pair is "the same"
-    when the stored candidate names the same target and the similarity is
-    within :data:`RESURFACE_SIMILARITY_DELTA` of the stored one — the rule the
-    dismissal tombstone uses for the same reason.
+    when the stored candidate names the same target, the similarity is within
+    :data:`RESURFACE_SIMILARITY_DELTA` of the stored one (the rule the
+    dismissal tombstone uses) AND the texts the judge saw are unchanged
+    (``fingerprint``) — cosine alone cannot tell an edit that flips the
+    verdict, which is the whole reason the judge exists.
     """
     verification = stored_verification(stored)
     if verification is None or not isinstance(stored, dict):
         return None
     if str(stored.get("memory_id")) != target_id:
+        return None
+    if verification.get("fingerprint") != fingerprint:
         return None
     previous = stored.get("similarity")
     if not isinstance(previous, (int, float)):
@@ -347,7 +423,7 @@ async def judge_pair(
             workspace_id=workspace_id,
             model=config.sleep_llm_model,
             provider=provider,
-            max_tokens=256,
+            max_tokens=512,
             platform_only=judge_platform_only(config),
         )
     except Exception as exc:  # noqa: BLE001 — best-effort, never blocks ingest
@@ -378,6 +454,7 @@ async def judge_pair(
         reason,
         model=response.model,
         min_confidence=config.supersede_verify_min_confidence,
+        fingerprint=pair_fingerprint(old, new),
     )
     logger.info(
         "supersede_verify_judged",

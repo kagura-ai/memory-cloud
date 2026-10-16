@@ -116,45 +116,89 @@ class TestParseJudgement:
 
 class TestVerificationRecord:
     def test_verified_needs_supersedes_at_or_above_the_floor(self):
-        above = sv.verification_record("supersedes", 0.7, "r", model="m", min_confidence=0.7)
-        below = sv.verification_record("supersedes", 0.69, "r", model="m", min_confidence=0.7)
-        parallel = sv.verification_record("parallel", 1.0, "r", model="m", min_confidence=0.7)
+        kw = {"model": "m", "min_confidence": 0.7, "fingerprint": "f"}
+        above = sv.verification_record("supersedes", 0.7, "r", **kw)
+        below = sv.verification_record("supersedes", 0.69, "r", **kw)
+        parallel = sv.verification_record("parallel", 1.0, "r", **kw)
         assert above["verified"] is True
         assert below["verified"] is False
         assert parallel["verified"] is False
         assert above["prompt_revision"] == sv.PROMPT_REVISION
+        assert above["fingerprint"] == "f"
         assert above["at"].endswith("Z")
 
     def test_predicates_read_the_stored_shape(self):
         cand = {"memory_id": "x", "similarity": 0.9, "verification": {"verdict": "parallel"}}
         assert sv.is_parallel(cand) is True
-        assert sv.is_verified(cand) is False
-        cand["verification"] = {"verdict": "supersedes", "verified": True}
+        assert sv.is_verified(cand, min_confidence=0.0) is False
+        cand["verification"] = {"verdict": "supersedes", "confidence": 0.8, "verified": True}
         assert sv.is_parallel(cand) is False
-        assert sv.is_verified(cand) is True
+        assert sv.is_verified(cand, min_confidence=0.7) is True
+        # The floor is applied at read time: a raised floor retires the flag.
+        assert sv.is_verified(cand, min_confidence=0.9) is False
+        # The stored audit boolean never wins over the floor.
+        cand["verification"] = {"verdict": "supersedes", "confidence": 0.5, "verified": True}
+        assert sv.is_verified(cand, min_confidence=0.7) is False
         assert sv.is_parallel({"dismissed": {}}) is False
-        assert sv.is_verified(None) is False
+        assert sv.is_verified(None, min_confidence=0.7) is False
         assert sv.stored_verification({"verification": {"verdict": "bogus"}}) is None
+        assert sv.stored_verification({"verification": {"verdict": ["parallel"]}}) is None
+
+    def test_stale_when_the_old_memory_changed_after_the_verdict(self):
+        cand = {
+            "memory_id": "x",
+            "similarity": 0.9,
+            "verification": {"verdict": "parallel", "at": "2026-10-01T12:00:00Z"},
+        }
+        assert sv.verification_stale(cand, target_updated_at=None) is False
+        assert sv.verification_stale(cand, target_updated_at=datetime(2026, 10, 1, 11)) is False
+        assert sv.verification_stale(cand, target_updated_at=datetime(2026, 10, 1, 13)) is True
+        assert (
+            sv.verification_stale(cand, target_updated_at=datetime(2026, 10, 1, 13, tzinfo=UTC))
+            is True
+        )
+        cand["verification"] = {"verdict": "parallel"}
+        assert sv.verification_stale(cand, target_updated_at=datetime(2026, 1, 1)) is True
+        assert (
+            sv.verification_stale({"memory_id": "x"}, target_updated_at=datetime(2026, 1, 1))
+            is False
+        )
 
 
 class TestReuseVerification:
-    def test_same_pair_within_delta_reuses(self):
-        stored = {"memory_id": "t", "similarity": 0.930, "verification": {"verdict": "parallel"}}
-        assert sv.reuse_verification(stored, target_id="t", similarity=0.935) == {
-            "verdict": "parallel"
-        }
+    STORED = {
+        "memory_id": "t",
+        "similarity": 0.930,
+        "verification": {"verdict": "parallel", "fingerprint": "abc"},
+    }
 
-    def test_moved_pair_or_other_target_does_not(self):
-        stored = {"memory_id": "t", "similarity": 0.930, "verification": {"verdict": "parallel"}}
-        assert sv.reuse_verification(stored, target_id="t", similarity=0.96) is None
-        assert sv.reuse_verification(stored, target_id="u", similarity=0.93) is None
-        assert (
-            sv.reuse_verification(
-                {"memory_id": "t", "similarity": 0.93}, target_id="t", similarity=0.93
-            )
-            is None
+    def test_same_pair_same_texts_within_delta_reuses(self):
+        assert sv.reuse_verification(
+            self.STORED, target_id="t", similarity=0.935, fingerprint="abc"
+        ) == {"verdict": "parallel", "fingerprint": "abc"}
+
+    def test_edited_text_moved_pair_or_other_target_does_not(self):
+        reuse = sv.reuse_verification
+        assert reuse(self.STORED, target_id="t", similarity=0.935, fingerprint="zzz") is None
+        assert reuse(self.STORED, target_id="t", similarity=0.96, fingerprint="abc") is None
+        assert reuse(self.STORED, target_id="u", similarity=0.93, fingerprint="abc") is None
+        unverified = {"memory_id": "t", "similarity": 0.93}
+        assert reuse(unverified, target_id="t", similarity=0.93, fingerprint="abc") is None
+        tombstone = {"dismissed": {"memory_id": "t", "similarity": 0.93}}
+        assert reuse(tombstone, target_id="t", similarity=0.93, fingerprint="abc") is None
+        assert reuse(None, target_id="t", similarity=0.93, fingerprint="abc") is None
+
+    def test_fingerprint_covers_both_texts_heads(self):
+        old, new = _memory(summary="a", content="b"), _memory(summary="c", content="d")
+        base = sv.pair_fingerprint(old, new)
+        assert sv.pair_fingerprint(old, new) == base
+        assert sv.pair_fingerprint(_memory(summary="A", content="b"), new) != base
+        assert sv.pair_fingerprint(old, _memory(summary="c", content="D")) != base
+        # Text past the head the judge never saw does not change it.
+        long_new = _memory(summary="c", content="d" + "x" * 10_000)
+        assert sv.pair_fingerprint(old, long_new) == sv.pair_fingerprint(
+            old, _memory(summary="c", content="d" + "x" * (sv.CONTENT_HEAD_CHARS - 1))
         )
-        assert sv.reuse_verification(None, target_id="t", similarity=0.93) is None
 
 
 class TestJudgePair:
@@ -228,6 +272,7 @@ class TestJudgePair:
         assert record is not None
         assert record["verdict"] == "supersedes" and record["verified"] is True
         assert record["model"] == "gpt-5-nano"
+        assert record["fingerprint"] == sv.pair_fingerprint(old, new)
         call = llm.complete_json.await_args.kwargs
         assert call["system_prompt"] == sv.SUPERSEDE_VERIFY_SYSTEM
         assert "SECRET-OLD" in call["prompt"] and "SECRET-NEW" in call["prompt"]

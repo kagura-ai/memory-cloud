@@ -3292,17 +3292,13 @@ class MemoryService:
         from services.agent_binding_service import filter_memory_rows_by_binding
 
         try:
-            from services.supersede_verify import is_parallel, is_verified
+            from neural.config import NeuralMemoryConfig
+            from services.supersede_verify import is_parallel, is_verified, verification_stale
 
             pending: dict[UUID, dict] = {}
             for memory in memories.values():
                 cand = memory.supersede_candidate
                 if not isinstance(cand, dict):
-                    continue
-                if is_parallel(cand):
-                    # #2016: the judge said these are two facts, not an
-                    # update — kept in the column so the pair is not
-                    # re-judged, never surfaced.
                     continue
                 raw_target = cand.get("memory_id")
                 sim = cand.get("similarity")
@@ -3326,6 +3322,7 @@ class MemoryService:
                     Memory.context_id,
                     Memory.type,
                     Memory.source_type,
+                    Memory.updated_at,
                 ).where(
                     Memory.id.in_(target_ids),
                     Memory.deleted_at.is_(None),
@@ -3338,6 +3335,10 @@ class MemoryService:
                 self.db, list(rows.all()), operation=operation, user_id=user_id
             )
             live = {row.id: row for row in kept_rows}
+
+            # #2016: the floor is env-only and applied here, at read time, so
+            # a raised floor applies to stored verdicts too.
+            min_confidence = NeuralMemoryConfig.from_env().supersede_verify_min_confidence
 
             resolved: dict[UUID, SupersedeCandidate] = {}
             for source_id, p in pending.items():
@@ -3352,13 +3353,25 @@ class MemoryService:
                     continue  # never enrich across a context the caller isn't reading
                 cand = p["candidate"]
                 try:
+                    # #2016: a verdict given before the OLD memory was edited is
+                    # about text that no longer exists — neither the parallel
+                    # suppression nor ``verified`` may rest on it.
+                    stale = verification_stale(
+                        cand, target_updated_at=getattr(target, "updated_at", None)
+                    )
+                    if not stale and is_parallel(cand):
+                        # The judge said these are two facts, not an update —
+                        # kept in the column so the pair is not re-judged,
+                        # never surfaced.
+                        continue
+                    verified = not stale and is_verified(cand, min_confidence=min_confidence)
                     resolved[source_id] = SupersedeCandidate(
                         memory_id=target.id,
                         summary=target.summary,
                         similarity=float(cand["similarity"]),
                         detected_at=cand.get("detected_at"),
-                        # #2016: only a confirming verdict is a key on the wire.
-                        verified=True if is_verified(cand) else None,
+                        # only a confirming verdict is a key on the wire.
+                        verified=True if verified else None,
                     )
                 except (PydanticValidationError, ValueError, TypeError):
                     continue  # malformed stored value → drop just this suggestion
@@ -6933,7 +6946,12 @@ async def _detect_supersede_candidate(
     """
     from models.memory import EDGE_TYPE_SUPERSEDES
     from services.supersede_dismissal import is_dismissed
-    from services.supersede_verify import VERIFY_MODE_LLM, judge_pair, reuse_verification
+    from services.supersede_verify import (
+        VERIFY_MODE_LLM,
+        judge_pair,
+        pair_fingerprint,
+        reuse_verification,
+    )
 
     memory_id_str = str(memory.id)
     target_id_str = str(raw_top["id"])
@@ -6979,18 +6997,22 @@ async def _detect_supersede_candidate(
             "detected_at": to_utc_iso(utcnow()),
         }
         if getattr(config, "supersede_verify_mode", None) == VERIFY_MODE_LLM:
-            verification = reuse_verification(
-                memory.supersede_candidate, target_id=target_id_str, similarity=raw_top_score
-            )
-            if verification is None:
-                old = (
-                    await db.execute(
-                        select(Memory).where(
-                            Memory.id == UUID(target_id_str), Memory.deleted_at.is_(None)
-                        )
+            old = (
+                await db.execute(
+                    select(Memory).where(
+                        Memory.id == UUID(target_id_str), Memory.deleted_at.is_(None)
                     )
-                ).scalar_one_or_none()
-                if old is not None:
+                )
+            ).scalar_one_or_none()
+            verification = None
+            if old is not None:
+                verification = reuse_verification(
+                    memory.supersede_candidate,
+                    target_id=target_id_str,
+                    similarity=raw_top_score,
+                    fingerprint=pair_fingerprint(old, memory),
+                )
+                if verification is None:
                     verification = await judge_pair(
                         db,
                         config=config,
@@ -7000,6 +7022,31 @@ async def _detect_supersede_candidate(
                         new=memory,
                         old=old,
                     )
+                    # The judge took a round trip; a dismissal or an accept
+                    # committed meanwhile by update_memory / create_edge must
+                    # win over this write (re-read the column, then re-check).
+                    await db.refresh(memory, attribute_names=["supersede_candidate"])
+                    if is_dismissed(
+                        memory.supersede_candidate,
+                        target_id=target_id_str,
+                        similarity=raw_top_score,
+                    ):
+                        logger.info(
+                            "supersede_candidate_suppressed_by_dismissal",
+                            memory_id=memory_id_str,
+                            candidate_memory_id=target_id_str,
+                            similarity=round(raw_top_score, 4),
+                        )
+                        return
+                    refreshed = await edge_repo.get_edge(
+                        memory.user_id,
+                        memory.id,
+                        UUID(target_id_str),
+                        workspace_id=workspace_id_str,
+                        context_id=context_id_str,
+                    )
+                    if refreshed is not None and refreshed.edge_type == EDGE_TYPE_SUPERSEDES:
+                        return
             if verification is not None:
                 candidate["verification"] = verification
 

@@ -867,40 +867,78 @@ class TestSupersedeCandidateExposure:
         assert cand.similarity == 0.91
         assert cand.detected_at is not None
 
+    @staticmethod
+    def _verification(verdict, confidence, at="2026-10-01T12:00:00Z"):
+        return {"verdict": verdict, "confidence": confidence, "verified": False, "at": at}
+
     @pytest.mark.asyncio
     async def test_resolve_skips_parallel_verdict(self, service):
         """#2016: a candidate the judge called a parallel fact stays in the
-        column (no re-judge) but is never surfaced, and costs no liveness query."""
+        column (no re-judge) but is never surfaced."""
         target_id = uuid4()
         cand = self._candidate(target_id)
-        cand["verification"] = {"verdict": "parallel", "confidence": 0.9, "verified": False}
+        cand["verification"] = self._verification("parallel", 0.9)
         source = self._mem(cand)
-        service.db.execute = AsyncMock()
+        self._mock_rows(service, [self._target_row(target_id)])
 
         resolved = await service._resolve_supersede_candidates(
             {str(source.id): source}, user_id="u1", operation="recall"
         )
 
         assert resolved == {}
-        service.db.execute.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_resolve_surfaces_verified_flag(self, service):
-        """#2016: a confirming verdict surfaces as ``verified=True``; an
-        ``unclear`` or low-confidence one leaves ``verified`` None."""
-        confirmed, unclear = uuid4(), uuid4()
+    async def test_resolve_surfaces_verified_flag_against_the_current_floor(
+        self, service, monkeypatch
+    ):
+        """#2016: ``verified=True`` only for a supersedes verdict at or above the
+        CURRENT floor (env); unclear or below the floor leaves it None — the
+        stored audit boolean does not count."""
+        monkeypatch.setenv("SUPERSEDE_VERIFY_MIN_CONFIDENCE", "0.9")
+        confirmed, unclear, low = uuid4(), uuid4(), uuid4()
         c1 = self._candidate(confirmed)
-        c1["verification"] = {"verdict": "supersedes", "confidence": 0.95, "verified": True}
+        c1["verification"] = {**self._verification("supersedes", 0.95), "verified": True}
         c2 = self._candidate(unclear)
-        c2["verification"] = {"verdict": "unclear", "confidence": 0.4, "verified": False}
+        c2["verification"] = self._verification("unclear", 0.99)
+        c3 = self._candidate(low)
+        c3["verification"] = {**self._verification("supersedes", 0.8), "verified": True}
+        s1, s2, s3 = self._mem(c1), self._mem(c2), self._mem(c3)
+        self._mock_rows(
+            service,
+            [self._target_row(confirmed), self._target_row(unclear), self._target_row(low)],
+        )
+
+        resolved = await service._resolve_supersede_candidates(
+            {str(s1.id): s1, str(s2.id): s2, str(s3.id): s3}, user_id="u1", operation="recall"
+        )
+
+        assert resolved[s1.id].verified is True
+        assert resolved[s2.id].verified is None
+        assert resolved[s3.id].verified is None
+
+    @pytest.mark.asyncio
+    async def test_resolve_sets_a_verdict_aside_when_the_old_memory_changed(self, service):
+        """#2016: the judge saw the old text as it was; once the old memory is
+        edited after the verdict, a parallel verdict no longer hides the pair
+        and a supersedes verdict no longer verifies it."""
+        from datetime import datetime
+
+        parallel_t, verified_t = uuid4(), uuid4()
+        c1 = self._candidate(parallel_t)
+        c1["verification"] = self._verification("parallel", 0.9)
+        c2 = self._candidate(verified_t)
+        c2["verification"] = self._verification("supersedes", 0.99)
         s1, s2 = self._mem(c1), self._mem(c2)
-        self._mock_rows(service, [self._target_row(confirmed), self._target_row(unclear)])
+        edited = datetime(2026, 10, 2, 0, 0, 0)  # after the 2026-10-01 verdicts
+        rows = [self._target_row(parallel_t), self._target_row(verified_t)]
+        rows = [SimpleNamespace(**vars(r), updated_at=edited) for r in rows]
+        self._mock_rows(service, rows)
 
         resolved = await service._resolve_supersede_candidates(
             {str(s1.id): s1, str(s2.id): s2}, user_id="u1", operation="recall"
         )
 
-        assert resolved[s1.id].verified is True
+        assert resolved[s1.id].verified is None  # surfaced again, unverified
         assert resolved[s2.id].verified is None
 
     @pytest.mark.asyncio
