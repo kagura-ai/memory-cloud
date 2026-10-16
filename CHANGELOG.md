@@ -4,6 +4,30 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.108.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.108.0) — 2026-10-16
+
+The MCP session-start path points agents at `bootstrap`, `recall` answers compactly by default, `remember` stops refusing a long summary or mislabelling a too-large memory, supersede suggestions fire on uncalibrated embedders, agent denies on `list` / `changes_since` are uniform again, and a deployment can opt in to pushing a user's guardrails at connect.
+
+### Added
+- **Opt-in last-used guardrail digest at connect** ([#2000](https://github.com/kagura-ai/memory-cloud/issues/2000)): with `MCP_GUARDRAIL_DIGEST_LAST_USED_FALLBACK=true` (off by default), a user credential with neither `?guardrails=` nor an agent binding receives in the `initialize` / `server/discover` instructions the digest of the context its own most recent tool call touched (one narrow `usage_stats` read in the last 30 days; a fresh account's sole context). A connector's shared key never gets it; the default keeps the plain-URL handshake static, DB-free and publicly cacheable as the Directory scope describes.
+- **`recall` `verbosity`** ([#2002](https://github.com/kagura-ai/memory-cloud/issues/2002)): `"compact"` (the default) returns per hit `memory_id`, the first 160 characters of `summary` (`summary_cut: true` when shortened), `type`, `importance`, `score`, `updated_at` and the actionable annotations (`superseded_by`, `contradicts`, `supersede_candidate`), with `confidence` as the first key; `"full"` is the previous shape. A k=5 reply is about half the size.
+- **Tolerant `remember`** ([#2003](https://github.com/kagura-ai/memory-cloud/issues/2003)): a summary over 500 characters is cut at a sentence end (the full text is kept at the head of `content`) and the reply says `summary_truncated: true` with `summary_original_length`; the `summary_long` lint is muted on a cut. A memory over 1 MB answers `payload_too_large` with `limit`, `actual` and a help line instead of `quota_exceeded`; `remember_batch` items behave the same, and `missing_fields` carries the same help.
+
+### Changed
+- **Server instructions and Quick Reference start at `bootstrap`** ([#2001](https://github.com/kagura-ai/memory-cloud/issues/2001)): the base text names `bootstrap(context_id)` as the session-start call and `changes_since` for "what changed, when" beside `remember` / `recall`; the Quick Reference's Session Start is tool-neutral (it is also `get_agent_bootstrap`'s instructions). Core-profile tool text that pointed at `create_edge` / `recall_nearby` now says those sit outside the core profile and that `describe_tools([...])` has their schema; the `guide` topics carry the same qualifier and a test keeps it so.
+
+### Fixed
+- **Supersede suggestions without a `knn_seed` row** ([#2006](https://github.com/kagura-ai/memory-cloud/issues/2006)): the detection no longer depends on the k-NN seed calibration row; only seed-edge creation is skipped without one (0/100 → 100/100 suggestions on an uncalibrated embedder). An uncalibrated embedder past the D3 gate logs `knn_seed_uncalibrated_embedder` once per process.
+- **Uniform agent denies on `list` / `changes_since`** ([#2007](https://github.com/kagura-ai/memory-cloud/issues/2007)): both (and `recall_upcoming` / `recall_nearby`) are in the memory-access-event vocabulary (migration `e98_2007`), so an unbound agent gets `context_not_found` in enforce mode and a `would_deny` event in shadow mode instead of `validation_error`; a future vocabulary gap degrades to an error log, never a different API response.
+
+### Behaviour changes
+- `recall` is compact by default: clients that read `tags`, `context_summary`, `scope` or `created_at` from a result must pass `verbosity="full"` (or read one hit with `reference`).
+- `remember` / `remember_batch` store a long summary instead of refusing it; `payload_too_large` is a new MCP error code (REST keeps 429 `QUOTA-001`).
+
+### Migration
+- `alembic upgrade head` (e98_2007: widens the `valid_mae_operation` CHECK; zero-downtime).
+- Optional: `MCP_GUARDRAIL_DIGEST_LAST_USED_FALLBACK=true` to push a user's last-used guardrails at connect (production values belong to the devops repo).
+
 ## [v0.107.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.107.0) — 2026-10-16
 
 Every recall now tells which stage its time went to, a database outage during a REST credential lookup answers 503 instead of 401, the files left in contexts deleted before v0.101.0 can be cleared so the upload quota and the capacity lock count the same bytes, and the test suite no longer stalls on a pooled connection reused across event loops.
