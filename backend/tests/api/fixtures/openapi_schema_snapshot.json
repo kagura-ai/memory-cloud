@@ -9444,7 +9444,8 @@
           "detected_at": {},
           "memory_id": {},
           "similarity": {},
-          "summary": {}
+          "summary": {},
+          "verified": {}
         },
         "required": [
           "memory_id",
