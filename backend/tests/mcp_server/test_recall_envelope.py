@@ -458,10 +458,11 @@ class TestSizeGuard:
         assert payload["confidence"]["level"] == "high"
 
 
-# #2002: the compact default renders the same fixture to 2,337 characters
-# (five 160-character summary heads are ~1,000 of them); the budget is that
-# plus 15% headroom, under the same rule as above.
-RECALL_K5_COMPACT_BUDGET_CHARS = 2_685
+# #2002: the compact default renders the same fixture to 2,517 characters
+# (five 160-character summary heads are ~1,000 of them, created_at and
+# updated_at 180); the budget is that plus 15% headroom, under the same rule
+# as above.
+RECALL_K5_COMPACT_BUDGET_CHARS = 2_890
 
 
 class TestCompactSizeGuard:
@@ -476,24 +477,32 @@ class TestCompactSizeGuard:
         text = _dumps(_compact(_fixture_recall()))
         assert len(text) * 1.15 >= RECALL_K5_COMPACT_BUDGET_CHARS - 1
 
-    def test_compact_is_at_least_45_percent_smaller_than_full(self):
+    def test_compact_is_at_least_40_percent_smaller_than_full(self):
         fixture = _fixture_recall()
         compact, full = len(_dumps(_compact(fixture))), len(_dumps(_envelope(fixture)))
-        assert 1 - compact / full >= 0.45, f"{full} -> {compact} chars"
+        assert 1 - compact / full >= 0.40, f"{full} -> {compact} chars"
 
 
 # ============================================================================
 # #2002: verbosity="compact" (the handler default)
 # ============================================================================
 
-_COMPACT_ITEM_KEYS = ["memory_id", "summary", "type", "importance", "score", "updated_at"]
+_COMPACT_ITEM_KEYS = [
+    "memory_id",
+    "summary",
+    "type",
+    "importance",
+    "score",
+    "created_at",  # most memories are never edited: updated_at is null on them
+    "updated_at",
+]
 
 
 class TestCompact:
     def test_item_keys(self):
         item = _compact(RecallResponse(results=[_memory()]))["results"][0]
         assert list(item) == _COMPACT_ITEM_KEYS
-        for dropped in ("context_summary", "tags", "scope", "created_at"):
+        for dropped in ("context_summary", "tags", "scope"):
             assert dropped not in item
 
     def test_compact_keys_are_a_subset_of_full_keys(self):
@@ -541,6 +550,28 @@ class TestCompact:
         assert summary.startswith(head)
         assert summary[len(head)] == " "  # cut before a space, not mid-word
 
+    def test_a_long_token_does_not_collapse_the_head(self):
+        # A raw summary is not a flattened digest line: cutting at its last
+        # space would leave "Release v0.107.0:…".
+        summary = "Release v0.107.0: backend/src/" + "a" * 140 + ".py merged"
+        item = _compact(RecallResponse(results=[_memory(summary=summary)]))["results"][0]
+        assert item["summary_cut"] is True
+        assert len(item["summary"]) == 160
+        assert item["summary"] == summary[:159] + "…"
+
+    def test_newlines_are_flattened_before_the_cut(self):
+        summary = "line one\nline two\n" + "t" * 150
+        item = _compact(RecallResponse(results=[_memory(summary=summary)]))["results"][0]
+        assert "\n" not in item["summary"]
+        assert item["summary"].startswith("line one line two t")
+        assert len(item["summary"]) == 160 and item["summary_cut"] is True
+
+    def test_whitespace_only_change_is_not_a_cut(self):
+        summary = "a  b " * 33  # 165 chars, 99 once flattened
+        item = _compact(RecallResponse(results=[_memory(summary=summary)]))["results"][0]
+        assert item["summary"] == " ".join(summary.split())
+        assert "summary_cut" not in item
+
     def test_160_char_summary_is_not_cut(self):
         summary = "x" * 160
         item = _compact(RecallResponse(results=[_memory(summary=summary)]))["results"][0]
@@ -553,10 +584,16 @@ class TestCompact:
         assert _dumps(envelope).startswith('{"confidence":')
         assert list(envelope)[1] == "status"
 
-    def test_full_keeps_status_first(self):
+    def test_full_puts_confidence_first_too(self):
+        # Key order only: full keeps every key it had.
         confidence = RecallConfidence(level="low", result_count=1, rationale="weak")
-        envelope = _envelope(RecallResponse(results=[_memory()], confidence=confidence))
-        assert next(iter(envelope)) == "status"
+        result = RecallResponse(results=[_memory()], confidence=confidence)
+        envelope = _envelope(result)
+        assert list(envelope)[:2] == ["confidence", "status"]
+        assert set(envelope) == set(_compact(result))
+
+    def test_no_confidence_starts_with_status(self):
+        assert next(iter(_envelope(RecallResponse(results=[])))) == "status"
 
     def test_envelope_signals_pass_through(self):
         result = _fixture_recall()
@@ -641,7 +678,23 @@ class TestHandlerVerbosity:
         item = payload["results"][0]
         for key in ("context_summary", "scope", "tags", "created_at"):
             assert key in item
-        assert next(iter(payload)) == "status"
+        assert next(iter(payload)) == "confidence"
+
+    async def test_deployment_default_full_applies_when_omitted(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        settings = SimpleNamespace(mcp_recall_default_verbosity="full")
+        with patch("config.settings.get_settings", return_value=settings):
+            omitted = await _handler_payload({}, _handler_result())
+            explicit = await _handler_payload({"verbosity": "compact"}, _handler_result())
+        assert "tags" in omitted["results"][0] and "scope" in omitted["results"][0]
+        assert list(explicit["results"][0]) == _COMPACT_ITEM_KEYS
+
+    def test_the_setting_defaults_to_compact(self):
+        from config.settings import Settings
+
+        assert Settings.model_fields["mcp_recall_default_verbosity"].default == "compact"
 
     async def test_bad_value_is_a_validation_error(self):
         for bad in ("verbose", "FULL", "", 1, ["full"]):

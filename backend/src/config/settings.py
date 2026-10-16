@@ -782,6 +782,15 @@ class Settings(BaseSettings):
         ),
     )
 
+    # #2002: the shape a recall without ``verbosity`` returns. "compact" is the
+    # product default; "full" is a flag-day escape for a deployment whose
+    # third-party clients still read tags / context_summary from every recall.
+    # An explicit ``verbosity`` argument always wins.
+    mcp_recall_default_verbosity: Literal["compact", "full"] = Field(
+        default="compact",
+        description="recall result shape when the caller omits verbosity",
+    )
+
     # #1740: MCP Streamable HTTP spec alignment. ``/mcp`` answers a request
     # whose ``Origin`` header is present and not allow-listed with 403 (the
     # spec's DNS-rebinding defence). The allow-list is ``CORS_ORIGINS``, the
