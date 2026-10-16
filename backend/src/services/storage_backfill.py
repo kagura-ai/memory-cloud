@@ -69,6 +69,9 @@ class DeletedContextFilesBackfill:
     """Bytes the upload quota no longer holds, per workspace (uploaded + reserved)."""
     skipped: list[UUID] = field(default_factory=list)
     """Contexts restored between the plan and their turn; left alone."""
+    skipped_past_window: list[UUID] = field(default_factory=list)
+    """Contexts past the restore window left alone because
+    ``include_past_window`` was not given (their deletion would be permanent)."""
 
     @property
     def workspaces(self) -> set[UUID]:
@@ -133,7 +136,11 @@ async def find_deleted_context_files(
 
 
 async def backfill_deleted_context_files(
-    db: AsyncSession, *, dry_run: bool = True, workspace_id: UUID | None = None
+    db: AsyncSession,
+    *,
+    dry_run: bool = True,
+    workspace_id: UUID | None = None,
+    include_past_window: bool = False,
 ) -> DeletedContextFilesBackfill:
     """Soft-delete the files left live in soft-deleted contexts.
 
@@ -144,6 +151,11 @@ async def backfill_deleted_context_files(
             earlier context fully done and the rest untouched.
         dry_run: Count only.
         workspace_id: Limit to one workspace.
+        include_past_window: Also apply to contexts deleted more than
+            ``FILE_RESTORE_WINDOW`` ago. Off by default: for those the
+            deletion is permanent (the next file GC removes the objects), so
+            it is a separate, explicit decision; the plan lists them either
+            way.
 
     Returns:
         The contexts found and, on apply, what was changed.
@@ -161,6 +173,9 @@ async def backfill_deleted_context_files(
 
     files = FileStorageService(db)
     for context in result.contexts:
+        if context.past_restore_window and not include_past_window:
+            result.skipped_past_window.append(context.context_id)
+            continue
         # Re-check under lock: a context restored since the plan is live again
         # and its files must stay.
         still_deleted = (

@@ -383,3 +383,23 @@ class TestGetCurrentStorageUsage:
                 await storage_quota_service.get_current_storage_usage(workspace_id, db_session)
                 == 8192
             )
+
+
+class TestInvalidateStorageCounter:
+    """#1966: a backfill drops the counter instead of decrementing it."""
+
+    @pytest.mark.asyncio
+    async def test_deletes_the_workspace_key(self):
+        ws_id = uuid4()
+        with patch.object(storage_quota_service, "delete_cache", AsyncMock()) as delete:
+            await storage_quota_service.invalidate_storage_counter(ws_id)
+        delete.assert_awaited_once_with(storage_quota_service._build_key(ws_id))
+
+    @pytest.mark.asyncio
+    async def test_redis_errors_are_logged_not_raised(self):
+        from utils.exceptions import RedisError
+
+        with patch.object(
+            storage_quota_service, "delete_cache", AsyncMock(side_effect=RedisError("down"))
+        ):
+            await storage_quota_service.invalidate_storage_counter(uuid4())  # no raise

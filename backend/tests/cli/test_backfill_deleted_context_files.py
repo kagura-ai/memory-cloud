@@ -92,6 +92,20 @@ class TestBackfillCommand:
         backfill = AsyncMock(return_value=_found(dry_run=True))
         assert _run(["--workspace", str(WS)], backfill) == 0
         assert backfill.await_args.kwargs["workspace_id"] == WS
+        assert backfill.await_args.kwargs["include_past_window"] is False
+
+    def test_past_window_is_opt_in(self, capsys):
+        applied = _found(dry_run=False)
+        applied.skipped_past_window = [OLD]
+        backfill = AsyncMock(side_effect=[_found(dry_run=True), applied])
+        assert _run(["--apply", "--yes"], backfill) == 0
+        out = capsys.readouterr().out
+        assert "skipped unless --include-past-window is given" in out
+        assert f"skipped    {OLD}  past the restore window; pass --include-past-window" in out
+
+        backfill = AsyncMock(side_effect=[_found(dry_run=True), _found(dry_run=False)])
+        assert _run(["--apply", "--yes", "--include-past-window"], backfill) == 0
+        assert backfill.await_args.kwargs["include_past_window"] is True
 
     def test_nothing_to_do_exits_zero_without_applying(self, capsys):
         backfill = AsyncMock(return_value=DeletedContextFilesBackfill(dry_run=True))

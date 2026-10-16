@@ -1406,7 +1406,8 @@ rows are cleared once with a one-shot command:
 
 ```bash
 python -m src.cli.backfill_deleted_context_files                # plan: one line per deleted context, changes nothing
-python -m src.cli.backfill_deleted_context_files --apply --yes  # soft-delete the files and release their bytes
+python -m src.cli.backfill_deleted_context_files --apply --yes  # contexts inside the file restore window
+python -m src.cli.backfill_deleted_context_files --apply --include-past-window   # the rest (permanent, see below)
 ```
 
 The command runs one context per transaction, drops that workspace's Redis
@@ -1421,9 +1422,10 @@ deleted inside the file restore window (6 days) `restore_context` brings them
 back with the context, like any deletion since #1960. For a context deleted
 earlier — most of what this command finds — the plan prints `past window`:
 those files cannot be restored and the nightly file GC removes their objects
-on its next run. **That deletion is permanent.** Until the command runs, such a
-context can still be restored with its files; run the plan, read the warning,
-and keep the backups' retention in mind before `--apply`.
+on its next run. **That deletion is permanent**, so those contexts are skipped
+unless `--include-past-window` is given. Until then such a context can still
+be restored with its files; run the plan, read the warning, and keep the
+backups' retention in mind before `--apply --include-past-window`.
 
 ### Restoring a deleted context — Issue #1804
 
