@@ -6877,10 +6877,11 @@ _SUPERSEDE_SUGGEST_THRESHOLD = 0.85
 # the WARNING fires once per process per embedder instead of on every ingest.
 _KNN_SEED_UNCALIBRATED_WARNED: set[tuple[str, int]] = set()
 
-# #2010: one INFO line per process when the deployment turned suggestion
-# detection off (SUPERSEDE_SUGGEST_ENABLED=false or the DB key), so an operator
-# can see the switch took effect without a line per ingest.
-_SUPERSEDE_SUGGEST_DISABLED_LOGGED = False
+# #2010: the last observed value of ``supersede_suggest_enabled`` in this
+# process. One INFO line is logged each time the switch is observed off after
+# having been on (or at the first ingest), so an operator sees the switch take
+# effect without a line per ingest, and a later off→on→off toggle logs again.
+_SUPERSEDE_SUGGEST_LAST_SEEN: bool | None = None
 
 
 async def _create_knn_seed_edges(
@@ -6931,7 +6932,7 @@ async def _create_knn_seed_edges(
     from neural.config import NeuralMemoryConfig
     from repositories.neural_edge import NeuralEdgeRepository
 
-    global _SUPERSEDE_SUGGEST_DISABLED_LOGGED
+    global _SUPERSEDE_SUGGEST_LAST_SEEN
 
     try:
         config = await NeuralMemoryConfig.from_db(db)
@@ -6942,12 +6943,16 @@ async def _create_knn_seed_edges(
         # with both off there is nothing to read the query for.
         seed_enabled = bool(config.knn_seed_enabled)
         suggest_enabled = bool(config.supersede_suggest_enabled)
-        if not suggest_enabled and not _SUPERSEDE_SUGGEST_DISABLED_LOGGED:
-            _SUPERSEDE_SUGGEST_DISABLED_LOGGED = True
+        if not suggest_enabled and _SUPERSEDE_SUGGEST_LAST_SEEN is not False:
             logger.info(
                 "supersede_suggest_disabled",
-                hint="SUPERSEDE_SUGGEST_ENABLED is off; no supersede_candidate is detected",
+                hint=(
+                    "SUPERSEDE_SUGGEST_ENABLED is off; the post-embed detection stores "
+                    "no new supersede_candidate (existing ones stay until dismissed or "
+                    "accepted; remember(dedupe='check') is unaffected)"
+                ),
             )
+        _SUPERSEDE_SUGGEST_LAST_SEEN = suggest_enabled
         if not seed_enabled and not suggest_enabled:
             return
 
@@ -6955,20 +6960,19 @@ async def _create_knn_seed_edges(
             # Defensive: 3-level isolation requires both
             return
 
-        # Resolve the threshold via the D4 fallback chain (#406). None means
-        # "no seed edges for this call" — bootstrap will catch up later. The
-        # supersede detection below still runs (#2006).
-        threshold = (
-            await resolve_knn_threshold(
+        # Resolve the threshold via the D4 fallback chain (#406) — only when
+        # seeding is on (#2010). None means "no seed edges for this call":
+        # bootstrap will catch up later, and the supersede detection below
+        # still runs (#2006).
+        threshold: float | None = None
+        if seed_enabled:
+            threshold = await resolve_knn_threshold(
                 db=db,
                 config=config,
                 model_name=model_name,
                 dimensions=len(vector),
             )
-            if seed_enabled
-            else None
-        )
-        if threshold is None and seed_enabled:
+        if seed_enabled and threshold is None:
             # Bootstrap trigger (#406 C2 trigger 1): if this (model, dims)
             # has crossed D3, enqueue a deduped calibration job so
             # subsequent remember() calls find a populated row and exit
@@ -7024,25 +7028,35 @@ async def _create_knn_seed_edges(
                     ),
                 )
 
+        # #2010: seeding reads the query only with a threshold in hand; if the
+        # detection is off as well, nothing consumes it, so skip the round trip.
+        needs_seed = seed_enabled and threshold is not None
+        if not needs_seed and not suggest_enabled:
+            logger.debug(
+                "knn_seed_skip_no_consumer",
+                memory_id=str(memory.id),
+                model=model_name,
+                dimensions=len(vector),
+            )
+            return
+
         workspace_id_str = str(memory.workspace_id)
         context_id_str = str(memory.context_id)
         memory_id_str = str(memory.id)
 
         # Search for k+1 candidates because the new memory itself will appear
-        # as the top hit (cosine similarity with itself = 1.0). Without a seed
-        # threshold (or with seeding off, #2010) only the supersede detection
-        # consumes the result, and it
-        # reads just the top non-self neighbour, so 2 hits suffice (#2006).
-        # This runs BEFORE
-        # the seed-edge idempotency guard below because the #1403 supersede
-        # detection (which reads these candidates) must not inherit that guard —
-        # see its comment.
+        # as the top hit (cosine similarity with itself = 1.0). When seeding
+        # will not run (no threshold, or switched off — #2006 / #2010) only the
+        # supersede detection consumes the result, and it reads just the top
+        # non-self neighbour, so 2 hits suffice. This runs BEFORE the seed-edge
+        # idempotency guard below because the #1403 supersede detection (which
+        # reads these candidates) must not inherit that guard — see its comment.
         candidates = await search_memories_qdrant(
             user_id=memory.user_id,
             query_vector=vector,
             workspace_id=workspace_id_str,
             context_id=context_id_str,
-            limit=2 if threshold is None else config.knn_seed_k + 1,
+            limit=config.knn_seed_k + 1 if needs_seed else 2,
             collection_name=collection_name,
         )
 
@@ -7137,9 +7151,7 @@ async def _create_knn_seed_edges(
         # #2006: everything below creates seed edges, which needs a calibrated
         # (or operator) threshold. Without one — or with seeding switched off
         # (#2010) — only the detection above runs.
-        if not seed_enabled:
-            return
-        if threshold is None:
+        if not needs_seed:
             logger.debug(
                 "knn_seed_skip_no_threshold",
                 memory_id=memory_id_str,

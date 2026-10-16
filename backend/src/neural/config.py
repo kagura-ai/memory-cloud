@@ -224,7 +224,9 @@ class NeuralMemoryConfig:
     knn_seed_k: int = 5  # Neighbors per new memory (1-20)
     # #1403 supersede suggestions share the seeding's neighbour query but are a
     # separate consumer (#2010): knn_seed_enabled gates only the seed edges,
-    # this flag gates only the suggestion detection. Both off skips the query.
+    # this flag gates only the post-embed suggestion detection. Both off skips
+    # the query. Env-only (SUPERSEDE_SUGGEST_ENABLED): there is no seeded
+    # neural_config row, and a hand-inserted string row would read as truthy.
     supersede_suggest_enabled: bool = True
     # Cosine threshold override. None (default) → use `embedding_calibrations`
     # percentile path; non-None → raw operator override (D6). Prior to #406,
@@ -891,9 +893,7 @@ class NeuralMemoryConfig:
             max_candidates_k=configs.get("max_candidates_k", base_config.max_candidates_k),
             # k-NN Cold-Start Seeding (Issue #221, #406) — DB-overridable
             knn_seed_enabled=configs.get("knn_seed_enabled", base_config.knn_seed_enabled),
-            supersede_suggest_enabled=configs.get(
-                "supersede_suggest_enabled", base_config.supersede_suggest_enabled
-            ),
+            supersede_suggest_enabled=base_config.supersede_suggest_enabled,  # env-only (#2010)
             knn_seed_k=configs.get("knn_seed_k", base_config.knn_seed_k),
             # A DB row for knn_seed_min_similarity is an operator override that
             # wins over calibration (D6). Post-#406 migration deletes rows with
