@@ -1,4 +1,4 @@
-"""DB-level pin for storage-quota aggregation ghost-row exclusion (#995 / #962).
+"""DB-level pin for storage-quota aggregation ghost-row exclusion (#995 / #962 / #1966).
 
 ``storage_quota_service._aggregate_from_db`` is the cold-start source of truth
 for a workspace's committed storage usage (reseeds the Redis counter). It MUST
@@ -82,3 +82,39 @@ async def test_aggregate_zero_for_workspace_with_only_ghost_rows(db_session):
 
     total = await storage_quota_service._aggregate_from_db(ws_id, db_session)
     assert total == 0
+
+
+@pytest.mark.asyncio
+async def test_aggregate_excludes_files_of_deleted_contexts(db_session):
+    """#1966: the reseed shares the reducible definition (#1961) — a file left
+    live in a soft-deleted context is not committed storage, a file in a live
+    context or workspace-scoped is."""
+    from datetime import timedelta
+
+    from models.auth import WorkspaceMember, WorkspaceRole
+
+    from ._admin_helpers import make_context, make_user, make_workspace
+
+    owner = make_user()
+    db_session.add(owner)
+    await db_session.flush()
+    ws = make_workspace(owner_user_id=owner.user_id, plan_name="free")
+    db_session.add(ws)
+    await db_session.flush()
+    db_session.add(
+        WorkspaceMember(workspace_id=ws.id, user_id=owner.user_id, role=WorkspaceRole.OWNER)
+    )
+    live = make_context(workspace_id=ws.id, created_by=owner.user_id, is_private=True)
+    gone = make_context(workspace_id=ws.id, created_by=owner.user_id, is_private=True)
+    db_session.add_all([live, gone])
+    await db_session.flush()
+    gone.deleted_at = utcnow() - timedelta(days=1)
+    in_live = _file(ws.id, size_bytes=100, status="uploaded")
+    in_live.context_id = live.id
+    in_gone = _file(ws.id, size_bytes=500, status="uploaded")
+    in_gone.context_id = gone.id
+    scoped = _file(ws.id, size_bytes=30, status="uploaded")
+    db_session.add_all([in_live, in_gone, scoped])
+    await db_session.commit()
+
+    assert await storage_quota_service._aggregate_from_db(ws.id, db_session) == 130

@@ -1393,6 +1393,29 @@ The sweep reads Postgres one page of points at a time and ends its
 transaction after each page, so a long scan is not cut short by
 `idle_in_transaction_session_timeout`.
 
+### Files left in contexts deleted before v0.100 — Issue #1966
+
+Until #1960 (v0.100.0) deleting a context left its files live: hidden from
+every listing and from the storage page, but still counted by the upload
+quota (`workspace_storage_usage` and the Redis counter). The capacity lock and
+the downgrade eligibility (#1961) never counted them, so such a workspace could
+downgrade to Free and then have every upload refused with no lock to explain
+it. Since #1966 the Redis counter reseeds from the same definition the lock
+uses (committed files in live contexts or workspace-scoped), and the leftover
+rows are cleared once with a one-shot command:
+
+```bash
+python -m src.cli.backfill_deleted_context_files                # plan: one line per deleted context, changes nothing
+python -m src.cli.backfill_deleted_context_files --apply --yes  # soft-delete the files and release their bytes
+```
+
+The command runs one context per transaction, releases that context's bytes
+from the Redis counter right after its commit, and logs
+`deleted_context_files_backfilled` per context (files, uploaded bytes, released
+bytes). A second run finds nothing. The files are stamped with their context's
+own `deleted_at`, so `restore_context` brings them back with the context inside
+the file restore window, like any deletion since #1960.
+
 ### Restoring a deleted context — Issue #1804
 
 Deleting a context soft-deletes it and its memories, and removes their points.

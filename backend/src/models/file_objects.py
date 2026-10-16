@@ -178,11 +178,12 @@ class WorkspaceStorageUsage(Base):
     Maintained atomically with ``file_objects`` inserts/soft-deletes so
     the quota path reads one row instead of an online ``SUM`` over
     millions of rows. Identical pattern to ``addon_*_bonus`` columns on
-    ``Workspace`` — single source of truth for fast reads **of the upload
-    quota**. The capacity lock and the downgrade-eligibility read do not use
-    it: they take ``services/storage_counts.py``'s reducible figure (#1961),
-    which leaves out files left in soft-deleted contexts that this counter
-    still holds.
+    ``Workspace`` — single source of truth for fast reads. Its definition
+    is ``services/storage_counts.py``'s reducible figure (#1961, #1966):
+    committed files in live contexts or workspace-scoped. The capacity lock
+    and the downgrade-eligibility read query that figure directly (the
+    counter is delta-maintained and floored at 0, so it is not an upper
+    bound); the Redis upload counter reseeds from the same statement.
     """
 
     __tablename__ = "workspace_storage_usage"

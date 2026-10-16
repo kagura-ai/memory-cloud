@@ -23,7 +23,6 @@ import asyncio
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.redis import get_cache, get_redis_client, incrby_counter, set_cache
@@ -369,20 +368,15 @@ async def _get_or_seed_counter(
 
 
 async def _aggregate_from_db(workspace_id: UUID, db: AsyncSession) -> int:
-    """Sum committed (uploaded, not deleted) ``file_objects`` size_bytes
-    for ``workspace_id``.
+    """Sum the committed bytes of ``workspace_id`` the way every other gate does.
 
-    Excludes ``status='reserved'`` rows because those are tracked in
-    Redis until ``confirm_upload`` flips them to ``uploaded``. Excludes
-    ``status='failed'`` and soft-deleted rows.
+    One definition (#1966): ``services/storage_counts.reducible_storage_bytes_stmt``
+    — ``status='uploaded'``, not soft-deleted, and in a live context or
+    workspace-scoped. ``reserved`` rows are tracked in Redis until
+    ``confirm_upload`` flips them; ``failed`` rows, soft-deleted rows and files
+    left in soft-deleted contexts (before #1960; backfilled by
+    ``cli/backfill_deleted_context_files``) are not committed storage.
     """
-    from models.file_objects import FileObject
+    from services.storage_counts import reducible_storage_bytes
 
-    result = await db.execute(
-        select(func.coalesce(func.sum(FileObject.size_bytes), 0)).where(
-            FileObject.workspace_id == workspace_id,
-            FileObject.status == "uploaded",
-            FileObject.deleted_at.is_(None),
-        )
-    )
-    return int(result.scalar_one())
+    return await reducible_storage_bytes(db, workspace_id)
