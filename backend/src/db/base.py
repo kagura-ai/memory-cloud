@@ -103,11 +103,6 @@ def _pool_kwargs(settings: "Settings", *, warn_below_fanout: bool = False) -> di
             passes it so the warning is logged once per process.
     """
     if settings.db_null_pool:
-        if warn_below_fanout:
-            # One line per process: the only signal that a deployment is
-            # running without connection pooling (no pool_exhausted
-            # back-pressure, one handshake per checkout).
-            logger.warning("database_null_pool_enabled", reason="DB_NULL_POOL=true")
         return {"poolclass": NullPool}
     if warn_below_fanout:
         _warn_if_pool_below_fanout(settings.db_pool_size, settings.db_max_overflow)
@@ -151,6 +146,11 @@ def _get_engine():
         logger.info(
             "database_engine_created", url=redact_db_url(url), null_pool=settings.db_null_pool
         )
+        if settings.db_null_pool:
+            # One line per process: the only signal that a deployment is
+            # running without connection pooling (no pool_exhausted
+            # back-pressure, one handshake per checkout).
+            logger.warning("database_null_pool_enabled", reason="DB_NULL_POOL=true")
 
     return engine
 

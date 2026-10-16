@@ -570,7 +570,7 @@ class Settings(BaseSettings):
             "(SQLAlchemy NullPool) on both engines (#1988). For test processes "
             "that run several event loops against one engine; asyncpg "
             "connections are bound to the loop that opened them. Never set it "
-            "in a deployment: DB_POOL_* are then ignored."
+            "in a deployment. DB_POOL_* are still validated but no engine reads them."
         ),
     )
 

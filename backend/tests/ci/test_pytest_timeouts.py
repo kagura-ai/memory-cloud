@@ -25,7 +25,12 @@ pytestmark = pytest.mark.skipif(
 
 
 def _pytest_invocations(text: str) -> list[str]:
-    """Each ``run:`` block that invokes pytest, folded onto one line."""
+    """Each ``run:`` block that invokes pytest, folded onto one line.
+
+    Any ``run:`` block counts — ``cd backend && pytest``, ``uv run pytest`` or
+    a job with ``working-directory: backend`` — so a new job cannot slip past
+    the guard by spelling the invocation differently.
+    """
     blocks: list[str] = []
     current: list[str] = []
     for line in text.splitlines():
@@ -40,7 +45,7 @@ def _pytest_invocations(text: str) -> list[str]:
             current = []
     if current:
         blocks.append(" ".join(current))
-    return [b for b in blocks if re.search(r"\bpytest\b", b) and "cd backend" in b]
+    return [b for b in blocks if re.search(r"\bpytest\b", b)]
 
 
 def test_ci_backend_pytest_jobs_have_a_per_test_timeout() -> None:

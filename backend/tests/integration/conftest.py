@@ -131,12 +131,11 @@ if "config.database" in sys.modules:
 # split the singleton for tests that patch it.
 _cached_settings = getattr(sys.modules.get("config.settings"), "_settings", None)
 if _cached_settings is not None:
-    _cached_settings.db_null_pool = os.environ["DB_NULL_POOL"].lower() in ("1", "true", "yes")
-    _cached_settings.scheduler_leader_enabled = os.environ["SCHEDULER_LEADER_ENABLED"].lower() in (
-        "1",
-        "true",
-        "yes",
-    )
+    from pydantic import TypeAdapter
+
+    _as_bool = TypeAdapter(bool).validate_python  # the same truthy set pydantic-settings reads
+    _cached_settings.db_null_pool = _as_bool(os.environ["DB_NULL_POOL"])
+    _cached_settings.scheduler_leader_enabled = _as_bool(os.environ["SCHEDULER_LEADER_ENABLED"])
 
 _reset_db_base_state()
 

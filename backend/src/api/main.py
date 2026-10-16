@@ -47,14 +47,14 @@ async def _start_scheduler_leader(app: FastAPI) -> None:
     event loops; a deployment that switches it off in every worker runs no
     background job at all, hence the warning.
     """
-    from tasks import register_scheduled_jobs
-    from tasks.scheduler_leader import SchedulerLeader
-
     settings = get_settings()
     if not settings.scheduler_leader_enabled:
         app.state.scheduler_leader = None
         logger.warning("scheduler_leader_disabled", reason="SCHEDULER_LEADER_ENABLED=false")
         return
+    from tasks import register_scheduled_jobs
+    from tasks.scheduler_leader import SchedulerLeader
+
     scheduler_leader = SchedulerLeader(
         register_jobs=register_scheduled_jobs,
         retry_seconds=settings.scheduler_leader_retry_seconds,
