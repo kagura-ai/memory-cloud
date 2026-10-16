@@ -37,6 +37,34 @@ setup_logger()
 logger = get_logger(__name__)
 
 
+async def _start_scheduler_leader(app: FastAPI) -> None:
+    """Start the APScheduler leader loop unless ``SCHEDULER_LEADER_ENABLED`` is off.
+
+    The leader object (and through it the loop task) is held strongly on
+    ``app.state``; ``None`` there tells the shutdown path there is nothing
+    to stop. Test processes switch the leader off (#1988) so no cron job
+    runs inside pytest and no lifespan holds the lock connection across
+    event loops; a deployment that switches it off in every worker runs no
+    background job at all, hence the warning.
+    """
+    from tasks import register_scheduled_jobs
+    from tasks.scheduler_leader import SchedulerLeader
+
+    settings = get_settings()
+    if not settings.scheduler_leader_enabled:
+        app.state.scheduler_leader = None
+        logger.warning("scheduler_leader_disabled", reason="SCHEDULER_LEADER_ENABLED=false")
+        return
+    scheduler_leader = SchedulerLeader(
+        register_jobs=register_scheduled_jobs,
+        retry_seconds=settings.scheduler_leader_retry_seconds,
+        ping_seconds=settings.scheduler_leader_ping_seconds,
+    )
+    app.state.scheduler_leader = scheduler_leader
+    await scheduler_leader.start()
+    logger.info("background_tasks_scheduled", scheduler_leader="pending")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
@@ -102,17 +130,7 @@ async def lifespan(app: FastAPI):
     # only creates the background loop (its first tick tries the lock), so
     # startup never waits on Postgres. The leader object (and through it the
     # loop task) is held strongly on app.state.
-    from tasks import register_scheduled_jobs
-    from tasks.scheduler_leader import SchedulerLeader
-
-    scheduler_leader = SchedulerLeader(
-        register_jobs=register_scheduled_jobs,
-        retry_seconds=get_settings().scheduler_leader_retry_seconds,
-        ping_seconds=get_settings().scheduler_leader_ping_seconds,
-    )
-    app.state.scheduler_leader = scheduler_leader
-    await scheduler_leader.start()
-    logger.info("background_tasks_scheduled", scheduler_leader="pending")
+    await _start_scheduler_leader(app)
 
     # MCP session cleanup runs in EVERY worker (#1980): it cleans this
     # process's own session table, which the scheduler leader cannot reach.

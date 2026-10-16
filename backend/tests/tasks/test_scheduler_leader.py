@@ -418,4 +418,59 @@ async def test_loop_retries_on_the_retry_cadence_while_standby(sched):
 def test_lifespan_passes_the_ping_cadence():
     """The lifespan wires SCHEDULER_LEADER_PING_SECONDS into the leader."""
     main_src = (Path(__file__).resolve().parents[2] / "src" / "api" / "main.py").read_text()
-    assert "ping_seconds=get_settings().scheduler_leader_ping_seconds" in main_src
+    assert "ping_seconds=settings.scheduler_leader_ping_seconds" in main_src
+
+
+async def test_lifespan_starts_the_leader_only_when_enabled(monkeypatch):
+    """#1988: ``SCHEDULER_LEADER_ENABLED=false`` keeps the lifespan from
+    constructing or starting the leader, so a test process never runs cron
+    jobs or holds the leader's dedicated pooled connection across event
+    loops; ``app.state.scheduler_leader`` is ``None`` for the shutdown path."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    import api.main as main_module
+
+    leader_cls = MagicMock(name="SchedulerLeader")
+    leader_cls.return_value.start = AsyncMock()
+    monkeypatch.setattr(sl, "SchedulerLeader", leader_cls)
+
+    app = SimpleNamespace(state=SimpleNamespace())
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            scheduler_leader_enabled=False,
+            scheduler_leader_retry_seconds=60,
+            scheduler_leader_ping_seconds=10,
+        ),
+    )
+    await main_module._start_scheduler_leader(app)
+    leader_cls.assert_not_called()
+    assert app.state.scheduler_leader is None
+
+    monkeypatch.setattr(
+        main_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            scheduler_leader_enabled=True,
+            scheduler_leader_retry_seconds=7,
+            scheduler_leader_ping_seconds=3,
+        ),
+    )
+    await main_module._start_scheduler_leader(app)
+    leader_cls.assert_called_once()
+    assert leader_cls.call_args.kwargs["retry_seconds"] == 7
+    assert leader_cls.call_args.kwargs["ping_seconds"] == 3
+    leader_cls.return_value.start.assert_awaited_once()
+    assert app.state.scheduler_leader is leader_cls.return_value
+
+
+def test_scheduler_leader_enabled_setting(monkeypatch):
+    import config.settings as settings_module
+
+    monkeypatch.setitem(settings_module.Settings.model_config, "env_file", None)
+    monkeypatch.delenv("SCHEDULER_LEADER_ENABLED", raising=False)
+    assert settings_module.Settings().scheduler_leader_enabled is True
+    monkeypatch.setenv("SCHEDULER_LEADER_ENABLED", "false")
+    assert settings_module.Settings().scheduler_leader_enabled is False

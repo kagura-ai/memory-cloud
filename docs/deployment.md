@@ -2215,6 +2215,7 @@ Each API process opens PostgreSQL connections through SQLAlchemy's `QueuePool` (
 | `DB_POOL_SIZE` | `5` | Connections the pool keeps open (minimum `1`). |
 | `DB_MAX_OVERFLOW` | `10` | Extra connections opened under load and closed again when returned (minimum `0`). |
 | `DB_POOL_TIMEOUT` | `30` | Seconds a request waits for a free connection once `DB_POOL_SIZE + DB_MAX_OVERFLOW` are checked out (must be greater than `0`). |
+| `DB_NULL_POOL` | `false` | Test processes only: open a fresh connection per checkout (SQLAlchemy `NullPool`) on both engines and ignore the three sizing values (#1988). Never set it in a deployment. |
 
 `DB_POOL_SIZE=0` and `DB_MAX_OVERFLOW=-1`, which SQLAlchemy reads as "unlimited", are refused at startup, and so is `DB_POOL_TIMEOUT=0`: the async pool's timed checkout cancels a zero-second wait before it can take an idle connection, so every request would read as `pool_exhausted`. For fail-fast behaviour use a small positive value such as `1`. `DB_POOL_SIZE + DB_MAX_OVERFLOW` must be at least `2`, because the scheduler leader keeps one pooled connection for the process lifetime and requests need another. Keep it at `15` or more: the analysis labeler borrows up to 8 connections at once next to its orchestrator session, and the API logs `database_pool_below_fanout` at startup when the configured pool is smaller than that.
 
@@ -2278,6 +2279,9 @@ Each worker is a full, independent process:
   (`scheduler_leader_lost`) and competes again. If Postgres is unreachable at
   startup the worker logs `scheduler_leader_check_failed`, keeps serving
   requests and retries.
+  `SCHEDULER_LEADER_ENABLED=false` switches the leader loop off in a process
+  (#1988); the test suite sets it so no cron job runs inside pytest. Leave it
+  on in every deployment: with it off everywhere, no process runs the jobs.
 
   The lock serialises schedulers, not job executions, and has two bounded
   overlaps:

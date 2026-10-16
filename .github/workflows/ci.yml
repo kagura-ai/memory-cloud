@@ -224,7 +224,7 @@ jobs:
         # route (including Postgres-backed public endpoints) and asserts no
         # 500s, which inherently requires a running DB + migrated schema.
         # It runs in the backend-integration job below alongside tests/integration/.
-        run: cd backend && pytest --ignore=tests/e2e --ignore=tests/integration --ignore=tests/smoke/test_all_routes.py -v --maxfail=5
+        run: cd backend && pytest --ignore=tests/e2e --ignore=tests/integration --ignore=tests/smoke/test_all_routes.py -v --maxfail=5 --timeout=300
 
   frontend:
     runs-on: ubuntu-latest

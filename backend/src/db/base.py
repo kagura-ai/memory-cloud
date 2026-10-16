@@ -8,13 +8,18 @@ Note:
 """
 
 from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import MetaData, create_engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from utils.logger import get_logger
 from utils.url_redact import redact_db_url
+
+if TYPE_CHECKING:
+    from config.settings import Settings
 
 logger = get_logger(__name__)
 
@@ -78,6 +83,41 @@ def _warn_if_pool_below_fanout(pool_size: int, max_overflow: int) -> None:
         )
 
 
+def _pool_kwargs(settings: "Settings", *, warn_below_fanout: bool = False) -> dict[str, Any]:
+    """Pool arguments shared by the async and the sync engine.
+
+    ``DB_POOL_SIZE`` / ``DB_MAX_OVERFLOW`` / ``DB_POOL_TIMEOUT`` size a
+    ``QueuePool`` (#1980). ``DB_NULL_POOL=true`` (#1988) replaces it with a
+    ``NullPool`` — one fresh connection per checkout, closed on return — for
+    test processes whose event loops change between lifespans: an asyncpg
+    connection is bound to the loop that opened it, and a pooled one reused
+    from another loop is terminated on checkout from the wrong loop. The
+    psycopg2 connections of the sync engine are not loop-bound; it takes the
+    same pool class so the setting means one thing for the process. The
+    sizing values are meaningless to a ``NullPool`` and are not passed.
+
+    Args:
+        settings: The process settings.
+        warn_below_fanout: Log ``database_pool_below_fanout`` for a pool
+            smaller than the in-process fan-out needs; the async engine
+            passes it so the warning is logged once per process.
+    """
+    if settings.db_null_pool:
+        if warn_below_fanout:
+            # One line per process: the only signal that a deployment is
+            # running without connection pooling (no pool_exhausted
+            # back-pressure, one handshake per checkout).
+            logger.warning("database_null_pool_enabled", reason="DB_NULL_POOL=true")
+        return {"poolclass": NullPool}
+    if warn_below_fanout:
+        _warn_if_pool_below_fanout(settings.db_pool_size, settings.db_max_overflow)
+    return {
+        "pool_size": settings.db_pool_size,
+        "max_overflow": settings.db_max_overflow,
+        "pool_timeout": settings.db_pool_timeout,
+    }
+
+
 def _get_engine():
     """Get or create async engine (lazy initialization)."""
     global engine
@@ -87,7 +127,6 @@ def _get_engine():
         from config.settings import get_settings
 
         settings = get_settings()
-        _warn_if_pool_below_fanout(settings.db_pool_size, settings.db_max_overflow)
 
         # Name asyncpg explicitly: a bare ``postgresql://`` would resolve to
         # SQLAlchemy's default driver (#1695).
@@ -103,16 +142,15 @@ def _get_engine():
             # statement text still surfaces for debugging.
             hide_parameters=True,
             pool_pre_ping=True,
-            # #1980: sized by DB_POOL_SIZE / DB_MAX_OVERFLOW / DB_POOL_TIMEOUT.
-            pool_size=settings.db_pool_size,
-            max_overflow=settings.db_max_overflow,
-            pool_timeout=settings.db_pool_timeout,
+            **_pool_kwargs(settings, warn_below_fanout=True),
             # Belt-and-braces against container TZ/PGTZ being dropped in
             # a future deploy — see .claude/rules/backend.md for the
             # three-layer UTC policy.
             connect_args={"server_settings": {"timezone": "UTC"}},
         )
-        logger.info("database_engine_created", url=redact_db_url(url))
+        logger.info(
+            "database_engine_created", url=redact_db_url(url), null_pool=settings.db_null_pool
+        )
 
     return engine
 
@@ -154,10 +192,7 @@ def _get_sync_engine():
             # #1331: same bound-parameter log hygiene as the async engine.
             hide_parameters=True,
             pool_pre_ping=True,
-            # #1980: sized by DB_POOL_SIZE / DB_MAX_OVERFLOW / DB_POOL_TIMEOUT.
-            pool_size=settings.db_pool_size,
-            max_overflow=settings.db_max_overflow,
-            pool_timeout=settings.db_pool_timeout,
+            **_pool_kwargs(settings),
             # psycopg2 equivalent — see async engine above.
             connect_args={"options": "-c timezone=utc"},
         )

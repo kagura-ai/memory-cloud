@@ -225,6 +225,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    scheduler_leader_enabled: bool = Field(
+        default=True,
+        description=(
+            "Start the APScheduler leader loop in this process (#1988). Test "
+            "processes set it to false so no cron job runs inside pytest and no "
+            "lifespan holds the leader's dedicated pooled connection across "
+            "event loops. Production keeps the default: with it off, no process "
+            "runs the background jobs."
+        ),
+    )
     scheduler_leader_retry_seconds: int = Field(
         default=60,
         ge=5,
@@ -552,6 +562,16 @@ class Settings(BaseSettings):
         default=30.0,
         gt=0,
         description="Seconds a request waits for a free pooled PostgreSQL connection (Issue #1980)",
+    )
+    db_null_pool: bool = Field(
+        default=False,
+        description=(
+            "Open a fresh PostgreSQL connection per checkout instead of pooling "
+            "(SQLAlchemy NullPool) on both engines (#1988). For test processes "
+            "that run several event loops against one engine; asyncpg "
+            "connections are bound to the loop that opened them. Never set it "
+            "in a deployment: DB_POOL_* are then ignored."
+        ),
     )
 
     @model_validator(mode="after")

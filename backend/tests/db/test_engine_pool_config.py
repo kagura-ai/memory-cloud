@@ -18,7 +18,7 @@ import config.database as config_database
 import config.settings as settings_module
 import db.base as db_base
 
-_POOL_ENV = ("DB_POOL_SIZE", "DB_MAX_OVERFLOW", "DB_POOL_TIMEOUT")
+_POOL_ENV = ("DB_POOL_SIZE", "DB_MAX_OVERFLOW", "DB_POOL_TIMEOUT", "DB_NULL_POOL")
 
 
 @pytest.fixture
@@ -114,3 +114,50 @@ def test_fanout_floor_warning(
         assert log.warning.call_args.kwargs["total"] == pool_size + max_overflow
     else:
         log.warning.assert_not_called()
+
+
+def test_default_pool_is_a_queue_pool(fresh_engines: pytest.MonkeyPatch) -> None:
+    from sqlalchemy.pool import AsyncAdaptedQueuePool, QueuePool
+
+    assert isinstance(db_base._get_engine().pool, AsyncAdaptedQueuePool)
+    assert isinstance(db_base._get_sync_engine().pool, QueuePool)
+
+
+def test_null_pool_setting_disables_pooling_on_both_engines(
+    fresh_engines: pytest.MonkeyPatch,
+) -> None:
+    """#1988: ``DB_NULL_POOL=true`` gives both engines a ``NullPool`` so no
+    connection outlives its checkout. Test processes set it: pytest-asyncio's
+    session loop and each ``TestClient(app)`` lifespan's portal loop share the
+    process-global engine, and a pooled asyncpg connection reused across
+    loops is terminated on checkout from the wrong loop."""
+    from sqlalchemy.pool import NullPool
+
+    fresh_engines.setenv("DB_NULL_POOL", "true")
+    # The pool-size values are still accepted and validated; they just do
+    # not reach the engine.
+    fresh_engines.setenv("DB_POOL_SIZE", "7")
+
+    assert isinstance(db_base._get_engine().pool, NullPool)
+    assert isinstance(db_base._get_sync_engine().pool, NullPool)
+
+
+def test_null_pool_warns_once_and_skips_the_fanout_warning(
+    fresh_engines: pytest.MonkeyPatch,
+) -> None:
+    """A NullPool has no size, so the below-fanout warning does not apply; the
+    process instead logs ``database_null_pool_enabled`` once (async engine)."""
+    from unittest.mock import MagicMock
+
+    fresh_engines.setenv("DB_NULL_POOL", "true")
+    fresh_engines.setenv("DB_POOL_SIZE", "1")
+    fresh_engines.setenv("DB_MAX_OVERFLOW", "1")
+    log = MagicMock()
+    fresh_engines.setattr(db_base, "logger", log)
+
+    db_base._get_engine()
+    db_base._get_sync_engine()
+
+    events = [call.args[0] for call in log.warning.call_args_list if call.args]
+    assert "database_pool_below_fanout" not in events
+    assert events.count("database_null_pool_enabled") == 1
