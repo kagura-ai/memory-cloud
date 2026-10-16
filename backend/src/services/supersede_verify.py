@@ -25,7 +25,8 @@ verdict is stored on the candidate under ``verification``:
   The floor is applied when the candidate is READ, so raising it later
   applies to stored verdicts too; the stored ``verified`` is audit only.
 * anything else (``unclear``, a low-confidence ``supersedes``, the judge off,
-  over its daily cap, or failing) — surfaced as before, without ``verified``.
+  over its daily cap, its counter unreachable, or failing) — surfaced as
+  before, without ``verified``.
 
 A verdict is about two texts. It carries a ``fingerprint`` of both (summary
 and content head), so an edit of the new memory re-judges the pair instead of
@@ -332,18 +333,24 @@ _NO_PROVIDER_REPORTED = False
 
 
 async def _under_daily_cap(workspace_id: str, max_calls: int) -> bool:
-    """Count this call against the workspace's daily cap; fail-open on Redis."""
+    """Count this call against the workspace's daily cap.
+
+    Fail-closed: when the counter cannot be read the paid call is skipped and
+    the candidate surfaces unverified (the pre-#2016 shape) — an outage must
+    not turn into unbounded judge spend. Ingest itself is unaffected.
+    """
     from db.redis import incrby_counter
 
     try:
         count = await incrby_counter(counter_key(workspace_id), 1, ttl=_COUNTER_TTL_SECONDS)
-    except Exception as exc:  # noqa: BLE001 — a Redis outage must not stop ingest
+    except Exception as exc:  # noqa: BLE001 — never raises into the embedding task
         logger.warning(
             "supersede_verify_counter_failed",
             workspace_id=workspace_id,
             error_type=type(exc).__name__,
+            hint="judge skipped; the candidate surfaces unverified",
         )
-        return True
+        return False
     if count <= max_calls:
         return True
     key = (workspace_id, utcnow().strftime("%Y-%m-%d"))

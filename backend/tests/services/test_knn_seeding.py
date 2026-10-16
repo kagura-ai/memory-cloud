@@ -1570,6 +1570,44 @@ class TestSupersedeVerification:
         db.commit.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_accept_during_the_judge_call_wins(self):
+        """A supersedes edge created while the judge was out (create_edge
+        accepted the suggestion and cleared the column) suppresses the write."""
+        from models.memory import EDGE_TYPE_SUPERSEDES
+
+        memory = _make_memory()
+        db = _make_db()
+        config = _make_config(enabled=False, verify_mode="llm")
+        dup_id, candidates, _ = self._run(memory, db, config, None)
+        repo = _make_edge_repo()
+        accepted = MagicMock()
+        accepted.edge_type = EDGE_TYPE_SUPERSEDES
+        # First get_edge (before the judge): nothing; second (after): accepted.
+        repo.get_edge = AsyncMock(side_effect=[None, accepted])
+
+        async def judge(*_a, **_k):
+            memory.supersede_candidate = None  # cleared by the accept
+            return {"verdict": "supersedes", "confidence": 0.9, "verified": True}
+
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=candidates)),
+            patch("repositories.neural_edge.NeuralEdgeRepository", return_value=repo),
+            patch("services.supersede_verify.judge_pair", new=judge),
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        assert repo.get_edge.await_count == 2
+        assert memory.supersede_candidate is None
+        db.commit.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_llm_mode_with_a_tombstone_never_calls_the_judge(self):
         """The #1504 dismissal guard runs before the judge: a rejected pair
         costs no LLM call."""

@@ -307,14 +307,14 @@ class TestJudgePair:
         assert warned.count("supersede_verify_cap_reached") == 1
 
     @pytest.mark.asyncio
-    async def test_redis_outage_fails_open(self):
+    async def test_redis_outage_skips_the_paid_call(self):
+        """Fail-closed: no counter, no judge — the candidate surfaces unverified."""
         llm = MagicMock()
-        llm.complete_json = AsyncMock(
-            return_value=self._response({"verdict": "unclear", "confidence": 0.5, "reason": ""})
-        )
+        llm.complete_json = AsyncMock()
         with (
             patch("services.llm_service.LLMService", return_value=llm),
             patch("db.redis.incrby_counter", new=AsyncMock(side_effect=ConnectionError("down"))),
+            patch("services.supersede_verify.logger") as log,
         ):
             record = await sv.judge_pair(
                 MagicMock(),
@@ -325,7 +325,12 @@ class TestJudgePair:
                 new=_memory(),
                 old=_memory(),
             )
-        assert record is not None and record["verdict"] == "unclear" and record["verified"] is False
+        assert record is None
+        llm.complete_json.assert_not_called()
+        failed = [
+            c for c in log.warning.call_args_list if c.args[0] == "supersede_verify_counter_failed"
+        ]
+        assert failed and failed[0].kwargs["error_type"] == "ConnectionError"
 
     @pytest.mark.asyncio
     async def test_llm_failure_and_unparseable_answer_none(self):
