@@ -38,7 +38,28 @@ READ_OPERATIONS = [
     "explore",
     "list",
     "changes_since",
+    "recall_upcoming",
+    "recall_nearby",
 ]
+
+# _resolve_context_for_read call sites that deliberately thread no operation:
+# they do not read memory rows, so they sit outside the memory_access_events
+# vocabulary and their binding denies stay log-only. Keyed (module, function).
+UNAUDITED_READ_SITES = {
+    # Context metadata (stats / settings), not memory content.
+    ("context.py", "handle_get_context_info"),
+    # Owner-level context administration; both contexts are re-checked by the
+    # merge service, which is not a memory read.
+    ("context.py", "handle_merge_contexts"),
+    # Graph edges between memories, not memory rows.
+    ("edge.py", "handle_list_edges"),
+    # Agent key/value state lives in its own table, not in memories.
+    ("state.py", "handle_set_state"),
+    ("state.py", "handle_get_state"),
+    # Measurement series live in their own table, not in memories.
+    ("measurement.py", "handle_record_measurement"),
+    ("measurement.py", "handle_recall_series"),
+}
 
 
 @pytest.fixture(autouse=True)
@@ -159,32 +180,97 @@ def _callee_name(func: ast.expr) -> str | None:
     return None
 
 
+def _resolver_calls():
+    """Yield (path, enclosing function, call) for every ``_resolve_context*``
+    call under mcp_server/tools."""
+    for path in sorted(_TOOLS_DIR.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = _callee_name(node.func)
+                if name is not None and name.startswith("_resolve_context"):
+                    yield path, fn.name, node, name
+
+
 def test_every_threaded_operation_is_in_the_mae_vocabulary():
     """Every ``operation=`` passed to a ``_resolve_context*`` pre-gate must be a
     string literal in MAE_OPERATIONS — a computed value cannot be checked
     statically, so it fails here too."""
-    found: list[tuple[str, str]] = []
+    found: set[tuple[str, str]] = set()
     problems: list[str] = []
-    for path in sorted(_TOOLS_DIR.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
+    for path, _fn, call, _name in _resolver_calls():
+        for kw in call.keywords:
+            if kw.arg != "operation":
                 continue
-            name = _callee_name(node.func)
-            if name is None or not name.startswith("_resolve_context"):
-                continue
-            for kw in node.keywords:
-                if kw.arg != "operation":
-                    continue
-                where = f"{path.name}:{kw.value.lineno}"
-                value = kw.value
-                if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                    found.append((value.value, where))
-                    if value.value not in MAE_OPERATIONS:
-                        problems.append(f"{where}: {value.value!r} is not in MAE_OPERATIONS")
-                else:
-                    problems.append(f"{where}: operation= is not a string literal")
-    # The scan must actually see the call sites, or it passes vacuously.
-    assert len(found) >= 8, found
-    assert {"list", "changes_since"} <= {op for op, _ in found}
+            where = f"{path.name}:{kw.value.lineno}"
+            value = kw.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                found.add((value.value, where))
+                if value.value not in MAE_OPERATIONS:
+                    problems.append(f"{where}: {value.value!r} is not in MAE_OPERATIONS")
+            else:
+                problems.append(f"{where}: operation= is not a string literal")
+    # The scan must actually see every read lane, or it passes vacuously.
+    assert set(READ_OPERATIONS) <= {op for op, _ in found}, sorted(found)
     assert not problems, "\n".join(problems)
+
+
+def test_every_memory_read_pre_gate_threads_an_operation():
+    """A read pre-gate with no ``operation=`` returns the uniform 404 on an
+    agent deny but writes no audit row. Only the allowlisted sites may do so."""
+    missing: list[str] = []
+    seen_sites: set[tuple[str, str]] = set()
+    for path, fn, call, name in _resolver_calls():
+        if name != "_resolve_context_for_read":
+            continue
+        if any(kw.arg == "operation" for kw in call.keywords):
+            continue
+        site = (path.name, fn)
+        seen_sites.add(site)
+        if site not in UNAUDITED_READ_SITES:
+            missing.append(f"{path.name}:{call.lineno} in {fn}")
+    assert not missing, "read pre-gate without operation=: " + ", ".join(missing)
+    # A stale allowlist entry hides nothing today but would excuse a regression.
+    assert seen_sites == UNAUDITED_READ_SITES, UNAUDITED_READ_SITES - seen_sites
+
+
+@pytest.mark.asyncio
+async def test_vocabulary_gap_keeps_the_enforce_deny_and_logs():
+    """An operation missing from the vocabulary loses its row, never the deny:
+    the request still gets the uniform 404 and the gap is logged at ERROR."""
+    set_agent_scope(_scope("enforce"))
+    db = _unbound_db()
+    context = SimpleNamespace(id=uuid4(), is_private=False)
+    with (
+        _get_db(db),
+        _patched_resolver(context),
+        patch("services.memory_access_event_writer.logger.error") as error,
+        pytest.raises(_ContextNotFoundError),
+    ):
+        await _resolve_context_for_read(db, "u", context.id, operation="not_an_operation")
+    assert _audit_rows(db) == []
+    error.assert_called_once()
+    assert error.call_args.args[0] == "mae_vocabulary_gap"
+    assert error.call_args.kwargs["operation"] == "not_an_operation"
+
+
+@pytest.mark.asyncio
+async def test_vocabulary_gap_lets_a_shadow_request_proceed():
+    set_agent_scope(_scope("shadow"))
+    db = _unbound_db()
+    context = SimpleNamespace(id=uuid4(), is_private=False)
+    with (
+        _get_db(db),
+        _patched_resolver(context),
+        patch("services.memory_access_event_writer.logger.error") as error,
+    ):
+        resolved = await _resolve_context_for_read(
+            db, "u", context.id, operation="not_an_operation"
+        )
+    assert resolved is context
+    assert _audit_rows(db) == []
+    assert error.call_args.args[0] == "mae_vocabulary_gap"

@@ -552,8 +552,11 @@ async def handle_recall_upcoming(
         try:
             current_context_id = _resolve_context_id(args["context_id"])
             # Read path: uniform context_not_found on any deny (CWE-639 / OWASP
-            # A01), mirroring handle_recall.
-            current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+            # A01), mirroring handle_recall. #2007: the operation makes an
+            # agent binding deny here leave its audit row.
+            current_context = await _resolve_context_for_read(
+                db, user_id, current_context_id, operation="recall_upcoming"
+            )
 
             results = await query_upcoming_time_memories(
                 db,
@@ -643,8 +646,11 @@ async def handle_recall_nearby(
             # Read path: uniform context_not_found on any deny (CWE-639 / OWASP
             # A01), mirroring handle_recall. Cross-context nearby deliberately
             # does not exist — it would be a location-disclosure oracle across
-            # private contexts.
-            current_context = await _resolve_context_for_read(db, user_id, current_context_id)
+            # private contexts. #2007: the operation makes an agent binding
+            # deny here leave its audit row.
+            current_context = await _resolve_context_for_read(
+                db, user_id, current_context_id, operation="recall_nearby"
+            )
 
             results = await query_nearby_memories(
                 db,

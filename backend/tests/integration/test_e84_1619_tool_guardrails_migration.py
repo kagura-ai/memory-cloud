@@ -40,6 +40,8 @@ from alembic import command
 from tests.integration.test_alembic_migrations import (
     _alembic_at_test_db,
     _get_alembic_config,
+    _mae_check,
+    _mae_check_validated,
     _reset_alembic_state,
     _sync_engine,
 )
@@ -82,21 +84,6 @@ def _index_is_valid(conn: Connection) -> bool | None:
         ),
         {"n": INDEX_NAME},
     ).scalar_one_or_none()
-
-
-def _mae_check(conn: Connection) -> str:
-    return conn.execute(
-        text(
-            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-            "WHERE conname = 'valid_mae_operation'"
-        )
-    ).scalar_one()
-
-
-def _mae_check_validated(conn: Connection) -> bool:
-    return conn.execute(
-        text("SELECT convalidated FROM pg_constraint WHERE conname = 'valid_mae_operation'")
-    ).scalar_one()
 
 
 def _insert_load_guardrails_audit_row(conn: Connection, user_id: str) -> None:

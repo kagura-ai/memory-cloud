@@ -15,18 +15,19 @@
   [#1277](https://github.com/kagura-ai/memory-cloud/issues/1277)) for the semantics of the
   correlation columns this table stores
 
-`MemoryAccessEvent` (`memory_access_events`) is the append-only audit row for the twelve
+`MemoryAccessEvent` (`memory_access_events`) is the append-only audit row for the fourteen
 memory operations performed under verified agent identity: **recall / reference / remember /
 update / forget / load_pinned / bootstrap / feedback / explore / load_guardrails / list /
-changes_since** (`explore` appended in #1401, migration `e74_1401`; `load_guardrails` in
-`e84_1619`; `list` / `changes_since` in #2007, migration `e98_2007`). Rows store identifiers, outcome,
+changes_since / recall_upcoming / recall_nearby** (`explore` appended in #1401, migration
+`e74_1401`; `load_guardrails` in `e84_1619`; `list` / `changes_since` / `recall_upcoming` /
+`recall_nearby` in #2007, migration `e98_2007`). Rows store identifiers, outcome,
 latency, policy decision, and keyed (HMAC) hashes — **never** raw prompts, retrieved
 content, secrets, or PII. This document restates every RFC-0002 decision the schema depends
 on (D20–D25, D29, D34) so it is self-contained, records the CSO review of the deny-logging
 layer, and settles the one question RFC-0002 deferred to F3 (the deny-capture layer).
 
 The v0.49.0 implementation emits bootstrap, load-pinned, feedback, recall, reference, and
-remember events. The schema reserves all twelve operations (`explore` added in #1401);
+remember events. The schema reserves all fourteen operations (appended by `e74_1401`, `e84_1619` and `e98_2007`);
 `update`/`forget` emission plus denied/`would_deny` persistence remain in #1286.
 
 ## Scope and non-goals
@@ -142,7 +143,7 @@ CREATE TABLE memory_access_events (
     event_metadata     JSONB NULL,
     CONSTRAINT valid_mae_operation CHECK (operation IN
         ('recall','reference','remember','update','forget','load_pinned','bootstrap','feedback','explore',
-         'load_guardrails','list','changes_since')),
+         'load_guardrails','list','changes_since','recall_upcoming','recall_nearby')),
     CONSTRAINT valid_mae_outcome   CHECK (outcome IN ('success','denied','error','partial')),
     CONSTRAINT valid_mae_surface   CHECK (surface IN ('mcp','rest')),
     CONSTRAINT valid_mae_principal CHECK (principal_type IN ('api_key','oauth','session')),

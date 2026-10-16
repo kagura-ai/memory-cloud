@@ -1,4 +1,4 @@
-"""Add 'list' and 'changes_since' to memory_access_events.valid_mae_operation.
+"""Add the list / changes_since / recall_upcoming / recall_nearby MAE operations.
 
 Issue #2007: the #1852 read lanes ``list`` and ``changes_since`` thread
 ``operation="list"`` / ``"changes_since"`` into the read pre-gate
@@ -7,6 +7,9 @@ vocabulary. On an agent-binding deny the audit writer's enum check raised
 ``ValueError`` and the handler answered ``validation_error`` instead of the
 uniform ``context_not_found`` every other read tool returns (shadow mode
 failed the same way instead of proceeding with a ``would_deny`` row).
+``recall_upcoming`` and ``recall_nearby`` resolved their context with no
+operation at all, so an agent-binding deny there returned the uniform 404 but
+wrote no audit row; they now thread their own values too.
 
 The CHECK literal is kept byte-identical to the ordered ``MAE_OPERATIONS``
 tuple in ``models/memory_access_event.py`` (pinned by
@@ -41,7 +44,7 @@ _OLD_CHECK = (
 _NEW_CHECK = (
     "operation IN ('recall', 'reference', 'remember', 'update', 'forget', "
     "'load_pinned', 'bootstrap', 'feedback', 'explore', 'load_guardrails', 'list', "
-    "'changes_since')"
+    "'changes_since', 'recall_upcoming', 'recall_nearby')"
 )
 
 
@@ -64,8 +67,8 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Restore the previous CHECK, keeping the audit rows.
 
-    ``memory_access_events`` is append-only, so rows with ``operation`` in
-    ('list', 'changes_since') are never deleted here (the e84_1619 form). The
+    ``memory_access_events`` is append-only, so rows with any of the four new
+    operations are never deleted here (the e84_1619 form). The
     previous CHECK is restored ``NOT VALID`` — enforced on every new INSERT /
     UPDATE, and a downgraded server never writes these operations — and is
     VALIDATEd only when no such row exists. With rows present the constraint
@@ -83,7 +86,8 @@ def downgrade() -> None:
         .execute(
             sa.text(
                 "SELECT 1 FROM memory_access_events "
-                "WHERE operation IN ('list', 'changes_since') LIMIT 1"
+                "WHERE operation IN ('list', 'changes_since', 'recall_upcoming', "
+                "'recall_nearby') LIMIT 1"
             )
         )
         .first()

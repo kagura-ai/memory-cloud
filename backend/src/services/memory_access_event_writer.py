@@ -5,7 +5,10 @@ session (so the audit write neither joins nor poisons the caller's
 transaction, and a caller rollback never loses the audit row), swallows DB
 failures with a structured warning that logs ``error_type`` — never
 ``str(exc)`` (the credential-leak guard, ``llm_call_log_writer`` precedent).
-Validation errors (bad enum) RAISE. A dropped event degrades observability,
+Validation errors (bad enum) RAISE from :func:`record_memory_access_event`;
+:func:`emit_memory_access_event` turns an operation outside the vocabulary into
+an ERROR log (``mae_vocabulary_gap``) and no row, so a vocabulary gap never
+changes the caller's response (#2007). A dropped event degrades observability,
 not security — P0 policy decisions are advisory.
 
 **Audited population**: only requests carrying **verified agent identity** are
@@ -48,6 +51,10 @@ _would_deny_emitted: ContextVar[frozenset[tuple[str, str | None, str | None, str
 )
 
 
+class MemoryAccessVocabularyError(ValueError):
+    """A value outside the memory_access_events CHECK vocabularies."""
+
+
 def _validate_enums(
     *, operation: str, outcome: str, surface: str, principal_type: str, policy_decision: str | None
 ) -> None:
@@ -60,15 +67,19 @@ def _validate_enums(
     )
 
     if operation not in MAE_OPERATIONS:
-        raise ValueError(f"invalid memory-access operation: {operation!r}")
+        raise MemoryAccessVocabularyError(f"invalid memory-access operation: {operation!r}")
     if outcome not in MAE_OUTCOMES:
-        raise ValueError(f"invalid memory-access outcome: {outcome!r}")
+        raise MemoryAccessVocabularyError(f"invalid memory-access outcome: {outcome!r}")
     if surface not in MAE_SURFACES:
-        raise ValueError(f"invalid memory-access surface: {surface!r}")
+        raise MemoryAccessVocabularyError(f"invalid memory-access surface: {surface!r}")
     if principal_type not in MAE_PRINCIPAL_TYPES:
-        raise ValueError(f"invalid memory-access principal_type: {principal_type!r}")
+        raise MemoryAccessVocabularyError(
+            f"invalid memory-access principal_type: {principal_type!r}"
+        )
     if policy_decision is not None and policy_decision not in MAE_POLICY_DECISIONS:
-        raise ValueError(f"invalid memory-access policy_decision: {policy_decision!r}")
+        raise MemoryAccessVocabularyError(
+            f"invalid memory-access policy_decision: {policy_decision!r}"
+        )
 
 
 async def record_memory_access_event(
@@ -218,25 +229,38 @@ async def emit_memory_access_event(
             return
         _would_deny_emitted.set(seen | {key})
 
-    await record_memory_access_event(
-        workspace_id=workspace_id,
-        user_id=user_id,
-        # Agent workloads authenticate with member API keys (P0-2); the audited
-        # population is API-key-authenticated by construction.
-        principal_type="api_key",
-        operation=operation,
-        outcome=outcome,
-        surface=surface,
-        agent_id=scope.agent_id,
-        context_id=context_id,
-        session_id=corr.session_id if corr else None,
-        run_id=corr.run_id if corr else None,
-        trace_id=corr.trace_id if corr else None,
-        span_id=corr.span_id if corr else None,
-        policy_decision=policy_decision,
-        memory_id=memory_id,
-        result_count=result_count,
-        latency_ms=latency_ms,
-        query_hash=query_hash,
-        event_metadata=metadata,
-    )
+    try:
+        await record_memory_access_event(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            # Agent workloads authenticate with member API keys (P0-2); the audited
+            # population is API-key-authenticated by construction.
+            principal_type="api_key",
+            operation=operation,
+            outcome=outcome,
+            surface=surface,
+            agent_id=scope.agent_id,
+            context_id=context_id,
+            session_id=corr.session_id if corr else None,
+            run_id=corr.run_id if corr else None,
+            trace_id=corr.trace_id if corr else None,
+            span_id=corr.span_id if corr else None,
+            policy_decision=policy_decision,
+            memory_id=memory_id,
+            result_count=result_count,
+            latency_ms=latency_ms,
+            query_hash=query_hash,
+            event_metadata=metadata,
+        )
+    except MemoryAccessVocabularyError as exc:
+        # #2007: a value missing from the vocabulary must not change the
+        # caller's response (an enforce deny stays the uniform 404, a shadow
+        # request proceeds). The row is lost, so this is loud; the static
+        # scan in test_read_tool_binding_deny is the CI signal.
+        logger.error(
+            "mae_vocabulary_gap",
+            operation=operation,
+            outcome=outcome,
+            policy_decision=policy_decision,
+            error=str(exc),
+        )

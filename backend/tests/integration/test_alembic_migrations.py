@@ -103,6 +103,35 @@ def _reset_alembic_state():
     engine.dispose()
 
 
+def _upgrade_to(revision: str) -> None:
+    """``alembic upgrade <revision>`` aimed at the test DB."""
+    with _alembic_at_test_db():
+        command.upgrade(_get_alembic_config(), revision)
+
+
+def _downgrade_to(revision: str) -> None:
+    """``alembic downgrade <revision>`` aimed at the test DB."""
+    with _alembic_at_test_db():
+        command.downgrade(_get_alembic_config(), revision)
+
+
+def _mae_check(conn) -> str:
+    """The live ``valid_mae_operation`` CHECK definition."""
+    return conn.execute(
+        text(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'valid_mae_operation'"
+        )
+    ).scalar_one()
+
+
+def _mae_check_validated(conn) -> bool:
+    """Whether ``valid_mae_operation`` is VALIDATEd (``convalidated``)."""
+    return conn.execute(
+        text("SELECT convalidated FROM pg_constraint WHERE conname = 'valid_mae_operation'")
+    ).scalar_one()
+
+
 class TestAlembicMigrations:
     """Test that all Alembic migrations apply and rollback cleanly.
 

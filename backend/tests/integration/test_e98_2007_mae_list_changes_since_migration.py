@@ -1,7 +1,8 @@
 """Migration round-trip for e98_2007_mae_list_changes_since (#2007).
 
-1. upgrade widens ``valid_mae_operation`` with ``'list'`` and
-   ``'changes_since'``, appended after ``'load_guardrails'`` and validated;
+1. upgrade widens ``valid_mae_operation`` with ``'list'``,
+   ``'changes_since'``, ``'recall_upcoming'`` and ``'recall_nearby'``,
+   appended after ``'load_guardrails'`` and validated;
 2. downgrade with no such rows restores the previous CHECK fully validated;
 3. downgrade with a ``'list'`` audit row present keeps the row (append-only
    table) and leaves the restored CHECK ``NOT VALID``; the next upgrade
@@ -18,43 +19,18 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import text
-from sqlalchemy.engine import Connection
 
-from alembic import command
 from tests.integration.test_alembic_migrations import (
-    _alembic_at_test_db,
-    _get_alembic_config,
+    _downgrade_to,
+    _mae_check,
+    _mae_check_validated,
     _reset_alembic_state,
     _sync_engine,
+    _upgrade_to,
 )
 
 E98_REVISION = "e98_2007_mae_list_changes_since"
 PRIOR_HEAD = "e97_1975_memories_per_day_addon"
-
-
-def _mae_check(conn: Connection) -> str:
-    return conn.execute(
-        text(
-            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
-            "WHERE conname = 'valid_mae_operation'"
-        )
-    ).scalar_one()
-
-
-def _mae_check_validated(conn: Connection) -> bool:
-    return conn.execute(
-        text("SELECT convalidated FROM pg_constraint WHERE conname = 'valid_mae_operation'")
-    ).scalar_one()
-
-
-def _upgrade(rev: str) -> None:
-    with _alembic_at_test_db():
-        command.upgrade(_get_alembic_config(), rev)
-
-
-def _downgrade(rev: str) -> None:
-    with _alembic_at_test_db():
-        command.downgrade(_get_alembic_config(), rev)
 
 
 def test_e98_round_trip_check() -> None:
@@ -62,13 +38,13 @@ def test_e98_round_trip_check() -> None:
     engine = _sync_engine()
     audit_user = f"e98-migration-test-{uuid.uuid4().hex[:8]}"
     try:
-        _upgrade(PRIOR_HEAD)
+        _upgrade_to(PRIOR_HEAD)
         with engine.connect() as conn:
             check = _mae_check(conn)
             assert "'list'" not in check and "'changes_since'" not in check
             assert "'load_guardrails'" in check
 
-        _upgrade(E98_REVISION)
+        _upgrade_to(E98_REVISION)
         with engine.connect() as conn:
             check = _mae_check(conn)
             # Appended, never reordered.
@@ -76,16 +52,18 @@ def test_e98_round_trip_check() -> None:
                 check.index("'load_guardrails'")
                 < check.index("'list'")
                 < check.index("'changes_since'")
+                < check.index("'recall_upcoming'")
+                < check.index("'recall_nearby'")
             )
             assert _mae_check_validated(conn) is True
 
-        _downgrade(PRIOR_HEAD)
+        _downgrade_to(PRIOR_HEAD)
         with engine.connect() as conn:
             check = _mae_check(conn)
-            assert "'list'" not in check and "'changes_since'" not in check
+            assert "'list'" not in check and "'recall_nearby'" not in check
             assert _mae_check_validated(conn) is True
 
-        _upgrade(E98_REVISION)
+        _upgrade_to(E98_REVISION)
         with engine.connect() as conn:
             conn.execute(
                 text(
@@ -97,7 +75,7 @@ def test_e98_round_trip_check() -> None:
             )
             conn.commit()
 
-        _downgrade(PRIOR_HEAD)
+        _downgrade_to(PRIOR_HEAD)
         with engine.connect() as conn:
             kept = conn.execute(
                 text("SELECT count(*) FROM memory_access_events WHERE user_id = :u"),
@@ -107,12 +85,12 @@ def test_e98_round_trip_check() -> None:
             assert "'list'" not in _mae_check(conn)
             assert _mae_check_validated(conn) is False
 
-        _upgrade(E98_REVISION)
+        _upgrade_to(E98_REVISION)
         with engine.connect() as conn:
             assert "'changes_since'" in _mae_check(conn)
             assert _mae_check_validated(conn) is True
     finally:
         try:
-            _upgrade("head")
+            _upgrade_to("head")
         finally:
             engine.dispose()

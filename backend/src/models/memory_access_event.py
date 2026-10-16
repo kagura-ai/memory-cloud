@@ -1,8 +1,9 @@
 """memory_access_events — append-only agent memory-access audit (RFC-0002 P0-5, #1278).
 
-The append-only audit row for the nine memory operations performed under
+The append-only audit row for the fourteen memory operations performed under
 **verified agent identity**: recall / reference / remember / update / forget /
-load_pinned / bootstrap / feedback / explore (design F3,
+load_pinned / bootstrap / feedback / explore / load_guardrails / list /
+changes_since / recall_upcoming / recall_nearby (design F3,
 ``docs/design/memory-access-events.md``). Rows store identifiers, outcome,
 latency, policy decision, and keyed (HMAC) hashes — NEVER raw prompts,
 retrieved content, secrets, or PII.
@@ -70,6 +71,11 @@ MAE_OPERATIONS: tuple[str, ...] = (
     # CHECK altered in e98_2007.
     "list",
     "changes_since",
+    # #2007: the time and location recall lanes resolved their context with no
+    # operation, so an agent binding deny left no audit row. Appended (never
+    # reordered); CHECK altered in e98_2007.
+    "recall_upcoming",
+    "recall_nearby",
 )
 MAE_OUTCOMES: tuple[str, ...] = ("success", "denied", "error", "partial")
 MAE_SURFACES: tuple[str, ...] = ("mcp", "rest")

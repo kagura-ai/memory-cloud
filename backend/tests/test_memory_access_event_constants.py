@@ -36,6 +36,8 @@ def test_operation_tuple_is_the_audited_ops():
         "load_guardrails",  # tool guardrails (appended, never reordered)
         "list",  # #2007 (appended, never reordered)
         "changes_since",  # #2007 (appended, never reordered)
+        "recall_upcoming",  # #2007 (appended, never reordered)
+        "recall_nearby",  # #2007 (appended, never reordered)
     )
 
 
@@ -43,7 +45,7 @@ def test_check_literals_byte_identical_to_migration():
     assert _check("valid_mae_operation") == (
         "operation IN ('recall', 'reference', 'remember', 'update', 'forget', "
         "'load_pinned', 'bootstrap', 'feedback', 'explore', 'load_guardrails', 'list', "
-        "'changes_since')"
+        "'changes_since', 'recall_upcoming', 'recall_nearby')"
     )
     assert _check("valid_mae_outcome") == "outcome IN ('success', 'denied', 'error', 'partial')"
     assert _check("valid_mae_surface") == "surface IN ('mcp', 'rest')"

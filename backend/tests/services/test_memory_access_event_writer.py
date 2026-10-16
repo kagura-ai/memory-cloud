@@ -167,6 +167,32 @@ class TestEmitGate:
         assert kwargs["result_count"] == 3
 
     @pytest.mark.asyncio
+    async def test_vocabulary_gap_is_logged_not_raised(self):
+        # #2007: record_memory_access_event still raises on a bad enum, but the
+        # emit boundary turns it into an ERROR log and no row, so the caller's
+        # response never changes shape.
+        from contextlib import ExitStack
+
+        scope = SimpleNamespace(agent_id=AGENT_ID, enforcement_mode="enforce")
+        with ExitStack() as stack:
+            db, committed = _patch_db(stack)
+            error = stack.enter_context(patch("services.memory_access_event_writer.logger.error"))
+            stack.enter_context(patch("auth.agent_scope.get_agent_scope", return_value=scope))
+            stack.enter_context(patch("api.correlation.get_correlation", return_value=None))
+            await emit_memory_access_event(
+                operation="not_an_operation",
+                outcome="denied",
+                workspace_id=WORKSPACE_ID,
+                user_id="u",
+                policy_decision="binding_denied",
+            )
+        db.add.assert_not_called()
+        assert committed["n"] == 0
+        error.assert_called_once()
+        assert error.call_args.args[0] == "mae_vocabulary_gap"
+        assert error.call_args.kwargs["operation"] == "not_an_operation"
+
+    @pytest.mark.asyncio
     async def test_query_is_hashed_never_stored_raw(self):
         # #1281 item 7: emit hashes the raw query with the audit key; the row
         # writer only ever receives query_hash, never the raw text.
