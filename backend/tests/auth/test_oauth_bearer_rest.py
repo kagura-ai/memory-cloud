@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 _BACKEND_SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_BACKEND_SRC) not in sys.path:
@@ -362,8 +363,6 @@ class TestOAuthLookupDBFailure:
 
     @pytest.mark.asyncio
     async def test_pool_timeout_propagates(self):
-        from sqlalchemy.exc import TimeoutError as PoolTimeoutError
-
         from auth.oauth2_bearer import verify_oauth_bearer_token
 
         failing_db = AsyncMock()
@@ -397,29 +396,42 @@ class TestOAuthLookupDBFailure:
         with pytest.raises(ConnectionRefusedError):
             await verify_oauth_bearer_token("randomtok", failing_db)
 
-    def test_pool_timeout_in_dependency_returns_503_db_002(self, app_with_oauth_route):
+    @pytest.mark.parametrize(
+        ("exc", "reason"),
+        [
+            pytest.param(
+                PoolTimeoutError("QueuePool limit reached"), "pool_exhausted", id="pool-timeout"
+            ),
+            pytest.param(
+                ConnectionRefusedError("db down"), "connection_refused", id="connection-refused"
+            ),
+        ],
+    )
+    def test_db_failure_in_dependency_returns_503_db_002(self, app_with_oauth_route, exc, reason):
         """End-to-end through the real lookup: the request session's
-        ``execute`` times out on pool checkout inside ``find_active_oauth_token``,
-        the error leaves the auth dependency and the app-wide SQLAlchemyError
-        handler answers 503 DB-002 ``pool_exhausted`` with ``Retry-After``."""
+        ``execute`` fails inside ``find_active_oauth_token``, the error leaves
+        the auth dependency and the app-wide handler for that lane answers
+        503 DB-002 with ``details.reason`` and ``Retry-After``. Both lanes:
+        SQLAlchemy's pool timeout and asyncpg's bare ConnectionRefusedError."""
         from sqlalchemy.exc import SQLAlchemyError
-        from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
         from api.main import app as real_app
-        from api.main import sqlalchemy_exception_handler
+        from api.main import connection_error_handler, sqlalchemy_exception_handler
         from db.base import get_db
 
-        # The probe app carries the same handler the real app registers.
+        # The probe app carries the same handlers the real app registers.
         assert real_app.exception_handlers[SQLAlchemyError] is sqlalchemy_exception_handler
+        assert real_app.exception_handlers[ConnectionRefusedError] is connection_error_handler
         app_with_oauth_route.add_exception_handler(SQLAlchemyError, sqlalchemy_exception_handler)
+        app_with_oauth_route.add_exception_handler(ConnectionRefusedError, connection_error_handler)
 
-        exhausted_db = AsyncMock()
-        exhausted_db.execute = AsyncMock(side_effect=PoolTimeoutError("QueuePool limit reached"))
+        failing_db = AsyncMock()
+        failing_db.execute = AsyncMock(side_effect=exc)
 
-        async def _exhausted_get_db():
-            yield exhausted_db
+        async def _failing_get_db():
+            yield failing_db
 
-        app_with_oauth_route.dependency_overrides[get_db] = _exhausted_get_db
+        app_with_oauth_route.dependency_overrides[get_db] = _failing_get_db
         try:
             client = TestClient(app_with_oauth_route)
             resp = client.get("/_t/read", headers={"Authorization": "Bearer randomtok"})
@@ -429,10 +441,10 @@ class TestOAuthLookupDBFailure:
         assert resp.status_code == 503
         body = resp.json()
         assert body["error"] == "DB-002"
-        assert body["details"]["reason"] == "pool_exhausted"
+        assert body["details"]["reason"] == reason
         assert resp.headers["Retry-After"] == "5"
         assert "www-authenticate" not in {k.lower() for k in resp.headers}
-        exhausted_db.execute.assert_awaited_once()
+        failing_db.execute.assert_awaited_once()
 
     def test_unknown_token_still_returns_401(self, app_with_oauth_route):
         """``None`` from the verifier still means "no such token" -> 401."""
