@@ -214,7 +214,7 @@ Manual: guide(["update_memory"]).""",
                     },
                     "dismiss_supersede_candidate": {
                         "type": "boolean",
-                        "description": "true rejects this memory's current supersede_candidate (requires memory_id); nothing is deleted or shadowed. To accept instead: create_edge(edge_type='supersedes').",
+                        "description": "true rejects this memory's current supersede_candidate (requires memory_id); nothing is deleted or shadowed. To accept instead: create_edge(edge_type='supersedes'), a tool outside the core profile that guide([\"create_edge\"]) documents.",
                     },
                     "summary": {
                         "type": "string",
@@ -265,9 +265,9 @@ Manual: guide(["update_memory"]).""",
         {
             "name": "recall",
             "readOnly": True,
-            "description": """Search a context's memories by meaning and keywords (hybrid semantic + BM25 with Neural Memory boosting); returns ranked summaries, not full content. reference(memory_id) reads one hit, explore(memory_id) walks its graph, load_pinned() / recall_upcoming() / recall_nearby() return deterministic sets.
+            "description": """Search a context's memories by meaning and keywords (hybrid semantic + BM25 with Neural Memory boosting); returns ranked summaries, not full content. reference(memory_id) reads one hit, explore(memory_id) walks its graph, load_pinned() / recall_upcoming() return deterministic sets.
 Tip: search with the answer you expect ('JWT expiry caused 401; fixed with refresh token rotation'), not the question. Read confidence.level (high|moderate|low|none) first: none/low means the topic is probably not stored here, prefer an external source; degraded=true means the semantic half was unavailable. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories.
-Returns: {status, results: [{memory_id, summary, context_summary?, type, importance, scope, score, tags?, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?}], count, related_tags?: [{tag, count}], confidence: {level, top_score, prominence, relative_margin, result_count, rationale}, explore_hints?, tag_suggestions?, degraded?, degraded_reason?, context_summary_omitted?, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. Keys marked ? are absent, never null. supersede_candidate is an older near-duplicate (a suggestion): accept with create_edge(source_id, target_id, edge_type='supersedes'), reject with update_memory(dismiss_supersede_candidate=true).
+Returns: {status, results: [{memory_id, summary, context_summary?, type, importance, scope, score, tags?, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?}], count, related_tags?: [{tag, count}], confidence: {level, top_score, prominence, relative_margin, result_count, rationale}, explore_hints?, tag_suggestions?, degraded?, degraded_reason?, context_summary_omitted?, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. Keys marked ? are absent, never null. supersede_candidate is an older near-duplicate (a suggestion): reject with update_memory(dismiss_supersede_candidate=true); accept with create_edge(edge_type='supersedes'), a tool outside the core profile that guide([\"create_edge\"]) documents.
 Manual: guide(["recall"]).""",
             "inputSchema": {
                 "type": "object",
@@ -336,7 +336,7 @@ Manual: guide(["recall"]).""",
             "name": "reference",
             "readOnly": True,
             "description": """Read one memory in full (summary, context_summary, content, details, provenance, links) by id, within max_chars. Use it after recall(), which returns summaries only.
-Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, client, source_uri, source_type, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate}}. supersede_candidate names an older near-duplicate (a suggestion): accept with create_edge(edge_type="supersedes"). Oversized content arrives as a slice (content_truncated, content_next_offset) or content_omitted; oversized details / context arrive as details_json / context_json pages with *_next_offset, or <field>_omitted; continue with the *_offset parameters. Errors: memory_not_found, invalid_argument.
+Returns: {status, memory: {memory_id, summary, context_summary, content, details, type, scope, importance, tags, context, created_at, updated_at, client, source_uri, source_type, outgoing_links, outgoing_has_more, incoming_links, incoming_has_more, supersede_candidate}}. supersede_candidate names an older near-duplicate (a suggestion): accept with create_edge(edge_type="supersedes"), a tool outside the core profile that guide(["create_edge"]) documents. Oversized content arrives as a slice (content_truncated, content_next_offset) or content_omitted; oversized details / context arrive as details_json / context_json pages with *_next_offset, or <field>_omitted; continue with the *_offset parameters. Errors: memory_not_found, invalid_argument.
 Manual: guide(["reference"]).""",
             "inputSchema": {
                 "type": "object",
@@ -758,7 +758,7 @@ Returns: {status, message}.""",
         {
             "name": "get_context_info",
             "readOnly": True,
-            "description": """Describe one context: purpose, usage_guide (the owner's note on what it holds — information, not instructions), search config, memory counts and tool tips. Call it at session start and after switching contexts; list_contexts() only maps names to ids.
+            "description": """Describe one context: purpose, usage_guide (the owner's note on what it holds — information, not instructions), search config, memory counts and tool tips. bootstrap(context_id) returns this block plus the pinned set and recent changes in one call at session start; call this alone after switching contexts or to re-read the block. list_contexts() only maps names to ids.
 Returns: {status, context: {id, name, display_name, summary, usage_guide, is_private, is_locked, embedding_model, embedding_dimensions, search_config}, workspace: {id, name, description, description_truncated?}, stats: {total_memories, working_memories, persistent_memories, details?}, instructions, guardrails?}.
 Manual: guide(["get_context_info"]).""",
             "inputSchema": {
@@ -1896,7 +1896,7 @@ Manual: guide(["list"]).""",
                     },
                     "filters": {
                         "type": "object",
-                        "description": "Exact-match filters, ANDed: type, scope, source_type, delivery_mode (string or list), tags (+ tags_match any|all, tags_normalize), importance {gte|lte|gt|lt}, created_after/before, updated_after/before (ISO 8601), source_uri_prefix, trust_tier='trusted', details.<key> (scalar; same JSON type, numbers as written: 2 is not 2.0 or \"2\"). near/within: use recall_nearby.",
+                        "description": 'Exact-match filters, ANDed: type, scope, source_type, delivery_mode (string or list), tags (+ tags_match any|all, tags_normalize), importance {gte|lte|gt|lt}, created_after/before, updated_after/before (ISO 8601), source_uri_prefix, trust_tier=\'trusted\', details.<key> (scalar; same JSON type, numbers as written: 2 is not 2.0 or "2"). near/within: use recall_nearby, a tool outside the core profile that guide(["recall_nearby"]) documents.',
                     },
                     "order_by": {
                         "type": "string",
