@@ -107,7 +107,7 @@ Both eras return an `instructions` string — `InitializeResult.instructions` on
 
 The base text is the same for every caller and describes the tools only; it does not send the model to fetch rules (#1682):
 
-> Kagura Memory Cloud: persistent memory for AI agents. list_contexts gives context IDs; bootstrap(context_id) starts a session (context block, pinned notes, recent changes). recall searches knowledge; changes_since lists what changed, when.
+> Kagura Memory Cloud: persistent memory for AI agents. list_contexts gives context IDs; bootstrap(context_id) opens a session (context, pinned notes, recent changes). remember stores, recall searches; changes_since lists what changed, when.
 
 **Selecting the context.** `?guardrails=` on the endpoint URL (the same place as `?profile=`), evaluated once per request after authentication, first value wins:
 

@@ -21,7 +21,7 @@ A tool profile filters `tools/list` only; it is not an authorization boundary ([
 
 `initialize` and `server/discover` return this text to a connector with the plain URL:
 
-> Kagura Memory Cloud: persistent memory for AI agents. list_contexts gives context IDs; bootstrap(context_id) starts a session (context block, pinned notes, recent changes). recall searches knowledge; changes_since lists what changed, when.
+> Kagura Memory Cloud: persistent memory for AI agents. list_contexts gives context IDs; bootstrap(context_id) opens a session (context, pinned notes, recent changes). remember stores, recall searches; changes_since lists what changed, when.
 
 It is a how-to. It does not send the model to fetch rules or guardrails (the pre-#1682 text did: "get_context_info(context_id) for a context's rules and guardrails").
 

@@ -329,8 +329,8 @@ SERVER_CAPABILITIES: dict[str, dict] = {"tools": {}}
 # ``tests/mcp_server/test_directory_instruction_boundary.py`` guards the wording.
 SERVER_INSTRUCTIONS_BASE = (
     "Kagura Memory Cloud: persistent memory for AI agents. list_contexts gives "
-    "context IDs; bootstrap(context_id) starts a session (context block, pinned "
-    "notes, recent changes). recall searches knowledge; changes_since lists what "
+    "context IDs; bootstrap(context_id) opens a session (context, pinned notes, "
+    "recent changes). remember stores, recall searches; changes_since lists what "
     "changed, when."
 )
 # Kept as a module attribute for imports that still read the old name.

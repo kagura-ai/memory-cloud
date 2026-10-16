@@ -62,7 +62,9 @@ def test_base_text_is_at_most_240_characters_and_points_at_bootstrap():
     # recent changes together. get_context_info alone is no longer the entry.
     assert "bootstrap(context_id)" in SERVER_INSTRUCTIONS_BASE
     assert "get_context_info" not in SERVER_INSTRUCTIONS_BASE
-    # Knowledge is searched; what changed and when is listed, not searched.
+    # A write and a read tool are both named; what changed and when is listed,
+    # not searched.
+    assert "remember" in SERVER_INSTRUCTIONS_BASE
     assert "recall" in SERVER_INSTRUCTIONS_BASE
     assert "changes_since" in SERVER_INSTRUCTIONS_BASE
     assert "rules and guardrails" not in SERVER_INSTRUCTIONS_BASE  # #1682
