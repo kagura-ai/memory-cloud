@@ -666,3 +666,105 @@ class TestSharedContextReadFlag:
         assert embed_calls[0].get("disallow_env_fallback") is True, (
             "Option A reads MUST forward disallow_env_fallback=True"
         )
+
+
+class TestHybridSearchTimings:
+    """#1989: ``hybrid_search`` fills the caller's ``RecallTimings`` per stage."""
+
+    @pytest.fixture(autouse=True)
+    def _routing(self, _patch_routing):
+        """Activate the module-level routing patch for every test in this class."""
+
+    @pytest.fixture
+    def service(self):
+        return SearchService(MagicMock())
+
+    @pytest.fixture
+    def default_search_config(self):
+        return type(
+            "DefaultConfig",
+            (),
+            {
+                "semantic_weight": 0.6,
+                "bm25_weight": 0.4,
+                "fetch_factor": 3,
+                "use_rerank": False,
+                "embedding_model": "text-embedding-3-small",
+                "embedding_dimensions": 512,
+            },
+        )()
+
+    @pytest.mark.asyncio
+    async def test_each_stage_is_timed_and_rerank_is_omitted_when_off(
+        self, service, default_search_config
+    ):
+        from services.recall_timings import RecallTimings
+
+        clock = {"now": 0.0}
+
+        def tick(seconds):
+            async def _run(*_args, **_kwargs):
+                clock["now"] += seconds
+                return []
+
+            return _run
+
+        timings = RecallTimings(clock=lambda: clock["now"])
+        service._get_search_config = AsyncMock(return_value=default_search_config)
+        mock_ctx_svc = MagicMock()
+        mock_ctx_svc.is_context_shared = AsyncMock(return_value=False)
+        with (
+            patch(
+                "services.search_service.search_memories_qdrant",
+                new=AsyncMock(side_effect=tick(0.030)),
+            ),
+            patch(
+                "services.search_service.search_memories_fulltext",
+                new=AsyncMock(side_effect=tick(0.007)),
+            ),
+            patch("services.context_service.ContextService", return_value=mock_ctx_svc),
+        ):
+            await service.hybrid_search(
+                query="test",
+                user_id="user",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                context_id="00000000-0000-0000-0000-000000000002",
+                k=5,
+                timings=timings,
+            )
+
+        fields = timings.log_fields()
+        assert fields["qdrant_ms"] == 30
+        assert fields["fulltext_ms"] == 7
+        assert "embed_ms" in fields  # the routed embed_with_usage stub ran
+        assert fields["embed_cache_hit"] is True  # the stub reports 0 tokens
+        assert "rerank_ms" not in fields
+
+    @pytest.mark.asyncio
+    async def test_keyword_mode_times_no_embedding(self, service, default_search_config):
+        from services.recall_timings import RecallTimings
+
+        timings = RecallTimings(clock=lambda: 0.0)
+        service._get_search_config = AsyncMock(return_value=default_search_config)
+        mock_ctx_svc = MagicMock()
+        mock_ctx_svc.is_context_shared = AsyncMock(return_value=False)
+        with (
+            patch("services.search_service.search_memories_qdrant", new=AsyncMock(return_value=[])),
+            patch(
+                "services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])
+            ),
+            patch("services.context_service.ContextService", return_value=mock_ctx_svc),
+        ):
+            await service.hybrid_search(
+                query="test",
+                user_id="user",
+                workspace_id="00000000-0000-0000-0000-000000000001",
+                context_id="00000000-0000-0000-0000-000000000002",
+                k=5,
+                search_mode="keyword",
+                timings=timings,
+            )
+        fields = timings.log_fields()
+        assert "embed_ms" not in fields and "qdrant_ms" not in fields
+        assert "embed_cache_hit" not in fields
+        assert "fulltext_ms" in fields

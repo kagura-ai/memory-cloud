@@ -158,3 +158,123 @@ class TestDegradedRecallDoesNotWriteToTheGraph:
             "ungated, full-strength edges are written into the persistent graph "
             "and outlive the outage (#1515 review)."
         )
+
+
+@pytest.mark.asyncio
+class TestRecallTimingsWiring:
+    """#1989: ``recall_completed`` carries the per-stage timings on every exit."""
+
+    async def test_hybrid_search_is_called_with_the_timings_out_param(self):
+        import inspect
+
+        from services.memory_service import MemoryService
+
+        src = inspect.getsource(MemoryService.recall)
+        assert "timings=timings" in src, (
+            "MemoryService.recall must pass its RecallTimings to hybrid_search; "
+            "without it embed/qdrant/fulltext/rerank never reach recall_completed (#1989)."
+        )
+
+    async def test_empty_exit_logs_one_recall_completed_line(self, monkeypatch):
+        from services import memory_service as ms
+        from services.memory_service import MemoryService
+        from services.recall_timings import RecallTimings
+
+        log = MagicMock()
+        monkeypatch.setattr(ms, "logger", log)
+        service = MemoryService(db=AsyncMock())
+        request = SimpleNamespace(
+            query="q",
+            k=5,
+            use_rerank=False,
+            filters=None,
+            search_mode="hybrid",
+            include_explore_hints=False,
+        )
+        clock = {"now": 10.0}
+        timings = RecallTimings(clock=lambda: clock["now"])
+        with timings.stage("embed"):
+            clock["now"] += 0.2
+
+        await service._empty_recall_response(
+            request=request,
+            selection_config=None,
+            search_config=None,
+            context_id=uuid4(),
+            timings=timings,
+            user_id="u1",
+            context_count=1,
+        )
+
+        completed = [
+            c for c in log.info.call_args_list if c.args and c.args[0] == "recall_completed"
+        ]
+        assert len(completed) == 1
+        kw = completed[0].kwargs
+        assert kw["user_id"] == "u1"
+        assert kw["results"] == 0 and kw["candidates"] == 0 and kw["k"] == 5
+        assert kw["context_count"] == 1
+        assert kw["embed_ms"] == 200 and kw["duration_ms"] == 200
+        assert "hydrate_ms" not in kw
+
+    async def test_finalize_logs_the_fields_after_the_audit_row(self, monkeypatch):
+        from services import memory_service as ms
+        from services.memory_service import MemoryService
+        from services.recall_timings import RecallTimings
+
+        log = MagicMock()
+        monkeypatch.setattr(ms, "logger", log)
+        emitted = AsyncMock()
+        monkeypatch.setattr("services.memory_access_event_writer.emit_memory_access_event", emitted)
+        service = MemoryService(db=AsyncMock())
+        service._aggregate_related_tags = MagicMock(return_value=[])
+        service._tag_suggestions_for_empty_result = AsyncMock(return_value=None)
+        service._compute_recall_confidence = MagicMock(return_value=None)
+
+        clock = {"now": 0.0}
+        timings = RecallTimings(clock=lambda: clock["now"])
+        with timings.stage("hydrate"):
+            clock["now"] += 0.05
+
+        async def _slow_emit(**_kwargs):
+            clock["now"] += 0.02
+
+        emitted.side_effect = _slow_emit
+        request = SimpleNamespace(
+            query="q",
+            k=5,
+            use_rerank=False,
+            filters=None,
+            search_mode="hybrid",
+            include_explore_hints=False,
+            include_superseded=False,
+        )
+        search_results = [{"id": "a", "score": 0.9}, {"id": "b", "score": 0.5}]
+        responses: list = []  # the page itself is validated elsewhere; the clock is the subject
+
+        await service._recall_finalize(
+            request,
+            search_results,
+            responses,
+            user_id="u1",
+            current_context_id=uuid4(),
+            effective_workspace_id=uuid4(),
+            neural_enabled=False,
+            binding_row_filtered=0,
+            selection_evidence=None,
+            timings=timings,
+            context_count=3,
+        )
+
+        completed = [
+            c for c in log.info.call_args_list if c.args and c.args[0] == "recall_completed"
+        ]
+        assert len(completed) == 1
+        kw = completed[0].kwargs
+        assert kw["results"] == 0 and kw["candidates"] == 2 and kw["k"] == 5
+        assert kw["context_count"] == 3
+        assert kw["hydrate_ms"] == 50
+        assert kw["finalize_ms"] == 20  # the audit row write is inside finalize
+        assert kw["duration_ms"] == 70
+        # the log is the last thing finalize does: the audit row was already written
+        emitted.assert_awaited_once()

@@ -2226,6 +2226,35 @@ Recall, explore and `reference` record access statistics (`access_count`, `last_
 
 Two lanes do not carry `details.reason`: MCP tool calls report the same failure as the envelope error `service_unavailable` (`backend/src/mcp_server/tools/_errors.py` classifies the pool timeout with the other dependency failures), and a REST request authenticated with an OAuth Bearer token whose token lookup itself hits the exhausted pool answers `401` because that lookup keeps the silent-failure contract of #1742. In both cases the server log still names the exception type.
 
+### Recall stage timings — Issue #1989
+
+Every `recall` logs one `recall_completed` line (also when the page is empty) with the time each stage took, as integer milliseconds:
+
+| Field | Stage |
+|---|---|
+| `duration_ms` | Request accepted to response built (everything the caller waited for). |
+| `embed_ms`, `embed_cache_hit` | Query embedding (`SearchService.hybrid_search`); `embed_cache_hit: true` means the vector came from the cache. A degraded embed records its time-to-failure here, next to `degraded` / `degraded_reason` in the response. |
+| `qdrant_ms`, `fulltext_ms` | The dense and the BM25 search. |
+| `rerank_ms` | The cross-encoder rerank; absent when no rerank ran (not `0`). |
+| `hydrate_ms` | The Postgres row fetch. |
+| `finalize_ms` | Response build, explore hints, related tags, confidence and the `memory_access_events` row. |
+| `post_commit_ms` | The access-statistics and Hebbian writes that run after the read commits (#1985) and still delay the response. |
+| `other_ms` | `duration_ms` minus the stages above: preparation, binding and supersede filters, reinforce and selection passes. |
+| `candidates`, `results`, `k`, `context_count` | Size context: candidate pool, returned page, requested page, contexts searched. |
+
+The stages run one after another, so `embed_ms + qdrant_ms + fulltext_ms + rerank_ms + hydrate_ms + finalize_ms + post_commit_ms + other_ms` equals `duration_ms` up to rounding. `memory_access_events.latency_ms` and `usage_stats` keep the total only; the breakdown lives in the log. A p50 / p95 per stage from the container's JSON log:
+
+```bash
+docker logs api-blue --since 1h 2>&1 | grep recall_completed | jq -s '
+  def pct(p): sort | .[((length - 1) * p | floor)];
+  def stage(f): {p50: (map(f // empty) | pct(0.5)), p95: (map(f // empty) | pct(0.95))};
+  {duration: stage(.duration_ms), embed: stage(.embed_ms), qdrant: stage(.qdrant_ms),
+   fulltext: stage(.fulltext_ms), rerank: stage(.rerank_ms), hydrate: stage(.hydrate_ms),
+   finalize: stage(.finalize_ms), post_commit: stage(.post_commit_ms), other: stage(.other_ms)}'
+```
+
+To see the slow requests with their breakdown beside them: `... | grep recall_completed | jq -r '[.duration_ms, .embed_ms, .qdrant_ms, .fulltext_ms, .hydrate_ms, .finalize_ms, .post_commit_ms, .candidates] | @tsv' | sort -n | tail`.
+
 ## Multiple API workers and Postgres connections — Issue #1980
 
 By default each API container (`api-blue` / `api-green` in the single-server

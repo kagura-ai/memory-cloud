@@ -82,6 +82,7 @@ from services.recall_selection import (
     RecallSelectionPlan,
     plan_recall_selection,
 )
+from services.recall_timings import RecallTimings
 from services.search_service import SearchService
 from services.supersede_dismissal import unconditional_tombstone
 from utils.datetime import to_utc_iso, utcnow
@@ -3870,6 +3871,9 @@ class MemoryService:
         search_config: Any,
         context_id: UUID,
         degradation: dict[str, Any] | None = None,
+        timings: RecallTimings | None = None,
+        user_id: str | None = None,
+        context_count: int = 1,
     ) -> RecallResponse:
         """Build the zero-candidate ``recall()`` response.
 
@@ -3884,6 +3888,12 @@ class MemoryService:
             selection_config: #1306 evaluation seam config, or None.
             search_config: Prefetched per-context search config (may be None).
             context_id: Context the evidence is stamped against.
+            timings: #1989 per-stage clock of the recall; when given, the
+                ``recall_completed`` line is logged here with ``results=0``
+                (an empty page is still one recall, and a cold embedding or
+                a wide full-text scan that found nothing is still a tail).
+            user_id: Caller, for that log line.
+            context_count: Contexts the recall spanned, for that log line.
 
         Returns:
             An empty RecallResponse carrying the full empty-recall contract.
@@ -3897,7 +3907,7 @@ class MemoryService:
                 search_config=search_config,
                 context_id=context_id,
             )
-        return RecallResponse(
+        response = RecallResponse(
             results=[],
             explore_hints=[] if request.include_explore_hints else None,
             confidence=self._compute_recall_confidence([]),  # #1047: "none"
@@ -3908,6 +3918,15 @@ class MemoryService:
             degraded=(degradation or {}).get("degraded"),
             degraded_reason=(degradation or {}).get("reason"),
         )
+        if timings is not None:
+            logger.info(
+                "recall_completed",
+                user_id=user_id,
+                **timings.log_fields(
+                    results=0, candidates=0, k=request.k, context_count=context_count
+                ),
+            )
+        return response
 
     async def _recall_check_agent_bindings(
         self,
@@ -4716,6 +4735,8 @@ class MemoryService:
         selection_evidence: dict[str, Any] | None,
         cross_context: bool = False,
         degradation: dict[str, Any] | None = None,
+        timings: RecallTimings | None = None,
+        context_count: int = 1,
     ) -> RecallResponse:
         """Assemble the final response: hints, tags, confidence, audit row.
 
@@ -4733,10 +4754,59 @@ class MemoryService:
             selection_evidence: #1306 evidence dict, or None.
             cross_context: True when the recall spanned several contexts, which
                 disables the single-context tag hints (#1503).
+            timings: #1989 per-stage clock; this whole method is its
+                ``finalize`` stage and ``recall_completed`` is logged from it
+                last, after the audit row. ``None`` (direct callers) logs the
+                line with a fresh clock.
+            context_count: Contexts the recall spanned, for the log line.
 
         Returns:
             The completed RecallResponse.
         """
+        timings = timings or RecallTimings()
+        with timings.stage("finalize"):
+            response = await self._recall_finalize_response(
+                request,
+                search_results,
+                responses,
+                user_id=user_id,
+                current_context_id=current_context_id,
+                effective_workspace_id=effective_workspace_id,
+                neural_enabled=neural_enabled,
+                binding_row_filtered=binding_row_filtered,
+                selection_evidence=selection_evidence,
+                cross_context=cross_context,
+                degradation=degradation,
+            )
+        # #1989: one line per recall, after everything the caller waits for.
+        logger.info(
+            "recall_completed",
+            user_id=user_id,
+            **timings.log_fields(
+                results=len(responses),
+                candidates=len(search_results),
+                k=request.k,
+                context_count=context_count,
+            ),
+        )
+        return response
+
+    async def _recall_finalize_response(
+        self,
+        request: RecallRequest,
+        search_results: list[dict],
+        responses: list[MemoryResponse],
+        *,
+        user_id: str,
+        current_context_id: UUID,
+        effective_workspace_id: UUID,
+        neural_enabled: bool,
+        binding_row_filtered: int,
+        selection_evidence: dict[str, Any] | None,
+        cross_context: bool,
+        degradation: dict[str, Any] | None,
+    ) -> RecallResponse:
+        """The body of :meth:`_recall_finalize`, timed as one stage."""
         # Issue #216: Generate explore hints (best-effort, opt-in)
         explore_hints = [] if request.include_explore_hints else None
         if request.include_explore_hints and responses:
@@ -4753,8 +4823,6 @@ class MemoryService:
 
         # Issue #104: Aggregate related tags from results
         related_tags = self._aggregate_related_tags(responses, limit=10)
-
-        logger.info("recall_completed", user_id=user_id, results=len(responses))
 
         # Issue #1047/#1052: relevance confidence from the full candidate pool's
         # score distribution (search_results, which holds up to candidates_k >> k
@@ -4973,6 +5041,10 @@ class MemoryService:
             k=request.k,
             use_rerank=request.use_rerank,
         )
+        # #1989: one clock per recall; every stage below reports into it and
+        # _recall_finalize / _empty_recall_response log recall_completed from it.
+        timings = RecallTimings()
+        context_count = len(context_ids) if context_ids else 1
 
         # Single Collection Migration: Validate required parameters
         if not current_workspace_id or not current_context_id:
@@ -5027,6 +5099,9 @@ class MemoryService:
                 selection_config=selection_config,
                 search_config=search_config,
                 context_id=current_context_id,
+                timings=timings,
+                user_id=user_id,
+                context_count=context_count,
             )
 
         # #708 Option A H1 gate (deferred): we now know hybrid_search will
@@ -5114,6 +5189,7 @@ class MemoryService:
             # hybrid_search``.
             is_shared_context_read=is_shared_context_read,
             degradation=degradation,
+            timings=timings,
         )
 
         # Get full memory data from PostgreSQL
@@ -5126,16 +5202,20 @@ class MemoryService:
                 search_config=search_config,
                 context_id=current_context_id,
                 degradation=degradation,
+                timings=timings,
+                user_id=user_id,
+                context_count=context_count,
             )
 
         # Fetch memories from PostgreSQL (exclude soft-deleted), applying the
         # #214 source post-filters, the #887 trust-tier filter and the #496
         # cluster scope. Keyed by both the row id and the Qdrant point id (#972).
-        memories = await self._recall_hydrate_memories(
-            request,
-            memory_ids=memory_ids,
-            cluster_memory_ids=cluster_memory_ids,
-        )
+        with timings.stage("hydrate"):
+            memories = await self._recall_hydrate_memories(
+                request,
+                memory_ids=memory_ids,
+                cluster_memory_ids=cluster_memory_ids,
+            )
 
         # #1299: per-memory type/source binding filter over the FULL candidate
         # pool, before shadowing / rerank / the top-k slice.
@@ -5198,14 +5278,15 @@ class MemoryService:
                 context_id=current_context_id,
             )
 
-        responses = await self._recall_build_responses(
-            request,
-            search_results,
-            memories,
-            shadow_map=shadow_map,
-            contradiction_map=contradiction_map,
-            user_id=user_id,
-        )
+        with timings.stage("finalize"):
+            responses = await self._recall_build_responses(
+                request,
+                search_results,
+                memories,
+                shadow_map=shadow_map,
+                contradiction_map=contradiction_map,
+                user_id=user_id,
+            )
 
         # Hebbian learning: build graph for explore() (best-effort, does not affect recall)
         # #1515: the `!= "keyword"` clause already says keyword-only results must
@@ -5220,19 +5301,22 @@ class MemoryService:
         # #1985: the statistics writes run AFTER the read commits, each in its
         # own session, so a recall never holds memory or edge row locks while
         # it waits for another one, and a failure there cannot undo or fail
-        # the page it already has.
+        # the page it already has. They do delay the response (#1989
+        # post_commit_ms).
         client = request.filters.get("client", "api") if request.filters else "api"
-        await self._recall_record_access(responses, memories, client=client)
+        with timings.stage("post_commit"):
+            await self._recall_record_access(responses, memories, client=client)
 
         if neural_enabled and request.search_mode != "keyword" and not degradation.get("degraded"):
-            await self._recall_run_hebbian_learning(
-                request,
-                search_results,
-                memories,
-                user_id=user_id,
-                current_context_id=current_context_id,
-                effective_workspace_id=effective_workspace_id,
-            )
+            with timings.stage("post_commit"):
+                await self._recall_run_hebbian_learning(
+                    request,
+                    search_results,
+                    memories,
+                    user_id=user_id,
+                    current_context_id=current_context_id,
+                    effective_workspace_id=effective_workspace_id,
+                )
 
         return await self._recall_finalize(
             request,
@@ -5246,6 +5330,8 @@ class MemoryService:
             selection_evidence=selection_evidence,
             cross_context=bool(context_ids),
             degradation=degradation,
+            timings=timings,
+            context_count=context_count,
         )
 
     async def load_pinned(
