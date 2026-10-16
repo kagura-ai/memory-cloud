@@ -72,7 +72,7 @@ Never pass `recall` a list of contexts. Every read that accepts `filters` passes
 
 **Supersede candidates**
 
-Only those that appear as `supersede_candidate` on a result of the topic recall. No tool lists pending candidates, so this is not a complete list — say so. Proposed action: supersede.
+Only those that appear as `supersede_candidate` on a result of the topic recall. No tool lists pending candidates, so this is not a complete list — say so. Proposed action: supersede; read both unless `verified: true`.
 
 Show a memory once, in the first category it appears in. If every category is empty, say that nothing was found and stop — but never report "nothing needs attention" when the only evidence is an empty topic recall.
 
