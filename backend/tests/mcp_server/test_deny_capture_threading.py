@@ -20,6 +20,7 @@ import pytest
 
 from mcp_server.tools import explore as explore_tools
 from mcp_server.tools import feedback as feedback_tools
+from mcp_server.tools import listing as listing_tools
 from mcp_server.tools import memory as memory_tools
 from mcp_server.tools._helpers import _ContextNotFoundError
 
@@ -98,6 +99,21 @@ CASES = [
         {"memory_id": _MID, "context_id": _CTX},
         "_resolve_context_for_read",
         "explore",
+    ),
+    (
+        # #2007: the #1852 read lanes thread their own vocabulary values.
+        listing_tools,
+        "handle_list",
+        {"context_id": _CTX},
+        "_resolve_context_for_read",
+        "list",
+    ),
+    (
+        listing_tools,
+        "handle_changes_since",
+        {"context_id": _CTX, "since": "2026-10-01T00:00:00Z"},
+        "_resolve_context_for_read",
+        "changes_since",
     ),
     (
         memory_tools,

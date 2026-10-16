@@ -64,6 +64,12 @@ MAE_OPERATIONS: tuple[str, ...] = (
     # establishing surface, so its allows and denies must be auditable.
     # CHECK altered in e84_1619_tool_guardrails.
     "load_guardrails",
+    # #2007: the list / changes_since read lanes (#1852) thread their own
+    # operation into the read pre-gate; appended (never reordered) so an agent
+    # binding deny lands as an audit row instead of a writer ValueError.
+    # CHECK altered in e98_2007.
+    "list",
+    "changes_since",
 )
 MAE_OUTCOMES: tuple[str, ...] = ("success", "denied", "error", "partial")
 MAE_SURFACES: tuple[str, ...] = ("mcp", "rest")
