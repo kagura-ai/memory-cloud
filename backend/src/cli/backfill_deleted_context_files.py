@@ -10,9 +10,11 @@ those files the deletion their context had, releasing their bytes from
     python -m src.cli.backfill_deleted_context_files                # plan (default, read-only)
     python -m src.cli.backfill_deleted_context_files --apply --yes  # soft-delete and release
 
-One context per transaction; a second run finds nothing. The files come
-back with ``restore_context`` inside the file restore window, as for any
-context deleted since #1960.
+One context per transaction; a second run finds nothing. A context deleted
+inside the file restore window gets its files back with ``restore_context``,
+as for any context deleted since #1960. For a context deleted earlier the
+plan says ``past window``: the next nightly file GC removes its objects for
+good. ``--workspace <id>`` limits the run to one workspace (a canary).
 
 Exit codes: 0 ok · 1 error.
 """
@@ -23,6 +25,7 @@ import argparse
 import asyncio
 import sys
 from pathlib import Path
+from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -42,20 +45,28 @@ def _print_plan(result: DeletedContextFilesBackfill) -> None:
         return
     print(f"{'context':36}  {'workspace':36}  {'deleted at':20}  files  uploaded bytes")
     for c in result.contexts:
+        note = "  past window: objects removed at the next file GC" if c.past_restore_window else ""
         print(
             f"{str(c.context_id):36}  {str(c.workspace_id):36}  "
-            f"{to_utc_iso(c.deleted_at):20}  {c.files:5}  {c.uploaded_bytes}"
+            f"{to_utc_iso(c.deleted_at):20}  {c.files:5}  {c.uploaded_bytes}{note}"
         )
     print(
         f"total      {len(result.contexts)} context(s) in {len(result.workspaces)} workspace(s), "
         f"{result.files} file(s), {result.uploaded_bytes} uploaded bytes"
     )
+    if result.past_restore_window:
+        print(
+            f"warning    {result.past_restore_window} context(s) are past the file restore "
+            "window: their files cannot come back and the next GC deletes their objects"
+        )
 
 
 def _print_applied(result: DeletedContextFilesBackfill) -> None:
     print(f"files soft-deleted: {result.files_soft_deleted}")
     for ws_id, size in sorted(result.released_bytes.items(), key=lambda kv: str(kv[0])):
-        print(f"released   {ws_id}  {size} bytes")
+        print(f"released   {ws_id}  {size} bytes (counter reseeds on the next upload)")
+    for ctx_id in result.skipped:
+        print(f"skipped    {ctx_id}  restored since the plan; files kept")
 
 
 def _summary(result: DeletedContextFilesBackfill) -> str:
@@ -69,7 +80,9 @@ async def _main(args: argparse.Namespace) -> int:
     configure_logging(args.log_level)
 
     async def run(db: AsyncSession, dry_run: bool) -> DeletedContextFilesBackfill:
-        return await backfill_deleted_context_files(db, dry_run=dry_run)
+        return await backfill_deleted_context_files(
+            db, dry_run=dry_run, workspace_id=args.workspace
+        )
 
     return await run_plan_apply(
         run=run,
@@ -92,6 +105,9 @@ def _parse(argv: list[str] | None = None) -> argparse.Namespace:
     mode.add_argument("--plan", action="store_true", help="show what would be deleted (default)")
     mode.add_argument("--apply", action="store_true", help="soft-delete the files and release")
     parser.add_argument("--yes", action="store_true", help="no confirmation prompt")
+    parser.add_argument(
+        "--workspace", type=UUID, default=None, help="limit the run to this workspace"
+    )
     add_log_level_argument(parser)
     return parser.parse_args(argv)
 

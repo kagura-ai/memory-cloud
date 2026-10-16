@@ -189,10 +189,9 @@ class DowngradeEligibilityService:
         # File storage the owner can still reduce (#1961): uploaded, not
         # soft-deleted, workspace-scoped or in a live context — the capacity
         # lock's figure, so "eligible after cleanup" and "locked until cleanup"
-        # never disagree. Deliberately NOT the upload quota's aggregate
-        # (storage_quota_service), which also counts files left in deleted
-        # contexts that no UI lets the owner remove. A direct aggregate (not
-        # the Redis-cached counter) keeps the verdict authoritative.
+        # never disagree; since #1966 the upload quota reseeds from the same
+        # statement. A direct aggregate (not the Redis-cached counter) keeps
+        # the verdict authoritative.
         storage_bytes = await self._scalar(reducible_storage_bytes_stmt(workspace_id))
         return WorkspaceUsage(
             members=members,

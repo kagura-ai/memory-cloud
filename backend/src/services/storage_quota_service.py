@@ -25,7 +25,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.redis import get_cache, get_redis_client, incrby_counter, set_cache
+from db.redis import delete_cache, get_cache, get_redis_client, incrby_counter, set_cache
 from utils.exceptions import QuotaExceededError, RedisError
 from utils.logger import get_logger
 
@@ -318,6 +318,27 @@ async def release_storage_bytes(
                 workspace_id=str(workspace_id),
                 error=str(expire_exc),
             )
+
+
+async def invalidate_storage_counter(workspace_id: UUID) -> None:
+    """Drop the Redis counter so the next reservation reseeds it from the database.
+
+    For writes that change what the counter should hold without going
+    through a reservation (the #1966 backfill): a decrement would create a
+    negative key with no TTL when none exists, and would subtract bytes a
+    reseed already left out. Fail-open on Redis errors: the key keeps its
+    24h TTL and reseeds then.
+    """
+    key = _build_key(workspace_id)
+    try:
+        await delete_cache(key)
+        logger.info("storage_quota_counter_invalidated", workspace_id=str(workspace_id))
+    except RedisError as exc:
+        logger.error(
+            "storage_quota_counter_invalidate_failed",
+            workspace_id=str(workspace_id),
+            error=str(exc),
+        )
 
 
 async def get_current_storage_usage(

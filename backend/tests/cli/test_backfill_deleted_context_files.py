@@ -26,6 +26,7 @@ from services.storage_backfill import (  # noqa: E402
 
 WS = uuid4()
 CTX = uuid4()
+OLD = uuid4()
 
 
 def _found(*, dry_run: bool) -> DeletedContextFilesBackfill:
@@ -37,11 +38,20 @@ def _found(*, dry_run: bool) -> DeletedContextFilesBackfill:
             deleted_at=datetime(2026, 9, 30, 12, 0, 0),
             files=3,
             uploaded_bytes=220,
-        )
+            past_restore_window=False,
+        ),
+        DeletedContextFiles(
+            context_id=OLD,
+            workspace_id=WS,
+            deleted_at=datetime(2026, 8, 1, 12, 0, 0),
+            files=1,
+            uploaded_bytes=10,
+            past_restore_window=True,
+        ),
     ]
     if not dry_run:
-        result.files_soft_deleted = 3
-        result.released_bytes = {WS: 260}
+        result.files_soft_deleted = 4
+        result.released_bytes = {WS: 270}
     return result
 
 
@@ -64,7 +74,9 @@ class TestBackfillCommand:
         assert [call.kwargs["dry_run"] for call in backfill.await_args_list] == [True]
         out = capsys.readouterr().out
         assert str(CTX) in out and "220" in out
-        assert "1 context(s) in 1 workspace(s), 3 file(s), 220 uploaded bytes" in out
+        assert "2 context(s) in 1 workspace(s), 4 file(s), 230 uploaded bytes" in out
+        assert "past window: objects removed at the next file GC" in out
+        assert "warning    1 context(s) are past the file restore window" in out
         assert "dry run — pass --apply to write" in out
 
     def test_apply_soft_deletes_and_reports_the_release(self, capsys):
@@ -72,9 +84,14 @@ class TestBackfillCommand:
         assert _run(["--apply", "--yes"], backfill) == 0
         assert [call.kwargs["dry_run"] for call in backfill.await_args_list] == [True, False]
         out = capsys.readouterr().out
-        assert "soft-deleted 3 file(s) in 1 deleted context(s), 220 uploaded bytes" in out
-        assert "files soft-deleted: 3" in out
-        assert f"released   {WS}  260 bytes" in out
+        assert "soft-deleted 4 file(s) in 2 deleted context(s), 230 uploaded bytes" in out
+        assert "files soft-deleted: 4" in out
+        assert f"released   {WS}  270 bytes" in out
+
+    def test_workspace_flag_scopes_the_run(self, capsys):
+        backfill = AsyncMock(return_value=_found(dry_run=True))
+        assert _run(["--workspace", str(WS)], backfill) == 0
+        assert backfill.await_args.kwargs["workspace_id"] == WS
 
     def test_nothing_to_do_exits_zero_without_applying(self, capsys):
         backfill = AsyncMock(return_value=DeletedContextFilesBackfill(dry_run=True))

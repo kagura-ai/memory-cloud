@@ -21,7 +21,7 @@ import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.auth import WorkspaceMember, WorkspaceRole
+from models.auth import Context, WorkspaceMember, WorkspaceRole
 from models.file_objects import FileObject, WorkspaceStorageUsage
 from services import storage_quota_service
 from services.storage_backfill import backfill_deleted_context_files
@@ -60,10 +60,14 @@ async def seeded(db_session: AsyncSession) -> dict:
     )
     live = make_context(workspace_id=ws.id, created_by=owner.user_id, is_private=True)
     gone = make_context(workspace_id=ws.id, created_by=owner.user_id, is_private=True)
-    db_session.add_all([live, gone])
+    old = make_context(workspace_id=ws.id, created_by=owner.user_id, is_private=True)
+    db_session.add_all([live, gone, old])
     await db_session.flush()
-    # Deleted before #1960: the context is soft-deleted, its files are not.
+    # Deleted before #1960: the contexts are soft-deleted, their files are not.
+    # ``gone`` is inside the file restore window, ``old`` (the production
+    # shape: #1960 shipped weeks ago) is past it.
     gone.deleted_at = utcnow() - timedelta(days=3)
+    old.deleted_at = utcnow() - timedelta(days=30)
     db_session.add_all(
         [
             _file(ws.id, live.id, owner.user_id, 100),
@@ -72,12 +76,20 @@ async def seeded(db_session: AsyncSession) -> dict:
             _file(ws.id, gone.id, owner.user_id, 70),
             _file(ws.id, gone.id, owner.user_id, 40, status="reserved"),
             _file(ws.id, gone.id, owner.user_id, 999, status="failed"),
+            _file(ws.id, old.id, owner.user_id, 10),
         ]
     )
-    # The counter still holds the pre-#1960 leftovers: 100 + 30 + 150 + 70.
-    db_session.add(WorkspaceStorageUsage(workspace_id=ws.id, used_bytes=350, file_count=4))
+    # The counter still holds the pre-#1960 leftovers: 100 + 30 + 150 + 70 + 10.
+    db_session.add(WorkspaceStorageUsage(workspace_id=ws.id, used_bytes=360, file_count=5))
     await db_session.commit()
-    return {"ws": ws.id, "live": live.id, "gone": gone.id, "deleted_at": gone.deleted_at}
+    return {
+        "ws": ws.id,
+        "live": live.id,
+        "gone": gone.id,
+        "old": old.id,
+        "deleted_at": gone.deleted_at,
+        "old_deleted_at": old.deleted_at,
+    }
 
 
 async def _usage(db_session: AsyncSession, ws_id: UUID) -> WorkspaceStorageUsage:
@@ -101,25 +113,36 @@ async def _rows(db_session: AsyncSession, ctx_id: UUID | None, ws_id: UUID) -> l
 
 
 @pytest.mark.asyncio
-async def test_plan_lists_the_deleted_context_and_changes_nothing(db_session, seeded):
-    with patch.object(storage_quota_service, "release_storage_bytes", AsyncMock()) as release:
-        result = await backfill_deleted_context_files(db_session, dry_run=True)
+async def test_plan_lists_the_deleted_contexts_and_changes_nothing(db_session, seeded):
+    with patch.object(storage_quota_service, "invalidate_storage_counter", AsyncMock()) as drop:
+        result = await backfill_deleted_context_files(
+            db_session, dry_run=True, workspace_id=seeded["ws"]
+        )
+    # The plan ended its transaction (the operator reads it at a prompt).
+    assert not db_session.in_transaction()
 
-    mine = [c for c in result.contexts if c.workspace_id == seeded["ws"]]
-    assert [c.context_id for c in mine] == [seeded["gone"]]
-    assert mine[0].files == 4  # uploaded x2, reserved, failed
-    assert mine[0].uploaded_bytes == 220
-    assert mine[0].deleted_at == seeded["deleted_at"]
+    # Oldest deletion first, scoped to the workspace.
+    assert [c.context_id for c in result.contexts] == [seeded["old"], seeded["gone"]]
+    old, gone = result.contexts
+    assert gone.files == 4  # uploaded x2, reserved, failed
+    assert gone.uploaded_bytes == 220
+    assert gone.deleted_at == seeded["deleted_at"]
+    assert gone.past_restore_window is False
+    assert old.files == 1 and old.uploaded_bytes == 10
+    assert old.past_restore_window is True  # the next file GC removes its objects
+    assert result.past_restore_window == 1
     assert result.files_soft_deleted == 0 and result.released_bytes == {}
-    release.assert_not_awaited()
+    drop.assert_not_awaited()
     assert all(f.deleted_at is None for f in await _rows(db_session, seeded["gone"], seeded["ws"]))
-    assert (await _usage(db_session, seeded["ws"])).used_bytes == 350
+    assert (await _usage(db_session, seeded["ws"])).used_bytes == 360
 
 
 @pytest.mark.asyncio
 async def test_apply_gives_the_files_their_context_deletion(db_session, seeded):
-    with patch.object(storage_quota_service, "release_storage_bytes", AsyncMock()) as release:
-        result = await backfill_deleted_context_files(db_session, dry_run=False)
+    with patch.object(storage_quota_service, "invalidate_storage_counter", AsyncMock()) as drop:
+        result = await backfill_deleted_context_files(
+            db_session, dry_run=False, workspace_id=seeded["ws"]
+        )
 
     gone_rows = await _rows(db_session, seeded["gone"], seeded["ws"])
     assert len(gone_rows) == 4
@@ -129,24 +152,63 @@ async def test_apply_gives_the_files_their_context_deletion(db_session, seeded):
     by_size = {f.size_bytes: f for f in gone_rows}
     assert by_size[40].status == "failed"  # the reservation was cancelled
     assert by_size[999].status == "failed"
+    old_rows = await _rows(db_session, seeded["old"], seeded["ws"])
+    assert {f.deleted_at for f in old_rows} == {seeded["old_deleted_at"]}  # past the window
 
     # The live context's file and the workspace-scoped file are untouched.
     assert all(f.deleted_at is None for f in await _rows(db_session, seeded["live"], seeded["ws"]))
     assert all(f.deleted_at is None for f in await _rows(db_session, None, seeded["ws"]))
 
     usage = await _usage(db_session, seeded["ws"])
-    assert usage.used_bytes == 130  # 350 - 150 - 70
+    assert usage.used_bytes == 130  # 360 - 150 - 70 - 10
     assert usage.file_count == 2
 
-    # Redis follows the commit: uploaded (220) + the cancelled reservation (40).
-    assert result.released_bytes.get(seeded["ws"]) == 260
-    release.assert_any_await(seeded["ws"], 260)
-    assert result.files_soft_deleted >= 4
+    # The counter is dropped once per context commit, never decremented:
+    # uploaded (220 + 10) + the cancelled reservation (40) no longer count.
+    assert result.released_bytes.get(seeded["ws"]) == 270
+    assert drop.await_count == 2
+    drop.assert_any_await(seeded["ws"])
+    assert result.files_soft_deleted == 5
+    assert result.skipped == []
 
-    # Idempotent: the second run finds nothing of ours.
-    with patch.object(storage_quota_service, "release_storage_bytes", AsyncMock()):
-        again = await backfill_deleted_context_files(db_session, dry_run=False)
-    assert not [c for c in again.contexts if c.workspace_id == seeded["ws"]]
+    # Idempotent: the second run finds nothing.
+    with patch.object(storage_quota_service, "invalidate_storage_counter", AsyncMock()):
+        again = await backfill_deleted_context_files(
+            db_session, dry_run=False, workspace_id=seeded["ws"]
+        )
+    assert again.contexts == []
+
+
+@pytest.mark.asyncio
+async def test_a_context_restored_since_the_plan_is_skipped(db_session, seeded, monkeypatch):
+    """The apply re-checks each context under lock: one restored between the
+    plan and its turn keeps its files (they would otherwise vanish with a
+    stale deleted_at stamp)."""
+    from services import storage_backfill
+
+    stale = await storage_backfill.find_deleted_context_files(db_session, workspace_id=seeded["ws"])
+    await db_session.rollback()
+    gone = (
+        await db_session.execute(select(Context).where(Context.id == seeded["gone"]))
+    ).scalar_one()
+    gone.deleted_at = None  # restored meanwhile
+    await db_session.commit()
+
+    async def _stale(*_args, **_kwargs):
+        return stale
+
+    monkeypatch.setattr(storage_backfill, "find_deleted_context_files", _stale)
+    with patch.object(storage_quota_service, "invalidate_storage_counter", AsyncMock()):
+        result = await backfill_deleted_context_files(
+            db_session, dry_run=False, workspace_id=seeded["ws"]
+        )
+
+    assert result.skipped == [seeded["gone"]]
+    assert all(f.deleted_at is None for f in await _rows(db_session, seeded["gone"], seeded["ws"]))
+    assert {f.deleted_at for f in await _rows(db_session, seeded["old"], seeded["ws"])} == {
+        seeded["old_deleted_at"]
+    }
+    assert result.files_soft_deleted == 1
 
 
 @pytest.mark.asyncio

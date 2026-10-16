@@ -1393,9 +1393,9 @@ The sweep reads Postgres one page of points at a time and ends its
 transaction after each page, so a long scan is not cut short by
 `idle_in_transaction_session_timeout`.
 
-### Files left in contexts deleted before v0.100 — Issue #1966
+### Files left in contexts deleted before v0.101 — Issue #1966
 
-Until #1960 (v0.100.0) deleting a context left its files live: hidden from
+Until #1960 (v0.101.0) deleting a context left its files live: hidden from
 every listing and from the storage page, but still counted by the upload
 quota (`workspace_storage_usage` and the Redis counter). The capacity lock and
 the downgrade eligibility (#1961) never counted them, so such a workspace could
@@ -1409,12 +1409,21 @@ python -m src.cli.backfill_deleted_context_files                # plan: one line
 python -m src.cli.backfill_deleted_context_files --apply --yes  # soft-delete the files and release their bytes
 ```
 
-The command runs one context per transaction, releases that context's bytes
-from the Redis counter right after its commit, and logs
-`deleted_context_files_backfilled` per context (files, uploaded bytes, released
-bytes). A second run finds nothing. The files are stamped with their context's
-own `deleted_at`, so `restore_context` brings them back with the context inside
-the file restore window, like any deletion since #1960.
+The command runs one context per transaction, drops that workspace's Redis
+counter right after the commit (the next upload reseeds it from the shared
+definition), and logs `deleted_context_files_backfilled` per context (files,
+uploaded bytes, released bytes). A second run finds nothing; a context restored
+between the plan and its turn is skipped. `--workspace <id>` limits a run to
+one workspace.
+
+The files are stamped with their context's own `deleted_at`. For a context
+deleted inside the file restore window (6 days) `restore_context` brings them
+back with the context, like any deletion since #1960. For a context deleted
+earlier — most of what this command finds — the plan prints `past window`:
+those files cannot be restored and the nightly file GC removes their objects
+on its next run. **That deletion is permanent.** Until the command runs, such a
+context can still be restored with its files; run the plan, read the warning,
+and keep the backups' retention in mind before `--apply`.
 
 ### Restoring a deleted context — Issue #1804
 

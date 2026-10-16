@@ -14,11 +14,12 @@ with the context) are reachable by nobody — no listing shows them — so
 counting them would describe a lock no one can lift and an eligibility no one
 can earn.
 
-This is deliberately *not* the upload quota's figure. The upload quota
-(``storage_quota_service``, the ``workspace_storage_usage`` counter) bounds the
-bytes that exist in R2, hidden files included — a different question, left
-alone. Before this module the eligibility check summed every live file and so
-disagreed with the lock whenever a deleted context still held files.
+Since #1966 the upload quota shares this figure: the Redis counter
+(``storage_quota_service``) reseeds from this statement, and the files left in
+soft-deleted contexts before #1960 were backfilled into their deletion
+(``cli/backfill_deleted_context_files``). Before this module the eligibility
+check summed every live file and so disagreed with the lock whenever a deleted
+context still held files.
 
 A leaf module, like ``memory_counts``: models and SQLAlchemy only.
 """

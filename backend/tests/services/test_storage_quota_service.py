@@ -245,6 +245,7 @@ class TestReserveStorageBytes:
         result = MagicMock()
         result.scalar_one = MagicMock(return_value=2048)
         db_session.execute = AsyncMock(return_value=result)
+        db_session.scalar = AsyncMock(return_value=2048)  # #1966: the shared statement
 
         with (
             patch.object(storage_quota_service, "get_cache", AsyncMock(return_value=None)),
@@ -371,6 +372,7 @@ class TestGetCurrentStorageUsage:
         result = MagicMock()
         result.scalar_one = MagicMock(return_value=8192)
         db_session.execute = AsyncMock(return_value=result)
+        db_session.scalar = AsyncMock(return_value=8192)  # #1966: the shared statement
 
         with patch.object(
             storage_quota_service,
