@@ -74,14 +74,14 @@ The descriptions in `tools/list` keep three to five lines per core tool (purpose
 |------|------------|---------------|
 | `remember` | Store a new memory (summary + content + type; optional `delivery_mode`); `tags_normalize` stores the context's established tag spellings, `dedupe="check"` asks before writing a near-duplicate | Member+ |
 | `remember_batch` | Store up to 50 memories in one call, independently or `atomic`; per-item results | Member+ |
-| `recall` | Search memories with Hybrid Search (supports `trust_tier` filter). Results are Layers 1-2; `related_tags` is `[{tag, count}]`, absent when there are none, as is an empty `tags` on a result. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories ([Tool annotations](#tool-annotations)) | Viewer+ |
+| `recall` | Search memories with Hybrid Search (supports `trust_tier` filter). Results are compact by default (`verbosity="compact"`: the first 160 characters of `summary`, `summary_cut: true` when shortened, no tags or `context_summary`); `verbosity="full"` returns Layers 1-2; `related_tags` is `[{tag, count}]`, absent when there are none, as is an empty `tags` on a result. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories ([Tool annotations](#tool-annotations)) | Viewer+ |
 | `recall_nearby` | Deterministic WHERE-axis query — memories with `details.location` within `radius_m` of a point, nearest first | Viewer+ |
 | `reference` | Get full 3-layer details of a memory | Viewer+ |
 | `update_memory` | Update an existing memory in-place or upsert by external ID | Member+ |
 | `forget` | Soft-delete a memory (retention bounded by the deployment's cleanup window, default 30 days) | Member+ |
 | `explore` | Discover related memories via Neural Memory graph | Viewer+ |
 
-> **Response format.** Every tool returns one JSON text block, serialized as compact UTF-8 — non-ASCII text (e.g. Japanese) arrives as-is, never as `\uXXXX` escapes, because the calling model pays for every character. Fields that are empty on most results are omitted rather than sent as `null` / `[]`: a `recall` result carries `context_summary`, `superseded_by`, `contradicts` and `supersede_candidate` only when they have a value, and `score` is rounded to 4 decimals. Treat an absent key as "none". The authoritative per-tool shape is the `Returns:` line of each tool description (`tools/list`).
+> **Response format.** Every tool returns one JSON text block, serialized as compact UTF-8 — non-ASCII text (e.g. Japanese) arrives as-is, never as `\uXXXX` escapes, because the calling model pays for every character. Fields that are empty on most results are omitted rather than sent as `null` / `[]`: a `recall` result carries `superseded_by`, `contradicts` and `supersede_candidate` (and, under `verbosity="full"`, `tags` and `context_summary`) only when they have a value, and `score` is rounded to 4 decimals. Treat an absent key as "none". The authoritative per-tool shape is the `Returns:` line of each tool description (`tools/list`).
 
 ## Agent Substrate (11)
 
@@ -545,7 +545,7 @@ MCP clients cap what a tool result may put in front of the model — about 25k t
 
 | Tool | Default | Largest | Flags |
 |------|---------|---------|-------|
-| `recall` | `max_chars` 20,000 | `max_chars` 100,000 (k up to 100) | `context_summary_omitted`, then `truncated` (lowest-ranked results cut; `count` = returned) |
+| `recall` | `max_chars` 20,000; `verbosity="compact"` items (160-character summary head, no tags / `context_summary`) | `max_chars` 100,000 (k up to 100), `verbosity="full"` | `context_summary_omitted`, then `truncated` (lowest-ranked results cut; `count` = returned) |
 | `load_pinned` | `max_chars` 20,000 | 100,000 | `context_summary_omitted`, then `truncated` with the real `total_available` |
 | `load_guardrails` | `max_chars` 20,000 | 100,000 | `context_summary_omitted`, then pinned, then tool-triggered items (`pinned_truncated`, `tool_triggered_truncated`) |
 | `get_agent_bootstrap` | `max_chars` 20,000 for the whole envelope; `pinned_cap` 20 | 100,000 | `context_summary_omitted`, then `truncated: true` on the pinned / recall / upcoming components, in that order; `state` is a `get_state` page |
@@ -574,7 +574,9 @@ The descriptions an agent receives from `tools/list` are paid for on every sessi
 
 ### `recall`
 
-**Which read tool.** `recall(query)` finds candidate memories and returns Layers 1-2 (summary + context summary). `reference(memory_id)` returns one memory in full (Layer 3). `explore(memory_id)` walks the graph to adjacent memories. `load_pinned()` returns the complete pinned set, unranked. `recall_upcoming()` and `recall_nearby()` are deterministic time / place queries, not search. The usual flow is recall → reference → explore; for a bug fix: `recall("<error message>")` → find similar past fixes → `reference()` for the details → apply.
+**Which read tool.** `recall(query)` finds candidate memories and returns a compact ranking by default (the first 160 characters of each summary plus the signals to decide with); `verbosity="full"` returns Layers 1-2 (summary + context summary). `reference(memory_id)` returns one memory in full (Layer 3). `explore(memory_id)` walks the graph to adjacent memories. `load_pinned()` returns the complete pinned set, unranked. `recall_upcoming()` and `recall_nearby()` are deterministic time / place queries, not search. The usual flow is recall → reference → explore; for a bug fix: `recall("<error message>")` → find similar past fixes → `reference()` for the details → apply.
+
+**Compact first (`verbosity`).** A default recall is `verbosity="compact"`: `confidence` comes first, and each result is `{memory_id, summary, summary_cut?, type, importance, score, updated_at}` plus `superseded_by` / `contradicts` / `supersede_candidate` when present — `summary` is cut to its first 160 characters at a word boundary (`summary_cut: true`). It is cheap enough to call whenever you are unsure whether the topic is stored. Then `reference(memory_id)` reads one hit in full, or `verbosity="full"` returns every result with `context_summary`, `scope`, `tags`, `created_at` and the whole `summary`.
 
 **Search with a hypothetical answer (HyDE).** For question-style queries, generate the answer you would expect to find and search with that instead — typically 3-10% better results, up to 25% in the best cases, because a stored memory reads like an answer, not like a question.
 

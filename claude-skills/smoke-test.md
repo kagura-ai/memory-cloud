@@ -209,8 +209,8 @@ remember(
 ### 4. Memory read tools
 
 ```
-recall(context_id=..., query="smoke test memory", k=5)
--> Verify: returns results array with length >= 1
+recall(context_id=..., query="smoke test memory", k=5, verbosity="full")
+-> Verify: returns results array with length >= 1 (the default compact shape has no tags / created_at — this step reads the full shape)
 -> Verify: at least one result matches the memory created in step 3
 -> Verify: that result has a `tags` array holding "smoke-test" and "automated" (tags are present
    when non-empty) and updated_at == null — a memory that was never edited has no updated_at; created_at is set
@@ -352,7 +352,7 @@ update_memory(memory_id=..., context_id=..., summary="MCP smoke test memory — 
 update_memory(memory_id=..., context_id=..., importance=0.8, verbose=true)
 -> Verify: success response; persistence.detail is a non-empty string (verbose acknowledgement)
 
-recall(context_id=..., query="smoke test UPDATED", k=5)
+recall(context_id=..., query="smoke test UPDATED", k=5, verbosity="full")
 -> Verify: returns updated memory with new summary
 -> Verify: its updated_at is now a UTC timestamp (it was null in step 4) and is not earlier than
    created_at

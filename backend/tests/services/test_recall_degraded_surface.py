@@ -87,7 +87,7 @@ class TestMcpEnvelope:
 
         from mcp_server.tools import memory as mcp_memory
 
-        assert "_recall_envelope(result, current_context)" in inspect.getsource(
+        assert "_recall_envelope(result, current_context, verbosity)" in inspect.getsource(
             mcp_memory.handle_recall
         )
         src = inspect.getsource(mcp_memory._recall_envelope)

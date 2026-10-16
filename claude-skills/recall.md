@@ -26,6 +26,8 @@ Use `recall` with the resolved context_id:
 recall(context_id=..., query="$ARGUMENTS", k=10)
 ```
 
+The reply is compact by default: each result carries `memory_id`, the first 160 characters of `summary` (`summary_cut: true` when it was shortened), `type`, `importance`, `score` and `updated_at`. Read one hit in full with `reference(memory_id)`; pass `verbosity="full"` when you need every result's `tags`, `context_summary`, `scope` and `created_at`.
+
 **Query technique** — a question often matches better as a hypothetical answer (HyDE): for "how to fix auth errors?" search `"Auth errors are caused by expired JWT tokens. Use the refresh token to re-authenticate..."` (typically 3-10% better, up to 25%). Expand with related terms ("認証エラー" → also `OAuth2`, `JWT`, `401 error`) and combine the searches when you need coverage.
 
 **Search modes** — choose based on the query type:
@@ -95,7 +97,7 @@ recall(context_id=..., query="...", k=10, filters={"source_uri_prefix": "vault:/
 
 ### 4. Display results
 
-Show results in a table: memory_id, summary, type, importance, tags.
+Show results in a table: memory_id, summary, type, importance. List the reply's `related_tags` below it. When the user wants each result's tags, repeat the search with `verbosity="full"` and add a tags column.
 
 ### 5. Follow up
 

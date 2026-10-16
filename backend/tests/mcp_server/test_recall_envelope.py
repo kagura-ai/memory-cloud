@@ -65,8 +65,14 @@ def _context():
     return context
 
 
-def _envelope(result: RecallResponse) -> dict:
-    return mcp_memory._recall_envelope(result, _context())
+def _envelope(result: RecallResponse, verbosity: str = "full") -> dict:
+    # The shape tests below pin verbosity="full" (#2002) — today's item exactly.
+    # The compact default has its own tests further down.
+    return mcp_memory._recall_envelope(result, _context(), verbosity)
+
+
+def _compact(result: RecallResponse) -> dict:
+    return _envelope(result, "compact")
 
 
 # ============================================================================
@@ -230,7 +236,7 @@ class TestEnvelope:
     def test_the_handler_serializes_this_envelope(self):
         # Pins the wiring: these tests would otherwise exercise an unused function.
         src = inspect.getsource(mcp_memory.handle_recall)
-        assert "_recall_envelope(result, current_context)" in src
+        assert "_recall_envelope(result, current_context, verbosity)" in src
         assert "_dumps(" in src
 
 
@@ -452,6 +458,201 @@ class TestSizeGuard:
         assert payload["confidence"]["level"] == "high"
 
 
+# #2002: the compact default renders the same fixture to 2,337 characters
+# (five 160-character summary heads are ~1,000 of them); the budget is that
+# plus 15% headroom, under the same rule as above.
+RECALL_K5_COMPACT_BUDGET_CHARS = 2_685
+
+
+class TestCompactSizeGuard:
+    def test_k5_compact_envelope_is_within_budget(self):
+        text = _dumps(_compact(_fixture_recall()))
+        assert len(text) <= RECALL_K5_COMPACT_BUDGET_CHARS, (
+            f"k=5 compact recall envelope is {len(text)} chars "
+            f"(budget {RECALL_K5_COMPACT_BUDGET_CHARS})."
+        )
+
+    def test_compact_budget_is_not_slack(self):
+        text = _dumps(_compact(_fixture_recall()))
+        assert len(text) * 1.15 >= RECALL_K5_COMPACT_BUDGET_CHARS - 1
+
+    def test_compact_is_at_least_45_percent_smaller_than_full(self):
+        fixture = _fixture_recall()
+        compact, full = len(_dumps(_compact(fixture))), len(_dumps(_envelope(fixture)))
+        assert 1 - compact / full >= 0.45, f"{full} -> {compact} chars"
+
+
+# ============================================================================
+# #2002: verbosity="compact" (the handler default)
+# ============================================================================
+
+_COMPACT_ITEM_KEYS = ["memory_id", "summary", "type", "importance", "score", "updated_at"]
+
+
+class TestCompact:
+    def test_item_keys(self):
+        item = _compact(RecallResponse(results=[_memory()]))["results"][0]
+        assert list(item) == _COMPACT_ITEM_KEYS
+        for dropped in ("context_summary", "tags", "scope", "created_at"):
+            assert dropped not in item
+
+    def test_compact_keys_are_a_subset_of_full_keys(self):
+        newer = uuid4()
+        candidate = SupersedeCandidate(
+            memory_id=uuid4(), summary="older", similarity=0.97, detected_at=CREATED
+        )
+        memory = _memory(
+            summary="word " * 60,
+            superseded_by=newer,
+            contradicts=[uuid4()],
+            supersede_candidate=candidate,
+        )
+        result = RecallResponse(results=[memory])
+        full = set(_envelope(result)["results"][0])
+        compact = set(_compact(result)["results"][0])
+        assert compact - full == {"summary_cut"}
+        full_env, compact_env = set(_envelope(result)), set(_compact(result))
+        assert compact_env == full_env
+
+    def test_rare_annotations_are_kept_unchanged(self):
+        newer, opposing = uuid4(), uuid4()
+        candidate = SupersedeCandidate(
+            memory_id=uuid4(), summary="the older fact", similarity=0.97, detected_at=CREATED
+        )
+        memory = _memory(superseded_by=newer, contradicts=[opposing], supersede_candidate=candidate)
+        item = _compact(RecallResponse(results=[memory]))["results"][0]
+        assert item["superseded_by"] == str(newer)
+        assert item["contradicts"] == [str(opposing)]
+        assert item["supersede_candidate"] == candidate.model_dump(mode="json")
+
+    def test_short_summary_is_whole_and_unflagged(self):
+        memory = _memory()
+        item = _compact(RecallResponse(results=[memory]))["results"][0]
+        assert item["summary"] == memory.summary
+        assert "summary_cut" not in item
+
+    def test_long_summary_is_cut_at_a_word_boundary(self):
+        summary = "alpha beta gamma delta " * 20  # 460 chars
+        item = _compact(RecallResponse(results=[_memory(summary=summary)]))["results"][0]
+        assert item["summary_cut"] is True
+        assert len(item["summary"]) <= 160
+        assert item["summary"].endswith("…")
+        head = item["summary"][:-1]
+        assert summary.startswith(head)
+        assert summary[len(head)] == " "  # cut before a space, not mid-word
+
+    def test_160_char_summary_is_not_cut(self):
+        summary = "x" * 160
+        item = _compact(RecallResponse(results=[_memory(summary=summary)]))["results"][0]
+        assert item["summary"] == summary and "summary_cut" not in item
+
+    def test_confidence_is_the_first_key(self):
+        confidence = RecallConfidence(level="low", result_count=1, rationale="weak")
+        envelope = _compact(RecallResponse(results=[_memory()], confidence=confidence))
+        assert next(iter(envelope)) == "confidence"
+        assert _dumps(envelope).startswith('{"confidence":')
+        assert list(envelope)[1] == "status"
+
+    def test_full_keeps_status_first(self):
+        confidence = RecallConfidence(level="low", result_count=1, rationale="weak")
+        envelope = _envelope(RecallResponse(results=[_memory()], confidence=confidence))
+        assert next(iter(envelope)) == "status"
+
+    def test_envelope_signals_pass_through(self):
+        result = _fixture_recall()
+        envelope = _compact(result)
+        assert envelope["related_tags"] == _envelope(result)["related_tags"]
+        assert envelope["confidence"] == result.confidence.model_dump()
+        assert envelope["count"] == 5
+
+    def test_bound_still_applies(self):
+        big = RecallResponse(results=[_memory(summary="s " * 400) for _ in range(100)])
+        bounded = mcp_memory._bound_recall_envelope(_compact(big), 10_000)
+        assert len(_dumps(bounded)) <= 10_000
+        assert bounded["truncated"] is True
+        assert "context_summary_omitted" not in bounded
+
+
+# ============================================================================
+# #2002: verbosity through the handler
+# ============================================================================
+
+
+def _get_db_yielding(db):
+    async def mock_get_db():
+        yield db
+
+    return mock_get_db
+
+
+async def _handler_payload(args: dict, recall_result: RecallResponse) -> dict:
+    from contextlib import ExitStack
+    from unittest.mock import AsyncMock, patch
+
+    service = MagicMock()
+    service.recall = AsyncMock(return_value=recall_result)
+    with ExitStack() as stack:
+        stack.enter_context(patch("db.base.get_db", new=_get_db_yielding(AsyncMock())))
+        stack.enter_context(
+            patch(
+                "mcp_server.tools.memory._resolve_context_for_read",
+                new=AsyncMock(return_value=MagicMock()),
+            )
+        )
+        stack.enter_context(
+            patch("mcp_server.tools.memory._context_response_fields", return_value={})
+        )
+        stack.enter_context(
+            patch("mcp_server.tools.memory._touch_context_last_used", new=AsyncMock())
+        )
+        stack.enter_context(patch("mcp_server.tools.memory._log_tool_usage", new=AsyncMock()))
+        stack.enter_context(
+            patch("services.memory_service.MemoryService", new=MagicMock(return_value=service))
+        )
+        result = await mcp_memory.handle_recall(
+            {"query": "q", "context_id": str(uuid4()), **args}, "u", None
+        )
+    return json.loads(result[0].text)
+
+
+def _handler_result() -> RecallResponse:
+    return RecallResponse(
+        results=[_memory()],
+        confidence=RecallConfidence(level="high", result_count=1, rationale="strong"),
+    )
+
+
+class TestHandlerVerbosity:
+    async def test_default_is_compact(self):
+        payload = await _handler_payload({}, _handler_result())
+        assert list(payload["results"][0]) == _COMPACT_ITEM_KEYS
+        assert next(iter(payload)) == "confidence"
+
+    async def test_null_means_the_default(self):
+        payload = await _handler_payload({"verbosity": None}, _handler_result())
+        assert list(payload["results"][0]) == _COMPACT_ITEM_KEYS
+
+    async def test_explicit_compact(self):
+        payload = await _handler_payload({"verbosity": "compact"}, _handler_result())
+        assert list(payload["results"][0]) == _COMPACT_ITEM_KEYS
+
+    async def test_full_returns_the_full_item(self):
+        payload = await _handler_payload({"verbosity": "full"}, _handler_result())
+        item = payload["results"][0]
+        for key in ("context_summary", "scope", "tags", "created_at"):
+            assert key in item
+        assert next(iter(payload)) == "status"
+
+    async def test_bad_value_is_a_validation_error(self):
+        for bad in ("verbose", "FULL", "", 1, ["full"]):
+            result = await mcp_memory.handle_recall(
+                {"query": "q", "context_id": str(uuid4()), "verbosity": bad}, "u", None
+            )
+            payload = json.loads(result[0].text)
+            assert payload["error"] == "validation_error", bad
+            assert "verbosity must be 'compact' or 'full'" in payload["message"]
+
+
 # ============================================================================
 # The tool description states the shape clients actually get
 # ============================================================================
@@ -469,6 +670,16 @@ class TestToolDescription:
         returns = description.rsplit("Returns: {", 1)[1]
         assert "related_tags?: [{tag, count}]" in returns  # #1851: absent when none
         assert "sample_summary" not in description
+
+    def test_returns_describes_both_verbosities(self):
+        tool = self._recall_tool()
+        prop = tool["inputSchema"]["properties"]["verbosity"]
+        assert prop["enum"] == ["compact", "full"]
+        assert prop["default"] == "compact"
+        returns = tool["description"].rsplit("Returns: {", 1)[1]
+        assert returns.startswith("confidence")
+        assert "summary_cut?" in returns
+        assert "verbosity='full'" in returns
 
     def test_returns_marks_the_omittable_keys(self):
         returns = self._recall_tool()["description"].rsplit("Returns: {", 1)[1]

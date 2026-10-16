@@ -166,6 +166,12 @@ GUIDE_TOPICS: dict[str, str] = {
         "'2026-03-01T00:00:00Z'}"
     ),
     "recall.reading-results": (
+        "• verbosity — 'compact' (default) is the cheap first pass: confidence first, "
+        "then each result's memory_id, summary (its first 160 characters, cut at a "
+        "word boundary; summary_cut: true when shortened), type, importance, score, "
+        "updated_at. Then reference(memory_id) reads one hit in full, or "
+        "verbosity='full' returns every result with context_summary, scope, tags, "
+        "created_at and the whole summary.\n"
         "• confidence — a triage hint, not a correctness verdict. level "
         "(high|moderate|low|none) comes from top_score (best semantic cosine) and "
         "prominence (how far the top hit stands above the candidate pool). none/low, "
@@ -192,7 +198,12 @@ GUIDE_TOPICS: dict[str, str] = {
         "by a supersedes edge, annotated with superseded_by (audit / history)."
     ),
     "recall.returns": (
-        "Returns: {status, results: [{memory_id, summary, context_summary?, type, "
+        "Returns (verbosity='compact', the default): {confidence, status, results: "
+        "[{memory_id, summary, summary_cut?, type, importance, score, updated_at, "
+        "superseded_by?, contradicts?, supersede_candidate?}], then the same "
+        "envelope keys as below; summary_cut: true means summary is the first 160 "
+        "characters. "
+        "Returns (verbosity='full'): {status, results: [{memory_id, summary, context_summary?, type, "
         "importance, scope, score, tags?, created_at, updated_at, superseded_by?, "
         "contradicts?, supersede_candidate?}], count, related_tags?: [{tag, count}], "
         "context_id, context_name, context_display_name, context_is_private, "

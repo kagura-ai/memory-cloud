@@ -281,6 +281,14 @@
         },
         "include_superseded": {
           "type": "boolean"
+        },
+        "verbosity": {
+          "type": "string",
+          "enum": [
+            "compact",
+            "full"
+          ],
+          "default": "compact"
         }
       },
       "additionalProperties": false

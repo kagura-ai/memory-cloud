@@ -266,8 +266,8 @@ Manual: guide(["update_memory"]).""",
             "name": "recall",
             "readOnly": True,
             "description": """Search a context's memories by meaning and keywords (hybrid semantic + BM25 with Neural Memory boosting); returns ranked summaries, not full content. reference(memory_id) reads one hit, explore(memory_id) walks its graph, load_pinned() / recall_upcoming() / recall_nearby() return deterministic sets.
-Tip: search with the answer you expect ('JWT expiry caused 401; fixed with refresh token rotation'), not the question. Read confidence.level (high|moderate|low|none) first: none/low means the topic is probably not stored here, prefer an external source; degraded=true means the semantic half was unavailable. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories.
-Returns: {status, results: [{memory_id, summary, context_summary?, type, importance, scope, score, tags?, created_at, updated_at, superseded_by?, contradicts?, supersede_candidate?}], count, related_tags?: [{tag, count}], confidence: {level, top_score, prominence, relative_margin, result_count, rationale}, explore_hints?, tag_suggestions?, degraded?, degraded_reason?, context_summary_omitted?, truncated?, context_id, context_name, context_display_name, context_is_private, context_is_locked}. Keys marked ? are absent, never null. supersede_candidate is an older near-duplicate (a suggestion): accept with create_edge(source_id, target_id, edge_type='supersedes'), reject with update_memory(dismiss_supersede_candidate=true).
+Tip: query with the expected answer ('JWT expiry caused 401; fixed by token rotation'), not the question. Read confidence.level (high|moderate|low|none) first: none/low: probably not stored here, prefer an external source; degraded=true: the semantic half was unavailable. Compact first, then reference(memory_id) for one hit or verbosity='full' when you need tags / context_summary. Searches may also strengthen associations (not keyword-only or degraded recalls) and promote returned memories.
+Returns: {confidence: {level, top_score, prominence, relative_margin, result_count, rationale}, status, results: [{memory_id, summary, summary_cut?, type, importance, score, updated_at, superseded_by?, contradicts?, supersede_candidate?}], count, related_tags?: [{tag, count}], explore_hints?, tag_suggestions?, degraded?, degraded_reason?, context_summary_omitted?, truncated?, context_{id, name, display_name, is_private, is_locked}}; summary_cut?: cut at 160 chars. verbosity='full' adds context_summary?, scope, tags?, created_at, uncut summary. Keys marked ? are absent, never null. supersede_candidate is an older near-duplicate (a suggestion): accept with create_edge(source_id, target_id, edge_type='supersedes'), reject with update_memory(dismiss_supersede_candidate=true).
 Manual: guide(["recall"]).""",
             "inputSchema": {
                 "type": "object",
@@ -319,7 +319,7 @@ Manual: guide(["recall"]).""",
                     "search_mode": {
                         "type": "string",
                         "enum": ["hybrid", "semantic", "keyword"],
-                        "description": "hybrid (default: semantic + BM25 with Neural Memory boosting), semantic (vectors only) or keyword (BM25 only: exact terms, ids, hiragana-only Japanese).",
+                        "description": "hybrid (default), semantic (vectors only) or keyword (BM25 only: exact terms, ids, hiragana-only Japanese).",
                     },
                     "include_explore_hints": {
                         "type": "boolean",
@@ -328,6 +328,12 @@ Manual: guide(["recall"]).""",
                     "include_superseded": {
                         "type": "boolean",
                         "description": "true also returns memories shadowed by a supersedes edge, annotated with superseded_by (audit / history). Default false.",
+                    },
+                    "verbosity": {
+                        "type": "string",
+                        "enum": ["compact", "full"],
+                        "default": "compact",
+                        "description": "Result detail (default compact); see Returns.",
                     },
                 },
             },

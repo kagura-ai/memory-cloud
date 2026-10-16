@@ -210,7 +210,10 @@ async def test_recall_returns_japanese_as_is():
 
     with _patched_memory_handler(service):
         result = await handle_recall(
-            {"query": "認証エラー", "context_id": str(uuid4())}, user_id="u1", workspace_id=None
+            # #2002: "full" carries context_summary, which this test reads.
+            {"query": "認証エラー", "context_id": str(uuid4()), "verbosity": "full"},
+            user_id="u1",
+            workspace_id=None,
         )
 
     text = result[0].text
