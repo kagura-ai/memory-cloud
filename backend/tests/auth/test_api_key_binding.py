@@ -407,3 +407,57 @@ class TestVerifyKeyLastUsedThrottle:
         db, result = await self._verify(rec, self.NOW)
         assert rec.last_used_at == self.NOW
         db.flush.assert_awaited_once()
+
+
+class TestVerifyApiKeyStandaloneDBFailure:
+    """#1981: the standalone ``verify_api_key`` never reads a database
+    failure as "invalid key". SQLAlchemy errors and the driver's bare
+    connection OSErrors propagate so the MCP transport answers 503.
+    """
+
+    @staticmethod
+    def _get_db_raising(exc: BaseException):
+        async def _fake_get_db():
+            raise exc
+            yield  # pragma: no cover - makes this an async generator
+
+        return _fake_get_db
+
+    @pytest.mark.asyncio
+    async def test_pool_timeout_propagates(self) -> None:
+        from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+
+        from auth.dependencies import verify_api_key
+
+        exc = PoolTimeoutError("QueuePool limit reached")
+        with patch("db.base.get_db", new=self._get_db_raising(exc)):
+            with pytest.raises(PoolTimeoutError):
+                await verify_api_key("kagura_test")
+
+    @pytest.mark.asyncio
+    async def test_connection_refused_propagates(self) -> None:
+        from auth.dependencies import verify_api_key
+
+        exc = ConnectionRefusedError("db down")
+        with patch("db.base.get_db", new=self._get_db_raising(exc)):
+            with pytest.raises(ConnectionRefusedError):
+                await verify_api_key("kagura_test")
+
+    @pytest.mark.asyncio
+    async def test_sqlalchemy_error_from_verify_key_propagates(self) -> None:
+        from sqlalchemy.exc import OperationalError
+
+        from auth.dependencies import verify_api_key
+
+        async def _fake_get_db():
+            yield AsyncMock()
+
+        with (
+            patch("db.base.get_db", new=_fake_get_db),
+            patch(
+                "auth.api_keys.APIKeyManager.verify_key",
+                new=AsyncMock(side_effect=OperationalError("SELECT 1", {}, Exception("down"))),
+            ),
+        ):
+            with pytest.raises(OperationalError):
+                await verify_api_key("kagura_test")

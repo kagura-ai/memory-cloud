@@ -285,7 +285,7 @@ async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | Non
     """
     from auth.dependencies import verify_api_key
 
-    result = await verify_api_key(api_key, raise_on_lookup_error=True)
+    result = await verify_api_key(api_key)
 
     if result:
         user_id = result.user_id
@@ -316,7 +316,7 @@ async def _verify_oauth2_token(access_token: str) -> OAuthGrant | None:
     async with contextlib.aclosing(get_db()) as sessions:
         async for db in sessions:
             # #1742: a failed lookup raises (→ 503), never "no such token".
-            token = await find_active_oauth_token(access_token, db, raise_on_lookup_error=True)
+            token = await find_active_oauth_token(access_token, db)
             if token is None:
                 return None
             client_scope = None

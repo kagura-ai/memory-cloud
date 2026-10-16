@@ -348,36 +348,97 @@ class TestSharedLookup:
 
 
 # ---------------------------------------------------------------------------
-# DB failure → 401 (silent-failure contract matches verify_api_key)
+# DB failure → 503 DB-002 (#1981; same contract as MCP, #1742)
 # ---------------------------------------------------------------------------
 
 
-class TestOAuthVerifyDBFailure:
-    """``verify_oauth_bearer_token`` swallows SQLAlchemy errors and
-    returns ``None`` so that a transient DB failure during the OAuth
-    lookup surfaces as 401 to the client, not 500 — matching
-    ``verify_api_key``'s contract (``auth.dependencies:225-227``).
+class TestOAuthLookupDBFailure:
+    """#1981: a failed token lookup propagates instead of reading as an
+    invalid token. The app-wide handlers (``api.main``) turn it into
+    503 ``DB-002`` with ``details.reason`` and ``Retry-After``, so a REST
+    client retries rather than discarding its token and re-authorizing.
+    MCP already got this contract in #1742; REST now shares it.
     """
 
     @pytest.mark.asyncio
-    async def test_sqlalchemy_error_returns_none(self):
+    async def test_pool_timeout_propagates(self):
+        from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+
+        from auth.oauth2_bearer import verify_oauth_bearer_token
+
+        failing_db = AsyncMock()
+        failing_db.execute = AsyncMock(side_effect=PoolTimeoutError("QueuePool limit reached"))
+
+        with pytest.raises(PoolTimeoutError):
+            await verify_oauth_bearer_token("randomtok", failing_db)
+
+    @pytest.mark.asyncio
+    async def test_operational_error_propagates(self):
         from sqlalchemy.exc import OperationalError
 
         from auth.oauth2_bearer import verify_oauth_bearer_token
 
         failing_db = AsyncMock()
         failing_db.execute = AsyncMock(
-            side_effect=OperationalError("statement", {}, Exception("pool exhausted"))
+            side_effect=OperationalError("statement", {}, Exception("down"))
         )
 
-        result = await verify_oauth_bearer_token("randomtok", failing_db)
-        assert result is None
+        with pytest.raises(OperationalError):
+            await verify_oauth_bearer_token("randomtok", failing_db)
 
-    def test_db_failure_in_dependency_returns_401(self, app_with_oauth_route):
-        """End-to-end: DB error in the verifier results in 401, not 500."""
+    @pytest.mark.asyncio
+    async def test_connection_refused_propagates(self):
+        """asyncpg's bare OSError (not a SQLAlchemyError) propagates too."""
+        from auth.oauth2_bearer import verify_oauth_bearer_token
+
+        failing_db = AsyncMock()
+        failing_db.execute = AsyncMock(side_effect=ConnectionRefusedError("db down"))
+
+        with pytest.raises(ConnectionRefusedError):
+            await verify_oauth_bearer_token("randomtok", failing_db)
+
+    def test_pool_timeout_in_dependency_returns_503_db_002(self, app_with_oauth_route):
+        """End-to-end through the real lookup: the request session's
+        ``execute`` times out on pool checkout inside ``find_active_oauth_token``,
+        the error leaves the auth dependency and the app-wide SQLAlchemyError
+        handler answers 503 DB-002 ``pool_exhausted`` with ``Retry-After``."""
+        from sqlalchemy.exc import SQLAlchemyError
+        from sqlalchemy.exc import TimeoutError as PoolTimeoutError
+
+        from api.main import app as real_app
+        from api.main import sqlalchemy_exception_handler
+        from db.base import get_db
+
+        # The probe app carries the same handler the real app registers.
+        assert real_app.exception_handlers[SQLAlchemyError] is sqlalchemy_exception_handler
+        app_with_oauth_route.add_exception_handler(SQLAlchemyError, sqlalchemy_exception_handler)
+
+        exhausted_db = AsyncMock()
+        exhausted_db.execute = AsyncMock(side_effect=PoolTimeoutError("QueuePool limit reached"))
+
+        async def _exhausted_get_db():
+            yield exhausted_db
+
+        app_with_oauth_route.dependency_overrides[get_db] = _exhausted_get_db
+        try:
+            client = TestClient(app_with_oauth_route)
+            resp = client.get("/_t/read", headers={"Authorization": "Bearer randomtok"})
+        finally:
+            app_with_oauth_route.dependency_overrides.clear()
+
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["error"] == "DB-002"
+        assert body["details"]["reason"] == "pool_exhausted"
+        assert resp.headers["Retry-After"] == "5"
+        assert "www-authenticate" not in {k.lower() for k in resp.headers}
+        exhausted_db.execute.assert_awaited_once()
+
+    def test_unknown_token_still_returns_401(self, app_with_oauth_route):
+        """``None`` from the verifier still means "no such token" -> 401."""
         with patch(
             "auth.dependencies.verify_oauth_bearer_token",
-            new=AsyncMock(return_value=None),  # simulate "lookup failed → None"
+            new=AsyncMock(return_value=None),
         ):
             client = TestClient(app_with_oauth_route)
             resp = client.get("/_t/read", headers={"Authorization": "Bearer randomtok"})

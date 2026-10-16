@@ -240,30 +240,28 @@ async def test_the_modern_era_gets_the_same_503(app):
 
 
 @pytest.mark.asyncio
-async def test_the_mcp_token_lookup_raises_on_a_database_error():
-    """``find_active_oauth_token`` answers ``None`` on a lookup failure for REST
-    (unchanged); MCP asks it to raise, including asyncpg's bare OSError."""
+async def test_the_token_lookup_raises_on_a_database_error():
+    """``find_active_oauth_token`` raises on a lookup failure for both lanes
+    (#1742 MCP, #1981 REST), including asyncpg's bare OSError."""
 
     class _FailingDb:
         async def execute(self, _stmt):
             raise DB_DOWN
 
     with pytest.raises(ConnectionRefusedError):
-        await bearer.find_active_oauth_token("tok", _FailingDb(), raise_on_lookup_error=True)
+        await bearer.find_active_oauth_token("tok", _FailingDb())
 
     class _SqlFailingDb:
         async def execute(self, _stmt):
             raise OperationalError("SELECT 1", {}, Exception("down"))
 
-    assert await bearer.find_active_oauth_token("tok", _SqlFailingDb()) is None
+    with pytest.raises(OperationalError):
+        await bearer.find_active_oauth_token("tok", _SqlFailingDb())
 
 
 @pytest.mark.asyncio
-async def test_the_mcp_verifier_passes_raise_on_lookup_error(monkeypatch):
-    seen: dict = {}
-
-    async def find(_token, _db, **kwargs):
-        seen.update(kwargs)
+async def test_the_mcp_verifier_propagates_a_lookup_failure(monkeypatch):
+    async def find(_token, _db):
         raise DB_DOWN
 
     async def get_db():
@@ -273,7 +271,6 @@ async def test_the_mcp_verifier_passes_raise_on_lookup_error(monkeypatch):
     monkeypatch.setattr("db.base.get_db", get_db)
     with pytest.raises(ConnectionRefusedError):
         await mcp_auth._verify_oauth2_token("tok")
-    assert seen == {"raise_on_lookup_error": True}
 
 
 @pytest.mark.asyncio

@@ -175,13 +175,13 @@ class TestVerifyApiKey:
             assert await _verify_api_key("key_x") is None
 
     async def test_a_failed_lookup_raises_instead_of_reading_as_invalid(self):
-        """#1742: a lookup failure propagates (the transport answers 503), and
-        the MCP path asks the verifier to raise rather than answer ``None``."""
+        """#1742: a lookup failure propagates (the transport answers 503)
+        rather than reading as ``None``."""
         verify = AsyncMock(side_effect=RuntimeError("db down"))
         with patch("auth.dependencies.verify_api_key", new=verify):
             with pytest.raises(RuntimeError, match="db down"):
                 await _verify_api_key("key_x")
-        verify.assert_awaited_once_with("key_x", raise_on_lookup_error=True)
+        verify.assert_awaited_once_with("key_x")
 
 
 class TestVerifyOauth2Token:

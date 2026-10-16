@@ -13,7 +13,6 @@ OAuth client manager for the Web login flow.
 from __future__ import annotations
 
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.api_keys import API_KEY_PREFIX
@@ -26,17 +25,18 @@ logger = get_logger(__name__)
 async def find_active_oauth_token(
     access_token: str,
     db: AsyncSession,
-    *,
-    raise_on_lookup_error: bool = False,
 ) -> OAuth2Token | None:
     """Look up an OAuth 2.0 Bearer access token that is neither revoked nor expired.
 
     Returns the ``oauth_tokens`` row, or ``None`` if the token is unknown,
-    expired, revoked, or if the lookup itself fails (matches
-    ``verify_api_key``'s silent-failure contract so a transient DB error
-    surfaces as 401 to the client, not 500). REST reads ``(user_id, scope)``
-    through ``verify_oauth_bearer_token``; MCP also reads the RFC 8707
-    ``resource`` (audience) from the row.
+    expired or revoked. A failed lookup (pool exhausted, database down)
+    propagates instead of reading as an unknown token (#1742 for MCP,
+    #1981 for REST): the app-wide handlers in ``api.main`` answer 503
+    ``DB-002`` with ``details.reason`` and ``Retry-After``, and the MCP
+    transport answers 503, so an outage never tells a client that its
+    credential is bad (which would make it re-authorize). REST reads
+    ``(user_id, scope)`` through ``verify_oauth_bearer_token``; MCP also
+    reads the RFC 8707 ``resource`` (audience) from the row.
 
     The async query uses the caller's request-scoped session so this
     function does not contend with the smaller sync pool that Authlib's
@@ -47,20 +47,9 @@ async def find_active_oauth_token(
     Args:
         access_token: The Bearer token.
         db: The caller's session.
-        raise_on_lookup_error: ``True`` lets a failed lookup raise instead of
-            answering "no such token". MCP passes it (#1742): a database
-            outage must not read as an invalid credential, which makes a
-            client re-authorize. REST keeps the silent-failure contract.
     """
     stmt = select(OAuth2Token).where(OAuth2Token.access_token == access_token)
-    if raise_on_lookup_error:
-        token = (await db.execute(stmt)).scalar_one_or_none()
-    else:
-        try:
-            token = (await db.execute(stmt)).scalar_one_or_none()
-        except SQLAlchemyError as exc:
-            logger.error("oauth_bearer_token_lookup_failed", error=str(exc))
-            return None
+    token = (await db.execute(stmt)).scalar_one_or_none()
 
     if token is None:
         logger.debug("oauth_bearer_token_not_found")

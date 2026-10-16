@@ -200,9 +200,7 @@ async def get_api_key(authorization: str | None = Header(None)) -> str | None:
     return authorization[7:]  # Remove "Bearer " prefix
 
 
-async def verify_api_key(
-    api_key: str, *, raise_on_lookup_error: bool = False
-) -> VerifiedKey | None:
+async def verify_api_key(api_key: str) -> VerifiedKey | None:
     """Verify API key and return a ``VerifiedKey`` view.
 
     Issue #169: ``workspace_id`` for workspace-scoped API keys.
@@ -212,7 +210,12 @@ async def verify_api_key(
 
     Standalone function for MCP authentication (non-FastAPI context).
     This function does not use FastAPI dependencies, making it suitable
-    for use in MCP server authentication flows.
+    for use in MCP server authentication flows. No REST route calls it:
+    the REST dependencies call ``APIKeyManager.verify_key`` directly.
+
+    A failed lookup (pool exhausted, database down) propagates instead of
+    reading as an invalid key (#1742, #1981): the MCP transport answers
+    503, so an outage never tells the client that its credential is bad.
 
     **Public-bound key rejection (#626)**: A key with
     ``bound_context_id != None`` is intended ONLY for the REST public
@@ -229,10 +232,6 @@ async def verify_api_key(
 
     Args:
         api_key: API key to verify (e.g., "kagura_...")
-        raise_on_lookup_error: ``True`` lets a failed lookup (database down,
-            any unexpected error) raise instead of answering "invalid key".
-            MCP authentication passes it (#1742), so an outage is a 503, not
-            a 401 that tells the client its credential is bad.
 
     Returns:
         ``VerifiedKey`` if valid AND not public-bound; ``None`` if
@@ -248,44 +247,37 @@ async def verify_api_key(
     from auth.api_keys import APIKeyManager
     from db.base import get_db
 
-    try:
-        async for db in get_db():
-            manager = APIKeyManager(db)
-            verified = await manager.verify_key(api_key)
-            if verified is None:
-                return None
-            if verified.bound_context_id is not None:
-                # Public-bound key (#626) — reject from non-public surfaces.
-                # The public endpoint calls APIKeyManager.verify_key directly
-                # (not this wrapper) and is unaffected.
-                logger.warning(
-                    "public_bound_key_rejected_outside_public_endpoint",
-                    bound_context_id=str(verified.bound_context_id),
-                )
-                return None
-            # #945: this wrapper consumes get_db() via `async for ... return`,
-            # so the early return raises GeneratorExit at get_db's yield and its
-            # post-yield `await session.commit()` never runs — the last_used_at
-            # flushed by verify_key would be rolled back. Commit explicitly.
-            # Isolated try/except: a commit failure must NOT fail auth
-            # (last_used_at is non-critical metadata, and the outer
-            # `except Exception: return None` would otherwise reject a valid key).
-            try:
-                await db.commit()
-            except Exception as commit_err:
-                logger.warning("api_key_last_used_commit_failed", error=str(commit_err))
-            # Issue #1275: surface the verified agent binding (if any) to the
-            # per-request scope so the context chokepoints can apply the
-            # subtractive binding intersection. No-op (clears) for unbound keys.
-            from auth.agent_scope import set_agent_scope_from_verified
+    async for db in get_db():
+        manager = APIKeyManager(db)
+        verified = await manager.verify_key(api_key)
+        if verified is None:
+            return None
+        if verified.bound_context_id is not None:
+            # Public-bound key (#626) — reject from non-public surfaces.
+            # The public endpoint calls APIKeyManager.verify_key directly
+            # (not this wrapper) and is unaffected.
+            logger.warning(
+                "public_bound_key_rejected_outside_public_endpoint",
+                bound_context_id=str(verified.bound_context_id),
+            )
+            return None
+        # #945: this wrapper consumes get_db() via `async for ... return`,
+        # so the early return raises GeneratorExit at get_db's yield and its
+        # post-yield `await session.commit()` never runs — the last_used_at
+        # flushed by verify_key would be rolled back. Commit explicitly.
+        # Isolated try/except: a commit failure must NOT fail auth
+        # (last_used_at is non-critical metadata).
+        try:
+            await db.commit()
+        except Exception as commit_err:
+            logger.warning("api_key_last_used_commit_failed", error=str(commit_err))
+        # Issue #1275: surface the verified agent binding (if any) to the
+        # per-request scope so the context chokepoints can apply the
+        # subtractive binding intersection. No-op (clears) for unbound keys.
+        from auth.agent_scope import set_agent_scope_from_verified
 
-            set_agent_scope_from_verified(verified)
-            return verified
-    except Exception:
-        if raise_on_lookup_error:
-            raise
-        # Silent failure - return None on any error
-        return None
+        set_agent_scope_from_verified(verified)
+        return verified
     return None
 
 
