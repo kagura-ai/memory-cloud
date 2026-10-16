@@ -864,7 +864,7 @@ class TestKnnSeeding:
         with (
             patch(
                 "neural.config.NeuralMemoryConfig.from_db",
-                new=AsyncMock(return_value=_make_config()),
+                new=AsyncMock(return_value=_make_config(min_similarity=None)),
             ),
             patch(
                 "neural.calibration.resolve_knn_threshold",
@@ -894,8 +894,10 @@ class TestKnnSeeding:
 
         # Threshold resolver was consulted with the right dimensions.
         mock_resolve.assert_awaited_once()
-        # The shared candidates query still runs (supersede detection, #2006).
+        # The shared candidates query still runs (supersede detection, #2006),
+        # sized for the top non-self neighbour only.
         mock_search.assert_awaited_once()
+        assert mock_search.await_args.kwargs["limit"] == 2
         # No seed edges without a calibrated threshold.
         mock_repo.create_edge_if_absent.assert_not_called()
         # Below the supersede threshold: nothing persisted.
@@ -927,7 +929,7 @@ class TestKnnSeeding:
         with (
             patch(
                 "neural.config.NeuralMemoryConfig.from_db",
-                new=AsyncMock(return_value=_make_config()),
+                new=AsyncMock(return_value=_make_config(min_similarity=None)),
             ),
             patch(
                 "neural.calibration.resolve_knn_threshold",
@@ -956,6 +958,7 @@ class TestKnnSeeding:
             )
 
         mock_search.assert_awaited_once()
+        assert mock_search.await_args.kwargs["limit"] == 2
         stored = memory.supersede_candidate
         assert stored is not None
         assert stored["memory_id"] == dup_id
@@ -965,17 +968,19 @@ class TestKnnSeeding:
         mock_bootstrap.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_none_threshold_warns_once_per_model_and_dims(self):
-        """#2006: a missing calibration row is a silent capability loss for
-        seed edges, so it is logged at WARNING — once per process per
-        (model, dims) — plus the debug skip line on every call."""
+    async def test_none_threshold_warns_once_per_model_and_dims_past_d3(self):
+        """#2006: once the D3 bootstrap gate is crossed (maybe_trigger_bootstrap
+        returned True) a missing calibration row means seed edges are really
+        off, so it is logged at WARNING — once per process per (model, dims).
+        Below D3 (bootstrap returned False) it is the expected state of a fresh
+        deployment and stays at DEBUG. The debug skip line fires every call."""
         db = _make_db()
         mock_repo = _make_edge_repo()
 
         with (
             patch(
                 "neural.config.NeuralMemoryConfig.from_db",
-                new=AsyncMock(return_value=_make_config()),
+                new=AsyncMock(return_value=_make_config(min_similarity=None)),
             ),
             patch(
                 "neural.calibration.resolve_knn_threshold",
@@ -991,12 +996,17 @@ class TestKnnSeeding:
             ),
             patch(
                 "tasks.neural_calibration.maybe_trigger_bootstrap",
-                new=AsyncMock(return_value=True),
+                new=AsyncMock(side_effect=[False, True, True, True]),
             ),
             patch.object(memory_service, "_KNN_SEED_UNCALIBRATED_WARNED", set()),
             patch("services.memory_service.logger") as mock_logger,
         ):
-            for model, dims in (("model-a", 512), ("model-a", 512), ("model-a", 768)):
+            for model, dims in (
+                ("model-a", 512),  # below D3 → no warning
+                ("model-a", 512),  # D3 crossed → warning
+                ("model-a", 512),  # already warned
+                ("model-a", 768),  # new pair → warning
+            ):
                 await _create_knn_seed_edges(
                     db=db,
                     memory=_make_memory(),
@@ -1008,15 +1018,68 @@ class TestKnnSeeding:
         warnings = [
             c.kwargs
             for c in mock_logger.warning.call_args_list
-            if c.args and c.args[0] == "knn_seed_disabled_no_calibration"
+            if c.args and c.args[0] == "knn_seed_uncalibrated_embedder"
         ]
         assert [(w["model"], w["dimensions"]) for w in warnings] == [
             ("model-a", 512),
             ("model-a", 768),
         ]
+        assert all("supersede detection still runs" in w["hint"] for w in warnings)
         debugs = [
             c
             for c in mock_logger.debug.call_args_list
             if c.args and c.args[0] == "knn_seed_skip_no_threshold"
         ]
-        assert len(debugs) == 3
+        assert len(debugs) == 4
+
+    @pytest.mark.asyncio
+    async def test_none_threshold_bootstrap_failure_rolls_back_then_detects(self):
+        """#2006 review: a DB error swallowed inside the bootstrap trigger would
+        leave the session aborted for the supersede detection that now follows.
+        The session is rolled back, and detection still persists the candidate."""
+        memory = _make_memory()
+        db = _make_db()
+        mock_repo = _make_edge_repo()
+        dup_id = str(uuid4())
+        candidates = [
+            {"id": str(memory.id), "score": 1.0, "payload": {}, "embedding": []},
+            {"id": dup_id, "score": 0.91, "payload": {}, "embedding": []},
+        ]
+
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=_make_config(min_similarity=None)),
+            ),
+            patch(
+                "neural.calibration.resolve_knn_threshold",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "db.qdrant.search_memories_qdrant",
+                new=AsyncMock(return_value=candidates),
+            ),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=mock_repo,
+            ),
+            patch(
+                "tasks.neural_calibration.maybe_trigger_bootstrap",
+                new=AsyncMock(side_effect=RuntimeError("db down")),
+            ),
+            patch.object(memory_service, "_KNN_SEED_UNCALIBRATED_WARNED", set()),
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+
+        db.rollback.assert_awaited_once()
+        stored = memory.supersede_candidate
+        assert stored is not None
+        assert stored["memory_id"] == dup_id
+        db.commit.assert_awaited_once()
+        mock_repo.create_edge_if_absent.assert_not_called()
