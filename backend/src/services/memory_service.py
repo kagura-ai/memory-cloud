@@ -6877,6 +6877,11 @@ _SUPERSEDE_SUGGEST_THRESHOLD = 0.85
 # the WARNING fires once per process per embedder instead of on every ingest.
 _KNN_SEED_UNCALIBRATED_WARNED: set[tuple[str, int]] = set()
 
+# #2010: one INFO line per process when the deployment turned suggestion
+# detection off (SUPERSEDE_SUGGEST_ENABLED=false or the DB key), so an operator
+# can see the switch took effect without a line per ingest.
+_SUPERSEDE_SUGGEST_DISABLED_LOGGED = False
+
 
 async def _create_knn_seed_edges(
     db: AsyncSession,
@@ -6904,6 +6909,10 @@ async def _create_knn_seed_edges(
     neighbour query but does not depend on the seed threshold, so it runs
     whether or not the threshold resolved.
 
+    Issue #2010: ``knn_seed_enabled`` gates only the seed edges and
+    ``supersede_suggest_enabled`` only the detection; the neighbour query runs
+    when either is on.
+
     Best-effort: any failure is logged and swallowed — must not affect memory
     creation. Edge creation uses an isolated commit so partial failures do not
     roll back unrelated work.
@@ -6922,10 +6931,24 @@ async def _create_knn_seed_edges(
     from neural.config import NeuralMemoryConfig
     from repositories.neural_edge import NeuralEdgeRepository
 
+    global _SUPERSEDE_SUGGEST_DISABLED_LOGGED
+
     try:
         config = await NeuralMemoryConfig.from_db(db)
 
-        if not config.knn_seed_enabled:
+        # #2010: two consumers share the neighbour query below — the seed edges
+        # (knn_seed_enabled) and the #1403 supersede suggestions
+        # (supersede_suggest_enabled). Each flag gates only its own consumer;
+        # with both off there is nothing to read the query for.
+        seed_enabled = bool(config.knn_seed_enabled)
+        suggest_enabled = bool(config.supersede_suggest_enabled)
+        if not suggest_enabled and not _SUPERSEDE_SUGGEST_DISABLED_LOGGED:
+            _SUPERSEDE_SUGGEST_DISABLED_LOGGED = True
+            logger.info(
+                "supersede_suggest_disabled",
+                hint="SUPERSEDE_SUGGEST_ENABLED is off; no supersede_candidate is detected",
+            )
+        if not seed_enabled and not suggest_enabled:
             return
 
         if not memory.context_id:
@@ -6935,13 +6958,17 @@ async def _create_knn_seed_edges(
         # Resolve the threshold via the D4 fallback chain (#406). None means
         # "no seed edges for this call" — bootstrap will catch up later. The
         # supersede detection below still runs (#2006).
-        threshold = await resolve_knn_threshold(
-            db=db,
-            config=config,
-            model_name=model_name,
-            dimensions=len(vector),
+        threshold = (
+            await resolve_knn_threshold(
+                db=db,
+                config=config,
+                model_name=model_name,
+                dimensions=len(vector),
+            )
+            if seed_enabled
+            else None
         )
-        if threshold is None:
+        if threshold is None and seed_enabled:
             # Bootstrap trigger (#406 C2 trigger 1): if this (model, dims)
             # has crossed D3, enqueue a deduped calibration job so
             # subsequent remember() calls find a populated row and exit
@@ -7003,7 +7030,8 @@ async def _create_knn_seed_edges(
 
         # Search for k+1 candidates because the new memory itself will appear
         # as the top hit (cosine similarity with itself = 1.0). Without a seed
-        # threshold only the supersede detection consumes the result, and it
+        # threshold (or with seeding off, #2010) only the supersede detection
+        # consumes the result, and it
         # reads just the top non-self neighbour, so 2 hits suffice (#2006).
         # This runs BEFORE
         # the seed-edge idempotency guard below because the #1403 supersede
@@ -7042,7 +7070,7 @@ async def _create_knn_seed_edges(
         edge_repo = NeuralEdgeRepository(db)
 
         non_self = [c for c in candidates if str(c["id"]) != memory_id_str]
-        if non_self:
+        if non_self and suggest_enabled:
             raw_top = max(non_self, key=lambda c: float(c["score"]))
             raw_top_score = float(raw_top["score"])
             if raw_top_score >= _SUPERSEDE_SUGGEST_THRESHOLD:
@@ -7107,7 +7135,10 @@ async def _create_knn_seed_edges(
                     )
 
         # #2006: everything below creates seed edges, which needs a calibrated
-        # (or operator) threshold. Without one, only the detection above runs.
+        # (or operator) threshold. Without one — or with seeding switched off
+        # (#2010) — only the detection above runs.
+        if not seed_enabled:
+            return
         if threshold is None:
             logger.debug(
                 "knn_seed_skip_no_threshold",
