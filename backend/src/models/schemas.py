@@ -53,6 +53,7 @@ SUMMARY_LONG_THRESHOLD = 400
 # The hard cap on ``summary``. MCP ``remember`` / ``remember_batch`` cut a longer
 # summary to it at a sentence boundary (``summary_truncated``) instead of refusing.
 SUMMARY_MAX_LENGTH = 500
+SUMMARY_MIN_LENGTH = 10
 
 # ============================================================================
 # OAuth2 Token Introspection (RFC 7662, Issue #157)
@@ -106,7 +107,10 @@ class RememberRequest(BaseModel):
 
     # Layer 1: 検索用サマリー (必須)
     summary: str = Field(
-        ..., min_length=10, max_length=SUMMARY_MAX_LENGTH, description="検索用サマリー"
+        ...,
+        min_length=SUMMARY_MIN_LENGTH,
+        max_length=SUMMARY_MAX_LENGTH,
+        description="検索用サマリー",
     )
 
     # Layer 2: 文脈説明 (推奨)
@@ -979,7 +983,10 @@ class UpdateMemoryRequest(BaseModel):
 
     # Updatable fields (all optional for in-place, summary/content/type required for upsert)
     summary: str | None = Field(
-        None, min_length=10, max_length=SUMMARY_MAX_LENGTH, description="Updated summary"
+        None,
+        min_length=SUMMARY_MIN_LENGTH,
+        max_length=SUMMARY_MAX_LENGTH,
+        description="Updated summary",
     )
     context_summary: str | None = Field(
         None, max_length=2000, description="Updated context summary"
@@ -1092,7 +1099,7 @@ class PatchMemoryRequest(BaseModel):
     they have orthogonal lifecycles handled by separate operations.
     """
 
-    summary: str | None = Field(None, min_length=10, max_length=SUMMARY_MAX_LENGTH)
+    summary: str | None = Field(None, min_length=SUMMARY_MIN_LENGTH, max_length=SUMMARY_MAX_LENGTH)
     content: str | None = Field(None, min_length=1)
     type: str | None = Field(None, min_length=1, max_length=50)
     importance: float | None = Field(None, ge=0.0, le=1.0)

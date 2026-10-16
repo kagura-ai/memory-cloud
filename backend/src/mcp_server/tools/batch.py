@@ -42,8 +42,10 @@ from mcp_server.tools._helpers import (
     execute_with_timeout,
 )
 from mcp_server.tools.memory import (
+    MISSING_FIELDS_HELP,
     PAYLOAD_HELP,
     fit_summary,
+    lint_after_fit,
     parse_write_options,
     remember_request_from_args,
 )
@@ -132,7 +134,7 @@ def _request_from_item(item: Any, batch_context_id: str) -> ParsedItem | dict[st
         return {
             "error": "missing_fields",
             "message": f"Missing: {', '.join(missing)}",
-            "help": PAYLOAD_HELP,
+            "help": MISSING_FIELDS_HELP,
         }
     item, fitted = fit_summary(item)
     try:
@@ -153,6 +155,7 @@ def item_error(exc: BaseException) -> dict[str, Any]:
             "message": exc.message,
             "limit": exc.details["limit"],
             "actual": exc.details["actual"],
+            "help": PAYLOAD_HELP,
         }
     if isinstance(exc, QuotaExceededError):
         return {"error": "quota_exceeded", "message": str(exc)}
@@ -169,13 +172,18 @@ def item_error(exc: BaseException) -> dict[str, Any]:
     return {"error": "internal_error", "message": "memory write failed"}
 
 
-def _success_item(result: Any, *, verbose: bool) -> dict[str, Any]:
+def _success_item(
+    result: Any, *, verbose: bool, fitted: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """One written item; ``fitted`` reports a summary cut and mutes the lint it moots."""
+    fitted = fitted or {}
     return {
         "status": "success",
         "memory_id": str(result.memory_id),
         "scope": result.scope,
         **_persistence_response_field(result.persistence, verbose=verbose),
-        **_lint_response_field(result.lint),
+        **_lint_response_field(lint_after_fit(result.lint, fitted)),
+        **fitted,
     }
 
 
@@ -228,6 +236,8 @@ def usage_status(results: list[dict[str, Any]]) -> int:
     errors = [r.get("error") for r in results if r["status"] == "error"]
     if errors and all(e == "quota_exceeded" for e in errors):
         return 429
+    if errors and all(e == "payload_too_large" for e in errors):
+        return 413  # as remember's
     if errors and all(
         e in ("validation_error", "missing_fields", "invalid_argument") for e in errors
     ):
@@ -334,7 +344,7 @@ async def handle_remember_batch(
                     await db.rollback()
                     rolled_back = True
                     results = [
-                        _finish(i, _success_item(r, verbose=verbose))
+                        _finish(i, _success_item(r, verbose=verbose, fitted=valid[i].fitted))
                         for i, r in enumerate(e.responses)
                     ]
                     note = {
@@ -391,7 +401,7 @@ async def handle_remember_batch(
                     ]
                 else:
                     results = [
-                        _finish(i, {**_success_item(r, verbose=verbose), **valid[i].fitted})
+                        _finish(i, _success_item(r, verbose=verbose, fitted=valid[i].fitted))
                         for i, r in enumerate(responses)
                     ]
             else:
@@ -420,7 +430,8 @@ async def handle_remember_batch(
                     else:
                         results.append(
                             _finish(
-                                i, {**_success_item(result, verbose=verbose), **parsed_item.fitted}
+                                i,
+                                _success_item(result, verbose=verbose, fitted=parsed_item.fitted),
                             )
                         )
             await _log_tool_usage(

@@ -92,6 +92,40 @@ def test_the_prepend_check_ignores_whitespace_differences():
     assert fitted["content"] == wrapped  # already there, just wrapped differently
 
 
+def test_a_period_right_at_the_cap_is_not_a_sentence_end_when_text_follows():
+    # char 499 is the '.' of a version number that continues: not an end.
+    summary = "a" * 300 + " " + "b" * 198 + ".5 more words follow here and on"
+    fitted, _ = fit_summary({"summary": summary, "content": "c", "type": "note"})
+    assert not fitted["summary"].endswith(".")
+    assert fitted["summary"].endswith("…") and len(fitted["summary"]) <= SUMMARY_MAX_LENGTH
+
+
+def test_trailing_whitespace_past_the_cap_is_not_a_cut():
+    text = "s" * 474
+    args = {"summary": text + "\n" * 30, "content": "c", "type": "note"}
+    assert fit_summary(args) == (args, {})
+
+
+def test_the_word_boundary_cut_keeps_a_word_that_ends_at_the_cap():
+    summary = "a" * 300 + " " + "b" * 190 + " " + "ccccccc" + " " + "d" * 50
+    fitted, _ = fit_summary({"summary": summary, "content": "c", "type": "note"})
+    assert fitted["summary"].endswith("ccccccc…")
+
+
+def test_the_prepend_is_skipped_when_it_would_cross_the_size_limit():
+    summary = (SENTENCE * 8).strip()
+    content = "x" * (1_000_000 - 100)
+    fitted, fields = fit_summary({"summary": summary, "content": content, "type": "note"})
+    assert fitted["content"] is content  # left as sent
+    assert fields["summary_truncated"] is True
+
+
+def test_usage_status_counts_a_size_refusal_as_413():
+    from mcp_server.tools.batch import usage_status
+
+    assert usage_status([{"status": "error", "error": "payload_too_large"}]) == 413
+
+
 def test_a_non_string_summary_passes_through_for_the_schema():
     args = {"summary": 12, "content": "c", "type": "note"}
     assert fit_summary(args) == (args, {})
@@ -103,7 +137,7 @@ def test_a_non_string_summary_passes_through_for_the_schema():
 def test_the_size_refusal_is_payload_too_large_with_the_numbers():
     code, message, extra = _refusal(ContentSizeExceededError(actual=1_000_001, limit=1_000_000))
     assert code == "payload_too_large"
-    assert extra == {"limit": 1_000_000, "actual": 1_000_001}
+    assert extra == {"limit": 1_000_000, "actual": 1_000_001, "help": PAYLOAD_HELP}
     assert "1,000,001" in message and "exceeds limit" in message
 
 
@@ -196,6 +230,9 @@ async def test_remember_stores_a_cut_summary_and_says_so(live):
     assert payload["status"] == "success"
     assert payload["summary_truncated"] is True
     assert payload["summary_original_length"] == len(summary)
+    # A cut summary is 400-500 chars: the summary_long lint would tell the
+    # agent to redo what the server just did, so it is muted.
+    assert all(h["code"] != "summary_long" for h in payload.get("lint", []))
     stored_summary, stored_content = await _stored_summary(live, payload["memory_id"])
     assert len(stored_summary) <= SUMMARY_MAX_LENGTH and stored_summary.endswith("picks it up.")
     assert stored_content.startswith(summary)
@@ -262,5 +299,6 @@ async def test_a_batch_item_reports_its_own_summary_cut(live):
     assert payload["status"] == "success"
     first, second = payload["results"]
     assert first["summary_truncated"] is True
+    assert all(h["code"] != "summary_long" for h in first.get("lint", []))
     assert first["summary_original_length"] == len(long_item["summary"])
     assert "summary_truncated" not in second

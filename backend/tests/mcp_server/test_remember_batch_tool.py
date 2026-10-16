@@ -128,6 +128,7 @@ def test_item_errors_map_onto_the_remember_error_codes():
     size = item_error(ContentSizeExceededError(actual=1_000_001, limit=1_000_000))
     assert size["error"] == "payload_too_large"
     assert (size["limit"], size["actual"]) == (1_000_000, 1_000_001)
+    assert "Split" in size["help"]
     assert item_error(AuthorizationError("no"))["error"] == "forbidden"
     assert item_error(ValueError("details.trigger must …"))["error"] == "validation_error"
     assert item_error(RuntimeError("boom"))["error"] == "internal_error"

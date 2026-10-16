@@ -309,10 +309,12 @@ def _refusal(exc: BaseException) -> tuple[str, str, dict[str, Any]]:
         details["help"] = exc.help_text
         return "capacity_locked", exc.message, details
     if isinstance(exc, ContentSizeExceededError):
+        from mcp_server.tools.memory import PAYLOAD_HELP
+
         return (
             "payload_too_large",
             exc.message,
-            {"limit": exc.details["limit"], "actual": exc.details["actual"]},
+            {"limit": exc.details["limit"], "actual": exc.details["actual"], "help": PAYLOAD_HELP},
         )
     if isinstance(exc, QuotaExceededError):
         code = "quota_exceeded"
