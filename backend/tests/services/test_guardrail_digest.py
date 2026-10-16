@@ -633,3 +633,106 @@ def test_entries_from_rows_version_rows_default_to_the_rendered_rows():
     default = entries_from_rows(CTX, [row], total=1, limit=10, user_id="u1")
     explicit = entries_from_rows(CTX, [row], total=1, limit=10, user_id="u1", version_rows=[row])
     assert default.tool_triggered_version == explicit.tool_triggered_version
+
+
+# ---------------------------------------------------------------------------
+# The last-used fallback's candidate (a user credential with no ``?guardrails=``
+# and no agent binding): the most recently used context the credential can
+# read, from the permission-scoped listing — never a raw ORDER BY.
+# ---------------------------------------------------------------------------
+
+
+def _ctx(last_used_at):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(id=uuid4(), last_used_at=last_used_at)
+
+
+@pytest.mark.asyncio
+async def test_select_last_used_context_picks_the_most_recently_used_accessible_context(
+    monkeypatch,
+):
+    from datetime import UTC, datetime
+
+    from services import context_service as cs_mod
+    from services.guardrail_digest import select_last_used_context
+
+    older = _ctx(datetime(2026, 10, 1, tzinfo=UTC))
+    newest = _ctx(datetime(2026, 10, 15, tzinfo=UTC))
+    never = _ctx(None)
+    seen: dict = {}
+
+    async def fake_list(self, user_id, *, raise_on_lookup_error=False):
+        seen["user_id"], seen["raise"] = user_id, raise_on_lookup_error
+        return [older, never, newest]
+
+    monkeypatch.setattr(cs_mod.ContextService, "list_contexts", fake_list)
+
+    picked = await select_last_used_context(object(), user_id="user-1", key_workspace_id=None)
+
+    assert picked == newest.id
+    # The listing that list_contexts (the tool) sorts — same permission scope,
+    # and a failed lookup raises so the caller's fail-open path logs it.
+    assert seen == {"user_id": "user-1", "raise": True}
+
+
+@pytest.mark.asyncio
+async def test_select_last_used_context_confines_a_workspace_scoped_key_to_its_workspace(
+    monkeypatch,
+):
+    from datetime import UTC, datetime
+
+    from services import context_service as cs_mod
+    from services import permission_service as ps_mod
+    from services.guardrail_digest import select_last_used_context
+
+    ws = uuid4()
+    inside = _ctx(datetime(2026, 10, 2, tzinfo=UTC))
+    seen: dict = {}
+
+    async def fake_accessible(self, user_id, workspace_id):
+        seen["args"] = (user_id, workspace_id)
+        return [inside]
+
+    async def never_called(self, *a, **k):  # pragma: no cover - the assertion below
+        raise AssertionError("the current-workspace listing must not run for a scoped key")
+
+    monkeypatch.setattr(ps_mod.PermissionService, "get_accessible_contexts", fake_accessible)
+    monkeypatch.setattr(cs_mod.ContextService, "list_contexts", never_called)
+
+    picked = await select_last_used_context(object(), user_id="user-1", key_workspace_id=ws)
+
+    assert picked == inside.id
+    assert seen["args"] == ("user-1", ws)
+
+
+@pytest.mark.asyncio
+async def test_select_last_used_context_takes_a_sole_context_even_before_first_use(monkeypatch):
+    from services import context_service as cs_mod
+    from services.guardrail_digest import select_last_used_context
+
+    only = _ctx(None)
+
+    async def fake_list(self, user_id, *, raise_on_lookup_error=False):
+        return [only]
+
+    monkeypatch.setattr(cs_mod.ContextService, "list_contexts", fake_list)
+
+    assert await select_last_used_context(object(), user_id="u", key_workspace_id=None) == only.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("listing", [[], [None, None]])
+async def test_select_last_used_context_is_none_without_a_used_context_to_pick(
+    monkeypatch, listing
+):
+    """No context, or several that were never used: nothing to guess at."""
+    from services import context_service as cs_mod
+    from services.guardrail_digest import select_last_used_context
+
+    async def fake_list(self, user_id, *, raise_on_lookup_error=False):
+        return [_ctx(x) for x in listing]
+
+    monkeypatch.setattr(cs_mod.ContextService, "list_contexts", fake_list)
+
+    assert await select_last_used_context(object(), user_id="u", key_workspace_id=None) is None

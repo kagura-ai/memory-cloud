@@ -66,6 +66,24 @@ def get_mcp_oauth_scopes() -> frozenset[str] | None:
     return _mcp_oauth_scopes.get()
 
 
+# Whether the current request's credential is a connector's shared API key
+# (``VerifiedKey.is_connector_key``). Set once per request by
+# ``authenticate_mcp_request``; the ``instructions`` digest's user-credential
+# fallback (the context used last) never runs for one, because the key's owner
+# is not the person on the other end of the connector.
+_mcp_connector_credential: ContextVar[bool] = ContextVar("mcp_connector_credential", default=False)
+
+
+def get_mcp_connector_credential() -> bool:
+    """``True`` when the current request authenticated with a connector's shared key."""
+    return _mcp_connector_credential.get()
+
+
+def set_mcp_connector_credential(value: bool) -> None:
+    """Record whether the request's credential is a connector key (tests and the auth seam)."""
+    _mcp_connector_credential.set(value)
+
+
 _SCOPE_SEPARATORS = re.compile(r"[\s,]+")
 
 
@@ -170,6 +188,7 @@ async def authenticate_mcp_request(
 
     set_agent_scope(None)
     _mcp_oauth_scopes.set(None)
+    _mcp_connector_credential.set(False)
 
     # Try session cookie first (Issue #155: Claude Web UI support)
     # Issue #245: context_id is no longer returned from auth (now required in tool args)
@@ -291,6 +310,7 @@ async def _verify_api_key(api_key: str) -> tuple[str, "UUID | None", "UUID | Non
         user_id = result.user_id
         workspace_id = result.workspace_id
         context_id = None  # Issue #245: context_id is now in tool args
+        _mcp_connector_credential.set(bool(getattr(result, "is_connector_key", False)))
         logger.debug(f"API key valid: user={user_id}, workspace={workspace_id}")
         return (user_id, context_id, workspace_id)
     logger.debug("API key invalid")

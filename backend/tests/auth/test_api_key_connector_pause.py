@@ -333,3 +333,27 @@ class TestConnectorKeyPauseDB:
     ) -> None:
         manager: APIKeyManager = connector_key["manager"]  # type: ignore[assignment]
         assert await manager.verify_key(connector_key["user_plaintext"]) is not None  # type: ignore[arg-type]
+
+
+class TestVerifiedKeyConnectorFlag:
+    """``VerifiedKey.is_connector_key``: the MCP transport withholds the
+    last-used guardrail digest from a connector's shared key, whose owner is
+    not the person on the other end of the connector."""
+
+    @pytest.mark.asyncio
+    async def test_connector_key_is_flagged(self) -> None:
+        record = _key_record(f"connector:{CONNECTOR_ID}")
+        db = _db(record, _workspace(3))
+
+        verified = await _verify(db)
+
+        assert verified is not None and verified.is_connector_key is True
+
+    @pytest.mark.asyncio
+    async def test_ordinary_key_is_not_flagged(self) -> None:
+        record = _key_record("my laptop")
+        db = _db(record)
+
+        verified = await _verify(db)
+
+        assert verified is not None and verified.is_connector_key is False

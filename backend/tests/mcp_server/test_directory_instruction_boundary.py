@@ -477,6 +477,12 @@ def directory_connector(monkeypatch):
         async def get_session(self, _session_id):  # pragma: no cover - not reached
             return None
 
+    # The plain-URL OAuth handshake described in docs/remote-mcp-directory-scope.md
+    # is the default: the opt-in last-used fallback stays off here whatever the
+    # shell exports, so a failure below names the real cause.
+    from config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "mcp_guardrail_digest_last_used_fallback", False)
     monkeypatch.setattr(mcp_auth, "_verify_api_key", not_an_api_key)
     monkeypatch.setattr(mcp_auth, "_verify_oauth2_token", oauth_user)
     monkeypatch.setattr(transport, "_get_user_workspace_id", no_workspace)

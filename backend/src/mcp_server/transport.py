@@ -382,14 +382,19 @@ async def _read_digest(
     generator (and its session) even when the caller's ``asyncio.timeout``
     cancels this coroutine mid-query, and the statement timeout bounds the one
     query on the server side so a cancelled read cannot leave a long-running
-    statement behind. Only called when a selection exists — never for the
-    param-absent, non-agent case (``initialize`` / ``server/discover`` must be
-    provably DB-free there).
+    statement behind. Only called when a selection exists or the
+    user-credential fallback applies — never for a connector key or with the
+    fallback switched off (``initialize`` / ``server/discover`` stay provably
+    DB-free there).
     """
     from sqlalchemy import text
 
     from db.base import get_db
-    from services.guardrail_digest import INSTRUCTIONS_CAPS, fetch_entries
+    from services.guardrail_digest import (
+        INSTRUCTIONS_CAPS,
+        fetch_entries,
+        select_last_used_context,
+    )
 
     async with contextlib.aclosing(get_db()) as sessions:
         async for db in sessions:
@@ -400,9 +405,16 @@ async def _read_digest(
                 {"ms": str(timeout_ms)},
             )
             context_id = selection.context_id
-            if selection.mode == "binding":
-                if agent_id is None:  # pragma: no cover - guarded by the caller
+            if selection.mode == "binding" and agent_id is None:
+                # A user credential: the context it used last (the caller has
+                # already excluded connector keys and the switched-off case).
+                context_id = await select_last_used_context(
+                    db, user_id=user_id, key_workspace_id=key_workspace_id
+                )
+                if context_id is None:
+                    logger.debug("mcp_guardrail_digest_no_last_used_context")
                     return None
+            elif selection.mode == "binding":
                 from services.agent_binding_service import AgentBindingService
 
                 binding, outcome = await AgentBindingService(db).resolve_default_binding(agent_id)
@@ -435,19 +447,22 @@ async def build_instructions(
     The digest of ONE context's tool guardrails is appended to the base text
     when the endpoint URL selects it (``?guardrails=<context_id>``) or, with
     the parameter absent, when the request's credential is an agent-bound key
-    whose default (or sole) binding names one. ``?guardrails=off`` and a value
-    that is neither ``off`` nor a UUID (``ignored``, logged without its bytes)
-    yield the base text.
+    whose default (or sole) binding names one — or, for any other user
+    credential, the context it used last (``select_last_used_context``; the
+    fallback a connector's shared key never gets, and
+    ``mcp_guardrail_digest_last_used_fallback`` switches off).
+    ``?guardrails=off`` and a value that is neither ``off`` nor a UUID
+    (``ignored``, logged without its bytes) yield the base text.
 
-    Order, so the no-selection path is provably DB-free: the flag, the pure
-    query parse and the ``get_agent_scope()`` contextvar read run first with no
-    I/O; ``get_db()`` is opened only for ``explicit``, or ``binding`` with a
-    scope. ``private`` is ``True`` whenever a selection was *attempted* (any
-    ``guardrails=`` value, or an agent scope) whatever the outcome — a result
-    that may vary by caller is never ``public`` — and ``False`` only for the
-    param-absent, non-agent case, whose bytes are static per deployment and
-    identical for every caller (the base text was reworded in #1621, so this
-    result differs from the pre-#1621 one in ``instructions`` only).
+    Order, so the DB-free paths stay provably DB-free: the flags, the pure
+    query parse and the contextvar reads (agent scope, connector credential)
+    run first with no I/O; ``get_db()`` is opened only for ``explicit``,
+    ``binding`` with a scope, or the user-credential fallback. ``private`` is
+    ``True`` whenever a selection was *attempted* (any ``guardrails=`` value,
+    an agent scope, or the fallback) whatever the outcome — a result that may
+    vary by caller is never ``public`` — and ``False`` only when the base text
+    is all this caller can ever get (a connector key, or the fallback switched
+    off), whose bytes are static per deployment and identical for every caller.
 
     Fails open: a deny, an unknown context, a DB error or the
     ``mcp_guardrail_digest_timeout_ms`` budget expiring all serve the base text
@@ -456,17 +471,25 @@ async def build_instructions(
     ``memory_access_events`` row (successes write nothing).
     """
     from auth.agent_scope import get_agent_scope
+    from mcp_server.auth import get_mcp_connector_credential
     from services.guardrail_digest import (
         render_instructions,
         select_guardrail_context,
         tool_view_names,
     )
 
+    settings = get_settings()
     selection = select_guardrail_context(query_string)
     scope = get_agent_scope()
-    attempted = selection.mode != "binding" or scope is not None
+    user_fallback = (
+        selection.mode == "binding"
+        and scope is None
+        and settings.mcp_guardrail_digest_enabled
+        and settings.mcp_guardrail_digest_last_used_fallback
+        and not get_mcp_connector_credential()
+    )
+    attempted = selection.mode != "binding" or scope is not None or user_fallback
 
-    settings = get_settings()
     if not settings.mcp_guardrail_digest_enabled:
         return SERVER_INSTRUCTIONS_BASE, attempted
     if selection.mode == "ignored":
@@ -478,7 +501,7 @@ async def build_instructions(
         return SERVER_INSTRUCTIONS_BASE, True
     if selection.mode == "off":
         return SERVER_INSTRUCTIONS_BASE, True
-    if selection.mode == "binding" and scope is None:
+    if selection.mode == "binding" and scope is None and not user_fallback:
         return SERVER_INSTRUCTIONS_BASE, False
 
     try:
@@ -506,7 +529,7 @@ async def build_instructions(
         len(entries.entries),
         entries.truncated,
         era,
-        selection.mode,
+        "last_used" if user_fallback else selection.mode,
     )
     return instructions, True
 
@@ -1159,7 +1182,7 @@ async def _dispatch_message(scope: Scope, send: Send, session: "MCPSession", bod
         # prompt"). Codex reads it from initialization; ChatGPT-class clients
         # read the same string from ``server/discover``. Computed once per
         # session here; DB-free unless the URL or an agent binding selects a
-        # guardrail context.
+        # guardrail context, or the opt-in last-used fallback applies.
         from mcp_server.tools._helpers import get_mcp_key_workspace_scope
 
         instructions, _private = await build_instructions(

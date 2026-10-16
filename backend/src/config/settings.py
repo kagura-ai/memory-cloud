@@ -781,6 +781,21 @@ class Settings(BaseSettings):
             "on expiry the base instructions are served"
         ),
     )
+    # Opt-in: with neither ``?guardrails=`` nor an agent binding, a user
+    # credential's handshake carries the digest of the context it used last
+    # (the pick from the permission-scoped listing; one bounded read,
+    # fail-open). A connector's shared key never gets it. Off (the default)
+    # keeps the static, DB-free, publicly cacheable base text for every
+    # unselected user credential — the Directory position in
+    # docs/remote-mcp-directory-scope.md; a deployment that wants its users'
+    # guardrails pushed at connect turns it on.
+    mcp_guardrail_digest_last_used_fallback: bool = Field(
+        default=False,
+        description=(
+            "With no ?guardrails= and no agent binding, serve a user credential "
+            "the digest of the context it used last (off: the static base text)"
+        ),
+    )
 
     # #1740: MCP Streamable HTTP spec alignment. ``/mcp`` answers a request
     # whose ``Origin`` header is present and not allow-listed with 403 (the

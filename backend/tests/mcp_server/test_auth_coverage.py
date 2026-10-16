@@ -298,3 +298,36 @@ class TestVerifySessionCookie:
             patch("config.database.get_redis_url", new=MagicMock(return_value="redis://x")),
         ):
             assert await _verify_session_cookie(_COOKIE) is None
+
+
+class TestConnectorCredentialFlag:
+    """``get_mcp_connector_credential``: set by the API-key branch from
+    ``VerifiedKey.is_connector_key``, reset by every authentication."""
+
+    async def test_connector_key_sets_the_flag(self):
+        from auth.api_keys import VerifiedKey
+        from mcp_server.auth import get_mcp_connector_credential
+
+        ws = uuid4()
+        key = VerifiedKey(
+            id=1, user_id="u-c", workspace_id=ws, bound_context_id=None, is_connector_key=True
+        )
+        with patch("auth.dependencies.verify_api_key", new=AsyncMock(return_value=key)):
+            assert await authenticate_mcp_request("Bearer key_connector") == ("u-c", None, ws)
+        assert get_mcp_connector_credential() is True
+
+    async def test_an_ordinary_key_and_a_session_cookie_reset_the_flag(self):
+        from mcp_server.auth import get_mcp_connector_credential, set_mcp_connector_credential
+
+        set_mcp_connector_credential(True)
+        with patch(
+            "auth.dependencies.verify_api_key",
+            new=AsyncMock(return_value=_verified_key("u-1", None)),
+        ):
+            await authenticate_mcp_request("Bearer key_plain")
+        assert get_mcp_connector_credential() is False
+
+        set_mcp_connector_credential(True)
+        with patch("mcp_server.auth._verify_session_cookie", new=AsyncMock(return_value="u-s")):
+            await authenticate_mcp_request(None, cookie_header=b"session=abc")
+        assert get_mcp_connector_credential() is False

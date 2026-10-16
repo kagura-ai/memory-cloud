@@ -1164,6 +1164,42 @@ def digest_source(monkeypatch):
 
 
 @pytest.fixture
+def last_used(monkeypatch):
+    """Fake the last-used candidate pick behind the user-key fallback.
+
+    ``select_last_used_context`` returns ``state.context_id`` (``None`` by
+    default: no context to pick) and records every call.
+    """
+    import services.guardrail_digest as digest_mod
+
+    state = SimpleNamespace(context_id=None, calls=[])
+
+    async def fake_select(db, **kwargs):
+        state.calls.append(kwargs)
+        return state.context_id
+
+    monkeypatch.setattr(digest_mod, "select_last_used_context", fake_select)
+    return state
+
+
+@pytest.fixture
+def fallback_on(monkeypatch):
+    """Opt in to the last-used fallback (off by default — the Directory position)."""
+    from config.settings import get_settings
+
+    monkeypatch.setattr(get_settings(), "mcp_guardrail_digest_last_used_fallback", True)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_connector_credential():
+    from mcp_server.auth import set_mcp_connector_credential
+
+    set_mcp_connector_credential(False)
+    yield
+    set_mcp_connector_credential(False)
+
+
+@pytest.fixture
 def agent_scope():
     from uuid import uuid4
 
@@ -1191,9 +1227,21 @@ def _no_ambient_agent_scope():
 
 @pytest.mark.asyncio
 async def test_discover_without_selection_is_the_base_text_public_one_hour_and_db_free(
-    digest_source,
+    digest_source, last_used
 ):
+    """The default: a user credential with no ``?guardrails=`` and no agent
+    binding gets the static base text, publicly cacheable, with no database
+    session — the last-used fallback below is opt-in."""
+    from uuid import uuid4
+
+    from config.settings import Settings
     from mcp_server.transport import DISCOVER_TTL_MS, SERVER_INSTRUCTIONS_BASE
+
+    # The switch is off by default (the Directory position) — a shell that
+    # exports MCP_GUARDRAIL_DIGEST_LAST_USED_FALLBACK=true must not change it.
+    assert Settings.model_fields["mcp_guardrail_digest_last_used_fallback"].default is False
+    last_used.context_id = uuid4()
+    digest_source.entries = _digest_entries(last_used.context_id, "would have appeared")
 
     send = await _post(_request("server/discover"))
 
@@ -1203,6 +1251,85 @@ async def test_discover_without_selection_is_the_base_text_public_one_hour_and_d
     assert result["ttlMs"] == DISCOVER_TTL_MS
     assert digest_source.db_calls == 0
     assert digest_source.fetch_kwargs == []
+    assert last_used.calls == []
+
+
+@pytest.mark.asyncio
+async def test_discover_without_selection_serves_the_last_used_contexts_digest_privately(
+    digest_source, last_used, fallback_on, caplog
+):
+    """Opted in: a user credential with no ``?guardrails=`` and no agent
+    binding gets the digest of the context it used last, read in the one
+    bounded session."""
+    from uuid import uuid4
+
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE, TOOLS_LIST_TTL_MS
+    from services.guardrail_digest import digest_header
+
+    ctx = uuid4()
+    last_used.context_id = ctx
+    digest_source.entries = _digest_entries(ctx, "run next build pinned to four cores")
+
+    with caplog.at_level("INFO", logger="mcp_server.transport"):
+        send = await _post(_request("server/discover"))
+
+    result = send.body["result"]
+    assert result["instructions"].startswith(SERVER_INSTRUCTIONS_BASE + "\n\n" + digest_header(ctx))
+    assert "run next build pinned to four cores" in result["instructions"]
+    assert result["cacheScope"] == "private"
+    assert result["ttlMs"] == TOOLS_LIST_TTL_MS
+    assert digest_source.db_calls == 1  # the pick and the read share one session
+    assert last_used.calls == [{"user_id": "user-1", "key_workspace_id": None}]
+    assert digest_source.fetch_kwargs[0]["context_id"] == ctx
+    assert "mcp_guardrail_digest_served" in caplog.text
+    assert "selection=last_used" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_discover_without_a_usable_last_used_context_is_the_base_text_private(
+    digest_source, last_used, fallback_on
+):
+    """No context to pick, or one without tool guardrails: the base text, and
+    the hint stays private because the answer depends on the caller."""
+    from uuid import uuid4
+
+    from mcp_server.transport import SERVER_INSTRUCTIONS_BASE
+
+    none_picked = await _post(_request("server/discover"))
+    assert none_picked.body["result"]["instructions"] == SERVER_INSTRUCTIONS_BASE
+    assert none_picked.body["result"]["cacheScope"] == "private"
+    assert digest_source.fetch_kwargs == []  # nothing picked → no read, no oracle
+
+    last_used.context_id = uuid4()
+    digest_source.entries = _digest_entries(last_used.context_id)  # zero entries
+    empty = await _post(_request("server/discover"))
+    assert empty.body["result"]["instructions"] == SERVER_INSTRUCTIONS_BASE
+    assert empty.body["result"]["cacheScope"] == "private"
+
+
+@pytest.mark.asyncio
+async def test_connector_credential_never_gets_the_last_used_fallback(
+    digest_source, last_used, fallback_on
+):
+    """A connector's shared key serves many people who are not its owner: the
+    handshake stays the static, DB-free, public base text for it."""
+    from uuid import uuid4
+
+    from mcp_server.auth import set_mcp_connector_credential
+    from mcp_server.transport import DISCOVER_TTL_MS, SERVER_INSTRUCTIONS_BASE
+
+    set_mcp_connector_credential(True)
+    last_used.context_id = uuid4()
+    digest_source.entries = _digest_entries(last_used.context_id, "owner's lesson")
+
+    send = await _post(_request("server/discover"))
+
+    result = send.body["result"]
+    assert result["instructions"] == SERVER_INSTRUCTIONS_BASE
+    assert result["cacheScope"] == "public"
+    assert result["ttlMs"] == DISCOVER_TTL_MS
+    assert digest_source.db_calls == 0
+    assert last_used.calls == []
 
 
 @pytest.mark.asyncio

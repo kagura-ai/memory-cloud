@@ -61,6 +61,10 @@ class VerifiedKey(NamedTuple):
             (``shadow`` | ``enforce``), read in the same verify-time lookup
             so the binding chokepoints need no second agents query. None for
             unbound keys.
+        is_connector_key: A connector's shared key (``connector:<uuid>`` name
+            on a workspace-scoped key). Its owner is not the person on the
+            other end of the connector, so the MCP handshake withholds the
+            owner's last-used guardrail digest from it.
     """
 
     id: int
@@ -70,6 +74,7 @@ class VerifiedKey(NamedTuple):
     key_prefix: str | None = None
     agent_id: UUID | None = None
     agent_enforcement_mode: str | None = None
+    is_connector_key: bool = False
 
 
 def apply_zero_knowledge_hide(key: APIKey) -> None:
@@ -428,6 +433,7 @@ class APIKeyManager:
             key_prefix=key_record.key_prefix,
             agent_id=key_record.agent_id,
             agent_enforcement_mode=agent_enforcement_mode,
+            is_connector_key=connector_id is not None and key_record.workspace_id is not None,
         )
 
     async def list_keys(

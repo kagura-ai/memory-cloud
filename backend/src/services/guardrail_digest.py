@@ -461,6 +461,45 @@ async def fetch_entries_for_context(
     )
 
 
+async def select_last_used_context(
+    db: AsyncSession, *, user_id: str, key_workspace_id: UUID | None
+) -> UUID | None:
+    """The context a user credential used last — the ``instructions`` digest's
+    candidate when the URL selects nothing and no agent binding applies.
+
+    The pick comes from the permission-scoped listing the ``list_contexts``
+    tool sorts by ``last_used_at``: a workspace-scoped key sees its workspace,
+    every other credential the user's current workspace. Never a raw
+    ``ORDER BY last_used_at`` over ``contexts`` — that would cross workspaces
+    and privacy. ``None`` when no context was ever used, unless exactly one is
+    accessible (a fresh account's only context). The caller still reads the set
+    through ``fetch_entries``, so a deny on the picked context stays a deny and
+    nothing here is an existence oracle.
+    """
+    from services.context_service import ContextListingFailedError, ContextService
+    from services.permission_service import PermissionService
+    from utils.exceptions import FeatureNotAvailableError
+
+    try:
+        if key_workspace_id is not None:
+            contexts = await PermissionService(db).get_accessible_contexts(
+                user_id, key_workspace_id
+            )
+        else:
+            contexts = await ContextService(db).list_contexts(user_id, raise_on_lookup_error=True)
+    except (ContextListingFailedError, FeatureNotAvailableError) as e:
+        # A seatless member or a credential outside its workspace: an expected
+        # state of the account, not a failure of the handshake — no digest.
+        logger.debug("guardrail_digest_no_listing", reason=type(e).__name__)
+        return None
+    if len(contexts) == 1:
+        return contexts[0].id
+    used = [context for context in contexts if context.last_used_at is not None]
+    if not used:
+        return None
+    return max(used, key=lambda context: context.last_used_at).id
+
+
 async def fetch_entries(
     db: AsyncSession,
     *,
