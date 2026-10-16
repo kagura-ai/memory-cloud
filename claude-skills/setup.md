@@ -144,7 +144,7 @@ A context's tool guardrails reach the agent by exactly one of two lanes:
 | Lane | When | MCP URL |
 |---|---|---|
 | **Hooks** — the client runs the plugin's hook script before each tool call | the harness has hooks and they are configured (Claude Code: B2) | carries `guardrails=off`, so the server does not also send a digest of the same memories |
-| **Server digest** — `get_context_info` carries a `guardrails` block | no hooks, or they are not set up | no `guardrails` parameter |
+| **Server digest** — `bootstrap` and `get_context_info` carry a `guardrails` block | no hooks, or they are not set up | no `guardrails` parameter |
 
 For an entry that runs a local proxy, the MCP URL is the one the proxy forwards to, with the query
 its own flags add (Claude Code: B1).
