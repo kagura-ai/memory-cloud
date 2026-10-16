@@ -6879,6 +6879,11 @@ class MemoryService:
 # with different score distributions.
 _SUPERSEDE_SUGGEST_THRESHOLD = 0.85
 
+# #2006: (model_name, dimensions) pairs already warned about having no
+# ``knn_seed`` calibration row, so the WARNING fires once per process per
+# embedder instead of on every ingest.
+_KNN_SEED_UNCALIBRATED_WARNED: set[tuple[str, int]] = set()
+
 
 async def _create_knn_seed_edges(
     db: AsyncSession,
@@ -6898,9 +6903,13 @@ async def _create_knn_seed_edges(
     ``neural.calibration.resolve_knn_threshold`` which implements the D4
     fallback chain (operator override → model-global calibration percentile →
     disabled). When ``resolve_knn_threshold`` returns ``None`` (no
-    calibration row yet), seeding is skipped for this call — the bootstrap
-    trigger in the remember() path will populate the row once the context
-    crosses D3, and subsequent calls will use the calibrated threshold.
+    calibration row yet), seed-edge creation is skipped for this call — the
+    bootstrap trigger in the remember() path will populate the row once the
+    context crosses D3, and subsequent calls will use the calibrated threshold.
+
+    Issue #2006: the #1403 supersede-suggestion detection shares the same
+    neighbour query but does not depend on the seed threshold, so it runs
+    whether or not the threshold resolved.
 
     Best-effort: any failure is logged and swallowed — must not affect memory
     creation. Edge creation uses an isolated commit so partial failures do not
@@ -6931,7 +6940,8 @@ async def _create_knn_seed_edges(
             return
 
         # Resolve the threshold via the D4 fallback chain (#406). None means
-        # "disable seeding for this call" — bootstrap will catch up later.
+        # "no seed edges for this call" — bootstrap will catch up later. The
+        # supersede detection below still runs (#2006).
         threshold = await resolve_knn_threshold(
             db=db,
             config=config,
@@ -6945,6 +6955,14 @@ async def _create_knn_seed_edges(
                 model=model_name,
                 dimensions=len(vector),
             )
+            warn_key = (model_name, len(vector))
+            if warn_key not in _KNN_SEED_UNCALIBRATED_WARNED:
+                _KNN_SEED_UNCALIBRATED_WARNED.add(warn_key)
+                logger.warning(
+                    "knn_seed_disabled_no_calibration",
+                    model=model_name,
+                    dimensions=len(vector),
+                )
             # Bootstrap trigger (#406 C2 trigger 1): if this (model, dims)
             # has crossed D3, enqueue a deduped calibration job so
             # subsequent remember() calls find a populated row and exit
@@ -6968,7 +6986,6 @@ async def _create_knn_seed_edges(
                     model=model_name,
                     error=str(exc),
                 )
-            return
 
         workspace_id_str = str(memory.workspace_id)
         context_id_str = str(memory.context_id)
@@ -7075,6 +7092,11 @@ async def _create_knn_seed_edges(
                         candidate_memory_id=candidate["memory_id"],
                         similarity=candidate["similarity"],
                     )
+
+        # #2006: everything below creates seed edges, which needs a calibrated
+        # (or operator) threshold. Without one, only the detection above runs.
+        if threshold is None:
+            return
 
         # Idempotency guard (SEEDING ONLY — the supersede detection above
         # deliberately runs first): process_pending_embedding is called on both new
