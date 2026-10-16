@@ -153,8 +153,8 @@ def item_error(exc: BaseException) -> dict[str, Any]:
         return {
             "error": "payload_too_large",
             "message": exc.message,
-            "limit": exc.details["limit"],
-            "actual": exc.details["actual"],
+            "limit": exc.limit,
+            "actual": exc.actual,
             "help": PAYLOAD_HELP,
         }
     if isinstance(exc, QuotaExceededError):

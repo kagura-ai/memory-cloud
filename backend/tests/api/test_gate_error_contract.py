@@ -618,6 +618,10 @@ NOT_GATE_REFUSALS: frozenset[str] = frozenset(
 
 _GATE_EXCEPTIONS = {
     "QuotaExceededError",
+    # #2003: the 1 MB size guards raise this QuotaExceededError subclass; it is
+    # untyped by construction (no quota_type, no gate) and the REST body is
+    # byte-identical to the bare raise it replaced.
+    "ContentSizeExceededError",
     "EmbeddingSpendCapExceeded",
     "FeatureNotAvailableError",
 }
@@ -1656,9 +1660,20 @@ class TestTheMcpEnvelopeCarriesTheSameGate:
         invent a ``gate`` the REST body does not carry. ``remember`` is the
         tool the size guard and the memory caps actually reach; the other two
         doors pin the same forwarding in the other mappers."""
-        mcp = await door(await driver())
+        from utils.exceptions import ContentSizeExceededError
 
-        assert mcp["error"] == "quota_exceeded"
+        exc = await driver()
+        mcp = await door(exc)
+
+        if isinstance(exc, ContentSizeExceededError):
+            # #2003: the 1 MB size guard is named as a request-size limit on
+            # MCP (payload_too_large, with the numbers) where a mapper knows
+            # it; the REST body and the quota-family mappers are unchanged.
+            assert mcp["error"] in ("payload_too_large", "quota_exceeded")
+            if mcp["error"] == "payload_too_large":
+                assert (mcp["limit"], mcp["actual"]) == (exc.limit, exc.actual)
+        else:
+            assert mcp["error"] == "quota_exceeded"
         assert "gate" not in mcp
         assert "quota_type" not in mcp
 

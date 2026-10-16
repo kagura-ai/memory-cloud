@@ -4,7 +4,6 @@ Extracted from tools.py for modularity (Issue #7).
 """
 
 import logging
-import re
 import time
 from typing import Any
 from uuid import UUID
@@ -125,8 +124,27 @@ def _guardrail_author_denied(operation: str) -> list[TextContent]:
     )
 
 
-# A sentence ends at one of these followed by whitespace or the end of the text.
-_SENTENCE_END = re.compile(r"[.!?](?=\s|$)|[。！？]|\n")
+# Sentence ends: an ASCII terminator followed by whitespace or the end of the
+# text, a CJK terminator, or a line break. Scanned by hand — this module never
+# compiles a pattern (tests/utils/test_tool_trigger_regex.py keeps the stored
+# tool_trigger regexes from ever running server-side, and the guard is per
+# module).
+_ASCII_SENTENCE_END = frozenset(".!?")
+_CJK_SENTENCE_END = frozenset("。！？")
+
+
+def _sentence_ends(text: str) -> list[int]:
+    """Indexes just past each sentence end of ``text``, in order."""
+    ends: list[int] = []
+    last = len(text) - 1
+    for i, ch in enumerate(text):
+        if ch in _CJK_SENTENCE_END or ch == "\n":
+            ends.append(i + 1)
+        elif ch in _ASCII_SENTENCE_END and (i == last or text[i + 1].isspace()):
+            ends.append(i + 1)
+    return ends
+
+
 # Below this many characters a sentence boundary is not worth the loss; cut at a word.
 _SUMMARY_KEEP_AT_LEAST = 200
 PAYLOAD_HELP = (
@@ -166,11 +184,11 @@ def fit_summary(args: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     if len(summary) <= SUMMARY_MAX_LENGTH:
         return args, {}
     cut: str | None = None
-    for match in _SENTENCE_END.finditer(summary):
-        if match.end() > SUMMARY_MAX_LENGTH:
+    for end in _sentence_ends(summary):
+        if end > SUMMARY_MAX_LENGTH:
             break
-        if match.start() >= _SUMMARY_KEEP_AT_LEAST:
-            cut = summary[: match.end()].rstrip()
+        if end - 1 >= _SUMMARY_KEEP_AT_LEAST:
+            cut = summary[:end].rstrip()
     if cut is None:
         head = summary[: SUMMARY_MAX_LENGTH - 1].rstrip()
         if summary[SUMMARY_MAX_LENGTH - 1].isspace():
@@ -373,8 +391,8 @@ async def handle_remember(
             return _error_response(
                 "payload_too_large",
                 e.message,
-                limit=e.details["limit"],
-                actual=e.details["actual"],
+                limit=e.limit,
+                actual=e.actual,
                 help=PAYLOAD_HELP,
             )
         except QuotaExceededError as e:

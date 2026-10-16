@@ -314,7 +314,7 @@ def _refusal(exc: BaseException) -> tuple[str, str, dict[str, Any]]:
         return (
             "payload_too_large",
             exc.message,
-            {"limit": exc.details["limit"], "actual": exc.details["actual"], "help": PAYLOAD_HELP},
+            {"limit": exc.limit, "actual": exc.actual, "help": PAYLOAD_HELP},
         )
     if isinstance(exc, QuotaExceededError):
         code = "quota_exceeded"
