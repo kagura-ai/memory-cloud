@@ -10,13 +10,13 @@ then have every upload refused by the counter with no lock to explain it.
 This one-shot backfill soft-deletes those files the way ``delete_context``
 does since #1960 — stamped with the context's own ``deleted_at``, so
 ``restore_context`` treats them like any #1960 deletion — releasing their
-bytes from ``workspace_storage_usage`` in the same transaction and dropping
-the workspace's Redis counter after each commit so the next reservation
-reseeds it (R5: Redis follows the database). It runs one context per
-transaction, re-checking under lock that the context is still deleted, so a
-workspace with many files never holds every row locked at once and a context
-restored meanwhile is left alone. It is idempotent: the target set shrinks
-to empty.
+bytes from ``workspace_storage_usage`` in the same transaction and rewriting
+the workspace's Redis counter from the database aggregate after each commit
+(R5: Redis follows the database). It runs one context per transaction,
+re-checking under lock that the context is still deleted with the planned
+``deleted_at``, so a workspace with many files never holds every row locked
+at once and a context restored (or deleted again) meanwhile is left alone.
+It is idempotent: the target set shrinks to empty.
 
 A context deleted more than ``FILE_RESTORE_WINDOW`` ago is past the window:
 its files are stamped past the GC retention and the nightly
@@ -62,28 +62,42 @@ class DeletedContextFilesBackfill:
     """What the backfill did, or would do on a dry run."""
 
     dry_run: bool
+    include_past_window: bool = False
     contexts: list[DeletedContextFiles] = field(default_factory=list)
+    """Every deleted context with live files, whether or not the apply touches it."""
     # Filled on apply.
     files_soft_deleted: int = 0
     released_bytes: dict[UUID, int] = field(default_factory=dict)
     """Bytes the upload quota no longer holds, per workspace (uploaded + reserved)."""
+    counter_bytes: dict[UUID, int | None] = field(default_factory=dict)
+    """The Redis counter value rewritten per workspace (``None``: Redis refused)."""
     skipped: list[UUID] = field(default_factory=list)
-    """Contexts restored between the plan and their turn; left alone."""
-    skipped_past_window: list[UUID] = field(default_factory=list)
-    """Contexts past the restore window left alone because
-    ``include_past_window`` was not given (their deletion would be permanent)."""
+    """Contexts restored, or deleted again, between the plan and their turn; left alone."""
+
+    @property
+    def targets(self) -> list[DeletedContextFiles]:
+        """The contexts the apply touches: past-window ones only on request."""
+        return [c for c in self.contexts if self.include_past_window or not c.past_restore_window]
+
+    @property
+    def skipped_past_window(self) -> list[UUID]:
+        """Contexts past the restore window left alone because
+        ``include_past_window`` was not given (their deletion would be permanent)."""
+        if self.include_past_window:
+            return []
+        return [c.context_id for c in self.contexts if c.past_restore_window]
 
     @property
     def workspaces(self) -> set[UUID]:
-        return {c.workspace_id for c in self.contexts}
+        return {c.workspace_id for c in self.targets}
 
     @property
     def uploaded_bytes(self) -> int:
-        return sum(c.uploaded_bytes for c in self.contexts)
+        return sum(c.uploaded_bytes for c in self.targets)
 
     @property
     def files(self) -> int:
-        return sum(c.files for c in self.contexts)
+        return sum(c.files for c in self.targets)
 
     @property
     def past_restore_window(self) -> int:
@@ -160,9 +174,9 @@ async def backfill_deleted_context_files(
     Returns:
         The contexts found and, on apply, what was changed.
     """
-    result = DeletedContextFilesBackfill(dry_run=dry_run)
+    result = DeletedContextFilesBackfill(dry_run=dry_run, include_past_window=include_past_window)
     result.contexts = await find_deleted_context_files(db, workspace_id=workspace_id)
-    if dry_run or not result.contexts:
+    if dry_run or not result.targets:
         # Do not sit in a read transaction while the operator reads the plan
         # (idle_in_transaction_session_timeout).
         await db.rollback()
@@ -172,24 +186,23 @@ async def backfill_deleted_context_files(
     from services.file_storage_service import FileStorageService
 
     files = FileStorageService(db)
-    for context in result.contexts:
-        if context.past_restore_window and not include_past_window:
-            result.skipped_past_window.append(context.context_id)
-            continue
+    for context in result.targets:
         # Re-check under lock: a context restored since the plan is live again
-        # and its files must stay.
-        still_deleted = (
+        # and its files must stay; one deleted again carries a new deleted_at
+        # that the plan's stamp (and its window verdict) would not match.
+        deleted_at = (
             await db.execute(
-                select(Context.id)
-                .where(Context.id == context.context_id, Context.deleted_at.is_not(None))
-                .with_for_update()
+                select(Context.deleted_at).where(Context.id == context.context_id).with_for_update()
             )
         ).scalar_one_or_none()
-        if still_deleted is None:
+        if deleted_at != context.deleted_at:
             await db.rollback()
             result.skipped.append(context.context_id)
             logger.info(
-                "deleted_context_files_backfill_skipped", context_id=str(context.context_id)
+                "deleted_context_files_backfill_skipped",
+                context_id=str(context.context_id),
+                planned_deleted_at=str(context.deleted_at),
+                current_deleted_at=str(deleted_at),
             )
             continue
         # The same rows and accounting as a #1960 context deletion, stamped
@@ -202,10 +215,12 @@ async def backfill_deleted_context_files(
         result.files_soft_deleted += len(rows)
         for ws_id, size in released.items():
             result.released_bytes[ws_id] = result.released_bytes.get(ws_id, 0) + size
-            # Not a decrement: the key may be missing (no TTL-less negative
-            # key) or already reseeded from the new definition (no double
-            # release). The next reservation reseeds from _aggregate_from_db.
-            await storage_quota_service.invalidate_storage_counter(ws_id)
+            # Neither a decrement nor a delete (see reseed_storage_counter):
+            # the counter is rewritten from the aggregate, which already
+            # excludes these rows.
+            result.counter_bytes[ws_id] = await storage_quota_service.reseed_storage_counter(
+                ws_id, db
+            )
         logger.info(
             "deleted_context_files_backfilled",
             context_id=str(context.context_id),

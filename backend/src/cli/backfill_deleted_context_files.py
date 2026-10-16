@@ -53,7 +53,7 @@ def _print_plan(result: DeletedContextFilesBackfill) -> None:
             f"{to_utc_iso(c.deleted_at):20}  {c.files:5}  {c.uploaded_bytes}{note}"
         )
     print(
-        f"total      {len(result.contexts)} context(s) in {len(result.workspaces)} workspace(s), "
+        f"total      {len(result.targets)} context(s) in {len(result.workspaces)} workspace(s), "
         f"{result.files} file(s), {result.uploaded_bytes} uploaded bytes"
     )
     if result.past_restore_window:
@@ -67,16 +67,18 @@ def _print_plan(result: DeletedContextFilesBackfill) -> None:
 def _print_applied(result: DeletedContextFilesBackfill) -> None:
     print(f"files soft-deleted: {result.files_soft_deleted}")
     for ws_id, size in sorted(result.released_bytes.items(), key=lambda kv: str(kv[0])):
-        print(f"released   {ws_id}  {size} bytes (counter reseeds on the next upload)")
+        counter = result.counter_bytes.get(ws_id)
+        state = f"counter now {counter} bytes" if counter is not None else "counter NOT rewritten"
+        print(f"released   {ws_id}  {size} bytes ({state})")
     for ctx_id in result.skipped:
-        print(f"skipped    {ctx_id}  restored since the plan; files kept")
+        print(f"skipped    {ctx_id}  restored or deleted again since the plan; files kept")
     for ctx_id in result.skipped_past_window:
         print(f"skipped    {ctx_id}  past the restore window; pass --include-past-window")
 
 
 def _summary(result: DeletedContextFilesBackfill) -> str:
     return (
-        f"{result.files} file(s) in {len(result.contexts)} deleted context(s), "
+        f"{result.files} file(s) in {len(result.targets)} deleted context(s), "
         f"{result.uploaded_bytes} uploaded bytes"
     )
 

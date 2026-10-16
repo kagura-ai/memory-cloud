@@ -29,8 +29,8 @@ CTX = uuid4()
 OLD = uuid4()
 
 
-def _found(*, dry_run: bool) -> DeletedContextFilesBackfill:
-    result = DeletedContextFilesBackfill(dry_run=dry_run)
+def _found(*, dry_run: bool, include_past_window: bool = True) -> DeletedContextFilesBackfill:
+    result = DeletedContextFilesBackfill(dry_run=dry_run, include_past_window=include_past_window)
     result.contexts = [
         DeletedContextFiles(
             context_id=CTX,
@@ -50,8 +50,9 @@ def _found(*, dry_run: bool) -> DeletedContextFilesBackfill:
         ),
     ]
     if not dry_run:
-        result.files_soft_deleted = 4
-        result.released_bytes = {WS: 270}
+        result.files_soft_deleted = result.files
+        result.released_bytes = {WS: 270 if include_past_window else 260}
+        result.counter_bytes = {WS: 130}
     return result
 
 
@@ -69,12 +70,14 @@ def _run(argv: list[str], backfill: AsyncMock) -> int:
 
 class TestBackfillCommand:
     def test_default_is_a_read_only_plan(self, capsys):
-        backfill = AsyncMock(return_value=_found(dry_run=True))
+        backfill = AsyncMock(return_value=_found(dry_run=True))  # as if --include-past-window
         assert _run([], backfill) == 0
         assert [call.kwargs["dry_run"] for call in backfill.await_args_list] == [True]
         out = capsys.readouterr().out
         assert str(CTX) in out and "220" in out
-        assert "2 context(s) in 1 workspace(s), 4 file(s), 230 uploaded bytes" in out
+        assert (
+            "2 context(s) in 1 workspace(s), 4 file(s), 230 uploaded bytes" in out
+        )  # include_past_window
         assert "past window: objects removed at the next file GC" in out
         assert "warning    1 context(s) are past the file restore window" in out
         assert "dry run — pass --apply to write" in out
@@ -86,7 +89,7 @@ class TestBackfillCommand:
         out = capsys.readouterr().out
         assert "soft-deleted 4 file(s) in 2 deleted context(s), 230 uploaded bytes" in out
         assert "files soft-deleted: 4" in out
-        assert f"released   {WS}  270 bytes" in out
+        assert f"released   {WS}  270 bytes (counter now 130 bytes)" in out
 
     def test_workspace_flag_scopes_the_run(self, capsys):
         backfill = AsyncMock(return_value=_found(dry_run=True))
@@ -95,12 +98,21 @@ class TestBackfillCommand:
         assert backfill.await_args.kwargs["include_past_window"] is False
 
     def test_past_window_is_opt_in(self, capsys):
-        applied = _found(dry_run=False)
-        applied.skipped_past_window = [OLD]
-        backfill = AsyncMock(side_effect=[_found(dry_run=True), applied])
+        backfill = AsyncMock(
+            side_effect=[
+                _found(dry_run=True, include_past_window=False),
+                _found(dry_run=False, include_past_window=False),
+            ]
+        )
         assert _run(["--apply", "--yes"], backfill) == 0
         out = capsys.readouterr().out
+        # The prompt, the plan totals and the report count only what the
+        # apply touches: the past-window context is listed but not counted.
+        assert str(OLD) in out
         assert "skipped unless --include-past-window is given" in out
+        assert "1 context(s) in 1 workspace(s), 3 file(s), 220 uploaded bytes" in out
+        assert "soft-deleted 3 file(s) in 1 deleted context(s), 220 uploaded bytes" in out
+        assert "files soft-deleted: 3" in out
         assert f"skipped    {OLD}  past the restore window; pass --include-past-window" in out
 
         backfill = AsyncMock(side_effect=[_found(dry_run=True), _found(dry_run=False)])

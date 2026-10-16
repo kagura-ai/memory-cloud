@@ -1410,12 +1410,12 @@ python -m src.cli.backfill_deleted_context_files --apply --yes  # contexts insid
 python -m src.cli.backfill_deleted_context_files --apply --include-past-window   # the rest (permanent, see below)
 ```
 
-The command runs one context per transaction, drops that workspace's Redis
-counter right after the commit (the next upload reseeds it from the shared
-definition), and logs `deleted_context_files_backfilled` per context (files,
-uploaded bytes, released bytes). A second run finds nothing; a context restored
-between the plan and its turn is skipped. `--workspace <id>` limits a run to
-one workspace.
+The command runs one context per transaction, rewrites that workspace's Redis
+counter from the shared definition right after the commit
+(`storage_quota_counter_reseeded`), and logs `deleted_context_files_backfilled`
+per context (files, uploaded bytes, released bytes). A second run finds
+nothing; a context restored, or deleted again, between the plan and its turn
+is skipped. `--workspace <id>` limits a run to one workspace.
 
 The files are stamped with their context's own `deleted_at`. For a context
 deleted inside the file restore window (6 days) `restore_context` brings them

@@ -114,7 +114,9 @@ async def _rows(db_session: AsyncSession, ctx_id: UUID | None, ws_id: UUID) -> l
 
 @pytest.mark.asyncio
 async def test_plan_lists_the_deleted_contexts_and_changes_nothing(db_session, seeded):
-    with patch.object(storage_quota_service, "invalidate_storage_counter", AsyncMock()) as drop:
+    with patch.object(
+        storage_quota_service, "reseed_storage_counter", AsyncMock(return_value=0)
+    ) as drop:
         result = await backfill_deleted_context_files(
             db_session, dry_run=True, workspace_id=seeded["ws"]
         )
@@ -140,7 +142,9 @@ async def test_plan_lists_the_deleted_contexts_and_changes_nothing(db_session, s
 @pytest.mark.asyncio
 async def test_apply_skips_past_window_contexts_by_default(db_session, seeded):
     """The permanent deletions are a separate, explicit decision."""
-    with patch.object(storage_quota_service, "invalidate_storage_counter", AsyncMock()) as drop:
+    with patch.object(
+        storage_quota_service, "reseed_storage_counter", AsyncMock(return_value=0)
+    ) as drop:
         result = await backfill_deleted_context_files(
             db_session, dry_run=False, workspace_id=seeded["ws"]
         )
@@ -150,13 +154,16 @@ async def test_apply_skips_past_window_contexts_by_default(db_session, seeded):
         seeded["deleted_at"]
     }
     assert result.files_soft_deleted == 4
+    assert result.files == 4 and result.uploaded_bytes == 220  # the targets, not the plan
     assert drop.await_count == 1
     assert (await _usage(db_session, seeded["ws"])).used_bytes == 140  # 360 - 150 - 70
 
 
 @pytest.mark.asyncio
 async def test_apply_gives_the_files_their_context_deletion(db_session, seeded):
-    with patch.object(storage_quota_service, "invalidate_storage_counter", AsyncMock()) as drop:
+    with patch.object(
+        storage_quota_service, "reseed_storage_counter", AsyncMock(return_value=0)
+    ) as drop:
         result = await backfill_deleted_context_files(
             db_session, dry_run=False, workspace_id=seeded["ws"], include_past_window=True
         )
@@ -180,16 +187,17 @@ async def test_apply_gives_the_files_their_context_deletion(db_session, seeded):
     assert usage.used_bytes == 130  # 360 - 150 - 70 - 10
     assert usage.file_count == 2
 
-    # The counter is dropped once per context commit, never decremented:
+    # The counter is rewritten once per context commit, never decremented:
     # uploaded (220 + 10) + the cancelled reservation (40) no longer count.
     assert result.released_bytes.get(seeded["ws"]) == 270
     assert drop.await_count == 2
-    drop.assert_any_await(seeded["ws"])
+    assert drop.await_args.args[0] == seeded["ws"]
+    assert result.counter_bytes == {seeded["ws"]: 0}
     assert result.files_soft_deleted == 5
     assert result.skipped == [] and result.skipped_past_window == []
 
     # Idempotent: the second run finds nothing.
-    with patch.object(storage_quota_service, "invalidate_storage_counter", AsyncMock()):
+    with patch.object(storage_quota_service, "reseed_storage_counter", AsyncMock(return_value=0)):
         again = await backfill_deleted_context_files(
             db_session, dry_run=False, workspace_id=seeded["ws"], include_past_window=True
         )
@@ -215,11 +223,37 @@ async def test_a_context_restored_since_the_plan_is_skipped(db_session, seeded, 
         return stale
 
     monkeypatch.setattr(storage_backfill, "find_deleted_context_files", _stale)
-    with patch.object(storage_quota_service, "invalidate_storage_counter", AsyncMock()):
+    with patch.object(storage_quota_service, "reseed_storage_counter", AsyncMock(return_value=0)):
         result = await backfill_deleted_context_files(
             db_session, dry_run=False, workspace_id=seeded["ws"], include_past_window=True
         )
 
+    assert result.skipped == [seeded["gone"]]
+    assert all(f.deleted_at is None for f in await _rows(db_session, seeded["gone"], seeded["ws"]))
+
+
+@pytest.mark.asyncio
+async def test_a_context_deleted_again_since_the_plan_is_skipped(db_session, seeded, monkeypatch):
+    """A new deleted_at would not match the plan's stamp (restore_context keys
+    on it) nor its window verdict: left alone for the next run."""
+    from services import storage_backfill
+
+    stale = await storage_backfill.find_deleted_context_files(db_session, workspace_id=seeded["ws"])
+    await db_session.rollback()
+    gone = (
+        await db_session.execute(select(Context).where(Context.id == seeded["gone"]))
+    ).scalar_one()
+    gone.deleted_at = utcnow()  # restored and deleted again
+    await db_session.commit()
+
+    async def _stale(*_args, **_kwargs):
+        return stale
+
+    monkeypatch.setattr(storage_backfill, "find_deleted_context_files", _stale)
+    with patch.object(storage_quota_service, "reseed_storage_counter", AsyncMock(return_value=0)):
+        result = await backfill_deleted_context_files(
+            db_session, dry_run=False, workspace_id=seeded["ws"], include_past_window=True
+        )
     assert result.skipped == [seeded["gone"]]
     assert all(f.deleted_at is None for f in await _rows(db_session, seeded["gone"], seeded["ws"]))
     assert {f.deleted_at for f in await _rows(db_session, seeded["old"], seeded["ws"])} == {

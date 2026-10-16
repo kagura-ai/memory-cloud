@@ -25,7 +25,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.redis import delete_cache, get_cache, get_redis_client, incrby_counter, set_cache
+from db.redis import get_cache, get_redis_client, incrby_counter, set_cache
 from utils.exceptions import QuotaExceededError, RedisError
 from utils.logger import get_logger
 
@@ -320,25 +320,39 @@ async def release_storage_bytes(
             )
 
 
-async def invalidate_storage_counter(workspace_id: UUID) -> None:
-    """Drop the Redis counter so the next reservation reseeds it from the database.
+async def reseed_storage_counter(workspace_id: UUID, db: AsyncSession) -> int | None:
+    """Rewrite the Redis counter from the database aggregate, with the seed TTL.
 
     For writes that change what the counter should hold without going
-    through a reservation (the #1966 backfill): a decrement would create a
-    negative key with no TTL when none exists, and would subtract bytes a
-    reseed already left out. Fail-open on Redis errors: the key keeps its
-    24h TTL and reseeds then.
+    through a reservation (the #1966 backfill). Neither a decrement nor a
+    delete is safe there: a decrement creates a negative key with no TTL
+    when none exists and subtracts bytes a reseed already left out; a
+    delete races the reservation Lua (``GET`` → nil → ``INCRBY``, no
+    ``EXPIRE``), which would leave a TTL-less key holding one reservation's
+    delta instead of the aggregate. ``SET`` with the 24h TTL can at worst
+    lose one in-flight increment, never the aggregate, and the next TTL
+    expiry reseeds anyway. Fail-open on Redis errors: the stale value keeps
+    its TTL and is logged.
+
+    Returns:
+        The value written, or ``None`` when Redis refused it.
     """
     key = _build_key(workspace_id)
+    seeded = await _aggregate_from_db(workspace_id, db)
     try:
-        await delete_cache(key)
-        logger.info("storage_quota_counter_invalidated", workspace_id=str(workspace_id))
+        await set_cache(key, str(seeded), ttl=86400)
     except RedisError as exc:
         logger.error(
-            "storage_quota_counter_invalidate_failed",
+            "storage_quota_counter_reseed_failed",
             workspace_id=str(workspace_id),
+            seeded_bytes=seeded,
             error=str(exc),
         )
+        return None
+    logger.info(
+        "storage_quota_counter_reseeded", workspace_id=str(workspace_id), seeded_bytes=seeded
+    )
+    return seeded
 
 
 async def get_current_storage_usage(
