@@ -3922,6 +3922,7 @@ class MemoryService:
             logger.info(
                 "recall_completed",
                 user_id=user_id,
+                degraded=(degradation or {}).get("degraded"),
                 **timings.log_fields(
                     results=0, candidates=0, k=request.k, context_count=context_count
                 ),
@@ -4756,15 +4757,15 @@ class MemoryService:
                 disables the single-context tag hints (#1503).
             timings: #1989 per-stage clock; this whole method is its
                 ``finalize`` stage and ``recall_completed`` is logged from it
-                last, after the audit row. ``None`` (direct callers) logs the
-                line with a fresh clock.
+                last, after the audit row. ``None`` (direct callers) logs no
+                line, like :meth:`_empty_recall_response`.
             context_count: Contexts the recall spanned, for the log line.
 
         Returns:
             The completed RecallResponse.
         """
-        timings = timings or RecallTimings()
-        with timings.stage("finalize"):
+        clock = timings or RecallTimings()
+        with clock.stage("finalize"):
             response = await self._recall_finalize_response(
                 request,
                 search_results,
@@ -4779,16 +4780,18 @@ class MemoryService:
                 degradation=degradation,
             )
         # #1989: one line per recall, after everything the caller waits for.
-        logger.info(
-            "recall_completed",
-            user_id=user_id,
-            **timings.log_fields(
-                results=len(responses),
-                candidates=len(search_results),
-                k=request.k,
-                context_count=context_count,
-            ),
-        )
+        if timings is not None:
+            logger.info(
+                "recall_completed",
+                user_id=user_id,
+                degraded=(degradation or {}).get("degraded"),
+                **timings.log_fields(
+                    results=len(responses),
+                    candidates=len(search_results),
+                    k=request.k,
+                    context_count=context_count,
+                ),
+            )
         return response
 
     async def _recall_finalize_response(
@@ -4806,7 +4809,16 @@ class MemoryService:
         cross_context: bool,
         degradation: dict[str, Any] | None,
     ) -> RecallResponse:
-        """The body of :meth:`_recall_finalize`, timed as one stage."""
+        """The body of :meth:`_recall_finalize`, timed as one stage there.
+
+        Builds the page: explore hints (opt-in), related tags, the
+        ``memory_access_events`` audit row, the relevance confidence over the
+        full candidate pool, and the empty-result tag suggestions. Arguments
+        are :meth:`_recall_finalize`'s, which documents them.
+
+        Returns:
+            The completed RecallResponse.
+        """
         # Issue #216: Generate explore hints (best-effort, opt-in)
         explore_hints = [] if request.include_explore_hints else None
         if request.include_explore_hints and responses:

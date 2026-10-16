@@ -408,7 +408,9 @@ class TestExpansionIsActuallyWired:
         finalize = next(
             node
             for node in ast.walk(tree)
-            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_recall_finalize"
+            # #1989: the body lives in _recall_finalize_response (timed as one
+            # stage by _recall_finalize, which only adds the log line).
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_recall_finalize_response"
         )
         responses = [
             node
@@ -417,7 +419,7 @@ class TestExpansionIsActuallyWired:
             and isinstance(node.func, ast.Name)
             and node.func.id == "RecallResponse"
         ]
-        assert responses, "_recall_finalize no longer builds a RecallResponse"
+        assert responses, "_recall_finalize_response no longer builds a RecallResponse"
         assert all(
             any(kw.arg == "tag_suggestions" for kw in call.keywords) for call in responses
         ), "RecallResponse built without tag_suggestions — the hint would never reach a caller"

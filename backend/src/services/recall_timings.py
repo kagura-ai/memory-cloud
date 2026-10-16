@@ -60,6 +60,10 @@ class RecallTimings:
         finally:
             self._stages[name] = self._stages.get(name, 0.0) + (self.clock() - started)
 
+    def discard(self, name: str) -> None:
+        """Forget a stage that turned out not to run (its time goes to ``other_ms``)."""
+        self._stages.pop(name, None)
+
     def log_fields(self, **context: Any) -> dict[str, Any]:
         """Structured fields for ``recall_completed``, in a stable order.
 

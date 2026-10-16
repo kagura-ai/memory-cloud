@@ -111,8 +111,10 @@ class SearchService:
                 honor this flag.
             timings: #1989 out-parameter. When given, the embed / qdrant /
                 fulltext / rerank stages are timed into it (``stage()``) and
-                ``embed_cache_hit`` is set from the embedding token count. A
-                degraded embed records its time-to-failure as ``embed_ms``.
+                ``embed_cache_hit`` is set from the embedding service's
+                ``outcome`` (never from the token count). ``rerank_ms`` is kept
+                only when a provider scored. A degraded embed records its
+                time-to-failure as ``embed_ms``.
 
         Returns:
             List of search results with scores
@@ -283,6 +285,7 @@ class SearchService:
                 # otherwise a TOCTOU race between the preflight ``has_byok_key``
                 # probe in ``MemoryService.recall`` and this resolution could
                 # silently route to the uncapped platform key.
+                embed_outcome: dict[str, Any] = {}
                 with timings.stage("embed"):
                     query_vector, embedding_tokens = await embed_svc.embed_with_usage(
                         normalized_query,
@@ -290,10 +293,12 @@ class SearchService:
                         context_id=primary_context_id,
                         workspace_id=workspace_id,
                         disallow_env_fallback=is_shared_context_read,
+                        outcome=embed_outcome,
                     )
-                # Cache hits return 0 tokens (B1 pin below): the same signal
-                # tells the recall_completed reader a cold embedding was paid.
-                timings.embed_cache_hit = embedding_tokens == 0
+                # The service says whether the vector came from the cache; the
+                # token count cannot (providers without usage accounting, e.g.
+                # Ollama, report 0 for a cold embed too).
+                timings.embed_cache_hit = embed_outcome.get("cache_hit")
                 if embedding_tokens > 0:
                     # Cache hits return 0 tokens and intentionally produce no
                     # llm_call_log row (B1 pin) — the table is "API was
@@ -428,21 +433,29 @@ class SearchService:
 
             if plan_allows:
                 try:
+                    candidates = merged_results[:fetch_size]  # Dynamic fetch size (#130)
                     with timings.stage("rerank"):
-                        merged_results = await self.reranker_service.rerank(
+                        reranked = await self.reranker_service.rerank(
                             query=query,
-                            candidates=merged_results[:fetch_size],  # Dynamic fetch size (#130)
+                            candidates=candidates,
                             user_id=user_id,
                             k=k,
                             context_id=primary_context_id,
                             workspace_id=workspace_id,  # NEW: Issue #146
                         )
+                    if reranked is candidates:
+                        # No provider scored (none configured, or nothing to
+                        # score): the list came back untouched, so there was
+                        # no rerank to report (#1989 rerank_ms means one ran).
+                        timings.discard("rerank")
+                    merged_results = reranked
                     logger.debug("reranking_completed", results=len(merged_results))
                 except Exception as e:
                     # Fail open to the un-reranked hybrid results — never fail
                     # the recall. ``rerank_failed_open`` is the stable event
                     # operators alert on (#1572; same shape as
                     # ``quota_check_failed_open`` in api/middleware/rate_limit.py).
+                    timings.discard("rerank")  # #1989: no rerank happened
                     logger.warning(
                         "rerank_failed_open",
                         provider=getattr(config, "reranker_provider", None),

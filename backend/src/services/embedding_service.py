@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import os
 import unicodedata
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import xxhash
 from openai import AsyncOpenAI
@@ -641,6 +641,7 @@ class EmbeddingService:
         context_id: str | None = None,
         workspace_id: str | None = None,
         disallow_env_fallback: bool = False,
+        outcome: dict[str, Any] | None = None,
     ) -> tuple[list[float], int]:
         """Generate embedding and return token usage for cost tracking (#471).
 
@@ -669,6 +670,10 @@ class EmbeddingService:
                 so a TOCTOU race between the preflight ``has_byok_key``
                 probe and this call cannot silently route to the platform
                 key (which would bypass PR #711's BYOK-only spend cap).
+
+            outcome: Optional out-parameter; ``outcome["cache_hit"]`` is set to
+                whether the vector came from the cache (#1989). The token count
+                cannot tell: providers without usage accounting report 0 too.
 
         Returns:
             ``(vector, tokens_used)``. ``tokens_used`` is 0 for cache
@@ -701,7 +706,12 @@ class EmbeddingService:
                     text_length=len(text),
                     cache_key=cache_key[:16] + "...",
                 )
+                if outcome is not None:
+                    outcome["cache_hit"] = True
                 return vector, 0
+            if outcome is not None:
+                # Set before the provider call: a failed call is a miss too.
+                outcome["cache_hit"] = False
 
             # Issue #709/#1033: embedding spend cap gate (BYOK + paid-tier platform).
             # #708 loop 4: thread ``context_id`` so the gate's BYOK probe mirrors
