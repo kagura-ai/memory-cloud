@@ -31,7 +31,7 @@ Describe one of your public-bound API keys by exactly one selector (read-only).
 Store information into long-term memory with 3-layer architecture (summary / context_summary / details).
 
 - **Required**:
-  - `summary` — string (10–500 chars, per description; no `minLength`/`maxLength` constraint in schema ⚠ documented limits not schema-enforced)
+  - `summary` — string (10–500 chars, per description; no `minLength`/`maxLength` constraint in schema ⚠ documented limits not schema-enforced; since v0.108.0 the server cuts a longer summary at a sentence end and answers `summary_truncated: true` instead of refusing)
   - `content` — string
   - `type` — string (free-form; examples: 'code', 'note', 'decision', 'bug-fix', 'feature', 'config', 'learning') ⚠ free string with magic value `'time'` (Time Memory, see recall_upcoming) not listed among the examples — enum-vs-open-vocabulary decision should be explicit before freeze
   - `context_id` — string, format `uuid`

@@ -94,7 +94,6 @@ from utils.exceptions import (
     FeatureNotAvailableError,
     MemoryGoneError,
     NotFoundException,
-    QuotaExceededError,
     ValidationError,
 )
 from utils.logger import get_logger
@@ -842,12 +841,9 @@ class MemoryService:
             + len(str(request.details or ""))
         )
         if content_size > MAX_CONTENT_SIZE:
-            from utils.exceptions import QuotaExceededError
+            from utils.exceptions import ContentSizeExceededError
 
-            raise QuotaExceededError(
-                f"Memory size {content_size:,} bytes exceeds limit {MAX_CONTENT_SIZE:,} bytes (1MB). "
-                f"Please reduce content size or split into multiple memories."
-            )
+            raise ContentSizeExceededError(actual=content_size, limit=MAX_CONTENT_SIZE)
 
         # Create memory ID first
         memory_id = uuid4()
@@ -1763,11 +1759,9 @@ class MemoryService:
             + len(str(next_details) if next_details is not None else "")
         )
         if content_size > MAX_CONTENT_SIZE:
-            from utils.exceptions import QuotaExceededError
+            from utils.exceptions import ContentSizeExceededError
 
-            raise QuotaExceededError(
-                f"Memory size {content_size:,} bytes exceeds limit {MAX_CONTENT_SIZE:,} bytes (1MB)."
-            )
+            raise ContentSizeExceededError(actual=content_size, limit=MAX_CONTENT_SIZE)
 
     def _update_apply_fields(
         self,
@@ -1959,10 +1953,9 @@ class MemoryService:
             + len(str(next_details) if next_details is not None else "")
         )
         if content_size > MAX_CONTENT_SIZE:
-            raise QuotaExceededError(
-                f"Memory size {content_size:,} bytes exceeds limit "
-                f"{MAX_CONTENT_SIZE:,} bytes (1MB)."
-            )
+            from utils.exceptions import ContentSizeExceededError
+
+            raise ContentSizeExceededError(actual=content_size, limit=MAX_CONTENT_SIZE)
 
     def _patch_apply_fields(
         self,

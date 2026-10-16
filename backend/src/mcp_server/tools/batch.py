@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import difflib
 import time
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
 from mcp.types import TextContent
@@ -41,7 +41,12 @@ from mcp_server.tools._helpers import (
     _touch_context_last_used,
     execute_with_timeout,
 )
-from mcp_server.tools.memory import parse_write_options, remember_request_from_args
+from mcp_server.tools.memory import (
+    PAYLOAD_HELP,
+    fit_summary,
+    parse_write_options,
+    remember_request_from_args,
+)
 from services.memory_service import (
     MAX_BATCH_ITEMS,
     BatchCommittedError,
@@ -49,7 +54,12 @@ from services.memory_service import (
     DedupeUnavailableError,
     DuplicateCandidateError,
 )
-from utils.exceptions import AuthorizationError, NotFoundException, QuotaExceededError
+from utils.exceptions import (
+    AuthorizationError,
+    ContentSizeExceededError,
+    NotFoundException,
+    QuotaExceededError,
+)
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -94,8 +104,16 @@ def _undeclared_keys(item: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _request_from_item(item: Any, batch_context_id: str) -> Any:
-    """A ``RememberRequest`` for one item, or a per-item error dict."""
+class ParsedItem(NamedTuple):
+    """One valid item: the request to write, and the response fields that
+    report a summary cut (``summary_truncated``, ``summary_original_length``)."""
+
+    request: Any
+    fitted: dict[str, Any]
+
+
+def _request_from_item(item: Any, batch_context_id: str) -> ParsedItem | dict[str, Any]:
+    """A ``ParsedItem`` for one item, or a per-item error dict."""
     if not isinstance(item, dict):
         return {"error": "validation_error", "message": "item must be an object"}
     undeclared = _undeclared_keys(item)
@@ -111,9 +129,14 @@ def _request_from_item(item: Any, batch_context_id: str) -> Any:
         }
     missing = [f for f in _REQUIRED if f not in item]
     if missing:
-        return {"error": "missing_fields", "message": f"Missing: {', '.join(missing)}"}
+        return {
+            "error": "missing_fields",
+            "message": f"Missing: {', '.join(missing)}",
+            "help": PAYLOAD_HELP,
+        }
+    item, fitted = fit_summary(item)
     try:
-        return remember_request_from_args(item)
+        return ParsedItem(remember_request_from_args(item), fitted)
     except ValidationError as e:
         return {"error": "validation_error", "message": _format_validation_error(e)}
 
@@ -124,6 +147,13 @@ def item_error(exc: BaseException) -> dict[str, Any]:
         return {"status": "duplicate_candidate", "candidate": exc.candidate}
     if isinstance(exc, DedupeUnavailableError):
         return {"error": "dedupe_unavailable", "message": "duplicate check unavailable"}
+    if isinstance(exc, ContentSizeExceededError):
+        return {
+            "error": "payload_too_large",
+            "message": exc.message,
+            "limit": exc.details["limit"],
+            "actual": exc.details["actual"],
+        }
     if isinstance(exc, QuotaExceededError):
         return {"error": "quota_exceeded", "message": str(exc)}
     if isinstance(exc, AuthorizationError):
@@ -289,9 +319,12 @@ async def handle_remember_batch(
             results: list[dict[str, Any]] = []
             note: dict[str, Any] = {}
             if atomic:
+                # Every item is valid here: an invalid one refused the batch above.
+                valid = [p for p in parsed if isinstance(p, ParsedItem)]
                 try:
                     responses = await execute_with_timeout(
-                        service.remember_many(parsed, **write), operation_name="remember_batch"
+                        service.remember_many([p.request for p in valid], **write),
+                        operation_name="remember_batch",
                     )
                 except BatchCommittedError as e:
                     # #1873: the time limit passed AFTER the commit. The rows
@@ -358,7 +391,7 @@ async def handle_remember_batch(
                     ]
                 else:
                     results = [
-                        _finish(i, _success_item(r, verbose=verbose))
+                        _finish(i, {**_success_item(r, verbose=verbose), **valid[i].fitted})
                         for i, r in enumerate(responses)
                     ]
             else:
@@ -371,13 +404,13 @@ async def handle_remember_batch(
                     if tags_normalize
                     else None
                 )
-                for i, request in enumerate(parsed):
-                    if isinstance(request, dict):
-                        results.append(_finish(i, request))
+                for i, parsed_item in enumerate(parsed):
+                    if isinstance(parsed_item, dict):
+                        results.append(_finish(i, parsed_item))
                         continue
                     try:
                         result = await execute_with_timeout(
-                            service.remember(request, **write, tag_canonical=canonical),
+                            service.remember(parsed_item.request, **write, tag_canonical=canonical),
                             operation_name="remember",
                         )
                     except Exception as exc:  # per item: the batch goes on
@@ -385,7 +418,11 @@ async def handle_remember_batch(
                         rolled_back = True
                         results.append(_finish(i, item_error(exc)))
                     else:
-                        results.append(_finish(i, _success_item(result, verbose=verbose)))
+                        results.append(
+                            _finish(
+                                i, {**_success_item(result, verbose=verbose), **parsed_item.fitted}
+                            )
+                        )
             await _log_tool_usage(
                 db,
                 user_id,

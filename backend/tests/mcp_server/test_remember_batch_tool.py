@@ -20,6 +20,7 @@ from mcp_server.tools._annotations import TOOL_ANNOTATIONS
 from mcp_server.tools._errors import _VERIFY_WITH
 from mcp_server.tools._profiles import CORE_TOOLS
 from mcp_server.tools.batch import (
+    ParsedItem,
     _envelope,
     _request_from_item,
     handle_remember_batch,
@@ -34,7 +35,7 @@ from services.memory_service import (
     DedupeUnavailableError,
     DuplicateCandidateError,
 )
-from utils.exceptions import AuthorizationError, QuotaExceededError
+from utils.exceptions import AuthorizationError, ContentSizeExceededError, QuotaExceededError
 
 CTX = "00000000-0000-4000-8000-000000000001"
 ITEM = {"summary": "a reusable conclusion", "content": "c", "type": "note"}
@@ -78,7 +79,9 @@ def test_write_options_default_and_validate():
 
 
 def test_item_parsing_builds_a_request_or_names_the_problem():
-    assert isinstance(_request_from_item(ITEM, CTX), RememberRequest)
+    parsed = _request_from_item(ITEM, CTX)
+    assert isinstance(parsed, ParsedItem) and isinstance(parsed.request, RememberRequest)
+    assert parsed.fitted == {}
     assert _request_from_item("not an object", CTX)["error"] == "validation_error"
     assert _request_from_item({"summary": "s" * 20}, CTX)["error"] == "missing_fields"
     other = _request_from_item({**ITEM, "context_id": "0" * 32}, CTX)
@@ -105,12 +108,12 @@ def test_an_item_key_remember_does_not_declare_is_refused_not_dropped():
     # Every argument remember declares (but the batch-level ones) is still an item key.
     assert isinstance(
         _request_from_item({**ITEM, "context_id": CTX, "importance": 0.9, "tags": ["a"]}, CTX),
-        RememberRequest,
+        ParsedItem,
     )
 
 
 def test_item_values_get_remembers_json_string_coercion():
-    request = _request_from_item({**ITEM, "tags": '["a", "b"]', "details": '{"k": 1}'}, CTX)
+    request = _request_from_item({**ITEM, "tags": '["a", "b"]', "details": '{"k": 1}'}, CTX).request
     assert isinstance(request, RememberRequest)
     assert request.tags == ["a", "b"] and request.details == {"k": 1}
 
@@ -122,6 +125,9 @@ def test_item_errors_map_onto_the_remember_error_codes():
     }
     assert item_error(DedupeUnavailableError("down"))["error"] == "dedupe_unavailable"
     assert item_error(QuotaExceededError("full"))["error"] == "quota_exceeded"
+    size = item_error(ContentSizeExceededError(actual=1_000_001, limit=1_000_000))
+    assert size["error"] == "payload_too_large"
+    assert (size["limit"], size["actual"]) == (1_000_000, 1_000_001)
     assert item_error(AuthorizationError("no"))["error"] == "forbidden"
     assert item_error(ValueError("details.trigger must …"))["error"] == "validation_error"
     assert item_error(RuntimeError("boom"))["error"] == "internal_error"

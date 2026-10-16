@@ -43,6 +43,7 @@ from utils.exceptions import (
     AdminProtectionError,
     AuthorizationError,
     CapacityLockedError,
+    ContentSizeExceededError,
     DatabaseConnectionError,
     ExternalServiceError,
     FeatureNotAvailableError,
@@ -307,6 +308,12 @@ def _refusal(exc: BaseException) -> tuple[str, str, dict[str, Any]]:
         details = {k: v for k, v in exc.details.items() if v is not None}
         details["help"] = exc.help_text
         return "capacity_locked", exc.message, details
+    if isinstance(exc, ContentSizeExceededError):
+        return (
+            "payload_too_large",
+            exc.message,
+            {"limit": exc.details["limit"], "actual": exc.details["actual"]},
+        )
     if isinstance(exc, QuotaExceededError):
         code = "quota_exceeded"
     elif isinstance(exc, RateLimitError):

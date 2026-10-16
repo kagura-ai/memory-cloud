@@ -4,6 +4,7 @@ Extracted from tools.py for modularity (Issue #7).
 """
 
 import logging
+import re
 import time
 from typing import Any
 from uuid import UUID
@@ -42,7 +43,12 @@ from services.memory_service import (
     DuplicateCandidateError,
 )
 from utils.datetime import to_utc_iso
-from utils.exceptions import AuthorizationError, NotFoundException, QuotaExceededError
+from utils.exceptions import (
+    AuthorizationError,
+    ContentSizeExceededError,
+    NotFoundException,
+    QuotaExceededError,
+)
 from utils.response_budget import (
     DEFAULT_MAX_CHARS,
     BudgetArgumentError,
@@ -119,6 +125,67 @@ def _guardrail_author_denied(operation: str) -> list[TextContent]:
     )
 
 
+# A sentence ends at one of these followed by whitespace or the end of the text.
+_SENTENCE_END = re.compile(r"[.!?](?=\s|$)|[。！？]|\n")
+# Below this many characters a sentence boundary is not worth the loss; cut at a word.
+_SUMMARY_KEEP_AT_LEAST = 200
+# RememberRequest.summary min_length — a cut never goes below it.
+_SUMMARY_MIN_LENGTH = 10
+PAYLOAD_HELP = (
+    "One memory holds up to 1,000,000 characters across summary, context_summary, "
+    "content and details. Split long material into several memories, one topic each, "
+    "and keep the summary to one or two sentences."
+)
+MISSING_FIELDS_HELP = (
+    "summary, content and type are required. If the call carried a large payload, the "
+    "client may have dropped fields: " + PAYLOAD_HELP
+)
+
+
+def fit_summary(args: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Cut a too-long ``summary`` to ``SUMMARY_MAX_LENGTH`` instead of refusing it.
+
+    The cut lands on the last sentence end at or before the cap (at least
+    ``_SUMMARY_KEEP_AT_LEAST`` characters in), else on a word boundary with
+    ``…``. The full text is kept: when ``content`` does not already contain it,
+    it is prepended there, so nothing the caller wrote is lost — the summary is
+    what recall matches, the content is what reference() reads. Returns the
+    arguments to build the request from and the response fields that report the
+    cut (``summary_truncated``, ``summary_original_length``), or ``({}, {})``
+    untouched when the summary fits. Non-string summaries pass through for the
+    schema to refuse.
+    """
+    from models.schemas import SUMMARY_MAX_LENGTH
+
+    summary = args.get("summary")
+    if not isinstance(summary, str) or len(summary) <= SUMMARY_MAX_LENGTH:
+        return args, {}
+    head = summary[:SUMMARY_MAX_LENGTH]
+    cut = None
+    for match in _SENTENCE_END.finditer(head):
+        if match.start() >= _SUMMARY_KEEP_AT_LEAST:
+            cut = head[: match.end()].rstrip()
+    if cut is None:
+        words = head[: SUMMARY_MAX_LENGTH - 1].rsplit(None, 1)
+        stem = (
+            words[0]
+            if len(words) == 2 and len(words[0]) >= _SUMMARY_KEEP_AT_LEAST
+            else head[: SUMMARY_MAX_LENGTH - 1]
+        ).rstrip()
+        if len(stem) < _SUMMARY_MIN_LENGTH:
+            # Mostly whitespace: keep the raw head so the schema's minimum still holds.
+            stem = head[: SUMMARY_MAX_LENGTH - 1]
+        cut = stem + "…"
+    fitted = dict(args)
+    fitted["summary"] = cut
+    content = args.get("content")
+    # Whitespace-insensitive: a content that already opens with the summary
+    # (CRLF, wrapped lines) is not given a second copy.
+    if isinstance(content, str) and " ".join(summary.split()) not in " ".join(content.split()):
+        fitted["content"] = summary.strip() + "\n\n" + content if content else summary.strip()
+    return fitted, {"summary_truncated": True, "summary_original_length": len(summary)}
+
+
 def remember_request_from_args(args: dict[str, Any]) -> Any:
     """The ``RememberRequest`` for ``remember``'s arguments — also one ``remember_batch``
     item, so a new ``remember`` field reaches both tools from this one place."""
@@ -164,6 +231,7 @@ async def handle_remember(
             "missing_fields",
             f"Missing required fields: {', '.join(missing)}",
             missing_fields=missing,
+            help=MISSING_FIELDS_HELP,
         )
 
     from db.base import get_db
@@ -176,6 +244,7 @@ async def handle_remember(
         tags_normalize, dedupe = parse_write_options(args)
     except ValueError as e:
         return _error_response("validation_error", str(e))
+    args, summary_fit = fit_summary(args)
     request = remember_request_from_args(args)
 
     start_time = time.time()
@@ -229,6 +298,9 @@ async def handle_remember(
                             # #1502: advisory recall-ability hints; absent when
                             # the write looks fine.
                             **_lint_response_field(result.lint),
+                            # The summary was over the cap and cut at a sentence
+                            # boundary; the full text went into content.
+                            **summary_fit,
                             **_context_response_fields(current_context),
                         }
                     ),
@@ -273,6 +345,20 @@ async def handle_remember(
         except _ContextNotFoundError as e:
             await db.rollback()
             return e.to_response()
+        except ContentSizeExceededError as e:
+            # A request-size limit, not a plan quota: the caller splits or
+            # shortens, and the numbers say by how much.
+            await db.rollback()
+            await _log_tool_usage(
+                db, user_id, "remember", start_time, 413, args.get("context_id"), workspace_id
+            )
+            return _error_response(
+                "payload_too_large",
+                e.message,
+                limit=e.details["limit"],
+                actual=e.details["actual"],
+                help=PAYLOAD_HELP,
+            )
         except QuotaExceededError as e:
             # The quota family (total memory_limit, #1549 daily memories_per_day)
             # is a 429, not a crash: same ``quota_exceeded`` envelope as

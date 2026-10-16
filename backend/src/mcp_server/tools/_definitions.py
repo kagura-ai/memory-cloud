@@ -59,7 +59,7 @@ Returns: {status, binding: {key_id, name, context_id, context_name, created_at, 
             "name": "remember",
             "description": """Store a new memory (a decision, fix, pattern, fact or note) for later recall. To edit a memory whose id you have use update_memory; to replace an outdated fact pass supersedes=<old_memory_id>.
 Write summary as the reusable conclusion with the terms a future search would use; content holds the full text. SECURITY: never store secrets, credentials or PII — refuse and ask the user to redact; coordinates go only in details.location, never in context.
-Returns: {status, memory_id, scope, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days}, lint?, — or, with dedupe='check', {status: 'duplicate_candidate', candidate}; plus context_id, context_name, context_display_name, context_is_private, context_is_locked}. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, validation_error.
+Returns: {status, memory_id, scope, persistence?: {scope, committed, promotes_via, consolidation_archive_min_age_days}, lint?, — or, with dedupe='check', {status: 'duplicate_candidate', candidate}; plus context_id, context_name, context_display_name, context_is_private, context_is_locked}. summary_truncated + summary_original_length: the summary was cut to 500 chars. Committed before it returns; a forgotten supersedes surfaces later as a supersede_candidate on recall()/reference(). Errors: quota_exceeded, payload_too_large (limit, actual: the memory is over 1,000,000 chars — split it), validation_error.
 Manual: guide(["remember"]).""",
             "inputSchema": {
                 "type": "object",
@@ -80,7 +80,7 @@ Manual: guide(["remember"]).""",
                     },
                     "summary": {
                         "type": "string",
-                        "description": "Search summary, 10-500 chars (best 100-250). This is what recall matches.",
+                        "description": "Search summary, 10-500 chars (best 100-250); longer is cut at a sentence end (summary_truncated; full text kept in content). This is what recall matches.",
                     },
                     "content": {
                         "type": "string",

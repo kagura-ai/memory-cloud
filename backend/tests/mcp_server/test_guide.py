@@ -178,13 +178,16 @@ def test_every_usage_note_in_the_docs_has_a_guide_topic():
     ("tool", "args", "error"),
     [
         # pydantic Request model → the dispatcher's invalid_argument envelope
+        # schema-level out-of-range value (a 600-char summary is no longer an
+        # error: remember cuts it and reports summary_truncated)
         (
             "remember",
             {
                 "context_id": "00000000-0000-4000-8000-000000000001",
-                "summary": "x" * 600,
+                "summary": "a summary long enough",
                 "content": "c",
                 "type": "note",
+                "importance": 1.5,
             },
             "invalid_argument",
         ),

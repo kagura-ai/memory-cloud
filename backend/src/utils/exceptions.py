@@ -748,6 +748,24 @@ class QuotaExceededError(MemoryCloudException):
         )
 
 
+class ContentSizeExceededError(QuotaExceededError):
+    """One memory's text (summary + context_summary + content + details) is over
+    ``MAX_CONTENT_SIZE``. A request-size limit no plan lifts — it stays in the
+    quota family for the REST routes that already map it, carries ``limit`` and
+    ``actual`` in ``details``, and the MCP tools answer it as
+    ``payload_too_large`` with those numbers so the caller can split or shorten
+    instead of guessing.
+    """
+
+    def __init__(self, *, actual: int, limit: int) -> None:
+        super().__init__(
+            f"Memory size {actual:,} characters exceeds limit {limit:,} characters (1 MB). "
+            "Split the content across several memories (one topic each) or shorten it.",
+            limit=limit,
+            actual=actual,
+        )
+
+
 class EmbeddingSpendCapExceeded(QuotaExceededError):
     """BYOK embedding spend cap reached (429).
 
