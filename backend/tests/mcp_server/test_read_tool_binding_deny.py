@@ -12,8 +12,8 @@ next read tool cannot thread an unknown operation.
 
 from __future__ import annotations
 
+import ast
 import json
-import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -27,11 +27,6 @@ from models.memory_access_event import MAE_OPERATIONS, MemoryAccessEvent
 from services.permission_service import PermissionService
 
 _TOOLS_DIR = Path(__file__).resolve().parents[2] / "src" / "mcp_server" / "tools"
-_RESOLVER_CALL = re.compile(
-    r"_resolve_context(?:_for_read)?\((?P<args>[^()]*)\)", re.MULTILINE | re.DOTALL
-)
-_OPERATION_KW = re.compile(r"operation\s*=\s*\"(?P<op>[^\"]+)\"")
-
 # Every read operation the MCP read tools thread into _resolve_context_for_read.
 READ_OPERATIONS = [
     "recall",
@@ -156,12 +151,40 @@ async def test_list_and_changes_since_enforce_deny_envelope(name):
     assert row.operation == name
 
 
+def _callee_name(func: ast.expr) -> str | None:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
 def test_every_threaded_operation_is_in_the_mae_vocabulary():
-    found: dict[str, str] = {}
+    """Every ``operation=`` passed to a ``_resolve_context*`` pre-gate must be a
+    string literal in MAE_OPERATIONS — a computed value cannot be checked
+    statically, so it fails here too."""
+    found: list[tuple[str, str]] = []
+    problems: list[str] = []
     for path in sorted(_TOOLS_DIR.rglob("*.py")):
-        for call in _RESOLVER_CALL.finditer(path.read_text(encoding="utf-8")):
-            for kw in _OPERATION_KW.finditer(call.group("args")):
-                found[kw.group("op")] = path.name
-    assert {"list", "changes_since", "recall", "explore"} <= set(found)  # the scan sees them
-    unknown = {op: where for op, where in found.items() if op not in MAE_OPERATIONS}
-    assert not unknown, f"operation(s) outside MAE_OPERATIONS: {unknown}"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _callee_name(node.func)
+            if name is None or not name.startswith("_resolve_context"):
+                continue
+            for kw in node.keywords:
+                if kw.arg != "operation":
+                    continue
+                where = f"{path.name}:{kw.value.lineno}"
+                value = kw.value
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    found.append((value.value, where))
+                    if value.value not in MAE_OPERATIONS:
+                        problems.append(f"{where}: {value.value!r} is not in MAE_OPERATIONS")
+                else:
+                    problems.append(f"{where}: operation= is not a string literal")
+    # The scan must actually see the call sites, or it passes vacuously.
+    assert len(found) >= 8, found
+    assert {"list", "changes_since"} <= {op for op, _ in found}
+    assert not problems, "\n".join(problems)
