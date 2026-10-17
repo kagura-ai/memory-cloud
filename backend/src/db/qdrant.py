@@ -1828,6 +1828,9 @@ class PointRef:
     # has such a process indexing a backlog, its in-flight points get the
     # pre-#1869 behaviour (no worse than before), and only for that overlap.
     written_at: datetime | None = None
+    # A content chunk point (#2015): the memory id it belongs to. Its own id
+    # is derived from (memory id, chunk index), so the row is ``chunk_of``.
+    chunk_of: str | None = None
 
 
 def _payload_datetime(raw: Any) -> datetime | None:
@@ -1864,12 +1867,14 @@ def _point_ref(point: Any) -> PointRef:
             if stamp is not None
         ]
         written_at = max(stamps) if stamps else None
+    chunk_of = payload.get(CHUNK_OF_FIELD)
     return PointRef(
         point_id=str(point.id),
         context_id=payload.get("context_id"),
         is_resource=is_resource,
         resource_key=resource_key,
         written_at=written_at,
+        chunk_of=str(chunk_of) if chunk_of else None,
     )
 
 
@@ -1916,6 +1921,7 @@ async def scroll_point_refs(
                     "version",
                     "updated_at",
                     "indexed_at",
+                    CHUNK_OF_FIELD,
                 ],
                 with_vectors=False,
             )

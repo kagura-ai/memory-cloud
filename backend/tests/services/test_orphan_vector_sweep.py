@@ -41,7 +41,13 @@ def _memory(**overrides) -> Memory:
 
 
 def _ref(
-    point_id, *, context_id=None, is_resource=False, resource_key=None, written_at=None
+    point_id,
+    *,
+    context_id=None,
+    is_resource=False,
+    resource_key=None,
+    written_at=None,
+    chunk_of=None,
 ) -> PointRef:
     return PointRef(
         point_id=str(point_id),
@@ -49,6 +55,7 @@ def _ref(
         is_resource=is_resource,
         resource_key=resource_key,
         written_at=written_at,
+        chunk_of=str(chunk_of) if chunk_of else None,
     )
 
 
@@ -395,6 +402,60 @@ class TestWhatCountsAsAnOrphan:
 
         assert result.orphans == 0
         assert store.deleted == []
+
+
+class TestContentChunkPoints:
+    """#2015: a content chunk point (``chunk_of`` set) follows its memory row."""
+
+    @pytest.mark.asyncio
+    async def test_chunks_of_a_live_memory_are_kept(self, db_session):
+        live = _memory()
+        db_session.add(live)
+        await db_session.flush()
+        store = _FakeStore(
+            [_ref(live.id), _ref(uuid4(), chunk_of=live.id), _ref(uuid4(), chunk_of=live.id)]
+        )
+
+        result = await _sweep(db_session, store, dry_run=False)
+
+        assert result.orphans == 0
+        assert store.deleted == []
+
+    @pytest.mark.asyncio
+    async def test_chunk_of_a_missing_row_is_an_orphan(self, db_session):
+        chunk_a, chunk_b = uuid4(), uuid4()
+        gone = uuid4()
+        store = _FakeStore([_ref(chunk_a, chunk_of=gone), _ref(chunk_b, chunk_of=gone)])
+
+        result = await _sweep(db_session, store, dry_run=False)
+
+        assert sorted(store.deleted) == sorted([str(chunk_a), str(chunk_b)])
+        assert result.collections[0].no_row == 2
+
+    @pytest.mark.asyncio
+    async def test_chunk_of_an_old_tombstone_is_an_orphan_and_a_fresh_one_is_kept(self, db_session):
+        fresh = _memory(deleted_at=utcnow() - timedelta(minutes=5))
+        old = _memory(deleted_at=utcnow() - timedelta(hours=2))
+        db_session.add_all([fresh, old])
+        await db_session.flush()
+        fresh_chunk, old_chunk = uuid4(), uuid4()
+        store = _FakeStore([_ref(fresh_chunk, chunk_of=fresh.id), _ref(old_chunk, chunk_of=old.id)])
+
+        result = await _sweep(db_session, store, dry_run=False, grace=timedelta(hours=1))
+
+        assert store.deleted == [str(old_chunk)]
+        assert result.collections[0].tombstoned == 1
+
+    def test_point_ref_reads_chunk_of(self):
+        from types import SimpleNamespace
+
+        from db.qdrant import _point_ref
+
+        mid = str(uuid4())
+        ref = _point_ref(SimpleNamespace(id="p", payload={"chunk_of": mid, "context_id": "c"}))
+        assert ref.chunk_of == mid
+        assert ref.is_resource is False
+        assert _point_ref(SimpleNamespace(id="p", payload={})).chunk_of is None
 
 
 class TestSafetyRails:

@@ -152,9 +152,11 @@ async def _classify(db: AsyncSession, refs: list[PointRef], cutoff: datetime) ->
     """Map the orphans among ``refs`` to the reason they are orphans.
 
     Anything that cannot be decided — an id that is not a UUID, a resource
-    point with no ``context_id`` — is left out, i.e. kept.
+    point with no ``context_id`` — is left out, i.e. kept. A content chunk
+    point (#2015) is judged by the row it is a chunk of, like that memory's
+    own point.
     """
-    memory_ids: dict[UUID, str] = {}
+    memory_ids: dict[UUID, list[str]] = {}
     resource_contexts: dict[str, UUID] = {}
     for ref in refs:
         if ref.is_resource:
@@ -162,9 +164,9 @@ async def _classify(db: AsyncSession, refs: list[PointRef], cutoff: datetime) ->
             if context_id is not None:
                 resource_contexts[ref.point_id] = context_id
             continue
-        memory_id = _as_uuid(ref.point_id)
+        memory_id = _as_uuid(ref.chunk_of or ref.point_id)
         if memory_id is not None:
-            memory_ids[memory_id] = ref.point_id
+            memory_ids.setdefault(memory_id, []).append(ref.point_id)
 
     orphans: dict[str, str] = {}
 
@@ -173,13 +175,17 @@ async def _classify(db: AsyncSession, refs: list[PointRef], cutoff: datetime) ->
             select(Memory.id, Memory.deleted_at).where(Memory.id.in_(list(memory_ids)))
         )
         deleted_at_by_id = {row.id: row.deleted_at for row in rows}
-        for memory_id, point_id in memory_ids.items():
+        for memory_id, point_ids in memory_ids.items():
+            reason: str | None = None
             if memory_id not in deleted_at_by_id:
-                orphans[point_id] = REASON_NO_ROW
+                reason = REASON_NO_ROW
             else:
                 deleted_at = deleted_at_by_id[memory_id]
                 if deleted_at is not None and deleted_at < cutoff:
-                    orphans[point_id] = REASON_TOMBSTONED
+                    reason = REASON_TOMBSTONED
+            if reason is not None:
+                for point_id in point_ids:
+                    orphans[point_id] = reason
 
     if resource_contexts:
         context_ids = set(resource_contexts.values())
