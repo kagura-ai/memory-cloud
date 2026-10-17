@@ -168,9 +168,16 @@ class ContextSearchConfigRepository:
             setattr(config, key, value)
 
         # #2015 invariant: a context with content_chunks_enabled off has no
-        # chunk points. Purge them BEFORE the commit: if the purge fails the
-        # update is rolled back and the flag stays on, never off-with-chunks.
-        if chunks_were_on and getattr(config, "content_chunks_enabled", False) is not True:
+        # chunk points, and recall only reads chunk points while it is on.
+        # Any flag change purges them BEFORE the commit — off: if the purge
+        # fails the update is rolled back and the flag stays on; on: chunks a
+        # racing writer left while it was off never become visible. Turning
+        # it off purges again AFTER the commit, for a writer that read "on"
+        # between the first purge and the commit (the writer also re-reads
+        # the flag right before its upsert).
+        chunks_now_on = getattr(config, "content_chunks_enabled", False) is True
+        flag_changed = chunks_were_on != chunks_now_on
+        if flag_changed:
             try:
                 await self._purge_chunk_points(context_id, config)
             except Exception:
@@ -179,6 +186,17 @@ class ContextSearchConfigRepository:
 
         await self.db.commit()
         await self.db.refresh(config)
+        if flag_changed and not chunks_now_on:
+            try:
+                await self._purge_chunk_points(context_id, config)
+            except Exception as exc:  # noqa: BLE001 — flag is committed off
+                # Leftovers stay invisible (recall reads chunks only while the
+                # flag is on) and are purged when it is turned on again.
+                logger.warning(
+                    "content_chunks_post_commit_purge_failed",
+                    context_id=str(context_id),
+                    error_class=type(exc).__name__,
+                )
         if "content_chunks_enabled" in update_dict:
             from services.content_chunk_writer import forget_cached_chunk_flag
 
@@ -241,6 +259,8 @@ class ContextSearchConfigRepository:
             reinforce_enabled=True,
             reinforce_max_boost=0.15,
             reinforce_require_host_arbitration=False,
+            # #2015: chunks off (update purges the context's chunk points).
+            content_chunks_enabled=False,
         )
 
         config = await self.update(context_id, defaults)

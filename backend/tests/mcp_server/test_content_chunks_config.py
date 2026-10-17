@@ -53,10 +53,13 @@ async def test_partial_update_keeps_enabled():
 
 @pytest.mark.asyncio
 async def test_explicit_flag_is_applied():
+    from unittest.mock import patch
+
     config = SimpleNamespace(content_chunks_enabled=False)
     repo = ContextSearchConfigRepository(AsyncMock())
     repo.get_by_context = AsyncMock(return_value=config)
-    await repo.update(uuid4(), ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=True))
+    with patch.object(repo, "_purge_chunk_points", AsyncMock()):
+        await repo.update(uuid4(), ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=True))
     assert config.content_chunks_enabled is True
 
 
@@ -103,17 +106,43 @@ async def test_turning_the_flag_off_purges_the_contexts_chunk_points():
     ws, ctx = uuid4(), uuid4()
     config = _flagged_config(True)
     repo, db = _repo_with(config, ws)
-    with patch("db.qdrant.purge_context_chunk_points", AsyncMock()) as purge:
+    order = []
+    db.commit.side_effect = lambda: order.append("commit")
+    with patch(
+        "db.qdrant.purge_context_chunk_points",
+        AsyncMock(side_effect=lambda *a: order.append("purge")),
+    ) as purge:
         await repo.update(ctx, ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=False))
-    purge.assert_awaited_once_with(
-        str(ws), str(ctx), get_collection_name("text-embedding-3-small", 512)
+    # Before the commit (a failure keeps the flag on) and again after it, for
+    # a writer that read "on" in between (self-repairing invariant).
+    assert order == ["purge", "commit", "purge"]
+    assert purge.await_args.args == (
+        str(ws),
+        str(ctx),
+        get_collection_name("text-embedding-3-small", 512),
     )
-    db.commit.assert_awaited()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("before", "after"), [(True, True), (False, False), (False, True)])
-async def test_no_purge_without_an_on_to_off_flip(before, after):
+async def test_turning_the_flag_on_purges_leftovers_before_the_commit():
+    """#2015: chunks a racing writer left while the flag was off are removed
+    before the flag makes chunk points visible to recall again."""
+    from unittest.mock import patch
+
+    repo, db = _repo_with(_flagged_config(False), uuid4())
+    order = []
+    db.commit.side_effect = lambda: order.append("commit")
+    with patch(
+        "db.qdrant.purge_context_chunk_points",
+        AsyncMock(side_effect=lambda *a: order.append("purge")),
+    ):
+        await repo.update(uuid4(), ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=True))
+    assert order == ["purge", "commit"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("before", "after"), [(True, True), (False, False)])
+async def test_no_purge_without_a_flag_change(before, after):
     from unittest.mock import patch
 
     repo, _ = _repo_with(_flagged_config(before), uuid4())
@@ -137,3 +166,30 @@ async def test_a_failed_purge_keeps_the_flag_on():
         await repo.update(uuid4(), ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=False))
     db.commit.assert_not_awaited()
     db.rollback.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_post_commit_purge_does_not_fail_the_update():
+    """The flag is committed off; leftovers are removed by the purge when it is
+    turned on again, and recall never reads chunks while it is off."""
+    from unittest.mock import patch
+
+    repo, db = _repo_with(_flagged_config(True), uuid4())
+    with patch(
+        "db.qdrant.purge_context_chunk_points",
+        AsyncMock(side_effect=[None, RuntimeError("down")]),
+    ):
+        await repo.update(uuid4(), ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=False))
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reset_to_default_turns_chunks_off_and_purges():
+    """#2015: a reset means the documented defaults — chunks off."""
+    from unittest.mock import patch
+
+    repo, _ = _repo_with(_flagged_config(True), uuid4())
+    with patch("db.qdrant.purge_context_chunk_points", AsyncMock()) as purge:
+        config = await repo.reset_to_default(uuid4())
+    assert config.content_chunks_enabled is False
+    assert purge.await_count == 2
