@@ -67,3 +67,73 @@ def test_mcp_tool_schema_exposes_the_flag():
     prop = tool["inputSchema"]["properties"]["content_chunks_enabled"]
     assert prop["type"] == "boolean"
     assert "content_chunks_enabled" in tool["description"]
+
+
+def _flagged_config(enabled: bool):
+    return SimpleNamespace(
+        content_chunks_enabled=enabled,
+        semantic_weight=0.6,
+        bm25_weight=0.4,
+        fetch_factor=3,
+        use_rerank=False,
+        embedding_model="text-embedding-3-small",
+        embedding_dimensions=512,
+    )
+
+
+def _repo_with(config, workspace_id):
+    from unittest.mock import MagicMock
+
+    db = AsyncMock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = workspace_id
+    db.execute = AsyncMock(return_value=result)
+    repo = ContextSearchConfigRepository(db)
+    repo.get_by_context = AsyncMock(return_value=config)
+    return repo, db
+
+
+@pytest.mark.asyncio
+async def test_turning_the_flag_off_purges_the_contexts_chunk_points():
+    """#2015 invariant: a context with the flag off has no chunk points."""
+    from unittest.mock import patch
+
+    from db.qdrant import get_collection_name
+
+    ws, ctx = uuid4(), uuid4()
+    config = _flagged_config(True)
+    repo, db = _repo_with(config, ws)
+    with patch("db.qdrant.purge_context_chunk_points", AsyncMock()) as purge:
+        await repo.update(ctx, ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=False))
+    purge.assert_awaited_once_with(
+        str(ws), str(ctx), get_collection_name("text-embedding-3-small", 512)
+    )
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("before", "after"), [(True, True), (False, False), (False, True)])
+async def test_no_purge_without_an_on_to_off_flip(before, after):
+    from unittest.mock import patch
+
+    repo, _ = _repo_with(_flagged_config(before), uuid4())
+    with patch("db.qdrant.purge_context_chunk_points", AsyncMock()) as purge:
+        await repo.update(uuid4(), ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=after))
+    purge.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_purge_keeps_the_flag_on():
+    """Purge before commit: if the chunks cannot be removed, the flag stays on
+    (rolled back), so the invariant still holds."""
+    from unittest.mock import patch
+
+    config = _flagged_config(True)
+    repo, db = _repo_with(config, uuid4())
+    with (
+        patch("db.qdrant.purge_context_chunk_points", AsyncMock(side_effect=RuntimeError("x"))),
+        pytest.raises(RuntimeError),
+    ):
+        await repo.update(uuid4(), ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=False))
+    db.commit.assert_not_awaited()
+    db.rollback.assert_awaited()

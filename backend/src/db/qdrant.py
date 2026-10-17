@@ -1062,6 +1062,42 @@ async def delete_chunk_points(
         raise QdrantError(f"Failed to delete content chunks: {e}") from e
 
 
+async def purge_context_chunk_points(
+    workspace_id: str,
+    context_id: str,
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
+) -> None:
+    """Delete every content chunk point (#2015) of one context.
+
+    Run when a context turns ``content_chunks_enabled`` off, so the invariant
+    "flag off ⇒ no chunk points" holds. Summary and resource points are kept
+    (``chunk_of`` must be set). A no-op on a non-Qdrant store.
+
+    Raises:
+        QdrantError: If the delete fails.
+    """
+    if _active_store() is not None:
+        return
+    _validate_uuid_format(workspace_id, "workspace_id")
+    _validate_uuid_format(context_id, "context_id")
+    client = get_qdrant_client()
+    try:
+        await client.delete(
+            collection_name=collection_name,
+            points_selector=FilterSelector(
+                filter=Filter(
+                    must=[
+                        FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
+                        FieldCondition(key="context_id", match=MatchValue(value=context_id)),
+                    ],
+                    must_not=[IsEmptyCondition(is_empty=PayloadField(key=CHUNK_OF_FIELD))],
+                )
+            ),
+        )
+    except Exception as e:
+        raise QdrantError(f"Failed to purge content chunks: {e}") from e
+
+
 async def delete_memory_from_qdrant(
     user_id: str,
     memory_id: UUID,

@@ -162,9 +162,20 @@ class ContextSearchConfigRepository:
             raise ValueError(error_msg)
 
         # Update fields
+        chunks_were_on = getattr(config, "content_chunks_enabled", False) is True
         update_dict = update_data.model_dump(exclude_unset=True)
         for key, value in update_dict.items():
             setattr(config, key, value)
+
+        # #2015 invariant: a context with content_chunks_enabled off has no
+        # chunk points. Purge them BEFORE the commit: if the purge fails the
+        # update is rolled back and the flag stays on, never off-with-chunks.
+        if chunks_were_on and getattr(config, "content_chunks_enabled", False) is not True:
+            try:
+                await self._purge_chunk_points(context_id, config)
+            except Exception:
+                await self.db.rollback()
+                raise
 
         await self.db.commit()
         await self.db.refresh(config)
@@ -180,6 +191,23 @@ class ContextSearchConfigRepository:
         )
 
         return config
+
+    async def _purge_chunk_points(self, context_id: UUID, config: ContextSearchConfig) -> None:
+        """Delete every content chunk point of a context (#2015)."""
+        from db.qdrant import get_collection_name, purge_context_chunk_points
+        from models.auth import Context
+
+        workspace_id = (
+            await self.db.execute(select(Context.workspace_id).where(Context.id == context_id))
+        ).scalar_one_or_none()
+        if workspace_id is None:
+            return
+        await purge_context_chunk_points(
+            str(workspace_id),
+            str(context_id),
+            get_collection_name(config.embedding_model, config.embedding_dimensions),
+        )
+        logger.info("content_chunks_purged", context_id=str(context_id))
 
     async def reset_to_default(self, context_id: UUID) -> ContextSearchConfig:
         """Reset configuration to default values.

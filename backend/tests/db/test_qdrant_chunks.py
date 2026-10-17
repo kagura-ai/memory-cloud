@@ -132,3 +132,25 @@ async def test_chunk_helpers_are_noops_on_a_non_qdrant_store(monkeypatch):
     await delete_chunk_points([uuid4()])
     client.upsert.assert_not_awaited()
     client.delete.assert_not_awaited()
+
+
+async def test_purge_context_chunk_points_targets_chunks_of_one_context(mock_client):
+    from db.qdrant import purge_context_chunk_points
+
+    await purge_context_chunk_points(WS, CTX, "coll")
+    kwargs = mock_client.delete.await_args.kwargs
+    assert kwargs["collection_name"] == "coll"
+    flt = kwargs["points_selector"].filter
+    keys = {c.key: c.match.value for c in flt.must}
+    assert keys == {"workspace_id": WS, "context_id": CTX}
+    assert [c.is_empty.key for c in flt.must_not] == [CHUNK_OF_FIELD]
+
+
+async def test_purge_context_chunk_points_is_a_noop_off_qdrant(monkeypatch):
+    from db.qdrant import purge_context_chunk_points
+
+    client = AsyncMock()
+    monkeypatch.setattr(qmod, "get_qdrant_client", lambda: client)
+    monkeypatch.setattr(qmod, "_active_store", lambda: object())
+    await purge_context_chunk_points(WS, CTX, "coll")
+    client.delete.assert_not_awaited()
