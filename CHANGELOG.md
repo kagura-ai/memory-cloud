@@ -4,6 +4,23 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.109.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.109.0) — 2026-10-17
+
+Supersede suggestions a client can trust: a deployment can put each cosine candidate to the Sleep judge before it surfaces, and the suggestion detection has its own switch instead of riding on the k-NN seed flag.
+
+### Added
+- **Verified supersede suggestions** ([#2016](https://github.com/kagura-ai/memory-cloud/issues/2016)): similarity alone proposed a supersede for every true update and for every sibling-entity negative on the eval slice (two depots with different opening hours read as one updated fact). With `SUPERSEDE_VERIFY_MODE=llm` the Sleep judge (`SLEEP_LLM_PROVIDER` / `SLEEP_LLM_MODEL`, same credential lane as Sleep) is asked once per pair whether the new memory replaces the old one: a `parallel` verdict is stored and never surfaced, a `supersedes` verdict at or above `SUPERSEDE_VERIFY_MIN_CONFIDENCE` (default 0.7) surfaces the candidate with `verified: true` on `recall` / `reference`, and `unclear`, a judge that is off (the default), over `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` (default 200 per workspace) or failing leaves the candidate as before. An unmoved pair is never re-judged on a re-embed; the judge never creates the edge. The `maintain` skill reads the flag.
+
+### Fixed
+- **Supersede suggestions have their own switch** ([#2010](https://github.com/kagura-ai/memory-cloud/issues/2010)): `KNN_SEED_ENABLED=false` switched off the suggestion detection too, silently. `SUPERSEDE_SUGGEST_ENABLED` (default `true`) now gates the post-embed detection alone; seed edges off still stores candidates, suggestions off still seeds edges, both off skips the neighbour query, and seeding on without a calibration row no longer runs a query nothing reads. One INFO line per off-transition.
+
+### Behaviour changes
+- `supersede_candidate` on MCP `recall` / `reference` omits `detected_at` when it has no value (it was `null`), per the "absent, never null" rule; `verified` is a key only when `true`.
+- Deployments with `KNN_SEED_ENABLED=false` now get supersede suggestions (`SUPERSEDE_SUGGEST_ENABLED=false` turns them off again).
+
+### Migration
+- None. New env switches are optional: `SUPERSEDE_SUGGEST_ENABLED`, `SUPERSEDE_VERIFY_MODE`, `SUPERSEDE_VERIFY_MIN_CONFIDENCE`, `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY` (production values belong to the devops repo).
+
 ## [v0.108.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.108.0) — 2026-10-16
 
 The MCP session-start path points agents at `bootstrap`, `recall` answers compactly by default, `remember` stops refusing a long summary or mislabelling a too-large memory, supersede suggestions fire on uncalibrated embedders, agent denies on `list` / `changes_since` are uniform again, and a deployment can opt in to pushing a user's guardrails at connect.
