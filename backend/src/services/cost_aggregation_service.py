@@ -27,6 +27,14 @@ unpriced, the bucket's cost is ``None`` so that partial totals don't
 look like real money. Usage figures (calls, tokens) are still surfaced
 even when cost is unknown.
 
+Event-shaped callers (#2019): ``llm_call_log`` rows of the callers in
+:data:`LEDGER_COST_SOURCES` (today the ingest-time supersede judge,
+``supersede_verify``) join as a third leg, tagged with their caller as the
+``source``. Their cost is the row's write-time snapshot (``cost_usd``), not a
+read-time pricing join; a row flagged ``call_metadata.pricing_miss`` makes its
+bucket "cost unknown" like an unpriced Sleep usage row. The other ledger
+callers (recall embeddings, reranks) are not part of this view yet.
+
 v1 limitation: pricing-tier lookup uses ``context_min_tokens=0`` because
 ``sleep_report_llm_usage`` does not store the per-call context window
 size. Multi-tier models (Gemini 2.5 Pro doubles past 200k) are
@@ -46,6 +54,7 @@ from uuid import UUID
 from sqlalchemy import RowMapping, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from models.llm_call_log import LLM_CALL_LOG_CALLERS
 from models.sleep import SLEEP_REPORT_PAID_BY_VALUES, SLEEP_REPORT_SOURCES
 from utils.logger import get_logger
 
@@ -57,6 +66,16 @@ logger = get_logger(__name__)
 # value is bound (not interpolated), passing arbitrary strings would 500
 # the query when ``date_trunc`` rejects them.
 VALID_PERIODS: tuple[str, ...] = ("day", "week", "month")
+
+# ``llm_call_log.caller`` values aggregated here (#2019), each surfacing as its
+# own ``source``. Interpolated into the SQL as literals — hardcoded constants,
+# never user input; each must be a member of ``LLM_CALL_LOG_CALLERS``.
+LEDGER_COST_SOURCES: tuple[str, ...] = ("supersede_verify",)
+assert set(LEDGER_COST_SOURCES) <= set(LLM_CALL_LOG_CALLERS)
+assert not set(LEDGER_COST_SOURCES) & set(SLEEP_REPORT_SOURCES)
+
+# Every value the ``source`` filter accepts.
+COST_SOURCES: tuple[str, ...] = (*SLEEP_REPORT_SOURCES, *LEDGER_COST_SOURCES)
 
 # Maximum span of a single aggregation request, in days. Mirrors the
 # frontend's UI soft cap (``CostDashboard.tsx`` ``MAX_LOOKBACK_DAYS = 365``)
@@ -222,25 +241,30 @@ def _build_filter_clauses(
     user_id: str | None,
     source: str | None,
     paid_by: str | None,
+    alias: str = "sr",
+    source_column: str = "source",
 ) -> tuple[list[str], dict[str, Any]]:
     """Return (where-fragment list, bound-param dict) for caller filters.
 
     Fragments are concatenated with ``AND`` into the WHERE clause; only
     bound parameter names appear in the strings, never user input.
+    ``alias`` / ``source_column`` are hardcoded at the call sites
+    (``sr`` / ``source`` for ``sleep_reports``, ``l`` / ``caller`` for
+    ``llm_call_log``); both legs bind the same parameter values.
     """
     clauses: list[str] = []
     params: dict[str, Any] = {}
     if workspace_id is not None:
-        clauses.append("sr.workspace_id = :workspace_id")
+        clauses.append(f"{alias}.workspace_id = :workspace_id")
         params["workspace_id"] = workspace_id
     if user_id is not None:
-        clauses.append("sr.user_id = :user_id")
+        clauses.append(f"{alias}.user_id = :user_id")
         params["user_id"] = user_id
     if source is not None:
-        clauses.append("sr.source = :source")
+        clauses.append(f"{alias}.{source_column} = :source")
         params["source"] = source
     if paid_by is not None:
-        clauses.append("sr.paid_by = :paid_by")
+        clauses.append(f"{alias}.paid_by = :paid_by")
         params["paid_by"] = paid_by
     return clauses, params
 
@@ -279,7 +303,9 @@ class CostAggregationService:
                 workspace-scoped route always sets this; admin route
                 leaves None to see all).
             user_id: Restrict to a single user.
-            source: Restrict to ``'sleep'`` or ``'analysis'``.
+            source: Restrict to one of :data:`COST_SOURCES` (``'sleep'``,
+                ``'analysis'``, or a ledger caller such as
+                ``'supersede_verify'``).
             paid_by: Restrict to ``'platform'`` or ``'byok'``.
 
         Returns:
@@ -298,8 +324,8 @@ class CostAggregationService:
         # validating against an allowlist preserves clear ValueError UX.
         if period not in VALID_PERIODS:
             raise ValueError(f"Invalid period {period!r}; must be one of {VALID_PERIODS}")
-        if source is not None and source not in SLEEP_REPORT_SOURCES:
-            raise ValueError(f"Invalid source {source!r}; must be one of {SLEEP_REPORT_SOURCES}")
+        if source is not None and source not in COST_SOURCES:
+            raise ValueError(f"Invalid source {source!r}; must be one of {COST_SOURCES}")
         if paid_by is not None and paid_by not in SLEEP_REPORT_PAID_BY_VALUES:
             raise ValueError(
                 f"Invalid paid_by {paid_by!r}; must be one of {SLEEP_REPORT_PAID_BY_VALUES}"
@@ -324,6 +350,24 @@ class CostAggregationService:
         )
         base_where = " AND ".join(
             ["sr.started_at >= :start", "sr.started_at < :end", *filter_clauses]
+        )
+        ledger_clauses, _ = _build_filter_clauses(
+            workspace_id=workspace_id,
+            user_id=user_id,
+            source=source,
+            paid_by=paid_by,
+            alias="l",
+            source_column="caller",
+        )
+        ledger_callers = ", ".join(f"'{c}'" for c in LEDGER_COST_SOURCES)
+        ledger_where = " AND ".join(
+            [
+                "l.occurred_at >= :start",
+                "l.occurred_at < :end",
+                f"l.caller IN ({ledger_callers})",
+                "l.call_type = 'completion'",
+                *ledger_clauses,
+            ]
         )
 
         params: dict[str, Any] = {
@@ -413,6 +457,31 @@ class CostAggregationService:
             FROM llm_per_row
             GROUP BY 1, 2, 3, 4, 5, 6
         ),
+        -- #2019: event-shaped callers from llm_call_log. Cost is the row's
+        -- write-time snapshot; a pricing_miss row makes the bucket NULL
+        -- (sticky, same BOOL_AND rule as the Sleep leg).
+        ledger_per_model AS (
+            SELECT
+                date_trunc(:period, l.occurred_at)::date AS period_start,
+                l.workspace_id,
+                l.user_id,
+                l.model,
+                l.caller AS source,
+                l.paid_by,
+                COUNT(*)::bigint                              AS calls,
+                COALESCE(SUM(l.input_tokens), 0)::bigint        AS tokens_in,
+                COALESCE(SUM(l.output_tokens), 0)::bigint       AS tokens_out,
+                COALESCE(SUM(l.cached_input_tokens), 0)::bigint AS tokens_cached_in,
+                COALESCE(SUM(l.cache_write_tokens), 0)::bigint  AS tokens_cache_write,
+                CASE
+                    WHEN BOOL_AND(COALESCE(l.call_metadata ->> 'pricing_miss', 'false') <> 'true')
+                    THEN SUM(l.cost_usd)::float8
+                    ELSE NULL::float8
+                END AS cost
+            FROM llm_call_log l
+            WHERE {ledger_where}
+            GROUP BY 1, 2, 3, 4, 5, 6
+        ),
         emb_per_row AS (
             SELECT
                 date_trunc(:period, sr.started_at)::date AS period_start,
@@ -458,6 +527,15 @@ class CostAggregationService:
             0::bigint AS embedding_tokens,
             cost
         FROM llm_per_model
+        UNION ALL
+        SELECT
+            'llm'::text AS kind,
+            period_start, workspace_id, user_id,
+            model, source, paid_by,
+            calls, tokens_in, tokens_out, tokens_cached_in, tokens_cache_write,
+            0::bigint AS embedding_tokens,
+            cost
+        FROM ledger_per_model
         UNION ALL
         SELECT
             'emb'::text AS kind,

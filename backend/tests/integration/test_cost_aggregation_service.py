@@ -664,3 +664,186 @@ async def test_window_upper_bound_includes_late_day_records(db_session):
     assert row.period_start == date(2026, 4, 7)
     assert row.calls == 1
     assert row.cost_usd == pytest.approx(3.0)
+
+
+# ----------------------------------------------------------------------
+# #2019: the llm_call_log leg (event-shaped callers outside Sleep)
+# ----------------------------------------------------------------------
+
+
+def _make_ledger_row(
+    *,
+    user_id: str,
+    workspace_id: UUID,
+    occurred_at: datetime,
+    caller: str = "supersede_verify",
+    call_type: str = "completion",
+    model: str = "claude-haiku-4-5",
+    input_tokens: int | None = 1_000_000,
+    output_tokens: int | None = 100_000,
+    embedding_tokens: int | None = None,
+    cost_usd: str = "1.5",
+    paid_by: str = "platform",
+    pricing_miss: bool = False,
+):
+    from models.llm_call_log import LLMCallLog
+
+    return LLMCallLog(
+        occurred_at=occurred_at,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        context_id=uuid4(),
+        caller=caller,
+        call_type=call_type,
+        provider="anthropic" if call_type == "completion" else "openai",
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        embedding_tokens=embedding_tokens,
+        cost_usd=Decimal(cost_usd),
+        paid_by=paid_by,
+        call_metadata={"pricing_miss": True} if pricing_miss else {"verdict": "parallel"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_supersede_verify_ledger_rows_surface_as_their_own_source(db_session):
+    """Judge calls (#2019) add calls, tokens and their write-time cost, and show
+    up as ``source='supersede_verify'`` beside the Sleep source."""
+    await _seed_pricing(db_session)
+    workspace_id = uuid4()
+    user_id = "user-ledger"
+    at = datetime(2026, 4, 5, 3, 0)
+
+    report = _make_report(user_id=user_id, workspace_id=workspace_id, started_at=at)
+    db_session.add(report)
+    await db_session.flush()
+    db_session.add(
+        _make_usage(
+            report_id=report.id,
+            provider="anthropic",
+            model="claude-haiku-4-5",
+            calls=2,
+            input_tokens=1_000_000,  # $1
+            output_tokens=0,
+        )
+    )
+    db_session.add_all(
+        [
+            _make_ledger_row(user_id=user_id, workspace_id=workspace_id, occurred_at=at),
+            _make_ledger_row(
+                user_id=user_id, workspace_id=workspace_id, occurred_at=at, cost_usd="0.5"
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    rows = await CostAggregationService(db_session).aggregate(
+        period="day",
+        start=datetime(2026, 4, 1),
+        end=datetime(2026, 4, 8),
+        workspace_id=workspace_id,
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.calls == 4
+    assert row.tokens_in == 3_000_000
+    assert row.tokens_out == 200_000
+    assert row.cost_usd == pytest.approx(3.0)  # $1 Sleep + $1.5 + $0.5 ledger
+    by_source = {b.source: b for b in row.cost_breakdown_by_source}
+    assert set(by_source) == {"sleep", "supersede_verify"}
+    assert by_source["supersede_verify"].calls == 2
+    assert by_source["supersede_verify"].cost_usd == pytest.approx(2.0)
+    by_model = {b.model: b for b in row.cost_breakdown_by_model}
+    assert by_model["claude-haiku-4-5"].calls == 4
+
+
+@pytest.mark.asyncio
+async def test_ledger_pricing_miss_is_cost_unknown(db_session):
+    workspace_id = uuid4()
+    db_session.add(
+        _make_ledger_row(
+            user_id="user-miss",
+            workspace_id=workspace_id,
+            occurred_at=datetime(2026, 4, 5),
+            cost_usd="0",
+            pricing_miss=True,
+        )
+    )
+    await db_session.flush()
+    rows = await CostAggregationService(db_session).aggregate(
+        period="day",
+        start=datetime(2026, 4, 1),
+        end=datetime(2026, 4, 8),
+        workspace_id=workspace_id,
+    )
+    assert len(rows) == 1
+    assert rows[0].calls == 1 and rows[0].cost_usd is None
+
+
+@pytest.mark.asyncio
+async def test_ledger_leg_honours_filters_and_skips_other_callers(db_session):
+    """Recall embeddings stay out (not part of this view yet); source /
+    paid_by / user filters apply to the ledger leg as to Sleep."""
+    await _seed_pricing(db_session)
+    workspace_id = uuid4()
+    at = datetime(2026, 4, 5, 3, 0)
+    report = _make_report(user_id="user-a", workspace_id=workspace_id, started_at=at)
+    db_session.add(report)
+    await db_session.flush()
+    db_session.add(
+        _make_usage(
+            report_id=report.id,
+            provider="anthropic",
+            model="claude-haiku-4-5",
+            calls=1,
+            input_tokens=1_000_000,
+            output_tokens=0,
+        )
+    )
+    db_session.add_all(
+        [
+            _make_ledger_row(user_id="user-a", workspace_id=workspace_id, occurred_at=at),
+            _make_ledger_row(
+                user_id="user-a",
+                workspace_id=workspace_id,
+                occurred_at=at,
+                paid_by="byok",
+                cost_usd="0.25",
+            ),
+            _make_ledger_row(user_id="user-b", workspace_id=workspace_id, occurred_at=at),
+            _make_ledger_row(
+                user_id="user-a",
+                workspace_id=workspace_id,
+                occurred_at=at,
+                caller="recall",
+                call_type="embedding",
+                model="text-embedding-3-small",
+                input_tokens=None,
+                output_tokens=None,
+                embedding_tokens=1_000,
+                cost_usd="0.00002",
+            ),
+        ]
+    )
+    await db_session.flush()
+    service = CostAggregationService(db_session)
+    window = {"period": "day", "start": datetime(2026, 4, 1), "end": datetime(2026, 4, 8)}
+
+    rows = await service.aggregate(**window, workspace_id=workspace_id, user_id="user-a")
+    assert len(rows) == 1
+    assert rows[0].calls == 3  # Sleep 1 + two judge calls; the recall row stays out
+    assert rows[0].embedding_tokens == 0
+    assert rows[0].cost_usd == pytest.approx(2.5)
+    assert rows[0].cost_usd_byok == pytest.approx(0.25)
+
+    only_judge = await service.aggregate(
+        **window, workspace_id=workspace_id, source="supersede_verify", paid_by="platform"
+    )
+    assert sorted((r.user_id, r.calls) for r in only_judge) == [("user-a", 1), ("user-b", 1)]
+    assert all(
+        [b.source for b in r.cost_breakdown_by_source] == ["supersede_verify"] for r in only_judge
+    )
+
+    only_sleep = await service.aggregate(**window, workspace_id=workspace_id, source="sleep")
+    assert [(r.user_id, r.calls) for r in only_sleep] == [("user-a", 1)]
