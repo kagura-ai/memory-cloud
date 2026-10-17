@@ -7,7 +7,8 @@
 #
 #   single host : docker-compose.prod.yml includes this file — unchanged topology
 #   data VM     : docker compose -f docker-compose.data.yml \
-#                                -f docker-compose.data-expose.yml up -d
+#                                -f docker-compose.data-expose.yml \
+#                                --env-file .env.prod up -d
 #
 # NOTE: no ports are published here. Port publishing is opt-in via
 # docker-compose.data-expose.yml so the single-host layout keeps these services

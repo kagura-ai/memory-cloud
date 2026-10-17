@@ -6,7 +6,7 @@
 # single-host layout) or on a dedicated app host (a split-host layout).
 #
 #   single host : docker-compose.prod.yml includes this file — unchanged topology
-#   app VM      : docker compose -f docker-compose.app.yml up -d
+#   app VM      : docker compose -f docker-compose.app.yml --env-file .env.prod up -d
 #                 with POSTGRES_HOST/QDRANT_HOST/REDIS_HOST pointed at the data VM
 #
 # The data-tier hostnames default to the compose service names, so on a single

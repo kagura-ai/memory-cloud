@@ -458,7 +458,8 @@ docker compose -f docker-compose.prod.yml logs -f api
 ```
 
 **Rotation (#1591).** Every service in the compose files declares the
-`json-file` driver with `max-size: 50m` / `max-file: 3`, so container logs are
+`json-file` driver, by default with `max-size: 50m` / `max-file: 3` (see
+"Configurable cap" below), so container logs are
 bounded on any host — `startup.sh` writes the same default into
 `/etc/docker/daemon.json`, but a VM that was not provisioned by it has none.
 `logging` is fixed when a container is **created**: `deploy.sh` recreates the
@@ -478,7 +479,11 @@ docker inspect -f '{{json .HostConfig.LogConfig}}' kagura-caddy   # max-size 50m
 for every other service; unset, all four default to `50m` / `3`. A new value
 applies only when a container is recreated: the next `deploy.sh` run recreates
 the incoming API color only (the other one follows with the next deploy), and
-`caddy` / `web` need the recreate above. A stopped standby color keeps its log
+`caddy` / `web` need the recreate above. A reboot runs a plain `up -d` through
+`kagura-memory.service` and recreates every service with a pending change, the
+data tier included, so recreate those yourself in a maintenance window right
+after changing `LOG_MAX_*`. `deploy.sh` refuses a malformed value (size
+`<number>k|m|g`, file count a positive whole number). A stopped standby color keeps its log
 files, so count both colors' API logs when planning the disk. Details:
 [`docs/deployment.md` → Changing the cap](../../docs/deployment.md#changing-the-cap--issue-2025).
 

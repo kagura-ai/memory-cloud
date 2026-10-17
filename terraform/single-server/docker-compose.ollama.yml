@@ -7,6 +7,7 @@
 #   docker compose \
 #     -f docker-compose.prod.yml \
 #     -f docker-compose.ollama.yml \
+#     --env-file .env.prod \
 #     up -d
 #
 # Model pre-pull is a manual step, run AFTER `up`:

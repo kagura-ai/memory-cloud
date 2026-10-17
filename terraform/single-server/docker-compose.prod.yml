@@ -12,7 +12,8 @@
 #   ./scripts/deploy.sh
 #
 # Add Ollama (local embeddings) as an override (sets EMBEDDING_PROVIDER=self_hosted):
-#   docker compose -f docker-compose.prod.yml -f docker-compose.ollama.yml up -d
+#   docker compose -f docker-compose.prod.yml -f docker-compose.ollama.yml \
+#     --env-file .env.prod up -d
 #
 # Build context note: the api / web images are built from the source tree in
 # the same repo. On the VM, `git clone` the repo next to this file, or

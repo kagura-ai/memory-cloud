@@ -5,7 +5,8 @@
 # split-host layout. It publishes the database ports so the app VM can reach
 # them across the private switch.
 #
-#   docker compose -f docker-compose.data.yml -f docker-compose.data-expose.yml up -d
+#   docker compose -f docker-compose.data.yml -f docker-compose.data-expose.yml \
+#     --env-file .env.prod up -d
 #
 # NEVER add this overlay to the single-host composition: there the app and data
 # tiers share a compose network and reaching these services over a published
