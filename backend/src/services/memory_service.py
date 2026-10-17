@@ -3267,7 +3267,12 @@ class MemoryService:
             return {}, {}
 
     async def _resolve_supersede_candidates(
-        self, memories: Mapping[Any, Memory], *, user_id: str, operation: str
+        self,
+        memories: Mapping[Any, Memory],
+        *,
+        user_id: str,
+        operation: str,
+        trusted_only: bool = False,
     ) -> dict[UUID, SupersedeCandidate]:
         """#1403: liveness-guarded supersede suggestions for a page of memories.
 
@@ -3288,6 +3293,14 @@ class MemoryService:
         ``_apply_supersede_shadowing``'s self-healing liveness JOIN: a suggestion
         whose target is gone silently stops surfacing (the stored value is cleared
         on acceptance at edge-creation time).
+
+        ``trusted_only`` (a recall under ``filters={"trust_tier": "trusted"}``,
+        which every agent-bootstrap recall is) also drops a connector-sourced
+        target, as the recall filter drops a connector-sourced row (#887): the
+        suggestion carries the target's summary, so it must not bring back
+        what the filter kept out. The context half of that filter holds by
+        construction — the target shares the (already trusted) source's
+        context.
 
         Fail-open, per item: a malformed stored value (or a Pydantic coercion
         error) drops only that one suggestion; any wider error returns ``{}`` — a
@@ -3360,6 +3373,8 @@ class MemoryService:
                 target = live.get(p["target_id"])
                 if target is None:
                     continue  # self-healing: target gone → drop the suggestion
+                if trusted_only and target.source_type == SOURCE_TYPE_CONNECTOR:
+                    continue  # the trusted filter's connector exclusion (#887)
                 source = p["source"]
                 if (target.workspace_id, target.context_id) != (
                     source.workspace_id,
@@ -4385,7 +4400,10 @@ class MemoryService:
         page = search_results[: request.k]
         page_memories = {sr["id"]: memories[sr["id"]] for sr in page if sr["id"] in memories}
         supersede_candidates = await self._resolve_supersede_candidates(
-            page_memories, user_id=user_id, operation="recall"
+            page_memories,
+            user_id=user_id,
+            operation="recall",
+            trusted_only=bool(request.filters) and request.filters.get("trust_tier") == "trusted",
         )
 
         responses: list[MemoryResponse] = []
