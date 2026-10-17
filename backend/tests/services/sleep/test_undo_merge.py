@@ -154,6 +154,8 @@ async def test_happy_path_restores_reembeds_and_audits() -> None:
     assert summary["undone_action_id"] == 42
 
     re_embed.assert_awaited_once()
+    # #2015: the session is passed so the loser's chunk points are rebuilt.
+    assert re_embed.await_args.kwargs["db"] is db
 
     # The undo is audited as an undo_merge action on the SAME report.
     added = db.add.call_args.args[0]
@@ -344,3 +346,30 @@ async def test_shadow_undo_snapshot_edge_deleted_is_blocked_without_claiming_sha
     assert exc.value.code == "edge_changed"
     assert "changed or removed" in exc.value.message
     assert "still in effect" not in exc.value.message
+
+
+@pytest.mark.asyncio
+async def test_re_embed_rebuilds_content_chunks_when_given_a_session() -> None:
+    """#2015: the restore helper rewrites the chunk points after the summary point."""
+    from services.sleep.undo import re_embed_memory_to_qdrant
+
+    memory = MagicMock()
+    memory.id = uuid4()
+    memory.summary = "s"
+    memory.location_lat = None
+    memory.location_lon = None
+    svc = MagicMock()
+    svc.embed = AsyncMock(return_value=[0.1])
+    db = MagicMock()
+    with (
+        patch("db.qdrant.add_memory_to_qdrant", new=AsyncMock()),
+        patch("services.content_chunk_writer.write_content_chunks", new=AsyncMock()) as write,
+    ):
+        await re_embed_memory_to_qdrant(memory, "u", svc, "w", "c", "coll", db=db)
+        write.assert_awaited_once()
+        assert write.await_args.args[:2] == (db, memory)
+        assert write.await_args.kwargs["collection_name"] == "coll"
+
+        write.reset_mock()
+        await re_embed_memory_to_qdrant(memory, "u", svc, "w", "c", "coll")
+        write.assert_not_awaited()

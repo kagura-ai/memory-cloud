@@ -44,7 +44,7 @@ async def content_chunks_enabled(db: AsyncSession, context_id: Any) -> bool:
             ContextSearchConfig.context_id == context_id
         )
     )
-    return bool(result.scalar_one_or_none())
+    return result.scalar_one_or_none() is True
 
 
 # Process-local cache of the per-context flag for the hot metadata-update

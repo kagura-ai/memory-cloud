@@ -131,6 +131,8 @@ async def _re_embed_to_qdrant(
     workspace_id: str,
     context_id: str,
     collection_name: str,
+    *,
+    db: Any = None,
 ) -> None:
     """Re-embed a restored memory back into Qdrant.
 
@@ -147,6 +149,7 @@ async def _re_embed_to_qdrant(
         workspace_id,
         context_id,
         collection_name,
+        db=db,
     )
 
 
@@ -466,7 +469,13 @@ async def _restore_sleep_tombstone(
         summary["errors"].append(not_restorable)
         return
     await _re_embed_to_qdrant(
-        mem, ctx.user_id, ctx.embedding_svc, ctx.ws_id, ctx.ctx_id_str, ctx.collection_name
+        mem,
+        ctx.user_id,
+        ctx.embedding_svc,
+        ctx.ws_id,
+        ctx.ctx_id_str,
+        ctx.collection_name,
+        db=db,
     )
     summary[counter_key] += 1
 

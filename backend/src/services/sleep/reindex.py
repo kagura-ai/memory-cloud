@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.qdrant import add_memory_to_qdrant
 from models.memory import Memory
+from services.content_chunk_writer import content_chunks_enabled, write_content_chunks
 from services.embedding_service import EmbeddingService
 from services.sleep.reporter import PhaseResult
 from utils.datetime import to_utc_iso
@@ -78,6 +79,15 @@ class ReindexPhase:
         row = await self.db.execute(stmt)
         memory_map = {m.id: m for m in row.scalars().all()}
 
+        # #2015: the context's content-chunk flag, read once for the batch
+        # (None = unknown; the writer then looks it up per memory).
+        chunks_enabled: bool | None = None
+        if context_id:
+            try:
+                chunks_enabled = await content_chunks_enabled(self.db, UUID(str(context_id)))
+            except Exception:  # noqa: BLE001 — the writer retries the lookup
+                chunks_enabled = None
+
         for memory_id in changed_memory_ids:
             memory = memory_map.get(memory_id)
             if not memory:
@@ -136,6 +146,16 @@ class ReindexPhase:
                     workspace_id=workspace_id,
                     context_id=context_id,
                     collection_name=self.collection_name,
+                )
+                # #2015: the summary point was rewritten from the current
+                # content; rewrite the chunk points too (delete-first).
+                await write_content_chunks(
+                    self.db,
+                    memory,
+                    base_payload=payload,
+                    embed_svc=self.embedding_service,
+                    collection_name=self.collection_name,
+                    chunks_enabled=chunks_enabled,
                 )
 
                 reindexed += 1

@@ -156,3 +156,33 @@ class TestReindexPhase:
 
         assert result.success is False
         assert "All" in result.error
+
+
+class TestReindexContentChunks:
+    """#2015: a reindexed memory's chunk points are rewritten too."""
+
+    @pytest.mark.asyncio
+    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.content_chunks_enabled", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.write_content_chunks", new_callable=AsyncMock)
+    async def test_chunks_rewritten_with_the_flag_read_once(
+        self, mock_write, mock_flag, mock_qdrant, reindex_phase, mock_db
+    ):
+        mock_flag.return_value = True
+        mem1, mem2 = _make_memory(), _make_memory()
+        _mock_batch_fetch(mock_db, [mem1, mem2])
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1], 1))
+
+        await reindex_phase.execute(
+            changed_memory_ids={mem1.id, mem2.id},
+            user_id="user-1",
+            workspace_id=str(uuid4()),
+            context_id=str(uuid4()),
+        )
+
+        mock_flag.assert_awaited_once()
+        assert mock_write.await_count == 2
+        kwargs = mock_write.await_args.kwargs
+        assert kwargs["chunks_enabled"] is True
+        assert kwargs["embed_svc"] is reindex_phase.embedding_service
+        assert kwargs["base_payload"]["summary"] == "test summary"

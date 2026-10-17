@@ -180,12 +180,15 @@ async def re_embed_memory_to_qdrant(
     workspace_id: str,
     context_id: str,
     collection_name: str,
+    *,
+    db: AsyncSession | None = None,
 ) -> None:
     """Re-embed a restored memory back into Qdrant.
 
     Merge hard-deletes the loser's vector (orphan-vector prevention), so any
     restore path must rebuild it. Shared by run-level rollback and per-merge
-    undo.
+    undo. With ``db`` the memory's content chunk points (#2015) are rebuilt
+    too when its context has ``content_chunks_enabled`` (delete-first).
     """
     from db.qdrant import add_memory_to_qdrant
 
@@ -219,6 +222,16 @@ async def re_embed_memory_to_qdrant(
         context_id=context_id,
         collection_name=collection_name,
     )
+    if db is not None:
+        from services.content_chunk_writer import write_content_chunks
+
+        await write_content_chunks(
+            db,
+            memory,
+            base_payload=payload,
+            embed_svc=embedding_svc,
+            collection_name=collection_name,
+        )
 
 
 async def _resolve_embedding_info(
@@ -413,6 +426,7 @@ async def undo_merge_action(
         ws_id,
         ctx_id,
         collection_name,
+        db=db,
     )
 
     # Audit symmetry: the undo is a SleepAction on the SAME report, so the
