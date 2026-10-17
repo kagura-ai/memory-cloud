@@ -1733,8 +1733,8 @@ key resolved at recall time — there is no platform-key tier); `self_hosted` is
 | `RERANK_BASE_URL` | — | OpenAI/Jina-style `/v1/rerank` endpoint (vLLM `--runner pooling`, TEI, Infinity). When set, `self_hosted` makes **one batched** `POST {RERANK_BASE_URL}/v1/rerank` per recall. |
 | `RERANK_MODEL` | `qwen3-reranker-0.6b` | Served model name on that endpoint (vLLM `--served-model-name`). |
 | `RERANK_API_KEY` | — | Bearer token when the `/v1/rerank` endpoint is behind auth. |
-| `RERANK_PROMPT_FORMAT` | `auto` | How the query and documents are sent to `/v1/rerank`. `qwen3` wraps them in the Qwen3-Reranker prompt template (system judge prompt, `<Instruct>` / `<Query>` on the query, `<Document>` plus the empty think block on each document); `raw` sends text verbatim; `auto` picks `qwen3` when the model name contains `qwen3-reranker` (case-insensitive), else `raw`. Set `raw` if the server applies the template itself (vLLM `--chat-template`), or the template is applied twice. A forced `qwen3` also templates contexts that override `reranker_model` with a non-Qwen model on the same endpoint; `auto` decides per model. |
-| `RERANK_INSTRUCTION` | `Given a web search query, retrieve relevant passages that answer the query` | The `<Instruct>` line of the Qwen3 template; empty ⇒ this default. Ignored for `raw`. |
+| `RERANK_PROMPT_FORMAT` | `auto` | How the query and documents are sent to `/v1/rerank`. `qwen3` wraps them in the Qwen3-Reranker prompt template (system judge prompt, `<Instruct>` / `<Query>` on the query, `<Document>` plus the empty think block on each document); `raw` sends text verbatim; `auto` picks `qwen3` when the served model name (`RERANK_MODEL`, or a context's `reranker_model`) contains `qwen3-reranker` (case-insensitive), else `raw` — so if `--served-model-name` is something else, set `qwen3` explicitly. In the `qwen3` format the tokenizer's control tokens (`<\|im_start\|>`, `<\|im_end\|>`, `<think>`, …) in the query and in stored memories are broken up so content cannot close the document slot. Set `raw` if the server applies the template itself (vLLM `--chat-template`), or the template is applied twice. A forced `qwen3` also templates contexts that override `reranker_model` with a non-Qwen model on the same endpoint; `auto` decides per model. |
+| `RERANK_INSTRUCTION` | — | The `<Instruct>` line of the Qwen3 template; empty ⇒ the model card default, `Given a web search query, retrieve relevant passages that answer the query`. Ignored for `raw`. |
 | `SELF_HOSTED_RERANK_MODEL` | `dengcao/Qwen3-Reranker-8B:Q5_K_M` | Prompt-scoring fallback on `SELF_HOSTED_BASE_URL` (`/v1/completions`, one call per document), used only when `RERANK_BASE_URL` is unset. The default is an Ollama-registry id — a pure-vLLM stack must set a model it actually serves. |
 
 The `DEFAULT_*` values apply to contexts created from now on; **existing rows
@@ -1801,22 +1801,31 @@ metrics counters). `reranking_disabled_by_deployment` (debug) and
 
 ### Calibration check
 
-When `RERANK_BASE_URL` is set, every API process scores one relevant and one
-irrelevant document against `RERANK_MODEL` once at startup, in the background
-(it never runs on a recall). If the relevant document does not win by at least
-0.5, a warning is logged:
+When `RERANK_BASE_URL` is set and `ENABLE_RERANKING` is on, every API process
+(each Uvicorn worker) scores one relevant and one irrelevant document against
+`RERANK_MODEL` once at startup, in the background (it never runs on a recall).
+It covers only `RERANK_MODEL`, not a per-context `reranker_model` override.
+
+With the `qwen3` format, the relevant document must win by at least 0.5, else
+a warning is logged:
 
 ```
-rerank_model_uncalibrated model=qwen3-reranker-0.6b prompt_format=raw relevant_score=0.98 irrelevant_score=0.866 margin=0.114 min_margin=0.5
+rerank_model_uncalibrated model=qwen3-reranker-0.6b prompt_format=qwen3 relevant_score=0.98 irrelevant_score=0.866 margin=0.114 min_margin=0.5
 ```
 
-This usually means the prompt format is wrong: a Qwen3 reranker getting raw
-text (set `RERANK_PROMPT_FORMAT=qwen3`), or a template applied by both the
-client and the server (set `raw`). A passing check logs
-`rerank_model_calibrated` (info). An endpoint that is still down after two
-retries (10 s, then 30 s) logs `rerank_calibration_check_failed` (info) and is
-not checked again until the next restart. The check covers only the ops-level
-`RERANK_MODEL`, not a per-context `reranker_model` override.
+That usually means the template is applied twice (the server also runs
+`--chat-template`: set `RERANK_PROMPT_FORMAT=raw`) or the model is not a Qwen3
+reranker. A passing check logs `rerank_model_calibrated` (info).
+
+With `raw` the score scale depends on the server (probabilities, logits), so
+no verdict is given: the scores are logged as `rerank_calibration_observed`
+(info). A Qwen3 reranker served under a name without `qwen3-reranker` shows up
+here with close scores — set `RERANK_PROMPT_FORMAT=qwen3`.
+
+Connect errors, timeouts and HTTP 5xx are retried twice (after 10 s, then
+30 s) while the reranker loads; an HTTP 4xx, a malformed response or the last
+failed retry logs `rerank_calibration_check_failed` (warning) and the check is
+not repeated until the next restart.
 
 ## Plan Tiers
 
