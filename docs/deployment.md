@@ -1733,7 +1733,7 @@ key resolved at recall time — there is no platform-key tier); `self_hosted` is
 | `RERANK_BASE_URL` | — | OpenAI/Jina-style `/v1/rerank` endpoint (vLLM `--runner pooling`, TEI, Infinity). When set, `self_hosted` makes **one batched** `POST {RERANK_BASE_URL}/v1/rerank` per recall. |
 | `RERANK_MODEL` | `qwen3-reranker-0.6b` | Served model name on that endpoint (vLLM `--served-model-name`). |
 | `RERANK_API_KEY` | — | Bearer token when the `/v1/rerank` endpoint is behind auth. |
-| `RERANK_PROMPT_FORMAT` | `auto` | How the query and documents are sent to `/v1/rerank`. `qwen3` wraps them in the Qwen3-Reranker prompt template (system judge prompt, `<Instruct>` / `<Query>` on the query, `<Document>` plus the empty think block on each document); `raw` sends text verbatim; `auto` picks `qwen3` when the served model name (`RERANK_MODEL`, or a context's `reranker_model`) contains `qwen3-reranker` (case-insensitive), else `raw` — so if `--served-model-name` is something else, set `qwen3` explicitly. In the `qwen3` format the tokenizer's control tokens (`<\|im_start\|>`, `<\|im_end\|>`, `<think>`, …) in the query and in stored memories are broken up so content cannot close the document slot. Set `raw` if the server applies the template itself (vLLM `--chat-template`), or the template is applied twice. A forced `qwen3` also templates contexts that override `reranker_model` with a non-Qwen model on the same endpoint; `auto` decides per model. |
+| `RERANK_PROMPT_FORMAT` | `auto` | How the query and documents are sent to `/v1/rerank`. `qwen3` wraps them in the Qwen3-Reranker prompt template (system judge prompt, `<Instruct>` / `<Query>` on the query, `<Document>` plus the empty think block on each document); `raw` sends text verbatim; `auto` picks `qwen3` when the served model name (`RERANK_MODEL`, or a context's `reranker_model`) contains `qwen3-reranker` (case-insensitive), else `raw` — so if `--served-model-name` is something else, set `qwen3` explicitly. In the `qwen3` format the tokenizer's control tokens (`<\|im_start\|>`, `<\|im_end\|>`, `<think>`, …) in the query and in stored memories are broken up so content cannot close the document slot, and each document body is cut to 2000 characters so the template's closing tokens survive server-side truncation. With `raw` — including `raw` plus a server-side `--chat-template` — the text is sent as is: no token neutralising or truncation happens on this side. Set `raw` if the server applies the template itself (vLLM `--chat-template`), or the template is applied twice. A forced `qwen3` also templates contexts that override `reranker_model` with a non-Qwen model on the same endpoint; `auto` decides per model. |
 | `RERANK_INSTRUCTION` | — | The `<Instruct>` line of the Qwen3 template; empty ⇒ the model card default, `Given a web search query, retrieve relevant passages that answer the query`. Ignored for `raw`. |
 | `SELF_HOSTED_RERANK_MODEL` | `dengcao/Qwen3-Reranker-8B:Q5_K_M` | Prompt-scoring fallback on `SELF_HOSTED_BASE_URL` (`/v1/completions`, one call per document), used only when `RERANK_BASE_URL` is unset. The default is an Ollama-registry id — a pure-vLLM stack must set a model it actually serves. |
 
@@ -1823,9 +1823,11 @@ no verdict is given: the scores are logged as `rerank_calibration_observed`
 here with close scores — set `RERANK_PROMPT_FORMAT=qwen3`.
 
 Connect errors, timeouts and HTTP 5xx are retried twice (after 10 s, then
-30 s) while the reranker loads; an HTTP 4xx, a malformed response or the last
-failed retry logs `rerank_calibration_check_failed` (warning) and the check is
-not repeated until the next restart.
+30 s) while the reranker loads; an HTTP 4xx, a malformed or incomplete
+response (fewer than two scores) or the last failed retry logs
+`rerank_calibration_check_failed` (warning, with the error class, the HTTP
+status and the endpoint with any password masked) and the check is not
+repeated until the next restart.
 
 ## Plan Tiers
 
