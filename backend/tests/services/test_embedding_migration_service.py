@@ -1046,11 +1046,13 @@ class TestContentChunks:
             patch.object(svc, "build_memory_point", return_value=({"p": 1}, [], [])),
             patch.object(svc, "rebuild_content_chunks", AsyncMock(side_effect=[4, 2])) as rebuild,
         ):
-            written = await svc.rebuild_target_chunks(
+            result = await svc.rebuild_target_chunks(
                 db, plan, [c.id, a.id, b.id, doc.id, a.id], batch_size=2, embedding_service=service
             )
 
-        assert written == 6
+        assert result.chunks_written == 6
+        assert result.rebuilt == 3
+        assert result.still_missing == []  # flag off now: nothing is expected
         assert db.execute.await_count == 2  # 4 distinct ids, pages of 2
         first, second = rebuild.await_args_list
         assert first.args == (db, [a, b])
@@ -1066,12 +1068,41 @@ class TestContentChunks:
         assert db.commit.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_rebuild_target_chunks_reports_what_the_switch_will_not_requeue(
+        self, _no_content_chunks
+    ):
+        """After the rebuild the chunks are counted again; a memory whose
+        count still differs is reported, unless the switch re-queues it (the
+        query filters those out with ``requeue_since``)."""
+        plan = _plan()
+        ok, stuck = _memory(), _memory()
+        _no_content_chunks["enabled"].return_value = True
+        _no_content_chunks["counted"].return_value = {str(ok.id): 2, str(stuck.id): 1}
+        since = datetime(2026, 10, 1)
+        db = _db([_result(scalars=[ok, stuck]), _rows_result([(ok.id, 4000), (stuck.id, 4000)])])
+        with (
+            patch.object(svc, "build_memory_point", return_value=({}, [], [])),
+            patch.object(svc, "expected_chunk_count", side_effect=lambda n: 2),
+            patch.object(svc, "rebuild_content_chunks", AsyncMock(return_value=3)),
+        ):
+            result = await svc.rebuild_target_chunks(
+                db, plan, [ok.id, stuck.id], requeue_since=since, embedding_service=MagicMock()
+            )
+        assert result.still_missing == [stuck.id]
+        _no_content_chunks["counted"].assert_awaited_once_with(
+            str(plan.workspace_id), str(plan.context_id), plan.target_collection
+        )
+        recheck = db.execute.await_args_list[1].args[0]
+        compiled = str(recheck.compile())
+        assert "embedding_status" in compiled and "updated_at <" in compiled
+        assert "created_at <" in compiled
+
+    @pytest.mark.asyncio
     async def test_rebuild_target_chunks_with_no_ids_does_nothing(self):
         db = _db([])
         with patch.object(svc, "rebuild_content_chunks", AsyncMock()) as rebuild:
-            assert (
-                await svc.rebuild_target_chunks(db, _plan(), [], embedding_service=MagicMock()) == 0
-            )
+            result = await svc.rebuild_target_chunks(db, _plan(), [], embedding_service=MagicMock())
+        assert result.rebuilt == 0 and result.chunks_written == 0 and result.still_missing == []
         rebuild.assert_not_awaited()
         db.execute.assert_not_awaited()
 

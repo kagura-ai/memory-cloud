@@ -572,14 +572,26 @@ async def reembed_context(
     )
 
 
+@dataclass
+class ChunkRebuildResult:
+    rebuilt: int = 0
+    """Memories whose chunks were rebuilt (live plain rows of those asked for)."""
+    chunks_written: int = 0
+    still_missing: list[UUID] = field(default_factory=list)
+    """Rebuilt memories whose chunk count in the target still differs from
+    their content afterwards, leaving out those the switch re-queues anyway
+    (changed since ``requeue_since``, or not embedded successfully)."""
+
+
 async def rebuild_target_chunks(
     db: AsyncSession,
     plan: MigrationPlan,
     memory_ids: Iterable[UUID],
     *,
+    requeue_since: datetime | None = None,
     batch_size: int = 64,
     embedding_service: EmbeddingService | None = None,
-) -> int:
+) -> ChunkRebuildResult:
     """Rebuild the content chunk points of ``memory_ids`` in the target (#2015).
 
     For the memories :func:`verify_context_migration` lists in
@@ -588,17 +600,24 @@ async def rebuild_target_chunks(
     that no longer matches the content. The same writer as the re-embed
     (``rebuild_content_chunks``: the flag read fresh, delete first, then
     write), page by page; rows that are no longer live or own a resource
-    point are skipped. Returns the number of chunk points written.
+    point are skipped.
+
+    Then counts the rebuilt memories' chunks in the target again (only the
+    chunks: summary points of memories written meanwhile are the switch's
+    re-queue's job, as they are after any verify). A memory the switch
+    re-queues with this ``requeue_since`` is not reported: the sweep
+    rewrites its chunks under the new routing.
     """
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
+    out = ChunkRebuildResult()
     ids = sorted(set(memory_ids))
     if not ids:
-        return 0
+        return out
     service = embedding_service or EmbeddingService(
         db, model=plan.target_model, dimensions=plan.target_dimensions
     )
-    written = 0
+    rebuilt_ids: list[UUID] = []
     for i in range(0, len(ids), batch_size):
         result = await db.execute(
             select(Memory)
@@ -616,7 +635,7 @@ async def rebuild_target_chunks(
         if not rows:
             continue
         payloads = {memory.id: build_memory_point(memory)[0] for memory in rows}
-        written += await rebuild_content_chunks(
+        out.chunks_written += await rebuild_content_chunks(
             db,
             rows,
             base_payloads=payloads,
@@ -624,14 +643,42 @@ async def rebuild_target_chunks(
             collection_name=plan.target_collection,
             context_id=plan.context_id,
         )
+        rebuilt_ids.extend(memory.id for memory in rows)
+    out.rebuilt = len(rebuilt_ids)
+
+    if rebuilt_ids and await content_chunks_enabled(db, plan.context_id):
+        stored = await count_context_chunk_points(
+            str(plan.workspace_id), str(plan.context_id), plan.target_collection
+        )
+        length = func.char_length(Memory.content)
+        for i in range(0, len(rebuilt_ids), batch_size):
+            stmt = select(Memory.id, length).where(
+                Memory.id.in_(rebuilt_ids[i : i + batch_size]), Memory.deleted_at.is_(None)
+            )
+            if requeue_since is not None:
+                # What switch_context_embedding re-queues is left to the sweep.
+                stmt = stmt.where(
+                    Memory.embedding_status == "success",
+                    Memory.created_at < requeue_since,
+                    Memory.updated_at < requeue_since,
+                )
+            for memory_id, n in (await db.execute(stmt)).all():
+                expected = expected_chunk_count(int(n or 0))
+                if stored.get(str(memory_id), 0) != expected:
+                    out.still_missing.append(memory_id)
+        await db.commit()
+        out.still_missing.sort()
+
     logger.info(
         "context_embedding_chunks_rebuilt",
         context_id=str(plan.context_id),
         target_collection=plan.target_collection,
-        memories=len(ids),
-        chunks_written=written,
+        requested=len(ids),
+        rebuilt=out.rebuilt,
+        chunks_written=out.chunks_written,
+        still_missing=len(out.still_missing),
     )
-    return written
+    return out
 
 
 async def verify_context_migration(

@@ -23,6 +23,7 @@ if str(_BACKEND_SRC) not in sys.path:
 
 from cli import migrate_context_embedding as cli  # noqa: E402
 from services.embedding_migration_service import (  # noqa: E402
+    ChunkRebuildResult,
     MigrationPlan,
     ReembedResult,
     SwitchResult,
@@ -69,7 +70,9 @@ async def _run(
         patch.object(cli, "plan_context_migration", AsyncMock(return_value=plan)),
         patch.object(cli, "reembed_context", AsyncMock(return_value=reembed)),
         patch.object(cli, "verify_context_migration", verify_mock),
-        patch.object(cli, "rebuild_target_chunks", rebuild or AsyncMock(return_value=0)),
+        patch.object(
+            cli, "rebuild_target_chunks", rebuild or AsyncMock(return_value=ChunkRebuildResult())
+        ),
         patch.object(cli, "switch_context_embedding", switch or AsyncMock(return_value=_SWITCHED)),
     ):
         return await cli._one_context(MagicMock(), context_id, args)
@@ -84,10 +87,11 @@ _SWITCHED = SwitchResult(
 )
 
 
+_STARTED = datetime(2026, 10, 1)
+
+
 def _reembed(unrebuildable: list[UUID]) -> ReembedResult:
-    return ReembedResult(
-        embedded=2, batches=1, started_at=datetime(2026, 10, 1), unrebuildable=unrebuildable
-    )
+    return ReembedResult(embedded=2, batches=1, started_at=_STARTED, unrebuildable=unrebuildable)
 
 
 @pytest.mark.asyncio
@@ -192,15 +196,16 @@ async def test_verify_alone_names_a_remedy_that_works_before_the_switch(capsys):
 async def test_run_rebuilds_chunks_the_flag_flip_left_out_before_switching(capsys):
     """F8: content_chunks_enabled turned on while ``--run --yes`` re-embedded
     (the plan had it off, so no chunks were written): the run rebuilds the
-    listed memories' chunks in the target, verifies again, then switches."""
+    listed memories' chunks in the target, checks them, then switches."""
     a, b = uuid4(), uuid4()
     order: list[str] = []
-    rebuild = AsyncMock(side_effect=lambda *_a, **_k: order.append("rebuild") or 6)
+    rebuilt = ChunkRebuildResult(rebuilt=2, chunks_written=6)
+    rebuild = AsyncMock(side_effect=lambda *_a, **_k: order.append("rebuild") or rebuilt)
     switch = AsyncMock(side_effect=lambda *_a, **_k: order.append("switch") or _SWITCHED)
     code = await _run(
         ["--run", "--yes"],
         reembed=_reembed([]),
-        verify=[_chunks_missing(a, b), _chunks_complete()],
+        verify=_chunks_missing(a, b),
         rebuild=rebuild,
         switch=switch,
         content_chunks_on=False,
@@ -208,12 +213,14 @@ async def test_run_rebuilds_chunks_the_flag_flip_left_out_before_switching(capsy
     out = capsys.readouterr().out
     assert code == 0
     assert order == ["rebuild", "switch"]
-    rebuild.assert_awaited_once()
     assert rebuild.await_args.args[2] == [a, b]
+    # The switch re-queues what changed since the re-embed started: the
+    # rebuild's check leaves those to the sweep.
+    assert rebuild.await_args.kwargs["requeue_since"] == _STARTED
+    assert switch.await_args.kwargs["requeue_since"] == _STARTED
     assert "content_chunks_enabled was turned on after the plan" in out
     assert "Rebuilding them before the switch" in out
-    assert "rebuilt 6 content chunk points" in out
-    assert "content chunks: 6/6 present" in out
+    assert "rebuilt the content chunks of 2 memory(ies): 6 chunk points" in out
     assert "Not switched yet" not in out
     assert "switched: text-embedding-3-small -> " in out
 
@@ -225,8 +232,8 @@ async def test_run_stops_before_the_switch_when_chunks_stay_missing(capsys):
     code = await _run(
         ["--run", "--yes"],
         reembed=_reembed([]),
-        verify=[_chunks_missing(stuck), _chunks_missing(stuck)],
-        rebuild=AsyncMock(return_value=0),
+        verify=_chunks_missing(stuck),
+        rebuild=AsyncMock(return_value=ChunkRebuildResult(rebuilt=1, still_missing=[stuck])),
         switch=switch,
         content_chunks_on=True,
     )
@@ -234,8 +241,62 @@ async def test_run_stops_before_the_switch_when_chunks_stay_missing(capsys):
     assert code == 2
     switch.assert_not_awaited()
     assert "turned on after the plan" not in out
-    assert "the context was NOT switched. Run --run again" in out
-    assert str(stuck) in out
+    assert "the context was NOT switched" in out
+    # A retry that does not re-embed the whole context, keeping the re-queue.
+    assert f"--verify --switch --requeue-since {_STARTED.isoformat()}" in out
+    assert out.count(str(stuck)) == 2  # the first verify's line and the one after the rebuild
+
+
+@pytest.mark.asyncio
+async def test_a_failed_chunk_rebuild_skips_the_switch_and_the_run_goes_on(capsys):
+    switch = AsyncMock()
+    code = await _run(
+        ["--run", "--yes"],
+        reembed=_reembed([]),
+        verify=_chunks_missing(uuid4()),
+        rebuild=AsyncMock(side_effect=RuntimeError("upsert failed")),
+        switch=switch,
+    )
+    assert code == 1
+    switch.assert_not_awaited()
+    assert "chunk rebuild failed, NOT switched (RuntimeError: upsert failed)" in (
+        capsys.readouterr().out
+    )
+
+
+@pytest.mark.asyncio
+async def test_declining_asks_before_the_rebuild_and_spends_nothing(capsys):
+    rebuild = AsyncMock()
+    switch = AsyncMock()
+    with patch("builtins.input", return_value="n") as asked:
+        code = await _run(
+            ["--verify", "--switch"],
+            reembed=_reembed([]),
+            verify=_chunks_missing(uuid4()),
+            rebuild=rebuild,
+            switch=switch,
+        )
+    assert code == 0
+    asked.assert_called_once()
+    assert "Rebuild the content chunks of 1 memory(ies), then switch" in asked.call_args.args[0]
+    rebuild.assert_not_awaited()
+    switch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_one_confirmation_covers_the_rebuild_and_the_switch(capsys):
+    switch = AsyncMock(return_value=_SWITCHED)
+    with patch("builtins.input", return_value="y") as asked:
+        code = await _run(
+            ["--verify", "--switch"],
+            reembed=_reembed([]),
+            verify=_chunks_missing(uuid4()),
+            rebuild=AsyncMock(return_value=ChunkRebuildResult(rebuilt=1, chunks_written=3)),
+            switch=switch,
+        )
+    assert code == 0
+    asked.assert_called_once()
+    switch.assert_awaited_once()
 
 
 @pytest.mark.asyncio

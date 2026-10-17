@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -93,10 +94,21 @@ _CHUNKS_REMEDY_NO_SWITCH = (
     "before it switches. Once switched, the migration cannot rebuild them; see the runbook"
 )
 _CHUNKS_REMEDY_BEFORE_SWITCH = "Rebuilding them before the switch"
-_CHUNKS_REMEDY_STILL_MISSING = (
-    "Still incomplete after the rebuild, so the context was NOT switched. Run --run "
-    "again; if the same memories stay listed, look for content_chunks_* errors in the log"
-)
+
+
+def _still_missing_remedy(requeue_since: datetime | None) -> str:
+    since = f" --requeue-since {requeue_since.isoformat()}" if requeue_since else ""
+    return (
+        "Still incomplete after the rebuild, so the context was NOT switched. "
+        f"Retry just these with --verify --switch{since} (no full re-embed); if the same "
+        "memories stay listed, look for content_chunks_* errors in the log"
+    )
+
+
+def _print_chunk_ids(label: str, ids: list[UUID], remedy: str) -> None:
+    shown = ", ".join(str(memory_id) for memory_id in ids[:20])
+    more = f" (+{len(ids) - 20} more)" if len(ids) > 20 else ""
+    print(f"  {label} {len(ids)} memory(ies): {remedy}: {shown}{more}")
 
 
 def _print_verify(verified: VerifyResult) -> None:
@@ -189,6 +201,7 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
 
     requeue_since = None
     skipped: list[UUID] = []
+    switch_confirmed = False
     if args.reembed or args.run:
 
         def _progress(done: int, total: int) -> None:
@@ -222,19 +235,42 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
             # context already uses it), so chunks verify found incomplete are
             # rebuilt now: e.g. content_chunks_enabled turned on while the
             # re-embed ran (verify read the flag again; the plan had it off).
+            # Asked before the rebuild: it is embedding spend for the switch.
+            if not _confirm(
+                f"Rebuild the content chunks of {len(verified.chunks_missing)} memory(ies), "
+                f"then switch {context_id} to {plan.target_model}?",
+                args.yes,
+            ):
+                print("  skipped")
+                return 0
+            switch_confirmed = True
             if not plan.content_chunks_on:
                 print("  content_chunks_enabled was turned on after the plan")
-            written = await rebuild_target_chunks(
-                db, plan, verified.chunks_missing, batch_size=args.batch_size
+            switch_since = requeue_since if requeue_since is not None else args.requeue_since
+            try:
+                rebuilt = await rebuild_target_chunks(
+                    db,
+                    plan,
+                    verified.chunks_missing,
+                    requeue_since=switch_since,
+                    batch_size=args.batch_size,
+                )
+            except Exception as exc:  # noqa: BLE001 - one context's failure, the run goes on
+                print(
+                    f"  chunk rebuild failed, NOT switched ({type(exc).__name__}: {exc}); "
+                    "retry with --verify --switch"
+                )
+                return 1
+            print(
+                f"  rebuilt the content chunks of {rebuilt.rebuilt} memory(ies): "
+                f"{rebuilt.chunks_written} chunk points"
             )
-            print(f"  rebuilt {written} content chunk points")
-            verified = await verify_context_migration(db, plan)
-            _print_verify(verified)
-            _print_chunks(verified, _CHUNKS_REMEDY_STILL_MISSING)
-            if not verified.ok:
-                _print_missing(verified)
-                return 2
-            if verified.chunks_missing:
+            if rebuilt.still_missing:
+                _print_chunk_ids(
+                    "CHUNKS_MISSING",
+                    rebuilt.still_missing,
+                    _still_missing_remedy(switch_since),
+                )
                 return 2
 
     if args.switch or args.run:
@@ -245,7 +281,9 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
                 "routing only if you pass --requeue-since"
             )
             requeue_since = args.requeue_since
-        if not _confirm(f"Switch {context_id} to {plan.target_model}?", args.yes):
+        if not switch_confirmed and not _confirm(
+            f"Switch {context_id} to {plan.target_model}?", args.yes
+        ):
             print("  skipped")
             return 0
         switched = await switch_context_embedding(
