@@ -26,6 +26,11 @@ from services.identity_link_service import linked_user_ids, opens_contexts_as_se
 from services.llm_call_log_writer import LLMCallLogWriter
 from services.recall_timings import RecallTimings
 from services.reranker_service import RerankerService
+from utils.content_chunks import (
+    CONTENT_CHUNK_DENSE_MAX_FETCH,
+    CONTENT_CHUNK_DENSE_OVERSAMPLE,
+    collapse_chunk_hits,
+)
 from utils.exceptions import ExternalServiceError, OpenAIError
 from utils.logger import get_logger
 
@@ -147,6 +152,11 @@ class SearchService:
         if effective_use_rerank:
             fetch_factor = fetch_factor * 2
         fetch_size = min(k * fetch_factor, 200)  # Cap to prevent excessive Qdrant/reranker load
+        # #2015: a context with content chunk vectors returns chunk points from
+        # the dense arm; several of one memory collapse into one, so that arm
+        # oversamples and collapses back to fetch_size. `is True`: a duck-typed
+        # default config has no such attribute.
+        content_chunks_on = getattr(config, "content_chunks_enabled", False) is True
 
         # Issue #XXX: Team collaboration - workspace membership + context privacy check
         from uuid import UUID
@@ -333,18 +343,38 @@ class SearchService:
                         fail_on_error=False,
                     )
                 with timings.stage("qdrant"):
+                    chunk_kwargs: dict[str, Any] = (
+                        {"include_chunks": True} if content_chunks_on else {}
+                    )
                     semantic_results = await search_memories_qdrant(
                         user_id=user_id,
                         query_vector=query_vector,
                         workspace_id=workspace_id,
                         context_id=context_id,
-                        limit=fetch_size,
+                        limit=(
+                            min(
+                                fetch_size * CONTENT_CHUNK_DENSE_OVERSAMPLE,
+                                CONTENT_CHUNK_DENSE_MAX_FETCH,
+                            )
+                            if content_chunks_on
+                            else fetch_size
+                        ),
                         filters=filters,
                         is_shared_context=is_shared_context,
                         collection_name=collection,
                         include_vectors=include_vectors,
                         owner_ids=owner_ids,
+                        **chunk_kwargs,
                     )
+                    if content_chunks_on:
+                        dense_hits = len(semantic_results)
+                        semantic_results = collapse_chunk_hits(semantic_results)[:fetch_size]
+                        logger.debug(
+                            "content_chunks_collapsed",
+                            context_id=str(primary_context_id),
+                            dense_hits=dense_hits,
+                            collapsed_memories=len(semantic_results),
+                        )
             except ExternalServiceError as exc:
                 # The semantic arm is down (embedding provider or vector
                 # store). A hybrid search can still answer from BM25, so
