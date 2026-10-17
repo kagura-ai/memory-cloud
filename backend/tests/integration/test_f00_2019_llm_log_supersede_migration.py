@@ -7,8 +7,9 @@
    (append-only cost ledger) and leaves the restored CHECK ``NOT VALID``; the
    next upgrade validates it again.
 
-The ledger row is left in place for the same reason as in the e84 / e98
-tests: the next run's ``_reset_alembic_state()`` drops the schema with it.
+Unlike the e84 / e98 audit rows, the ledger row is deleted at the end: a
+leftover ``llm_call_log`` row would show up in the all-workspace cost
+aggregation tests that share the database.
 
 Not executed in the local unit run — needs the DB container.
 """
@@ -98,5 +99,10 @@ def test_f00_round_trip_check() -> None:
     finally:
         try:
             _upgrade_to("head")
+            with engine.connect() as conn:
+                conn.execute(
+                    text("DELETE FROM llm_call_log WHERE user_id = :u"), {"u": ledger_user}
+                )
+                conn.commit()
         finally:
             engine.dispose()
