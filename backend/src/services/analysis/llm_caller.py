@@ -44,7 +44,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from services.llm_service import LLMResponse, LLMService, LLMServiceError
+from services.llm_service import LLMResponse, LLMService, LLMServiceError, billed_usage
 from utils.exceptions import ExternalServiceError
 from utils.logger import get_logger
 
@@ -107,24 +107,6 @@ class CallResult:
     parsed: dict[str, Any]
     response: LLMResponse
     prior_usages: tuple[LLMResponse, ...] = ()
-
-
-def _billed_usage_from_error(exc: LLMServiceError) -> LLMResponse | None:
-    """Return the billed token usage of a failed LLM attempt, if any.
-
-    A fallback-chain attempt can fail *after* the provider round-trip
-    completed and consumed paid tokens (e.g. the model returned
-    unparseable JSON on both internal tries). When the raised
-    ``LLMServiceError`` carries the usage of that completed call via a
-    ``response`` attribute (an ``LLMResponse``), we surface it so the
-    caller can bill it. Returns ``None`` when the attempt spent no
-    billable tokens (a transport error before any completion) or when the
-    error does not expose usage — accumulation then simply skips it.
-    """
-    candidate = getattr(exc, "response", None)
-    if isinstance(candidate, LLMResponse):
-        return candidate
-    return None
 
 
 async def call_with_fallback(
@@ -218,9 +200,9 @@ async def call_with_fallback(
             last_error = e
             # #1247: a failed attempt may still have consumed paid tokens
             # (the provider call completed but its output failed to parse).
-            # Capture that usage when the error exposes it so cost
+            # Capture that usage (LLMServiceError.usage, #2019) so cost
             # accounting sums ALL billed calls, not just the winner.
-            billed = _billed_usage_from_error(e)
+            billed = billed_usage(e)
             if billed is not None:
                 prior_usages.append(billed)
 
