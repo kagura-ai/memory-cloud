@@ -2073,6 +2073,44 @@ free, but the same provider key also fronts paid OpenAI-compatible endpoints
 which one you run. (Earlier releases seeded those models at `$0`; that seed is
 removed on upgrade so a paid endpoint no longer shows `$0.00`.)
 
+### Where cost is recorded (`sleep_reports` vs `llm_call_log`)
+
+Cost is recorded in two places, by shape:
+
+- **Run-shaped: `sleep_reports`** (+ `sleep_report_llm_usage`). One row per
+  Sleep Maintenance or Memory Analysis run, with per-phase / per-model usage
+  aggregated across the run. All of Sleep's judges (edge discovery, dedup,
+  consolidation, importance re-evaluation) are counted here, and only here.
+- **Event-shaped: `llm_call_log`.** One row per provider call made outside a
+  run: recall embeddings (`caller='recall'`) and the write-time supersede
+  check (`caller='supersede_verify'`, enabled by `SUPERSEDE_VERIFY_MODE=llm`).
+  Each row stores its tokens, a cost snapshot priced when it is written,
+  `paid_by` (`byok` when a stored workspace key was used, `platform`
+  otherwise), and for the supersede check the verdict (`supersedes`,
+  `parallel` or `unclear`) and confidence in `call_metadata`. A call that
+  fails writes no row. A call whose answer could not be parsed is recorded
+  with `outcome: unparseable`, because its tokens were still spent.
+
+Sleep never writes per-call rows to `llm_call_log`. A run already has a row
+that totals its calls, and counting the same spend in two tables would mean
+reconciling them on every report. The per-run totals in `sleep_reports` are the
+record of Sleep cost.
+
+The admin and workspace cost dashboards combine Sleep, Memory Analysis and the
+supersede check, and each one appears as its own row in the *By Source* table.
+Recall embeddings are in `llm_call_log` but are not shown in the dashboards
+yet. Because the ledger is a table, you can still answer questions such as
+"how did the supersede verdicts split last week, and what did they cost?"
+after your logs have rotated:
+
+```sql
+SELECT call_metadata->>'verdict' AS verdict, count(*), sum(input_tokens + output_tokens) AS tokens,
+       sum(cost_usd) AS cost_usd
+FROM llm_call_log
+WHERE caller = 'supersede_verify' AND occurred_at >= now() - interval '7 days'
+GROUP BY 1;
+```
+
 ### Setting prices (`LLM_PRICING_OVERRIDES`)
 
 Price a model — self-hosted or any other — with a JSON array:

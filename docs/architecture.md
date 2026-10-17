@@ -338,7 +338,8 @@ Since v0.48.0, REST and MCP batch ingest are thin adapters over `ResourceIngestS
 **Plans, quotas & sleep**
 - **user_plans** / **plan_changes** — Plan state and history
 - **usage_stats** — Rate-limit and quota counters
-- **sleep_reports** — Per-run Sleep Maintenance summaries
+- **sleep_reports** — Per-run Sleep Maintenance summaries (the only record of Sleep's LLM cost)
+- **llm_call_log** — Per-call cost ledger for LLM / embedding calls made outside a run (recall embeddings, the write-time supersede check); see [deployment.md](deployment.md#where-cost-is-recorded-sleep_reports-vs-llm_call_log)
 - **sleep_actions** — Reversible action audit log (used by `rollback_sleep_run`)
 
 **Configuration**
