@@ -1733,9 +1733,9 @@ key resolved at recall time — there is no platform-key tier); `self_hosted` is
 | `RERANK_BASE_URL` | — | OpenAI/Jina-style `/v1/rerank` endpoint (vLLM `--runner pooling`, TEI, Infinity). When set, `self_hosted` makes **one batched** `POST {RERANK_BASE_URL}/v1/rerank` per recall. |
 | `RERANK_MODEL` | `qwen3-reranker-0.6b` | Served model name on that endpoint (vLLM `--served-model-name`). |
 | `RERANK_API_KEY` | — | Bearer token when the `/v1/rerank` endpoint is behind auth. |
-| `RERANK_PROMPT_FORMAT` | `auto` | How the query and documents are sent to `/v1/rerank`. `qwen3` wraps them in the Qwen3-Reranker prompt template (system judge prompt, `<Instruct>` / `<Query>` on the query, `<Document>` plus the empty think block on each document); `raw` sends text verbatim; `auto` picks `qwen3` when the served model name (`RERANK_MODEL`, or a context's `reranker_model`) contains `qwen3-reranker` (case-insensitive), else `raw` — so if `--served-model-name` is something else, set `qwen3` explicitly. In the `qwen3` format the tokenizer's control tokens (`<\|im_start\|>`, `<\|im_end\|>`, `<think>`, …) in the query and in stored memories are broken up so content cannot close the document slot, and each document body is cut to 2000 characters so the template's closing tokens survive server-side truncation. With `raw` — including `raw` plus a server-side `--chat-template` — the text is sent as is: no token neutralising or truncation happens on this side. Set `raw` if the server applies the template itself (vLLM `--chat-template`), or the template is applied twice. A forced `qwen3` also templates contexts that override `reranker_model` with a non-Qwen model on the same endpoint; `auto` decides per model. |
-| `RERANK_INSTRUCTION` | — | The `<Instruct>` line of the Qwen3 template; empty ⇒ the model card default, `Given a web search query, retrieve relevant passages that answer the query`. Ignored for `raw`. |
-| `SELF_HOSTED_RERANK_MODEL` | `dengcao/Qwen3-Reranker-8B:Q5_K_M` | Prompt-scoring fallback on `SELF_HOSTED_BASE_URL` (`/v1/completions`, one call per document), used only when `RERANK_BASE_URL` is unset. The default is an Ollama-registry id — a pure-vLLM stack must set a model it actually serves. |
+| `RERANK_PROMPT_FORMAT` | `auto` | How the query and documents are sent to `/v1/rerank`. `qwen3` wraps them in the Qwen3-Reranker prompt template (system judge prompt, `<Instruct>` / `<Query>` on the query, `<Document>` plus the empty think block on each document); `raw` sends text verbatim; `auto` picks `qwen3` when the served model name (`RERANK_MODEL`, or a context's `reranker_model`) contains `qwen3-reranker` (case-insensitive), else `raw` — so if `--served-model-name` is something else, set `qwen3` explicitly. In the `qwen3` format the tokenizer's control tokens (`<\|im_start\|>`, `<\|im_end\|>`, `<think>`, …) in the query and in stored memories are broken up so content cannot close the document slot, and each document body is cut to 2000 characters so the template's closing tokens survive server-side truncation. With `raw` — including `raw` plus a server-side `--chat-template` — the text is sent as is: no token neutralising or truncation happens on this side. Set `raw` if the server applies the template itself (vLLM `--chat-template`), or the template is applied twice. A forced `qwen3` also templates contexts that override `reranker_model` with a non-Qwen model on the same endpoint; `auto` decides per model. Without `RERANK_BASE_URL` the same setting picks the format of the Ollama path (see [Ollama path](#ollama-path-no-rerank_base_url)). |
+| `RERANK_INSTRUCTION` | — | The `<Instruct>` line of the Qwen3 template (both paths); empty ⇒ the model card default, `Given a web search query, retrieve relevant passages that answer the query`. Ignored for `raw`. |
+| `SELF_HOSTED_RERANK_MODEL` | `dengcao/Qwen3-Reranker-8B:Q5_K_M` | Model scored one call per document on `SELF_HOSTED_BASE_URL`, used only when `RERANK_BASE_URL` is unset — see [Ollama path](#ollama-path-no-rerank_base_url). The default is an Ollama-registry id — a pure-vLLM stack must set a model it actually serves, or better, use `RERANK_BASE_URL`. |
 
 The `DEFAULT_*` values apply to contexts created from now on; **existing rows
 are never rewritten by a migration** (#1207 decision) — see the recipe below.
@@ -1766,6 +1766,38 @@ served name containing `qwen3-reranker`, `RERANK_PROMPT_FORMAT=auto` applies
 the template on the client side. If you name the model something else, set
 `RERANK_PROMPT_FORMAT=qwen3`.
 
+### Ollama path (no `RERANK_BASE_URL`)
+
+Without `RERANK_BASE_URL`, a `self_hosted` context scores each candidate with
+one request to `SELF_HOSTED_BASE_URL` (`SELF_HOSTED_RERANK_MODEL`). This is
+slower than a batched `/v1/rerank` call and is meant for small Ollama
+installs; **`RERANK_BASE_URL` (vLLM `/v1/rerank`, recipe above) is the
+recommended self-hosted reranker.** `RERANK_PROMPT_FORMAT` picks the format
+here too (#2033):
+
+- **`qwen3`** (what `auto` picks for a model name containing
+  `qwen3-reranker` — the default model is one): the Qwen3-Reranker template is
+  sent to Ollama's native `POST /api/generate` with `raw: true` (no Modelfile
+  chat template on top), `logprobs: true` and one output token, and the score
+  is P(yes) / (P(yes) + P(no)) over the first token's top 20 alternatives —
+  the model card's yes/no scoring. **Needs Ollama 0.12.11 or later** (older
+  versions ignore `logprobs`, every score comes back unparseable and recall
+  fails open). vLLM does not serve `/api/generate`; with vLLM use
+  `RERANK_BASE_URL`. Token neutralising and the 2000-character cut apply as
+  on `/v1/rerank`.
+- **`raw`**: the generic "Score the relevance … Score: " prompt on the
+  OpenAI-compatible `/v1/completions`, with the number in the reply parsed as
+  the score — for general instruction models only. **Not supported for
+  Qwen3 rerankers**: measured on Ollama, `dengcao/Qwen3-Reranker-8B:Q5_K_M`
+  answers `0` for almost every real memory and
+  `dengcao/Qwen3-Reranker-0.6B:Q8_0` answers `!!!!!`. Control tokens in the
+  query and memories are neutralised here as well.
+
+`dengcao/Qwen3-Reranker-0.6B:Q8_0` is unusable on Ollama in either format:
+its first-token distribution is flat (every token at the same logprob), so it
+never says yes or no. Use the 8B build on Ollama, or the 0.6B model through
+vLLM `/v1/rerank`.
+
 A freshly created context on a plan with `reranking` now reranks with no user
 action and no external key; a Free workspace does not
 (`reranking_disabled_by_plan_tier` in the log). Then convert the contexts that
@@ -1795,19 +1827,45 @@ results are returned and exactly one warning is logged:
 rerank_failed_open provider=self_hosted error_class=ConnectError context_id=... workspace_id=...
 ```
 
+A rerank whose scores carry no ranking is treated the same way
+(`error_class=RerankNotDiscriminatingError`, #2033), so the hybrid scores are
+kept instead of being overwritten with one value: on the Ollama path when no
+output could be parsed or every document got the same score (for example all
+`0`), and on `/v1/rerank` when the server scored every candidate and all the
+scores are identical. A single candidate is never judged this way, and on
+`/v1/rerank` a tie inside a `top_n` cut is not either (saturated relevant
+documents can tie). Ollama replies that hold no score are also counted in one
+warning per recall:
+
+```
+self_hosted_rerank_unparseable model=... rerank_format=qwen3 unparseable_count=4 failed_count=0 doc_count=4
+```
+
 Alert on `rerank_failed_open` (a structured log event — the backend has no
 metrics counters). `reranking_disabled_by_deployment` (debug) and
 `reranking_disabled_by_plan_tier` (info) mark the two deliberate skips.
 
 ### Calibration check
 
-When `RERANK_BASE_URL` is set and `ENABLE_RERANKING` is on, every API process
-(each Uvicorn worker) scores one relevant and one irrelevant document against
-`RERANK_MODEL` once at startup, in the background (it never runs on a recall).
-It covers only `RERANK_MODEL`, not a per-context `reranker_model` override.
+When `ENABLE_RERANKING` is on and either `RERANK_BASE_URL` is set or (without
+it) `DEFAULT_RERANKER_PROVIDER=self_hosted`, every API process (each Uvicorn
+worker) scores one relevant and one irrelevant document once at startup, in
+the background (it never runs on a recall), through the reranker recalls use:
+`RERANK_MODEL` on `/v1/rerank`, else `SELF_HOSTED_RERANK_MODEL` on the Ollama
+path. It covers only that ops-level model, not a per-context `reranker_model`
+override. `SELF_HOSTED_BASE_URL` alone does not start the Ollama check — it
+also serves self-hosted embeddings, and the check would make Ollama load a
+reranker nobody uses.
 
-With the `qwen3` format, the relevant document must win by at least 0.5, else
-a warning is logged:
+On the Ollama path the scores are always between 0 and 1, so both formats get
+the 0.5 verdict below; an unparseable reply counts as 0 and is reported as
+`unparseable_count` on `rerank_model_uncalibrated`. The toy pair is easy: a
+pass does not prove the `raw` score prompt works on real memories (the 8B
+model passes it and still answers `0` for most memories) — the per-recall
+check in [Fail-open behaviour](#fail-open-behaviour) covers that.
+
+With the `qwen3` format (and on the Ollama path, either format), the relevant
+document must win by at least 0.5, else a warning is logged:
 
 ```
 rerank_model_uncalibrated model=qwen3-reranker-0.6b prompt_format=qwen3 relevant_score=0.98 irrelevant_score=0.866 margin=0.114 min_margin=0.5
@@ -1817,8 +1875,8 @@ That usually means the template is applied twice (the server also runs
 `--chat-template`: set `RERANK_PROMPT_FORMAT=raw`) or the model is not a Qwen3
 reranker. A passing check logs `rerank_model_calibrated` (info).
 
-With `raw` the score scale depends on the server (probabilities, logits), so
-no verdict is given: the scores are logged as `rerank_calibration_observed`
+With `raw` on `/v1/rerank` the score scale depends on the server
+(probabilities, logits), so no verdict is given: the scores are logged as `rerank_calibration_observed`
 (info). A Qwen3 reranker served under a name without `qwen3-reranker` shows up
 here with close scores — set `RERANK_PROMPT_FORMAT=qwen3`.
 
