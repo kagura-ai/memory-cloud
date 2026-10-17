@@ -216,6 +216,33 @@ class TestFailOpen:
             "ConnectError"
         ]
 
+    async def test_fail_open_log_carries_no_error_text(self, service, settings):
+        """#2033 (CSO): str(e) of an httpx error embeds the request URL, which
+        may carry credentials — log the class and the status code instead."""
+        request = httpx.Request("POST", "http://user:secret@gpu:8002/v1/rerank")
+        response = httpx.Response(503, request=request)
+        service.reranker_service.rerank = AsyncMock(
+            side_effect=httpx.HTTPStatusError(
+                "503 for url http://user:secret@gpu:8002/v1/rerank",
+                request=request,
+                response=response,
+            )
+        )
+        with structlog.testing.capture_logs() as logs:
+            await _search(service, use_rerank=None, config=_config(True))
+        (event,) = [e for e in logs if e["event"] == "rerank_failed_open"]
+        assert "error" not in event
+        assert event["error_class"] == "HTTPStatusError"
+        assert event["status_code"] == 503
+        assert "secret" not in repr(event)
+
+    async def test_fail_open_without_a_status_code(self, service, settings):
+        service.reranker_service.rerank = AsyncMock(side_effect=RuntimeError("down"))
+        with structlog.testing.capture_logs() as logs:
+            await _search(service, use_rerank=None, config=_config(True))
+        (event,) = [e for e in logs if e["event"] == "rerank_failed_open"]
+        assert event["status_code"] is None
+
 
 class TestSelfHostedDefaultEndToEnd:
     """Acceptance 1 (recall half): a context stamped with the self_hosted

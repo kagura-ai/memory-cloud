@@ -305,6 +305,15 @@ class TestCohereReranker:
 # ---------------------------------------------------------------------------
 
 
+def _exc(raiser):
+    """The exception ``raiser()`` raises (to hand to _FakeHttpResponse)."""
+    try:
+        raiser()
+    except Exception as e:  # noqa: BLE001
+        return e
+    raise AssertionError("raiser did not raise")
+
+
 def _patch_ollama_post(monkeypatch, handler):
     """Patch httpx.AsyncClient.post with an async ``handler(url, json=...)``."""
 
@@ -362,67 +371,64 @@ class TestSelfHostedReranker:
         assert out[1]["relevance_score"] == pytest.approx(0.5)
         assert len(out) == 2
 
-    async def test_http_error_falls_back_to_zero(self, monkeypatch):
-        """A raise_for_status error on one doc yields score 0.0 for that doc."""
+    # #2033: an unscored document (failed / unparseable) is no 0.0 any more:
+    # it comes back with relevance_score None so RerankerService keeps it at
+    # its hybrid position, after the scored ones. Up to 20% unscored is kept;
+    # above that the call fails open (test_self_hosted_reranker.py). Each test
+    # pairs the bad document with four healthy ones: 1 of 5 = 20%.
+    _HEALTHY = {"c1": "0.1", "c2": "0.2", "c3": "0.3"}
 
+    async def _rerank_with_one_bad(self, monkeypatch, bad_reply, good_text):
         def handler(url, json):
-            if "good" in json["prompt"]:
-                return _FakeHttpResponse(json_data={"choices": [{"text": "0.8"}]})
-            return _FakeHttpResponse(
-                raise_exc=httpx.HTTPStatusError("500", request=MagicMock(), response=MagicMock())
-            )
+            prompt = json["prompt"]
+            if "bad" in prompt:
+                return bad_reply()
+            for doc, text in self._HEALTHY.items():
+                if doc in prompt:
+                    return _FakeHttpResponse(json_data={"choices": [{"text": text}]})
+            return _FakeHttpResponse(json_data={"choices": [{"text": good_text}]})
 
         _patch_ollama_post(monkeypatch, handler)
-
         out = await SelfHostedReranker("http://x", prompt_format="raw").rerank(
-            "q", ["good", "bad"], 5
+            "q", ["good", "bad", "c1", "c2", "c3"], 5
         )
-        scores = {d["index"]: d["relevance_score"] for d in out}
+        return {d["index"]: d["relevance_score"] for d in out}
+
+    async def test_http_error_leaves_that_doc_unscored(self, monkeypatch):
+        """A raise_for_status error on one doc leaves it unscored (None)."""
+
+        def bad():
+            raise httpx.HTTPStatusError("500", request=MagicMock(), response=MagicMock())
+
+        scores = await self._rerank_with_one_bad(
+            monkeypatch, lambda: _FakeHttpResponse(raise_exc=_exc(bad)), "0.8"
+        )
         assert scores[0] == pytest.approx(0.8)
-        assert scores[1] == 0.0
+        assert scores[1] is None
 
-    async def test_timeout_on_one_doc_falls_back_to_zero(self, monkeypatch):
-        """A timeout on one doc yields 0.0 for that doc; the others keep their
-        score (no raise). #1572 narrowed the old single-doc variant: a lone
-        document that times out is now "every doc failed" and raises instead."""
+    async def test_timeout_on_one_doc_leaves_it_unscored(self, monkeypatch):
+        """A timeout on one doc leaves it unscored; the others keep their score.
+        #1572: a lone document that times out is "every doc failed" and raises."""
 
-        def handler(url, json):
-            if "slow" in json["prompt"]:
-                raise httpx.TimeoutException("slow")
-            return _FakeHttpResponse(json_data={"choices": [{"text": "0.7"}]})
+        def bad():
+            raise httpx.TimeoutException("slow")
 
-        _patch_ollama_post(monkeypatch, handler)
-
-        out = await SelfHostedReranker("http://x", prompt_format="raw").rerank(
-            "q", ["fast", "slow"], 2
-        )
-        scores = {d["index"]: d["relevance_score"] for d in out}
+        scores = await self._rerank_with_one_bad(monkeypatch, bad, "0.7")
         assert scores[0] == pytest.approx(0.7)
-        assert scores[1] == 0.0
+        assert scores[1] is None
 
-    async def test_malformed_completion_body_scores_zero(self, monkeypatch):
-        """A malformed /v1/completions body (no 'choices') scores 0.0 for that doc.
+    async def test_malformed_completion_body_leaves_that_doc_unscored(self, monkeypatch):
+        """A malformed /v1/completions body (no 'choices') leaves that doc unscored.
 
         The reranker reads ``resp.json()["choices"][0]["text"]``; an empty
-        ``{}`` raises KeyError, which the per-doc ``except`` swallows to 0.0.
-        This exercises that fallback path (also hit by ``{"choices": []}`` /
-        ``{"choices": [{}]}`` from a real backend). Paired with a healthy doc
-        because an all-malformed batch now raises (#1572).
+        ``{}`` raises KeyError, which the per-doc ``except`` catches (also hit
+        by ``{"choices": []}`` / ``{"choices": [{}]}`` from a real backend).
         """
-
-        def handler(url, json):
-            if "bad" in json["prompt"]:
-                return _FakeHttpResponse(json_data={})
-            return _FakeHttpResponse(json_data={"choices": [{"text": "0.6"}]})
-
-        _patch_ollama_post(monkeypatch, handler)
-
-        out = await SelfHostedReranker("http://x", prompt_format="raw").rerank(
-            "q", ["good", "bad"], 2
+        scores = await self._rerank_with_one_bad(
+            monkeypatch, lambda: _FakeHttpResponse(json_data={}), "0.6"
         )
-        scores = {d["index"]: d["relevance_score"] for d in out}
         assert scores[0] == pytest.approx(0.6)
-        assert scores[1] == 0.0
+        assert scores[1] is None
 
     async def test_every_doc_failing_raises_instead_of_arbitrary_order(self, monkeypatch):
         """#1572: when EVERY scoring fails (backend down, model 404) the reranker

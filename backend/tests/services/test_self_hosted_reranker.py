@@ -33,11 +33,13 @@ from services.reranker_service import (
     QWEN3_RERANK_MAX_DOC_CHARS,
     QWEN3_RERANK_PREFIX,
     QWEN3_RERANK_SUFFIX,
+    SELF_HOSTED_RERANK_MAX_UNSCORED_RATIO,
     RerankerService,
     RerankGenerateUnsupportedError,
     RerankNotDiscriminatingError,
     SelfHostedReranker,
     VLLMReranker,
+    _qwen3_yes_probability,
     run_rerank_calibration_check,
     should_run_rerank_calibration,
 )
@@ -222,7 +224,7 @@ class TestQwen3Scoring:
         with structlog.testing.capture_logs() as logs:
             with pytest.raises(RerankNotDiscriminatingError):
                 await SelfHostedReranker("http://x").rerank("q", ["a", "b", "c"], 3)
-        warned = [e for e in logs if e["event"] == "self_hosted_rerank_unparseable"]
+        warned = [e for e in logs if e["event"] == "self_hosted_rerank_unscored"]
         assert len(warned) == 1, "one aggregated warning per call, not one per document"
         assert warned[0]["log_level"] == "warning"
         assert warned[0]["unparseable_count"] == 3
@@ -235,6 +237,36 @@ class TestQwen3Scoring:
         _patch_post(monkeypatch, lambda u, j, h: _Resp(_generate(flat)))
         with pytest.raises(RerankNotDiscriminatingError):
             await SelfHostedReranker("http://x").rerank("q", ["a", "b"], 2)
+
+
+class TestRealOllamaReply:
+    """A reply captured from Ollama 0.20.2 (dengcao/Qwen3-Reranker-8B:Q5_K_M)."""
+
+    @pytest.fixture(scope="class")
+    def replies(self):
+        import json
+        from pathlib import Path
+
+        path = Path(__file__).parent / "fixtures" / "ollama_generate_qwen3_reranker.json"
+        return json.loads(path.read_text(encoding="utf-8"))["replies"]
+
+    def test_relevant_reply_scores_high(self, replies):
+        body = replies["relevant"]["body"]
+        assert body["response"] == "yes"
+        assert _qwen3_yes_probability(body) > 0.9
+
+    def test_irrelevant_reply_scores_low(self, replies):
+        body = replies["irrelevant"]["body"]
+        assert body["response"].strip() == "no"
+        assert _qwen3_yes_probability(body) < 0.05
+
+    def test_score_is_the_variant_sum_ratio(self, replies):
+        body = replies["relevant"]["body"]
+        first = body["logprobs"][0]
+        by_token = {t["token"]: t["logprob"] for t in [first, *first["top_logprobs"]]}
+        p_yes = sum(math.exp(v) for k, v in by_token.items() if k.strip().lower() == "yes")
+        p_no = sum(math.exp(v) for k, v in by_token.items() if k.strip().lower() == "no")
+        assert _qwen3_yes_probability(body) == pytest.approx(p_yes / (p_yes + p_no))
 
 
 # ---------------------------------------------------------------------------
@@ -264,23 +296,53 @@ class TestRawScorePrompt:
         with structlog.testing.capture_logs() as logs:
             with pytest.raises(RerankNotDiscriminatingError, match="unparseable"):
                 await SelfHostedReranker("http://x", prompt_format="raw").rerank("q", ["a", "b"], 2)
-        warned = [e for e in logs if e["event"] == "self_hosted_rerank_unparseable"]
+        warned = [e for e in logs if e["event"] == "self_hosted_rerank_unscored"]
         assert len(warned) == 1 and warned[0]["unparseable_count"] == 2
 
-    async def test_partly_unparseable_keeps_the_ranking_and_warns_once(self, monkeypatch):
+    async def test_unscored_share_at_the_threshold_is_kept(self, monkeypatch):
+        """2 of 10 unscored (20%): kept — scored first by score, then the
+        unscored ones as None in their (hybrid) input order; one warning."""
+        replies = {f"d{i}": f"0.{i}" for i in range(10)}
+        replies["d3"] = "!!!"  # unparseable
+        replies["d7"] = "boom"  # failed (raised below)
+
         def handler(url, json, headers):
             doc = _doc_of(json)
-            return _Resp(_completion({"a": "0.9", "b": "!!!", "c": "!!", "d": "0.2"}[doc]))
+            if doc == "d7":
+                raise httpx.ReadTimeout("slow")
+            return _Resp(_completion(replies[doc]))
 
         _patch_post(monkeypatch, handler)
         with structlog.testing.capture_logs() as logs:
             out = await SelfHostedReranker("http://x", prompt_format="raw").rerank(
-                "q", ["a", "b", "c", "d"], 4
+                "q", [f"d{i}" for i in range(10)], 10
             )
-        assert out[0] == {"index": 0, "relevance_score": pytest.approx(0.9)}
-        assert {r["index"]: r["relevance_score"] for r in out}[1] == 0.0
-        warned = [e for e in logs if e["event"] == "self_hosted_rerank_unparseable"]
-        assert len(warned) == 1 and warned[0]["unparseable_count"] == 2
+        assert [r["index"] for r in out] == [9, 8, 6, 5, 4, 2, 1, 0, 3, 7]
+        assert [r["relevance_score"] for r in out[-2:]] == [None, None]
+        warned = [e for e in logs if e["event"] == "self_hosted_rerank_unscored"]
+        assert len(warned) == 1
+        assert warned[0]["log_level"] == "warning"
+        assert (warned[0]["unparseable_count"], warned[0]["failed_count"]) == (1, 1)
+        assert warned[0]["doc_count"] == 10
+
+    async def test_unscored_share_above_the_threshold_fails_the_call(self, monkeypatch):
+        """3 of 10 unscored (30%): fail open, like 9 of 10 timing out on the 8B."""
+
+        def handler(url, json, headers):
+            doc = _doc_of(json)
+            return _Resp(_completion("!!!" if doc in {"d1", "d2", "d3"} else "0.5"))
+
+        _patch_post(monkeypatch, handler)
+        with structlog.testing.capture_logs() as logs:
+            with pytest.raises(RerankNotDiscriminatingError, match="unscored"):
+                await SelfHostedReranker("http://x", prompt_format="raw").rerank(
+                    "q", [f"d{i}" for i in range(10)], 10
+                )
+        warned = [e for e in logs if e["event"] == "self_hosted_rerank_unscored"]
+        assert len(warned) == 1 and warned[0]["unparseable_count"] == 3
+
+    def test_the_threshold_is_one_named_constant(self):
+        assert SELF_HOSTED_RERANK_MAX_UNSCORED_RATIO == 0.2
 
     async def test_a_single_candidate_with_a_score_is_kept(self, monkeypatch):
         """Never fail open on a legitimately single-candidate list."""
@@ -340,8 +402,12 @@ def _service_with(monkeypatch, scores, provider_name="voyage"):
 
     async def fake_rerank(query, documents, top_n):
         out = [{"index": i, "relevance_score": sc} for i, sc in enumerate(scores)]
-        out.sort(key=lambda r: r["relevance_score"], reverse=True)
-        return out[:top_n]
+        scored = sorted(
+            (r for r in out if r["relevance_score"] is not None),
+            key=lambda r: r["relevance_score"],
+            reverse=True,
+        )
+        return (scored + [r for r in out if r["relevance_score"] is None])[:top_n]
 
     provider.rerank = AsyncMock(side_effect=fake_rerank)
     service = RerankerService(MagicMock())
@@ -400,6 +466,21 @@ class TestNoSignalGuard:
         monkeypatch.setattr(service, "get_active_provider", AsyncMock(return_value=provider))
         out = await service.rerank("q", _cands(4), "u", k=2)
         assert [c["rerank_score"] for c in out] == [0.0, 0.0]
+
+    async def test_unscored_candidates_keep_hybrid_position_and_score(self, monkeypatch):
+        """relevance_score None (self_hosted, #2033): after the scored ones, in
+        hybrid order, hybrid_score untouched and no rerank_score."""
+        service, _ = _service_with(monkeypatch, [0.2, None, 0.9, None, 0.5])
+        out = await service.rerank("q", _cands(5), "u", k=5)
+        assert [c["id"] for c in out] == ["m2", "m4", "m0", "m1", "m3"]
+        assert [c["hybrid_score"] for c in out[3:]] == pytest.approx([0.8, 0.6])
+        assert all("rerank_score" not in c for c in out[3:])
+        assert out[0]["rerank_score"] == pytest.approx(0.9)
+
+    async def test_all_scored_zero_beside_unscored_is_still_a_failure(self, monkeypatch):
+        service, _ = _service_with(monkeypatch, [0.0, 0.0, None, 0.0, 0.0])
+        with pytest.raises(RerankNotDiscriminatingError):
+            await service.rerank("q", _cands(5), "u", k=5)
 
     async def test_a_single_candidate_is_unchanged(self, monkeypatch):
         service, _ = _service_with(monkeypatch, [0.0])
@@ -465,7 +546,9 @@ async def test_per_document_failure_log_is_redacted(monkeypatch):
     _patch_post(monkeypatch, handler)
     r = SelfHostedReranker("http://user:secret@ollama:11434", prompt_format="raw")
     with structlog.testing.capture_logs() as logs:
-        await r.rerank("q", ["good", "bad"], 2)
+        # 1 of 2 unscored is above the threshold: the call fails open too.
+        with pytest.raises(RerankNotDiscriminatingError):
+            await r.rerank("q", ["good", "bad"], 2)
     failed = [e for e in logs if e["event"] == "self_hosted_rerank_score_failed"]
     assert len(failed) == 1
     entry = failed[0]

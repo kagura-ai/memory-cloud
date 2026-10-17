@@ -124,6 +124,12 @@ class RerankGenerateUnsupportedError(RuntimeError):
 # self_hosted_rerank_generate_unsupported is logged once per process.
 _GENERATE_UNSUPPORTED_WARNED = False
 
+# Share of documents SelfHostedReranker may leave unscored (failed or
+# unparseable) before the call fails open (#2033). Up to it, unscored
+# documents keep their hybrid position and score after the scored ones;
+# above it, they would make up too much of the "ranking".
+SELF_HOSTED_RERANK_MAX_UNSCORED_RATIO = 0.2
+
 
 # Character budget for a document body in the qwen3 format (#2020 gate2). The
 # template's suffix (<|im_end|> + the assistant turn + the empty think block)
@@ -661,7 +667,12 @@ class SelfHostedReranker(RerankerProvider):
             RerankGenerateUnsupportedError: If the backend 404s /api/generate
                 (qwen3 format on a non-Ollama backend).
             RuntimeError: If every document scoring failed (backend down).
-            RerankNotDiscriminatingError: If no output was parseable.
+            RerankNotDiscriminatingError: If more than
+                ``SELF_HOSTED_RERANK_MAX_UNSCORED_RATIO`` of the documents are
+                unscored (failed or unparseable).
+
+        Returns are sorted by score; an unscored document comes last with
+        ``relevance_score`` ``None``.
         """
         if not documents:
             return []
@@ -686,11 +697,12 @@ class SelfHostedReranker(RerankerProvider):
             raise unsupported
         failed = sum(1 for o in outcomes if isinstance(o, Exception))
         unparseable = sum(1 for o in outcomes if o is None)
-        if unparseable:
-            # Once per call with a count — not one line per document.
+        unscored = failed + unparseable
+        if unscored:
+            # Once per call with the counts — not one line per document.
             rerank_format = self.prompt_format
             logger.warning(
-                "self_hosted_rerank_unparseable",
+                "self_hosted_rerank_unscored",
                 model=self.model,
                 rerank_format=rerank_format,
                 unparseable_count=unparseable,
@@ -707,17 +719,34 @@ class SelfHostedReranker(RerankerProvider):
                 f"self_hosted rerank backend unavailable: all {n} "
                 f"document scorings failed (model={self.model})"
             )
-        if failed + unparseable == n:
+        # Too many unscored documents (e.g. 9 of 10 timing out on the 8B model)
+        # and the "ranking" is mostly the unscored tail: fail open (#2033).
+        if unscored / n > SELF_HOSTED_RERANK_MAX_UNSCORED_RATIO:
             raise RerankNotDiscriminatingError(
-                f"self_hosted rerank produced no usable score: {unparseable} of {n} "
-                f"outputs unparseable, {failed} failed (model={self.model}, "
+                f"self_hosted rerank left {unscored} of {n} documents unscored "
+                f"({unparseable} unparseable, {failed} failed; max ratio "
+                f"{SELF_HOSTED_RERANK_MAX_UNSCORED_RATIO}) (model={self.model}, "
                 f"format={self.prompt_format})"
             )
-        # A partial failure / unparseable reply keeps a zero for that document.
-        # Whether the scores rank at all is RerankerService's shared guard.
-        scores = [o if isinstance(o, float) else 0.0 for o in outcomes]
-        scored = [{"index": i, "relevance_score": sc} for i, sc in enumerate(scores)]
-        scored.sort(key=lambda x: x["relevance_score"], reverse=True)
+        # Scored documents by score, then the unscored ones with
+        # relevance_score None in input (= hybrid) order: RerankerService keeps
+        # those at their hybrid position with their hybrid_score, instead of a
+        # 0.0 that would sink them. Whether the scores rank at all is
+        # RerankerService's shared guard.
+        scored = sorted(
+            (
+                {"index": i, "relevance_score": o}
+                for i, o in enumerate(outcomes)
+                if isinstance(o, float)
+            ),
+            key=lambda x: x["relevance_score"],
+            reverse=True,
+        )
+        tail = [
+            {"index": i, "relevance_score": None}
+            for i, o in enumerate(outcomes)
+            if not isinstance(o, float)
+        ]
 
         logger.debug(
             "self_hosted_rerank_completed",
@@ -726,7 +755,7 @@ class SelfHostedReranker(RerankerProvider):
             top_n=top_n,
         )
 
-        return scored[:top_n]
+        return (scored + tail)[:top_n]
 
 
 class VLLMReranker(RerankerProvider):
@@ -1379,8 +1408,15 @@ class RerankerService:
 
         if outcome is not None:
             outcome["scored"] = True
+        # The guard judges only a list that covers every candidate. A provider
+        # that returns fewer results than candidates is not judged (and only
+        # its returned results are mapped below).
         if n >= 2 and len(results) == n:
-            scores = {r["relevance_score"] for r in results}
+            # A relevance_score of None is a document the provider could not
+            # score (self_hosted, #2033); the verdict is on the scored ones.
+            # Exact equality on purpose: a near-flat tolerance is to be
+            # decided from eval numbers (kagura-memory-eval N7-R), not guessed.
+            scores = {r["relevance_score"] for r in results if r["relevance_score"] is not None}
             if scores == {0.0}:
                 # The measured Qwen3-on-Ollama case: raise so SearchService
                 # fails open (rerank_failed_open) and the hybrid scores stay.
@@ -1395,14 +1431,19 @@ class RerankerService:
                 logger.info("rerank_no_signal", provider=provider.provider_name, doc_count=n)
                 return candidates[:k]
 
-        # Map reranked results back to candidates
+        # Map reranked results back to candidates: scored ones in score order,
+        # then unscored ones (None) untouched in their hybrid order.
         reranked = []
-        for result in results[:k]:
-            idx = result["index"]
-            candidate = candidates[idx]
+        unscored_idx: list[int] = []
+        for result in results:
+            candidate = candidates[result["index"]]
+            if result["relevance_score"] is None:
+                unscored_idx.append(result["index"])
+                continue
             candidate["rerank_score"] = result["relevance_score"]
             candidate["hybrid_score"] = result["relevance_score"]  # Override hybrid score
             reranked.append(candidate)
+        reranked = (reranked + [candidates[i] for i in sorted(unscored_idx)])[:k]
 
         logger.debug(
             "reranking_completed",

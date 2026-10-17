@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, Literal
 from uuid import UUID
 
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
@@ -464,8 +465,12 @@ class SearchService:
                     logger.warning(
                         "rerank_failed_open",
                         provider=getattr(config, "reranker_provider", None),
+                        # No str(e): an httpx message embeds the request URL,
+                        # which may carry a provider's credentials (#2033).
                         error_class=type(e).__name__,
-                        error=str(e),
+                        status_code=(
+                            e.response.status_code if isinstance(e, httpx.HTTPStatusError) else None
+                        ),
                         context_id=primary_context_id,
                         workspace_id=str(workspace_id) if workspace_id else None,
                     )
