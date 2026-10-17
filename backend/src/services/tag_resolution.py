@@ -354,6 +354,12 @@ async def expand_tag_filter(
         an over-wide filter only returns more and each result shows its tags,
         whereas a write would store the memory under the other identifier.
         ``docs/mcp-tools.md`` documents the difference.
+
+        ``expanded`` is flat. Under ``tags_match='all'`` the store builders
+        (``db.qdrant._build_tag_filter_conditions``, ``db.lance_store.
+        _build_tag_clause``) read it back as one group per tag by regrouping
+        on the same ``normalize_tag`` fold (``group_tags_by_fold``, #2058),
+        so every variant added here must share its requested tag's fold.
     """
     try:
         # #1512: widening only needs the mechanical variants, so a vocabulary up

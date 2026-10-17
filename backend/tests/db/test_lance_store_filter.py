@@ -97,6 +97,53 @@ def test_tags_all_is_and():
     assert "(array_has(tags, 'x') AND array_has(tags, 'y'))" in where
 
 
+def test_tags_all_with_normalize_ors_the_spellings_of_one_tag():
+    """#2058: the expanded spellings of one tag are one OR group, ANDed per tag."""
+    where = build_lance_filter(
+        WS,
+        CTX,
+        USER,
+        filters={"tags": ["ログ", "デプロイ", "ろぐ"], "tags_match": "all", "tags_normalize": True},
+    )
+    assert (
+        "((array_has(tags, 'ログ') OR array_has(tags, 'ろぐ')) AND array_has(tags, 'デプロイ'))"
+    ) in where
+
+
+def test_tags_all_with_normalize_and_no_variants_is_unchanged():
+    plain = {"tags": ["x", "y"], "tags_match": "all"}
+    assert build_lance_filter(WS, CTX, USER, filters={**plain, "tags_normalize": True}) == (
+        build_lance_filter(WS, CTX, USER, filters=plain)
+    )
+
+
+def test_tags_all_without_normalize_requires_every_spelling():
+    where = build_lance_filter(
+        WS, CTX, USER, filters={"tags": ["ログ", "ろぐ"], "tags_match": "all"}
+    )
+    assert "(array_has(tags, 'ログ') AND array_has(tags, 'ろぐ'))" in where
+
+
+def test_tags_any_with_normalize_stays_one_flat_or():
+    where = build_lance_filter(
+        WS, CTX, USER, filters={"tags": ["ログ", "デプロイ", "ろぐ"], "tags_normalize": True}
+    )
+    assert (
+        "(array_has(tags, 'ログ') OR array_has(tags, 'デプロイ') OR array_has(tags, 'ろぐ'))"
+    ) in where
+
+
+def test_tags_all_with_normalize_caps_tags_not_spellings():
+    widened: list[str] = []
+    for stem in ("alpha", "bravo", "charlie"):
+        widened += [stem] + [f"{stem}{'-' * n}" for n in range(1, 21)]
+    widened.append("delta")
+    where = build_lance_filter(
+        WS, CTX, USER, filters={"tags": widened, "tags_match": "all", "tags_normalize": True}
+    )
+    assert "AND array_has(tags, 'delta'))" in where
+
+
 def test_tag_value_is_escaped():
     where = build_lance_filter(WS, CTX, USER, filters={"tags": ["a'b"]})
     assert "array_has(tags, 'a''b')" in where

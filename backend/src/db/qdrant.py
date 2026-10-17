@@ -56,6 +56,7 @@ from utils.geo_location import extract_near_filter, extract_within_filter
 from utils.logger import get_logger
 from utils.sparse_vector import build_query_sparse_vector
 from utils.synonyms import expand_query_tokens
+from utils.tag_normalize import group_tags_by_fold
 from utils.tokenizer import augment_reading_tokens, tokenize_and_reading
 
 if TYPE_CHECKING:
@@ -373,15 +374,42 @@ def _validate_uuid_format(value: str, field_name: str) -> None:
         raise ValueError(ERROR_MSG_INVALID_UUID.format(field=field_name, value=value)) from e
 
 
+# Bound on the tags a filter matches on: tags under "any" / exact "all", tag
+# groups under "all" + tags_normalize (#2058).
+_MAX_FILTER_TAGS = 50
+# Bound on the spellings scanned to build those groups. expand_tag_filter adds
+# at most MAX_EXPANSION_PER_TAG (20) spellings per tag, so 50 widened tags stay
+# within it; the cap only limits the fold work on an oversized caller list.
+_MAX_FILTER_SPELLINGS = 2000
+
+
+def tag_groups_for_all(tags: list[str]) -> list[list[str]]:
+    """The groups a tags_match='all' + tags_normalize filter ANDs (#2058).
+
+    Groups BEFORE capping, so the variants of the first tags cannot push a
+    later requested tag past the cap and silently drop it from the AND.
+
+    Args:
+        tags: The filter's non-empty string tags, uncapped.
+
+    Returns:
+        At most ``_MAX_FILTER_TAGS`` groups from ``group_tags_by_fold``.
+    """
+    return group_tags_by_fold(tags[:_MAX_FILTER_SPELLINGS])[:_MAX_FILTER_TAGS]
+
+
 def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition]:
     """Build FieldConditions for tag filtering.
 
     Issue #67: Exact-match tag filtering only. Tags are NOT added to
     BM25 text search to avoid score inflation for tag-heavy memories.
     Issue #79: Support AND logic via tags_match="all".
+    Issue #2058: with tags_normalize, "all" requires each TAG, not each
+    spelling: the spellings recall widened one tag to are one MatchAny.
 
     Args:
-        filters: Filter dict with optional tags list and tags_match mode
+        filters: Filter dict with optional tags list, tags_match mode and
+            tags_normalize flag
 
     Returns:
         List of FieldConditions for tag matching (empty if no tags)
@@ -391,7 +419,8 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
         return []
 
     # Validate: only non-empty strings, bounded to 50 tags
-    valid_tags = [t for t in filter_tags if isinstance(t, str) and t][:50]
+    strings = [t for t in filter_tags if isinstance(t, str) and t]
+    valid_tags = strings[:_MAX_FILTER_TAGS]
     if not valid_tags:
         return []
 
@@ -401,7 +430,17 @@ def _build_tag_filter_conditions(filters: dict[str, Any]) -> list[FieldCondition
 
     if tags_match == "all":
         # AND logic: memory must have ALL specified tags
-        return [FieldCondition(key="tags", match=MatchValue(value=tag)) for tag in valid_tags]
+        if not filters.get("tags_normalize"):
+            return [FieldCondition(key="tags", match=MatchValue(value=tag)) for tag in valid_tags]
+        # #2058: the list holds every stored spelling of each requested tag
+        # (expand_tag_filter); any one spelling satisfies that tag. A tag with
+        # one spelling keeps the exact MatchValue above.
+        return [
+            FieldCondition(key="tags", match=MatchValue(value=group[0]))
+            if len(group) == 1
+            else FieldCondition(key="tags", match=MatchAny(any=group))
+            for group in tag_groups_for_all(strings)
+        ]
     else:
         # OR logic (default): memory must have ANY of the specified tags
         return [FieldCondition(key="tags", match=MatchAny(any=valid_tags))]

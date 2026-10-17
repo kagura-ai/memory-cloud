@@ -170,6 +170,30 @@ class TestExpandTagFilter:
         assert f"LIMIT {VOCABULARY_LIMIT}" in sql
 
 
+class TestExpansionRegroupsPerRequestedTag:
+    """#2058: the store builders regroup the flat expansion by fold.
+
+    Under tags_match='all' they AND one group per tag, so every spelling the
+    widening adds must land in its own requested tag's group. A widening rule
+    that adds a spelling outside the fold would make that spelling a required
+    tag again; this pins the invariant the builders rely on.
+    """
+
+    @pytest.mark.asyncio
+    async def test_each_requested_tag_regroups_with_exactly_its_variants(self):
+        from utils.tag_normalize import group_tags_by_fold
+
+        db = _db_with_vocabulary(
+            {"ログ": 4, "ろぐ": 1, "デプロイ": 3, "でぷろい": 1, "Dev_Env": 2, "dev env": 1}
+        )
+        requested = ["ログ", "デプロイ", "dev-env", "never-used"]
+        expanded, added = await expand_tag_filter(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, tags=requested
+        )
+        assert added, "the vocabulary has variants, so the filter must widen"
+        assert group_tags_by_fold(expanded) == [[t, *added.get(t, [])] for t in requested]
+
+
 class TestSuggestTags:
     @pytest.mark.asyncio
     async def test_abbreviation_is_suggested_with_its_count(self):
