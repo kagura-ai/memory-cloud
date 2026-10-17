@@ -160,3 +160,26 @@ async def test_an_owner_reset_turns_the_flag_off():
     perms, repo = await _reset(stored=True, owner=True)
     perms.check_context_owner.assert_awaited_once()
     assert repo.reset_to_default.await_args.kwargs == {"reset_content_chunks": True}
+
+
+@pytest.mark.asyncio
+async def test_a_missing_config_row_still_runs_the_gate():
+    """Fail closed: with no stored row the flag counts as off, so an editor's
+    request to turn it on is refused before any write path is reached."""
+    perms, repo = _perms(owner=False), _repo(False)
+    repo.get_by_context = AsyncMock(return_value=None)
+    from api.routes.context_search_config import update_context_search_config
+
+    with (
+        patch(f"{_MODULE}.PermissionService", return_value=perms),
+        patch(f"{_MODULE}.ContextSearchConfigRepository", return_value=repo),
+        pytest.raises(AuthorizationError),
+    ):
+        await update_context_search_config(
+            uuid4(),
+            ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=True),
+            {"user_id": "u-1"},
+            db=AsyncMock(),
+        )
+    perms.check_context_owner.assert_awaited()
+    repo.update.assert_not_awaited()

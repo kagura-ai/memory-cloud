@@ -137,14 +137,16 @@ async def update_context_search_config(
         # #2015: changing content_chunks_enabled takes the context owner (or a
         # workspace owner/admin); the stored value is a no-op and not written.
         current = await repo.get_by_context(context_id)
-        if current is not None:
-            update_data = await gate_content_chunks_change(
-                perm_service,
-                user_id,
-                context_id,
-                update_data,
-                current_enabled=current.content_chunks_enabled,
-            )
+        # Fail closed: a missing row is the default (off), so the gate always
+        # runs before any write path is reached.
+        current_enabled = current is not None and current.content_chunks_enabled is True
+        update_data = await gate_content_chunks_change(
+            perm_service,
+            user_id,
+            context_id,
+            update_data,
+            current_enabled=current_enabled,
+        )
         config = await repo.update(context_id, update_data)
 
         logger.info(
