@@ -36,7 +36,11 @@ This guide helps you make the most of this architecture by adopting effective **
 
 **What leaves your deployment**: with the flag off, only summaries are sent to the embedding provider and the reranker. Turning it on is the first time memory **content** is sent to them: every chunk of a long memory is embedded by the context's embedding provider, and the passage that matched is sent to the reranker with the summary. On a self-hosted embedder and reranker nothing leaves the host; with a hosted provider (OpenAI, Voyage, Cohere) the body text does.
 
-Known limit in this first version: a memory found only through one of its chunks takes no part in Hebbian co-activation for that recall (there is no summary vector in the hit to compare).
+Known limits in this first version:
+
+- A memory found only through one of its chunks takes no part in Hebbian co-activation for that recall (there is no summary vector in the hit to compare).
+- For up to 30 seconds after the flag is turned on, an API process that cached it as off can skip copying a metadata edit (tags, type, importance, location) to a memory's chunk points, so those chunks can keep the old value until the memory is next re-embedded. Ownership (`user_id`) is never affected: moving a memory to another user always updates or removes its chunks.
+- Two re-embeds of the same memory that overlap can leave the older run's chunks in place, the same race the summary point already has.
 
 The advice below still holds: one coherent topic per memory ranks and dedupes better than one long memory, chunks or not.
 
