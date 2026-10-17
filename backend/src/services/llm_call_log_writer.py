@@ -2,7 +2,8 @@
 
 Issue #474: Inserts one ``llm_call_log`` row per LLM/embedding/rerank
 API call from non-Sleep paths (recall reranking, recall embedding via
-#475 PR-3, future ``ask()``, admin actions). Sleep Maintenance never
+#475 PR-3, future ``ask()``, admin actions, the ingest-time supersede judge
+#2019). Sleep Maintenance never
 emits here — Sleep cost stays in ``sleep_reports`` + ``sleep_report_llm_usage``
 (canonical pattern, memory ``9db43e36`` / 2026-05-14 gate1 decision).
 
@@ -73,7 +74,7 @@ _FORBIDDEN_CALLERS: frozenset[str] = frozenset({"sleep"})
 # may run without a user binding. The table CHECK is permissive (all
 # three columns nullable); this Python-side assert enforces the
 # operational contract.
-_FULL_IDENTITY_CALLERS: frozenset[str] = frozenset({"recall", "rerank", "ask"})
+_FULL_IDENTITY_CALLERS: frozenset[str] = frozenset({"recall", "rerank", "ask", "supersede_verify"})
 
 # Column-name → llm_pricing.unit_type axis. ``cached_input_tokens`` maps
 # to the ``cache_read_tokens`` pricing axis — naming differs because

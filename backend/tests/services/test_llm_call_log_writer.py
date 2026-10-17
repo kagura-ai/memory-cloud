@@ -120,6 +120,20 @@ class TestInputValidation:
             )
 
     @pytest.mark.asyncio
+    async def test_supersede_verify_caller_requires_full_identity(self, writer):
+        """#2019: the ingest-time judge always runs for one memory's
+        (user, workspace, context), so a row without them is a caller bug."""
+        with pytest.raises(ValueError, match="missing.*context_id"):
+            await writer.record(
+                caller="supersede_verify",
+                call_type="completion",
+                provider="openai",
+                model="gpt-5-nano",
+                user_id="u",
+                workspace_id="11111111-1111-1111-1111-111111111111",
+            )
+
+    @pytest.mark.asyncio
     async def test_admin_caller_allows_null_identity(self, writer, mock_pricing):
         """admin caller may legitimately run without user/workspace/context."""
         mock_pricing.compute_cost_usd.return_value = 0.0
