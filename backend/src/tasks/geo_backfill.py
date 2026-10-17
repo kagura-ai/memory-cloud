@@ -98,10 +98,14 @@ async def reconcile_stale_location_payloads(db: AsyncSession) -> int:
     """
     from uuid import UUID as _UUID
 
-    from qdrant_client.models import Filter, IsEmptyCondition, PayloadField
+    from qdrant_client.models import IsEmptyCondition, PayloadField
     from sqlalchemy import select
 
-    from db.qdrant import get_qdrant_client, update_memory_payload_in_qdrant
+    from db.qdrant import (
+        get_qdrant_client,
+        summary_points_filter,
+        update_memory_payload_in_qdrant,
+    )
     from db.vector_store import get_active_store
     from models.memory import Memory
     from services.content_chunk_writer import chunk_cascade_needed
@@ -117,8 +121,7 @@ async def reconcile_stale_location_payloads(db: AsyncSession) -> int:
     ]
     # #2015: summary points only — a content chunk point (chunk_of set) shares
     # its memory's location and is cleared by that point's payload cascade.
-    located_filter = Filter(
-        must=[IsEmptyCondition(is_empty=PayloadField(key="chunk_of"))],
+    located_filter = summary_points_filter(
         must_not=[IsEmptyCondition(is_empty=PayloadField(key="location"))],
     )
     cleared = 0

@@ -103,14 +103,18 @@ async def test_duplicate_indices_in_one_point_only_count_once() -> None:
 
 @pytest.mark.asyncio
 async def test_content_chunk_points_are_not_documents() -> None:
-    """#2015: a chunk point is part of its memory, not another document."""
-    chunk = SimpleNamespace(id=9, payload={"chunk_of": "m1"}, vector={})
-    points = [_point(1, [10], resource=False), chunk]
-    client = MagicMock()
-    client.scroll = AsyncMock(return_value=(points, None))
+    """#2015: a chunk point is part of its memory, not another document.
 
-    snapshot = await build_idf_snapshot(client, "kagura_memories", uuid4())
+    #2041: left out by the scroll filter (``summary_points_filter``)."""
+    from qdrant_client.models import IsEmptyCondition
+
+    client = MagicMock()
+    client.scroll = AsyncMock(return_value=([_point(1, [10], resource=False)], None))
+
+    context_id = uuid4()
+    snapshot = await build_idf_snapshot(client, "kagura_memories", context_id)
 
     assert snapshot.m_memory == 1
-    assert snapshot.n_global == 1
-    assert "chunk_of" in client.scroll.await_args.kwargs["with_payload"]
+    flt = client.scroll.await_args.kwargs["scroll_filter"]
+    assert any(isinstance(c, IsEmptyCondition) and c.is_empty.key == "chunk_of" for c in flt.must)
+    assert any(getattr(c, "key", None) == "context_id" for c in flt.must)

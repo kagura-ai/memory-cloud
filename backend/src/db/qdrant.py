@@ -837,7 +837,7 @@ async def search_memories_qdrant(
     )
     if not include_chunks:
         # #2015: summary (and resource) points only — chunk points carry chunk_of.
-        chunk_exclusion = IsEmptyCondition(is_empty=PayloadField(key=CHUNK_OF_FIELD))
+        chunk_exclusion = summary_points_condition()
         if qdrant_filter is None:
             qdrant_filter = Filter(must=[chunk_exclusion])
         else:
@@ -948,6 +948,28 @@ async def update_memory_payload_in_qdrant(
 
     except Exception as e:
         raise QdrantError(f"Failed to update memory payload: {e}") from e
+
+
+def summary_points_condition() -> IsEmptyCondition:
+    """The condition that keeps summary (and resource) points: ``chunk_of`` unset.
+
+    Content chunk points (#2015) carry ``chunk_of``; everything that assumes
+    one point per memory filters on this (#2041).
+    """
+    return IsEmptyCondition(is_empty=PayloadField(key=CHUNK_OF_FIELD))
+
+
+def summary_points_filter(*must: Condition, must_not: Sequence[Condition] | None = None) -> Filter:
+    """A filter of ``must`` (and ``must_not``) that also leaves chunk points out (#2041).
+
+    The one way to build the ``scroll_filter`` of a summary-only scroll:
+    ``tests/test_summary_points_scroll_guard.py`` fails on a ``.scroll(`` call
+    that does not use it, unless the function is allow-listed there.
+    """
+    return Filter(
+        must=[*must, summary_points_condition()],
+        must_not=list(must_not) if must_not is not None else None,
+    )
 
 
 def _chunks_of_filter(memory_ids: Sequence[UUID | str]) -> Filter:
@@ -1757,12 +1779,9 @@ async def list_context_point_ids(
         QdrantError: If the scroll fails.
     """
     client = get_qdrant_client()
-    filter_conditions = Filter(
-        must=[
-            FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
-            FieldCondition(key="context_id", match=MatchValue(value=context_id)),
-            IsEmptyCondition(is_empty=PayloadField(key=CHUNK_OF_FIELD)),
-        ]
+    filter_conditions = summary_points_filter(
+        FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
+        FieldCondition(key="context_id", match=MatchValue(value=context_id)),
     )
     ids: list[str] = []
     offset = None
@@ -2159,7 +2178,8 @@ async def _admin_scroll_context_points(
     non-admin code path.
 
     Used by the BM25 drift reveal-terms endpoint (#377) to rebuild the
-    token → mmh3-hash mapping for reverse lookup.
+    token → mmh3-hash mapping for reverse lookup. Summary (and resource)
+    points only: content chunk points (#2015) carry no token fields (#2041).
 
     Yields pages (lists of Record) instead of materializing the full
     point set so callers can break early once they have enough data —
@@ -2192,8 +2212,10 @@ async def _admin_scroll_context_points(
     while True:
         points, next_offset = await client.scroll(
             collection_name=collection_name,
-            scroll_filter=Filter(
-                must=[FieldCondition(key="context_id", match=MatchValue(value=context_id))]
+            # #2041: chunk points carry no BM25 token fields; their summary is
+            # their memory's, so they could only repeat a summary point's tokens.
+            scroll_filter=summary_points_filter(
+                FieldCondition(key="context_id", match=MatchValue(value=context_id))
             ),
             limit=200,
             offset=offset,

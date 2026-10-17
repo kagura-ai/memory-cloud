@@ -235,3 +235,36 @@ async def test_list_context_point_ids_leaves_chunk_points_out(mock_client):
     await list_context_point_ids(WS, CTX, "coll")
     flt = mock_client.scroll.await_args.kwargs["scroll_filter"]
     assert any(_is_chunk_exclusion(c) for c in flt.must)
+
+
+# --------------------------------------------------------------------- #2041
+
+
+async def test_summary_points_filter_appends_the_chunk_exclusion():
+    from qdrant_client.models import PayloadField
+
+    from db.qdrant import summary_points_filter
+
+    ws = FieldCondition(key="workspace_id", match=MatchValue(value=WS))
+    located = IsEmptyCondition(is_empty=PayloadField(key="location"))
+
+    flt = summary_points_filter(ws, must_not=[located])
+
+    assert flt.must is not None and len(flt.must) == 2
+    assert flt.must[0] is ws  # caller conditions first, order kept
+    assert _is_chunk_exclusion(flt.must[1])
+    assert flt.must_not == [located]
+    bare = summary_points_filter()
+    assert bare.must is not None and [_is_chunk_exclusion(c) for c in bare.must] == [True]
+    assert bare.must_not is None
+
+
+async def test_admin_context_scroll_leaves_chunk_points_out(mock_client):
+    """#2041: the BM25 reveal-terms scroll reads token fields chunks never carry."""
+    from db.qdrant import _admin_scroll_context_points
+
+    mock_client.scroll.return_value = ([], None)
+    _ = [page async for page in _admin_scroll_context_points(CTX)]
+    flt = mock_client.scroll.await_args.kwargs["scroll_filter"]
+    assert any(_is_chunk_exclusion(c) for c in flt.must)
+    assert any(isinstance(c, FieldCondition) and c.key == "context_id" for c in flt.must)

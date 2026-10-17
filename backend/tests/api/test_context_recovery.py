@@ -85,18 +85,8 @@ class TestRecoverContext:
             "summary": "Memory 2",
         }
 
-        # #2015: a content chunk point is a fragment of a memory, never recovered.
-        chunk_point = MagicMock()
-        chunk_point.id = str(uuid4())
-        chunk_point.payload = {
-            "workspace_id": workspace_id,
-            "user_id": "user1",
-            "summary": "Memory 1",
-            "chunk_of": str(mock_point_1.id),
-        }
-
         mock_client = AsyncMock()
-        mock_client.scroll.return_value = ([mock_point_1, chunk_point, mock_point_2], None)
+        mock_client.scroll.return_value = ([mock_point_1, mock_point_2], None)
 
         # Mock DB: context doesn't exist, no existing memories
         mock_context_result = MagicMock()
@@ -120,6 +110,11 @@ class TestRecoverContext:
                 embedding_dimensions=512,
             )
             response = await recover_context(request_body=request_body, user=admin_user, db=mock_db)
+
+        # #2015: a content chunk point is a fragment of a memory, never
+        # recovered — the scroll leaves chunk points out (#2041).
+        flt = mock_client.scroll.await_args.kwargs["scroll_filter"]
+        assert any(getattr(c, "is_empty", None) and c.is_empty.key == "chunk_of" for c in flt.must)
 
         assert response.dry_run is True
         assert response.qdrant_points_found == 2
