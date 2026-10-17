@@ -126,7 +126,7 @@ one exists. If the agent has multiple bindings and no default, the call fails wi
     "pinned":   { "status": "ok", "memories": [ /* load_pinned rows */ ],
                   "total_available": 12, "truncated": false, "cap": 100 },
     "recall":   { "status": "ok", "query_hash": "<hmac-sha256>",   // never the raw query
-                  "results": [ /* recall rows */ ], "k": 10, "trust_filter": "trusted",
+                  "results": [ /* recall verbosity="full" rows */ ], "k": 10, "trust_filter": "trusted",
                   // present only when recall_evaluation was requested
                   "selection_probabilities": { "<actual memory UUID>": 0.05 },
                   "selection_policy": { "name": "deterministic_uniform_mixture_v1",
@@ -148,7 +148,13 @@ one exists. If the agent has multiple bindings and no default, the call fails wi
 shapes, plus additive bootstrap metadata.** The primitive's response fields appear unchanged
 inside the sub-envelope (`load_pinned` → `{memories, total_available, truncated, cap}`;
 `recall_upcoming` → its handler's response fields including `results`, in the tool's default
-item shape (`trigger`, not `details`); keyless `get_state` →
+item shape (`trigger`, not `details`); `recall` → `results` in the `recall` tool's
+`verbosity="full"` item shape, built by the same projection (#2013: an empty
+`context_summary`, `tags`, `superseded_by` or `contradicts` is absent, never `null` / `[]`,
+and `score` is rounded to 4 decimals). The one exception: a bootstrap row never carries
+`supersede_candidate`, which `recall` returns when a live suggestion exists — an agent does
+not act on a suggestion in this session-start lane, the `max_chars` fit cannot drop it, and
+it would put another memory's summary in the trusted lane; keyless `get_state` →
 `{states, count, has_more, next_cursor}`), so clients reuse one parser per primitive whether they call it directly
 or via bootstrap. Bootstrap-only fields (`status`, `query_hash`, `k`, `trust_filter`, `from`,
 `until`, `selection_probabilities`, `selection_policy`) are additive metadata alongside the
