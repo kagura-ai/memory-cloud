@@ -189,9 +189,28 @@ async def re_embed_memory_to_qdrant(
     restore path must rebuild it. Shared by run-level rollback and per-merge
     undo. With ``db`` the memory's content chunk points (#2015) are rebuilt
     too when its context has ``content_chunks_enabled`` (delete-first).
+
+    A row the resource indexer wrote (#2053) gets the indexer's own point back
+    under ``Memory.point_id`` (the point the merge deleted), rebuilt from the
+    document; that needs ``db``.
     """
     from db.qdrant import add_memory_to_qdrant
     from services.memory_service import build_memory_point
+    from services.resource_indexer import ResourceIndexer, owns_resource_point
+
+    if owns_resource_point(memory):
+        # Not the summary path: that would embed the label ``[resource] doc
+        # vN`` into a stray point under the row id and leave the document's
+        # point deleted. Same branch as process_pending_embedding (#1870).
+        # Such a row has no content chunks.
+        if db is None:
+            raise ValueError(
+                f"Restoring resource-indexed memory {memory.id} needs a database session"
+            )
+        await ResourceIndexer(db).rebuild_point(
+            memory, collection_name=collection_name, embedding_service=embedding_svc
+        )
+        return
 
     vector = await embedding_svc.embed(
         memory.summary or "",

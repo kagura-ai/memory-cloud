@@ -391,6 +391,7 @@ def _restorable_memory(**overrides: object) -> MagicMock:
     memory.updated_at = datetime(2026, 1, 2)
     memory.location_lat = None
     memory.location_lon = None
+    memory.resource_id = None
     for key, value in overrides.items():
         setattr(memory, key, value)
     return memory
@@ -427,3 +428,60 @@ async def test_re_embed_upsert_carries_bm25_sparse_and_canonical_payload() -> No
     assert kwargs["payload"]["location"] == {"lat": 35.68, "lon": 139.76}
     assert kwargs["payload"]["context"] == {"issue": 2053}
     assert write.await_args.kwargs["base_payload"] is kwargs["payload"]
+
+
+def _resource_loser() -> MagicMock:
+    """#2053: a merge loser the resource indexer wrote; its point is ``point_id``."""
+    from services.resource_indexer import resource_point_id
+
+    point_id = resource_point_id("reports", "doc-1", 2)
+    return _restorable_memory(
+        summary="[resource] doc-1 v2",
+        content='{"title": "Annual report"}',
+        resource_id="reports",
+        resource_doc_id="doc-1",
+        resource_version=2,
+        summary_embedding_id=point_id,
+        point_id=point_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_re_embed_rebuilds_the_indexer_point_of_a_resource_row() -> None:
+    """#2053: undo restores the document's point, not a label point under the row id."""
+    from services.sleep.undo import re_embed_memory_to_qdrant
+
+    memory = _resource_loser()
+    svc = MagicMock()
+    svc.embed = AsyncMock(return_value=[0.1])
+    db = MagicMock()
+    indexer = MagicMock()
+    indexer.rebuild_point = AsyncMock(return_value=memory.point_id)
+    with (
+        patch("db.qdrant.add_memory_to_qdrant", new=AsyncMock()) as upsert,
+        patch("services.content_chunk_writer.write_content_chunks", new=AsyncMock()) as write,
+        patch("services.resource_indexer.ResourceIndexer", return_value=indexer) as indexer_cls,
+    ):
+        await re_embed_memory_to_qdrant(memory, "u", svc, "w", "c", "coll", db=db)
+
+    indexer_cls.assert_called_once_with(db)
+    indexer.rebuild_point.assert_awaited_once_with(
+        memory, collection_name="coll", embedding_service=svc
+    )
+    upsert.assert_not_awaited()
+    write.assert_not_awaited()
+    svc.embed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_re_embed_of_a_resource_row_needs_a_session() -> None:
+    from services.sleep.undo import re_embed_memory_to_qdrant
+
+    svc = MagicMock()
+    svc.embed = AsyncMock(return_value=[0.1])
+    with (
+        patch("db.qdrant.add_memory_to_qdrant", new=AsyncMock()) as upsert,
+        pytest.raises(ValueError, match="needs a database session"),
+    ):
+        await re_embed_memory_to_qdrant(_resource_loser(), "u", svc, "w", "c", "coll")
+    upsert.assert_not_awaited()

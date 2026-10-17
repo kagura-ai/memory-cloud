@@ -47,6 +47,22 @@ def _make_memory(memory_id=None, summary="test summary", importance=0.7):
     m.context = None
     m.location_lat = None
     m.location_lon = None
+    # Not a resource-indexer row (owns_resource_point is False).
+    m.resource_id = None
+    return m
+
+
+def _make_resource_memory():
+    """#2053: a row the resource indexer wrote; its point is ``point_id``."""
+    from services.resource_indexer import resource_point_id
+
+    m = _make_memory(summary="[resource] doc-1 v2", importance=0.6)
+    m.content = '{"title": "Annual report"}'
+    m.resource_id = "reports"
+    m.resource_doc_id = "doc-1"
+    m.resource_version = 2
+    m.summary_embedding_id = resource_point_id("reports", "doc-1", 2)
+    m.point_id = m.summary_embedding_id
     return m
 
 
@@ -237,3 +253,69 @@ class TestReindexPointShape:
         assert kwargs["payload"]["context"] == {"issue": 2053}
         # The chunk writer copies the very same payload.
         assert mock_write.await_args.kwargs["base_payload"] is kwargs["payload"]
+
+
+class TestReindexResourceRows:
+    """#2053: a resource-indexer row gets the indexer's point, not a stray one."""
+
+    @pytest.mark.asyncio
+    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.write_content_chunks", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.ResourceIndexer")
+    async def test_resource_row_is_rebuilt_by_the_indexer(
+        self, mock_indexer_cls, mock_write, mock_qdrant, reindex_phase, mock_db
+    ):
+        resource, plain = _make_resource_memory(), _make_memory()
+        _mock_batch_fetch(mock_db, [resource, plain])
+
+        async def _rebuild(memory, *, collection_name, embedding_service, usage):
+            usage["tokens"] = 11
+            return memory.point_id
+
+        rebuild = AsyncMock(side_effect=_rebuild)
+        mock_indexer_cls.return_value.rebuild_point = rebuild
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1], 5))
+
+        result = await reindex_phase.execute(
+            changed_memory_ids={resource.id, plain.id},
+            user_id="user-1",
+            workspace_id=str(uuid4()),
+            context_id=str(uuid4()),
+        )
+
+        mock_indexer_cls.assert_called_once_with(mock_db)
+        rebuild.assert_awaited_once()
+        assert rebuild.await_args.args == (resource,)
+        assert rebuild.await_args.kwargs["collection_name"] == "kagura_memories"
+        assert rebuild.await_args.kwargs["embedding_service"] is reindex_phase.embedding_service
+        # No summary upsert and no chunk rewrite for the resource row.
+        assert [c.kwargs["memory_id"] for c in mock_qdrant.await_args_list] == [plain.id]
+        assert [c.args[1] for c in mock_write.await_args_list] == [plain]
+        # Only the plain row's label-free summary was embedded here.
+        assert reindex_phase.embedding_service.embed_with_usage.await_count == 1
+        assert result.details["reindexed"] == 2
+        assert result.embedding_calls_used == 2
+        assert result.embedding_tokens == 16
+
+    @pytest.mark.asyncio
+    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.ResourceIndexer")
+    async def test_failed_rebuild_counts_as_failed_and_keeps_spent_tokens(
+        self, mock_indexer_cls, mock_qdrant, reindex_phase, mock_db
+    ):
+        resource = _make_resource_memory()
+        _mock_batch_fetch(mock_db, [resource])
+
+        async def _rebuild(memory, *, collection_name, embedding_service, usage):
+            usage["tokens"] = 9
+            raise RuntimeError("upsert failed")
+
+        mock_indexer_cls.return_value.rebuild_point = AsyncMock(side_effect=_rebuild)
+
+        result = await reindex_phase.execute(changed_memory_ids={resource.id}, user_id="user-1")
+
+        mock_qdrant.assert_not_called()
+        assert result.details["failed"] == 1
+        assert result.success is False
+        assert result.embedding_calls_used == 1
+        assert result.embedding_tokens == 9

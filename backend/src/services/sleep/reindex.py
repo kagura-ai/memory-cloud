@@ -16,6 +16,7 @@ from db.qdrant import add_memory_to_qdrant
 from models.memory import Memory
 from services.content_chunk_writer import content_chunks_enabled, write_content_chunks
 from services.embedding_service import EmbeddingService
+from services.resource_indexer import ResourceIndexer, owns_resource_point
 from services.sleep.reporter import PhaseResult
 from utils.logger import get_logger
 
@@ -98,6 +99,30 @@ class ReindexPhase:
                 continue
 
             try:
+                if owns_resource_point(memory):
+                    # #2053: a row the resource indexer wrote owns the
+                    # indexer's point (``Memory.point_id``, embedded from the
+                    # document). The path below would embed its label summary
+                    # and write a stray point under the row id; the indexer
+                    # rebuilds its own point instead, as
+                    # process_pending_embedding does (#1870). It has no
+                    # content chunks to rewrite.
+                    usage: dict[str, int] = {}
+                    try:
+                        await ResourceIndexer(self.db).rebuild_point(
+                            memory,
+                            collection_name=self.collection_name,
+                            embedding_service=self.embedding_service,
+                            usage=usage,
+                        )
+                    finally:
+                        # Set once the embedding answered: a failed upsert
+                        # still spent it.
+                        if "tokens" in usage:
+                            self._account_embedding(result, usage["tokens"])
+                    reindexed += 1
+                    continue
+
                 # #471: use embed_with_usage() to capture token count for
                 # cost-grade reporting. Cache hits return (vector, 0) which
                 # is the correct cost attribution — cached responses don't
@@ -108,17 +133,7 @@ class ReindexPhase:
                     context_id=context_id,
                     workspace_id=workspace_id,
                 )
-                result.embedding_calls_used += 1
-                result.embedding_tokens += tokens
-                # Embedding model is instance-global per the
-                # ``EmbeddingService`` config; capture the (provider, model)
-                # identity from the service on the first call so the
-                # reporter can populate the scalar columns on
-                # ``sleep_reports``.
-                if result.embedding_provider is None:
-                    result.embedding_provider = self.embedding_service.provider
-                    result.embedding_model = self.embedding_service.model
-
+                self._account_embedding(result, tokens)
                 # #2053: the upsert replaces the WHOLE point, so it must be
                 # the point the normal write path builds — BM25 sparse
                 # vector, tokenized/normalized payload and the geo field
@@ -178,3 +193,15 @@ class ReindexPhase:
         )
 
         return result
+
+    def _account_embedding(self, result: PhaseResult, tokens: int) -> None:
+        """Count one embedding call and its tokens on ``result``."""
+        result.embedding_calls_used += 1
+        result.embedding_tokens += tokens
+        # Embedding model is instance-global per the ``EmbeddingService``
+        # config; capture the (provider, model) identity from the service on
+        # the first call so the reporter can populate the scalar columns on
+        # ``sleep_reports``.
+        if result.embedding_provider is None:
+            result.embedding_provider = self.embedding_service.provider
+            result.embedding_model = self.embedding_service.model
