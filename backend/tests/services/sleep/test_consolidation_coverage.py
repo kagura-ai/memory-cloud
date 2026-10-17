@@ -458,6 +458,33 @@ class TestLLMJudgeBatch:
         assert phase._tokens_used == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_usage", [True, False])
+    async def test_failed_call_usage_is_counted(self, failed_llm_error, with_usage):
+        """#2038: a failed call's spent tokens reach the totals; calls stay 0."""
+        mems = [_make_memory()]
+        phase, llm = _build_phase(mems)
+        phase._tokens_used = 0
+        phase._llm_breakdown = None
+        phase._llm_failures = 0
+        llm.complete_json = AsyncMock(side_effect=failed_llm_error(with_usage))
+        budget = SleepBudget()
+
+        decisions = await phase._llm_judge_batch(mems, "u", "ctx", "ws", budget, _make_config())
+
+        assert decisions == {}
+        assert phase._llm_failures == 1
+        # A billed failure counts against the budget; an unbilled one does not.
+        assert budget.llm_calls_used == (1 if with_usage else 0)
+        if with_usage:
+            assert phase._tokens_used == 70
+            assert phase._llm_breakdown is not None
+            assert phase._llm_breakdown.total_tokens == 70
+            assert phase._llm_breakdown.calls == 0
+        else:
+            assert phase._tokens_used == 0
+            assert phase._llm_breakdown is None
+
+    @pytest.mark.asyncio
     async def test_token_and_breakdown_accumulation(self):
         mems = [_make_memory()]
         phase, llm = _build_phase(mems)

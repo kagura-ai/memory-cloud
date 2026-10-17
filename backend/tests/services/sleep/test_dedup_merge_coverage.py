@@ -406,6 +406,35 @@ class TestLLMJudge:
         assert budget.llm_calls_used == 0  # no consume on the failure path
         assert dedup_phase._tokens_used == 0
 
+    @pytest.mark.parametrize("with_usage", [True, False])
+    async def test_failed_call_usage_is_counted(self, failed_llm_error, dedup_phase, with_usage):
+        """#2038: a failed call's spent tokens reach the totals; calls stay 0."""
+        mem_a = _make_memory()
+        mem_b = _make_memory()
+        scores = {tuple(sorted([mem_a.id, mem_b.id], key=str)): 0.96}
+        budget = SleepBudget()
+        dedup_phase.llm_service.complete_json = AsyncMock(side_effect=failed_llm_error(with_usage))
+        dedup_phase._tokens_used = 0
+        dedup_phase._llm_breakdown = None
+        dedup_phase._llm_failures = 0
+
+        decisions = await dedup_phase._llm_judge(
+            [mem_a, mem_b], scores, "u", "ctx", "ws", budget, _make_config()
+        )
+
+        assert decisions == []
+        assert dedup_phase._llm_failures == 1
+        # A billed failure counts against the budget; an unbilled one does not.
+        assert budget.llm_calls_used == (1 if with_usage else 0)
+        if with_usage:
+            assert dedup_phase._tokens_used == 70
+            assert dedup_phase._llm_breakdown is not None
+            assert dedup_phase._llm_breakdown.total_tokens == 70
+            assert dedup_phase._llm_breakdown.calls == 0
+        else:
+            assert dedup_phase._tokens_used == 0
+            assert dedup_phase._llm_breakdown is None
+
 
 # ---------------------------------------------------------------------------
 # #1195 — winner selection must see and prefer recency
