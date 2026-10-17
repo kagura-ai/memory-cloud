@@ -82,6 +82,11 @@ KAGURA_IMAGE_TAG="${KAGURA_IMAGE_TAG:-}"            # e.g. v0.65.0
 KAGURA_WEB_IMAGE_REPO="${KAGURA_WEB_IMAGE_REPO:-}"  # e.g. registry.example.com/kagura-web
 KAGURA_WEB_IMAGE_TAG="${KAGURA_WEB_IMAGE_TAG:-}"
 
+# Container log rotation knobs (#2025), read by the compose files from the
+# shell environment or .env.prod. Checked by validate_log_rotation_env.
+LOG_ROTATION_SIZE_VARS=(API_LOG_MAX_SIZE LOG_MAX_SIZE)
+LOG_ROTATION_FILE_VARS=(API_LOG_MAX_FILE LOG_MAX_FILE)
+
 # Compose derives built image names as "<project>-<service>"; the project name
 # defaults to the directory holding the compose file (single-server).
 COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$PROJECT_DIR")}"
@@ -96,6 +101,46 @@ dc() { docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
 
 # The local image name compose resolves for a service (see COMPOSE_PROJECT).
 compose_image_name() { echo "${COMPOSE_PROJECT}-$1"; }
+
+# The value of the last `KEY=value` line of $ENV_FILE (empty when absent), for
+# the simple forms .env.prod.example uses: an optional `export `, surrounding
+# single or double quotes, or an unquoted value with a ` # comment` after it.
+env_file_value() {   # $1 key
+    local line value q
+    line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1=" "$ENV_FILE" 2>/dev/null | tail -n 1)" || true
+    [ -n "$line" ] || return 0
+    value="${line#*=}"
+    q="${value:0:1}"
+    if [ "$q" = '"' ] || [ "$q" = "'" ]; then
+        value="${value:1}"
+        value="${value%%"$q"*}"
+    else
+        value="${value%%[[:space:]]#*}"
+        value="${value%"${value##*[![:space:]]}"}"
+    fi
+    printf '%s' "$value"
+}
+
+# #2025: Docker rejects a bad json-file option only when it CREATES a
+# container — halfway through a deploy, or at the next reboot for caddy / web /
+# the data tier. Check the value compose will use (the shell environment wins
+# over .env.prod, as in compose) before any container is touched. Unset or
+# empty means the compose default (50m / 3).
+validate_log_rotation_env() {
+    local key value
+    for key in "${LOG_ROTATION_SIZE_VARS[@]}" "${LOG_ROTATION_FILE_VARS[@]}"; do
+        if [ -n "${!key+x}" ]; then value="${!key}"; else value="$(env_file_value "$key")"; fi
+        [ -n "$value" ] || continue
+        case " ${LOG_ROTATION_SIZE_VARS[*]} " in
+            *" $key "*)
+                [[ "$value" =~ ^[0-9]+[kmg]$ ]] \
+                    || error "$key must be a number with a k, m or g unit, e.g. 50m (got: $value)" ;;
+            *)
+                [[ "$value" =~ ^[1-9][0-9]*$ ]] \
+                    || error "$key must be a positive whole number of files, e.g. 3 (got: $value)" ;;
+        esac
+    done
+}
 
 # Pull "<repo>:<tag>" and re-tag it as the local name compose expects for
 # $service. Used by both acquire_* helpers below.
@@ -1156,6 +1201,7 @@ main() {
     [[ "$WEB_READINESS_INTERVAL" =~ ^[1-9][0-9]*$ ]] || error "WEB_READINESS_INTERVAL must be a positive integer >= 1 (got: $WEB_READINESS_INTERVAL); 0 would busy-loop the smoke check"
     [[ "$WORKERS_GATE_TIMEOUT" =~ ^[0-9]+$ ]] || error "WORKERS_GATE_TIMEOUT must be an integer (got: $WORKERS_GATE_TIMEOUT)"
     [[ "$WORKERS_GATE_INTERVAL" =~ ^[1-9][0-9]*$ ]] || error "WORKERS_GATE_INTERVAL must be a positive integer >= 1 (got: $WORKERS_GATE_INTERVAL); 0 would busy-loop the security gate"
+    validate_log_rotation_env
 
     # Ensure marker directory exists
     mkdir -p "$(dirname "$MARKER_FILE")"
