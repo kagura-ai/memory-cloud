@@ -14,7 +14,11 @@ from db.base import get_db
 from models.schemas import ContextSearchConfigResponse, ContextSearchConfigUpdate
 from repositories.config_repository import ContextSearchConfigRepository
 from services.capacity_lock import CapacityPolicy
-from services.permission_service import PermissionService
+from services.permission_service import (
+    PermissionService,
+    check_content_chunks_change,
+    gate_content_chunks_change,
+)
 from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
 
@@ -92,6 +96,12 @@ async def update_context_search_config(
     Updates hybrid search weights, fetch factor, and/or reranker settings.
     Validates that weights sum to 1.0 and model matches provider.
 
+    Context owners and editors may change every field except
+    ``content_chunks_enabled``: changing that one (on or off) takes the context
+    owner or a workspace owner/admin, since turning it on sends memory content
+    to the embedding and rerank providers (#2015). Sending the stored value is
+    not a change and is allowed.
+
     Args:
         context_id: Context UUID
         update_data: Configuration update request
@@ -102,7 +112,8 @@ async def update_context_search_config(
         Updated ContextSearchConfigResponse
 
     Raises:
-        HTTPException: 400 if validation fails, 404 if context not found, 500 on error
+        HTTPException: 400 if validation fails, 403 if the caller may not
+            change content_chunks_enabled, 404 if context not found, 500 on error
     """
     user_id = user.get("user_id")
     logger.info(
@@ -123,6 +134,17 @@ async def update_context_search_config(
         # Pydantic will automatically validate on model creation
         # Update config
         repo = ContextSearchConfigRepository(db)
+        # #2015: changing content_chunks_enabled takes the context owner (or a
+        # workspace owner/admin); the stored value is a no-op and not written.
+        current = await repo.get_by_context(context_id)
+        if current is not None:
+            update_data = await gate_content_chunks_change(
+                perm_service,
+                user_id,
+                context_id,
+                update_data,
+                current_enabled=current.content_chunks_enabled,
+            )
         config = await repo.update(context_id, update_data)
 
         logger.info(
@@ -175,6 +197,8 @@ async def reset_context_search_config(
     - use_rerank / reranker_provider / reranker_model: the deployment default
       (DEFAULT_USE_RERANK / DEFAULT_RERANKER_PROVIDER / DEFAULT_RERANKER_MODEL,
       #1572; unset: false / 'voyage' / 'rerank-2')
+    - content_chunks_enabled: false — while it is on, that is a change and takes
+      the context owner or a workspace owner/admin (#2015)
 
     Args:
         context_id: Context UUID
@@ -185,7 +209,8 @@ async def reset_context_search_config(
         Reset ContextSearchConfigResponse
 
     Raises:
-        HTTPException: 404 if context not found, 500 on error
+        HTTPException: 403 if content_chunks_enabled is on and the caller is
+            not the context owner, 404 if context not found, 500 on error
     """
     user_id = user.get("user_id")
     logger.info("reset_search_config_requested", user_id=user_id, context_id=str(context_id))
@@ -196,7 +221,14 @@ async def reset_context_search_config(
         await perm_service.check_context_write(user_id, context_id, capacity=CapacityPolicy.BLOCKED)
 
         repo = ContextSearchConfigRepository(db)
-        config = await repo.reset_to_default(context_id)
+        # #2015: a reset turns content_chunks_enabled off. While it is on that
+        # is a change and takes the context owner (or a workspace owner/admin);
+        # while it is off the reset does not write the flag at all.
+        current = await repo.get_by_context(context_id)
+        chunks_on = current is not None and current.content_chunks_enabled is True
+        if chunks_on:
+            await check_content_chunks_change(perm_service, user_id, context_id)
+        config = await repo.reset_to_default(context_id, reset_content_chunks=chunks_on)
 
         logger.info("reset_search_config_success", user_id=user_id, context_id=str(context_id))
 

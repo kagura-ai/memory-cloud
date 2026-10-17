@@ -231,11 +231,17 @@ class ContextSearchConfigRepository:
         )
         logger.info("content_chunks_purged", context_id=str(context_id))
 
-    async def reset_to_default(self, context_id: UUID) -> ContextSearchConfig:
+    async def reset_to_default(
+        self, context_id: UUID, *, reset_content_chunks: bool = True
+    ) -> ContextSearchConfig:
         """Reset configuration to default values.
 
         Args:
             context_id: Context UUID
+            reset_content_chunks: Also turn ``content_chunks_enabled`` off
+                (#2015). The REST route passes ``False`` when the flag is
+                already off, so a reset by an editor never writes the flag —
+                changing it takes the context owner.
 
         Returns:
             Reset ContextSearchConfig
@@ -245,6 +251,11 @@ class ContextSearchConfigRepository:
         """
         logger.info("config_resetting", context_id=str(context_id))
 
+        # #2015: chunks off (update purges the context's chunk points) — only
+        # when asked, so the flag is otherwise left out of the update.
+        chunk_reset: dict[str, bool] = (
+            {"content_chunks_enabled": False} if reset_content_chunks else {}
+        )
         defaults = ContextSearchConfigUpdate(
             semantic_weight=0.6,
             bm25_weight=0.4,
@@ -259,8 +270,7 @@ class ContextSearchConfigRepository:
             reinforce_enabled=True,
             reinforce_max_boost=0.15,
             reinforce_require_host_arbitration=False,
-            # #2015: chunks off (update purges the context's chunk points).
-            content_chunks_enabled=False,
+            **chunk_reset,
         )
 
         config = await self.update(context_id, defaults)

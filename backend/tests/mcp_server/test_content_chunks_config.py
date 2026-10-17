@@ -193,3 +193,102 @@ async def test_reset_to_default_turns_chunks_off_and_purges():
         config = await repo.reset_to_default(uuid4())
     assert config.content_chunks_enabled is False
     assert purge.await_count == 2
+
+
+# ---------------------------------------------------------------------------
+# #2015: changing the flag takes the context owner (MCP twin of the REST gate)
+# ---------------------------------------------------------------------------
+
+
+def _mcp_config(enabled: bool):
+    return SimpleNamespace(
+        content_chunks_enabled=enabled,
+        semantic_weight=0.6,
+        bm25_weight=0.4,
+        fetch_factor=3,
+        use_rerank=False,
+        reranker_provider="voyage",
+        reranker_model="rerank-2",
+        reinforce_enabled=True,
+        reinforce_max_boost=0.15,
+        reinforce_require_host_arbitration=False,
+        routing_mode="off",
+    )
+
+
+async def _call_update(args: dict, *, stored: bool, owner: bool):
+    import json
+    from unittest.mock import MagicMock, patch
+
+    from mcp_server.tools.search_config import handle_update_search_config
+    from utils.exceptions import AuthorizationError
+
+    db = MagicMock()
+    db.rollback = AsyncMock()
+
+    async def fake_get_db():
+        yield db
+
+    perms = MagicMock()
+    perms.check_context_write = AsyncMock()
+    perms.check_context_owner = AsyncMock(side_effect=None if owner else AuthorizationError())
+    config = _mcp_config(stored)
+    repo = MagicMock()
+    repo.get_by_context = AsyncMock(return_value=config)
+    repo.update = AsyncMock(return_value=config)
+    with (
+        patch("db.base.get_db", new=fake_get_db),
+        patch("services.permission_service.PermissionService", return_value=perms),
+        patch("services.plan_suspension.ensure_context_writable", AsyncMock()),
+        patch("repositories.config_repository.ContextSearchConfigRepository", return_value=repo),
+        patch("mcp_server.tools.search_config._log_tool_usage", AsyncMock()),
+    ):
+        result = await handle_update_search_config(
+            {"context_id": str(uuid4()), **args}, "user-1", uuid4()
+        )
+    return json.loads(result[0].text), perms, repo
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("stored", "requested"), [(False, True), (True, False)])
+async def test_mcp_an_editor_cannot_change_the_flag(stored, requested):
+    payload, _, repo = await _call_update(
+        {"content_chunks_enabled": requested}, stored=stored, owner=False
+    )
+    assert payload["error"] == "permission_denied"
+    assert "content_chunks_enabled" in payload["message"]
+    assert payload["required_role"] == "owner"
+    repo.update.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcp_an_editor_can_change_other_fields():
+    payload, perms, repo = await _call_update({"use_rerank": True}, stored=True, owner=False)
+    assert payload["status"] == "success"
+    perms.check_context_owner.assert_not_awaited()
+    applied = repo.update.await_args.args[1]
+    assert applied.use_rerank is True
+    # Omitted: not round-tripped, so a concurrent owner change is never undone.
+    assert "content_chunks_enabled" not in applied.model_fields_set
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored", [True, False])
+async def test_mcp_an_editor_sending_the_stored_value_is_a_no_op(stored):
+    payload, perms, repo = await _call_update(
+        {"content_chunks_enabled": stored}, stored=stored, owner=False
+    )
+    assert payload["status"] == "success"
+    perms.check_context_owner.assert_not_awaited()
+    assert "content_chunks_enabled" not in repo.update.await_args.args[1].model_fields_set
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("stored", "requested"), [(False, True), (True, False)])
+async def test_mcp_an_owner_or_workspace_admin_can_change_the_flag(stored, requested):
+    payload, perms, repo = await _call_update(
+        {"content_chunks_enabled": requested}, stored=stored, owner=True
+    )
+    assert payload["status"] == "success"
+    perms.check_context_owner.assert_awaited_once()
+    assert repo.update.await_args.args[1].content_chunks_enabled is requested

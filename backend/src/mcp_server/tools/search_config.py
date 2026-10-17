@@ -40,7 +40,10 @@ async def handle_update_search_config(
                 ContextSearchConfigRepository,
                 search_config_defaults,
             )
-            from services.permission_service import PermissionService
+            from services.permission_service import (
+                PermissionService,
+                gate_content_chunks_change,
+            )
             from services.reranker_service import default_reranker_model_for
             from utils.exceptions import AuthorizationError, NotFoundException
 
@@ -112,11 +115,12 @@ async def handle_update_search_config(
                 ),
                 # Issue #1212: query-intent router gate (round-trip current value).
                 "routing_mode": args.get("routing_mode", config.routing_mode),
-                # Issue #2015: content chunk vectors opt-in (round-trip current value).
-                "content_chunks_enabled": args.get(
-                    "content_chunks_enabled", config.content_chunks_enabled
-                ),
             }
+            # Issue #2015: content chunk vectors opt-in. Not round-tripped: an
+            # omitted flag stays out of the update (the repository applies
+            # exclude_unset), and changing it is gated below.
+            if "content_chunks_enabled" in args:
+                update_fields["content_chunks_enabled"] = args["content_chunks_enabled"]
 
             # Validate via Pydantic (same as REST API)
             try:
@@ -125,6 +129,29 @@ async def handle_update_search_config(
                 # #1323: don't leak the raw pydantic dump into the envelope.
                 return _error_response(
                     "invalid_search_config", _format_validation_error(validation_err)
+                )
+
+            # #2015: changing content_chunks_enabled takes the context owner (or
+            # a workspace owner/admin), like the REST twin; the stored value is
+            # a no-op and not written.
+            try:
+                update_data = await gate_content_chunks_change(
+                    perm_service,
+                    user_id,
+                    ctx_uuid,
+                    update_data,
+                    current_enabled=config.content_chunks_enabled,
+                )
+            except AuthorizationError as perm_err:
+                return _error_response(
+                    "permission_denied",
+                    str(perm_err),
+                    required_role="owner",
+                    help=(
+                        "Ask the context owner or a workspace owner/admin to change "
+                        "content_chunks_enabled. Other search settings need only "
+                        "editor access."
+                    ),
                 )
 
             # Apply via repository (same as REST API)

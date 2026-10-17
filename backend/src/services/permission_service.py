@@ -20,6 +20,7 @@ from auth.workspace_roles import (
     WORKSPACE_ROLE_WEIGHTS as ORG_ROLE_WEIGHTS,
 )
 from models.auth import Context, ContextMember, Workspace, WorkspaceMember
+from models.schemas import ContextSearchConfigUpdate
 from services.capacity_lock import CapacityPolicy, ensure_not_capacity_locked
 from services.identity_link_service import is_same_owner, owned_by
 from services.plan_suspension import ensure_context_writable, ensure_member_seated
@@ -1196,3 +1197,64 @@ class PermissionService:
             await _emit_rbac_denied()
             return False
         return await _binding_ok()
+
+
+CONTENT_CHUNKS_OWNER_ONLY_MESSAGE = (
+    "Only the context owner or a workspace owner/admin can change content_chunks_enabled"
+)
+
+
+async def check_content_chunks_change(
+    perm_service: PermissionService, user_id: str, context_id: UUID
+) -> None:
+    """Require the context owner to change ``content_chunks_enabled`` (#2015).
+
+    Turning the flag on is the first time memory content, not only summaries,
+    goes to the embedding and rerank providers, so a change of the stored value
+    (either way) takes ``check_context_owner``: a context owner, the creator of
+    a private context, or a workspace owner/admin. The caller has already
+    passed the context write check, so the refusal names the setting.
+
+    Raises:
+        AuthorizationError: 403 (``AUTH-101``) for anyone below context owner.
+    """
+    try:
+        # The write check before this one carries the capacity decision.
+        await perm_service.check_context_owner(user_id, context_id, capacity=CapacityPolicy.ALLOWED)
+    except AuthorizationError as exc:
+        raise AuthorizationError(
+            CONTENT_CHUNKS_OWNER_ONLY_MESSAGE, reason="content_chunks_owner_only"
+        ) from exc
+
+
+async def gate_content_chunks_change(
+    perm_service: PermissionService,
+    user_id: str,
+    context_id: UUID,
+    update: ContextSearchConfigUpdate,
+    *,
+    current_enabled: bool,
+) -> ContextSearchConfigUpdate:
+    """Apply the #2015 owner rule to a search-config update.
+
+    The rule: a request whose ``content_chunks_enabled`` differs from the
+    stored value needs the context owner (``check_content_chunks_change``).
+    One that omits it, or sends the stored value, is not a change: any editor
+    may send it, and the field is dropped from the update so the write never
+    touches the flag (a concurrent owner change is not overwritten by it).
+
+    Returns:
+        The update to apply (``update`` itself, or a copy without the flag).
+
+    Raises:
+        AuthorizationError: 403 when the flag changes and the caller is not
+            the context owner or a workspace owner/admin.
+    """
+    if "content_chunks_enabled" not in update.model_fields_set:
+        return update
+    if update.content_chunks_enabled == current_enabled:
+        return ContextSearchConfigUpdate(
+            **update.model_dump(exclude_unset=True, exclude={"content_chunks_enabled"})
+        )
+    await check_content_chunks_change(perm_service, user_id, context_id)
+    return update
