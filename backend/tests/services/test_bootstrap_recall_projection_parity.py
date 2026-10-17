@@ -130,3 +130,58 @@ class TestBootstrapRecallRowMatchesRecall:
         assert row == _recall_tool_row(memory, "full")
         assert row != _recall_tool_row(memory, "compact")
         assert "summary_cut" not in row
+
+
+# The keys a bootstrap recall row may carry, listed by hand on purpose: a field
+# added to recall_result_item later must fail here, not flow silently into the
+# trusted, behaviour-establishing bootstrap lane. Extend this only on purpose.
+BOOTSTRAP_RECALL_ROW_ALLOWED_KEYS = frozenset(
+    {
+        "memory_id",
+        "summary",
+        "context_summary",
+        "type",
+        "importance",
+        "scope",
+        "score",
+        "created_at",
+        "updated_at",
+        "tags",
+        "superseded_by",
+        "contradicts",
+    }
+)
+# Present on every row, whatever the memory holds.
+BOOTSTRAP_RECALL_ROW_REQUIRED_KEYS = frozenset(
+    {"memory_id", "summary", "type", "importance", "scope", "score", "created_at", "updated_at"}
+)
+
+
+@pytest.mark.asyncio
+class TestBootstrapRecallRowKeyContract:
+    async def test_a_fully_annotated_row_stays_within_the_allowed_keys(self):
+        memory = _memory(
+            context_summary="Recall when auth starts failing after a deploy",
+            tags=["auth", "jwt"],
+            updated_at=datetime(2026, 8, 20, 12, 0, tzinfo=UTC),
+            superseded_by=uuid.uuid4(),
+            contradicts=[uuid.uuid4()],
+            supersede_candidate=SupersedeCandidate(
+                memory_id=uuid.uuid4(), similarity=0.93, summary="older note", verified=True
+            ),
+        )
+
+        row = await _bootstrap_row(memory)
+
+        assert set(row) <= BOOTSTRAP_RECALL_ROW_ALLOWED_KEYS, (
+            f"unexpected keys in a bootstrap recall row: "
+            f"{sorted(set(row) - BOOTSTRAP_RECALL_ROW_ALLOWED_KEYS)}"
+        )
+        assert BOOTSTRAP_RECALL_ROW_REQUIRED_KEYS <= set(row)
+        # Fully annotated: every allowed key is in use here.
+        assert set(row) == BOOTSTRAP_RECALL_ROW_ALLOWED_KEYS
+
+    async def test_a_bare_row_carries_the_required_keys(self):
+        row = await _bootstrap_row(_memory())
+
+        assert BOOTSTRAP_RECALL_ROW_REQUIRED_KEYS <= set(row) <= BOOTSTRAP_RECALL_ROW_ALLOWED_KEYS
