@@ -200,3 +200,11 @@ def test_chunk_payload_keeps_every_field_of_the_real_summary_point():
         else:
             assert payload[key] == value, key
     assert payload["user_id"] == "owner-1"
+
+
+def test_expected_chunk_count_matches_split_content():
+    """#2015 PR 2a: the migration's verify counts chunks from char_length only."""
+    from utils.content_chunks import expected_chunk_count
+
+    for length in [*range(0, 3000, 1), *range(3000, 40000, 37)]:
+        assert expected_chunk_count(length) == len(split_content("x" * length)), length

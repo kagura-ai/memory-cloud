@@ -215,8 +215,18 @@ class ContextSearchConfigRepository:
         return config
 
     async def _purge_chunk_points(self, context_id: UUID, config: ContextSearchConfig) -> None:
-        """Delete every content chunk point of a context (#2015)."""
-        from db.qdrant import get_collection_name, purge_context_chunk_points
+        """Delete every content chunk point of a context (#2015), in every collection.
+
+        Not only the routed one: an embedding migration keeps the context's
+        points in its source collection until ``--purge`` and writes chunks
+        into its target collection from ``--reembed`` on, and the invariant
+        has to hold in both. Only the routed collection's purge is required
+        (recall reads chunks from it alone); a failure elsewhere is logged by
+        ``purge_context_chunk_points_everywhere`` and does not block the
+        flag change. Turning the flag off retries every collection after the
+        commit.
+        """
+        from db.qdrant import get_collection_name, purge_context_chunk_points_everywhere
         from models.auth import Context
 
         workspace_id = (
@@ -224,12 +234,14 @@ class ContextSearchConfigRepository:
         ).scalar_one_or_none()
         if workspace_id is None:
             return
-        await purge_context_chunk_points(
+        failed = await purge_context_chunk_points_everywhere(
             str(workspace_id),
             str(context_id),
-            get_collection_name(config.embedding_model, config.embedding_dimensions),
+            routed_collection=get_collection_name(
+                config.embedding_model, config.embedding_dimensions
+            ),
         )
-        logger.info("content_chunks_purged", context_id=str(context_id))
+        logger.info("content_chunks_purged", context_id=str(context_id), failed=len(failed))
 
     async def reset_to_default(
         self, context_id: UUID, *, reset_content_chunks: bool = True

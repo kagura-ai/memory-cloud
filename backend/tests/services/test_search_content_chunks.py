@@ -136,3 +136,102 @@ async def test_reranker_sees_the_matched_chunk_text():
     await svc.rerank("q", candidates, k=1, user_id="u", context_id=_CTX, workspace_id=_WS)
     documents = provider.rerank.await_args.args[1]
     assert documents == ["S C\nthe passage"]
+
+
+# #2015 PR 2a: cross-context recall follows each listed context's own flag.
+_CTX2 = "00000000-0000-0000-0000-000000000003"
+
+
+async def _search_contexts(config, dense, chunk_contexts):
+    service = SearchService(MagicMock())
+    service._get_search_config = AsyncMock(return_value=config)
+    service._chunk_enabled_context_ids = AsyncMock(return_value=chunk_contexts)
+    qdrant = AsyncMock(return_value=dense)
+    with (
+        patch("services.search_service.search_memories_qdrant", new=qdrant),
+        patch("services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])),
+    ):
+        results = await service.hybrid_search(
+            query="q",
+            user_id="u",
+            workspace_id=_WS,
+            context_id=[_CTX, _CTX2],
+            k=5,
+            search_mode="semantic",
+        )
+    service._chunk_enabled_context_ids.assert_awaited_once_with([_CTX, _CTX2])
+    return results, qdrant.await_args.kwargs
+
+
+async def test_cross_context_primary_off_still_gets_an_opted_in_secondarys_chunks():
+    results, kwargs = await _search_contexts(_config(False), _DENSE, [_CTX2])
+    assert kwargs["include_chunks"] == [_CTX2]
+    assert kwargs["limit"] == 5 * 3 * CONTENT_CHUNK_DENSE_OVERSAMPLE
+    assert [r["id"] for r in results] == ["m1", "m2"]  # collapsed
+
+
+async def test_cross_context_primary_on_admits_only_the_contexts_that_opted_in():
+    _, kwargs = await _search_contexts(_config(True), [], [_CTX])
+    assert kwargs["include_chunks"] == [_CTX]
+
+
+async def test_cross_context_none_opted_in_is_the_summary_only_call():
+    plain = [{"id": "m2", "score": 0.8, "payload": {"summary": "b"}, "embedding": []}]
+    results, kwargs = await _search_contexts(_config(True), plain, [])
+    assert "include_chunks" not in kwargs
+    assert kwargs["limit"] == 5 * 3
+    assert [r["id"] for r in results] == ["m2"]
+
+
+async def test_chunk_enabled_context_ids_keeps_the_callers_spelling_and_order():
+    from uuid import UUID
+
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = [UUID(_CTX2)]
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+    db.begin_nested = MagicMock(return_value=_Savepoint())
+    ids = await SearchService(db)._chunk_enabled_context_ids([_CTX, _CTX2])
+    assert ids == [_CTX2]
+    compiled = str(db.execute.await_args.args[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "content_chunks_enabled IS true" in compiled
+
+
+class _Savepoint:
+    """``db.begin_nested()``: records whether it was rolled back."""
+
+    def __init__(self):
+        self.rolled_back = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self.rolled_back = exc_type is not None
+        return False
+
+
+async def test_chunk_enabled_context_ids_fails_closed_inside_a_savepoint():
+    """A failed lookup must not leave the recall's transaction aborted."""
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=RuntimeError("db down"))
+    savepoint = _Savepoint()
+    db.begin_nested = MagicMock(return_value=savepoint)
+    assert await SearchService(db)._chunk_enabled_context_ids([_CTX, _CTX2]) == []
+    assert savepoint.rolled_back
+
+
+async def test_keyword_cross_context_search_reads_no_chunk_flags():
+    service = SearchService(MagicMock())
+    service._get_search_config = AsyncMock(return_value=_config(True))
+    service._chunk_enabled_context_ids = AsyncMock(return_value=[_CTX])
+    with patch("services.search_service.search_memories_fulltext", new=AsyncMock(return_value=[])):
+        await service.hybrid_search(
+            query="q",
+            user_id="u",
+            workspace_id=_WS,
+            context_id=[_CTX, _CTX2],
+            k=5,
+            search_mode="keyword",
+        )
+    service._chunk_enabled_context_ids.assert_not_awaited()

@@ -12,10 +12,11 @@ from typing import Any, Literal
 from uuid import UUID
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.settings import get_settings
-from db.qdrant import search_memories_fulltext, search_memories_qdrant
+from db.qdrant import chunk_points_supported, search_memories_fulltext, search_memories_qdrant
 from models.llm_call_log import (
     LLM_CALL_LOG_CALL_TYPES,
     LLM_CALL_LOG_CALLERS,
@@ -158,6 +159,18 @@ class SearchService:
         # oversamples and collapses back to fetch_size. `is True`: a duck-typed
         # default config has no such attribute.
         content_chunks_on = getattr(config, "content_chunks_enabled", False) is True
+        # #2015 PR 2a: cross-context recall follows each context's own flag,
+        # not the primary's: the dense arm returns chunk points of exactly the
+        # listed contexts that opted in (a filter, so a leftover chunk of a
+        # context whose flag is off never matches).
+        chunk_context_ids: list[str] | None = None
+        if isinstance(context_id, list):
+            chunk_context_ids = (
+                await self._chunk_enabled_context_ids(context_id)
+                if search_mode != "keyword" and chunk_points_supported()
+                else []
+            )
+            content_chunks_on = bool(chunk_context_ids)
 
         # Issue #XXX: Team collaboration - workspace membership + context privacy check
         from uuid import UUID
@@ -345,7 +358,13 @@ class SearchService:
                     )
                 with timings.stage("qdrant"):
                     chunk_kwargs: dict[str, Any] = (
-                        {"include_chunks": True} if content_chunks_on else {}
+                        {
+                            "include_chunks": (
+                                chunk_context_ids if chunk_context_ids is not None else True
+                            )
+                        }
+                        if content_chunks_on
+                        else {}
                     )
                     semantic_results = await search_memories_qdrant(
                         user_id=user_id,
@@ -595,6 +614,39 @@ class SearchService:
         sorted_results = sorted(merged.values(), key=lambda x: x["hybrid_score"], reverse=True)
 
         return sorted_results
+
+    async def _chunk_enabled_context_ids(self, context_ids: list[str]) -> list[str]:
+        """Those of ``context_ids`` with ``content_chunks_enabled`` on (#2015 PR 2a).
+
+        One SELECT, in a savepoint: a failed lookup answers ``[]`` (summary
+        points only, the safe side) and leaves the request's transaction
+        usable for the rest of the recall. Returned in the caller's spelling
+        and order (the vector filter matches them against the payload as
+        given).
+        """
+        from models.config import ContextSearchConfig
+
+        wanted: dict[UUID, str] = {}
+        for cid in context_ids:
+            try:
+                wanted.setdefault(UUID(str(cid)), cid)
+            except ValueError:
+                continue
+        if not wanted:
+            return []
+        try:
+            async with self.db.begin_nested():
+                result = await self.db.execute(
+                    select(ContextSearchConfig.context_id).where(
+                        ContextSearchConfig.context_id.in_(list(wanted)),
+                        ContextSearchConfig.content_chunks_enabled.is_(True),
+                    )
+                )
+                enabled = set(result.scalars().all())
+        except Exception as e:  # noqa: BLE001 — fail closed: no chunk points
+            logger.warning("content_chunks_flags_load_failed", error_class=type(e).__name__)
+            return []
+        return [cid for key, cid in wanted.items() if key in enabled]
 
     async def _get_search_config(self, context_id: str | None) -> Any:
         """Load search configuration from database.

@@ -15,7 +15,12 @@ Steps (each is a flag; ``--run`` chains the first three):
                   and listed
     --verify      every live memory has a point in the target; drops target points
                   whose memory was forgotten meanwhile. Resource-ingested memories
-                  that cannot be rebuilt are listed, and do not fail the step
+                  that cannot be rebuilt are listed, and do not fail the step.
+                  With content_chunks_enabled (#2015) the re-embed also rebuilds
+                  content chunk points; memories whose chunks are incomplete are
+                  listed on a CHUNKS_MISSING line, and do not fail the step. When
+                  a switch follows (--run, --verify --switch) their chunks are
+                  rebuilt first, and the switch is refused while any are left
     --switch      flip routing + re-queue the delta since the re-embed started
     --purge       delete the source points, in the same invocation as --switch
     --purge-source MODEL  delete MODEL's points for the context in a later run,
@@ -24,7 +29,8 @@ Steps (each is a flag; ``--run`` chains the first three):
     --rollback-to MODEL   route back to MODEL and re-queue everything written
                   since the switch (its collection must still exist)
 
-Exit codes: 0 ok · 1 error · 2 verification found missing points.
+Exit codes: 0 ok · 1 error · 2 verification found missing points (or, before a
+switch, memories whose content chunks could not be completed).
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -43,9 +50,11 @@ from db.base import get_db  # noqa: E402
 from services.context_routing import resolve_context_embedding  # noqa: E402
 from services.embedding_migration_service import (  # noqa: E402
     MigrationPlan,
+    VerifyResult,
     list_migratable_context_ids,
     plan_context_migration,
     purge_source_points,
+    rebuild_target_chunks,
     reembed_context,
     rollback_context_embedding,
     switch_context_embedding,
@@ -59,6 +68,11 @@ def _print_plan(plan: MigrationPlan) -> None:
     print(f"  source  {plan.source_model} / {plan.source_dimensions}d  -> {plan.source_collection}")
     print(f"  target  {plan.target_model} / {plan.target_dimensions}d  -> {plan.target_collection}")
     print(f"  memories {plan.memory_count}")
+    if plan.content_chunks_on:
+        print(
+            f"  content chunks on: the re-embed also writes ~{plan.chunk_estimate} "
+            "chunk point(s), one embedding input each"
+        )
 
 
 def _print_unrebuildable(memory_ids: list[UUID]) -> None:
@@ -73,6 +87,65 @@ def _print_unrebuildable(memory_ids: list[UUID]) -> None:
         "longer holds a JSON document. Ingest the documents again as a newer version "
         f"to make them searchable: {shown}{more}"
     )
+
+
+_CHUNKS_REMEDY_NO_SWITCH = (
+    "Not switched yet: re-run --reembed (idempotent) or --run, which rebuilds them "
+    "before it switches. Once switched, the migration cannot rebuild them; see the runbook"
+)
+_CHUNKS_REMEDY_BEFORE_SWITCH = "Rebuilding them before the switch"
+
+
+def _still_missing_remedy(requeue_since: datetime | None) -> str:
+    since = f" --requeue-since {requeue_since.isoformat()}" if requeue_since else ""
+    return (
+        "Still incomplete after the rebuild, so the context was NOT switched. "
+        f"Retry just these with --verify --switch{since} (no full re-embed); if the same "
+        "memories stay listed, look for content_chunks_* errors in the log"
+    )
+
+
+def _print_chunk_ids(label: str, ids: list[UUID], remedy: str) -> None:
+    shown = ", ".join(str(memory_id) for memory_id in ids[:20])
+    more = f" (+{len(ids) - 20} more)" if len(ids) > 20 else ""
+    print(f"  {label} {len(ids)} memory(ies): {remedy}: {shown}{more}")
+
+
+def _print_verify(verified: VerifyResult) -> None:
+    print(
+        f"  verify: {verified.present}/{verified.expected} present, "
+        f"{verified.stale_removed} stale target point(s) removed"
+    )
+
+
+def _print_missing(verified: VerifyResult) -> None:
+    print(f"  MISSING {len(verified.missing)}: {', '.join(str(m) for m in verified.missing[:20])}")
+
+
+def _print_chunks(verified: VerifyResult, remedy: str = _CHUNKS_REMEDY_NO_SWITCH) -> None:
+    """Content chunk points of the target (#2015).
+
+    ``remedy`` ends the CHUNKS_MISSING line: what this invocation does about
+    them, or what the operator can do (a re-embed works only before the
+    switch: afterwards the plan refuses the model the context already uses).
+    """
+    if verified.chunks_expected or verified.chunks_present:
+        print(f"  content chunks: {verified.chunks_present}/{verified.chunks_expected} present")
+    if verified.chunks_stale_removed:
+        print(
+            f"  removed the content chunks of {verified.chunks_stale_removed} memory(ies) "
+            "that are no longer live (or the context has content_chunks_enabled off)"
+        )
+    if verified.chunks_missing:
+        ids = verified.chunks_missing
+        shown = ", ".join(str(memory_id) for memory_id in ids[:20])
+        more = f" (+{len(ids) - 20} more)" if len(ids) > 20 else ""
+        print(
+            f"  CHUNKS_MISSING {len(ids)} memory(ies) whose number of content chunks in the "
+            "target differs from what their content splits into (recall finds them through "
+            "their summary meanwhile). "
+            f"{remedy}: {shown}{more}"
+        )
 
 
 def _confirm(prompt: str, assume_yes: bool) -> bool:
@@ -128,6 +201,7 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
 
     requeue_since = None
     skipped: list[UUID] = []
+    switch_confirmed = False
     if args.reembed or args.run:
 
         def _progress(done: int, total: int) -> None:
@@ -135,25 +209,69 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
 
         result = await reembed_context(db, plan, batch_size=args.batch_size, progress=_progress)
         requeue_since = result.started_at
-        print(f"  re-embed done: {result.embedded} points in {result.batches} batches")
+        chunks = f", {result.chunks_written} content chunk points" if plan.content_chunks_on else ""
+        print(f"  re-embed done: {result.embedded} points in {result.batches} batches{chunks}")
         skipped = result.unrebuildable
         if not (args.verify or args.run):
             _print_unrebuildable(skipped)
 
     if args.verify or args.run:
+        switching = bool(args.switch or args.run)
         verified = await verify_context_migration(db, plan)
-        print(
-            f"  verify: {verified.present}/{verified.expected} present, "
-            f"{verified.stale_removed} stale target point(s) removed"
-        )
+        _print_verify(verified)
         # One line for both steps. Verify alone would leave out a row the
         # re-embed skipped whose point another live row keeps in the target.
         _print_unrebuildable(sorted({*skipped, *verified.unrebuildable}))
+        rebuild_first = switching and verified.ok and bool(verified.chunks_missing)
+        _print_chunks(
+            verified,
+            _CHUNKS_REMEDY_BEFORE_SWITCH if rebuild_first else _CHUNKS_REMEDY_NO_SWITCH,
+        )
         if not verified.ok:
-            print(
-                f"  MISSING {len(verified.missing)}: {', '.join(str(m) for m in verified.missing[:20])}"
-            )
+            _print_missing(verified)
             return 2
+        if rebuild_first:
+            # After the switch a re-embed to this target is refused (the
+            # context already uses it), so chunks verify found incomplete are
+            # rebuilt now: e.g. content_chunks_enabled turned on while the
+            # re-embed ran (verify read the flag again; the plan had it off).
+            # Asked before the rebuild: it is embedding spend for the switch.
+            if not _confirm(
+                f"Rebuild the content chunks of {len(verified.chunks_missing)} memory(ies), "
+                f"then switch {context_id} to {plan.target_model}?",
+                args.yes,
+            ):
+                print("  skipped")
+                return 0
+            switch_confirmed = True
+            if not plan.content_chunks_on:
+                print("  content_chunks_enabled was turned on after the plan")
+            switch_since = requeue_since if requeue_since is not None else args.requeue_since
+            try:
+                rebuilt = await rebuild_target_chunks(
+                    db,
+                    plan,
+                    verified.chunks_missing,
+                    requeue_since=switch_since,
+                    batch_size=args.batch_size,
+                )
+            except Exception as exc:  # noqa: BLE001 - one context's failure, the run goes on
+                print(
+                    f"  chunk rebuild failed, NOT switched ({type(exc).__name__}: {exc}); "
+                    "retry with --verify --switch"
+                )
+                return 1
+            print(
+                f"  rebuilt the content chunks of {rebuilt.rebuilt} memory(ies): "
+                f"{rebuilt.chunks_written} chunk points"
+            )
+            if rebuilt.still_missing:
+                _print_chunk_ids(
+                    "CHUNKS_MISSING",
+                    rebuilt.still_missing,
+                    _still_missing_remedy(switch_since),
+                )
+                return 2
 
     if args.switch or args.run:
         if requeue_since is None:
@@ -163,7 +281,9 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
                 "routing only if you pass --requeue-since"
             )
             requeue_since = args.requeue_since
-        if not _confirm(f"Switch {context_id} to {plan.target_model}?", args.yes):
+        if not switch_confirmed and not _confirm(
+            f"Switch {context_id} to {plan.target_model}?", args.yes
+        ):
             print("  skipped")
             return 0
         switched = await switch_context_embedding(

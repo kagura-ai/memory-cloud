@@ -38,6 +38,15 @@ routing — the dual-collection shape::
   is skipped and reported, not given a label vector and not a reason to stop:
   it has no usable vector under any model until its document is ingested
   again.
+* Content chunk points (#2015) of a context with ``content_chunks_enabled``
+  are rebuilt in the target too: ``reembed`` writes each page's chunks with
+  the target model right after its summary points
+  (``rebuild_content_chunks``), ``verify`` reports memories whose chunk
+  count does not match their content (without failing ``ok``: re-running the re-embed
+  fills them, and :func:`rebuild_target_chunks` rebuilds just those before a
+  switch) and removes the chunks of memories that are no longer live,
+  and ``switch`` removes those of memories forgotten since the re-embed
+  started, so a context serves chunk hits right after the switch.
 """
 
 from __future__ import annotations
@@ -57,6 +66,9 @@ from config.embedding_policy import is_embedding_model_allowed
 from config.settings import get_settings
 from db.qdrant import (
     add_memory_to_qdrant,
+    chunk_points_supported,
+    count_context_chunk_points,
+    delete_chunk_points,
     delete_context_points,
     delete_points_from_qdrant,
     ensure_kagura_memories_collection,
@@ -68,6 +80,7 @@ from models.auth import Context
 from models.config import ContextSearchConfig
 from models.memory import Memory
 from repositories.config_repository import search_config_defaults
+from services.content_chunk_writer import content_chunks_enabled, rebuild_content_chunks
 from services.context_routing import (
     resolve_context_embedding,
     resolve_context_embedding_config,
@@ -75,6 +88,7 @@ from services.context_routing import (
 from services.embedding_service import EmbeddingService
 from services.memory_service import build_memory_point
 from services.resource_indexer import ResourceIndexer, ResourceRebuildError, owns_resource_point
+from utils.content_chunks import CONTENT_CHUNK_MIN_CONTENT_CHARS, expected_chunk_count
 from utils.datetime import utcnow
 from utils.exceptions import NotFoundException, ValidationError
 from utils.logger import get_logger
@@ -98,6 +112,12 @@ class MigrationPlan:
     target_dimensions: int
     target_collection: str
     memory_count: int
+    content_chunks_on: bool = False
+    """The context's ``content_chunks_enabled`` when planned (#2015): the
+    re-embed also rebuilds its chunk points in the target."""
+    chunk_estimate: int = 0
+    """With ``content_chunks_on``: about how many chunk points (= extra
+    embedding inputs) the re-embed writes."""
 
 
 @dataclass
@@ -109,6 +129,8 @@ class ReembedResult:
     unrebuildable: list[UUID] = field(default_factory=list)
     """Resource-ingested memories skipped because their point cannot be
     rebuilt from the row (#1896); not counted in ``embedded``."""
+    chunks_written: int = 0
+    """Content chunk points written to the target (#2015)."""
 
 
 @dataclass
@@ -121,6 +143,23 @@ class VerifyResult:
     unrebuildable: list[UUID] = field(default_factory=list)
     """Resource-ingested memories without a target point that no re-embed can
     give one (#1896). Reported, but not ``missing``: they do not fail ``ok``."""
+    chunks_expected: int = 0
+    """Chunk points the live memories' current content splits into (#2015;
+    0 while the context has ``content_chunks_enabled`` off)."""
+    chunks_present: int = 0
+    """Chunk points the target holds for live memories."""
+    chunks_missing: list[UUID] = field(default_factory=list)
+    """Memories whose number of chunk points in the target differs from what
+    their current content splits into (some missing, or a tail left from a
+    longer content). Counts only: an edit that keeps the count is not seen
+    here (an edit after the re-embed started is re-queued by the switch
+    anyway). Reported, not part of
+    ``ok``: a re-run of the re-embed, or :func:`rebuild_target_chunks`,
+    rewrites them before the switch (the CLI does the latter before it
+    switches), and a memory is still found through its summary point."""
+    chunks_stale_removed: int = 0
+    """Memories whose target chunk points were deleted: not live any more, or
+    the context has ``content_chunks_enabled`` off."""
 
     @property
     def ok(self) -> bool:
@@ -197,13 +236,6 @@ async def plan_context_migration(
         source_model, source_dimensions = current_model, current_dimensions
         if source_model == target_model:
             raise ValidationError(f"Context {context_id} already uses {target_model!r}")
-        # #2015: the re-embed and its verify pass handle summary points only —
-        # verify would delete the context's content chunk points as stale.
-        if content_chunks_on:
-            raise ValidationError(
-                f"Context {context_id} has content_chunks_enabled; turn it off "
-                "before migrating its embedding model"
-            )
     else:
         if source_model == current_model:
             raise ValidationError(
@@ -224,6 +256,28 @@ async def plan_context_migration(
     )
     memory_count = int(count_result.scalar_one() or 0)
 
+    chunk_estimate = 0
+    if content_chunks_on and source_model == current_model:
+        # The re-embed rebuilds chunk points (#2015): one extra embedding
+        # input per chunk. A row that owns a resource point is never chunked
+        # (the rule rebuild_content_chunks and verify apply).
+        length = func.char_length(Memory.content)
+        lengths = await db.execute(
+            select(Memory, length)
+            .options(load_only(*_POINT_ID_COLUMNS))
+            .where(
+                Memory.context_id == context_id,
+                Memory.deleted_at.is_(None),
+                length >= CONTENT_CHUNK_MIN_CONTENT_CHARS,
+            )
+        )
+        chunk_estimate = sum(
+            expected_chunk_count(int(n))
+            for memory, n in lengths.all()
+            if not owns_resource_point(memory)
+        )
+        db.expunge_all()
+
     return MigrationPlan(
         context_id=context_id,
         workspace_id=context.workspace_id,
@@ -234,6 +288,8 @@ async def plan_context_migration(
         target_dimensions=target_dimensions,
         target_collection=get_collection_name(target_model, target_dimensions),
         memory_count=memory_count,
+        content_chunks_on=content_chunks_on,
+        chunk_estimate=chunk_estimate,
     )
 
 
@@ -374,6 +430,15 @@ async def reembed_context(
     collection held before: the row has no target vector, and
     :func:`verify_context_migration` reports it.
 
+    With ``plan.content_chunks_on`` (#2015) each page's content chunk
+    points are rebuilt in the target right after its summary points, with
+    the target model (``rebuild_content_chunks``: delete first, the flag read
+    fresh before the delete and before the upsert, so a flag turned off
+    mid-run writes nothing more). A chunk failure stops the run like a
+    summary failure does. A flag turned on after the plan was made is not
+    picked up; :func:`verify_context_migration` then reports the memories
+    without chunks.
+
     Idempotent: points are upserted by point id, so a rerun after a failure
     overwrites instead of duplicating.
     """
@@ -388,6 +453,7 @@ async def reembed_context(
 
     embedded = 0
     batches = 0
+    chunks_written = 0
     unrebuildable: list[UUID] = []
     indexer: ResourceIndexer | None = None
     last_id: UUID | None = None
@@ -413,6 +479,7 @@ async def reembed_context(
         resource_rows = [memory for memory in rows if owns_resource_point(memory)]
         resource_row_ids = {memory.id for memory in resource_rows}
         plain_rows = [memory for memory in rows if memory.id not in resource_row_ids]
+        payloads: dict[UUID, dict[str, Any]] = {}
 
         for user_id, group in _group_by_user(plain_rows):
             vectors = await service.embed_batch(
@@ -427,6 +494,7 @@ async def reembed_context(
                 )
             for memory, vector in zip(group, vectors, strict=True):
                 payload, sparse_indices, sparse_values = build_memory_point(memory)
+                payloads[memory.id] = payload
                 await add_memory_to_qdrant(
                     user_id=memory.user_id,
                     memory_id=memory.id,
@@ -439,6 +507,16 @@ async def reembed_context(
                     collection_name=plan.target_collection,
                 )
                 embedded += 1
+
+        if plan.content_chunks_on and plain_rows:
+            chunks_written += await rebuild_content_chunks(
+                db,
+                plain_rows,
+                base_payloads=payloads,
+                embed_svc=service,
+                collection_name=plan.target_collection,
+                context_id=plan.context_id,
+            )
 
         for memory in resource_rows:
             if indexer is None:
@@ -483,10 +561,124 @@ async def reembed_context(
         embedded=embedded,
         batches=batches,
         unrebuildable=len(unrebuildable),
+        chunks_written=chunks_written,
     )
     return ReembedResult(
-        embedded=embedded, batches=batches, started_at=started_at, unrebuildable=unrebuildable
+        embedded=embedded,
+        batches=batches,
+        started_at=started_at,
+        unrebuildable=unrebuildable,
+        chunks_written=chunks_written,
     )
+
+
+@dataclass
+class ChunkRebuildResult:
+    rebuilt: int = 0
+    """Memories whose chunks were rebuilt (live plain rows of those asked for)."""
+    chunks_written: int = 0
+    still_missing: list[UUID] = field(default_factory=list)
+    """Rebuilt memories whose chunk count in the target still differs from
+    their content afterwards, leaving out those the switch re-queues anyway
+    (changed since ``requeue_since``, or not embedded successfully)."""
+
+
+async def rebuild_target_chunks(
+    db: AsyncSession,
+    plan: MigrationPlan,
+    memory_ids: Iterable[UUID],
+    *,
+    requeue_since: datetime | None = None,
+    batch_size: int = 64,
+    embedding_service: EmbeddingService | None = None,
+) -> ChunkRebuildResult:
+    """Rebuild the content chunk points of ``memory_ids`` in the target (#2015).
+
+    For the memories :func:`verify_context_migration` lists in
+    ``chunks_missing``, before the switch: a flag turned on after the plan
+    was made (``reembed_context`` wrote no chunks then), or a chunk count
+    that no longer matches the content. The same writer as the re-embed
+    (``rebuild_content_chunks``: the flag read fresh, delete first, then
+    write), page by page; rows that are no longer live or own a resource
+    point are skipped.
+
+    Then counts the rebuilt memories' chunks in the target again (only the
+    chunks: summary points of memories written meanwhile are the switch's
+    re-queue's job, as they are after any verify). A memory the switch
+    re-queues with this ``requeue_since`` is not reported: the sweep
+    rewrites its chunks under the new routing.
+    """
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    out = ChunkRebuildResult()
+    ids = sorted(set(memory_ids))
+    if not ids:
+        return out
+    service = embedding_service or EmbeddingService(
+        db, model=plan.target_model, dimensions=plan.target_dimensions
+    )
+    rebuilt_ids: list[UUID] = []
+    for i in range(0, len(ids), batch_size):
+        result = await db.execute(
+            select(Memory)
+            .where(
+                Memory.id.in_(ids[i : i + batch_size]),
+                Memory.context_id == plan.context_id,
+                Memory.deleted_at.is_(None),
+            )
+            .order_by(Memory.id)
+        )
+        rows = [memory for memory in result.scalars().all() if not owns_resource_point(memory)]
+        # As in the re-embed: end the read transaction before the embedding calls.
+        db.expunge_all()
+        await db.commit()
+        if not rows:
+            continue
+        payloads = {memory.id: build_memory_point(memory)[0] for memory in rows}
+        out.chunks_written += await rebuild_content_chunks(
+            db,
+            rows,
+            base_payloads=payloads,
+            embed_svc=service,
+            collection_name=plan.target_collection,
+            context_id=plan.context_id,
+        )
+        rebuilt_ids.extend(memory.id for memory in rows)
+    out.rebuilt = len(rebuilt_ids)
+
+    if rebuilt_ids and await content_chunks_enabled(db, plan.context_id):
+        stored = await count_context_chunk_points(
+            str(plan.workspace_id), str(plan.context_id), plan.target_collection
+        )
+        length = func.char_length(Memory.content)
+        for i in range(0, len(rebuilt_ids), batch_size):
+            stmt = select(Memory.id, length).where(
+                Memory.id.in_(rebuilt_ids[i : i + batch_size]), Memory.deleted_at.is_(None)
+            )
+            if requeue_since is not None:
+                # What switch_context_embedding re-queues is left to the sweep.
+                stmt = stmt.where(
+                    Memory.embedding_status == "success",
+                    Memory.created_at < requeue_since,
+                    Memory.updated_at < requeue_since,
+                )
+            for memory_id, n in (await db.execute(stmt)).all():
+                expected = expected_chunk_count(int(n or 0))
+                if stored.get(str(memory_id), 0) != expected:
+                    out.still_missing.append(memory_id)
+        await db.commit()
+        out.still_missing.sort()
+
+    logger.info(
+        "context_embedding_chunks_rebuilt",
+        context_id=str(plan.context_id),
+        target_collection=plan.target_collection,
+        requested=len(ids),
+        rebuilt=out.rebuilt,
+        chunks_written=out.chunks_written,
+        still_missing=len(out.still_missing),
+    )
+    return out
 
 
 async def verify_context_migration(
@@ -511,6 +703,14 @@ async def verify_context_migration(
     ``stale_removed`` — unless a live row of another context names it (a
     document two contexts ingested is one point in a shared collection). Deletes that land after this check are covered by
     :func:`switch_context_embedding`.
+
+    Content chunk points (#2015) are reconciled as well
+    (:func:`_reconcile_target_chunks`): with the context's
+    ``content_chunks_enabled`` on, memories whose chunk count in the target
+    differs from what their current content splits into are listed in
+    ``chunks_missing`` (reported, not part of ``ok``); chunks of memories
+    that are no longer live are deleted, and with the flag off every chunk
+    point of the context in the target is.
     """
     result = await db.execute(
         select(Memory)
@@ -586,13 +786,108 @@ async def verify_context_migration(
             count=len(stale),
         )
 
+    chunks = await _reconcile_target_chunks(
+        db, plan, {memory_id for memory_id, _, is_resource_row in expected if not is_resource_row}
+    )
+
     return VerifyResult(
         expected=len(expected),
         present=present,
         missing=missing,
         stale_removed=len(stale),
         unrebuildable=unrebuildable,
+        chunks_expected=chunks.expected,
+        chunks_present=chunks.present,
+        chunks_missing=chunks.missing,
+        chunks_stale_removed=chunks.stale_removed,
     )
+
+
+@dataclass
+class _ChunkReconciliation:
+    expected: int = 0
+    present: int = 0
+    missing: list[UUID] = field(default_factory=list)
+    stale_removed: int = 0
+
+
+async def _reconcile_target_chunks(
+    db: AsyncSession, plan: MigrationPlan, live_plain_ids: set[UUID], *, batch_size: int = 500
+) -> _ChunkReconciliation:
+    """Compare the target's chunk points with the live memories (#2015).
+
+    The expected count of each memory comes from ``char_length(content)``
+    (:func:`expected_chunk_count`), so no content is loaded. Chunk points
+    whose memory is not a live plain row of the context are deleted — after
+    asking Postgres again, so a memory written since the first read (verify
+    re-run after the switch, when the sweep writes to the target) keeps its
+    chunks. With the flag off nothing is expected and every chunk point of
+    the context in the target is deleted ("flag off ⇒ no chunk points").
+    A no-op on a store without chunk points.
+    """
+    out = _ChunkReconciliation()
+    if not chunk_points_supported():
+        return out
+    chunks_on = await content_chunks_enabled(db, plan.context_id)
+    stored = await count_context_chunk_points(
+        str(plan.workspace_id), str(plan.context_id), plan.target_collection
+    )
+
+    expected_counts: dict[UUID, int] = {}
+    if chunks_on:
+        length = func.char_length(Memory.content)
+        rows = await db.execute(
+            select(Memory.id, length).where(
+                Memory.context_id == plan.context_id,
+                Memory.deleted_at.is_(None),
+                length >= CONTENT_CHUNK_MIN_CONTENT_CHARS,
+            )
+        )
+        expected_counts = {
+            memory_id: expected_chunk_count(int(n))
+            for memory_id, n in rows.all()
+            if memory_id in live_plain_ids
+        }
+        out.expected = sum(expected_counts.values())
+        out.present = sum(n for key, n in stored.items() if _as_uuid(key) in live_plain_ids)
+        out.missing = sorted(
+            memory_id
+            for memory_id in live_plain_ids
+            if stored.get(str(memory_id), 0) != expected_counts.get(memory_id, 0)
+        )
+
+    stale_keys = [key for key in stored if not chunks_on or _as_uuid(key) not in live_plain_ids]
+    if stale_keys and chunks_on:
+        # A memory written after the first read is live, but not in the set.
+        candidates = [u for key in stale_keys if (u := _as_uuid(key)) is not None]
+        live_now: set[str] = set()
+        for i in range(0, len(candidates), batch_size):
+            result = await db.execute(
+                select(Memory.id).where(
+                    Memory.id.in_(candidates[i : i + batch_size]), Memory.deleted_at.is_(None)
+                )
+            )
+            live_now.update(str(memory_id) for memory_id in result.scalars().all())
+        stale_keys = [key for key in stale_keys if key not in live_now]
+    if stale_keys:
+        for i in range(0, len(stale_keys), batch_size):
+            await delete_chunk_points(stale_keys[i : i + batch_size], plan.target_collection)
+        out.stale_removed = len(stale_keys)
+        logger.info(
+            "context_embedding_stale_chunks_removed",
+            context_id=str(plan.context_id),
+            target_collection=plan.target_collection,
+            memories=len(stale_keys),
+            chunks_on=chunks_on,
+        )
+    if out.missing:
+        logger.info(
+            "context_embedding_chunks_missing",
+            context_id=str(plan.context_id),
+            target_collection=plan.target_collection,
+            memories=len(out.missing),
+        )
+    return out
 
 
 async def switch_context_embedding(
@@ -615,7 +910,8 @@ async def switch_context_embedding(
     after the flip, closing the window between the last verify and the
     routing change — each under the point id the migration wrote it with
     (:func:`_migrated_point_id`, #1896), and never a point a live row of any
-    context still names. With ``None`` this is a pure routing flip.
+    context still names — together with their content chunk points (#2015).
+    With ``None`` this is a pure routing flip.
 
     A worker that claimed a row before the flip resolved the old routing;
     ``process_pending_embedding`` only marks ``success`` while it still owns
@@ -682,7 +978,13 @@ async def switch_context_embedding(
             .options(load_only(*_POINT_ID_COLUMNS))
             .where(Memory.context_id == context_id, Memory.deleted_at >= requeue_since)
         )
-        forgotten_points = {_migrated_point_id(memory) for memory in forgotten.scalars().all()}
+        forgotten_rows = list(forgotten.scalars().all())
+        forgotten_points = {_migrated_point_id(memory) for memory in forgotten_rows}
+        # #2015: their content chunk points too (chunk_of = the memory id;
+        # resource rows have none). A no-op when there are none.
+        forgotten_chunk_owners = sorted(
+            str(memory.id) for memory in forgotten_rows if not owns_resource_point(memory)
+        )
         if forgotten_points:
             # A live row — of this context or of another one sharing the
             # collection — that names the same point keeps it.
@@ -693,6 +995,12 @@ async def switch_context_embedding(
                 get_collection_name(model, dimensions),
             )
             stale_removed = len(forgotten_points)
+        # After the summary points, so a failed chunk delete never keeps a
+        # forgotten memory's summary point in the collection now served.
+        if forgotten_chunk_owners:
+            await delete_chunk_points(
+                forgotten_chunk_owners, get_collection_name(model, dimensions)
+            )
 
     logger.info(
         "context_embedding_switched",
