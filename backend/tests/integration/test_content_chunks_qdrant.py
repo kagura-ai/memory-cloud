@@ -334,3 +334,286 @@ async def test_chunks_never_cross_user_or_context_isolation(qdrant, collection):
     assert len(hits) == 3  # its summary point + 2 chunks
     assert all(h["payload"]["user_id"] == _USER for h in hits)
     assert all(h["payload"]["context_id"] == _CTX for h in hits)
+
+
+# --------------------------------------------------------------------------
+# #2015 PR 2a: chunks across collections and contexts
+# --------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def second_collection(qdrant: AsyncQdrantClient) -> AsyncIterator[str]:
+    """A migration's target collection, next to ``collection`` (its source)."""
+    name = f"kagura_memories_it_{uuid4().hex[:12]}"
+    await ensure_kagura_memories_collection(_DIM, name)
+    yield name
+    await qdrant.delete_collection(name)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_cross_context_recall_returns_chunks_of_opted_in_contexts_only(qdrant, collection):
+    """Primary on + secondary off with a leftover chunk → the leftover is not
+    returned; primary off + secondary on → the secondary's chunk is."""
+    on_ctx, off_ctx = str(uuid4()), str(uuid4())
+    on_memory, off_memory = uuid4(), uuid4()
+    await _write(collection, on_memory, ctx=on_ctx)
+    await _write(collection, off_memory, ctx=off_ctx)  # its chunks are a leftover
+
+    async def _cross(contexts, chunk_contexts):
+        return await search_memories_qdrant(
+            user_id=_USER,
+            query_vector=_QUERY_VEC,
+            workspace_id=_WS,
+            context_id=contexts,
+            limit=20,
+            collection_name=collection,
+            include_chunks=chunk_contexts,
+        )
+
+    for contexts in ([on_ctx, off_ctx], [off_ctx, on_ctx]):
+        hits = await _cross(contexts, [on_ctx])
+        chunk_owners = {
+            h["payload"][CHUNK_OF_FIELD] for h in hits if CHUNK_OF_FIELD in h["payload"]
+        }
+        assert chunk_owners == {str(on_memory)}
+        summary_ids = {str(h["id"]) for h in hits if CHUNK_OF_FIELD not in h["payload"]}
+        assert summary_ids == {str(on_memory), str(off_memory)}
+        assert [str(h["id"]) for h in collapse_chunk_hits(hits)][0] == str(on_memory)
+
+    # No context opted in: summary points only.
+    hits = await _cross([on_ctx, off_ctx], [])
+    assert all(CHUNK_OF_FIELD not in h["payload"] for h in hits)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_migration_rebuild_writes_chunks_into_the_target_and_flag_off_purges_both(
+    qdrant, collection, second_collection, monkeypatch
+):
+    """The re-embed rebuilds chunk points in the target (a chunk-only fact is
+    found there); turning the flag off purges them from source and target."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from db.qdrant import count_context_chunk_points, purge_context_chunk_points_everywhere
+    from services import content_chunk_writer
+    from services.content_chunk_writer import rebuild_content_chunks
+
+    ctx = str(uuid4())
+    memory_id = uuid4()
+    await _write(collection, memory_id, ctx=ctx, chunks=3)  # the source's copy
+    # The target's summary point, as the re-embed writes it before the chunks.
+    await add_memory_to_qdrant(
+        user_id=_USER,
+        memory_id=memory_id,
+        vector=_SUMMARY_VEC,
+        payload={"summary": "summary", "type": "note"},
+        workspace_id=_WS,
+        context_id=ctx,
+        collection_name=second_collection,
+    )
+    monkeypatch.setattr(
+        content_chunk_writer, "content_chunks_enabled", AsyncMock(return_value=True)
+    )
+    db = MagicMock()
+    db.commit = AsyncMock()
+    row = SimpleNamespace(
+        id=memory_id,
+        user_id=_USER,
+        workspace_id=_WS,
+        context_id=ctx,
+        content="x" * 2500,
+        resource_id=None,
+    )
+
+    written = await rebuild_content_chunks(
+        db,
+        [row],  # type: ignore[list-item]
+        base_payloads={memory_id: {"summary": "summary", "type": "note"}},
+        embed_svc=_Embedder(),
+        collection_name=second_collection,
+        context_id=ctx,
+    )
+
+    assert written == 3
+    assert await count_context_chunk_points(_WS, ctx, second_collection) == {str(memory_id): 3}
+    hits = await search_memories_qdrant(
+        user_id=_USER,
+        query_vector=_QUERY_VEC,
+        workspace_id=_WS,
+        context_id=ctx,
+        limit=10,
+        collection_name=second_collection,
+        include_chunks=True,
+    )
+    collapsed = collapse_chunk_hits(hits)
+    assert [str(h["id"]) for h in collapsed] == [str(memory_id)]
+    assert collapsed[0]["matched_chunk_text"]
+
+    await purge_context_chunk_points_everywhere(
+        _WS, ctx, collections=[collection, second_collection]
+    )
+    for name in (collection, second_collection):
+        assert await count_context_chunk_points(_WS, ctx, name) == {}
+        # summary points stay
+        assert len(await qdrant.retrieve(name, ids=[str(memory_id)])) == 1
+
+
+class _MigrationEmbedder:
+    """Target-model embedder: summaries and chunks get different vectors, so a
+    hit on ``_QUERY_VEC`` can only come from a chunk point."""
+
+    async def embed_batch(self, texts, *args, **kwargs):
+        return [_SUMMARY_VEC if t.startswith("summary") else _CHUNK_VEC for t in texts]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_an_opted_in_context_migrates_end_to_end_with_its_chunks(
+    qdrant, collection, second_collection, db_session
+):
+    """#2015 PR 2a, A1 + A2: plan (no refusal) → reembed (chunks rebuilt in
+    the target) → verify (a forgotten memory's chunks go, nothing missing) →
+    switch (chunks of a memory forgotten since go) → a chunk-only fact is
+    found in the target → flag off purges source and target."""
+    from dataclasses import replace
+    from unittest.mock import patch
+
+    from sqlalchemy import delete, update
+
+    from config.settings import get_settings
+    from db.qdrant import count_context_chunk_points
+    from models.auth import Context, Workspace
+    from models.config import ContextSearchConfig
+    from models.schemas import ContextSearchConfigUpdate
+    from repositories.config_repository import (
+        ContextSearchConfigRepository,
+        search_config_defaults,
+    )
+    from services import embedding_migration_service as svc
+    from utils.datetime import utcnow
+
+    workspace = Workspace(id=uuid4(), name="chunks-migration", owner_user_id=_USER)
+    db_session.add(workspace)
+    await db_session.flush()
+    context = Context(
+        id=uuid4(),
+        workspace_id=workspace.id,
+        name=f"chunks_migration_{uuid4().hex[:8]}",
+        display_name="Chunks migration",
+        created_by=_USER,
+        is_private=False,
+    )
+    db_session.add(context)
+    await db_session.flush()
+    db_session.add(
+        ContextSearchConfig(
+            context_id=context.id,
+            embedding_model="text-embedding-3-small",
+            embedding_dimensions=512,
+            content_chunks_enabled=True,
+            **search_config_defaults(get_settings()),
+        )
+    )
+    kept, forgotten_before_verify, forgotten_before_switch, short = (uuid4() for _ in range(4))
+    for memory_id, content in (
+        (kept, "the deploy key rotates on the first Monday " * 50),
+        (forgotten_before_verify, "y" * 2000),
+        (forgotten_before_switch, "z" * 2000),
+        (short, "short"),
+    ):
+        db_session.add(
+            Memory(
+                id=memory_id,
+                user_id=_USER,
+                workspace_id=workspace.id,
+                context_id=context.id,
+                summary="summary of a long note",
+                content=content,
+                type="note",
+                client="pytest",
+                embedding_status="success",
+                summary_embedding_id=memory_id,
+            )
+        )
+    await db_session.commit()
+    ws, ctx = str(workspace.id), str(context.id)
+
+    try:
+        plan = await svc.plan_context_migration(db_session, context.id, "qwen3-embedding:4b")
+        assert plan.content_chunks_on
+        assert plan.chunk_estimate == 2 + 2 + 2  # 2,150 / 2,000 / 2,000 chars
+        plan = replace(
+            plan,
+            source_collection=collection,
+            target_collection=second_collection,
+            target_dimensions=_DIM,
+        )
+
+        result = await svc.reembed_context(db_session, plan, embedding_service=_MigrationEmbedder())
+        assert result.embedded == 4 and result.chunks_written == 6
+        assert await count_context_chunk_points(ws, ctx, second_collection) == {
+            str(kept): 2,
+            str(forgotten_before_verify): 2,
+            str(forgotten_before_switch): 2,
+        }
+
+        await db_session.execute(
+            update(Memory).where(Memory.id == forgotten_before_verify).values(deleted_at=utcnow())
+        )
+        await db_session.commit()
+        verified = await svc.verify_context_migration(db_session, plan)
+        assert verified.ok and verified.stale_removed == 1
+        assert verified.chunks_stale_removed == 1
+        assert verified.chunks_missing == []
+        assert (verified.chunks_expected, verified.chunks_present) == (4, 4)
+
+        await db_session.execute(
+            update(Memory).where(Memory.id == forgotten_before_switch).values(deleted_at=utcnow())
+        )
+        await db_session.commit()
+        with patch.object(svc, "get_collection_name", return_value=second_collection):
+            await svc.switch_context_embedding(
+                db_session, context.id, "qwen3-embedding:4b", 2560, requeue_since=result.started_at
+            )
+        assert await count_context_chunk_points(ws, ctx, second_collection) == {str(kept): 2}
+
+        hits = await search_memories_qdrant(
+            user_id=_USER,
+            query_vector=_QUERY_VEC,
+            workspace_id=ws,
+            context_id=ctx,
+            limit=10,
+            collection_name=second_collection,
+            is_shared_context=True,
+            include_chunks=True,
+        )
+        collapsed = collapse_chunk_hits(hits)
+        assert str(collapsed[0]["id"]) == str(kept)
+        assert "deploy key" in collapsed[0]["matched_chunk_text"]
+
+        # The source still holds the summary points only (it never had
+        # chunks here); flag off must leave no chunk point in either.
+        repo = ContextSearchConfigRepository(db_session)
+        await repo.update(
+            context.id, ContextSearchConfigUpdate(**_CONFIG_BASE, content_chunks_enabled=False)
+        )
+        assert await count_context_chunk_points(ws, ctx, second_collection) == {}
+        assert await count_context_chunk_points(ws, ctx, collection) == {}
+    finally:
+        await db_session.rollback()
+        await db_session.execute(delete(Memory).where(Memory.context_id == context.id))
+        await db_session.execute(
+            delete(ContextSearchConfig).where(ContextSearchConfig.context_id == context.id)
+        )
+        await db_session.execute(delete(Context).where(Context.id == context.id))
+        await db_session.execute(delete(Workspace).where(Workspace.id == workspace.id))
+        await db_session.commit()
+
+
+_CONFIG_BASE = {
+    "semantic_weight": 0.6,
+    "bm25_weight": 0.4,
+    "fetch_factor": 3,
+    "use_rerank": False,
+    "reranker_provider": "voyage",
+    "reranker_model": "rerank-2",
+}
