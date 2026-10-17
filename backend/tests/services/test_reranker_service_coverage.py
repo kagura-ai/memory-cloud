@@ -1,7 +1,7 @@
 """Coverage tests for services.reranker_service.
 
 Targets:
-- _parse_relevance_score: pure score-string parser (percent / fraction / plain / garbage)
+- _try_parse_relevance_score: pure score-string parser (percent / fraction / plain; None for no number)
 - VoyageReranker / CohereReranker: input validation + success/error mapping
   (external clients are imported lazily inside rerank(), so we inject fakes
   into sys.modules — never a real network call)
@@ -33,7 +33,7 @@ from services.reranker_service import (
     RerankerService,
     SelfHostedReranker,
     VoyageReranker,
-    _parse_relevance_score,
+    _try_parse_relevance_score,
 )
 from utils.exceptions import CohereError, VoyageError
 
@@ -71,7 +71,7 @@ class _FakeHttpResponse:
 
 
 # ---------------------------------------------------------------------------
-# _parse_relevance_score (pure)
+# _try_parse_relevance_score (pure)
 # ---------------------------------------------------------------------------
 
 
@@ -80,61 +80,61 @@ class TestParseRelevanceScore:
 
     def test_plain_decimal(self):
         """'0.83' parses to 0.83."""
-        assert _parse_relevance_score("0.83") == pytest.approx(0.83)
+        assert _try_parse_relevance_score("0.83") == pytest.approx(0.83)
 
     def test_plain_integer_zero_and_one(self):
         """Bare '0' and '1' parse to their float values."""
-        assert _parse_relevance_score("0") == 0.0
-        assert _parse_relevance_score("1") == 1.0
+        assert _try_parse_relevance_score("0") == 0.0
+        assert _try_parse_relevance_score("1") == 1.0
 
     def test_percentage(self):
         """'80%' converts to 0.8."""
-        assert _parse_relevance_score("80%") == pytest.approx(0.8)
+        assert _try_parse_relevance_score("80%") == pytest.approx(0.8)
 
     def test_percentage_over_100_clamped(self):
         """'150%' clamps to 1.0."""
-        assert _parse_relevance_score("150%") == 1.0
+        assert _try_parse_relevance_score("150%") == 1.0
 
     def test_fraction(self):
         """'0.8/1' parses the numerator/denominator to 0.8."""
-        assert _parse_relevance_score("0.8/1") == pytest.approx(0.8)
+        assert _try_parse_relevance_score("0.8/1") == pytest.approx(0.8)
 
     def test_fraction_score_label(self):
         """'Score: 5/10' parses the embedded fraction to 0.5."""
-        assert _parse_relevance_score("Score: 5/10") == pytest.approx(0.5)
+        assert _try_parse_relevance_score("Score: 5/10") == pytest.approx(0.5)
 
     def test_fraction_zero_denominator_returns_zero(self):
         """Division by zero in a fraction yields 0.0, not a crash."""
-        assert _parse_relevance_score("5/0") == 0.0
+        assert _try_parse_relevance_score("5/0") == 0.0
 
     def test_fraction_over_one_clamped(self):
         """A fraction > 1 (e.g. 9/4) clamps to 1.0."""
-        assert _parse_relevance_score("9/4") == 1.0
+        assert _try_parse_relevance_score("9/4") == 1.0
 
     def test_plain_number_out_of_range_clamped(self):
         """A plain number above 1 clamps to 1.0."""
-        assert _parse_relevance_score("7") == 1.0
+        assert _try_parse_relevance_score("7") == 1.0
 
     def test_embedded_plain_number(self):
         """A decimal embedded in prose is extracted."""
-        assert _parse_relevance_score("relevance is 0.42 overall") == pytest.approx(0.42)
+        assert _try_parse_relevance_score("relevance is 0.42 overall") == pytest.approx(0.42)
 
-    def test_empty_string_returns_zero(self):
-        """Empty input returns 0.0."""
-        assert _parse_relevance_score("") == 0.0
+    def test_empty_string_returns_none(self):
+        """Empty input holds no score (None)."""
+        assert _try_parse_relevance_score("") is None
 
-    def test_whitespace_only_returns_zero(self):
-        """Whitespace-only input returns 0.0 (stripped to empty)."""
-        assert _parse_relevance_score("   ") == 0.0
+    def test_whitespace_only_returns_none(self):
+        """Whitespace-only input holds no score (None)."""
+        assert _try_parse_relevance_score("   ") is None
 
-    def test_garbage_returns_zero(self):
-        """Non-numeric garbage returns 0.0."""
-        assert _parse_relevance_score("not a number at all") == 0.0
+    def test_garbage_returns_none(self):
+        """Non-numeric garbage holds no score (None)."""
+        assert _try_parse_relevance_score("not a number at all") is None
 
     def test_percentage_takes_priority_over_plain(self):
         """When a '%' is present, percentage parsing wins over plain-number."""
         # "80%" would parse as 80.0 -> clamp 1.0 if treated as plain; percentage gives 0.8.
-        assert _parse_relevance_score("80%") == pytest.approx(0.8)
+        assert _try_parse_relevance_score("80%") == pytest.approx(0.8)
 
 
 # ---------------------------------------------------------------------------

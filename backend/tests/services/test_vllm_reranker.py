@@ -458,8 +458,8 @@ def _capture_post(monkeypatch, results=None):
         data = (
             results
             if results is not None
-            # Distinct scores: an all-identical full list is non-discriminating
-            # and raises (#2033).
+            # Distinct scores: RerankerService treats an all-identical full
+            # list as carrying no signal (#2033).
             else [{"index": i, "relevance_score": 0.5 - 0.1 * i} for i in range(n)]
         )
         return _FakeHttpResponse(json_data={"results": data})

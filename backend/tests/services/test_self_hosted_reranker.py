@@ -34,6 +34,7 @@ from services.reranker_service import (
     QWEN3_RERANK_PREFIX,
     QWEN3_RERANK_SUFFIX,
     RerankerService,
+    RerankGenerateUnsupportedError,
     RerankNotDiscriminatingError,
     SelfHostedReranker,
     VLLMReranker,
@@ -250,18 +251,12 @@ class TestRawScorePrompt:
         assert url == "http://x/v1/completions"
         assert "<|im_end|>" not in body["prompt"] and "<|im_start|>" not in body["prompt"]
 
-    async def test_every_zero_fails_the_call(self, monkeypatch):
-        """Measured on dengcao/Qwen3-Reranker-8B:Q5_K_M: "0" for all memories."""
+    async def test_parsed_scores_are_returned_as_is(self, monkeypatch):
+        """An all-"0" list is the provider's answer; RerankerService's shared
+        guard judges it (TestNoSignalGuard)."""
         _patch_post(monkeypatch, lambda u, j, h: _Resp(_completion("0")))
-        with pytest.raises(RerankNotDiscriminatingError, match="identical"):
-            await SelfHostedReranker("http://x", prompt_format="raw").rerank("q", ["a", "b"], 2)
-
-    async def test_identical_nonzero_scores_fail_the_call(self, monkeypatch):
-        _patch_post(monkeypatch, lambda u, j, h: _Resp(_completion("0.5")))
-        with pytest.raises(RerankNotDiscriminatingError):
-            await SelfHostedReranker("http://x", prompt_format="raw").rerank(
-                "q", ["a", "b", "c"], 1
-            )
+        out = await SelfHostedReranker("http://x", prompt_format="raw").rerank("q", ["a", "b"], 2)
+        assert [r["relevance_score"] for r in out] == [0.0, 0.0]
 
     async def test_every_output_unparseable_fails_the_call(self, monkeypatch):
         """Measured on dengcao/Qwen3-Reranker-0.6B:Q8_0: "!!!!!"."""
@@ -313,22 +308,172 @@ def _patch_rerank(monkeypatch, scores):
     return _patch_post(monkeypatch, handler)
 
 
-class TestVLLMIdenticalScores:
-    async def test_every_document_scored_the_same_fails_the_call(self, monkeypatch):
-        _patch_rerank(monkeypatch, [0.5, 0.5, 0.5])
-        with pytest.raises(RerankNotDiscriminatingError):
-            await VLLMReranker("http://gpu:8002").rerank("q", ["a", "b", "c"], top_n=3)
-
-    async def test_a_tie_among_the_top_n_only_is_kept(self, monkeypatch):
-        """The server returned top_n < n: saturated relevant docs may tie."""
-        _patch_rerank(monkeypatch, [0.9995, 0.9995])
+class TestVLLMFullList:
+    async def test_asks_the_server_for_every_document_and_cuts_locally(self, monkeypatch):
+        """The shared guard needs every score, so top_n on the wire is len(documents)."""
+        calls = _patch_rerank(monkeypatch, [0.1, 0.9, 0.5])
         out = await VLLMReranker("http://gpu:8002").rerank("q", ["a", "b", "c"], top_n=2)
-        assert len(out) == 2
+        assert calls[0][1]["top_n"] == 3
+        assert [r["index"] for r in out] == [1, 2]
 
-    async def test_a_single_candidate_is_kept(self, monkeypatch):
-        _patch_rerank(monkeypatch, [0.0])
-        out = await VLLMReranker("http://gpu:8002").rerank("q", ["a"], top_n=1)
-        assert out == [{"index": 0, "relevance_score": 0.0}]
+    async def test_identical_scores_are_returned_not_raised(self, monkeypatch):
+        _patch_rerank(monkeypatch, [0.5, 0.5, 0.5])
+        out = await VLLMReranker("http://gpu:8002").rerank("q", ["a", "b", "c"], top_n=3)
+        assert len(out) == 3
+
+
+# ---------------------------------------------------------------------------
+# RerankerService: the one shared no-signal guard (every provider)
+# ---------------------------------------------------------------------------
+
+
+def _cands(n: int) -> list[dict]:
+    return [
+        {"id": f"m{i}", "hybrid_score": 0.9 - 0.1 * i, "payload": {"summary": f"s{i}"}}
+        for i in range(n)
+    ]
+
+
+def _service_with(monkeypatch, scores, provider_name="voyage"):
+    provider = MagicMock()
+    provider.provider_name = provider_name
+
+    async def fake_rerank(query, documents, top_n):
+        out = [{"index": i, "relevance_score": sc} for i, sc in enumerate(scores)]
+        out.sort(key=lambda r: r["relevance_score"], reverse=True)
+        return out[:top_n]
+
+    provider.rerank = AsyncMock(side_effect=fake_rerank)
+    service = RerankerService(MagicMock())
+    monkeypatch.setattr(service, "get_active_provider", AsyncMock(return_value=provider))
+    return service, provider
+
+
+class TestNoSignalGuard:
+    @pytest.mark.parametrize("provider_name", ["voyage", "cohere", "vllm", "self_hosted"])
+    async def test_all_zero_is_a_failure_for_every_provider(self, monkeypatch, provider_name):
+        """The measured case: raise so SearchService fails open with hybrid scores."""
+        service, _ = _service_with(monkeypatch, [0.0, 0.0, 0.0], provider_name)
+        candidates = _cands(3)
+        with pytest.raises(RerankNotDiscriminatingError):
+            await service.rerank("q", candidates, "u", k=3)
+        assert all("rerank_score" not in c for c in candidates)
+        assert [c["hybrid_score"] for c in candidates] == pytest.approx([0.9, 0.8, 0.7])
+
+    async def test_identical_nonzero_keeps_hybrid_order_and_scores(self, monkeypatch):
+        """Two relevant docs at '1' or duplicate memories may tie: not a failure."""
+        service, _ = _service_with(monkeypatch, [1.0, 1.0, 1.0])
+        candidates = _cands(3)
+        with structlog.testing.capture_logs() as logs:
+            out = await service.rerank("q", candidates, "u", k=2)
+        assert [c["id"] for c in out] == ["m0", "m1"]
+        assert [c["hybrid_score"] for c in out] == pytest.approx([0.9, 0.8])
+        assert all("rerank_score" not in c for c in out)
+        events = [e for e in logs if e["event"] == "rerank_no_signal"]
+        assert len(events) == 1
+        assert events[0]["log_level"] == "info"
+        assert events[0]["doc_count"] == 3
+
+    async def test_the_guard_sees_every_candidate_when_k_is_smaller(self, monkeypatch):
+        """n > top_n: the provider is asked for all n, the cut to k happens after."""
+        service, provider = _service_with(monkeypatch, [0.0] * 5)
+        with pytest.raises(RerankNotDiscriminatingError):
+            await service.rerank("q", _cands(5), "u", k=2)
+        assert provider.rerank.await_args.args[2] == 5
+
+    async def test_distinct_scores_rerank_and_cut_to_k(self, monkeypatch):
+        service, _ = _service_with(monkeypatch, [0.1, 0.0, 0.8, 0.3, 0.0])
+        out = await service.rerank("q", _cands(5), "u", k=2)
+        assert [c["id"] for c in out] == ["m2", "m3"]
+        assert out[0]["hybrid_score"] == pytest.approx(0.8)
+
+    async def test_partial_coverage_is_not_judged(self, monkeypatch):
+        """A provider that returns fewer results than candidates: no verdict."""
+        provider = MagicMock(provider_name="voyage")
+        provider.rerank = AsyncMock(
+            return_value=[
+                {"index": 0, "relevance_score": 0.0},
+                {"index": 1, "relevance_score": 0.0},
+            ]
+        )
+        service = RerankerService(MagicMock())
+        monkeypatch.setattr(service, "get_active_provider", AsyncMock(return_value=provider))
+        out = await service.rerank("q", _cands(4), "u", k=2)
+        assert [c["rerank_score"] for c in out] == [0.0, 0.0]
+
+    async def test_a_single_candidate_is_unchanged(self, monkeypatch):
+        service, _ = _service_with(monkeypatch, [0.0])
+        out = await service.rerank("q", _cands(1), "u", k=5)
+        assert out[0]["rerank_score"] == 0.0 and out[0]["hybrid_score"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# vLLM on SELF_HOSTED_BASE_URL: /api/generate 404
+# ---------------------------------------------------------------------------
+
+
+def _status_error(code: int, body: dict) -> _Resp:
+    request = httpx.Request("POST", "http://user:secret@vllm:8000/api/generate")
+    response = httpx.Response(code, json=body, request=request)
+    return _Resp(
+        json_data=body,
+        raise_exc=httpx.HTTPStatusError(f"{code}", request=request, response=response),
+    )
+
+
+class TestGenerateUnsupported:
+    @pytest.fixture(autouse=True)
+    def _reset_once_flag(self, monkeypatch):
+        from services import reranker_service
+
+        monkeypatch.setattr(reranker_service, "_GENERATE_UNSUPPORTED_WARNED", False)
+
+    async def test_a_404_on_api_generate_is_a_clear_failure_logged_once(self, monkeypatch):
+        """vLLM serves no /api/generate: FastAPI's {"detail": "Not Found"}."""
+        _patch_post(monkeypatch, lambda u, j, h: _status_error(404, {"detail": "Not Found"}))
+        r = SelfHostedReranker("http://user:secret@vllm:8000")
+        with structlog.testing.capture_logs() as logs:
+            for _ in range(2):
+                with pytest.raises(RerankGenerateUnsupportedError, match="RERANK_BASE_URL"):
+                    await r.rerank("q", ["a", "b", "c"], 3)
+        warned = [e for e in logs if e["event"] == "self_hosted_rerank_generate_unsupported"]
+        assert len(warned) == 1, "once per process"
+        assert warned[0]["log_level"] == "warning"
+        assert "secret" not in repr(warned[0])
+        assert not [e for e in logs if e["event"] == "self_hosted_rerank_score_failed"]
+
+    async def test_ollama_model_not_found_is_an_ordinary_failure(self, monkeypatch):
+        body = {"error": "model 'dengcao/Qwen3-Reranker-8B:Q5_K_M' not found"}
+        _patch_post(monkeypatch, lambda u, j, h: _status_error(404, body))
+        with structlog.testing.capture_logs() as logs:
+            with pytest.raises(RuntimeError, match="unavailable"):
+                await SelfHostedReranker("http://ollama:11434").rerank("q", ["a", "b"], 2)
+        assert not [e for e in logs if e["event"] == "self_hosted_rerank_generate_unsupported"]
+
+
+# ---------------------------------------------------------------------------
+# Redaction: self-hosted log lines never carry the URL's credentials
+# ---------------------------------------------------------------------------
+
+
+async def test_per_document_failure_log_is_redacted(monkeypatch):
+    def handler(url, json, headers):
+        if "good" in _doc_of(json):
+            return _Resp(_completion("0.8"))
+        return _status_error(500, {"error": "boom"})
+
+    _patch_post(monkeypatch, handler)
+    r = SelfHostedReranker("http://user:secret@ollama:11434", prompt_format="raw")
+    with structlog.testing.capture_logs() as logs:
+        await r.rerank("q", ["good", "bad"], 2)
+    failed = [e for e in logs if e["event"] == "self_hosted_rerank_score_failed"]
+    assert len(failed) == 1
+    entry = failed[0]
+    assert "error" not in entry
+    assert entry["error_class"] == "HTTPStatusError"
+    assert entry["status_code"] == 500
+    assert "secret" not in repr(entry) and "ollama:11434" in entry["endpoint"]
+    assert all("secret" not in repr(e) for e in logs)
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +518,7 @@ def _check_settings(**over) -> MagicMock:
     s.self_hosted_rerank_model = DEFAULT_SELF_HOSTED_RERANK_MODEL
     s.rerank_prompt_format = "auto"
     s.rerank_instruction = ""
+    s.default_use_rerank = True
     for k, v in over.items():
         setattr(s, k, v)
     return s
@@ -386,6 +532,10 @@ class TestSelfHostedCalibration:
             ({"enable_reranking": False}, False),
             ({"default_reranker_provider": "voyage"}, False),
             ({"default_reranker_provider": "cohere"}, False),
+            # Reranking off by default: do not load an 8B model at boot for nothing.
+            ({"default_use_rerank": False}, False),
+            # The RERANK_BASE_URL path keeps #2020's gating.
+            ({"default_use_rerank": False, "rerank_base_url": "http://gpu:8002"}, True),
         ],
     )
     def test_gating(self, over, expected):
@@ -446,16 +596,47 @@ class TestSelfHostedCalibration:
         assert result is not None and result["calibrated"] is True
         assert sleeps == [3.0]
 
-    async def test_permanent_failure_logs_check_failed(self, monkeypatch):
-        resp = MagicMock(status_code=404)
-        err = httpx.HTTPStatusError("404", request=MagicMock(), response=resp)
-        _patch_post(monkeypatch, lambda u, j, h: _Resp(raise_exc=err))
+    async def test_a_partial_transient_failure_is_retried(self, monkeypatch):
+        """One document timing out while the other scores: retry, not IncompleteResults."""
+        attempts = {"irrelevant": 0}
+
+        def handler(url, json, headers):
+            if "Paris" in _doc_of(json):
+                return _Resp(_generate({"yes": 0.95, "no": 0.02}))
+            attempts["irrelevant"] += 1
+            if attempts["irrelevant"] == 1:
+                raise httpx.ReadTimeout("slow")
+            return _Resp(_generate({" no": 0.4, "yes": 0.001}))
+
+        _patch_post(monkeypatch, handler)
+        sleeps: list[float] = []
+
+        async def fake_sleep(d):
+            sleeps.append(d)
+
+        monkeypatch.setattr("services.reranker_service.asyncio.sleep", fake_sleep)
+        with structlog.testing.capture_logs() as logs:
+            result = await run_rerank_calibration_check(_check_settings(), retry_delays=(2.0,))
+        assert result is not None and result["calibrated"] is True
+        assert sleeps == [2.0]
+        assert not [e for e in logs if e["event"] == "rerank_calibration_check_failed"]
+
+    @pytest.mark.parametrize(
+        ("body", "error_class"),
+        [
+            ({"error": "model 'x' not found, try pulling it first"}, "HTTPStatusError"),
+            ({"detail": "Not Found"}, "RerankGenerateUnsupportedError"),  # vLLM
+        ],
+    )
+    async def test_permanent_failure_logs_check_failed(self, monkeypatch, body, error_class):
+        _patch_post(monkeypatch, lambda u, j, h: _status_error(404, body))
         with structlog.testing.capture_logs() as logs:
             result = await run_rerank_calibration_check(_check_settings(), retry_delays=(1.0,))
         assert result is None
         failed = [e for e in logs if e["event"] == "rerank_calibration_check_failed"]
         assert len(failed) == 1
         assert failed[0]["status_code"] == 404
+        assert failed[0]["error_class"] == error_class
         assert failed[0]["provider"] == "self_hosted"
 
     async def test_rerank_base_url_still_checks_the_vllm_path(self, monkeypatch):
@@ -599,3 +780,34 @@ async def test_vllm_identical_calibration_pair_is_uncalibrated_not_a_failure(mon
     assert [e["event"] for e in logs if e["log_level"] == "warning"] == [
         "rerank_model_uncalibrated"
     ]
+
+
+@pytest.mark.usefixtures("no_identity_links")
+async def test_identical_nonzero_ollama_rerank_keeps_hybrid_and_logs_no_signal(monkeypatch):
+    for key in _RERANK_ENV:
+        monkeypatch.delenv(key, raising=False)
+    s = Settings(
+        _env_file=None,
+        self_hosted_base_url="http://ollama:11434",
+        rerank_prompt_format="raw",
+        default_reranker_provider="self_hosted",
+    )
+    monkeypatch.setattr("services.search_service.get_settings", lambda: s)
+    monkeypatch.setattr("config.settings.get_settings", lambda: s)
+    row = MagicMock(use_rerank=True, reranker_provider="self_hosted", reranker_model=None)
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=MagicMock(scalar_one_or_none=lambda: row))
+    _patch_post(monkeypatch, lambda u, j, h: _Resp(_completion("1")))
+
+    # Baseline: the same recall with a pass-through reranker (hybrid scores only).
+    baseline_service = SearchService(db)
+    baseline_service.reranker_service = MagicMock()
+    baseline_service.reranker_service.rerank = AsyncMock(side_effect=lambda **kw: kw["candidates"])
+    baseline = await _recall(baseline_service)
+
+    with structlog.testing.capture_logs() as logs:
+        results = await _recall(SearchService(db))
+    assert [r["id"] for r in results] == [r["id"] for r in baseline] == ["m1", "m2"]
+    assert all("rerank_score" not in r for r in results)
+    assert [r["hybrid_score"] for r in results] == [r["hybrid_score"] for r in baseline]
+    assert [e["event"] for e in logs if e["event"].startswith("rerank_")] == ["rerank_no_signal"]

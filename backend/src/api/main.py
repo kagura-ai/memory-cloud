@@ -163,7 +163,7 @@ async def lifespan(app: FastAPI):
     # recall. Background
     # and fail-soft: never on the recall path, never a reason not to boot.
     # Only when ENABLE_RERANKING is on and RERANK_BASE_URL is set or
-    # DEFAULT_RERANKER_PROVIDER=self_hosted.
+    # DEFAULT_RERANKER_PROVIDER=self_hosted with DEFAULT_USE_RERANK=true.
     from tasks.rerank_calibration import start_rerank_calibration
 
     app.state.rerank_calibration_task = start_rerank_calibration(get_settings())
