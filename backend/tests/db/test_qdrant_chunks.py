@@ -154,3 +154,28 @@ async def test_purge_context_chunk_points_is_a_noop_off_qdrant(monkeypatch):
     monkeypatch.setattr(qmod, "_active_store", lambda: object())
     await purge_context_chunk_points(WS, CTX, "coll")
     client.delete.assert_not_awaited()
+
+
+async def test_failed_payload_cascade_deletes_the_chunks_instead(mock_client):
+    """An isolation field (user_id, creator transfer) must never stay behind
+    on a chunk: when the cascade fails, the chunks go (re-embed rebuilds)."""
+    mid = uuid4()
+    mock_client.set_payload.side_effect = [None, RuntimeError("cascade")]
+    await update_memory_payload_in_qdrant(mid, {"user_id": "new-owner"})
+    selector = mock_client.delete.await_args.kwargs["points_selector"]
+    assert isinstance(selector, FilterSelector)
+    assert selector.filter.must[0].match == MatchValue(value=str(mid))
+
+
+async def test_failed_payload_cascade_and_failed_delete_raise(mock_client):
+    from utils.exceptions import QdrantError
+
+    mock_client.set_payload.side_effect = [None, RuntimeError("cascade")]
+    mock_client.delete.side_effect = RuntimeError("delete")
+    with pytest.raises(QdrantError):
+        await update_memory_payload_in_qdrant(uuid4(), {"user_id": "new-owner"})
+
+
+async def test_cascade_can_be_skipped_for_a_context_without_chunks(mock_client):
+    await update_memory_payload_in_qdrant(uuid4(), {"tags": ["a"]}, cascade_chunks=False)
+    assert mock_client.set_payload.await_count == 1

@@ -887,6 +887,8 @@ async def update_memory_payload_in_qdrant(
     payload_updates: dict[str, Any],
     collection_name: str = KAGURA_MEMORIES_COLLECTION,
     delete_keys: list[str] | None = None,
+    *,
+    cascade_chunks: bool = True,
 ) -> None:
     """Update payload fields of a Qdrant point without re-embedding.
 
@@ -900,6 +902,11 @@ async def update_memory_payload_in_qdrant(
         payload_updates: Dict of payload fields to update
         collection_name: Qdrant collection name
         delete_keys: Payload keys to remove from the point
+        cascade_chunks: #2015 — also apply the change to the memory's content
+            chunk points. A caller that knows the context has
+            ``content_chunks_enabled`` off may pass False: such a context has
+            no chunk points. Default True (always correct, one or two extra
+            calls).
 
     Raises:
         QdrantError: If operation fails
@@ -926,9 +933,10 @@ async def update_memory_payload_in_qdrant(
                 points=[str(memory_id)],
             )
 
-        await _cascade_payload_to_chunks(
-            client, memory_id, payload_updates, delete_keys, collection_name
-        )
+        if cascade_chunks:
+            await _cascade_payload_to_chunks(
+                client, memory_id, payload_updates, delete_keys, collection_name
+            )
 
         logger.debug(
             "memory_payload_updated_in_qdrant",
@@ -962,9 +970,13 @@ async def _cascade_payload_to_chunks(
 
     Chunk points copy the filterable fields of their summary point, so a tag /
     importance / type / location change must reach them too or a filtered
-    recall would match a chunk on stale metadata. BM25 token fields are not
-    copied (chunk points have no sparse vector). Fail-soft: the summary point
-    is already updated, and a failure here is logged, not raised.
+    recall would match a chunk on stale metadata — and an isolation field
+    (``user_id``, moved by the creator transfer) must never stay behind. BM25
+    token fields are not copied (chunk points have no sparse vector).
+
+    On failure the memory's chunk points are deleted instead (its next
+    re-embed rebuilds them), so no chunk keeps stale metadata. Only when that
+    delete fails too is :class:`QdrantError` raised.
     """
     chunk_updates = chunk_payload_updates(payload_updates)
     if not chunk_updates and not delete_keys:
@@ -988,6 +1000,15 @@ async def _cascade_payload_to_chunks(
             memory_id=str(memory_id),
             error_class=type(e).__name__,
         )
+        try:
+            await client.delete(
+                collection_name=collection_name,
+                points_selector=FilterSelector(filter=chunk_filter),
+            )
+        except Exception as delete_error:
+            raise QdrantError(
+                f"Failed to update or remove content chunks of {memory_id}: {delete_error}"
+            ) from delete_error
 
 
 def chunk_points_supported() -> bool:

@@ -179,6 +179,10 @@ class ContextSearchConfigRepository:
 
         await self.db.commit()
         await self.db.refresh(config)
+        if "content_chunks_enabled" in update_dict:
+            from services.content_chunk_writer import forget_cached_chunk_flag
+
+            forget_cached_chunk_flag(context_id)
 
         logger.info(
             "config_updated",

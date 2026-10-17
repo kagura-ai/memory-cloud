@@ -230,3 +230,22 @@ async def test_process_pending_embedding_writes_chunks_after_the_summary_point()
     assert kwargs["base_payload"] is base
     assert kwargs["embed_svc"] is embed_svc
     assert kwargs["collection_name"] == "coll"
+
+
+async def test_chunk_cascade_needed_is_cached_per_context():
+    writer._FLAG_CACHE.clear()
+    db = _db(False)
+    ctx = uuid4()
+    assert await writer.chunk_cascade_needed(db, ctx) is False
+    assert await writer.chunk_cascade_needed(db, ctx) is False
+    assert db.execute.await_count == 1
+    writer.forget_cached_chunk_flag(ctx)
+    db.execute.return_value.scalar_one_or_none.return_value = True
+    assert await writer.chunk_cascade_needed(db, ctx) is True
+
+
+async def test_chunk_cascade_needed_fails_safe():
+    writer._FLAG_CACHE.clear()
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=RuntimeError("db"))
+    assert await writer.chunk_cascade_needed(db, uuid4()) is True

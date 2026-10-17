@@ -20,6 +20,7 @@ stays a summary-only memory until its next re-embed.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from sqlalchemy import select
@@ -44,6 +45,41 @@ async def content_chunks_enabled(db: AsyncSession, context_id: Any) -> bool:
         )
     )
     return bool(result.scalar_one_or_none())
+
+
+# Process-local cache of the per-context flag for the hot metadata-update
+# path (#2015): {context_id: (enabled, expires_at_monotonic)}.
+_FLAG_CACHE: dict[str, tuple[bool, float]] = {}
+_FLAG_CACHE_TTL_SECONDS = 30.0
+
+
+async def chunk_cascade_needed(db: AsyncSession, context_id: Any) -> bool:
+    """Whether a memory metadata update must also reach chunk points (#2015).
+
+    Under the invariant "flag off ⇒ no chunk points" a context with the flag
+    off has nothing to cascade to, so the extra Qdrant calls are skipped. The
+    flag is cached per process for ``_FLAG_CACHE_TTL_SECONDS``; a lookup that
+    fails answers True (cascade), the safe side. Writers of isolation fields
+    (the creator transfer CLI) do not use this and always cascade.
+    """
+    if context_id is None:
+        return False
+    key = str(context_id)
+    now = time.monotonic()
+    cached = _FLAG_CACHE.get(key)
+    if cached is not None and cached[1] > now:
+        return cached[0]
+    try:
+        enabled = await content_chunks_enabled(db, context_id)
+    except Exception:
+        return True
+    _FLAG_CACHE[key] = (enabled, now + _FLAG_CACHE_TTL_SECONDS)
+    return enabled
+
+
+def forget_cached_chunk_flag(context_id: Any) -> None:
+    """Drop the cached flag of a context (its config just changed here)."""
+    _FLAG_CACHE.pop(str(context_id), None)
 
 
 async def write_content_chunks(

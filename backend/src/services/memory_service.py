@@ -72,7 +72,7 @@ from models.schemas import (
 )
 from repositories.memory import AccessStats, MemoryRepository
 from services.capacity_lock import CapacityPolicy
-from services.content_chunk_writer import write_content_chunks
+from services.content_chunk_writer import chunk_cascade_needed, write_content_chunks
 from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
@@ -1894,6 +1894,8 @@ class MemoryService:
             payload_updates=payload_updates,
             collection_name=collection,
             delete_keys=delete_keys or None,
+            # #2015: a context that never opted in has no chunk points.
+            cascade_chunks=await chunk_cascade_needed(self.db, memory.context_id),
         )
 
     async def _patch_load_authorized(self, memory_id: UUID, user_id: str) -> Any:
@@ -2144,6 +2146,8 @@ class MemoryService:
                 payload_updates=payload_updates,
                 collection_name=collection,
                 delete_keys=delete_keys or None,
+                # #2015: a context that never opted in has no chunk points.
+                cascade_chunks=await chunk_cascade_needed(self.db, memory.context_id),
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(
