@@ -703,10 +703,12 @@ def _is_transient_rerank_error(exc: BaseException) -> bool:
 
 def _log_calibration_failed(reranker: VLLMReranker, **fields: Any) -> None:
     """WARNING for a calibration check that produced no verdict (redacted URL)."""
+    # A format name, not prompt text (the #1720 log-redaction test keys on names).
+    rerank_format = reranker.prompt_format
     logger.warning(
         "rerank_calibration_check_failed",
         model=reranker.model,
-        prompt_format=reranker.prompt_format,
+        rerank_format=rerank_format,
         endpoint=reranker.safe_base_url,
         **fields,
     )
