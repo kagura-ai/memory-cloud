@@ -19,7 +19,7 @@ verdict is stored on the candidate under ``verification``:
                       "at": "...", "verified": true | false}}
 
 * ``parallel`` — the suggestion is kept in the column (so a mechanical
-  re-embed does not re-judge the pair) but never surfaced.
+  re-embed does not re-judge the pair) but not surfaced while it is current.
 * ``supersedes`` with ``confidence >= supersede_verify_min_confidence`` —
   surfaced with ``verified: true``, the signal a client may auto-accept on.
   The floor is applied when the candidate is READ, so raising it later
@@ -30,9 +30,12 @@ verdict is stored on the candidate under ``verification``:
 
 A verdict is about two texts. It carries a ``fingerprint`` of both (summary
 and content head) and an ``old_fingerprint`` of the old side alone, so an
-edit of either memory re-judges the pair instead of reusing the verdict, and
-the read path sets a verdict aside once the old memory's text no longer
-matches what the judge saw (``verification_stale``). Text, not
+edit of either memory re-judges the pair instead of reusing the verdict.
+:func:`verdict_current` is the one staleness rule (#2059): the read path
+honours ``parallel`` and ``verified`` only while it holds, and the dismissal
+treats a stored ``parallel`` verdict as "never shown" only while it holds.
+The write path applies the same text digest to its own side: a verdict whose
+new memory was edited during the judge call is not stored. Text, not
 ``updated_at``: Sleep stamps ``updated_at`` for importance and tag changes
 that the judge never looked at.
 
@@ -217,10 +220,16 @@ def text_fingerprint(summary: str | None, content_head: str | None) -> str:
     return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
+def _combine(old_fingerprint: str, new_fingerprint: str) -> str:
+    """The pair digest from the two one-side digests (old first)."""
+    return hashlib.sha256((old_fingerprint + new_fingerprint).encode("utf-8")).hexdigest()[:16]
+
+
 def pair_fingerprint(old: Any, new: Any) -> str:
     """A short digest of the two texts the judge saw (both sides)."""
-    joined = text_fingerprint(old.summary, old.content) + text_fingerprint(new.summary, new.content)
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+    return _combine(
+        text_fingerprint(old.summary, old.content), text_fingerprint(new.summary, new.content)
+    )
 
 
 def min_confidence_from_env(default: float = 0.7) -> float:
@@ -305,22 +314,39 @@ def is_verified(candidate: Any, *, min_confidence: float) -> bool:
     return float(confidence) >= min_confidence
 
 
-def verification_stale(
-    candidate: Any, *, old_summary: str | None, old_content_head: str | None
+def verdict_current(
+    candidate: Any,
+    *,
+    old_summary: str | None,
+    old_content_head: str | None,
+    new_summary: str | None,
+    new_content_head: str | None,
 ) -> bool:
-    """Whether the OLD memory's text is no longer what the judge saw.
+    """Whether a stored verdict is still about both texts as they are now.
 
-    The verdict was given about a specific old text; once that text differs
-    (``old_fingerprint`` no longer matches), the verdict is about text that no
-    longer exists, so neither ``verified`` nor the parallel suppression may
-    rest on it. A verdict without an ``old_fingerprint`` is stale. The next
-    re-embed of the new memory re-judges the pair (its pair fingerprint moved
-    too).
+    The one staleness rule (#2059) for the paths that act on a stored verdict:
+    the read path (``parallel`` hides the pair, ``supersedes`` sets
+    ``verified``) and the dismissal (a ``parallel`` pair was never shown, so
+    there is nothing to reject). The write path checks the new side with the
+    same :func:`text_fingerprint` before storing a fresh verdict. It holds only when the OLD memory's text still matches
+    ``old_fingerprint`` AND the pair still matches ``fingerprint`` — an edit of
+    either side means the verdict is about text that no longer exists. A
+    verdict missing either fingerprint is never current. Nothing re-judges the
+    pair when only the OLD memory is edited; the pair surfaces unverified
+    until the new memory's next re-embed.
+
+    Content heads may be passed whole: both are cut to
+    :data:`CONTENT_HEAD_CHARS` as the judge saw them.
     """
     verification = stored_verification(candidate)
     if verification is None:
         return False
-    return verification.get("old_fingerprint") != text_fingerprint(old_summary, old_content_head)
+    old_fp = text_fingerprint(old_summary, old_content_head)
+    if verification.get("old_fingerprint") != old_fp:
+        return False
+    return verification.get("fingerprint") == _combine(
+        old_fp, text_fingerprint(new_summary, new_content_head)
+    )
 
 
 def reuse_verification(
@@ -506,7 +532,11 @@ async def judge_pair(
 
     # Stamp the verdict with the moment the texts were read, not the moment
     # the answer came back: an edit during the round trip must read as later.
+    # The fingerprints too (#2059): they must describe the texts in this
+    # prompt, not whatever a caller's object holds once the answer is back.
     read_at = to_utc_iso(utcnow())
+    fingerprint = pair_fingerprint(old, new)
+    old_fingerprint = text_fingerprint(old.summary, old.content)
     prompt = build_prompt(
         old_summary=old.summary,
         old_content=old.content,
@@ -584,8 +614,8 @@ async def judge_pair(
         reason,
         model=response.model,
         min_confidence=config.supersede_verify_min_confidence,
-        fingerprint=pair_fingerprint(old, new),
-        old_fingerprint=text_fingerprint(old.summary, old.content),
+        fingerprint=fingerprint,
+        old_fingerprint=old_fingerprint,
         at=read_at,
     )
     await _record_judge_call(

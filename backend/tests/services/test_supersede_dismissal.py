@@ -138,12 +138,12 @@ class TestServiceApplication:
         memory.supersede_candidate = stored
         return memory
 
-    def _apply(self, stored, *, dismiss=True):
+    def _apply(self, stored, *, dismiss=True, **kwargs):
         from services.memory_service import MemoryService
 
         memory = self._memory(stored)
         request = UpdateMemoryRequest(memory_id=memory.id, dismiss_supersede_candidate=dismiss)
-        returned = MemoryService._apply_supersede_dismissal(memory, request)
+        returned = MemoryService._apply_supersede_dismissal(memory, request, **kwargs)
         return memory, returned
 
     def test_a_live_suggestion_is_tombstoned_and_echoed(self):
@@ -165,13 +165,23 @@ class TestServiceApplication:
         assert returned is None
         assert memory.supersede_candidate == stored
 
-    def test_a_parallel_verdict_is_not_a_live_suggestion(self):
-        """#2016: the judge set the pair aside and the caller never saw it —
-        dismissing is a no-op and the verdict stays (no re-judge later)."""
+    def test_a_current_parallel_verdict_is_not_a_live_suggestion(self):
+        """#2016: the judge set the pair aside, the verdict still describes both
+        texts, so the caller never saw it — dismissing is a no-op and the
+        verdict stays (no re-judge later)."""
         stored = {**_live_candidate(), "verification": {"verdict": "parallel", "confidence": 0.9}}
-        memory, returned = self._apply(stored)
+        memory, returned = self._apply(stored, parallel_current=True)
         assert returned is None
         assert memory.supersede_candidate == stored
+
+    def test_a_stale_parallel_verdict_is_dismissed_like_any_surfaced_one(self):
+        """#2059: once either text moved, the read path surfaces the pair
+        unverified — so the caller CAN see it and must be able to reject it.
+        Not proven current is the default: an explicit rejection wins."""
+        stored = {**_live_candidate(), "verification": {"verdict": "parallel", "confidence": 0.9}}
+        memory, returned = self._apply(stored)
+        assert str(returned) == TARGET
+        assert dismissed_entry(memory.supersede_candidate) is not None
 
     def test_dismissing_twice_is_idempotent(self):
         memory, first = self._apply(_live_candidate())
@@ -184,6 +194,154 @@ class TestServiceApplication:
         assert first is not None
         assert second is None
         assert memory.supersede_candidate == tombstone
+
+
+class TestParallelVerdictCurrent:
+    """#2059: the dismiss path asks the read path's question — is the stored
+    parallel verdict still about both texts as they are now?"""
+
+    OLD_SUMMARY, OLD_HEAD = "Depot A opens 9:00", "depot a details"
+    NEW_SUMMARY, NEW_CONTENT = "Depot B opens 9:00", "depot b details"
+
+    def _stored(self, verdict="parallel"):
+        from types import SimpleNamespace
+
+        from services.supersede_verify import pair_fingerprint, text_fingerprint
+
+        old = SimpleNamespace(summary=self.OLD_SUMMARY, content=self.OLD_HEAD)
+        new = SimpleNamespace(summary=self.NEW_SUMMARY, content=self.NEW_CONTENT)
+        return {
+            **_live_candidate(),
+            "verification": {
+                "verdict": verdict,
+                "confidence": 0.9,
+                "fingerprint": pair_fingerprint(old, new),
+                "old_fingerprint": text_fingerprint(old.summary, old.content),
+            },
+        }
+
+    def _service(self, target_row):
+        from unittest.mock import AsyncMock
+
+        from services.memory_service import MemoryService
+
+        result = MagicMock()
+        result.one_or_none = MagicMock(return_value=target_row)
+        db = MagicMock()
+        db.execute = AsyncMock(return_value=result)
+        return MemoryService(db), db
+
+    def _memory(self, stored, *, summary=None, content=None):
+        memory = MagicMock()
+        memory.id = uuid4()
+        memory.supersede_candidate = stored
+        memory.summary = summary or self.NEW_SUMMARY
+        memory.content = content or self.NEW_CONTENT
+        return memory
+
+    def _target(self, summary=None, head=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            summary=summary or self.OLD_SUMMARY, content_head=head or self.OLD_HEAD
+        )
+
+    @pytest.mark.asyncio
+    async def test_unmoved_texts_are_current(self):
+        service, _db = self._service(self._target())
+        assert await service._parallel_verdict_current(self._memory(self._stored())) is True
+
+    @pytest.mark.asyncio
+    async def test_an_edited_old_memory_is_not_current(self):
+        """F1: A was edited, B's verdict stayed — the resolver surfaces it."""
+        service, _db = self._service(self._target(summary="Depot A opens 10:00"))
+        assert await service._parallel_verdict_current(self._memory(self._stored())) is False
+
+    @pytest.mark.asyncio
+    async def test_an_edited_new_memory_is_not_current(self):
+        service, _db = self._service(self._target())
+        memory = self._memory(self._stored(), content="rewritten")
+        assert await service._parallel_verdict_current(memory) is False
+
+    @pytest.mark.asyncio
+    async def test_a_gone_target_is_not_current(self):
+        service, _db = self._service(None)
+        assert await service._parallel_verdict_current(self._memory(self._stored())) is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stored",
+        [None, _live_candidate(), {"dismissed": {"memory_id": TARGET}}],
+    )
+    async def test_no_parallel_verdict_costs_no_query(self, stored):
+        service, db = self._service(self._target())
+        assert await service._parallel_verdict_current(self._memory(stored)) is False
+        db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_supersedes_verdict_is_not_a_parallel_one(self):
+        service, db = self._service(self._target())
+        memory = self._memory(self._stored(verdict="supersedes"))
+        assert await service._parallel_verdict_current(memory) is False
+        db.execute.assert_not_called()
+
+    def test_update_in_place_decides_before_the_edit_is_applied(self):
+        """The caller saw the PRE-edit state. Deciding after
+        ``_update_apply_fields`` would read an edit-plus-dismiss call's own
+        edit as "the verdict moved" and tombstone a pair the caller never saw.
+        And the decision must reach the dismissal."""
+        import services.memory_service as memory_service
+
+        tree = ast.parse(Path(memory_service.__file__).read_text(encoding="utf-8"))
+        fn = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "_update_in_place"
+        )
+
+        def calls(attr):
+            return [
+                c
+                for c in ast.walk(fn)
+                if isinstance(c, ast.Call)
+                and isinstance(c.func, ast.Attribute)
+                and c.func.attr == attr
+            ]
+
+        decide, apply_fields = calls("_parallel_verdict_current"), calls("_update_apply_fields")
+        assert decide and apply_fields
+        assert max(c.lineno for c in decide) < min(c.lineno for c in apply_fields)
+        dismissals = calls("_apply_supersede_dismissal")
+        assert dismissals
+        for call in dismissals:
+            assert any(kw.arg == "parallel_current" for kw in call.keywords)
+
+    def test_a_dismissal_that_also_re_embeds_always_tombstones(self):
+        """Edit + dismiss in one call: the edit sets a parallel verdict aside
+        and the re-embed re-judges the pair, so "never shown" no longer holds —
+        the decision is skipped (False) whenever the call re-embeds."""
+        import services.memory_service as memory_service
+
+        tree = ast.parse(Path(memory_service.__file__).read_text(encoding="utf-8"))
+        fn = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "_update_in_place"
+        )
+        gates = [
+            n
+            for n in ast.walk(fn)
+            if isinstance(n, ast.IfExp)
+            and any(
+                isinstance(c, ast.Call)
+                and isinstance(c.func, ast.Attribute)
+                and c.func.attr == "_parallel_verdict_current"
+                for c in ast.walk(n.body)
+            )
+        ]
+        assert gates, "_parallel_verdict_current is no longer gated"
+        names = {x.id for g in gates for x in ast.walk(g.test) if isinstance(x, ast.Name)}
+        assert "needs_reembed" in names
 
 
 class TestWiring:
@@ -224,14 +382,40 @@ class TestWiring:
                 for node in ast.walk(fn)
             )
 
+        def only_clears(fn):
+            """Every write of the column in ``fn`` stores ``None``."""
+            return all(
+                isinstance(node.value, ast.Constant) and node.value.value is None
+                for node in ast.walk(fn)
+                if isinstance(node, ast.Assign)
+                and any(
+                    isinstance(t, ast.Attribute) and t.attr == "supersede_candidate"
+                    for t in node.targets
+                )
+            )
+
         writers = [
             fn
             for fn in ast.walk(tree)
             if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and writes_a_candidate(fn)
         ]
         # The dismissal itself writes the column too; the detector is the other one.
-        detectors = [fn for fn in writers if fn.name != "_apply_supersede_dismissal"]
+        detectors = [
+            fn for fn in writers if fn.name != "_apply_supersede_dismissal" and not only_clears(fn)
+        ]
         assert detectors, "no function assigns memory.supersede_candidate any more"
+        # #2059: a writer that only CLEARS the column (a re-embed that found no
+        # neighbour) must still tell a tombstone apart — clearing one would
+        # resurrect the rejected pair the next time it is a neighbour.
+        for fn in writers:
+            if fn in detectors or fn.name == "_apply_supersede_dismissal":
+                continue
+            assert any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "dismissed_entry"
+                for node in ast.walk(fn)
+            ), f"{fn.name} clears the supersede candidate without checking for a tombstone"
         for fn in detectors:
             assert any(
                 isinstance(node, ast.Call)

@@ -1736,3 +1736,275 @@ class TestSupersedeVerification:
         judge.assert_not_called()
         db.execute.assert_not_called()
         assert "dismissed" in memory.supersede_candidate
+
+
+class TestSupersedeVerdictAfterAnEdit:
+    """#2059: a verdict is about the text the judge saw. An edit of the NEW
+    memory during the judge's round trip, or one that moves it away from every
+    neighbour, must not leave a verdict about its earlier text in the column."""
+
+    @staticmethod
+    async def _seed(memory, db, candidates, *, config=None, judge=None, repo=None):
+        config = config or _make_config(enabled=False, verify_mode="llm")
+        with (
+            patch("neural.config.NeuralMemoryConfig.from_db", new=AsyncMock(return_value=config)),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock(return_value=candidates)),
+            patch(
+                "repositories.neural_edge.NeuralEdgeRepository",
+                return_value=repo or _make_edge_repo(),
+            ),
+            patch("services.supersede_verify.judge_pair", new=judge or AsyncMock()),
+            patch("services.memory_service.logger") as mock_logger,
+        ):
+            await _create_knn_seed_edges(
+                db=db,
+                memory=memory,
+                vector=[0.1] * 512,
+                collection_name="kagura_memories",
+                model_name="text-embedding-3-small",
+            )
+        return mock_logger
+
+    @staticmethod
+    def _with_target(db):
+        old = MagicMock()
+        old.id = str(uuid4())
+        old.summary, old.content = "old summary", "old content"
+        old.created_at = datetime(2026, 10, 1)
+        row = MagicMock()
+        row.scalar_one_or_none = MagicMock(return_value=old)
+        db.execute = AsyncMock(return_value=row)
+        return old
+
+    @staticmethod
+    def _hits(memory, *others):
+        return [{"id": str(memory.id), "score": 1.0, "payload": {}, "embedding": []}] + [
+            {"id": str(i), "score": s, "payload": {}, "embedding": []} for i, s in others
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_edit_during_the_judge_call_skips_the_write(self):
+        """F2: task 1 judged B_v1; meanwhile B_v2 was committed and its own
+        run owns the column. Task 1 re-reads B's text and writes nothing."""
+        memory = _make_memory()
+        db = _make_db()
+        old = self._with_target(db)
+        newer = {"memory_id": old.id, "similarity": 0.9, "verification": {"verdict": "parallel"}}
+
+        async def refresh(obj, attribute_names=None):
+            # What the row holds after the concurrent update_memory + task 2.
+            obj.summary = "B_v2: a different subject"
+            obj.supersede_candidate = newer
+
+        db.refresh = AsyncMock(side_effect=refresh)
+        judge = AsyncMock(return_value={"verdict": "supersedes", "confidence": 0.9})
+
+        log = await self._seed(memory, db, self._hits(memory, (old.id, 0.93)), judge=judge)
+
+        judge.assert_awaited_once()
+        assert set(db.refresh.await_args.kwargs["attribute_names"]) >= {
+            "summary",
+            "content",
+            "supersede_candidate",
+        }
+        assert memory.supersede_candidate is newer
+        db.commit.assert_not_called()
+        events = [c.args[0] for c in log.info.call_args_list if c.args]
+        assert "supersede_candidate_skipped_source_edited" in events
+        assert "supersede_candidate_detected" not in events
+
+    @pytest.mark.asyncio
+    async def test_unchanged_text_after_the_judge_call_still_writes(self):
+        memory = _make_memory()
+        db = _make_db()
+        old = self._with_target(db)
+        verdict = {"verdict": "supersedes", "confidence": 0.9, "verified": True}
+
+        await self._seed(
+            memory, db, self._hits(memory, (old.id, 0.93)), judge=AsyncMock(return_value=verdict)
+        )
+
+        assert memory.supersede_candidate["verification"] == verdict
+        db.commit.assert_awaited()
+
+    @staticmethod
+    def _orm_memory(stored):
+        """A real (transient) Memory: the clear sets the committed value on it."""
+        from models.memory import Memory
+
+        memory = Memory(
+            id=uuid4(),
+            user_id="user1",
+            workspace_id=uuid4(),
+            context_id=uuid4(),
+            summary="new summary",
+            content="new content",
+            created_at=datetime(2026, 10, 2),
+        )
+        memory.supersede_candidate = stored
+        return memory
+
+    @staticmethod
+    def _db_with_update(rowcount=1):
+        db = _make_db()
+        db.execute = AsyncMock(return_value=MagicMock(rowcount=rowcount))
+        return db
+
+    @staticmethod
+    def _update_sql(db):
+        from sqlalchemy.dialects import postgresql
+
+        statement = db.execute.await_args.args[0]
+        return str(statement.compile(dialect=postgresql.dialect())), statement
+
+    @pytest.mark.asyncio
+    async def test_no_neighbour_clears_a_live_candidate(self):
+        """The edit moved B away from every neighbour: the stored candidate
+        (and any verdict about B's earlier text) is cleared — conditionally on
+        the row still naming that target, so a dismissal committed after the
+        re-read is never wiped."""
+        target = str(uuid4())
+        memory = self._orm_memory(
+            {
+                "memory_id": target,
+                "similarity": 0.93,
+                "verification": {"verdict": "supersedes", "confidence": 0.95},
+            }
+        )
+        db = self._db_with_update()
+
+        log = await self._seed(memory, db, self._hits(memory, (uuid4(), 0.62)))
+
+        assert memory.supersede_candidate is None
+        db.execute.assert_awaited_once()
+        sql, statement = self._update_sql(db)
+        assert sql.startswith("UPDATE memories SET supersede_candidate=")
+        assert "supersede_candidate ->>" in sql
+        assert target in statement.compile().params.values()
+        db.commit.assert_awaited()
+        events = [c.args[0] for c in log.info.call_args_list if c.args]
+        assert "supersede_candidate_cleared_no_neighbour" in events
+
+    @pytest.mark.asyncio
+    async def test_a_row_that_changed_after_the_re_read_is_left_alone(self):
+        """The conditional UPDATE matched nothing (a tombstone or a newer
+        candidate landed after the re-read): the object keeps what it read and
+        no clear is reported."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.93}
+        memory = self._orm_memory(stored)
+        db = self._db_with_update(rowcount=0)
+
+        log = await self._seed(memory, db, self._hits(memory, (uuid4(), 0.5)))
+
+        assert memory.supersede_candidate == stored
+        events = [c.args[0] for c in log.info.call_args_list if c.args]
+        assert "supersede_candidate_cleared_no_neighbour" not in events
+
+    @pytest.mark.asyncio
+    async def test_no_other_memory_at_all_clears_it_too(self):
+        memory = self._orm_memory({"memory_id": str(uuid4()), "similarity": 0.93})
+        db = self._db_with_update()
+
+        await self._seed(memory, db, self._hits(memory))
+
+        assert memory.supersede_candidate is None
+
+    @pytest.mark.asyncio
+    async def test_a_neighbour_just_below_the_threshold_keeps_the_candidate(self):
+        """Hysteresis: a pair hovering at the threshold (0.851 / 0.849 across
+        re-embeds) must not be cleared and re-judged — a paid call — each time."""
+        from services.memory_service import _SUPERSEDE_SUGGEST_THRESHOLD
+        from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA
+
+        stored = {"memory_id": str(uuid4()), "similarity": 0.851}
+        memory = self._orm_memory(stored)
+        db = self._db_with_update()
+        hovering = _SUPERSEDE_SUGGEST_THRESHOLD - RESURFACE_SIMILARITY_DELTA / 2
+
+        await self._seed(memory, db, self._hits(memory, (uuid4(), hovering)))
+
+        assert memory.supersede_candidate == stored
+        db.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_tombstone_is_never_cleared(self):
+        """Clearing a dismissal would resurrect the rejected pair the next time
+        it is a neighbour — and remember(dedupe="off")'s tombstone is permanent."""
+        from services.supersede_dismissal import build_tombstone, unconditional_tombstone
+
+        for tombstone in (
+            build_tombstone({"memory_id": str(uuid4()), "similarity": 0.9}),
+            unconditional_tombstone(),
+        ):
+            memory = self._orm_memory(tombstone)
+            db = self._db_with_update()
+
+            await self._seed(memory, db, self._hits(memory, (uuid4(), 0.5)))
+
+            assert memory.supersede_candidate == tombstone
+            db.refresh.assert_not_called()
+            db.execute.assert_not_called()
+            db.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_dismissal_committed_during_the_search_survives(self):
+        memory = self._orm_memory({"memory_id": str(uuid4()), "similarity": 0.93})
+        db = self._db_with_update()
+        tombstone = {"dismissed": {"memory_id": "x", "dismissed_at": "y"}}
+
+        async def refresh(obj, attribute_names=None):
+            obj.supersede_candidate = tombstone
+
+        db.refresh = AsyncMock(side_effect=refresh)
+
+        await self._seed(memory, db, self._hits(memory, (uuid4(), 0.5)))
+
+        assert memory.supersede_candidate == tombstone
+        db.execute.assert_not_called()
+        db.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_edit_during_the_search_leaves_the_column_to_the_newer_run(self):
+        memory = self._orm_memory({"memory_id": str(uuid4()), "similarity": 0.93})
+        db = self._db_with_update()
+        written_by_newer_run = {"memory_id": str(uuid4()), "similarity": 0.91}
+
+        async def refresh(obj, attribute_names=None):
+            obj.summary = "edited meanwhile"
+            obj.supersede_candidate = written_by_newer_run
+
+        db.refresh = AsyncMock(side_effect=refresh)
+
+        await self._seed(memory, db, self._hits(memory, (uuid4(), 0.5)))
+
+        assert memory.supersede_candidate is written_by_newer_run
+        db.execute.assert_not_called()
+        db.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_suggestions_off_keep_stored_candidates(self):
+        """SUPERSEDE_SUGGEST_ENABLED=false promises "existing ones stay until
+        dismissed or accepted"."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.93}
+        memory = self._orm_memory(stored)
+        db = self._db_with_update()
+        config = _make_config(enabled=True, suggest=False)
+
+        with patch("neural.calibration.resolve_knn_threshold", new=AsyncMock(return_value=0.6)):
+            await self._seed(memory, db, self._hits(memory, (uuid4(), 0.5)), config=config)
+
+        assert memory.supersede_candidate == stored
+
+    @pytest.mark.asyncio
+    async def test_results_without_the_memory_itself_clear_nothing(self):
+        """The memory's own point was just upserted; a search that does not
+        return it is not evidence that there is no neighbour."""
+        stored = {"memory_id": str(uuid4()), "similarity": 0.93}
+        memory = self._orm_memory(stored)
+        db = self._db_with_update()
+
+        await self._seed(memory, db, [])
+
+        assert memory.supersede_candidate == stored
+        db.execute.assert_not_called()
+        db.commit.assert_not_called()

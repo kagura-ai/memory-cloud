@@ -231,10 +231,11 @@ class NeuralMemoryConfig:
     # #2016: verification of a detected supersede_candidate before it is
     # surfaced. "off" (default) stores it as before; "llm" asks the Sleep
     # judge (sleep_llm_provider / sleep_llm_model) whether the new memory
-    # replaces the old one — a "parallel" verdict is never surfaced, a
+    # replaces the old one — a "parallel" verdict is not surfaced, a
     # "supersedes" verdict at or above the confidence floor is surfaced with
-    # verified=true. Calls are capped per workspace per UTC day. Env-only,
-    # like supersede_suggest_enabled.
+    # verified=true, both only while neither memory's text has changed since
+    # (#2059). Calls are capped per workspace per UTC day. Env-only, like
+    # supersede_suggest_enabled.
     supersede_verify_mode: str = "off"
     supersede_verify_min_confidence: float = 0.7
     supersede_verify_max_calls_per_day: int = 200
