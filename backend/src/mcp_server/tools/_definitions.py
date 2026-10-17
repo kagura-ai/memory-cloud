@@ -2435,7 +2435,7 @@ Returns: {status, deleted, binding_id}.""",
             "readOnly": True,
             "description": """Rehydrate an agent's working state at session start in ONE call: context info + pinned memories + a trusted-only recall (only when query is given) + upcoming time memories + agent state, each bounded and filtered like its standalone tool. Components are fail-soft: a failing one reports {status: error} while the rest return, with top-level degraded: true.
 
-Returns: {status, degraded, agent, context, instructions, components: {pinned, recall, upcoming, state, policy}, correlation, generated_at}. The reply is held to max_chars: context_summary goes first (context_summary_omitted: true), then pinned / recall / upcoming items from the end, each such component flagged truncated: true. state is a get_state page (has_more, next_cursor).""",
+Returns: {status, degraded, agent, context, instructions, components: {pinned, recall, upcoming, state, policy}, correlation, generated_at}. recall.results are recall's verbosity="full" items (an empty context_summary, tags, superseded_by or contradicts is absent). The reply is held to max_chars: context_summary goes first (context_summary_omitted: true), then pinned / recall / upcoming items from the end, each such component flagged truncated: true. state is a get_state page (has_more, next_cursor).""",
             "inputSchema": {
                 "type": "object",
                 "properties": {

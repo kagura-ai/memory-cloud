@@ -29,6 +29,7 @@ from services.capacity_lock import CapacityPolicy
 from services.recall_selection import RecallSelectionConfig
 from utils.datetime import to_utc_iso, utcnow
 from utils.logger import get_logger
+from utils.recall_projection import recall_result_item
 from utils.response_budget import (
     DEFAULT_MAX_CHARS,
     BudgetArgumentError,
@@ -58,6 +59,8 @@ BOOTSTRAP_DEFAULT_PINNED_CAP = 20
 _STATE_SHARE = 4
 # The component item lists fitted to the envelope budget, in priority order.
 _BUDGETED_LISTS = (("pinned", "memories"), ("recall", "results"), ("upcoming", "results"))
+# #2013: the recall component's rows are recall's verbosity="full" items.
+BOOTSTRAP_RECALL_VERBOSITY = "full"
 
 
 class BootstrapError(Exception):
@@ -666,23 +669,12 @@ class AgentBootstrapService:
             context_workspace_id=context.workspace_id,
             selection_config=params.recall_evaluation,
         )
-        results_data = [
-            {
-                "memory_id": str(r.memory_id),
-                "summary": r.summary,
-                "context_summary": r.context_summary,
-                "type": r.type,
-                "importance": r.importance,
-                "scope": r.scope,
-                "score": r.score,
-                "tags": r.tags,
-                "created_at": to_utc_iso(r.created_at),
-                "updated_at": to_utc_iso(r.updated_at),
-                "superseded_by": str(r.superseded_by) if r.superseded_by else None,
-                "contradicts": [str(c) for c in r.contradicts],
-            }
-            for r in result.results
-        ]
+        # #2013: the recall tool's own projection, so a memory has one shape on
+        # both paths — an empty annotation is absent, never null / []. Always
+        # "full": these rows are behaviour-establishing and read once at session
+        # start, with no follow-up reference() per hit; max_chars already
+        # drops context_summary, then rows, when the envelope runs over.
+        results_data = [recall_result_item(r, BOOTSTRAP_RECALL_VERBOSITY) for r in result.results]
         # query_hash never leaks the raw query — correlation only.
         query_hash = hmac_sha256_hex(params.query or "", get_settings().api_key_secret)
         body = {
