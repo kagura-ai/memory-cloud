@@ -772,7 +772,7 @@ async def search_memories_qdrant(
     collection_name: str = KAGURA_MEMORIES_COLLECTION,
     include_vectors: bool = False,
     owner_ids: Sequence[str] | None = None,
-    include_chunks: bool = False,
+    include_chunks: bool | Sequence[str] = False,
 ) -> list[dict]:
     """Semantic search in Qdrant with workspace-aware isolation.
 
@@ -791,6 +791,9 @@ async def search_memories_qdrant(
             set). Off by default, so every caller that assumes one point per
             memory sees summary points only; recall opts in and collapses.
             Ignored by non-Qdrant stores, which never hold chunk points.
+            A sequence of context ids returns chunk points of those
+            contexts only (cross-context recall: the contexts that opted
+            in); an empty sequence is the same as False.
 
     Returns:
         List of scored results
@@ -842,6 +845,23 @@ async def search_memories_qdrant(
             qdrant_filter = Filter(must=[chunk_exclusion])
         else:
             qdrant_filter.must = [*(qdrant_filter.must or []), chunk_exclusion]  # type: ignore[misc]
+    elif not isinstance(include_chunks, bool):
+        # #2015 PR 2a: per-context chunk points — a point is a summary point,
+        # or a chunk of one of the listed (opted-in) contexts. A leftover
+        # chunk of a context whose flag is off never matches.
+        chunk_contexts = [str(cid) for cid in include_chunks]
+        for cid in chunk_contexts:
+            _validate_uuid_format(cid, "include_chunks")
+        per_context_chunks = Filter(
+            should=[
+                IsEmptyCondition(is_empty=PayloadField(key=CHUNK_OF_FIELD)),
+                FieldCondition(key="context_id", match=MatchAny(any=chunk_contexts)),
+            ]
+        )
+        if qdrant_filter is None:
+            qdrant_filter = Filter(must=[per_context_chunks])
+        else:
+            qdrant_filter.must = [*(qdrant_filter.must or []), per_context_chunks]  # type: ignore[misc]
 
     # #1229: score_threshold is a query_points kwarg, not a payload condition —
     # _build_search_filter used to drop it silently, so dedup/edge-discovery
@@ -1117,6 +1137,92 @@ async def purge_context_chunk_points(
         )
     except Exception as e:
         raise QdrantError(f"Failed to purge content chunks: {e}") from e
+
+
+async def purge_context_chunk_points_everywhere(
+    workspace_id: str, context_id: str, *, collections: list[str] | None = None
+) -> list[str]:
+    """Delete a context's content chunk points (#2015) from every ``kagura_memories*`` collection.
+
+    A context routes to one collection, but an embedding migration keeps its
+    points in two (the source until it is purged, the target from the
+    re-embed on), so "flag off ⇒ no chunk points" has to hold in every
+    collection, not only the routed one. One filter delete per collection.
+    A no-op on a non-Qdrant store.
+
+    Args:
+        collections: The collections to purge (default: list them now).
+
+    Returns:
+        The collections purged.
+
+    Raises:
+        QdrantError: If listing fails, or — after every collection has been
+            tried — if any single purge failed.
+    """
+    if _active_store() is not None:
+        return []
+    names = collections if collections is not None else await list_memory_collections()
+    failed: list[str] = []
+    for collection_name in names:
+        try:
+            await purge_context_chunk_points(workspace_id, context_id, collection_name)
+        except QdrantError as e:
+            # The collection that actually holds the chunks may come later.
+            failed.append(f"{collection_name}: {e}")
+    if failed:
+        raise QdrantError(
+            f"Failed to purge content chunks from {len(failed)} collection(s): {'; '.join(failed)}"
+        )
+    return names
+
+
+async def count_context_chunk_points(
+    workspace_id: str, context_id: str, collection_name: str, *, page_size: int = 1000
+) -> dict[str, int]:
+    """A context's content chunk points (#2015) in ``collection_name``, per memory.
+
+    Returns ``{chunk_of memory id: number of chunk points}``. Scrolls the
+    chunk points only (``chunk_of`` set), with no payload but ``chunk_of``
+    and no vectors. The embedding migration's verify uses it to report
+    memories whose chunks are incomplete and to find chunks of memories that
+    are no longer live. A non-Qdrant store holds none (``{}``).
+
+    Raises:
+        QdrantError: If the scroll fails.
+    """
+    if _active_store() is not None:
+        return {}
+    _validate_uuid_format(workspace_id, "workspace_id")
+    _validate_uuid_format(context_id, "context_id")
+    client = get_qdrant_client()
+    chunk_filter = Filter(
+        must=[
+            FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)),
+            FieldCondition(key="context_id", match=MatchValue(value=context_id)),
+        ],
+        must_not=[IsEmptyCondition(is_empty=PayloadField(key=CHUNK_OF_FIELD))],
+    )
+    counts: dict[str, int] = {}
+    offset = None
+    try:
+        while True:
+            points, offset = await client.scroll(
+                collection_name=collection_name,
+                scroll_filter=chunk_filter,
+                limit=page_size,
+                offset=offset,
+                with_payload=[CHUNK_OF_FIELD],
+                with_vectors=False,
+            )
+            for point in points:
+                chunk_of = (point.payload or {}).get(CHUNK_OF_FIELD)
+                if chunk_of:
+                    counts[str(chunk_of)] = counts.get(str(chunk_of), 0) + 1
+            if offset is None or not points:
+                return counts
+    except Exception as e:
+        raise QdrantError(f"Failed to count content chunks: {e}") from e
 
 
 async def delete_memory_from_qdrant(
