@@ -1042,7 +1042,7 @@ Returns: {status, message, merged, source_id, target_id, delete_source}. source_
         # =================================================================
         {
             "name": "update_search_config",
-            "description": """Tune a context's search: hybrid weights, reranker, reinforce re-rank and query routing. Context owner or editor only. semantic_weight + bm25_weight must sum to 1.0; a recall() that omits use_rerank follows this context's use_rerank.
+            "description": """Tune a context's search: hybrid weights, reranker, reinforce re-rank and query routing. Context owner or editor only (changing content_chunks_enabled: context owner or workspace owner/admin). semantic_weight + bm25_weight must sum to 1.0; a recall() that omits use_rerank follows this context's use_rerank.
 
 Example (keyless local reranking): use_rerank=true, reranker_provider='self_hosted' — reranker_model may be omitted.
 
@@ -1100,7 +1100,7 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                     },
                     "content_chunks_enabled": {
                         "type": "boolean",
-                        "description": "Also embed long content (1500+ chars) as chunk vectors, so semantic search finds facts in the body, not only in the summary (default false). Applies to memories written or re-embedded after it is turned on; turning it off deletes the chunks. When on, memory content (not only summaries) is sent to the embedding and rerank providers.",
+                        "description": "Also embed long content (1500+ chars) as chunk vectors, so semantic search finds facts in the body, not only in the summary (default false). Applies to memories written or re-embedded after it is turned on; turning it off deletes the chunks. When on, memory content (not only summaries) is sent to the embedding and rerank providers. Changing it takes the context owner or a workspace owner/admin; sending the stored value is a no-op.",
                     },
                 },
             },

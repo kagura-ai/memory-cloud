@@ -1406,7 +1406,9 @@ class ContextSearchConfigUpdate(BaseModel):
         "retrieval sees the body, not only the summary. Applies to writes and "
         "re-embeds after it is turned on; turning it off deletes the chunks. "
         "When on, memory content (not only summaries) is sent to the embedding "
-        "and rerank providers",
+        "and rerank providers. Changing it takes the context owner or a "
+        "workspace owner/admin (403 for an editor); sending the stored value is "
+        "a no-op",
     )
 
     @model_validator(mode="after")
