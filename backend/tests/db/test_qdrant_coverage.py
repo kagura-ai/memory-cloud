@@ -539,7 +539,9 @@ class TestUpdateMemoryPayload:
         """set_payload is called with the point id and updates."""
         mid = uuid4()
         await update_memory_payload_in_qdrant(mid, {"importance": 0.9})
-        kwargs = mock_client.set_payload.await_args.kwargs
+        # The first call is the summary point; the second cascades to its
+        # content chunk points (#2015).
+        kwargs = mock_client.set_payload.await_args_list[0].kwargs
         assert kwargs["points"] == [str(mid)]
         assert kwargs["payload"] == {"importance": 0.9}
 
@@ -562,7 +564,9 @@ class TestDeleteMemory:
         """delete is called with a PointIdsList of the memory id."""
         mid = uuid4()
         await delete_memory_from_qdrant(UID, mid)
-        kwargs = mock_client.delete.await_args.kwargs
+        # The first call is the summary point; the second removes its content
+        # chunk points (#2015).
+        kwargs = mock_client.delete.await_args_list[0].kwargs
         selector = kwargs["points_selector"]
         assert isinstance(selector, PointIdsList)
         assert selector.points == [str(mid)]
@@ -681,7 +685,12 @@ class TestEnsureCollection:
         params = SimpleNamespace(sparse_vectors={KAGURA_MEMORIES_BM25_VECTOR_NAME: object()})
         mock_client.get_collection.return_value = SimpleNamespace(
             config=SimpleNamespace(params=params),
-            payload_schema={"tags": object(), "location": object(), "scope": object()},
+            payload_schema={
+                "tags": object(),
+                "location": object(),
+                "chunk_of": object(),
+                "scope": object(),
+            },
         )
         await ensure_kagura_memories_collection()
         mock_client.create_collection.assert_not_awaited()
@@ -698,12 +707,13 @@ class TestEnsureCollection:
             payload_schema={"scope": object()},
         )
         await ensure_kagura_memories_collection()
-        # Both retrofit branches fire: tags (keyword) + location (geo, #1332).
+        # Every retrofit branch fires: tags (keyword), location (geo, #1332)
+        # and chunk_of (keyword, #2015).
         created = {
             c.kwargs["field_name"]: c.kwargs["field_schema"]
             for c in mock_client.create_payload_index.await_args_list
         }
-        assert created == {"tags": "keyword", "location": "geo"}
+        assert created == {"tags": "keyword", "location": "geo", "chunk_of": "keyword"}
         mock_client.create_collection.assert_not_awaited()
 
     async def test_old_collection_no_recreate_flag_raises(self, mock_client, monkeypatch):

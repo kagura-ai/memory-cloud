@@ -64,6 +64,11 @@ _TOKEN_FIELDS = frozenset(
 _CHUNK_FIELDS = (CHUNK_OF_FIELD, "chunk_index", "chunk_text")
 
 
+def chunk_payload_updates(payload_updates: dict[str, Any]) -> dict[str, Any]:
+    """The part of a summary-point payload update that applies to chunk points."""
+    return {k: v for k, v in payload_updates.items() if k not in _TOKEN_FIELDS}
+
+
 def split_content(content: str | None) -> list[str]:
     """Split ``content`` into fixed-size overlapping chunks.
 

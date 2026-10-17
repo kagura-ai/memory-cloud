@@ -116,7 +116,7 @@ class TestEnsureCollectionGeoIndex:
         params = SimpleNamespace(sparse_vectors={KAGURA_MEMORIES_BM25_VECTOR_NAME: object()})
         mock_client.get_collection.return_value = SimpleNamespace(
             config=SimpleNamespace(params=params),
-            payload_schema={"tags": object(), "location": object()},
+            payload_schema={"tags": object(), "location": object(), "chunk_of": object()},
         )
         await ensure_kagura_memories_collection()
         mock_client.create_payload_index.assert_not_awaited()

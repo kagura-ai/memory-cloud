@@ -23,13 +23,16 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    FilterSelector,
     GeoLineString,
     GeoPoint,
     GeoPolygon,
     GeoRadius,
+    IsEmptyCondition,
     MatchAny,
     MatchValue,
     Modifier,
+    PayloadField,
     PointIdsList,
     PointStruct,
     QuantizationSearchParams,
@@ -47,6 +50,7 @@ from qdrant_client.models import (
 )
 
 from config.database import QDRANT_URL
+from utils.content_chunks import CHUNK_OF_FIELD, chunk_payload_updates
 from utils.exceptions import QdrantError
 from utils.geo_location import extract_near_filter, extract_within_filter
 from utils.logger import get_logger
@@ -768,6 +772,7 @@ async def search_memories_qdrant(
     collection_name: str = KAGURA_MEMORIES_COLLECTION,
     include_vectors: bool = False,
     owner_ids: Sequence[str] | None = None,
+    include_chunks: bool = False,
 ) -> list[dict]:
     """Semantic search in Qdrant with workspace-aware isolation.
 
@@ -782,6 +787,10 @@ async def search_memories_qdrant(
         limit: Max results
         filters: Optional filters (scope, type, importance range, etc.)
         is_shared_context: If True, skip user_id filter (workspace members can access)
+        include_chunks: #2015 — also return content chunk points (``chunk_of``
+            set). Off by default, so every caller that assumes one point per
+            memory sees summary points only; recall opts in and collapses.
+            Ignored by non-Qdrant stores, which never hold chunk points.
 
     Returns:
         List of scored results
@@ -826,6 +835,13 @@ async def search_memories_qdrant(
     qdrant_filter = _build_search_filter(
         workspace_id, context_id, user_id, is_shared_context, filters, owner_ids
     )
+    if not include_chunks:
+        # #2015: summary (and resource) points only — chunk points carry chunk_of.
+        chunk_exclusion = IsEmptyCondition(is_empty=PayloadField(key=CHUNK_OF_FIELD))
+        if qdrant_filter is None:
+            qdrant_filter = Filter(must=[chunk_exclusion])
+        else:
+            qdrant_filter.must = [*(qdrant_filter.must or []), chunk_exclusion]  # type: ignore[misc]
 
     # #1229: score_threshold is a query_points kwarg, not a payload condition —
     # _build_search_filter used to drop it silently, so dedup/edge-discovery
@@ -910,6 +926,10 @@ async def update_memory_payload_in_qdrant(
                 points=[str(memory_id)],
             )
 
+        await _cascade_payload_to_chunks(
+            client, memory_id, payload_updates, delete_keys, collection_name
+        )
+
         logger.debug(
             "memory_payload_updated_in_qdrant",
             collection=collection_name,
@@ -920,6 +940,118 @@ async def update_memory_payload_in_qdrant(
 
     except Exception as e:
         raise QdrantError(f"Failed to update memory payload: {e}") from e
+
+
+def _chunks_of_filter(memory_ids: Sequence[UUID | str]) -> Filter:
+    """Filter selecting the content chunk points (#2015) of ``memory_ids``."""
+    return Filter(
+        must=[
+            FieldCondition(key=CHUNK_OF_FIELD, match=MatchAny(any=[str(mid) for mid in memory_ids]))
+        ]
+    )
+
+
+async def _cascade_payload_to_chunks(
+    client: AsyncQdrantClient,
+    memory_id: UUID,
+    payload_updates: dict[str, Any],
+    delete_keys: list[str] | None,
+    collection_name: str,
+) -> None:
+    """Apply a summary-point payload change to the memory's chunk points (#2015).
+
+    Chunk points copy the filterable fields of their summary point, so a tag /
+    importance / type / location change must reach them too or a filtered
+    recall would match a chunk on stale metadata. BM25 token fields are not
+    copied (chunk points have no sparse vector). Fail-soft: the summary point
+    is already updated, and a failure here is logged, not raised.
+    """
+    chunk_updates = chunk_payload_updates(payload_updates)
+    if not chunk_updates and not delete_keys:
+        return
+    chunk_filter = Filter(
+        must=[FieldCondition(key=CHUNK_OF_FIELD, match=MatchValue(value=str(memory_id)))]
+    )
+    try:
+        if chunk_updates:
+            await client.set_payload(
+                collection_name=collection_name, payload=chunk_updates, points=chunk_filter
+            )
+        if delete_keys:
+            await client.delete_payload(
+                collection_name=collection_name, keys=delete_keys, points=chunk_filter
+            )
+    except Exception as e:
+        logger.warning(
+            "content_chunks_payload_cascade_failed",
+            collection=collection_name,
+            memory_id=str(memory_id),
+            error_class=type(e).__name__,
+        )
+
+
+async def upsert_chunk_points(
+    points: Sequence[tuple[str, list[float], dict[str, Any]]],
+    *,
+    user_id: str,
+    workspace_id: str,
+    context_id: str,
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
+) -> None:
+    """Upsert a memory's content chunk points (#2015) in one call.
+
+    Each item is ``(point_id, dense_vector, payload)`` with the payload from
+    ``utils.content_chunks.build_chunk_payload``. Dense vector only — chunk
+    points have no ``bm25`` sparse vector. The isolation fields are added here,
+    as ``add_memory_to_qdrant`` does for a summary point. A no-op on a
+    non-Qdrant store (chunk vectors are Qdrant-only).
+    """
+    if not points or _active_store() is not None:
+        return
+    if not workspace_id or not context_id or not user_id:
+        raise ValueError("workspace_id, context_id, and user_id are required")
+    _validate_uuid_format(workspace_id, "workspace_id")
+    _validate_uuid_format(context_id, "context_id")
+
+    client = get_qdrant_client()
+    structs = [
+        PointStruct(
+            id=point_id,
+            vector={KAGURA_MEMORIES_VECTOR_NAME: vector},
+            payload={
+                **payload,
+                "workspace_id": workspace_id,
+                "context_id": context_id,
+                "user_id": user_id,
+            },
+        )
+        for point_id, vector, payload in points
+    ]
+    try:
+        await client.upsert(collection_name=collection_name, points=structs)
+    except Exception as e:
+        raise QdrantError(f"Failed to add content chunks: {e}") from e
+
+
+async def delete_chunk_points(
+    memory_ids: Sequence[UUID | str],
+    collection_name: str = KAGURA_MEMORIES_COLLECTION,
+) -> None:
+    """Delete the content chunk points (#2015) of ``memory_ids``.
+
+    Filter-based, so it also removes stale chunks past the current chunk
+    count. A no-op for an empty list or on a non-Qdrant store.
+    """
+    if not memory_ids or _active_store() is not None:
+        return
+    client = get_qdrant_client()
+    try:
+        await client.delete(
+            collection_name=collection_name,
+            points_selector=FilterSelector(filter=_chunks_of_filter(memory_ids)),
+        )
+    except Exception as e:
+        raise QdrantError(f"Failed to delete content chunks: {e}") from e
 
 
 async def delete_memory_from_qdrant(
@@ -964,6 +1096,19 @@ async def delete_memory_from_qdrant(
 
     except Exception as e:
         raise QdrantError(f"Failed to delete memory: {e}") from e
+
+    # #2015: the memory's chunk points go with it. Fail-soft — the summary
+    # point is gone, and the orphan sweep removes chunks whose memory row is
+    # missing or tombstoned.
+    try:
+        await delete_chunk_points([memory_id], collection_name)
+    except QdrantError as e:
+        logger.warning(
+            "content_chunks_delete_failed",
+            collection=collection_name,
+            memory_id=str(memory_id),
+            error_class=type(e.__cause__ or e).__name__,
+        )
 
 
 async def search_memories_fulltext(
@@ -1149,6 +1294,15 @@ async def ensure_kagura_memories_collection(
                         field_schema="geo",  # type: ignore[arg-type]
                     )
                     logger.info("created_missing_index", field="location", type="geo")
+                if CHUNK_OF_FIELD not in existing_fields:
+                    # #2015: content chunk points are selected by chunk_of
+                    # (exclusion in search, cascade deletes / payload updates).
+                    await client.create_payload_index(
+                        collection_name=collection_name,
+                        field_name=CHUNK_OF_FIELD,
+                        field_schema="keyword",  # type: ignore[arg-type]
+                    )
+                    logger.info("created_missing_index", field=CHUNK_OF_FIELD, type="keyword")
                 return
 
             # Old collection without sparse vectors — requires manual migration
@@ -1292,6 +1446,13 @@ async def ensure_kagura_memories_collection(
             field_schema="geo",  # type: ignore[arg-type]
         )
 
+        # #2015: content chunk points carry chunk_of (the memory id)
+        await client.create_payload_index(
+            collection_name=collection_name,
+            field_name=CHUNK_OF_FIELD,
+            field_schema="keyword",  # type: ignore[arg-type]
+        )
+
         logger.info(
             "single_collection_indexes_created",
             collection=collection_name,
@@ -1307,6 +1468,7 @@ async def ensure_kagura_memories_collection(
                 "tags",
                 "created_at",
                 "updated_at",
+                CHUNK_OF_FIELD,
             ],
         )
 

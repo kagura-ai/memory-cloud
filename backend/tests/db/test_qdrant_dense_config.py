@@ -79,7 +79,7 @@ def _info(*, quantization=None, on_disk=None, named=True, dense_quantization=Non
     )
     return SimpleNamespace(
         config=SimpleNamespace(params=params, quantization_config=quantization),
-        payload_schema={"tags": object(), "location": object()},
+        payload_schema={"tags": object(), "location": object(), "chunk_of": object()},
     )
 
 

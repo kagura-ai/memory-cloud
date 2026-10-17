@@ -2,7 +2,7 @@
 
 from uuid import UUID, uuid4
 
-from services.content_chunks import (
+from utils.content_chunks import (
     CHUNK_OF_FIELD,
     CONTENT_CHUNK_CHARS,
     CONTENT_CHUNK_MAX_PER_MEMORY,

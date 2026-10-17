@@ -152,7 +152,7 @@ class ContextSearchConfig(Base):
     )
 
     # Issue #2015: give dense retrieval a view of content. When true, a long
-    # memory's content is also embedded as chunk points (services.content_chunks)
+    # memory's content is also embedded as chunk points (utils.content_chunks)
     # and recall collapses them to the memory before fusion and rerank. Off by
     # default until kagura-memory-eval shows it helps; only writes and
     # re-embeds after the flag is turned on produce chunks.
