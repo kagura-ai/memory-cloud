@@ -9,9 +9,9 @@ and callers on such a context can skip the chunk cascade.
 - Flag off: nothing is read from or written to the vector store (turning
   the flag off purges the context's chunks, see
   ``purge_context_chunk_points``).
-- Flag on: the memory's chunk points are always deleted first, then
-  rewritten from the current content — content that shrank below the split
-  threshold therefore just loses its chunks.
+- Flag on: the memory's chunk points are deleted first, then rewritten from
+  the current content — content that shrank below the split threshold
+  therefore just loses its chunks. A superseded run (below) does neither.
 
 The flag is read again, fresh, right before the upsert, so a writer whose
 embedding was in flight while the flag was turned off writes nothing; the
@@ -19,13 +19,18 @@ config update also purges after its commit and again when the flag is turned
 back on, so a leftover from the remaining window never becomes visible.
 
 Two overlapping re-embeds of one memory write the same chunk ids (#2041). So
-the row is also read again right before the upsert: a run whose memory was
-deleted, edited (its content changed or it was re-queued ``pending``) or
-claimed by a newer embedding run (``embedding_attempted_at`` moved) writes
-nothing — the newer write rewrites the chunks from the current content.
-``updated_at`` is not used: metadata-only changes move it without a re-embed,
-and the old chunks are already deleted, so skipping on it would leave the
-memory without chunks. (The summary point has the same race; not guarded.)
+the row is read again before the delete and again right before the upsert: a
+run whose memory was deleted, edited (its content changed or it was re-queued
+``pending``) or claimed by a newer embedding run (``embedding_attempted_at``
+moved) stops there — the newer write owns the chunks. The first check keeps a
+stale run from deleting chunks a newer run already wrote; the second catches
+an edit that landed while the chunks were embedded. ``updated_at`` is not
+used: metadata-only changes move it without a re-embed, so skipping on it
+would leave the memory without chunks. What remains is the gap between the
+second check and the upsert (one round trip): a newer run that deletes inside
+it can still be overwritten by this run's upsert. A content hash or version
+in the chunk payload would close it. The summary point has the same race and
+is not guarded here.
 
 A failed delete of the old chunk points is raised (the row is retried, the
 old body never survives an edit). Any other failure is fail-open: the summary
@@ -129,6 +134,31 @@ async def _superseded(
     return result.scalar_one_or_none() is None
 
 
+async def _superseded_before_delete(
+    db: AsyncSession, memory: Memory, content: str | None, claimed_at: Any
+) -> bool:
+    """The first superseded check (#2041); a failed lookup does not stop the run.
+
+    The check right before the upsert still runs; a failure there writes nothing.
+    """
+    try:
+        superseded = await _superseded(db, memory.id, content, claimed_at)
+    except Exception as e:
+        logger.warning(
+            "content_chunks_superseded_check_failed",
+            memory_id=str(memory.id),
+            error_class=type(e).__name__,
+        )
+        return False
+    if superseded:
+        logger.info(
+            "content_chunks_skipped_superseded",
+            memory_id=str(memory.id),
+            stage="before_delete",
+        )
+    return superseded
+
+
 async def write_content_chunks(
     db: AsyncSession,
     memory: Memory,
@@ -168,6 +198,8 @@ async def write_content_chunks(
         return 0
     if not chunks_enabled or not chunk_points_supported():
         return 0
+    if await _superseded_before_delete(db, memory, content, claimed_at):
+        return 0
     await delete_chunk_points([memory.id], collection_name)
     chunks = split_content(content)
     if not chunks:
@@ -198,7 +230,11 @@ async def write_content_chunks(
         # #2041: an edit or a newer embedding run landed while the chunks were
         # embedded; that run writes the chunks of the current content.
         if await _superseded(db, memory.id, content, claimed_at):
-            logger.info("content_chunks_skipped_superseded", memory_id=str(memory.id))
+            logger.info(
+                "content_chunks_skipped_superseded",
+                memory_id=str(memory.id),
+                stage="before_upsert",
+            )
             return 0
         await upsert_chunk_points(
             points,
@@ -215,7 +251,7 @@ async def write_content_chunks(
         memory_id=str(memory.id),
         collection=collection_name,
         chunks=len(points),
-        chars=len(memory.content or ""),
+        chars=len(content or ""),
     )
     return len(points)
 

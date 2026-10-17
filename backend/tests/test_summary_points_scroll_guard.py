@@ -45,19 +45,37 @@ def _is_helper_call(node: ast.AST | None) -> bool:
     )
 
 
+def _stored_names(target: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+
+
 def _helper_bound_names(func: ast.AST) -> set[str]:
-    """Names assigned from ``summary_points_filter(...)`` inside ``func``."""
-    names: set[str] = set()
+    """Names every assignment of which inside ``func`` is ``summary_points_filter(...)``.
+
+    A name that is also bound to anything else in the function (a later
+    reassignment, an augmented assignment, a loop target, a parameter) does not
+    count: the scroll might see that other value.
+    """
+    helper: set[str] = set()
+    other: set[str] = set()
     for node in ast.walk(func):
-        if isinstance(node, ast.Assign) and _is_helper_call(node.value):
-            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
-        elif (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and _is_helper_call(node.value)
-        ):
-            names.add(node.target.id)
-    return names
+        if isinstance(node, ast.Assign):
+            bucket = helper if _is_helper_call(node.value) else other
+            for target in node.targets:
+                bucket.update(_stored_names(target))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            (helper if _is_helper_call(node.value) else other).add(node.target.id)
+        elif isinstance(node, ast.AugAssign | ast.For | ast.AsyncFor):
+            other.update(_stored_names(node.target))
+        elif isinstance(node, ast.With | ast.AsyncWith):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    other.update(_stored_names(item.optional_vars))
+        elif isinstance(node, ast.NamedExpr):
+            other.add(node.target.id)
+        elif isinstance(node, ast.arg):
+            other.add(node.arg)
+    return helper - other
 
 
 def _scroll_calls(tree: ast.Module) -> list[tuple[str, int, ast.Call, ast.AST]]:
@@ -149,6 +167,27 @@ def test_flags_a_helper_name_bound_in_another_function() -> None:
     assert _check(src) == ["m.py:4 (f)"]
 
 
+def test_flags_a_helper_name_reassigned_to_something_else() -> None:
+    src = (
+        "async def f(c, x):\n"
+        "    flt = summary_points_filter(a)\n"
+        "    if x:\n"
+        "        flt = Filter(must=[a])\n"
+        "    await c.scroll(scroll_filter=flt)\n"
+    )
+    assert _check(src) == ["m.py:5 (f)"]
+
+
+def test_flags_a_helper_name_rebound_by_a_loop() -> None:
+    src = (
+        "async def f(c, filters):\n"
+        "    flt = summary_points_filter(a)\n"
+        "    for flt in filters:\n"
+        "        await c.scroll(scroll_filter=flt)\n"
+    )
+    assert _check(src) == ["m.py:4 (f)"]
+
+
 def test_accepts_the_helper_inline_and_through_a_local_name() -> None:
     src = (
         "async def f(c):\n"
@@ -159,6 +198,11 @@ def test_accepts_the_helper_inline_and_through_a_local_name() -> None:
         "async def h(c):\n"
         "    flt: Filter = summary_points_filter()\n"
         "    await c.scroll(scroll_filter=flt)\n"
+        "async def k(c, names):\n"
+        "    for name in names:\n"
+        "        with lock:\n"
+        "            flt = summary_points_filter(a)\n"
+        "            await c.scroll(collection_name=name, scroll_filter=flt)\n"
     )
     assert _check(src) == []
 
