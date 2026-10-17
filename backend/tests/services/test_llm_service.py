@@ -276,7 +276,10 @@ class TestGetProvider:
     async def test_openai_provider(self, llm_service):
         """Test OpenAI provider instantiation."""
         with patch.object(
-            llm_service, "_get_user_api_key", new_callable=AsyncMock, return_value="sk-test"
+            llm_service,
+            "_resolve_api_key",
+            new_callable=AsyncMock,
+            return_value=("sk-test", "env"),
         ):
             provider = await llm_service._get_provider("user-1", "openai")
 
@@ -561,7 +564,7 @@ class TestResolvePaidBy:
 
         monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
         mock_db.execute = AsyncMock(return_value=self._row_result(None))
-        await llm_service._get_user_api_key("u1", "openai", workspace_id=str(uuid4()))
+        await llm_service._get_provider("u1", "openai", workspace_id=str(uuid4()))
         assert llm_service.resolve_paid_by() == "platform"
 
     @pytest.mark.asyncio
@@ -575,7 +578,7 @@ class TestResolvePaidBy:
         enc = MagicMock()
         enc.decrypt = MagicMock(return_value="sk-db")
         with patch("services.llm_service.get_encryptor", return_value=enc):
-            await llm_service._get_user_api_key("u1", "openai", workspace_id=str(uuid4()))
+            await llm_service._get_provider("u1", "openai", workspace_id=str(uuid4()))
         assert llm_service.resolve_paid_by() == "byok"
 
     @pytest.mark.asyncio
@@ -587,7 +590,7 @@ class TestResolvePaidBy:
 
         monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
         mock_db.execute = AsyncMock(return_value=self._row_result(MagicMock()))
-        await llm_service._get_user_api_key(
+        await llm_service._get_provider(
             "u1", "openai", workspace_id=str(uuid4()), platform_only=True
         )
         mock_db.execute.assert_not_called()
@@ -616,9 +619,51 @@ class TestResolvePaidBy:
         assert llm_service.resolve_paid_by() == "platform"
 
     @pytest.mark.asyncio
+    async def test_blank_stored_self_hosted_url_falls_back_and_is_platform(
+        self, llm_service, mock_db, monkeypatch
+    ):
+        """A stored row whose base URL is blank is not used: the platform URL
+        serves the call, so it must not be labelled byok."""
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+
+        monkeypatch.delenv("SELF_HOSTED_BASE_URL", raising=False)
+        mock_db.execute = AsyncMock(return_value=self._row_result(MagicMock()))
+        enc = MagicMock()
+        enc.decrypt = MagicMock(return_value="")
+        with (
+            patch("services.llm_service.get_encryptor", return_value=enc),
+            patch("config.settings.get_settings") as settings,
+        ):
+            settings.return_value.self_hosted_base_url = "http://platform:8000"
+            settings.return_value.self_hosted_api_key = ""
+            await llm_service._get_provider("u1", "self_hosted", workspace_id=str(uuid4()))
+        assert llm_service._last_self_hosted_base_url == "http://platform:8000"
+        assert llm_service.resolve_paid_by() == "platform"
+
+    @pytest.mark.asyncio
+    async def test_failed_resolution_clears_an_earlier_source(
+        self, llm_service, mock_db, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+
+        mock_db.execute = AsyncMock(return_value=self._row_result(MagicMock()))
+        enc = MagicMock()
+        enc.decrypt = MagicMock(return_value="sk-db")
+        with patch("services.llm_service.get_encryptor", return_value=enc):
+            await llm_service._get_provider("u1", "openai", workspace_id=str(uuid4()))
+        assert llm_service.resolve_paid_by() == "byok"
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        mock_db.execute = AsyncMock(return_value=self._row_result(None))
+        with pytest.raises(ConfigurationError):
+            await llm_service._get_provider("u1", "anthropic", workspace_id=str(uuid4()))
+        assert llm_service.resolve_paid_by() == "platform"
+
+    @pytest.mark.asyncio
     async def test_self_hosted_settings_base_url_is_platform(self, llm_service, monkeypatch):
         monkeypatch.delenv("SELF_HOSTED_BASE_URL", raising=False)
-        llm_service._get_user_api_key = AsyncMock(side_effect=ConfigurationError("none"))
+        llm_service._resolve_api_key = AsyncMock(side_effect=ConfigurationError("none"))
         with patch("config.settings.get_settings") as settings:
             settings.return_value.self_hosted_base_url = "http://platform:8000"
             settings.return_value.self_hosted_api_key = ""
