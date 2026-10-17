@@ -7995,15 +7995,23 @@ async def process_pending_embedding(memory_id: UUID) -> None:
     from db.base import get_db
     from models.memory import Memory
     from services.context_routing import resolve_context_routing
+    from services.embedding_claim import EmbeddingClaim
     from services.embedding_service import EmbeddingService
+    from utils.datetime import utcnow as _utcnow
 
     async for db in get_db():
+        now = _utcnow()
+        # #2041: the claim's stamp is this run's token. The sweep reclaims a
+        # `processing` row whose stamp is older than the stale cutoff (status
+        # stays `processing`, the stamp moves), so the chunk writer's checks
+        # and the outcome writes below match on the stamp: a reclaimed run
+        # must not end the newer run's claim. A live run renews its stamp so
+        # it is not reclaimed for being slow (``services.embedding_claim``).
+        claim = EmbeddingClaim(db, memory_id, now)
         try:
             # Claim: atomically set pending/stale-processing → processing
-            # Stale processing: updated_at older than 60s (crash recovery)
-            from utils.datetime import utcnow as _utcnow
-
-            now = _utcnow()
+            # Stale processing: embedding_attempted_at older than 60s (crash
+            # recovery)
             stale_cutoff = now - timedelta(seconds=60)
             # #979: a `failed` row is also eligible for auto-retry once its
             # backoff has elapsed and it still has retry budget. The shared
@@ -8046,6 +8054,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 return  # Already claimed, not eligible, exhausted, or soft-deleted
 
             await db.commit()
+            claim.start_renewal()
 
             # Load memory (verify not soft-deleted)
             mem_result = await db.execute(
@@ -8114,6 +8123,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                     embed_svc=embed_svc,
                     collection_name=collection,
                     fail_open=False,
+                    claim=claim,
                 )
 
             # Mark success. Clear the prior embedding_error AND reset
@@ -8128,9 +8138,22 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             # that row from the sweep for good. If the claim is gone, leave
             # the row as the re-queue left it and let the sweep redo it under
             # the new routing.
+            #
+            # #2041: the claim is also gone when the sweep reclaimed the row
+            # from this run (its stamp went stale: the renewal failed, or the
+            # run outlived MAX_RENEW_SECONDS). Stamping `success` on that
+            # newer claim would hide the newer run's failed chunk write from
+            # every retry — and with this run's chunk write skipped as
+            # superseded, leave the memory with no chunk points for good.
+            # Stopping the renewal first makes ``claim.stamp`` final.
+            await claim.stop_renewal()
             done = await db.execute(
                 update(Memory)
-                .where(Memory.id == memory_id, Memory.embedding_status == "processing")
+                .where(
+                    Memory.id == memory_id,
+                    Memory.embedding_status == "processing",
+                    Memory.embedding_attempted_at == claim.stamp,
+                )
                 .values(
                     embedding_status="success",
                     embedding_error=None,
@@ -8187,6 +8210,7 @@ async def process_pending_embedding(memory_id: UUID) -> None:
 
         except Exception as e:
             await db.rollback()
+            await claim.stop_renewal()
 
             # #1496: a CONFIGURATION failure must not spend the retry budget.
             #
@@ -8205,11 +8229,16 @@ async def process_pending_embedding(memory_id: UUID) -> None:
             claim_lost = False
             try:
                 # #1525: same fence as the success write — a row re-queued
-                # (`pending`) by a migration switch must not be marked failed
-                # by the worker that lost it.
+                # (`pending`) by a migration switch, or reclaimed by a newer
+                # run (#2041), must not be marked failed by the worker that
+                # lost it.
                 result = await db.execute(
                     update(Memory)
-                    .where(Memory.id == memory_id, Memory.embedding_status == "processing")
+                    .where(
+                        Memory.id == memory_id,
+                        Memory.embedding_status == "processing",
+                        Memory.embedding_attempted_at == claim.stamp,
+                    )
                     .values(**values)
                     .returning(Memory.embedding_retry_count)
                 )
@@ -8245,3 +8274,5 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                 logger.error("embedding_budget_exhausted", **common)
             else:
                 logger.warning("embedding_failed", **common)
+        finally:
+            await claim.stop_renewal()
