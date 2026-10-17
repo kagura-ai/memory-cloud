@@ -72,6 +72,7 @@ from models.schemas import (
 )
 from repositories.memory import AccessStats, MemoryRepository
 from services.capacity_lock import CapacityPolicy
+from services.content_chunk_writer import write_content_chunks
 from services.context_routing import resolve_collection_name
 from services.context_service import ContextService
 from services.embedding_service import EmbeddingService
@@ -8035,6 +8036,17 @@ async def process_pending_embedding(memory_id: UUID) -> None:
                     context_id=str(memory.context_id),
                     sparse_indices=sparse_indices,
                     sparse_values=sparse_values,
+                    collection_name=collection,
+                )
+
+                # #2015: on an opted-in context, a long content is also
+                # embedded as chunk points. Fail-open, and a no-op (no query)
+                # for content too short to split.
+                await write_content_chunks(
+                    db,
+                    memory,
+                    base_payload=payload,
+                    embed_svc=embed_svc,
                     collection_name=collection,
                 )
 
