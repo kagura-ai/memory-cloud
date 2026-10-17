@@ -2087,9 +2087,12 @@ Cost is recorded in two places, by shape:
   Each row stores its tokens, a cost snapshot priced when it is written,
   `paid_by` (`byok` when a stored workspace key was used, `platform`
   otherwise), and for the supersede check the verdict (`supersedes`,
-  `parallel` or `unclear`) and confidence in `call_metadata`. A call that
-  fails writes no row. A call whose answer could not be parsed is recorded
-  with `outcome: unparseable`, because its tokens were still spent.
+  `parallel` or `unclear`) and confidence in `call_metadata`. Every call that
+  spent tokens is recorded: an answer that could not be parsed has
+  `outcome: unparseable`, and a call that failed after the provider had
+  answered at least once (two unparseable answers, or one and then an API
+  error on the retry) has `outcome: failed` with the tokens of the attempts
+  that answered. Only a call that got no answer at all writes no row.
 
 Sleep never writes per-call rows to `llm_call_log`. A run already has a row
 that totals its calls, and counting the same spend in two tables would mean
@@ -2104,7 +2107,8 @@ yet. Because the ledger is a table, you can still answer questions such as
 after your logs have rotated:
 
 ```sql
-SELECT call_metadata->>'verdict' AS verdict, count(*), sum(input_tokens + output_tokens) AS tokens,
+SELECT coalesce(call_metadata->>'verdict', call_metadata->>'outcome') AS verdict, count(*),
+       sum(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS tokens,
        sum(cost_usd) AS cost_usd
 FROM llm_call_log
 WHERE caller = 'supersede_verify' AND occurred_at >= now() - interval '7 days'

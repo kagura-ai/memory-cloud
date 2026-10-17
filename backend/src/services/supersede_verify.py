@@ -41,9 +41,12 @@ Every billed judge call leaves one ``llm_call_log`` row (#2019,
 write-time cost snapshot, ``paid_by`` from the credential the call actually
 used, and the verdict in ``call_metadata``. The row goes through its own
 short session, so it lands even when the ingest path returns early and a
-ledger failure never touches the embedding task's session. A call that
-raised (no answer, nothing billed that we can count) writes no row; an
-unparseable answer does, since its tokens were spent.
+ledger failure never touches the embedding task's session. Every call that
+spent tokens is recorded: an unparseable answer (``outcome: unparseable``) and
+a call that raised after an attempt answered (``outcome: failed``, the usage
+``LLMServiceError.usage`` carries — two unparseable answers, or one and then
+an API error on the retry). A call no attempt of which answered writes no
+row.
 
 The judge never creates an edge: the #1208 over-supersede prevention keeps
 edge authorship with the user / agent. Memory text goes into the prompt only
@@ -545,6 +548,20 @@ async def judge_pair(
             platform_only=judge_platform_only(config),
         )
     except Exception as exc:  # noqa: BLE001 — best-effort, never blocks ingest
+        # An attempt that answered was billed even though the call failed
+        # (unparseable twice, or unparseable then an API error on the retry):
+        # ``LLMServiceError.usage`` carries that spend to the ledger.
+        spent = getattr(exc, "usage", None)
+        if spent is not None:
+            await _record_judge_call(
+                db,
+                spent,
+                call_metadata={"outcome": "failed", "prompt_revision": PROMPT_REVISION},
+                paid_by=llm.resolve_paid_by(),
+                user_id=user_id,
+                workspace_id=workspace_id,
+                context_id=context_id,
+            )
         logger.warning(
             "supersede_verify_failed",
             memory_id=str(new.id),

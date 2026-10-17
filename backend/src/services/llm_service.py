@@ -35,7 +35,18 @@ logger = get_logger(__name__)
 
 
 class LLMServiceError(Exception):
-    """Error from LLM service (parse failure, API error, etc.)."""
+    """Error from LLM service (parse failure, API error, etc.).
+
+    ``usage`` (#2019) carries the tokens the failed call still spent — set when
+    at least one attempt got an answer back (a response that would not parse,
+    then a second unparseable answer or an API error on the retry), ``None``
+    when no attempt answered. A cost ledger records it so a failed call's
+    spend is not lost; ``parsed`` is ``{}`` on it.
+    """
+
+    def __init__(self, message: str, *, usage: LLMResponse | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage
 
 
 @dataclass(frozen=True)
@@ -255,6 +266,7 @@ class LLMService:
 
         # Retry with higher temperature (no-op on reasoning models that
         # only accept default — the provider omits temperature internally).
+        retry_usage: Usage | None = None
         try:
             response = await provider_instance.complete_json(
                 prompt=prompt,
@@ -282,11 +294,27 @@ class LLMService:
 
         except json.JSONDecodeError as e:
             raise LLMServiceError(
-                f"LLM JSON parse failed after retry ({resolved_provider}/{resolved_model}): {e}"
+                f"LLM JSON parse failed after retry ({resolved_provider}/{resolved_model}): {e}",
+                usage=self._build_response(
+                    parsed={},
+                    first=first_usage,
+                    retry=retry_usage,
+                    provider=resolved_provider,
+                    model=resolved_model,
+                ),
             ) from e
         except Exception as e:
+            # The first attempt answered (unparseable) and was billed; the
+            # retry did not answer, so only the first attempt's usage counts.
             raise LLMServiceError(
-                f"LLM API call failed on retry ({resolved_provider}/{resolved_model}): {e}"
+                f"LLM API call failed on retry ({resolved_provider}/{resolved_model}): {e}",
+                usage=self._build_response(
+                    parsed={},
+                    first=first_usage,
+                    retry=None,
+                    provider=resolved_provider,
+                    model=resolved_model,
+                ),
             ) from e
 
     async def list_models(

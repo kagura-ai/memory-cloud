@@ -556,6 +556,25 @@ class TestJudgeLedger:
         session.commit.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_failed_call_that_spent_tokens_records_them(self):
+        """Two unparseable answers (or one, then an API error on the retry):
+        ``complete_json`` raises, but the spend rides on ``.usage``."""
+        from services.llm_service import LLMServiceError
+
+        session, writer, session_cm = self._ledger()
+        error = LLMServiceError("parse failed twice", usage=self._response({}))
+        llm = self._llm(error=error, paid_by="byok")
+        assert await self._judge(llm, session_cm=session_cm, writer=writer) is None
+        kwargs = writer.return_value.record.await_args.kwargs
+        assert kwargs["call_metadata"] == {
+            "outcome": "failed",
+            "prompt_revision": sv.PROMPT_REVISION,
+        }
+        assert (kwargs["input_tokens"], kwargs["output_tokens"]) == (100, 40)
+        assert kwargs["paid_by"] == "byok"
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_unparseable_answer_still_records_the_billed_call(self):
         """The provider billed the tokens even though the verdict is unusable."""
         session, writer, session_cm = self._ledger()

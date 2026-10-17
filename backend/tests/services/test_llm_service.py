@@ -624,3 +624,45 @@ class TestResolvePaidBy:
             settings.return_value.self_hosted_api_key = ""
             await llm_service._get_provider("u1", "self_hosted", workspace_id="ws")
         assert llm_service.resolve_paid_by() == "platform"
+
+
+class TestFailedCallUsage:
+    """#2019 review: a failed call that still spent tokens carries them on
+    ``LLMServiceError.usage`` so a ledger can record the spend."""
+
+    @pytest.mark.asyncio
+    async def test_double_parse_failure_carries_both_attempts(self, llm_service):
+        provider = AsyncMock()
+        provider.complete_json.side_effect = [
+            _make_provider_response("not json", total=30, input_tokens=20, output_tokens=10),
+            _make_provider_response("still not", total=35, input_tokens=21, output_tokens=14),
+        ]
+        with patch.object(llm_service, "_get_provider", new=AsyncMock(return_value=provider)):
+            with pytest.raises(LLMServiceError) as excinfo:
+                await llm_service.complete_json("u1", "p", provider="openai", model="m")
+        usage = excinfo.value.usage
+        assert usage is not None
+        assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (41, 24, 65)
+        assert (usage.provider, usage.model) == ("openai", "m")
+
+    @pytest.mark.asyncio
+    async def test_parse_failure_then_api_error_carries_the_first_attempt(self, llm_service):
+        provider = AsyncMock()
+        provider.complete_json.side_effect = [
+            _make_provider_response("not json", total=30, input_tokens=20, output_tokens=10),
+            RuntimeError("upstream 500"),
+        ]
+        with patch.object(llm_service, "_get_provider", new=AsyncMock(return_value=provider)):
+            with pytest.raises(LLMServiceError) as excinfo:
+                await llm_service.complete_json("u1", "p", provider="openai", model="m")
+        usage = excinfo.value.usage
+        assert usage is not None and (usage.input_tokens, usage.output_tokens) == (20, 10)
+
+    @pytest.mark.asyncio
+    async def test_first_attempt_api_error_carries_no_usage(self, llm_service):
+        provider = AsyncMock()
+        provider.complete_json.side_effect = RuntimeError("API down")
+        with patch.object(llm_service, "_get_provider", new=AsyncMock(return_value=provider)):
+            with pytest.raises(LLMServiceError) as excinfo:
+                await llm_service.complete_json("u1", "p")
+        assert excinfo.value.usage is None
