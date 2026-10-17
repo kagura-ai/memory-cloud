@@ -1906,8 +1906,12 @@ unreachable, HTTP error, every document scoring failed), the un-reranked hybrid
 results are returned and exactly one warning is logged:
 
 ```
-rerank_failed_open provider=self_hosted error_class=ConnectError context_id=... workspace_id=...
+rerank_failed_open provider=self_hosted error_class=ConnectError status_code=None context_id=... workspace_id=...
 ```
+
+The event carries the error class and, for an HTTP error, the status code —
+never the error text, which for an HTTP client error embeds the request URL
+and any credentials in it.
 
 A rerank whose scores carry no ranking is checked in one place for every
 provider (Voyage, Cohere, `/v1/rerank`, the Ollama path), on the scores of all
@@ -1921,12 +1925,18 @@ candidates before the cut to *k* (#2033):
   relevant memories at 1, or duplicate memories, can tie on a small list),
   but no ranking either — the hybrid order and scores are kept and
   `rerank_no_signal` (info, with `doc_count`) is logged.
-- A single candidate is never judged.
+- A single candidate is never judged, and neither is a provider reply with
+  fewer results than candidates (only the returned results are mapped).
 
-Ollama replies that hold no score are also counted in one warning per recall:
+On the Ollama path a document whose request failed or whose reply holds no
+score is *unscored*. Up to 20% of the candidates may be unscored: they keep
+their hybrid order and `hybrid_score` and are placed after the scored ones
+(no 0 is written for them). Above 20% (for example most requests timing out)
+the recall fails open with `RerankNotDiscriminatingError`. Either way one
+warning per recall gives the counts:
 
 ```
-self_hosted_rerank_unparseable model=... rerank_format=qwen3 unparseable_count=4 failed_count=0 doc_count=4
+self_hosted_rerank_unscored model=... rerank_format=qwen3 unparseable_count=1 failed_count=1 doc_count=10
 ```
 
 Alert on `rerank_failed_open` (a structured log event — the backend has no
