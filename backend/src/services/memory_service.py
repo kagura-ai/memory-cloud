@@ -200,6 +200,16 @@ def _log_embedding_task_result(task: asyncio.Task, memory_id: str) -> None:
         )
 
 
+def _is_trusted_recall(request: RecallRequest) -> bool:
+    """Whether a recall runs under ``filters={"trust_tier": "trusted"}`` (#887).
+
+    The one reading of the trusted filter: the row filter, the supersede
+    resolver's connector exclusion and the selection-evidence guard all ask
+    here, so they cannot drift apart.
+    """
+    return (request.filters or {}).get("trust_tier") == "trusted"
+
+
 def location_payload_from_details(details: dict | None) -> dict | None:
     """Qdrant ``location`` geo payload value from a details dict (#1332).
 
@@ -4233,7 +4243,7 @@ class MemoryService:
             # Issue #887: trust-tier read filter. ``trusted`` excludes
             # external-origin memories from behaviour-influencing reads (OWASP
             # LLM01/LLM03 — external content is data, not instructions).
-            if request.filters.get("trust_tier") == "trusted":
+            if _is_trusted_recall(request):
                 # Authoritative check: the memory's context must itself be
                 # trusted. ``Context.trust_tier`` is the server-side trust
                 # signal (connector contexts = 'external'), so a non-connector
@@ -4403,7 +4413,7 @@ class MemoryService:
             page_memories,
             user_id=user_id,
             operation="recall",
-            trusted_only=bool(request.filters) and request.filters.get("trust_tier") == "trusted",
+            trusted_only=_is_trusted_recall(request),
         )
 
         responses: list[MemoryResponse] = []
@@ -5132,9 +5142,7 @@ class MemoryService:
         # Single Collection Migration: Validate required parameters
         if not current_workspace_id or not current_context_id:
             raise ValueError("recall() requires current_workspace_id and current_context_id")
-        if selection_config is not None and (
-            not request.filters or request.filters.get("trust_tier") != "trusted"
-        ):
+        if selection_config is not None and not _is_trusted_recall(request):
             raise ValueError("selection evidence requires trusted-tier recall")
 
         # #1291: recall does NOT pass through

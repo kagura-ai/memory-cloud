@@ -167,3 +167,24 @@ class TestBootstrapRecall:
 
         assert page[0].supersede_candidate is None
         assert "supersede_candidate" not in recall_result_item(page[0], "full")
+
+
+class TestIsTrustedRecall:
+    """One predicate for the trusted filter — the row filter, the supersede
+    resolver and the selection-evidence guard read it the same way."""
+
+    @pytest.mark.parametrize(
+        ("filters", "expected"),
+        [
+            (None, False),
+            ({}, False),
+            ({"trust_tier": "all"}, False),
+            ({"source_type": "manual"}, False),
+            ({"trust_tier": "trusted"}, True),
+            ({"trust_tier": "trusted", "type": "note"}, True),
+        ],
+    )
+    def test_reads_the_trust_tier_filter(self, filters, expected):
+        from services.memory_service import _is_trusted_recall
+
+        assert _is_trusted_recall(RecallRequest(query="q", filters=filters)) is expected
