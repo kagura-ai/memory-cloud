@@ -91,7 +91,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "reuse existing tag spellings. Tags: at most 50, 100 characters each; mix "
         "category tags ('category:auth') and entity tags ('oauth2', 'fastapi'); for "
         "Japanese add the kanji form and one kana form (['鯖', 'サバ']) — hiragana and "
-        "katakana fold together, so tags_normalize=true matches either script."
+        "katakana fold together; with one kana form stored, a filter in the other "
+        "script needs tags_normalize=true."
     ),
     "remember.supersedes": (
         "Updating a fact: pass supersedes=<old_memory_id>. The old memory is shadowed "
