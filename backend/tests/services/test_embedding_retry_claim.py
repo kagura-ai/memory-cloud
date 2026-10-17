@@ -11,8 +11,11 @@ counter only for previously-failed rows.
 
 from __future__ import annotations
 
+from datetime import datetime
+from types import ModuleType
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy.dialects import postgresql
@@ -236,3 +239,114 @@ async def test_failure_write_is_fenced_on_still_owning_the_claim():
     ).upper()
     assert "EMBEDDING_STATUS = 'PROCESSING'" in sql.replace("MEMORIES.", "")
     assert "'FAILED'" in sql
+
+
+# --------------------------------------------------------------------- #2041
+# A run that outlives the 60 s stale cutoff is reclaimed by the sweep: the
+# newer run stamps its own `embedding_attempted_at` and the status stays
+# `processing`. The old run's outcome must not land on the newer claim — a
+# `success` there would hide a later failed chunk write of the newer run from
+# every retry. Both writes are fenced on the stamp this run's claim wrote.
+
+_CLAIM_STAMP = datetime(2026, 1, 2, 3, 4, 5, 678901)
+
+
+def _compiled(stmt: Any) -> str:
+    return (
+        str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+        .upper()
+        .replace("MEMORIES.", "")
+    )
+
+
+async def _run_worker(
+    memory_service: ModuleType, db: MagicMock, embed_svc: MagicMock
+) -> tuple[AsyncMock, AsyncMock, MagicMock]:
+    async def _aiter():
+        yield db
+
+    with (
+        patch("db.base.get_db", return_value=_aiter()),
+        patch("utils.datetime.utcnow", return_value=_CLAIM_STAMP),
+        patch("services.embedding_service.EmbeddingService", MagicMock()),
+        patch(
+            "services.context_routing.resolve_context_routing",
+            AsyncMock(return_value=("kagura_memories", embed_svc)),
+        ),
+        patch.object(memory_service, "add_memory_to_qdrant", AsyncMock()),
+        patch.object(memory_service, "build_memory_point", return_value=({}, [], [])),
+        patch.object(memory_service, "_create_knn_seed_edges", AsyncMock()) as knn,
+        patch.object(memory_service, "_create_tag_cooccurrence_seed_edges", AsyncMock()) as tags,
+        patch.object(memory_service, "logger") as log,
+    ):
+        await memory_service.process_pending_embedding(db.memory_id)
+    return knn, tags, log
+
+
+def _capturing_db(memory_id: UUID, execute_results: list[MagicMock]) -> MagicMock:
+    db = _worker_db(execute_results)
+    db.memory_id = memory_id
+    db.captured = []
+    original_execute = db.execute
+
+    async def _execute(stmt, *a, **k):
+        db.captured.append(stmt)
+        return await original_execute(stmt, *a, **k)
+
+    db.execute = AsyncMock(side_effect=_execute)
+    return db
+
+
+@pytest.mark.asyncio
+async def test_a_reclaimed_run_does_not_stamp_success_on_the_newer_claim():
+    from services import memory_service
+
+    memory_id = uuid4()
+    # The newer claim moved the stamp: the fenced success UPDATE matches nothing.
+    db = _capturing_db(
+        memory_id, [_claimed(memory_id), _memory_row(memory_id), _chunk_flag(False), _rowcount(0)]
+    )
+    embed_svc = MagicMock()
+    embed_svc.embed = AsyncMock(return_value=[0.1])
+    embed_svc.model = "m"
+
+    knn, tags, log = await _run_worker(memory_service, db, embed_svc)
+
+    claim_sql, success_sql = _compiled(db.captured[0]), _compiled(db.captured[3])
+    # The claim writes the stamp the outcome is fenced on.
+    assert "EMBEDDING_ATTEMPTED_AT='2026-01-02 03:04:05.678901'" in claim_sql.split("WHERE", 1)[0]
+    assert "'SUCCESS'" in success_sql
+    where = success_sql.split("WHERE", 1)[1]
+    assert "EMBEDDING_STATUS = 'PROCESSING'" in where
+    assert "EMBEDDING_ATTEMPTED_AT = '2026-01-02 03:04:05.678901'" in where
+    # Fenced out: one info line, nothing else (no seeding, no further writes).
+    assert len(db.captured) == 4
+    knn.assert_not_awaited()
+    tags.assert_not_awaited()
+    events = [c.args[0] for c in log.info.call_args_list]
+    assert events == ["embedding_claim_lost"]
+
+
+@pytest.mark.asyncio
+async def test_a_reclaimed_run_does_not_mark_the_newer_claim_failed():
+    from services import memory_service
+
+    memory_id = uuid4()
+    db = _capturing_db(memory_id, [_claimed(memory_id), _memory_row(memory_id), _rowcount(0)])
+    embed_svc = MagicMock()
+    embed_svc.embed = AsyncMock(side_effect=RuntimeError("provider down"))
+
+    _, _, log = await _run_worker(memory_service, db, embed_svc)
+
+    failure_sql = _compiled(db.captured[2])
+    assert "'FAILED'" in failure_sql
+    where = failure_sql.split("WHERE", 1)[1]
+    assert "EMBEDDING_STATUS = 'PROCESSING'" in where
+    # The failure write itself moves the stamp (the #979 backoff clock); the
+    # fence still compares the value this run's claim wrote.
+    assert "EMBEDDING_ATTEMPTED_AT = '2026-01-02 03:04:05.678901'" in where
+    assert len(db.captured) == 3
+    events = [c.args[0] for c in log.info.call_args_list]
+    assert events == ["embedding_claim_lost"]
+    log.warning.assert_not_called()
+    log.error.assert_not_called()

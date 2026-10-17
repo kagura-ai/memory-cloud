@@ -39,13 +39,17 @@ is then fail-open: the summary point is already written and the memory stays
 summary-only until its next re-embed. ``process_pending_embedding`` passes
 ``fail_open=False`` (#2049) so the failure is raised and the row is marked
 failed and retried by the embedding sweep, never stamped ``success`` without
-its chunks.
+its chunks. Its outcome write is fenced on the claim's own
+``embedding_attempted_at``, so a run superseded here (it returns 0, like a
+no-op) cannot stamp the newer run's claim either.
 """
 
 from __future__ import annotations
 
 import time
-from typing import Any
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,6 +60,9 @@ from models.memory import Memory
 from utils.content_chunks import build_chunk_payload, chunk_point_id, split_content
 from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from services.embedding_claim import EmbeddingClaim
 
 logger = get_logger(__name__)
 
@@ -142,15 +149,31 @@ async def _superseded(
     return result.scalar_one_or_none() is None
 
 
+@asynccontextmanager
+async def _claim_stamp(claim: EmbeddingClaim | None, fallback: Any) -> AsyncIterator[Any]:
+    """The stamp to check against: the run's own claim (renewals held off), or
+    the row's stamp as loaded for a caller without one (the Sleep paths)."""
+    if claim is None:
+        yield fallback
+        return
+    async with claim.held() as stamp:
+        yield stamp
+
+
 async def _superseded_before_delete(
-    db: AsyncSession, memory: Memory, content: str | None, claimed_at: Any
+    db: AsyncSession,
+    memory: Memory,
+    content: str | None,
+    claimed_at: Any,
+    claim: EmbeddingClaim | None,
 ) -> bool:
     """The first superseded check (#2041); a failed lookup does not stop the run.
 
     The check right before the upsert still runs; a failure there writes nothing.
     """
     try:
-        superseded = await _superseded(db, memory.id, content, claimed_at)
+        async with _claim_stamp(claim, claimed_at) as stamp:
+            superseded = await _superseded(db, memory.id, content, stamp)
     except Exception as e:
         logger.warning(
             "content_chunks_superseded_check_failed",
@@ -176,6 +199,7 @@ async def write_content_chunks(
     collection_name: str,
     chunks_enabled: bool | None = None,
     fail_open: bool = True,
+    claim: EmbeddingClaim | None = None,
 ) -> int:
     """Replace the memory's chunk points; return how many were written.
 
@@ -196,6 +220,9 @@ async def write_content_chunks(
             is read again, fresh, right before the upsert.
         fail_open: False re-raises a failed flag lookup, embedding or upsert
             after logging it (#2049), so the caller's failure path retries.
+        claim: The embedding run's own claim (#2041); its stamp, renewed
+            while the run works, is what the superseded checks compare.
+            ``None`` compares the row's ``embedding_attempted_at`` as loaded.
 
     Raises:
         Exception: a failed delete of the old chunk points; with
@@ -216,7 +243,7 @@ async def write_content_chunks(
         return 0
     if not chunks_enabled or not chunk_points_supported():
         return 0
-    if await _superseded_before_delete(db, memory, content, claimed_at):
+    if await _superseded_before_delete(db, memory, content, claimed_at, claim):
         return 0
     await delete_chunk_points([memory.id], collection_name)
     chunks = split_content(content)
@@ -247,7 +274,9 @@ async def write_content_chunks(
             return 0
         # #2041: an edit or a newer embedding run landed while the chunks were
         # embedded; that run writes the chunks of the current content.
-        if await _superseded(db, memory.id, content, claimed_at):
+        async with _claim_stamp(claim, claimed_at) as stamp:
+            superseded = await _superseded(db, memory.id, content, stamp)
+        if superseded:
             logger.info(
                 "content_chunks_skipped_superseded",
                 memory_id=str(memory.id),
