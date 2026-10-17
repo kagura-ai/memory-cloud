@@ -5,7 +5,9 @@ stamping ``embedding_attempted_at``. The embedding sweep reclaims a
 ``processing`` row whose stamp is older than the 60 s stale cutoff: that is the
 crash recovery for a worker that died mid-run. The stamp is also the run's
 claim token. The chunk writer's superseded checks and the run's outcome writes
-match on it, so the result of a reclaimed run never lands on the newer claim.
+match on it, so a reclaimed run neither writes its chunks over the newer
+claim's nor records its status on it. (Its summary-point upsert is not fenced;
+see ``content_chunk_writer``.)
 
 A run that is only slow (a slow provider, a large chunk batch) must not be
 reclaimed for it: it would be fenced out, the newer run would be reclaimed in
@@ -56,6 +58,8 @@ class EmbeddingClaim:
         self._lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._renewing = False
+        self._gone = False
 
     @asynccontextmanager
     async def held(self) -> AsyncIterator[datetime]:
@@ -69,15 +73,22 @@ class EmbeddingClaim:
             self._task = asyncio.create_task(self._renew_loop())
 
     async def stop_renewal(self) -> None:
-        """Stop renewing; waits for a renewal in flight, so ``stamp`` is final."""
+        """Stop renewing, so ``stamp`` is final.
+
+        A renewal already writing (it holds the lock) is waited for; one still
+        waiting for a pooled connection is cancelled instead.
+        """
         self._stop.set()
         task, self._task = self._task, None
-        if task is not None:
-            await task
+        if task is None:
+            return
+        if not self._renewing:
+            task.cancel()
+        await asyncio.wait({task})
 
     async def _renew_loop(self) -> None:
         deadline = time.monotonic() + MAX_RENEW_SECONDS
-        while True:
+        while not self._gone:
             try:
                 await asyncio.wait_for(self._stop.wait(), RENEW_INTERVAL_SECONDS)
                 return
@@ -86,38 +97,44 @@ class EmbeddingClaim:
             if time.monotonic() >= deadline:
                 logger.warning("embedding_claim_renewal_expired", memory_id=str(self.memory_id))
                 return
+            try:
+                await self._renew()
+            except Exception as e:
+                logger.warning(
+                    "embedding_claim_renew_failed",
+                    memory_id=str(self.memory_id),
+                    error_class=type(e).__name__,
+                )
+
+    async def _renew(self) -> None:
+        """Move the stamp while this run still holds it; mark the claim gone if not."""
+        from utils.datetime import utcnow
+
+        async with isolated_session(self._db) as session:
+            # Check out the connection before taking the lock: under pool
+            # pressure the wait must not hold off the chunk writer's checks.
+            await session.connection()
             async with self._lock:
                 if self._stop.is_set():
                     return
+                self._renewing = True
                 try:
-                    renewed = await self._renew()
-                except Exception as e:
-                    logger.warning(
-                        "embedding_claim_renew_failed",
-                        memory_id=str(self.memory_id),
-                        error_class=type(e).__name__,
+                    new_stamp = utcnow()
+                    result = await session.execute(
+                        update(Memory)
+                        .where(
+                            Memory.id == self.memory_id,
+                            Memory.embedding_status == "processing",
+                            Memory.embedding_attempted_at == self.stamp,
+                        )
+                        .values(embedding_attempted_at=new_stamp)
+                        .returning(Memory.id)
                     )
-                    continue
-                if renewed is None:
-                    return  # The claim is gone; the outcome write logs it.
-                self.stamp = renewed
-
-    async def _renew(self) -> datetime | None:
-        """Move the stamp while this run still holds it; None when it does not."""
-        from utils.datetime import utcnow
-
-        new_stamp = utcnow()
-        async with isolated_session(self._db) as session:
-            result = await session.execute(
-                update(Memory)
-                .where(
-                    Memory.id == self.memory_id,
-                    Memory.embedding_status == "processing",
-                    Memory.embedding_attempted_at == self.stamp,
-                )
-                .values(embedding_attempted_at=new_stamp)
-                .returning(Memory.id)
-            )
-            renewed = result.scalar_one_or_none() is not None
-            await session.commit()
-        return new_stamp if renewed else None
+                    renewed = result.scalar_one_or_none() is not None
+                    await session.commit()
+                    if renewed:
+                        self.stamp = new_stamp
+                    else:
+                        self._gone = True  # Re-queued or reclaimed; the outcome write logs it.
+                finally:
+                    self._renewing = False

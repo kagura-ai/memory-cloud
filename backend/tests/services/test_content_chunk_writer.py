@@ -443,10 +443,25 @@ async def test_the_superseded_check_compares_content_status_and_claim():
 
     from sqlalchemy.dialects import postgresql
 
+    from services.embedding_claim import EmbeddingClaim
+
     claimed_at = datetime(2026, 1, 2, 3, 4, 5, 678901)
-    memory = _memory(LONG, embedding_attempted_at=claimed_at)
+    memory = _memory(LONG, embedding_attempted_at=None)
     db = _db_superseded_check(True)
-    await _write_with(db, memory)
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()),
+    ):
+        await writer.write_content_chunks(
+            db,
+            memory,
+            base_payload={},
+            embed_svc=_embed_svc(),
+            collection_name="c",
+            # The run's own claim, not the stamp loaded on the row.
+            claim=EmbeddingClaim(db, memory.id, claimed_at),
+        )
 
     stmt = db.execute.await_args_list[3].args[0]
     assert str(stmt) == str(db.execute.await_args_list[1].args[0])  # same check twice
@@ -462,6 +477,22 @@ async def test_the_superseded_check_compares_content_status_and_claim():
     assert LONG in params.values()  # the content this run split and embedded
     assert "pending" in params.values()
     assert claimed_at in params.values()
+
+
+async def test_a_caller_without_a_claim_compares_no_stamp():
+    """The Sleep paths hold no claim: a live run renewing its stamp must not
+    read to them as a newer claim (#2041), so only the content etc. is checked."""
+    from datetime import datetime
+
+    memory = _memory(LONG, embedding_attempted_at=datetime(2026, 1, 2, 3, 4, 5))
+    db = _db_superseded_check(True)
+    n, upsert, _ = await _write_with(db, memory)
+    assert n == len(split_content(LONG))
+    upsert.assert_awaited_once()
+    for call in (db.execute.await_args_list[1], db.execute.await_args_list[3]):
+        sql = str(call.args[0])
+        assert "memories.content = " in sql
+        assert "embedding_attempted_at" not in sql
 
 
 async def test_the_snapshot_is_taken_before_anything_is_awaited():
