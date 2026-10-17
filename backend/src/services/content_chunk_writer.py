@@ -1,14 +1,21 @@
 """Write a memory's content chunk points (#2015).
 
-Called by ``process_pending_embedding`` after the memory's summary point is
-upserted. Only a context with ``ContextSearchConfig.content_chunks_enabled``
-gets chunk points, and only for content long enough to split
-(``utils.content_chunks.split_content``). Every write first deletes the
-memory's existing chunk points, so a re-embed after a content change (or of a
-memory whose context turned the flag off) leaves no stale chunks.
+Called after a memory's summary point is upserted (``process_pending_embedding``,
+the Sleep reindex and the Sleep undo). The invariant the rest of the system
+relies on: **a context with ``content_chunks_enabled`` off has no chunk
+points** — so a chunk point never holds body text the memory no longer has,
+and callers on such a context can skip the chunk cascade.
 
-Fail-open: the summary point is already written, so any failure here is
-logged (``content_chunks_failed``) and the memory stays a summary-only memory.
+- Flag off: nothing is read from or written to the vector store (turning
+  the flag off purges the context's chunks, see
+  ``purge_context_chunk_points``).
+- Flag on: the memory's chunk points are always deleted first, then
+  rewritten from the current content — content that shrank below the split
+  threshold therefore just loses its chunks.
+
+Fail-open: the summary point is already written, so a failure here is logged
+(``content_chunks_failed``, error class only — never the text) and the memory
+stays a summary-only memory until its next re-embed.
 """
 
 from __future__ import annotations
@@ -18,7 +25,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.qdrant import delete_chunk_points, upsert_chunk_points
+from db.qdrant import chunk_points_supported, delete_chunk_points, upsert_chunk_points
 from models.config import ContextSearchConfig
 from models.memory import Memory
 from utils.content_chunks import build_chunk_payload, chunk_point_id, split_content
@@ -46,23 +53,29 @@ async def write_content_chunks(
     base_payload: dict[str, Any],
     embed_svc: Any,
     collection_name: str,
+    chunks_enabled: bool | None = None,
 ) -> int:
     """Replace the memory's chunk points; return how many were written.
 
-    ``base_payload`` is the memory's summary-point payload (from
-    ``build_memory_point``). Content too short to split returns before any
-    query or Qdrant call, so the common short memory costs nothing. Known
-    limit: a memory whose content shrinks below the split threshold keeps its
-    old chunk points until it is deleted or rewritten long again (they still
-    collapse to the same memory, and payload updates still reach them).
+    Args:
+        db: Session used for the flag lookup.
+        memory: The memory row (its ``content`` is split).
+        base_payload: The memory's summary-point payload (``build_memory_point``).
+        embed_svc: The context's embedding service.
+        collection_name: The context's routed collection.
+        chunks_enabled: The context's flag when the caller already has it
+            (a per-context batch); ``None`` looks it up.
     """
-    chunks = split_content(memory.content)
-    if not chunks:
-        return 0
+    points: list[tuple[str, list[float], dict[str, Any]]] = []
     try:
-        if not await content_chunks_enabled(db, memory.context_id):
+        if chunks_enabled is None:
+            chunks_enabled = await content_chunks_enabled(db, memory.context_id)
+        if not chunks_enabled or not chunk_points_supported():
             return 0
         await delete_chunk_points([memory.id], collection_name)
+        chunks = split_content(memory.content)
+        if not chunks:
+            return 0
         vectors = await embed_svc.embed_batch(
             chunks,
             memory.user_id,
@@ -92,7 +105,6 @@ async def write_content_chunks(
             memory_id=str(memory.id),
             collection=collection_name,
             error_class=type(e).__name__,
-            error=str(e)[:200],
         )
         return 0
     logger.info(

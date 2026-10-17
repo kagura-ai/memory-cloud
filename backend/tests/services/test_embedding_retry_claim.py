@@ -137,6 +137,12 @@ def _memory_row(memory_id):
     return result
 
 
+def _chunk_flag(enabled):
+    result = MagicMock()
+    result.scalar_one_or_none = MagicMock(return_value=enabled)
+    return result
+
+
 def _rowcount(n):
     result = MagicMock()
     result.rowcount = n
@@ -150,7 +156,8 @@ async def test_success_write_is_fenced_on_still_owning_the_claim():
 
     memory_id = uuid4()
     captured: list = []
-    db = _worker_db([_claimed(memory_id), _memory_row(memory_id), _rowcount(0)])
+    # #2015: the content-chunk flag is read after the summary point (off here).
+    db = _worker_db([_claimed(memory_id), _memory_row(memory_id), _chunk_flag(False), _rowcount(0)])
     original_execute = db.execute
 
     async def _execute(stmt, *a, **k):
@@ -180,10 +187,11 @@ async def test_success_write_is_fenced_on_still_owning_the_claim():
     ):
         await memory_service.process_pending_embedding(memory_id)
 
-    # claim UPDATE, SELECT memory, success UPDATE — and nothing after a lost claim.
-    assert len(captured) == 3
+    # claim UPDATE, SELECT memory, chunk-flag SELECT, success UPDATE — and
+    # nothing after a lost claim.
+    assert len(captured) == 4
     sql = str(
-        captured[2].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+        captured[3].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
     ).upper()
     assert "EMBEDDING_STATUS = 'PROCESSING'" in sql.replace("MEMORIES.", "")
     assert "'SUCCESS'" in sql

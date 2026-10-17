@@ -990,6 +990,14 @@ async def _cascade_payload_to_chunks(
         )
 
 
+def chunk_points_supported() -> bool:
+    """Whether the active vector store holds content chunk points (#2015).
+
+    Qdrant only: the LanceDB store keeps one vector per memory.
+    """
+    return _active_store() is None
+
+
 async def upsert_chunk_points(
     points: Sequence[tuple[str, list[float], dict[str, Any]]],
     *,

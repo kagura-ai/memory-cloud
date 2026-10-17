@@ -43,19 +43,77 @@ def _embed_svc():
 LONG = "x" * (CONTENT_CHUNK_MIN_CONTENT_CHARS * 3)
 
 
-async def test_short_content_costs_no_query_and_no_qdrant_call():
-    db = _db(True)
+async def test_flag_on_short_content_still_deletes_old_chunks():
+    """Shrink below the split threshold: the old body text must not survive."""
+    memory = _memory("short")
     with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
         patch.object(writer, "delete_chunk_points", AsyncMock()) as delete,
         patch.object(writer, "upsert_chunk_points", AsyncMock()) as upsert,
     ):
+        svc = _embed_svc()
         n = await writer.write_content_chunks(
-            db, _memory("short"), base_payload={}, embed_svc=_embed_svc(), collection_name="c"
+            _db(True), memory, base_payload={}, embed_svc=svc, collection_name="c"
         )
     assert n == 0
-    db.execute.assert_not_awaited()
-    delete.assert_not_awaited()
+    delete.assert_awaited_once_with([memory.id], "c")
+    svc.embed_batch.assert_not_awaited()
     upsert.assert_not_awaited()
+
+
+async def test_a_preloaded_flag_skips_the_lookup():
+    db = _db(True)
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()) as upsert,
+    ):
+        await writer.write_content_chunks(
+            db,
+            _memory(LONG),
+            base_payload={},
+            embed_svc=_embed_svc(),
+            collection_name="c",
+            chunks_enabled=False,
+        )
+    db.execute.assert_not_awaited()
+    upsert.assert_not_awaited()
+
+
+async def test_no_paid_embedding_on_a_store_without_chunk_points():
+    """LanceDB: no chunk points can be stored, so nothing is embedded."""
+    svc = _embed_svc()
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=False),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()) as upsert,
+    ):
+        n = await writer.write_content_chunks(
+            _db(True), _memory(LONG), base_payload={}, embed_svc=svc, collection_name="c"
+        )
+    assert n == 0
+    svc.embed_batch.assert_not_awaited()
+    upsert.assert_not_awaited()
+
+
+async def test_failure_log_carries_the_error_class_only():
+    import structlog
+
+    svc = MagicMock()
+    svc.embed_batch = AsyncMock(side_effect=RuntimeError("secret body text"))
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()),
+    ):
+        await writer.write_content_chunks(
+            _db(True), _memory(LONG), base_payload={}, embed_svc=svc, collection_name="c"
+        )
+    event = next(e for e in logs if e["event"] == "content_chunks_failed")
+    assert event["error_class"] == "RuntimeError"
+    assert "error" not in event
+    assert "secret body text" not in repr(event)
 
 
 async def test_flag_off_writes_nothing():
@@ -76,6 +134,7 @@ async def test_flag_on_replaces_chunks():
     svc = _embed_svc()
     calls = []
     with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
         patch.object(
             writer, "delete_chunk_points", AsyncMock(side_effect=lambda *a: calls.append("delete"))
         ) as delete,
@@ -113,6 +172,7 @@ async def test_failure_is_fail_open():
     svc = MagicMock()
     svc.embed_batch = AsyncMock(side_effect=RuntimeError("provider down"))
     with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
         patch.object(writer, "delete_chunk_points", AsyncMock()),
         patch.object(writer, "upsert_chunk_points", AsyncMock()) as upsert,
     ):
