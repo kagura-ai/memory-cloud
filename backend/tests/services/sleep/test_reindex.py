@@ -265,8 +265,8 @@ class TestReindexResourceRows:
     async def test_resource_row_is_rebuilt_by_the_indexer(
         self, mock_indexer_cls, mock_write, mock_qdrant, reindex_phase, mock_db
     ):
-        resource, plain = _make_resource_memory(), _make_memory()
-        _mock_batch_fetch(mock_db, [resource, plain])
+        resource, other, plain = _make_resource_memory(), _make_resource_memory(), _make_memory()
+        _mock_batch_fetch(mock_db, [resource, other, plain])
 
         async def _rebuild(memory, *, collection_name, embedding_service, usage):
             usage["tokens"] = 11
@@ -277,15 +277,15 @@ class TestReindexResourceRows:
         reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1], 5))
 
         result = await reindex_phase.execute(
-            changed_memory_ids={resource.id, plain.id},
+            changed_memory_ids={resource.id, other.id, plain.id},
             user_id="user-1",
             workspace_id=str(uuid4()),
             context_id=str(uuid4()),
         )
 
+        # One indexer for the batch, one rebuild per resource row.
         mock_indexer_cls.assert_called_once_with(mock_db)
-        rebuild.assert_awaited_once()
-        assert rebuild.await_args.args == (resource,)
+        assert {c.args[0] for c in rebuild.await_args_list} == {resource, other}
         assert rebuild.await_args.kwargs["collection_name"] == "kagura_memories"
         assert rebuild.await_args.kwargs["embedding_service"] is reindex_phase.embedding_service
         # No summary upsert and no chunk rewrite for the resource row.
@@ -293,9 +293,9 @@ class TestReindexResourceRows:
         assert [c.args[1] for c in mock_write.await_args_list] == [plain]
         # Only the plain row's label-free summary was embedded here.
         assert reindex_phase.embedding_service.embed_with_usage.await_count == 1
-        assert result.details["reindexed"] == 2
-        assert result.embedding_calls_used == 2
-        assert result.embedding_tokens == 16
+        assert result.details["reindexed"] == 3
+        assert result.embedding_calls_used == 3
+        assert result.embedding_tokens == 27
 
     @pytest.mark.asyncio
     @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)

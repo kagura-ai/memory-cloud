@@ -92,6 +92,9 @@ class ReindexPhase:
             except Exception:  # noqa: BLE001 — the writer retries the lookup
                 chunks_enabled = None
 
+        # #2053: built on the first resource-indexer row, then reused.
+        resource_indexer: ResourceIndexer | None = None
+
         for memory_id in changed_memory_ids:
             memory = memory_map.get(memory_id)
             if not memory:
@@ -107,9 +110,11 @@ class ReindexPhase:
                     # rebuilds its own point instead, as
                     # process_pending_embedding does (#1870). It has no
                     # content chunks to rewrite.
+                    if resource_indexer is None:
+                        resource_indexer = ResourceIndexer(self.db)
                     usage: dict[str, int] = {}
                     try:
-                        await ResourceIndexer(self.db).rebuild_point(
+                        await resource_indexer.rebuild_point(
                             memory,
                             collection_name=self.collection_name,
                             embedding_service=self.embedding_service,
