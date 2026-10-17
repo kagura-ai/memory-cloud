@@ -942,6 +942,28 @@ class Settings(BaseSettings):
             "Sent as 'Authorization: Bearer ...' by VLLMReranker; empty = no header."
         ),
     )
+    rerank_prompt_format: Literal["auto", "qwen3", "raw"] = Field(
+        default="auto",
+        description=(
+            "How VLLMReranker formats the query and documents for the /v1/rerank "
+            "endpoint (RERANK_BASE_URL). 'qwen3' wraps them in the Qwen3-Reranker "
+            "prompt template (system judge prompt, <Instruct>/<Query>/<Document>, "
+            "empty think block) — without it the model scores raw text close to "
+            "meaninglessly (#2020). 'raw' sends text verbatim: non-Qwen3 cross-"
+            "encoders, or a server that applies the template itself (vLLM "
+            "--chat-template). 'auto' = 'qwen3' when the model name contains "
+            "'qwen3-reranker' (case-insensitive), else 'raw'."
+        ),
+    )
+    rerank_instruction: str = Field(
+        default="Given a web search query, retrieve relevant passages that answer the query",
+        description=(
+            "The <Instruct> line of the Qwen3-Reranker template (used only when "
+            "the prompt format resolves to 'qwen3'). Empty = the model card "
+            "default. Keep in sync with "
+            "reranker_service.DEFAULT_QWEN3_RERANK_INSTRUCTION."
+        ),
+    )
     self_hosted_rerank_model: str = Field(
         default="dengcao/Qwen3-Reranker-8B:Q5_K_M",
         description=(
@@ -959,6 +981,7 @@ class Settings(BaseSettings):
         "rerank_base_url",
         "rerank_model",
         "rerank_api_key",
+        "rerank_instruction",
         "self_hosted_rerank_model",
         mode="before",
     )
@@ -970,6 +993,14 @@ class Settings(BaseSettings):
         # whitespace-only value to "" so a stray-space env var neither enables
         # the vLLM path with an invalid URL nor ships a blank model name.
         return v.strip() if isinstance(v, str) else v
+
+    @field_validator("rerank_prompt_format", mode="before")
+    @classmethod
+    def _normalize_rerank_prompt_format(cls, v: object) -> object:
+        # Case/whitespace-insensitive (" QWEN3 " → "qwen3"); blank = auto.
+        if isinstance(v, str):
+            return v.strip().lower() or "auto"
+        return v
 
     # Search Configuration (Issue #105)
     enable_reranking: bool = Field(

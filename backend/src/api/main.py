@@ -155,6 +155,17 @@ async def lifespan(app: FastAPI):
 
     app.state.dense_vector_config_task = asyncio.create_task(run_dense_vector_config_reconcile())
 
+    # #2020: one cheap calibration smoke check of the /v1/rerank model (a
+    # relevant vs an irrelevant document) per process, so a Qwen3 reranker fed
+    # raw text — or a template applied twice — surfaces as
+    # rerank_model_uncalibrated instead of silently wrecking recall. Background
+    # and fail-soft: never on the recall path, never a reason not to boot.
+    # No-op when RERANK_BASE_URL is unset.
+    if get_settings().rerank_base_url:
+        from services.reranker_service import run_rerank_calibration_check
+
+        app.state.rerank_calibration_task = asyncio.create_task(run_rerank_calibration_check())
+
     logger.info("application_started")
 
     yield
@@ -182,6 +193,16 @@ async def lifespan(app: FastAPI):
             await dense_task
         except asyncio.CancelledError:
             logger.info("dense_vector_config_cancelled_on_shutdown")
+
+    # Stop the rerank calibration check if it is still waiting on a
+    # reranker that has not come up (#2020).
+    calibration_task = getattr(app.state, "rerank_calibration_task", None)
+    if calibration_task is not None and not calibration_task.done():
+        calibration_task.cancel()
+        try:
+            await calibration_task
+        except asyncio.CancelledError:
+            pass  # expected: we cancelled it ourselves
 
     # Stop this worker's MCP session cleanup loop (#1980).
     cleanup_task = getattr(app.state, "mcp_session_cleanup_task", None)

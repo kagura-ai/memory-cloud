@@ -14,7 +14,9 @@ Architecture:
 - SelfHostedReranker: Self-hosted OpenAI-compatible reranker (registers under
   the "self_hosted" provider key; no API key needed for keyless backends)
 - VLLMReranker: Local true cross-encoder via an OpenAI/Jina-style /v1/rerank
-  endpoint (vLLM/TEI/Infinity); selected when settings.rerank_base_url is set
+  endpoint (vLLM/TEI/Infinity); selected when settings.rerank_base_url is set.
+  Issue #2020: wraps query/documents in the Qwen3-Reranker prompt template
+  when the served model is a Qwen3 reranker (RERANK_PROMPT_FORMAT)
 - RerankerService: Factory pattern to select active provider from DB
 """
 
@@ -57,6 +59,47 @@ DEFAULT_SELF_HOSTED_RERANK_MODEL = "dengcao/Qwen3-Reranker-8B:Q5_K_M"
 # is the hard floor used when RERANK_MODEL is explicitly blanked. Keep the two
 # literals in sync.
 DEFAULT_VLLM_RERANK_MODEL = "qwen3-reranker-0.6b"
+
+# Qwen3-Reranker prompt template (#2020). The model is trained on this exact
+# chat layout; fed raw text, its yes/no logit barely separates relevant from
+# irrelevant documents and rerank does worse than no rerank. Split the way the
+# model card and vLLM's qwen3_reranker example build a score / rerank request:
+# the query carries the system prefix + instruction + query, every document
+# carries the document + the assistant suffix, and the server concatenates them.
+QWEN3_RERANK_PREFIX = (
+    "<|im_start|>system\nJudge whether the Document meets the requirements based on "
+    'the Query and the Instruct provided. Note that the answer can only be "yes" or '
+    '"no".<|im_end|>\n<|im_start|>user\n'
+)
+QWEN3_RERANK_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+# The model card's default task instruction. Ops-level override:
+# settings.rerank_instruction (env RERANK_INSTRUCTION, same default value —
+# keep the two literals in sync; test_rerank_settings guards it).
+DEFAULT_QWEN3_RERANK_INSTRUCTION = (
+    "Given a web search query, retrieve relevant passages that answer the query"
+)
+# RERANK_PROMPT_FORMAT values: auto = qwen3 when the model name names a Qwen3
+# reranker, else raw; raw = send text verbatim (non-Qwen3 cross-encoders, or a
+# server that applies the template itself, e.g. vLLM --chat-template).
+RERANK_PROMPT_FORMATS = frozenset({"auto", "qwen3", "raw"})
+
+# Calibration smoke check (#2020): one relevant and one irrelevant document
+# must separate by at least this much, else rerank_model_uncalibrated.
+# Templated Qwen3-Reranker-0.6B scores the pair ~0.997 / ~0.000; the same
+# model on raw text ~0.980 / ~0.866.
+RERANK_CALIBRATION_MIN_MARGIN = 0.5
+_CALIBRATION_QUERY = "What is the capital of France?"
+_CALIBRATION_RELEVANT = "Paris is the capital of France."
+_CALIBRATION_IRRELEVANT = "Bananas are yellow fruit."
+# Waits before the 2nd/3rd attempt: the reranker container may still be loading
+# the model when the API boots.
+_CALIBRATION_RETRY_DELAYS: tuple[float, ...] = (10.0, 30.0)
+
+
+def _is_qwen3_reranker(model: str) -> bool:
+    """Whether a served model name names a Qwen3 reranker (case-insensitive)."""
+    return "qwen3-reranker" in model.lower().replace("_", "-")
+
 
 # Default model names of the REMOTE reranker providers (Voyage, Cohere). A
 # per-context reranker_model still carrying one of these is a stale default left
@@ -452,6 +495,8 @@ class VLLMReranker(RerankerProvider):
         base_url: str,
         model: str = DEFAULT_VLLM_RERANK_MODEL,
         api_key: str | None = None,
+        prompt_format: str = "auto",
+        instruction: str | None = None,
     ):
         """Initialize the /v1/rerank client.
 
@@ -462,10 +507,35 @@ class VLLMReranker(RerankerProvider):
                 endpoint served behind auth (e.g. vLLM --api-key). Without it,
                 every request to a secured endpoint 401s and rerank silently
                 falls back to unranked results.
+            prompt_format: ``auto`` | ``qwen3`` | ``raw`` (RERANK_PROMPT_FORMAT).
+                ``auto`` resolves to ``qwen3`` when ``model`` names a Qwen3
+                reranker, else ``raw`` (#2020).
+            instruction: Qwen3 ``<Instruct>`` text (RERANK_INSTRUCTION); blank
+                or ``None`` = the model card default.
+
+        Raises:
+            ValueError: If prompt_format is not one of auto, qwen3, raw.
         """
+        if prompt_format not in RERANK_PROMPT_FORMATS:
+            raise ValueError(
+                f"prompt_format must be one of {sorted(RERANK_PROMPT_FORMATS)}, "
+                f"got {prompt_format!r}"
+            )
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
+        if prompt_format == "auto":
+            prompt_format = "qwen3" if _is_qwen3_reranker(model) else "raw"
+        self.prompt_format = prompt_format
+        self.instruction = (instruction or "").strip() or DEFAULT_QWEN3_RERANK_INSTRUCTION
+
+    def _format(self, query: str, documents: list[str]) -> tuple[str, list[str]]:
+        """Apply the resolved prompt format to the query and documents."""
+        if self.prompt_format != "qwen3":
+            return query, documents
+        formatted_query = f"{QWEN3_RERANK_PREFIX}<Instruct>: {self.instruction}\n<Query>: {query}\n"
+        formatted_docs = [f"<Document>: {doc}{QWEN3_RERANK_SUFFIX}" for doc in documents]
+        return formatted_query, formatted_docs
 
     async def rerank(
         self,
@@ -498,6 +568,7 @@ class VLLMReranker(RerankerProvider):
         effective_top_n = min(top_n, len(documents))
 
         headers = _bearer_headers(self.api_key)
+        sent_query, sent_documents = self._format(query, documents)
 
         # v0.42 review #31: a per-call AsyncClient is deliberate here, not a
         # cached one. Rerank runs at most one HTTP request per call, so the
@@ -510,8 +581,8 @@ class VLLMReranker(RerankerProvider):
                 f"{self.base_url}/v1/rerank",
                 json={
                     "model": self.model,
-                    "query": query,
-                    "documents": documents,
+                    "query": sent_query,
+                    "documents": sent_documents,
                     "top_n": effective_top_n,
                 },
                 headers=headers,
@@ -565,11 +636,98 @@ class VLLMReranker(RerankerProvider):
         logger.debug(
             "vllm_rerank_completed",
             model=self.model,
+            prompt_format=self.prompt_format,
             doc_count=len(documents),
             top_n=effective_top_n,
         )
 
         return scored[:effective_top_n]
+
+
+async def run_rerank_calibration_check(
+    settings: Settings | None = None,
+    retry_delays: tuple[float, ...] = _CALIBRATION_RETRY_DELAYS,
+) -> dict[str, Any] | None:
+    """Smoke-check that the /v1/rerank model separates relevant from irrelevant (#2020).
+
+    Scores one relevant and one irrelevant document for a fixed query through
+    the same ``VLLMReranker`` (and prompt format) recalls use, with the
+    ops-level ``RERANK_MODEL``. A gap below ``RERANK_CALIBRATION_MIN_MARGIN``
+    logs ``rerank_model_uncalibrated`` at WARNING — the signature of a Qwen3
+    reranker fed raw text, or a template applied twice. Run once per process
+    as a background task at startup, never on the recall path. Fail-soft: an
+    unreachable endpoint is retried after each ``retry_delays`` entry, then
+    logged (``rerank_calibration_check_failed``) and given up; nothing raises.
+
+    Args:
+        settings: Settings to read RERANK_* from; loaded when omitted.
+        retry_delays: Seconds to wait before each retry after a failed attempt.
+
+    Returns:
+        ``{"calibrated", "relevant_score", "irrelevant_score", "margin"}``, or
+        ``None`` when RERANK_BASE_URL is unset or every attempt failed.
+    """
+    if settings is None:
+        from config.settings import get_settings
+
+        settings = get_settings()
+    if not settings.rerank_base_url:
+        return None
+    model = settings.rerank_model or DEFAULT_VLLM_RERANK_MODEL
+    try:
+        reranker = VLLMReranker(
+            base_url=settings.rerank_base_url,
+            model=model,
+            api_key=settings.rerank_api_key or None,
+            prompt_format=settings.rerank_prompt_format,
+            instruction=settings.rerank_instruction,
+        )
+    except ValueError as exc:
+        logger.warning("rerank_calibration_check_failed", model=model, error=str(exc))
+        return None
+
+    delays = list(retry_delays)
+    while True:
+        try:
+            results = await reranker.rerank(
+                _CALIBRATION_QUERY, [_CALIBRATION_RELEVANT, _CALIBRATION_IRRELEVANT], top_n=2
+            )
+            break
+        except Exception as exc:  # noqa: BLE001 — best-effort startup check
+            if delays:
+                await asyncio.sleep(delays.pop(0))
+                continue
+            logger.info(
+                "rerank_calibration_check_failed",
+                model=model,
+                error_class=type(exc).__name__,
+                error=str(exc),
+            )
+            return None
+
+    by_index = {r["index"]: r["relevance_score"] for r in results}
+    relevant = by_index.get(0, 0.0)
+    irrelevant = by_index.get(1, 0.0)
+    margin = relevant - irrelevant
+    calibrated = margin >= RERANK_CALIBRATION_MIN_MARGIN
+    fields: dict[str, Any] = {
+        "model": model,
+        "prompt_format": reranker.prompt_format,
+        "relevant_score": round(relevant, 4),
+        "irrelevant_score": round(irrelevant, 4),
+        "margin": round(margin, 4),
+        "min_margin": RERANK_CALIBRATION_MIN_MARGIN,
+    }
+    if calibrated:
+        logger.info("rerank_model_calibrated", **fields)
+    else:
+        logger.warning("rerank_model_uncalibrated", **fields)
+    return {
+        "calibrated": calibrated,
+        "relevant_score": relevant,
+        "irrelevant_score": irrelevant,
+        "margin": margin,
+    }
 
 
 def _parse_relevance_score(text: str) -> float:
@@ -710,6 +868,8 @@ class RerankerService:
                         base_url=settings.rerank_base_url,
                         model=model,
                         api_key=settings.rerank_api_key or None,
+                        prompt_format=settings.rerank_prompt_format,
+                        instruction=settings.rerank_instruction,
                     )
                 # Prompt-scoring path on SELF_HOSTED_BASE_URL. Re-resolve only a
                 # stale REMOTE-provider default to the configurable self-hosted
