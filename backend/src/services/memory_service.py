@@ -1379,13 +1379,18 @@ class MemoryService:
         written silently.
         """
         from db.qdrant import search_memories_qdrant
+        from services.content_chunk_writer import content_chunks_enabled
         from services.context_routing import resolve_context_routing
         from services.embedding_service import EmbeddingService
+        from utils.content_chunks import CONTENT_CHUNK_DENSE_OVERSAMPLE, collapse_chunk_hits
         from utils.text import normalize_for_search
 
         is_shared_context = await self.context_service.is_context_shared(UUID(context_id_str))
         linked = await link_set_reads(self.db, user_id, not is_shared_context)
         owner_ids = sorted(linked) if linked and len(linked) > 1 else None
+        # #2015: on a context with content chunk vectors the probe also sees a
+        # memory's body — a chunk hit collapses to its memory.
+        chunks_on = await content_chunks_enabled(self.db, UUID(context_id_str))
         try:
             collection, embed_svc = await resolve_context_routing(
                 self.db, UUID(context_id_str), default_service=EmbeddingService(self.db)
@@ -1396,16 +1401,22 @@ class MemoryService:
                 context_id=UUID(context_id_str),
                 workspace_id=UUID(workspace_id_str),
             )
+            chunk_kwargs: dict[str, Any] = {"include_chunks": True} if chunks_on else {}
             hits = await search_memories_qdrant(
                 user_id=user_id,
                 query_vector=vector,
                 workspace_id=workspace_id_str,
                 context_id=context_id_str,
-                limit=_DEDUPE_CHECK_K,
+                limit=_DEDUPE_CHECK_K * CONTENT_CHUNK_DENSE_OVERSAMPLE
+                if chunks_on
+                else _DEDUPE_CHECK_K,
                 collection_name=collection,
                 is_shared_context=is_shared_context,
                 owner_ids=owner_ids,
+                **chunk_kwargs,
             )
+            if chunks_on:
+                hits = collapse_chunk_hits(hits)
         except Exception as exc:
             raise DedupeUnavailableError(str(exc)) from exc
         from services.agent_binding_service import filter_memory_rows_by_binding
