@@ -6964,6 +6964,13 @@ _KNN_SEED_UNCALIBRATED_WARNED: set[tuple[str, int]] = set()
 # effect without a line per ingest, and a later off→on→off toggle logs again.
 _SUPERSEDE_SUGGEST_LAST_SEEN: bool | None = None
 
+# #2023: (model_name, dimensions) pairs whose ``knn_seed_skip_no_consumer``
+# (seeding on but uncalibrated, suggestions off: the ingest does no neighbour
+# work at all) was already logged at INFO. The first ingest per embedder per
+# process logs at INFO so the "nothing happened" state is visible at
+# LOG_LEVEL=info; later ones stay at DEBUG to keep it off every ingest.
+_KNN_SEED_NO_CONSUMER_REPORTED: set[tuple[str, int]] = set()
+
 
 async def _detect_supersede_candidate(
     db: AsyncSession,
@@ -7290,12 +7297,27 @@ async def _create_knn_seed_edges(
         # detection is off as well, nothing consumes it, so skip the round trip.
         needs_seed = seed_enabled and threshold is not None
         if not needs_seed and not suggest_enabled:
-            logger.debug(
-                "knn_seed_skip_no_consumer",
-                memory_id=str(memory.id),
-                model=model_name,
-                dimensions=len(vector),
-            )
+            skip_key = (model_name, len(vector))
+            if skip_key not in _KNN_SEED_NO_CONSUMER_REPORTED:
+                _KNN_SEED_NO_CONSUMER_REPORTED.add(skip_key)
+                logger.info(
+                    "knn_seed_skip_no_consumer",
+                    memory_id=str(memory.id),
+                    model=model_name,
+                    dimensions=len(vector),
+                    hint=(
+                        "no seed edges (no knn_seed calibration row yet) and "
+                        "SUPERSEDE_SUGGEST_ENABLED is off; logged once per process "
+                        "per embedder, later ingests at DEBUG"
+                    ),
+                )
+            else:
+                logger.debug(
+                    "knn_seed_skip_no_consumer",
+                    memory_id=str(memory.id),
+                    model=model_name,
+                    dimensions=len(vector),
+                )
             return
 
         workspace_id_str = str(memory.workspace_id)

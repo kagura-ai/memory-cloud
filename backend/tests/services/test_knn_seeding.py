@@ -1277,6 +1277,64 @@ class TestSupersedeSuggestFlag:
         mock_search.assert_not_called()
         assert memory.supersede_candidate is None
 
+    @pytest.mark.asyncio
+    async def test_skip_no_consumer_logged_at_info_once_per_embedder(self):
+        """#2023: the no-consumer skip (seeding on but uncalibrated, suggestions
+        off) logs INFO on the first ingest per (model, dims) in a process, so
+        the state is visible at LOG_LEVEL=info, and DEBUG after that."""
+        with (
+            patch(
+                "neural.config.NeuralMemoryConfig.from_db",
+                new=AsyncMock(return_value=_make_config(min_similarity=None, suggest=False)),
+            ),
+            patch(
+                "neural.calibration.resolve_knn_threshold",
+                new=AsyncMock(return_value=None),
+            ),
+            patch("db.qdrant.search_memories_qdrant", new=AsyncMock()) as mock_search,
+            patch(
+                "tasks.neural_calibration.maybe_trigger_bootstrap",
+                new=AsyncMock(return_value=False),
+            ),
+            patch.object(memory_service, "_SUPERSEDE_SUGGEST_LAST_SEEN", False),
+            patch.object(memory_service, "_KNN_SEED_NO_CONSUMER_REPORTED", set()),
+            patch("services.memory_service.logger") as mock_logger,
+        ):
+            for model, dims in (
+                ("model-a", 512),  # first → INFO
+                ("model-a", 512),  # already reported → DEBUG
+                ("model-a", 768),  # new pair → INFO
+                ("model-a", 768),  # DEBUG
+            ):
+                await _create_knn_seed_edges(
+                    db=_make_db(),
+                    memory=_make_memory(),
+                    vector=[0.1] * dims,
+                    collection_name="kagura_memories",
+                    model_name=model,
+                )
+
+        mock_search.assert_not_called()
+        infos = [
+            c.kwargs
+            for c in mock_logger.info.call_args_list
+            if c.args and c.args[0] == "knn_seed_skip_no_consumer"
+        ]
+        assert [(i["model"], i["dimensions"]) for i in infos] == [
+            ("model-a", 512),
+            ("model-a", 768),
+        ]
+        assert all("SUPERSEDE_SUGGEST_ENABLED" in i["hint"] for i in infos)
+        debugs = [
+            c.kwargs
+            for c in mock_logger.debug.call_args_list
+            if c.args and c.args[0] == "knn_seed_skip_no_consumer"
+        ]
+        assert [(d["model"], d["dimensions"]) for d in debugs] == [
+            ("model-a", 512),
+            ("model-a", 768),
+        ]
+
 
 class TestSupersedeSuggestConfig:
     """#2010: the flag is env-only — default on, SUPERSEDE_SUGGEST_ENABLED=false
