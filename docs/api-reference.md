@@ -734,7 +734,8 @@ pinned, recall and upcoming lists are cut from the end, each flagged `truncated:
 `pinned_cap` defaults to 20 here, and the state component is the first `get_state` page
 (`has_more` / `next_cursor`). Recall results are the MCP `recall` tool's `verbosity="full"`
 items: an empty `context_summary`, `tags`, `superseded_by` or `contradicts` is absent, not
-`null` / `[]`. See [the bootstrap contract](design/agent-bootstrap-contract.md).
+`null` / `[]`, and a row carries `supersede_candidate` when a live suggestion exists (never
+one whose target is connector-sourced). See [the bootstrap contract](design/agent-bootstrap-contract.md).
 
 > **Preview boundary:** `allowed_memory_types` and `allowed_source_types` are enforced per read-lane row as of [#1299](https://github.com/kagura-ai/memory-cloud/issues/1299) (`null` = all, `[]` = deny-all) on the memory-read lanes (recall, reference, forget, explore, load_pinned, upcoming) for enforce-mode agents; shadow mode records `would_deny` without filtering. REST and MCP accept W3C `traceparent` and baggage keys `gen_ai.agent.id`, `gen_ai.conversation.id` (or `session.id`), and `kagura.agent.run.id`; invalid advisory values are dropped and credential-bound agent identity always wins. Server-side span export is not part of P0. The append-only `memory_access_events` table and writer cover bootstrap, load-pinned, feedback, recall, reference, remember, update, and forget emission with binding deny capture.
 
