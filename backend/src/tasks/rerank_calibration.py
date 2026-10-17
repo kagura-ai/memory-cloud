@@ -1,9 +1,10 @@
-"""Startup rerank calibration task (Issue #2020).
+"""Startup rerank calibration task (Issue #2020, #2033).
 
-Every API worker runs the lifespan; each one scores the /v1/rerank model once
-in the background (``run_rerank_calibration_check``) so a mis-formatted Qwen3
-reranker surfaces as ``rerank_model_uncalibrated`` instead of silently wrecking
-recall. Started only when the check applies (``should_run_rerank_calibration``)
+Every API worker runs the lifespan; each one scores the local rerank model
+once in the background (``run_rerank_calibration_check``) — the /v1/rerank
+model, or the Ollama-path model when the deployment defaults to self_hosted
+without RERANK_BASE_URL — so a mis-formatted Qwen3 reranker surfaces as
+``rerank_model_uncalibrated`` instead of silently wrecking recall. Started only when the check applies (``should_run_rerank_calibration``)
 and cancelled at shutdown if it is still waiting on a reranker that has not
 come up.
 """

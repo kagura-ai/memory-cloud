@@ -301,6 +301,8 @@ class TestRerankBaseUrlSelection:
         settings = MagicMock()
         settings.self_hosted_base_url = "http://ollama:11434"
         settings.rerank_base_url = ""
+        settings.rerank_prompt_format = "auto"
+        settings.rerank_instruction = ""
         monkeypatch.setattr("config.settings.get_settings", lambda: settings, raising=True)
 
         cfg = self._ctx_config("self_hosted", True, "custom-ollama-model")
@@ -456,7 +458,9 @@ def _capture_post(monkeypatch, results=None):
         data = (
             results
             if results is not None
-            else [{"index": i, "relevance_score": 0.5} for i in range(n)]
+            # Distinct scores: an all-identical full list is non-discriminating
+            # and raises (#2033).
+            else [{"index": i, "relevance_score": 0.5 - 0.1 * i} for i in range(n)]
         )
         return _FakeHttpResponse(json_data={"results": data})
 

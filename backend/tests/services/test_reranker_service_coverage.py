@@ -315,7 +315,13 @@ def _patch_ollama_post(monkeypatch, handler):
 
 
 class TestSelfHostedReranker:
-    """SelfHostedReranker scoring, sorting, and per-doc error fallback."""
+    """SelfHostedReranker scoring, sorting, and per-doc error fallback.
+
+    These exercise the generic score prompt on /v1/completions, so they force
+    ``prompt_format="raw"`` — the default model is a Qwen3 reranker, which
+    resolves to the /api/generate yes/no format (#2033,
+    test_self_hosted_reranker.py).
+    """
 
     def test_init_strips_trailing_slash(self):
         """base_url trailing slash is stripped; default model is used."""
@@ -347,7 +353,7 @@ class TestSelfHostedReranker:
 
         _patch_ollama_post(monkeypatch, handler)
 
-        out = await SelfHostedReranker("http://x").rerank(
+        out = await SelfHostedReranker("http://x", prompt_format="raw").rerank(
             "q", ["alpha doc", "bravo doc", "charlie doc"], 2
         )
 
@@ -368,7 +374,9 @@ class TestSelfHostedReranker:
 
         _patch_ollama_post(monkeypatch, handler)
 
-        out = await SelfHostedReranker("http://x").rerank("q", ["good", "bad"], 5)
+        out = await SelfHostedReranker("http://x", prompt_format="raw").rerank(
+            "q", ["good", "bad"], 5
+        )
         scores = {d["index"]: d["relevance_score"] for d in out}
         assert scores[0] == pytest.approx(0.8)
         assert scores[1] == 0.0
@@ -385,7 +393,9 @@ class TestSelfHostedReranker:
 
         _patch_ollama_post(monkeypatch, handler)
 
-        out = await SelfHostedReranker("http://x").rerank("q", ["fast", "slow"], 2)
+        out = await SelfHostedReranker("http://x", prompt_format="raw").rerank(
+            "q", ["fast", "slow"], 2
+        )
         scores = {d["index"]: d["relevance_score"] for d in out}
         assert scores[0] == pytest.approx(0.7)
         assert scores[1] == 0.0
@@ -407,7 +417,9 @@ class TestSelfHostedReranker:
 
         _patch_ollama_post(monkeypatch, handler)
 
-        out = await SelfHostedReranker("http://x").rerank("q", ["good", "bad"], 2)
+        out = await SelfHostedReranker("http://x", prompt_format="raw").rerank(
+            "q", ["good", "bad"], 2
+        )
         scores = {d["index"]: d["relevance_score"] for d in out}
         assert scores[0] == pytest.approx(0.6)
         assert scores[1] == 0.0
@@ -425,9 +437,11 @@ class TestSelfHostedReranker:
         _patch_ollama_post(monkeypatch, handler)
 
         with pytest.raises(RuntimeError, match="self_hosted rerank backend unavailable"):
-            await SelfHostedReranker("http://x").rerank("q", ["a", "b", "c"], 2)
+            await SelfHostedReranker("http://x", prompt_format="raw").rerank(
+                "q", ["a", "b", "c"], 2
+            )
         with pytest.raises(RuntimeError, match="all 1 document"):
-            await SelfHostedReranker("http://x").rerank("q", ["only"], 1)
+            await SelfHostedReranker("http://x", prompt_format="raw").rerank("q", ["only"], 1)
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +604,8 @@ class TestRerankerServiceOllamaContextConfig:
         settings.self_hosted_base_url = "http://ollama:11434"
         settings.self_hosted_api_key = ""
         settings.rerank_base_url = ""  # not set → SelfHostedReranker, not the vLLM path
+        settings.rerank_prompt_format = "auto"
+        settings.rerank_instruction = ""
         monkeypatch.setattr("config.settings.get_settings", lambda: settings, raising=True)
 
         cfg = self._ctx_config("self_hosted", True, "custom-ollama-model")
@@ -613,6 +629,8 @@ class TestRerankerServiceOllamaContextConfig:
         settings.self_hosted_api_key = ""
         settings.self_hosted_rerank_model = DEFAULT_SELF_HOSTED_RERANK_MODEL
         settings.rerank_base_url = ""  # not set → SelfHostedReranker, not the vLLM path
+        settings.rerank_prompt_format = "auto"
+        settings.rerank_instruction = ""
         monkeypatch.setattr("config.settings.get_settings", lambda: settings, raising=True)
 
         cfg = self._ctx_config("self_hosted", True, "rerank-multilingual-v3.0")
@@ -631,6 +649,8 @@ class TestRerankerServiceOllamaContextConfig:
         settings.self_hosted_api_key = ""
         settings.self_hosted_rerank_model = DEFAULT_SELF_HOSTED_RERANK_MODEL
         settings.rerank_base_url = ""  # not set → SelfHostedReranker, not the vLLM path
+        settings.rerank_prompt_format = "auto"
+        settings.rerank_instruction = ""
         monkeypatch.setattr("config.settings.get_settings", lambda: settings, raising=True)
 
         cfg = self._ctx_config("self_hosted", True, None)
