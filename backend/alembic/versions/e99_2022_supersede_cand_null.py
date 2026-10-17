@@ -77,17 +77,22 @@ BATCH_SIZE = 5000
 LOCK_TIMEOUT = "5s"
 
 # One keyset step: the next BATCH_SIZE ids (after the previous step's last id,
-# ``{after}``), and the JSON-null rows among them set to SQL NULL. Returns the
+# ``{after}``), and the JSON-null rows among them set to SQL NULL. The rows are
+# locked in id order first (ordered ``FOR UPDATE``, the #1985 house rule for
+# multi-row UPDATEs) so the walk cannot deadlock with a concurrent bulk write. Returns the
 # step's last id (NULL once the walk is past the end) and how many rows it
 # rewrote.
 _BATCH_SQL = (
     "WITH batch AS ("
     "  SELECT id FROM memories {after}"
     "  ORDER BY id LIMIT :batch_size"
+    "), locked AS ("
+    "  SELECT m.id FROM memories AS m JOIN batch USING (id)"
+    "  WHERE m.supersede_candidate::text = 'null'"
+    "  ORDER BY m.id FOR UPDATE OF m"
     "), rewritten AS ("
     "  UPDATE memories AS m SET supersede_candidate = NULL"
-    "  FROM batch WHERE m.id = batch.id"
-    "  AND m.supersede_candidate::text = 'null'"
+    "  FROM locked WHERE m.id = locked.id"
     "  RETURNING 1"
     ") "
     "SELECT (SELECT id FROM batch ORDER BY id DESC LIMIT 1) AS last_id, "
