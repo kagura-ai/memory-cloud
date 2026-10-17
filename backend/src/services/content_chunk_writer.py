@@ -13,9 +13,16 @@ and callers on such a context can skip the chunk cascade.
   rewritten from the current content — content that shrank below the split
   threshold therefore just loses its chunks.
 
-Fail-open: the summary point is already written, so a failure here is logged
-(``content_chunks_failed``, error class only — never the text) and the memory
-stays a summary-only memory until its next re-embed.
+The flag is read again, fresh, right before the upsert, so a writer whose
+embedding was in flight while the flag was turned off writes nothing; the
+config update also purges after its commit and again when the flag is turned
+back on, so a leftover from the remaining window never becomes visible.
+
+A failed delete of the old chunk points is raised (the row is retried, the
+old body never survives an edit). Any other failure is fail-open: the summary
+point is already written, so it is logged (``content_chunks_failed``, error
+class only — never the text) and the memory stays summary-only until its
+next re-embed.
 """
 
 from __future__ import annotations
@@ -82,6 +89,15 @@ def forget_cached_chunk_flag(context_id: Any) -> None:
     _FLAG_CACHE.pop(str(context_id), None)
 
 
+def _is_resource_row(memory: Memory) -> bool:
+    """A row the resource indexer owns: its point is the indexer's, never chunked."""
+    if getattr(memory, "resource_id", None) is None:
+        return False
+    from services.resource_indexer import owns_resource_point
+
+    return owns_resource_point(memory)
+
+
 async def write_content_chunks(
     db: AsyncSession,
     memory: Memory,
@@ -93,25 +109,37 @@ async def write_content_chunks(
 ) -> int:
     """Replace the memory's chunk points; return how many were written.
 
+    A failed delete of the old chunk points is raised — the caller's normal
+    failure path (``process_pending_embedding`` marks the row failed and
+    retries it), so an edit never leaves the old body in ``chunk_text``. A
+    failed flag lookup, embedding or upsert is logged and returns 0.
+
     Args:
-        db: Session used for the flag lookup.
+        db: Session used for the flag lookups.
         memory: The memory row (its ``content`` is split).
         base_payload: The memory's summary-point payload (``build_memory_point``).
         embed_svc: The context's embedding service.
         collection_name: The context's routed collection.
         chunks_enabled: The context's flag when the caller already has it
-            (a per-context batch); ``None`` looks it up.
+            (a per-context batch); ``None`` looks it up. Either way the flag
+            is read again, fresh, right before the upsert.
     """
-    points: list[tuple[str, list[float], dict[str, Any]]] = []
+    if _is_resource_row(memory):
+        return 0
     try:
         if chunks_enabled is None:
             chunks_enabled = await content_chunks_enabled(db, memory.context_id)
-        if not chunks_enabled or not chunk_points_supported():
-            return 0
-        await delete_chunk_points([memory.id], collection_name)
-        chunks = split_content(memory.content)
-        if not chunks:
-            return 0
+    except Exception as e:
+        _log_failure(memory, collection_name, e)
+        return 0
+    if not chunks_enabled or not chunk_points_supported():
+        return 0
+    await delete_chunk_points([memory.id], collection_name)
+    chunks = split_content(memory.content)
+    if not chunks:
+        return 0
+    points: list[tuple[str, list[float], dict[str, Any]]] = []
+    try:
         vectors = await embed_svc.embed_batch(
             chunks,
             memory.user_id,
@@ -128,6 +156,11 @@ async def write_content_chunks(
             )
             for index, (text, vector) in enumerate(zip(chunks, vectors, strict=True))
         ]
+        # The flag may have been turned off (and the context purged) while
+        # the chunks were embedded: re-read it fresh, never from a cache.
+        if not await content_chunks_enabled(db, memory.context_id):
+            logger.info("content_chunks_skipped_flag_off", memory_id=str(memory.id))
+            return 0
         await upsert_chunk_points(
             points,
             user_id=memory.user_id,
@@ -136,12 +169,7 @@ async def write_content_chunks(
             collection_name=collection_name,
         )
     except Exception as e:
-        logger.warning(
-            "content_chunks_failed",
-            memory_id=str(memory.id),
-            collection=collection_name,
-            error_class=type(e).__name__,
-        )
+        _log_failure(memory, collection_name, e)
         return 0
     logger.info(
         "content_chunks_written",
@@ -151,3 +179,12 @@ async def write_content_chunks(
         chars=len(memory.content or ""),
     )
     return len(points)
+
+
+def _log_failure(memory: Memory, collection_name: str, error: Exception) -> None:
+    logger.warning(
+        "content_chunks_failed",
+        memory_id=str(memory.id),
+        collection=collection_name,
+        error_class=type(error).__name__,
+    )

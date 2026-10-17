@@ -276,3 +276,38 @@ async def test_turning_the_flag_off_purges_and_later_edits_write_none(qdrant, co
     )
     assert n == 0
     assert await _count(qdrant, collection, memory_id) == (1, 0)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_flag_turned_off_mid_write_leaves_no_chunks(qdrant, collection, monkeypatch):
+    """#2015 race, in order: the writer reads the flag on → the flag is turned
+    off and the context purged while the chunks are embedded → the writer's
+    fresh re-read stops the upsert: 0 chunks."""
+    from db.qdrant import purge_context_chunk_points
+    from services import content_chunk_writer
+    from services.content_chunk_writer import write_content_chunks
+
+    memory_id = uuid4()
+    await _write(collection, memory_id, chunks=1)
+    flag = {"on": True}
+
+    async def _flag(db, context_id):
+        return flag["on"]
+
+    class _PurgingEmbedder:
+        async def embed_batch(self, texts, *args, **kwargs):
+            flag["on"] = False
+            await purge_context_chunk_points(_WS, _CTX, collection)
+            return [_CHUNK_VEC for _ in texts]
+
+    monkeypatch.setattr(content_chunk_writer, "content_chunks_enabled", _flag)
+    n = await write_content_chunks(
+        None,  # type: ignore[arg-type]
+        _row(memory_id, "x" * 6000),
+        base_payload={"summary": "summary"},
+        embed_svc=_PurgingEmbedder(),
+        collection_name=collection,
+    )
+
+    assert n == 0
+    assert await _count(qdrant, collection, memory_id) == (1, 0)

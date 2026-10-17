@@ -20,10 +20,17 @@ WS = "11111111-1111-4111-8111-111111111111"
 CTX = "22222222-2222-4222-8222-222222222222"
 
 
-def _memory(content):
-    return SimpleNamespace(
-        id=uuid4(), user_id="u", workspace_id=WS, context_id=CTX, content=content
-    )
+def _memory(content, **extra):
+    fields = {
+        "id": uuid4(),
+        "user_id": "u",
+        "workspace_id": WS,
+        "context_id": CTX,
+        "content": content,
+        "resource_id": None,
+    }
+    fields.update(extra)
+    return SimpleNamespace(**fields)
 
 
 def _db(flag):
@@ -249,3 +256,83 @@ async def test_chunk_cascade_needed_fails_safe():
     db = MagicMock()
     db.execute = AsyncMock(side_effect=RuntimeError("db"))
     assert await writer.chunk_cascade_needed(db, uuid4()) is True
+
+
+async def test_flag_turned_off_while_embedding_writes_nothing():
+    """#2015 race: lookup says on, the flag is turned off and purged while the
+    chunks are embedded — the fresh re-read before the upsert stops the write."""
+    flags = AsyncMock(side_effect=[True, False])
+    with (
+        patch.object(writer, "content_chunks_enabled", flags),
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()) as upsert,
+    ):
+        n = await writer.write_content_chunks(
+            MagicMock(), _memory(LONG), base_payload={}, embed_svc=_embed_svc(), collection_name="c"
+        )
+    assert n == 0
+    assert flags.await_count == 2
+    upsert.assert_not_awaited()
+
+
+async def test_a_preloaded_flag_is_still_re_read_before_the_upsert():
+    flags = AsyncMock(return_value=False)
+    with (
+        patch.object(writer, "content_chunks_enabled", flags),
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()) as upsert,
+    ):
+        await writer.write_content_chunks(
+            MagicMock(),
+            _memory(LONG),
+            base_payload={},
+            embed_svc=_embed_svc(),
+            collection_name="c",
+            chunks_enabled=True,
+        )
+    flags.assert_awaited_once()
+    upsert.assert_not_awaited()
+
+
+async def test_a_failed_delete_propagates():
+    """#2015: the old body must not survive an edit — the row takes the normal
+    failed/retry path instead."""
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock(side_effect=RuntimeError("q"))),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()),
+        pytest.raises(RuntimeError),
+    ):
+        await writer.write_content_chunks(
+            _db(True), _memory(LONG), base_payload={}, embed_svc=_embed_svc(), collection_name="c"
+        )
+
+
+async def test_upsert_failure_stays_fail_open():
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(writer, "upsert_chunk_points", AsyncMock(side_effect=RuntimeError("q"))),
+    ):
+        n = await writer.write_content_chunks(
+            _db(True), _memory(LONG), base_payload={}, embed_svc=_embed_svc(), collection_name="c"
+        )
+    assert n == 0
+
+
+async def test_resource_indexer_rows_are_never_chunked():
+    db = _db(True)
+    svc = _embed_svc()
+    with (
+        patch.object(writer, "_is_resource_row", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()) as delete,
+    ):
+        n = await writer.write_content_chunks(
+            db, _memory(LONG), base_payload={}, embed_svc=svc, collection_name="c"
+        )
+    assert n == 0
+    db.execute.assert_not_awaited()
+    delete.assert_not_awaited()
+    svc.embed_batch.assert_not_awaited()
