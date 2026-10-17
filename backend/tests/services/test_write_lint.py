@@ -179,6 +179,15 @@ class TestTagRules:
         assert "tag_near_duplicate" in _codes(hints)
 
     @pytest.mark.asyncio
+    async def test_kana_variant_of_an_existing_tag_is_flagged(self):
+        """#2028: hiragana / katakana and a word-final ``ー`` are one tag."""
+        hints = await _lint(tags=["でぷろい", "サーバー"], vocabulary={"デプロイ": 6, "サーバ": 4})
+        flagged = {h.subject: h.hint for h in hints if h.code == "tag_near_duplicate"}
+        assert set(flagged) == {"でぷろい", "サーバー"}
+        assert "'デプロイ'" in flagged["でぷろい"]
+        assert "'サーバ'" in flagged["サーバー"]
+
+    @pytest.mark.asyncio
     async def test_numbered_tags_are_not_flagged_against_their_own_series(self):
         """#1608: a new issue / PR / version / date tag is not a misspelling.
 

@@ -68,7 +68,8 @@ def normalize_tag(tag: str) -> str:
 
     Applies, in order: NFKC (so full-width and half-width Latin fold together,
     matching how ``utils.text.normalize_for_search`` treats searchable text),
-    case folding, separator removal, and a conservative plural strip.
+    case folding, the Japanese kana fold (:func:`_fold_kana`, #2028),
+    separator removal, and a conservative plural strip.
 
     Args:
         tag: Raw tag string.
@@ -85,10 +86,51 @@ def normalize_tag(tag: str) -> str:
         True
         >>> normalize_tag("dev-env") == normalize_tag("dev-environment")
         False
+        >>> normalize_tag("ろぐ") == normalize_tag("ログ")
+        True
+        >>> normalize_tag("サーバー") == normalize_tag("サーバ")
+        True
     """
-    folded = unicodedata.normalize("NFKC", tag).strip().casefold()
+    folded = _fold_kana(unicodedata.normalize("NFKC", tag).strip().casefold())
     folded = _SEPARATORS.sub("", folded)
     return _strip_plural(folded)
+
+
+# Hiragana U+3041-U+3096 sit exactly 0x60 below their katakana counterparts.
+_HIRAGANA_TO_KATAKANA = {code: code + 0x60 for code in range(0x3041, 0x3097)}
+
+# The long-vowel mark, and the katakana block it may follow to be dropped.
+_LONG_VOWEL_MARK = "\u30fc"
+_KATAKANA_FIRST, _KATAKANA_LAST = "\u30a0", "\u30ff"
+
+# Shortest folded tag whose trailing long-vowel mark may be dropped: below this
+# (``ゲー`` / ``ゲ``) a dropped mark cannot be told from a different word.
+_MIN_LONG_VOWEL_LEN = 3
+
+
+def _fold_kana(folded: str) -> str:
+    """Fold the two common Japanese tag spellings together (#2028).
+
+    Hiragana becomes katakana (``ろぐ`` / ``ログ``), then ONE word-final ``ー``
+    after a katakana character is dropped once the tag is at least
+    ``_MIN_LONG_VOWEL_LEN`` characters (``サーバー`` / ``サーバ``, the JIS Z 8301
+    spelling split). Runs after NFKC, so half-width kana is already full-width.
+
+    Character-level, with no dictionary, so deliberately narrow: a
+    word-internal mark (``データーベース`` / ``データベース``), okurigana
+    (``引越し`` / ``引っ越し``) and kanji vs reading (``障害`` / ``しょうがい``,
+    a homophone hazard) are NOT folded. The length is measured before separators
+    are removed, and only the tag's last character is looked at, so the mark
+    on an inner segment of a compound tag (``サーバー-ログ``) stays.
+    """
+    folded = folded.translate(_HIRAGANA_TO_KATAKANA)
+    if (
+        len(folded) >= _MIN_LONG_VOWEL_LEN
+        and folded.endswith(_LONG_VOWEL_MARK)
+        and _KATAKANA_FIRST <= folded[-2] <= _KATAKANA_LAST
+    ):
+        return folded[:-1]
+    return folded
 
 
 # Two-letter endings that are almost never an English plural, so stripping the
