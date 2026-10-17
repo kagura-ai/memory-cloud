@@ -70,11 +70,11 @@ def _compact_recall_item(r: Any) -> dict[str, Any]:
             "updated_at": to_utc_iso(r.updated_at),
         }
     )
-    add_recall_annotations(item, r)
+    _add_recall_annotations(item, r)
     return item
 
 
-def add_recall_annotations(item: dict[str, Any], r: Any) -> None:
+def _add_recall_annotations(item: dict[str, Any], r: Any) -> None:
     """Copy the fact-succession annotations onto ``item`` when present."""
     # #1208: superseded_by is only set under include_superseded=true;
     # contradicts lists opposing memories (never hidden, both sides annotated).
@@ -93,7 +93,11 @@ def add_recall_annotations(item: dict[str, Any], r: Any) -> None:
 
 
 def recall_result_item(r: Any, verbosity: str = "full") -> dict[str, Any]:
-    """Project one recall result onto the MCP envelope.
+    """Project one recall result for the MCP recall tool and the agent bootstrap.
+
+    Serves the ``recall`` tool's results and the recall component of
+    ``get_agent_bootstrap`` (MCP and REST), which uses ``"full"`` and leaves
+    out ``supersede_candidate`` (#2013).
 
     #1599: the annotations that are empty on almost every result are omitted
     rather than serialized as ``null`` / ``[]`` — absence is the signal, as for
@@ -133,5 +137,5 @@ def recall_result_item(r: Any, verbosity: str = "full") -> dict[str, Any]:
     # the other empty annotations.
     if r.tags:
         item["tags"] = r.tags
-    add_recall_annotations(item, r)
+    _add_recall_annotations(item, r)
     return item
