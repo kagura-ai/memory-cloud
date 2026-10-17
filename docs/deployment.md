@@ -1782,9 +1782,13 @@ here too (#2033):
   is P(yes) / (P(yes) + P(no)) over the first token's top 20 alternatives —
   the model card's yes/no scoring. **Needs Ollama 0.12.11 or later** (older
   versions ignore `logprobs`, every score comes back unparseable and recall
-  fails open). vLLM does not serve `/api/generate`; with vLLM use
-  `RERANK_BASE_URL`. Token neutralising and the 2000-character cut apply as
-  on `/v1/rerank`.
+  fails open). vLLM does not serve `/api/generate`: a 404 there (other than
+  Ollama's "model not found") fails the recall open and logs
+  `self_hosted_rerank_generate_unsupported` (warning, once per process) —
+  with vLLM, set `RERANK_BASE_URL` and use `/v1/rerank`. Token neutralising
+  and the 2000-character cut apply as on `/v1/rerank`; that is about four
+  times the 500 characters the `raw` prompt sends per document, so expect
+  noticeably longer per-document latency on a CPU or a small GPU.
 - **`raw`**: the generic "Score the relevance … Score: " prompt on the
   OpenAI-compatible `/v1/completions`, with the number in the reply parsed as
   the score — for general instruction models only. **Not supported for
@@ -1792,6 +1796,10 @@ here too (#2033):
   answers `0` for almost every real memory and
   `dengcao/Qwen3-Reranker-0.6B:Q8_0` answers `!!!!!`. Control tokens in the
   query and memories are neutralised here as well.
+
+As on `/v1/rerank`, a forced `RERANK_PROMPT_FORMAT` (`qwen3` or `raw`) applies
+to every self-hosted context's model, including a context that overrides
+`reranker_model` with a different kind of model; `auto` decides per model.
 
 `dengcao/Qwen3-Reranker-0.6B:Q8_0` is unusable on Ollama in either format:
 its first-token distribution is flat (every token at the same logprob), so it
@@ -1827,15 +1835,21 @@ results are returned and exactly one warning is logged:
 rerank_failed_open provider=self_hosted error_class=ConnectError context_id=... workspace_id=...
 ```
 
-A rerank whose scores carry no ranking is treated the same way
-(`error_class=RerankNotDiscriminatingError`, #2033), so the hybrid scores are
-kept instead of being overwritten with one value: on the Ollama path when no
-output could be parsed or every document got the same score (for example all
-`0`), and on `/v1/rerank` when the server scored every candidate and all the
-scores are identical. A single candidate is never judged this way, and on
-`/v1/rerank` a tie inside a `top_n` cut is not either (saturated relevant
-documents can tie). Ollama replies that hold no score are also counted in one
-warning per recall:
+A rerank whose scores carry no ranking is checked in one place for every
+provider (Voyage, Cohere, `/v1/rerank`, the Ollama path), on the scores of all
+candidates before the cut to *k* (#2033):
+
+- **Every candidate scored 0**, or (Ollama path) no reply could be parsed:
+  a failure — `rerank_failed_open` with
+  `error_class=RerankNotDiscriminatingError`, and the hybrid scores are kept
+  instead of being overwritten with 0.
+- **Every candidate got the same non-zero score**: not a failure (two
+  relevant memories at 1, or duplicate memories, can tie on a small list),
+  but no ranking either — the hybrid order and scores are kept and
+  `rerank_no_signal` (info, with `doc_count`) is logged.
+- A single candidate is never judged.
+
+Ollama replies that hold no score are also counted in one warning per recall:
 
 ```
 self_hosted_rerank_unparseable model=... rerank_format=qwen3 unparseable_count=4 failed_count=0 doc_count=4
@@ -1848,14 +1862,18 @@ metrics counters). `reranking_disabled_by_deployment` (debug) and
 ### Calibration check
 
 When `ENABLE_RERANKING` is on and either `RERANK_BASE_URL` is set or (without
-it) `DEFAULT_RERANKER_PROVIDER=self_hosted`, every API process (each Uvicorn
+it) `DEFAULT_RERANKER_PROVIDER=self_hosted` with `DEFAULT_USE_RERANK=true`,
+every API process (each Uvicorn
 worker) scores one relevant and one irrelevant document once at startup, in
 the background (it never runs on a recall), through the reranker recalls use:
 `RERANK_MODEL` on `/v1/rerank`, else `SELF_HOSTED_RERANK_MODEL` on the Ollama
 path. It covers only that ops-level model, not a per-context `reranker_model`
 override. `SELF_HOSTED_BASE_URL` alone does not start the Ollama check — it
-also serves self-hosted embeddings, and the check would make Ollama load a
-reranker nobody uses.
+also serves self-hosted embeddings — and neither does a self_hosted default
+with reranking off by default: either way the check would make Ollama load a
+reranker nobody uses. (`DEFAULT_USE_RERANK` does not gate the `/v1/rerank`
+check.) A document that fails with a connect error, timeout or HTTP 5xx
+retries the check even when the other document scored.
 
 On the Ollama path the scores are always between 0 and 1, so both formats get
 the 0.5 verdict below; an unparseable reply counts as 0 and is reported as
