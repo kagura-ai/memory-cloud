@@ -6012,7 +6012,7 @@ class MemoryService:
                 break
             after = (rows[-1].created_at, rows[-1].id)
 
-        from db.qdrant import delete_points_from_qdrant
+        from db.qdrant import delete_chunk_points, delete_points_from_qdrant
         from services.memory_access_event_writer import (
             MAX_METADATA_MEMORY_IDS,
             emit_memory_access_event,
@@ -6038,6 +6038,18 @@ class MemoryService:
             except Exception:
                 await self.db.rollback()
                 raise
+            # #2015: their content chunk points too. Fail-soft — the rows are
+            # committed tombstones by now, and the orphan sweep removes the
+            # chunks of a tombstoned memory after the grace period.
+            try:
+                await delete_chunk_points(deleted, collection)
+            except Exception as exc:
+                logger.warning(
+                    "content_chunks_delete_failed",
+                    collection=collection,
+                    memories=len(deleted),
+                    error_class=type(exc).__name__,
+                )
             deleted_total += len(deleted)
             await emit_memory_access_event(
                 operation="forget",

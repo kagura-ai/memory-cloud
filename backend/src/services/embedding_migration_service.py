@@ -68,7 +68,10 @@ from models.auth import Context
 from models.config import ContextSearchConfig
 from models.memory import Memory
 from repositories.config_repository import search_config_defaults
-from services.context_routing import resolve_context_embedding
+from services.context_routing import (
+    resolve_context_embedding,
+    resolve_context_embedding_config,
+)
 from services.embedding_service import EmbeddingService
 from services.memory_service import build_memory_point
 from services.resource_indexer import ResourceIndexer, ResourceRebuildError, owns_resource_point
@@ -187,11 +190,20 @@ async def plan_context_migration(
     if context is None:
         raise NotFoundException("Context", str(context_id))
 
-    current_model, current_dimensions = await resolve_context_embedding(db, context_id)
+    current_model, current_dimensions, content_chunks_on = await resolve_context_embedding_config(
+        db, context_id
+    )
     if source_model is None:
         source_model, source_dimensions = current_model, current_dimensions
         if source_model == target_model:
             raise ValidationError(f"Context {context_id} already uses {target_model!r}")
+        # #2015: the re-embed and its verify pass handle summary points only —
+        # verify would delete the context's content chunk points as stale.
+        if content_chunks_on:
+            raise ValidationError(
+                f"Context {context_id} has content_chunks_enabled; turn it off "
+                "before migrating its embedding model"
+            )
     else:
         if source_model == current_model:
             raise ValidationError(

@@ -115,3 +115,29 @@ async def test_reconcile_clears_stale_location_payload():
     kwargs = update_mock.await_args.kwargs
     assert kwargs["memory_id"] == UUID(str(stale_id))
     assert kwargs["delete_keys"] == ["location"]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_scrolls_summary_points_only():
+    """#2015: chunk points share their memory's location and are cleared by
+    the summary point's payload cascade, so the scroll leaves them out."""
+    from qdrant_client.models import IsEmptyCondition
+
+    from tasks.geo_backfill import reconcile_stale_location_payloads
+
+    collection_stub = MagicMock()
+    collection_stub.name = "kagura_memories"
+    client = AsyncMock()
+    client.get_collections.return_value = MagicMock(collections=[collection_stub])
+    client.scroll = AsyncMock(return_value=([], None))
+
+    with (
+        patch("db.qdrant.get_qdrant_client", return_value=client),
+        patch("db.vector_store.get_active_store", return_value=None),
+    ):
+        await reconcile_stale_location_payloads(MagicMock())
+
+    flt = client.scroll.await_args.kwargs["scroll_filter"]
+    assert any(
+        isinstance(c, IsEmptyCondition) and c.is_empty.key == "chunk_of" for c in flt.must or []
+    )

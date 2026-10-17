@@ -110,10 +110,26 @@ async def resolve_context_embedding(
     *reason about* a context's model (migration planning, #1525) rather than
     embed with it.
     """
+    model, dimensions, _ = await resolve_context_embedding_config(db, context_id)
+    return model, dimensions
+
+
+async def resolve_context_embedding_config(
+    db: AsyncSession,
+    context_id: UUID,
+) -> tuple[str, int, bool]:
+    """:func:`resolve_context_embedding` plus ``content_chunks_enabled`` (#2015).
+
+    One SELECT. A context without a config row has no chunk points (False).
+    """
     config = await _fetch_config(db, context_id)
     if config:
-        return config.embedding_model, config.embedding_dimensions
-    return _LEGACY_MODEL, _LEGACY_DIMS
+        return (
+            config.embedding_model,
+            config.embedding_dimensions,
+            getattr(config, "content_chunks_enabled", False) is True,
+        )
+    return _LEGACY_MODEL, _LEGACY_DIMS, False
 
 
 def resolve_routing_from_config(

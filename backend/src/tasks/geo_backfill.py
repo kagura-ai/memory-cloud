@@ -112,7 +112,12 @@ async def reconcile_stale_location_payloads(db: AsyncSession) -> int:
         for c in (await client.get_collections()).collections
         if c.name.startswith("kagura_memories")
     ]
-    located_filter = Filter(must_not=[IsEmptyCondition(is_empty=PayloadField(key="location"))])
+    # #2015: summary points only — a content chunk point (chunk_of set) shares
+    # its memory's location and is cleared by that point's payload cascade.
+    located_filter = Filter(
+        must=[IsEmptyCondition(is_empty=PayloadField(key="chunk_of"))],
+        must_not=[IsEmptyCondition(is_empty=PayloadField(key="location"))],
+    )
     cleared = 0
     for collection in collections:
         offset = None

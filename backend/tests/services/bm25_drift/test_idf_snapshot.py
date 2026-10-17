@@ -99,3 +99,18 @@ async def test_duplicate_indices_in_one_point_only_count_once() -> None:
     snapshot = await build_idf_snapshot(client, "kagura_memories", uuid4())
 
     assert snapshot.df_memory == {10: 1, 20: 2}
+
+
+@pytest.mark.asyncio
+async def test_content_chunk_points_are_not_documents() -> None:
+    """#2015: a chunk point is part of its memory, not another document."""
+    chunk = SimpleNamespace(id=9, payload={"chunk_of": "m1"}, vector={})
+    points = [_point(1, [10], resource=False), chunk]
+    client = MagicMock()
+    client.scroll = AsyncMock(return_value=(points, None))
+
+    snapshot = await build_idf_snapshot(client, "kagura_memories", uuid4())
+
+    assert snapshot.m_memory == 1
+    assert snapshot.n_global == 1
+    assert "chunk_of" in client.scroll.await_args.kwargs["with_payload"]

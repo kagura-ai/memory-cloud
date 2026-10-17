@@ -95,6 +95,8 @@ def _service(rows, *, can_access=True) -> tuple[MemoryService, MagicMock]:
 
 AUDIT = AsyncMock()
 POINTS = AsyncMock()
+# #2015: the deleted memories' content chunk points.
+CHUNKS = AsyncMock()
 
 
 async def _run(service, perm, **kwargs):
@@ -110,10 +112,12 @@ def _deleted_ids(service) -> list:
 async def _run_full(service, perm, **kwargs):
     AUDIT.reset_mock()
     POINTS.reset_mock()
+    CHUNKS.reset_mock()
     with (
         patch("services.permission_service.PermissionService", return_value=perm),
         patch("services.memory_access_event_writer.emit_memory_access_event", AUDIT),
         patch("db.qdrant.delete_points_from_qdrant", POINTS),
+        patch("db.qdrant.delete_chunk_points", CHUNKS),
         patch(
             "services.memory_service.resolve_collection_name",
             AsyncMock(return_value="kagura_memories"),
@@ -201,6 +205,20 @@ class TestDryRunAndDelete:
         assert all(c.args[1] == "kagura_memories" for c in POINTS.await_args_list)
         # The collection is resolved once per request, not per memory.
         assert service.resolve_calls == 1
+        # #2015: each chunk's deleted memories lose their content chunk points.
+        assert [len(c.args[0]) for c in CHUNKS.await_args_list] == [2, 2, 1]
+        assert all(c.args[1] == "kagura_memories" for c in CHUNKS.await_args_list)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_chunk_point_delete_does_not_fail_the_forget(self) -> None:
+        """#2015: the rows are committed; the sweep removes the chunks later."""
+        rows = [_row() for _ in range(2)]
+        service, perm = _service(rows)
+        CHUNKS.side_effect = RuntimeError("qdrant down")
+        try:
+            assert await _run(service, perm, dry_run=False, chunk_size=2) == 2
+        finally:
+            CHUNKS.side_effect = None
 
     @pytest.mark.asyncio
     async def test_one_request_is_capped_and_reports_what_remains(self) -> None:
@@ -324,6 +342,7 @@ class TestBoundedReads:
                 patch("services.permission_service.PermissionService", return_value=perm),
                 patch("services.memory_access_event_writer.emit_memory_access_event", AUDIT),
                 patch("db.qdrant.delete_points_from_qdrant", POINTS),
+                patch("db.qdrant.delete_chunk_points", CHUNKS),
                 patch(
                     "services.memory_service.resolve_collection_name",
                     AsyncMock(return_value="kagura_memories"),

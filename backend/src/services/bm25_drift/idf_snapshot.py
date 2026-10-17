@@ -77,13 +77,17 @@ async def build_idf_snapshot(
             scroll_filter=scroll_filter,
             limit=_SCROLL_LIMIT,
             offset=offset,
-            with_payload=["resource_id"],
+            with_payload=["resource_id", "chunk_of"],
             with_vectors=[KAGURA_MEMORIES_BM25_VECTOR_NAME],
         )
 
         for point in points:
             # Source classification by payload-field presence.
             payload = point.payload or {}
+            # #2015: a content chunk point is part of its memory, not another
+            # document (it carries no bm25 vector either).
+            if payload.get("chunk_of") is not None:
+                continue
             is_resource = payload.get("resource_id") is not None
             if is_resource:
                 r_resource += 1

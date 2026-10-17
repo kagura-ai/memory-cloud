@@ -159,6 +159,24 @@ class TestPlan:
         assert plan.memory_count == 8261
 
     @pytest.mark.asyncio
+    async def test_a_context_with_content_chunks_is_refused(self):
+        """#2015: reembed/verify are summary-point only; verify would drop chunks."""
+        config = _config(SMALL, 512)
+        config.content_chunks_enabled = True
+        db = _db([_result(scalar=_context()), _result(scalar=config)])
+        with pytest.raises(ValidationError, match="content_chunks_enabled"):
+            await svc.plan_context_migration(db, uuid4(), QWEN)
+
+    @pytest.mark.asyncio
+    async def test_purging_a_context_with_content_chunks_is_allowed(self):
+        """The purge of the old collection is filter-based and takes chunks too."""
+        config = _config(QWEN, 2560)
+        config.content_chunks_enabled = True
+        db = _db([_result(scalar=_context()), _result(scalar=config), _result(scalar=3)])
+        plan = await svc.plan_context_migration(db, uuid4(), QWEN, source_model=SMALL)
+        assert plan.source_model == SMALL
+
+    @pytest.mark.asyncio
     async def test_explicit_source_equal_to_the_active_model_is_refused(self):
         # After A -> B switched the context routes to QWEN; naming QWEN as the
         # source would purge the collection it serves from.
