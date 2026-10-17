@@ -103,3 +103,21 @@ EOF
     [ -n "$case_at" ]
     [ "$check_at" -lt "$case_at" ]
 }
+
+@test "every knob is checked: a bad API_LOG_MAX_SIZE or LOG_MAX_FILE also fails" {
+    printf 'API_LOG_MAX_SIZE=50\n' > "$ENV_FILE"
+    run validate_log_rotation_env
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"API_LOG_MAX_SIZE must be"* ]]
+    printf 'LOG_MAX_FILE=0\n' > "$ENV_FILE"
+    run validate_log_rotation_env
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"LOG_MAX_FILE must be"* ]]
+}
+
+@test "an export KEY= line in .env.prod is read" {
+    printf 'export LOG_MAX_SIZE=bad\n' > "$ENV_FILE"
+    run validate_log_rotation_env
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"LOG_MAX_SIZE must be"* ]]
+}

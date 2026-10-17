@@ -156,7 +156,9 @@ this: a compose `logging:` block overrides the daemon default.
   leave the change pending. The same recreate moves `qdrant` to the image the
   compose file pins, so the
   [Qdrant upgrade runbook](ops/qdrant-upgrade-runbook.md) caveat in the table
-  below applies to a reboot too.
+  below applies to a reboot too. Setting only `API_LOG_MAX_*` and leaving
+  `LOG_MAX_*` unset changes no data-tier configuration, so nothing restarts
+  the databases.
 - **Plan the disk for both colors.** A stopped standby color keeps its log
   files until it is recreated, so the API takes up to
   `2 × API_LOG_MAX_SIZE × API_LOG_MAX_FILE`, plus
@@ -181,7 +183,9 @@ context, operation, outcome; see
 once per `API_KEY_LAST_USED_THROTTLE_SECONDS`, default 60). OAuth and
 session-cookie requests have no per-request row; set `LOG_LEVEL=debug` in
 `.env.prod` and recreate the API colors to bring the per-request line back,
-along with every other DEBUG line, while you investigate.
+along with every other DEBUG line, while you investigate. DEBUG also logs
+token and session-id prefixes, so set `LOG_LEVEL` back and recreate the API
+colors again when you are done.
 
 **Applying it to a running stack.** `logging` options are fixed when a container
 is *created* — `docker compose restart` does not apply them. After updating to a
