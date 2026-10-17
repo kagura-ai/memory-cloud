@@ -197,7 +197,7 @@ async def authenticate_mcp_request(
         if user_id:
             # #2025: auth success fires once per MCP request — DEBUG, not INFO,
             # so it does not dominate the log volume. Failures stay at WARNING.
-            logger.debug(f"MCP auth success: method=session_cookie, user={user_id}")
+            logger.debug("MCP auth success: method=session_cookie, user=%s", user_id)
             return (user_id, None, None)  # Session auth doesn't have context/workspace scope
 
     # No auth header and no session → authentication required
@@ -236,7 +236,10 @@ async def authenticate_mcp_request(
     if result:
         user_id, context_id, workspace_id = result
         logger.debug(
-            f"MCP auth success: method=api_key, user={user_id}, context={context_id}, workspace={workspace_id}"
+            "MCP auth success: method=api_key, user=%s, context=%s, workspace=%s",
+            user_id,
+            context_id,
+            workspace_id,
         )
         return result
 
@@ -262,7 +265,7 @@ async def authenticate_mcp_request(
                 client_scope_unavailable=grant.client_scope_unavailable,
             )
         )
-        logger.debug(f"MCP auth success: method=oauth2, user={grant.user_id}")
+        logger.debug("MCP auth success: method=oauth2, user=%s", grant.user_id)
         # Issue #245: context_id is now required in tool args, not from auth
         return (grant.user_id, None, None)
 
