@@ -76,7 +76,7 @@ Manual: guide(["remember"]).""",
                     "dedupe": {
                         "type": "string",
                         "enum": ["suggest", "check", "off"],
-                        "description": "suggest (default): write, flag a near-duplicate on a later recall. check: ask first — a live memory scoring >= 0.85 comes back as {status: 'duplicate_candidate', candidate} and nothing is written. off: write, never suggest. Manual: guide(['remember']).",
+                        "description": "suggest (default): write, flag a near-duplicate on a later recall. check: ask first — a live memory scoring >= 0.85 comes back as {status: 'duplicate_candidate', candidate} and nothing is written. off: write, never suggest for this memory (permanent).",
                     },
                     "summary": {
                         "type": "string",

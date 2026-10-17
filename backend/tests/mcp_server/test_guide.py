@@ -159,6 +159,15 @@ def test_guidance_removed_from_the_descriptions_lives_in_the_guide(phrase):
     assert any(phrase in text for text in GUIDE_TOPICS.values()), phrase
 
 
+def test_dedupe_off_permanence_comes_first():
+    """#2024: the first sentence about 'off' says it is permanent for that
+    memory, before the long paragraph about 'check'."""
+    text = GUIDE_TOPICS["remember.dedupe"]
+    first_off = next(s for s in re.split(r"(?<=\.) ", text) if "'off'" in s)
+    assert "permanent for that memory" in first_off
+    assert text.index("'off' is permanent") < text.index("'check':")
+
+
 @pytest.mark.skipif(not DOCS.exists(), reason="docs/ is not shipped in the image")
 def test_every_usage_note_in_the_docs_has_a_guide_topic():
     notes = DOCS.read_text(encoding="utf-8").split("## Usage notes", 1)[1]

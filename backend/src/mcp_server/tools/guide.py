@@ -263,7 +263,12 @@ GUIDE_TOPICS: dict[str, str] = {
     "remember.dedupe": (
         "dedupe selects how a near-duplicate is handled on a write. 'suggest' (default): "
         "the memory is written and a later recall / reference flags the older "
-        "near-duplicate as supersede_candidate. 'check': the summary is embedded first "
+        "near-duplicate as supersede_candidate. 'off' is "
+        "permanent for that memory: it is written with a tombstone and no "
+        "supersede_candidate is ever detected for it, even after edits. Use it only for "
+        "a memory you have decided is not a duplicate; a bulk import that merely wants "
+        "to avoid duplicate_candidate replies should keep the default 'suggest' (which "
+        "never refuses a write). 'check': the summary is embedded first "
         "and the nearest live memory of the context compared (the memories recall "
         "would search: every member's in a shared context, yours and your linked "
         "accounts' in a private one) — at similarity >= 0.85 "
@@ -274,8 +279,8 @@ GUIDE_TOPICS: dict[str, str] = {
         "with dedupe='off'. A candidate with supersedable: false is another member's "
         "memory: supersedes takes only your own, so for it the choices are dedupe='off' "
         "(store yours beside it) or not writing. If the embedder cannot run the reply is error "
-        "dedupe_unavailable (no detail field) and nothing is written. 'off': the memory is written and "
-        "never flagged as a duplicate afterwards. 'check' costs one embedding call; use "
+        "dedupe_unavailable (no detail field) and nothing is written. 'check' costs one "
+        "embedding call; use "
         "it for the memory you suspect already exists, not for every write."
     ),
     # ----------------------------------------------------------- remember_batch

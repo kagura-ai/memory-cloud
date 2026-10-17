@@ -461,8 +461,10 @@ remember_batch(context_id=..., tags_normalize=true, dedupe="off", items=[
    replacement="smoke-test" — tags_normalize stored the established spelling
 -> Verify: the context fields (context_id, context_name, ...) are at the top level
 -> Save results[0..2].memory_id as batch_id_1, batch_id_2 and batch_id_3
--> Note: dedupe="off" writes without ever suggesting a near-duplicate later; items 1 and 2 are
-   near-identical on purpose and both must be written (no duplicate_candidate)
+-> Note: dedupe="off" writes without ever suggesting a near-duplicate later, and that is
+   permanent for these memories (a real import keeps the default "suggest", which also never
+   refuses a write); items 1 and 2 are near-identical on purpose and both must be written
+   (no duplicate_candidate)
 
 remember_batch(context_id=..., atomic=true, items=[
   {"summary": "MCP smoke test atomic item — must not be written", "content": "Valid item of a refused atomic batch.", "type": "note"},
