@@ -1056,6 +1056,67 @@ the entry stays hidden while either answer is pending, so a lower tier never
 sees a flash-then-hide. The pages themselves stay reachable by URL and carry
 the upsell state for new objects.
 
+## Supersede suggestions and k-NN seeding: log events (Issue #2023)
+
+After a memory is embedded, one step reads its nearest neighbours. Two features
+use that read: the k-NN seed edges (`KNN_SEED_ENABLED`) and the supersede
+suggestions (`SUPERSEDE_SUGGEST_ENABLED`, plus the judge behind
+`SUPERSEDE_VERIFY_MODE=llm`; see [`supersede_candidate`](mcp-tools.md)). Each
+step writes a structured event to the API log. Some events are at DEBUG, so
+they never appear with the default `LOG_LEVEL=info`. If a DEBUG event is
+missing from your logs, the state may still have happened. Tally the INFO and
+WARNING events below.
+
+**Supersede suggestions** (`services/memory_service.py`, `services/edge_service.py`)
+
+| event | level | meaning |
+|---|---|---|
+| `supersede_suggest_disabled` | INFO | `SUPERSEDE_SUGGEST_ENABLED=false` was seen. Logged once each time the switch goes from on to off (and on the first ingest), not on every ingest |
+| `supersede_candidate_detected` | INFO | a candidate was stored. `verdict` is set when the judge ran, and is null otherwise |
+| `supersede_candidate_suppressed_by_dismissal` | INFO | a dismissal tombstone (#1504, or `remember(dedupe="off")`) held, so no candidate was stored. Also logged when a dismissal committed while the judge was running |
+| `supersede_suggestion_accepted` | INFO | a `supersedes` edge accepted the stored candidate, and the candidate was cleared |
+| `supersede_suggestion_dismissed` | INFO | an edit dismissed the candidate and wrote a tombstone |
+| `supersede_dismiss_noop` | INFO | there was nothing to dismiss (`reason=parallel`: the judge had already set the pair aside) |
+| `supersede_dismiss_malformed_candidate` / `supersede_accept_check_failed` / `supersede_candidate_resolve_failed` | WARNING | the stored candidate could not be dismissed, accepted or read. The edit, edge or read still succeeds; only the suggestion is skipped |
+
+**The judge** (`SUPERSEDE_VERIFY_MODE=llm`, `services/supersede_verify.py`, #2016)
+
+| event | level | meaning |
+|---|---|---|
+| `supersede_verify_judged` | INFO | one judge answer, with `verdict`, `confidence`, `verified` and `tokens` |
+| `supersede_verify_skipped_newer_target` | INFO | the neighbour was written after the memory, so the pair was not judged and the candidate is stored unverified |
+| `supersede_verify_failed` | WARNING | the provider call failed. The candidate is stored unverified |
+| `supersede_verify_unparseable` | WARNING | the answer could not be parsed. The candidate is stored unverified |
+| `supersede_verify_no_provider` | WARNING | `SLEEP_LLM_PROVIDER` is unset. Logged once per process |
+| `supersede_verify_cap_reached` | WARNING | a workspace hit `SUPERSEDE_VERIFY_MAX_CALLS_PER_DAY`. Logged once per workspace per UTC day |
+| `supersede_verify_counter_failed` | WARNING | the daily counter could not be read. The judge is skipped (fail-closed) |
+| `supersede_verify_ledger_failed` | WARNING | the `llm_call_log` row for a judge call could not be written. The verdict is still used |
+
+The judge's results do not depend on the log. Since #2019, each judge call that
+spent tokens is a `caller='supersede_verify'` row in `llm_call_log`, with the
+verdict or outcome in `call_metadata`, so the tally survives log rotation. See
+[Where cost is recorded](#where-cost-is-recorded-sleep_reports-vs-llm_call_log)
+for the query. A `supersede_verify_ledger_failed` line marks a call that is
+missing from that table.
+
+**k-NN seed edges** (`services/memory_service.py`, `neural/calibration.py`)
+
+| event | level | meaning |
+|---|---|---|
+| `knn_seed_edges_created` | INFO | seed edges were written (`edges_created`, `avg_similarity`) |
+| `knn_seed_uncalibrated_embedder` | WARNING | the D3 bootstrap gate is crossed but the embedder has no `knn_seed` calibration row, so seed edges are off and supersede detection still runs. Logged once per process per (model, dimensions) |
+| `knn_seed_skip_no_consumer` | INFO once, then DEBUG | seeding is on but has no threshold, and suggestions are off, so the ingest reads no neighbours at all. INFO on the first ingest per (model, dimensions) in each process, DEBUG after that |
+| `knn_seed_skip_no_threshold` | DEBUG | no seed edges on this ingest (seeding is off, or there is no calibrated threshold). Supersede detection still ran |
+| `knn_seed_disabled_no_calibration` | DEBUG | the threshold resolver found no calibration row. Below D3 this is the normal state of a new deployment or a small context |
+| `knn_seed_skip_already_seeded` / `knn_seed_no_neighbors` | DEBUG | a re-embed of a memory that already has edges, or no neighbour above the threshold |
+| `knn_seed_edge_failed` / `knn_seed_bootstrap_trigger_failed` / `knn_seed_bootstrap_rollback_failed` / `knn_seeding_failed` | WARNING | best-effort failures. The memory itself is stored |
+
+`knn_seed_skip_no_threshold` and `knn_seed_disabled_no_calibration` stay at
+DEBUG. Once the gate is crossed, `knn_seed_uncalibrated_embedder` already
+reports the case that matters, and below D3 the event would fire on every
+ingest of a fresh deployment. To see them, set `LOG_LEVEL=debug` for a while,
+then set it back.
+
 ## Tag Co-Occurrence Cold-Start Seeding (Issue #223)
 
 Migration `b05_223_tag_cooccurrence` adds the schema; seeding fires
@@ -2318,6 +2379,10 @@ FROM llm_call_log
 WHERE caller = 'supersede_verify' AND occurred_at >= now() - interval '7 days'
 GROUP BY 1;
 ```
+
+The log events for the same path (`supersede_verify_*`, the k-NN seeding
+events and their levels) are listed in
+[Supersede suggestions and k-NN seeding: log events](#supersede-suggestions-and-k-nn-seeding-log-events-issue-2023).
 
 ### Setting prices (`LLM_PRICING_OVERRIDES`)
 
