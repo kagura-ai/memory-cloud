@@ -16,6 +16,8 @@ from config.settings import Settings
 _RERANK_ENV_KEYS = [
     "RERANK_BASE_URL",
     "RERANK_MODEL",
+    "RERANK_PROMPT_FORMAT",
+    "RERANK_INSTRUCTION",
     "SELF_HOSTED_BASE_URL",
     "DEFAULT_RERANKER_PROVIDER",
     "DEFAULT_USE_RERANK",
@@ -39,6 +41,44 @@ def test_defaults_when_unset(clean_rerank_env):
     s = _fresh_settings()
     assert s.rerank_base_url == ""  # empty = local vLLM path disabled
     assert s.rerank_model == "qwen3-reranker-0.6b"
+
+
+def test_rerank_prompt_defaults(clean_rerank_env):
+    """#2020: auto = detect the Qwen3-Reranker template from the model name;
+    an empty instruction means the model card's default (applied by
+    VLLMReranker, so the literal lives in one place)."""
+    s = _fresh_settings()
+    assert s.rerank_prompt_format == "auto"
+    assert s.rerank_instruction == ""
+
+
+def test_rerank_prompt_formats_derive_from_the_literal():
+    from typing import get_args
+
+    from config.constants import RERANK_PROMPT_FORMATS, RerankPromptFormat
+
+    assert RERANK_PROMPT_FORMATS == frozenset(get_args(RerankPromptFormat))
+    assert RERANK_PROMPT_FORMATS == {"auto", "qwen3", "raw"}
+    assert get_args(Settings.model_fields["rerank_prompt_format"].annotation) == get_args(
+        RerankPromptFormat
+    )
+
+
+@pytest.mark.parametrize("value", ["raw", " QWEN3 ", "Auto"])
+def test_rerank_prompt_format_normalized(clean_rerank_env, value):
+    clean_rerank_env.setenv("RERANK_PROMPT_FORMAT", value)
+    assert _fresh_settings().rerank_prompt_format == value.strip().lower()
+
+
+def test_rerank_prompt_format_rejects_unknown(clean_rerank_env):
+    clean_rerank_env.setenv("RERANK_PROMPT_FORMAT", "chatml")
+    with pytest.raises(ValidationError):
+        _fresh_settings()
+
+
+def test_rerank_instruction_override_stripped(clean_rerank_env):
+    clean_rerank_env.setenv("RERANK_INSTRUCTION", "  Find the memory that answers  ")
+    assert _fresh_settings().rerank_instruction == "Find the memory that answers"
 
 
 def test_legacy_embedding_provider_ollama_coerced_to_self_hosted(monkeypatch):

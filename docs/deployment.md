@@ -1807,6 +1807,8 @@ key resolved at recall time — there is no platform-key tier); `self_hosted` is
 | `RERANK_BASE_URL` | — | OpenAI/Jina-style `/v1/rerank` endpoint (vLLM `--runner pooling`, TEI, Infinity). When set, `self_hosted` makes **one batched** `POST {RERANK_BASE_URL}/v1/rerank` per recall. |
 | `RERANK_MODEL` | `qwen3-reranker-0.6b` | Served model name on that endpoint (vLLM `--served-model-name`). |
 | `RERANK_API_KEY` | — | Bearer token when the `/v1/rerank` endpoint is behind auth. |
+| `RERANK_PROMPT_FORMAT` | `auto` | How the query and documents are sent to `/v1/rerank`. `qwen3` wraps them in the Qwen3-Reranker prompt template (system judge prompt, `<Instruct>` / `<Query>` on the query, `<Document>` plus the empty think block on each document); `raw` sends text verbatim; `auto` picks `qwen3` when the served model name (`RERANK_MODEL`, or a context's `reranker_model`) contains `qwen3-reranker` (case-insensitive), else `raw` — so if `--served-model-name` is something else, set `qwen3` explicitly. In the `qwen3` format the tokenizer's control tokens (`<\|im_start\|>`, `<\|im_end\|>`, `<think>`, …) in the query and in stored memories are broken up so content cannot close the document slot, and each document body is cut to 2000 characters so the template's closing tokens survive server-side truncation. With `raw` — including `raw` plus a server-side `--chat-template` — the text is sent as is: no token neutralising or truncation happens on this side. Set `raw` if the server applies the template itself (vLLM `--chat-template`), or the template is applied twice. A forced `qwen3` also templates contexts that override `reranker_model` with a non-Qwen model on the same endpoint; `auto` decides per model. |
+| `RERANK_INSTRUCTION` | — | The `<Instruct>` line of the Qwen3 template; empty ⇒ the model card default, `Given a web search query, retrieve relevant passages that answer the query`. Ignored for `raw`. |
 | `SELF_HOSTED_RERANK_MODEL` | `dengcao/Qwen3-Reranker-8B:Q5_K_M` | Prompt-scoring fallback on `SELF_HOSTED_BASE_URL` (`/v1/completions`, one call per document), used only when `RERANK_BASE_URL` is unset. The default is an Ollama-registry id — a pure-vLLM stack must set a model it actually serves. |
 
 The `DEFAULT_*` values apply to contexts created from now on; **existing rows
@@ -1824,12 +1826,19 @@ Serve a reranker behind `/v1/rerank` and make it the default for new contexts:
 
 ```bash
 # e.g. vLLM: vllm serve Qwen/Qwen3-Reranker-0.6B --runner pooling \
+#            --hf-overrides '{"architectures": ["Qwen3ForSequenceClassification"], "classifier_from_token": ["no", "yes"], "is_original_qwen3_reranker": true}' \
 #            --served-model-name qwen3-reranker-0.6b --port 8002
 RERANK_BASE_URL=http://reranker:8002
 RERANK_MODEL=qwen3-reranker-0.6b
 DEFAULT_RERANKER_PROVIDER=self_hosted
 DEFAULT_USE_RERANK=true
 ```
+
+Qwen3-Reranker is trained on a fixed prompt template; fed raw text it scores
+nearly everything as relevant and reranking does worse than none. With the
+served name containing `qwen3-reranker`, `RERANK_PROMPT_FORMAT=auto` applies
+the template on the client side. If you name the model something else, set
+`RERANK_PROMPT_FORMAT=qwen3`.
 
 A freshly created context on a plan with `reranking` now reranks with no user
 action and no external key; a Free workspace does not
@@ -1863,6 +1872,36 @@ rerank_failed_open provider=self_hosted error_class=ConnectError context_id=... 
 Alert on `rerank_failed_open` (a structured log event — the backend has no
 metrics counters). `reranking_disabled_by_deployment` (debug) and
 `reranking_disabled_by_plan_tier` (info) mark the two deliberate skips.
+
+### Calibration check
+
+When `RERANK_BASE_URL` is set and `ENABLE_RERANKING` is on, every API process
+(each Uvicorn worker) scores one relevant and one irrelevant document against
+`RERANK_MODEL` once at startup, in the background (it never runs on a recall).
+It covers only `RERANK_MODEL`, not a per-context `reranker_model` override.
+
+With the `qwen3` format, the relevant document must win by at least 0.5, else
+a warning is logged:
+
+```
+rerank_model_uncalibrated model=qwen3-reranker-0.6b prompt_format=qwen3 relevant_score=0.98 irrelevant_score=0.866 margin=0.114 min_margin=0.5
+```
+
+That usually means the template is applied twice (the server also runs
+`--chat-template`: set `RERANK_PROMPT_FORMAT=raw`) or the model is not a Qwen3
+reranker. A passing check logs `rerank_model_calibrated` (info).
+
+With `raw` the score scale depends on the server (probabilities, logits), so
+no verdict is given: the scores are logged as `rerank_calibration_observed`
+(info). A Qwen3 reranker served under a name without `qwen3-reranker` shows up
+here with close scores — set `RERANK_PROMPT_FORMAT=qwen3`.
+
+Connect errors, timeouts and HTTP 5xx are retried twice (after 10 s, then
+30 s) while the reranker loads; an HTTP 4xx, a malformed or incomplete
+response (fewer than two scores) or the last failed retry logs
+`rerank_calibration_check_failed` (warning, with the error class, the HTTP
+status and the endpoint with any password masked) and the check is not
+repeated until the next restart.
 
 ## Plan Tiers
 
@@ -2146,6 +2185,53 @@ free, but the same provider key also fronts paid OpenAI-compatible endpoints
 (`SELF_HOSTED_BASE_URL` + `SELF_HOSTED_API_KEY`), and the platform cannot know
 which one you run. (Earlier releases seeded those models at `$0`; that seed is
 removed on upgrade so a paid endpoint no longer shows `$0.00`.)
+
+### Where cost is recorded (`sleep_reports` vs `llm_call_log`)
+
+Cost is recorded in two places, by shape:
+
+- **Run-shaped: `sleep_reports`** (+ `sleep_report_llm_usage`). One row per
+  Sleep Maintenance or Memory Analysis run, with per-phase / per-model usage
+  aggregated across the run. All of Sleep's judges (edge discovery, dedup,
+  consolidation, importance re-evaluation) are counted here, and only here.
+- **Event-shaped: `llm_call_log`.** One row per provider call made outside a
+  run: recall embeddings (`caller='recall'`) and the write-time supersede
+  check (`caller='supersede_verify'`, enabled by `SUPERSEDE_VERIFY_MODE=llm`).
+  Each row stores its tokens, a cost snapshot priced when it is written,
+  `paid_by` (`byok` when a stored workspace key was used, `platform`
+  otherwise), and for the supersede check the verdict (`supersedes`,
+  `parallel` or `unclear`) and confidence in `call_metadata`. Every call that
+  spent tokens is recorded: an answer that could not be parsed has
+  `outcome: unparseable`, and a call that failed after the provider had
+  answered at least once (two unparseable answers, or one and then an API
+  error on the retry) has `outcome: failed` with the tokens of the attempts
+  that answered. Only a call that got no answer at all writes no row.
+
+Sleep never writes per-call rows to `llm_call_log`. A run already has a row
+that totals its calls, and counting the same spend in two tables would mean
+reconciling them on every report. The per-run totals in `sleep_reports` are the
+record of Sleep cost.
+
+The admin and workspace cost dashboards combine Sleep, Memory Analysis and the
+supersede check, and each one appears as its own row in the *By Source* table.
+They price the two kinds differently: Sleep and Memory Analysis usage is
+priced from `llm_pricing` each time the dashboard is read, so a price change
+also changes past Sleep figures, while a supersede-check row keeps the cost it
+was given when written. Both skip `pricing_model = 'subscription'` rows, so a
+model billed by subscription shows as cost unknown (`—`) in either.
+Recall embeddings are in `llm_call_log` but are not shown in the dashboards
+yet. Because the ledger is a table, you can still answer questions such as
+"how did the supersede verdicts split last week, and what did they cost?"
+after your logs have rotated:
+
+```sql
+SELECT coalesce(call_metadata->>'verdict', call_metadata->>'outcome') AS verdict, count(*),
+       sum(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS tokens,
+       sum(cost_usd) AS cost_usd
+FROM llm_call_log
+WHERE caller = 'supersede_verify' AND occurred_at >= now() - interval '7 days'
+GROUP BY 1;
+```
 
 ### Setting prices (`LLM_PRICING_OVERRIDES`)
 

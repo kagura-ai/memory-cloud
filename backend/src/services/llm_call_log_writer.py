@@ -2,7 +2,8 @@
 
 Issue #474: Inserts one ``llm_call_log`` row per LLM/embedding/rerank
 API call from non-Sleep paths (recall reranking, recall embedding via
-#475 PR-3, future ``ask()``, admin actions). Sleep Maintenance never
+#475 PR-3, future ``ask()``, admin actions, the ingest-time supersede judge
+#2019). Sleep Maintenance never
 emits here — Sleep cost stays in ``sleep_reports`` + ``sleep_report_llm_usage``
 (canonical pattern, memory ``9db43e36`` / 2026-05-14 gate1 decision).
 
@@ -73,7 +74,15 @@ _FORBIDDEN_CALLERS: frozenset[str] = frozenset({"sleep"})
 # may run without a user binding. The table CHECK is permissive (all
 # three columns nullable); this Python-side assert enforces the
 # operational contract.
-_FULL_IDENTITY_CALLERS: frozenset[str] = frozenset({"recall", "rerank", "ask"})
+_FULL_IDENTITY_CALLERS: frozenset[str] = frozenset({"recall", "rerank", "ask", "supersede_verify"})
+
+# Callers whose cost snapshot skips ``pricing_model='subscription'`` rows
+# (#2019) — the rule the cost aggregation's Sleep LLM leg applies, so a judge
+# completion and a Sleep completion on the same model price the same way (a
+# subscription row reads as a pricing miss, "cost unknown"). Recall is left
+# out deliberately: its rows (and the embedding spend cap sharing the lookup)
+# keep the pricing they always had.
+_SUBSCRIPTION_EXCLUDED_CALLERS: frozenset[str] = frozenset({"supersede_verify"})
 
 # Column-name → llm_pricing.unit_type axis. ``cached_input_tokens`` maps
 # to the ``cache_read_tokens`` pricing axis — naming differs because
@@ -299,6 +308,7 @@ class LLMCallLogWriter:
                 model=model,
                 occurred_at=resolved_occurred_at,
                 usage_pairs=usage_pairs,
+                exclude_subscription=caller in _SUBSCRIPTION_EXCLUDED_CALLERS,
             )
 
             final_metadata: dict[str, Any] | None = dict(call_metadata) if call_metadata else None
@@ -413,6 +423,7 @@ class LLMCallLogWriter:
         model: str,
         occurred_at: datetime,
         usage_pairs: list[tuple[str, int]],
+        exclude_subscription: bool = False,
     ) -> tuple[Decimal, bool]:
         """Sum cost across all priced unit_types for this call.
 
@@ -435,6 +446,7 @@ class LLMCallLogWriter:
                 unit_type=unit_type,
                 started_at=occurred_at,
                 units=units,
+                exclude_subscription=exclude_subscription,
             )
             if partial is None:
                 # First miss collapses the whole cost to 0 — short-circuit

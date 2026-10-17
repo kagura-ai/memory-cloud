@@ -61,7 +61,14 @@ writer side too:
 | rerank    | NOT NULL| NOT NULL     | NOT NULL   |
 | ask       | NOT NULL| NOT NULL     | NOT NULL   |
 | admin     | nullable| nullable     | nullable   |
+| supersede_verify | NOT NULL | NOT NULL | NOT NULL |
 | sleep     | (never written, see above)                |
+
+``supersede_verify`` (#2019) is the ingest-time supersede judge
+(``services/supersede_verify.py``): one ``completion`` row per judge call,
+with the verdict in ``call_metadata``. It runs on the Sleep judge's
+provider / model but outside a Sleep run, so it has no ``sleep_reports``
+row to aggregate into — it is event-shaped and belongs here.
 
 The 'sleep' value in the CHECK constraint exists for forward-compat
 (future migration that might unify sleep ledger here) but the writer
@@ -105,14 +112,16 @@ from db.base import Base
 # Public list of allowed ``caller`` values. Imported by the writer
 # service for input validation (defense in depth — the DB CHECK is the
 # source of truth). Keep in sync with the ``valid_llm_call_log_caller``
-# CHECK constraint string below AND the matching string in the alembic
-# migration (op.create_table form, see ``e12_474_llm_call_log``).
+# CHECK constraint string below AND the latest alembic migration that
+# rewrites it (``f00_2019_llm_log_supersede``; ``tests/test_schema_drift.py``
+# compares the two). New values are appended, never reordered.
 LLM_CALL_LOG_CALLERS: tuple[str, ...] = (
     "sleep",
     "recall",
     "rerank",
     "ask",
     "admin",
+    "supersede_verify",  # #2019 — appended, never reordered
 )
 
 # Public list of allowed ``call_type`` values. The codebase consistently
@@ -248,7 +257,7 @@ class LLMCallLog(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "caller IN ('sleep', 'recall', 'rerank', 'ask', 'admin')",
+            "caller IN ('sleep', 'recall', 'rerank', 'ask', 'admin', 'supersede_verify')",
             name="valid_llm_call_log_caller",
         ),
         CheckConstraint(

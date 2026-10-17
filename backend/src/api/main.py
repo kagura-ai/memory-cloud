@@ -162,6 +162,17 @@ async def lifespan(app: FastAPI):
 
     app.state.chunk_of_index_task = asyncio.create_task(ensure_chunk_of_index_on_all())
 
+    # #2020: one cheap calibration smoke check of the /v1/rerank model (a
+    # relevant vs an irrelevant document) per process, so a mis-formatted
+    # reranker shows up in the log (rerank_model_uncalibrated, or the raw
+    # scores as rerank_calibration_observed) instead of silently wrecking
+    # recall. Background
+    # and fail-soft: never on the recall path, never a reason not to boot.
+    # Only when RERANK_BASE_URL is set and ENABLE_RERANKING is on.
+    from tasks.rerank_calibration import start_rerank_calibration
+
+    app.state.rerank_calibration_task = start_rerank_calibration(get_settings())
+
     logger.info("application_started")
 
     yield
@@ -197,6 +208,12 @@ async def lifespan(app: FastAPI):
             await chunk_index_task
         except asyncio.CancelledError:
             pass  # expected: we cancelled it ourselves
+
+    # Stop the rerank calibration check if it is still waiting on a
+    # reranker that has not come up (#2020).
+    from tasks.rerank_calibration import stop_rerank_calibration
+
+    await stop_rerank_calibration(getattr(app.state, "rerank_calibration_task", None))
 
     # Stop this worker's MCP session cleanup loop (#1980).
     cleanup_task = getattr(app.state, "mcp_session_cleanup_task", None)

@@ -36,6 +36,18 @@ matches what the judge saw (``verification_stale``). Text, not
 ``updated_at``: Sleep stamps ``updated_at`` for importance and tag changes
 that the judge never looked at.
 
+Every billed judge call leaves one ``llm_call_log`` row (#2019,
+``caller='supersede_verify'``, ``call_type='completion'``): tokens, the
+write-time cost snapshot, ``paid_by`` from the credential the call actually
+used, and the verdict in ``call_metadata``. The row goes through its own
+short session, so it lands even when the ingest path returns early and a
+ledger failure never touches the embedding task's session. Every call that
+spent tokens is recorded: an unparseable answer (``outcome: unparseable``) and
+a call that raised after an attempt answered (``outcome: failed``, the usage
+``LLMServiceError.usage`` carries — two unparseable answers, or one and then
+an API error on the retry). A call no attempt of which answered writes no
+row.
+
 The judge never creates an edge: the #1208 over-supersede prevention keeps
 edge authorship with the user / agent. Memory text goes into the prompt only
 between the untrusted-content markers Sleep uses (#919); trusted metadata
@@ -48,6 +60,7 @@ import hashlib
 import os
 from typing import TYPE_CHECKING, Any
 
+from db.base import isolated_session
 from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import INJECTION_RESISTANCE_DIRECTIVE, wrap_untrusted_content
 from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA
@@ -344,6 +357,63 @@ def counter_key(workspace_id: str) -> str:
     return f"supersede_verify:{workspace_id}:{utcnow().strftime('%Y-%m-%d')}"
 
 
+# ``llm_call_log.caller`` for the judge's ledger rows (#2019).
+LEDGER_CALLER = "supersede_verify"
+
+
+async def _record_judge_call(
+    db: AsyncSession,
+    response: Any,
+    *,
+    paid_by: str,
+    user_id: str,
+    workspace_id: str,
+    context_id: str,
+    call_metadata: dict[str, Any],
+) -> None:
+    """Write the judge call's ``llm_call_log`` row; never raises.
+
+    Fail-open like the recall ledger: a lost row is an observability gap, not
+    a reason to drop the verdict. ``call_metadata`` carries the verdict only,
+    never memory text.
+
+    The row goes through ``isolated_session`` (the #1985 recipe): it must land
+    whatever the ingest path does next (it may return without committing), and
+    a failed ledger write must not leave the embedding task's session needing a
+    rollback, which would expire the memory it is still working on. The cost
+    is a second pooled connection held beside the task's own for the length
+    of this short write.
+    """
+    from services.llm_call_log_writer import LLMCallLogWriter
+
+    try:
+        async with isolated_session(db) as session:
+            row = await LLMCallLogWriter(session).record(
+                caller=LEDGER_CALLER,
+                call_type="completion",
+                provider=response.provider,
+                model=response.model,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                context_id=context_id,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                cached_input_tokens=response.cached_input_tokens,
+                cache_write_tokens=response.cache_write_tokens,
+                paid_by=paid_by,
+                call_metadata=call_metadata,
+                fail_on_error=False,
+            )
+            if row is not None:
+                await session.commit()
+    except Exception as exc:  # noqa: BLE001 — never raises into the embedding task
+        logger.warning(
+            "supersede_verify_ledger_failed",
+            workspace_id=workspace_id,
+            error_type=type(exc).__name__,
+        )
+
+
 # Workspaces whose cap was already reported today (reset when the UTC day
 # changes, so the set never grows past the day's capped workspaces).
 _CAP_REPORTED_DAY = ""
@@ -447,8 +517,9 @@ async def judge_pair(
         new_type=new.type,
         new_created_at=new.created_at,
     )
+    llm = LLMService(db)
     try:
-        response = await LLMService(db).complete_json(
+        response = await llm.complete_json(
             user_id=user_id,
             prompt=prompt,
             system_prompt=SUPERSEDE_VERIFY_SYSTEM,
@@ -460,6 +531,20 @@ async def judge_pair(
             platform_only=judge_platform_only(config),
         )
     except Exception as exc:  # noqa: BLE001 — best-effort, never blocks ingest
+        # An attempt that answered was billed even though the call failed
+        # (unparseable twice, or unparseable then an API error on the retry):
+        # ``LLMServiceError.usage`` carries that spend to the ledger.
+        spent = getattr(exc, "usage", None)
+        if spent is not None:
+            await _record_judge_call(
+                db,
+                spent,
+                call_metadata={"outcome": "failed", "prompt_revision": PROMPT_REVISION},
+                paid_by=llm.resolve_paid_by(),
+                user_id=user_id,
+                workspace_id=workspace_id,
+                context_id=context_id,
+            )
         logger.warning(
             "supersede_verify_failed",
             memory_id=str(new.id),
@@ -470,8 +555,20 @@ async def judge_pair(
         )
         return None
 
+    ledger = {
+        "paid_by": llm.resolve_paid_by(),
+        "user_id": user_id,
+        "workspace_id": workspace_id,
+        "context_id": context_id,
+    }
     judgement = parse_judgement(response.parsed)
     if judgement is None:
+        await _record_judge_call(
+            db,
+            response,
+            call_metadata={"outcome": "unparseable", "prompt_revision": PROMPT_REVISION},
+            **ledger,
+        )
         logger.warning(
             "supersede_verify_unparseable",
             memory_id=str(new.id),
@@ -490,6 +587,17 @@ async def judge_pair(
         fingerprint=pair_fingerprint(old, new),
         old_fingerprint=text_fingerprint(old.summary, old.content),
         at=read_at,
+    )
+    await _record_judge_call(
+        db,
+        response,
+        call_metadata={
+            "verdict": verdict,
+            "confidence": record["confidence"],
+            "verified": record["verified"],
+            "prompt_revision": PROMPT_REVISION,
+        },
+        **ledger,
     )
     logger.info(
         "supersede_verify_judged",

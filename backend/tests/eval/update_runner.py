@@ -414,6 +414,7 @@ async def run_update_eval(
     from models.auth import Context, Workspace, WorkspaceMember
     from models.config import ContextSearchConfig
     from services.memory_service import MemoryService
+    from services.reranker_service import default_reranker_model_for
     from utils.datetime import utcnow
 
     run_date = run_date or utcnow().strftime("%Y-%m-%d")
@@ -465,7 +466,8 @@ async def run_update_eval(
                 fetch_factor=3,
                 use_rerank=False,
                 reranker_provider="self_hosted",
-                reranker_model="qwen3-reranker-4b",
+                # The deployment's self-hosted model, not a hard-coded name (#2020).
+                reranker_model=default_reranker_model_for("self_hosted", settings),
                 embedding_model=emb_model,
                 embedding_dimensions=emb_dims,
                 reinforce_enabled=False,
@@ -478,7 +480,8 @@ async def run_update_eval(
                 fetch_factor=3,
                 use_rerank=False,
                 reranker_provider="self_hosted",
-                reranker_model="qwen3-reranker-4b",
+                # The deployment's self-hosted model, not a hard-coded name (#2020).
+                reranker_model=default_reranker_model_for("self_hosted", settings),
                 embedding_model=emb_model,
                 embedding_dimensions=emb_dims,
                 reinforce_enabled=True,

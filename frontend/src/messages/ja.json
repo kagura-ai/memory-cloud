@@ -2840,6 +2840,15 @@
         "costByok": "BYOK (USD)",
         "unknown": "コスト不明"
       },
+      "bySource": {
+        "title": "ソース別",
+        "source": "ソース"
+      },
+      "source": {
+        "sleep": "Sleep Maintenance",
+        "analysis": "メモリー分析",
+        "supersede_verify": "更新元の判定 (書き込み時)"
+      },
       "table": {
         "title": "期間別ブレイクダウン",
         "periodStart": "期間",

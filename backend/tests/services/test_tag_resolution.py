@@ -87,6 +87,16 @@ class TestExpandTagFilter:
         assert added == {"dev-environment": ["Dev_Environment", "dev environment"]}
 
     @pytest.mark.asyncio
+    async def test_a_hiragana_filter_matches_the_stored_katakana_tag(self):
+        """#2028: a filter on ろぐ widens to the stored ログ."""
+        db = _db_with_vocabulary({"ログ": 5, "python": 40})
+        expanded, added = await expand_tag_filter(
+            db, workspace_id=WS, context_id=CTX, user_id=USER, tags=["ろぐ"]
+        )
+        assert expanded == ["ろぐ", "ログ"]
+        assert added == {"ろぐ": ["ログ"]}
+
+    @pytest.mark.asyncio
     async def test_abbreviations_are_not_added(self):
         """The issue's example must NOT silently widen the filter."""
         db = _db_with_vocabulary({"dev-env": 3, "authentication": 9})

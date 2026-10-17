@@ -304,6 +304,16 @@ class TestAdminRoute:
         assert kwargs["source"] == "analysis"
         assert kwargs["paid_by"] == "byok"
 
+    def test_ledger_caller_is_an_accepted_source(self, client):
+        """#2019: the supersede judge's ledger rows are filterable by source."""
+        mock_aggregate = _install_admin_overrides(client, [])
+        response = client.get(
+            "/api/v1/admin/cost-aggregation"
+            "?period=day&from=2026-04-01&to=2026-04-07&source=supersede_verify"
+        )
+        assert response.status_code == 200
+        assert mock_aggregate.await_args.kwargs["source"] == "supersede_verify"
+
 
 # ============================================================================
 # Workspace-scoped route

@@ -71,7 +71,7 @@ Manual: guide(["remember"]).""",
                     },
                     "tags_normalize": {
                         "type": "boolean",
-                        "description": "true stores each tag as the context's established spelling (case / separator / plural variants) and reports each mapping in lint as tag_normalized; default false.",
+                        "description": "true stores each tag as the context's established spelling (case / separator / plural / kana variants) and reports each mapping in lint as tag_normalized; default false.",
                     },
                     "dedupe": {
                         "type": "string",

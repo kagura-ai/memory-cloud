@@ -39,8 +39,9 @@ from auth.dependencies import (
 )
 from db.base import get_db
 from models.api_base import TZAwareBaseModel
-from models.sleep import SLEEP_REPORT_PAID_BY_VALUES, SLEEP_REPORT_SOURCES
+from models.sleep import SLEEP_REPORT_PAID_BY_VALUES
 from services.cost_aggregation_service import (
+    COST_SOURCES,
     MAX_LOOKBACK_DAYS,
     VALID_PERIODS,
     CostAggregationRow,
@@ -188,10 +189,10 @@ def _parse_window(
 
 def _validate_enums(source: str | None, paid_by: str | None) -> None:
     """Reject unknown source/paid_by values with a 400 (not a 500)."""
-    if source is not None and source not in SLEEP_REPORT_SOURCES:
+    if source is not None and source not in COST_SOURCES:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid source {source!r}; must be one of {list(SLEEP_REPORT_SOURCES)}",
+            detail=f"Invalid source {source!r}; must be one of {list(COST_SOURCES)}",
         )
     if paid_by is not None and paid_by not in SLEEP_REPORT_PAID_BY_VALUES:
         raise HTTPException(
@@ -301,7 +302,7 @@ async def admin_cost_aggregation(
     to: date = Query(..., description="Inclusive upper-bound date"),
     workspace_id: UUID | None = Query(None, description="Filter to a single workspace"),
     user_id: str | None = Query(None, description="Filter to a single user"),
-    source: str | None = Query(None, description=f"Filter by source: {list(SLEEP_REPORT_SOURCES)}"),
+    source: str | None = Query(None, description=f"Filter by source: {list(COST_SOURCES)}"),
     paid_by: str | None = Query(
         None, description=f"Filter by billing classification: {list(SLEEP_REPORT_PAID_BY_VALUES)}"
     ),
@@ -356,7 +357,7 @@ async def workspace_cost_aggregation(
     from_: date = Query(..., alias="from", description="Inclusive lower-bound date"),
     to: date = Query(..., description="Inclusive upper-bound date"),
     user_id: str | None = Query(None, description="Filter to a single user"),
-    source: str | None = Query(None, description=f"Filter by source: {list(SLEEP_REPORT_SOURCES)}"),
+    source: str | None = Query(None, description=f"Filter by source: {list(COST_SOURCES)}"),
     paid_by: str | None = Query(
         None, description=f"Filter by billing classification: {list(SLEEP_REPORT_PAID_BY_VALUES)}"
     ),

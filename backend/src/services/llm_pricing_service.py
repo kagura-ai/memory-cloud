@@ -67,10 +67,12 @@ logger = get_logger(__name__)
 # unseeded model doesn't re-query.
 _PRICING_CACHE_TTL_SECONDS: Final = 3600
 _PRICING_CACHE_MAXSIZE: Final = 1024
-# key: (provider, model, unit_type, started_at.date(), context_tokens)
+# key: (provider, model, unit_type, started_at.date(), context_tokens,
+#      exclude_subscription)
 # value: (price_per_unit, unit_denominator) | None
-_pricing_cache: TTLCache[tuple[str, str, str, date, int], tuple[float, float] | None] = TTLCache[
-    tuple[str, str, str, date, int], tuple[float, float] | None
+_PricingKey = tuple[str, str, str, date, int, bool]
+_pricing_cache: TTLCache[_PricingKey, tuple[float, float] | None] = TTLCache[
+    _PricingKey, tuple[float, float] | None
 ](maxsize=_PRICING_CACHE_MAXSIZE, ttl=_PRICING_CACHE_TTL_SECONDS)
 
 
@@ -109,6 +111,7 @@ class LLMPricingService:
         unit_type: str,
         started_at: datetime,
         context_tokens: int = 0,
+        exclude_subscription: bool = False,
     ) -> LLMPricing | None:
         """Resolve the pricing row active for a call.
 
@@ -126,6 +129,12 @@ class LLMPricingService:
             context_tokens: Total context-window tokens for the call;
                 used to pick the right tier when a model has multiple
                 tier rows (default 0, i.e. the lowest tier).
+            exclude_subscription: Skip ``pricing_model='subscription'`` rows
+                (#2019), the rule the cost aggregation's Sleep LLM leg
+                applies: a flat subscription is not a per-token price, so the
+                call reads as a pricing miss ("cost unknown"). Off by default
+                so the recall ledger and the embedding spend cap keep the
+                lookup they always had.
 
         Returns:
             The matching ``LLMPricing`` row, or ``None`` if no row
@@ -148,21 +157,22 @@ class LLMPricingService:
         # tier — e.g. for Gemini 2.5 Pro at 250k tokens, the
         # ``context_min_tokens=200000`` row wins over the
         # ``context_min_tokens=0`` row.
+        conditions = [
+            LLMPricing.provider == provider,
+            LLMPricing.model == model,
+            LLMPricing.unit_type == unit_type,
+            LLMPricing.effective_from <= started_at,
+            LLMPricing.context_min_tokens <= context_tokens,
+            or_(
+                LLMPricing.context_max_tokens.is_(None),
+                LLMPricing.context_max_tokens > context_tokens,
+            ),
+        ]
+        if exclude_subscription:
+            conditions.append(LLMPricing.pricing_model != "subscription")
         stmt = (
             select(LLMPricing)
-            .where(
-                and_(
-                    LLMPricing.provider == provider,
-                    LLMPricing.model == model,
-                    LLMPricing.unit_type == unit_type,
-                    LLMPricing.effective_from <= started_at,
-                    LLMPricing.context_min_tokens <= context_tokens,
-                    or_(
-                        LLMPricing.context_max_tokens.is_(None),
-                        LLMPricing.context_max_tokens > context_tokens,
-                    ),
-                )
-            )
+            .where(and_(*conditions))
             .order_by(
                 LLMPricing.effective_from.desc(),
                 LLMPricing.context_min_tokens.desc(),
@@ -195,8 +205,11 @@ class LLMPricingService:
         started_at: datetime,
         units: int,
         context_tokens: int = 0,
+        exclude_subscription: bool = False,
     ) -> float | None:
         """Convenience wrapper: lookup price + multiply by units.
+
+        ``exclude_subscription`` is passed to :meth:`lookup`.
 
         Equivalent to ``lookup(...)`` followed by
         ``units * row.price_per_unit / row.unit_denominator``. Returns
@@ -228,6 +241,7 @@ class LLMPricingService:
             unit_type=unit_type,
             started_at=started_at,
             context_tokens=context_tokens,
+            exclude_subscription=exclude_subscription,
         )
         if components is None:
             return None
@@ -268,6 +282,7 @@ class LLMPricingService:
         unit_type: str,
         started_at: datetime,
         context_tokens: int,
+        exclude_subscription: bool = False,
     ) -> tuple[float, float] | None:
         """Return ``(price_per_unit, unit_denominator)`` for a call, cached (#713).
 
@@ -304,7 +319,16 @@ class LLMPricingService:
         finer time component OR the replay must bypass the cache** (Copilot review
         on PR #811).
         """
-        cache_key = (provider, model, unit_type, started_at.date(), context_tokens)
+        # ``exclude_subscription`` is part of the key: the two lookups can
+        # disagree for the same model (#2019).
+        cache_key = (
+            provider,
+            model,
+            unit_type,
+            started_at.date(),
+            context_tokens,
+            exclude_subscription,
+        )
         # A single ``__getitem__`` reads the TTL clock once, so it is race-free
         # (unlike ``key in cache`` then ``cache[key]``, which read the clock
         # twice and can raise on an entry expiring between them). A stored ``None``
@@ -322,6 +346,7 @@ class LLMPricingService:
             unit_type=unit_type,
             started_at=started_at,
             context_tokens=context_tokens,
+            exclude_subscription=exclude_subscription,
         )
         components = (
             None if row is None else (float(row.price_per_unit), float(row.unit_denominator))

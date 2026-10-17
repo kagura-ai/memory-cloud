@@ -25,6 +25,18 @@ DeployColor = Literal["blue", "green"]
 DEPLOY_COLORS: frozenset[str] = frozenset(get_args(DeployColor))
 
 # ============================================================================
+# Rerank prompt formats (#2020)
+# ============================================================================
+# RERANK_PROMPT_FORMAT values for the /v1/rerank path (VLLMReranker): auto =
+# qwen3 when the served model name contains "qwen3-reranker", else raw; qwen3 =
+# the Qwen3-Reranker prompt template; raw = text verbatim (non-Qwen3 cross-
+# encoders, or a server that applies the template itself, e.g. vLLM
+# --chat-template). The Literal types the settings field; the frozenset is
+# derived from it for the runtime check.
+RerankPromptFormat = Literal["auto", "qwen3", "raw"]
+RERANK_PROMPT_FORMATS: frozenset[str] = frozenset(get_args(RerankPromptFormat))
+
+# ============================================================================
 # Context Field Limits (#1193)
 # ============================================================================
 # Single source of truth for context metadata length caps — enforced
