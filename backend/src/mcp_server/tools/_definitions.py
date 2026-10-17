@@ -1046,7 +1046,7 @@ Returns: {status, message, merged, source_id, target_id, delete_source}. source_
 
 Example (keyless local reranking): use_rerank=true, reranker_provider='self_hosted' — reranker_model may be omitted.
 
-Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model, reinforce_enabled, reinforce_max_boost, reinforce_require_host_arbitration, routing_mode}}.""",
+Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fetch_factor, use_rerank, reranker_provider, reranker_model, reinforce_enabled, reinforce_max_boost, reinforce_require_host_arbitration, routing_mode, content_chunks_enabled}}.""",
             "inputSchema": {
                 "type": "object",
                 "required": ["context_id"],
@@ -1097,6 +1097,10 @@ Returns: {status, message, context_id, config: {semantic_weight, bm25_weight, fe
                         "type": "string",
                         "enum": ["off", "log_only", "active"],
                         "description": "Query-intent router. 'off' (default). 'log_only': records the routing decision in telemetry, no ranking change — enable it first. 'active': a recall() that OMITS search_mode is routed (exact ID / quoted / code symbol / hiragana-dominant → keyword, mixed → hybrid, else semantic); an explicit search_mode always wins.",
+                    },
+                    "content_chunks_enabled": {
+                        "type": "boolean",
+                        "description": "Also embed long content (1500+ chars) as chunk vectors, so semantic search finds facts in the body, not only in the summary (default false). Applies to memories written or re-embedded after it is turned on.",
                     },
                 },
             },

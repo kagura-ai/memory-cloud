@@ -933,6 +933,9 @@
             "log_only",
             "active"
           ]
+        },
+        "content_chunks_enabled": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false

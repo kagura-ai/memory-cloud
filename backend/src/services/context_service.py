@@ -537,6 +537,7 @@ class ContextService:
                 reinforce_max_boost=float(cfg.reinforce_max_boost),
                 reinforce_require_host_arbitration=cfg.reinforce_require_host_arbitration,
                 routing_mode=cfg.routing_mode,
+                content_chunks_enabled=cfg.content_chunks_enabled,
             )
             if cfg is not None
             else None

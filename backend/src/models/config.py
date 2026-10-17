@@ -151,6 +151,15 @@ class ContextSearchConfig(Base):
         String(10), nullable=False, server_default="off", default="off"
     )
 
+    # Issue #2015: give dense retrieval a view of content. When true, a long
+    # memory's content is also embedded as chunk points (services.content_chunks)
+    # and recall collapses them to the memory before fusion and rerank. Off by
+    # default until kagura-memory-eval shows it helps; only writes and
+    # re-embeds after the flag is turned on produce chunks.
+    content_chunks_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
+
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False

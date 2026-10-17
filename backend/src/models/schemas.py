@@ -778,6 +778,8 @@ class ExportedSearchConfig(BaseModel):
     reinforce_require_host_arbitration: bool = False
     # #1212: default keeps pre-routing exports parseable.
     routing_mode: str = "off"
+    # #2015: default keeps older exports parseable.
+    content_chunks_enabled: bool = False
 
 
 class ExportedMemory(TZAwareBaseModel):
@@ -1343,6 +1345,10 @@ class ContextSearchConfigResponse(TZAwareBaseModel):
         default="off",
         description="Query-intent router: off | log_only (telemetry only) | active (opt-in)",
     )
+    # Issue #2015: content chunk vectors opt-in.
+    content_chunks_enabled: bool = Field(
+        default=False, description="Embed long content as chunk vectors for dense retrieval"
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -1392,6 +1398,13 @@ class ContextSearchConfigUpdate(BaseModel):
         pattern="^(off|log_only|active)$",
         description="Query-intent router: off | log_only (stamp telemetry, zero "
         "ranking change) | active (routed lane used only when search_mode is omitted)",
+    )
+    # Issue #2015: optional (default-preserving via exclude_unset in the repo).
+    content_chunks_enabled: bool = Field(
+        default=False,
+        description="Embed long content (>= 1500 chars) as chunk vectors so dense "
+        "retrieval sees the body, not only the summary. Applies to writes and "
+        "re-embeds after it is turned on",
     )
 
     @model_validator(mode="after")

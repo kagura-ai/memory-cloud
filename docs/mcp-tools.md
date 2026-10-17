@@ -806,6 +806,7 @@ Weights run from 0.0 to 3.0; the default 1.0 is a full-confidence manual edge, s
 - Reranking: `use_rerank=true, reranker_provider="voyage"` (or `"cohere"`) needs the provider's API key; `reranker_provider="self_hosted"` is keyless and uses the deployment's local reranker, so `reranker_model` may be omitted. A `recall` that omits `use_rerank` follows this setting.
 - `reinforce_enabled` is the bounded adoption + feedback re-rank. Contexts created since [#1207](https://github.com/kagura-ai/memory-cloud/issues/1207) start enabled; older ones keep their stored setting (typically false) until you set it. It never overrides semantic relevance: each score is multiplied by a factor in `[1 − reinforce_max_boost, 1 + reinforce_max_boost]`.
 - `routing_mode` ([#1212](https://github.com/kagura-ai/memory-cloud/issues/1212)): turn on `log_only` first to measure the traffic mix with zero ranking change, then `active`.
+- `content_chunks_enabled` ([#2015](https://github.com/kagura-ai/memory-cloud/issues/2015), default false): a memory whose `content` is 1,500 characters or longer is also embedded as fixed-size chunks (1,200 characters, 200 overlap, at most 16), so semantic search can find a fact that sits in the body rather than the summary. Recall collapses the chunk hits back to one result per memory, and the reranker also sees the passage that matched. Only memories written or re-embedded after the flag is turned on get chunks; existing memories are not backfilled. Each chunk is one more embedding call at write time.
 
 ### Sleep Maintenance
 

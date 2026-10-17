@@ -2519,6 +2519,7 @@
       "ContextSearchConfigResponse": {
         "properties": {
           "bm25_weight": {},
+          "content_chunks_enabled": {},
           "context_id": {},
           "created_at": {},
           "embedding_dimensions": {},
@@ -2555,6 +2556,10 @@
             "maximum": 1.0,
             "minimum": 0.0,
             "type": "number"
+          },
+          "content_chunks_enabled": {
+            "default": false,
+            "type": "boolean"
           },
           "fetch_factor": {
             "maximum": 10.0,
@@ -3833,6 +3838,10 @@
         "properties": {
           "bm25_weight": {
             "type": "number"
+          },
+          "content_chunks_enabled": {
+            "default": false,
+            "type": "boolean"
           },
           "embedding_dimensions": {
             "type": "integer"

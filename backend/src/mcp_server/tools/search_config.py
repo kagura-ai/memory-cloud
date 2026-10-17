@@ -112,6 +112,10 @@ async def handle_update_search_config(
                 ),
                 # Issue #1212: query-intent router gate (round-trip current value).
                 "routing_mode": args.get("routing_mode", config.routing_mode),
+                # Issue #2015: content chunk vectors opt-in (round-trip current value).
+                "content_chunks_enabled": args.get(
+                    "content_chunks_enabled", config.content_chunks_enabled
+                ),
             }
 
             # Validate via Pydantic (same as REST API)
@@ -157,6 +161,7 @@ async def handle_update_search_config(
                                     config.reinforce_require_host_arbitration
                                 ),
                                 "routing_mode": config.routing_mode,
+                                "content_chunks_enabled": config.content_chunks_enabled,
                             },
                         }
                     ),
