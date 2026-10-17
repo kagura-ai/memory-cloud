@@ -188,6 +188,13 @@ class TestTagRules:
         assert "'サーバ'" in flagged["サーバー"]
 
     @pytest.mark.asyncio
+    async def test_an_inner_segment_mark_is_a_near_duplicate_not_a_specialisation(self):
+        """#2028: ``サーバー-ログ`` keeps its inner mark, so next to a stored
+        ``サーバ-ログ`` it is one edit away and hinted, never silenced."""
+        hints = await _lint(tags=["サーバー-ログ"], vocabulary={"サーバ-ログ": 3})
+        assert [h.subject for h in hints if h.code == "tag_near_duplicate"] == ["サーバー-ログ"]
+
+    @pytest.mark.asyncio
     async def test_numbered_tags_are_not_flagged_against_their_own_series(self):
         """#1608: a new issue / PR / version / date tag is not a misspelling.
 

@@ -1301,7 +1301,8 @@ class MemoryService:
 
         Two tags are the same tag written differently when
         ``is_mechanical_variant`` holds: ``normalize_tag`` folds them to one
-        form (NFKC, case, separators, a conservative plural strip) AND their
+        form (NFKC, case, hiragana to katakana, separators, one word-final ``ー``
+        after a katakana letter, a conservative plural strip) AND their
         numbers are the same (#1871). The fold alone is the rule recall's
         ``tags_normalize`` filter widens by, but it is not injective on
         numbered tags — ``v0.11.0`` / ``v0.1.10``, ``pr-123`` / ``pr-1-23`` —

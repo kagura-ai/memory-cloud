@@ -124,8 +124,15 @@ class TestJapaneseKanaFold:
             ("データーベース", "データーベース"),
             ("障害", "障害"),
             ("しょうがい", "ショウガイ"),
-            # Only ONE trailing mark goes.
-            ("サーバーー", "サーバー"),
+            # A doubled mark is not a long vowel after a letter: the mark before
+            # the last one is not a katakana LETTER, so nothing is dropped and
+            # the fold stays idempotent.
+            ("サーバーー", "サーバーー"),
+            # The final katakana word is what must be 3+ characters, not the tag.
+            ("category:ゲー", "category:ゲー"),
+            ("category:サーバー", "category:サーバ"),
+            # Iteration marks map with the hiragana.
+            ("いすゞ", "イスヾ"),
             # A mark after a non-katakana character stays.
             ("abcー", "abcー"),
             ("障害ー", "障害ー"),
@@ -133,6 +140,35 @@ class TestJapaneseKanaFold:
     )
     def test_the_fold_is_exact(self, tag, folded):
         assert normalize_tag(tag) == folded
+
+    @pytest.mark.parametrize(
+        "tag", ["サーバー", "サーバーー", "ゲー", "category:サーバー", "さーばー", "スキー"]
+    )
+    def test_the_fold_is_idempotent(self, tag):
+        assert normalize_tag(normalize_tag(tag)) == normalize_tag(tag)
+
+    def test_a_separator_never_changes_the_long_vowel_drop(self):
+        """The drop runs after separator removal: a trailing or leading
+        separator neither hides the final mark nor shortens the word."""
+        assert normalize_tag("サーバー-") == normalize_tag("サーバー") == normalize_tag("サーバ")
+        assert normalize_tag("-ゲー") == normalize_tag("ゲー")
+        assert normalize_tag("-ゲー") != normalize_tag("ゲ")
+
+    def test_a_short_final_word_keeps_its_mark_after_a_prefix(self):
+        assert normalize_tag("category:ゲー") != normalize_tag("category:ゲ")
+        assert normalize_tag("genre:ゲー") != normalize_tag("genre:ゲ")
+        assert normalize_tag("category:サーバー") == normalize_tag("category:サーバ")
+
+    @pytest.mark.parametrize("mark", ["\u30a0", "\u30fb", "\u30fd", "\u30fe"])
+    def test_a_mark_after_a_non_letter_katakana_character_stays(self, mark):
+        """゠ ・ ヽ ヾ sit in the katakana block but are not letters. (ヿ is not
+        listed: NFKC rewrites it to the letters コト.)"""
+        tag = "サーバ" + mark + "ー"
+        assert normalize_tag(tag) == tag
+
+    def test_iteration_marks_fold_across_scripts(self):
+        assert normalize_tag("いすゞ") == normalize_tag("イスヾ")
+        assert normalize_tag("こゝろ") == normalize_tag("コヽロ")
 
     @pytest.mark.parametrize(
         "tag", ["dev-environment", "Troubleshooting", "issues", "v0.73.0", "redis", "鯖"]
@@ -147,6 +183,23 @@ class TestJapaneseKanaFold:
             _SEPARATORS.sub("", unicodedata.normalize("NFKC", tag).strip().casefold())
         )
         assert normalize_tag(tag) == before
+
+    def test_segments_drop_the_mark_on_the_final_segment_only(self):
+        """``_segments`` agrees with ``normalize_tag``: an inner segment keeps its
+        mark (the whole fold keeps it too), the final segment loses it."""
+        from utils.tag_normalize import _segments
+
+        assert _segments("サーバー-ログ") == ["サーバー", "ログ"]
+        assert _segments("ログ-サーバー") == ["ログ", "サーバ"]
+        assert _segments("サーバー-") == ["サーバ"]
+        assert normalize_tag("サーバー-ログ") != normalize_tag("サーバ-ログ")
+        assert not is_mechanical_variant("サーバー-ログ", "サーバ-ログ")
+        assert not is_specialisation("サーバー-ログ", "サーバ-ログ")
+        # One mark apart in a long tag: a typo-distance hint, not a variant.
+        assert is_near_duplicate("サーバー-ログ", "サーバ-ログ")
+        # The final-segment drop keeps compounds ending in the word consistent.
+        assert is_specialisation("ログ-サーバー", "ログ")
+        assert is_mechanical_variant("ログ-サーバー", "ろぐ-さーば")
 
     def test_kana_variants_are_mechanical_variants_and_near_duplicates(self):
         assert is_mechanical_variant("ろぐ", "ログ")

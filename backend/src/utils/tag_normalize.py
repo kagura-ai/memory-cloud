@@ -4,9 +4,12 @@ Tag filters are exact-match, so a writer-side spelling drift silently empties or
 thins a reader's results with no signal that near-miss tags exist. This module
 defines the two relations the read path uses:
 
-* :func:`normalize_tag` — the MECHANICAL fold. ``Dev_Environment``,
-  ``dev-environment`` and ``dev environment`` are the same tag written three
-  ways; folding them is safe because no author means them differently.
+* :func:`normalize_tag` — the MECHANICAL fold: NFKC, case, hiragana to
+  katakana, separators, one word-final ``ー`` after katakana, and a simple
+  plural. ``Dev_Environment``, ``dev-environment`` and ``dev environment`` are
+  the same tag written three ways, as are ``ろぐ`` / ``ログ`` and ``サーバー`` /
+  ``サーバ`` (#2028); folding them is safe because no author means them
+  differently.
 * :func:`is_near_duplicate` — the ADVISORY relation, deliberately looser and
   never used to widen a filter. It powers ``tag_suggestions``: a hint that a
   similar tag exists, which the caller decides what to do with.
@@ -68,8 +71,9 @@ def normalize_tag(tag: str) -> str:
 
     Applies, in order: NFKC (so full-width and half-width Latin fold together,
     matching how ``utils.text.normalize_for_search`` treats searchable text),
-    case folding, the Japanese kana fold (:func:`_fold_kana`, #2028),
-    separator removal, and a conservative plural strip.
+    case folding, hiragana to katakana (:func:`_to_katakana`, #2028),
+    separator removal, the word-final long-vowel drop
+    (:func:`_drop_long_vowel`, #2028), and a conservative plural strip.
 
     Args:
         tag: Raw tag string.
@@ -91,46 +95,75 @@ def normalize_tag(tag: str) -> str:
         >>> normalize_tag("サーバー") == normalize_tag("サーバ")
         True
     """
-    folded = _fold_kana(unicodedata.normalize("NFKC", tag).strip().casefold())
+    return _drop_long_vowel(_fold_before_long_vowel(tag))
+
+
+def _fold_before_long_vowel(tag: str) -> str:
+    """Every step of :func:`normalize_tag` except the long-vowel drop.
+
+    The drop commutes with the plural strip (a tag ending in ``ー`` has no
+    plural ``s``, and dropping the mark leaves a katakana letter), so
+    :func:`_segments` can fold every segment with this and drop the mark on its
+    final segment only.
+    """
+    folded = _to_katakana(unicodedata.normalize("NFKC", tag).strip().casefold())
     folded = _SEPARATORS.sub("", folded)
     return _strip_plural(folded)
 
 
-# Hiragana U+3041-U+3096 sit exactly 0x60 below their katakana counterparts.
-_HIRAGANA_TO_KATAKANA = {code: code + 0x60 for code in range(0x3041, 0x3097)}
+# Hiragana U+3041-U+3096 and the iteration marks ゝ ゞ (U+309D-U+309E) sit
+# exactly 0x60 below their katakana counterparts.
+_HIRAGANA_TO_KATAKANA = {code: code + 0x60 for code in (*range(0x3041, 0x3097), 0x309D, 0x309E)}
 
-# The long-vowel mark, and the katakana block it may follow to be dropped.
+# The long-vowel mark, and the katakana LETTERS (ァ-ヺ) a droppable mark must
+# follow. The rest of the katakana block (゠ ・ ー ヽ ヾ ヿ) is not a letter, so
+# a doubled ``ーー`` or a mark after ``・`` is left alone.
 _LONG_VOWEL_MARK = "\u30fc"
-_KATAKANA_FIRST, _KATAKANA_LAST = "\u30a0", "\u30ff"
+_KATAKANA_LETTER_FIRST, _KATAKANA_LETTER_LAST = "\u30a1", "\u30fa"
 
-# Shortest folded tag whose trailing long-vowel mark may be dropped: below this
+# Shortest final katakana word whose trailing mark may be dropped: below this
 # (``ゲー`` / ``ゲ``) a dropped mark cannot be told from a different word.
 _MIN_LONG_VOWEL_LEN = 3
 
 
-def _fold_kana(folded: str) -> str:
-    """Fold the two common Japanese tag spellings together (#2028).
+def _to_katakana(folded: str) -> str:
+    """Map hiragana (and ゝ ゞ) to katakana: ``ろぐ`` / ``ログ``, ``いすゞ`` / ``イスヾ`` (#2028)."""
+    return folded.translate(_HIRAGANA_TO_KATAKANA)
 
-    Hiragana becomes katakana (``ろぐ`` / ``ログ``), then ONE word-final ``ー``
-    after a katakana character is dropped once the tag is at least
-    ``_MIN_LONG_VOWEL_LEN`` characters (``サーバー`` / ``サーバ``, the JIS Z 8301
-    spelling split). Runs after NFKC, so half-width kana is already full-width.
+
+def _is_katakana_letter(char: str) -> bool:
+    return _KATAKANA_LETTER_FIRST <= char <= _KATAKANA_LETTER_LAST
+
+
+def _drop_long_vowel(folded: str) -> str:
+    """Drop ONE word-final ``ー`` after a katakana letter (#2028).
+
+    ``サーバー`` / ``サーバ`` and ``ユーザー`` / ``ユーザ`` are the JIS Z 8301
+    spelling split. Runs after separator removal, so a separator cannot hide
+    the mark (``サーバー-``) or shorten the word (``-ゲー``). The length guard
+    is on the FINAL katakana word — the trailing run of katakana letters and
+    marks — not the whole tag, so ``category:ゲー`` keeps its mark while
+    ``category:サーバー`` loses it. At most one mark is ever dropped, and only
+    after a letter: ``サーバーー`` is left as written, which keeps the fold
+    idempotent.
 
     Character-level, with no dictionary, so deliberately narrow: a
     word-internal mark (``データーベース`` / ``データベース``), okurigana
     (``引越し`` / ``引っ越し``) and kanji vs reading (``障害`` / ``しょうがい``,
-    a homophone hazard) are NOT folded. The length is measured before separators
-    are removed, and only the tag's last character is looked at, so the mark
-    on an inner segment of a compound tag (``サーバー-ログ``) stays.
+    a homophone hazard) are NOT folded. The accepted price is a 3-character
+    word that differs from a real 2-letter word only by its mark (``スキー`` /
+    ``スキ``).
     """
-    folded = folded.translate(_HIRAGANA_TO_KATAKANA)
-    if (
-        len(folded) >= _MIN_LONG_VOWEL_LEN
-        and folded.endswith(_LONG_VOWEL_MARK)
-        and _KATAKANA_FIRST <= folded[-2] <= _KATAKANA_LAST
-    ):
-        return folded[:-1]
-    return folded
+    if not folded.endswith(_LONG_VOWEL_MARK) or len(folded) < 2:
+        return folded
+    if not _is_katakana_letter(folded[-2]):
+        return folded
+    run = 0
+    for char in reversed(folded):
+        if char != _LONG_VOWEL_MARK and not _is_katakana_letter(char):
+            break
+        run += 1
+    return folded[:-1] if run >= _MIN_LONG_VOWEL_LEN else folded
 
 
 # Two-letter endings that are almost never an English plural, so stripping the
@@ -325,7 +358,7 @@ def is_near_duplicate(requested: str, candidate: str) -> bool:
 
 
 def _segments(tag: str) -> list[str]:
-    """The tag's segments, each folded with :func:`normalize_tag`.
+    """The tag's segments, each folded like :func:`normalize_tag`.
 
     NFKC runs first so full-width separators (``－``, ``：``) split like ASCII
     ones. Folding per segment (rather than splitting the folded whole, which
@@ -333,9 +366,19 @@ def _segments(tag: str) -> list[str]:
     ``session-cookie`` and ``NEXT_PUBLIC`` the generic of ``next-public-plan``.
     A segment whose fold is empty (``session-.-cookie``) carries no signal and
     is dropped, so it can neither match nor break a match.
+
+    The word-final ``ー`` drop (#2028) applies to the LAST non-empty segment
+    only, as it does in the whole fold: ``サーバー-ログ`` is
+    ``["サーバー", "ログ"]`` (its whole fold keeps the inner mark too) and
+    ``ログ-サーバー`` is ``["ログ", "サーバ"]``. So ``サーバー-ログ`` /
+    ``サーバ-ログ`` are two tags here as in :func:`normalize_tag` — a
+    near-duplicate hint, never a variant or a specialisation.
     """
     pieces = _SEGMENT_BOUNDARY.split(unicodedata.normalize("NFKC", tag))
-    return [folded for folded in map(normalize_tag, pieces) if folded]
+    segments = [folded for folded in map(_fold_before_long_vowel, pieces) if folded]
+    if segments:
+        segments[-1] = _drop_long_vowel(segments[-1])
+    return segments
 
 
 def is_specialisation(a: str, b: str) -> bool:
