@@ -6,6 +6,12 @@ unrounded ``score`` — while ``recall`` omits an empty annotation and rounds th
 score (#1599, #2002). The same memory came back in two shapes. Both paths now
 project through ``utils.recall_projection.recall_result_item``; these tests
 feed one memory through each and compare the rows.
+
+One documented exception: bootstrap rows never carry ``supersede_candidate``
+(recall does). Bootstrap is the behaviour-establishing session-start lane —
+an agent does not act on a suggestion there, the field cannot be dropped by
+the max_chars fit, and it would put another memory's summary in the trusted
+lane.
 """
 
 from __future__ import annotations
@@ -89,7 +95,7 @@ class TestBootstrapRecallRowMatchesRecall:
             assert key not in row
         assert row["score"] == 0.8287
 
-    async def test_an_annotated_memory_carries_the_same_values(self):
+    async def test_an_annotated_memory_carries_the_same_values_but_no_suggestion(self):
         memory = _memory(
             context_summary="Recall when auth starts failing after a deploy",
             tags=["auth", "jwt"],
@@ -102,9 +108,15 @@ class TestBootstrapRecallRowMatchesRecall:
         )
 
         row = await _bootstrap_row(memory)
+        recall_row = _recall_tool_row(memory, "full")
 
-        assert row == _recall_tool_row(memory, "full")
-        assert list(row) == list(_recall_tool_row(memory, "full"))
+        # The one exception to key-set parity: recall keeps the suggestion,
+        # bootstrap never carries it.
+        assert "supersede_candidate" in recall_row
+        assert "supersede_candidate" not in row
+        expected = {k: v for k, v in recall_row.items() if k != "supersede_candidate"}
+        assert row == expected
+        assert list(row) == list(expected)
         assert row["contradicts"] == [str(c) for c in memory.contradicts]
 
     async def test_bootstrap_serves_the_full_projection(self):

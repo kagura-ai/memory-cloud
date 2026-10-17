@@ -674,7 +674,7 @@ class AgentBootstrapService:
         # "full": these rows are behaviour-establishing and read once at session
         # start, with no follow-up reference() per hit; max_chars already
         # drops context_summary, then rows, when the envelope runs over.
-        results_data = [recall_result_item(r, BOOTSTRAP_RECALL_VERBOSITY) for r in result.results]
+        results_data = [_bootstrap_recall_row(r) for r in result.results]
         # query_hash never leaks the raw query — correlation only.
         query_hash = hmac_sha256_hex(params.query or "", get_settings().api_key_secret)
         body = {
@@ -735,6 +735,20 @@ class AgentBootstrapService:
             context.id, after_key=None, limit=STATE_LIST_DEFAULT_LIMIT + 1
         )
         return bound_state_page(rows, limit=STATE_LIST_DEFAULT_LIMIT, budget=budget)
+
+
+def _bootstrap_recall_row(r: Any) -> dict[str, Any]:
+    """One recall result as the bootstrap recall component renders it (#2013).
+
+    Recall's ``verbosity="full"`` item, with one documented exception: no
+    ``supersede_candidate``. Bootstrap is the behaviour-establishing
+    session-start lane — an agent does not act on a suggestion there, the
+    max_chars fit cannot drop the field, and it would put another memory's
+    summary in the trusted lane. ``recall`` keeps it.
+    """
+    item = recall_result_item(r, BOOTSTRAP_RECALL_VERBOSITY)
+    item.pop("supersede_candidate", None)
+    return item
 
 
 def _fit_envelope(envelope: dict[str, Any], max_chars: int) -> dict[str, Any]:
