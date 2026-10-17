@@ -86,7 +86,7 @@ from services.recall_selection import (
 )
 from services.recall_timings import RecallTimings
 from services.search_service import SearchService
-from services.supersede_dismissal import unconditional_tombstone
+from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA, unconditional_tombstone
 from utils.datetime import to_utc_iso, utcnow
 from utils.exceptions import (
     ConfigurationError,
@@ -1547,6 +1547,18 @@ class MemoryService:
             getattr(request, field) is not None for field in _UPDATE_CONTENT_FIELDS
         )
 
+        # #2059: whether a stored parallel verdict still hides the pair is a
+        # question about what the caller could have READ — the texts before
+        # this call's own edit — so it is answered before the fields apply.
+        # A call that also re-embeds always tombstones: its own edit sets the
+        # verdict aside and the re-embed re-judges the pair, so leaving the
+        # rejected pair untombstoned would let it surface moments later.
+        parallel_current = (
+            await self._parallel_verdict_current(memory)
+            if request.dismiss_supersede_candidate and not needs_reembed
+            else False
+        )
+
         self._update_guard_size(memory, request, normalized_summary, normalized_ctx_summary)
         effective_details = self._update_apply_fields(
             memory, request, normalized_summary, normalized_ctx_summary
@@ -1560,7 +1572,7 @@ class MemoryService:
         # a stale memory read as freshly maintained (#1317's rule for the
         # detection half of this lifecycle).
         dismissed_target = self._apply_supersede_dismissal(
-            memory, request, drop_baseline=needs_reembed
+            memory, request, drop_baseline=needs_reembed, parallel_current=parallel_current
         )
 
         if request.dismiss_supersede_candidate and not edits_requested:
@@ -1625,9 +1637,54 @@ class MemoryService:
             ),
         )
 
+    async def _parallel_verdict_current(self, memory: Any) -> bool:
+        """#2059: whether ``memory``'s stored ``parallel`` verdict still hides it.
+
+        The read path (``_resolve_supersede_candidates``) suppresses a parallel
+        pair only while ``verdict_current`` holds for the target's and this
+        memory's current texts; once either was edited the pair surfaces,
+        unverified. The dismissal asks the same question so a suggestion the
+        caller can see is always one it can reject. Reads one row (the
+        target's summary and content head), and only for a parallel verdict.
+
+        Returns:
+            True only when the verdict is parallel and still current; a target
+            that is gone (the pair cannot surface either) reads as False.
+        """
+        from services.supersede_verify import CONTENT_HEAD_CHARS, is_parallel, verdict_current
+
+        stored = memory.supersede_candidate
+        if not is_parallel(stored):
+            return False
+        try:
+            target_id = UUID(str(stored["memory_id"]))
+        except (KeyError, ValueError, TypeError):
+            return False
+        row = (
+            await self.db.execute(
+                select(
+                    Memory.summary,
+                    func.substr(Memory.content, 1, CONTENT_HEAD_CHARS).label("content_head"),
+                ).where(Memory.id == target_id, Memory.deleted_at.is_(None))
+            )
+        ).one_or_none()
+        if row is None:
+            return False
+        return verdict_current(
+            stored,
+            old_summary=row.summary,
+            old_content_head=row.content_head,
+            new_summary=memory.summary,
+            new_content_head=memory.content,
+        )
+
     @staticmethod
     def _apply_supersede_dismissal(
-        memory: Any, request: UpdateMemoryRequest, *, drop_baseline: bool = False
+        memory: Any,
+        request: UpdateMemoryRequest,
+        *,
+        drop_baseline: bool = False,
+        parallel_current: bool = False,
     ) -> UUID | None:
         """#1504: tombstone the current supersede suggestion, if one is pending.
 
@@ -1642,6 +1699,11 @@ class MemoryService:
                 reported the dismissal as applied. Storing no baseline suppresses
                 the pair unconditionally instead — the caller rejected these two
                 memories knowing they were editing one of them.
+            parallel_current: The stored verdict is ``parallel`` and still
+                about both texts as the caller could read them
+                (``_parallel_verdict_current``), so the pair was never shown.
+                Defaults to False: without that proof an explicit rejection
+                wins and the pair is tombstoned (#2059).
 
         Returns:
             The dismissed candidate's memory id, or None when the flag was not
@@ -1662,10 +1724,11 @@ class MemoryService:
             if dismissed_entry(stored) is None:
                 logger.info("supersede_dismiss_noop", memory_id=str(memory.id))
             return None
-        if is_parallel(stored):
-            # #2016: the judge already set this pair aside and the caller was
-            # never shown it — nothing to reject, and the verdict stays so
-            # the pair is not re-judged.
+        if parallel_current and is_parallel(stored):
+            # #2016: the judge set this pair aside, the verdict still describes
+            # both texts, so the caller was never shown it — nothing to reject,
+            # and the verdict stays so the pair is not re-judged. A STALE
+            # parallel verdict surfaces on read (#2059) and is tombstoned below.
             logger.info("supersede_dismiss_noop", memory_id=str(memory.id), reason="parallel")
             return None
 
@@ -3333,7 +3396,8 @@ class MemoryService:
                 is_parallel,
                 is_verified,
                 min_confidence_from_env,
-                verification_stale,
+                stored_verification,
+                verdict_current,
             )
 
             pending: dict[UUID, dict] = {}
@@ -3399,20 +3463,26 @@ class MemoryService:
                     continue  # never enrich across a context the caller isn't reading
                 cand = p["candidate"]
                 try:
-                    # #2016: a verdict about an OLD text that has since been
-                    # edited is about text that no longer exists — neither the
-                    # parallel suppression nor ``verified`` may rest on it.
-                    stale = verification_stale(
+                    # #2016 / #2059: a verdict about a text that has since
+                    # been edited — the old memory's or this one's — is about
+                    # text that no longer exists, so neither the parallel
+                    # suppression nor ``verified`` may rest on it. The same
+                    # rule decides whether a dismissal has anything to reject.
+                    # (No verdict, nothing to be current: the source's text
+                    # is not read at all.)
+                    current = stored_verification(cand) is not None and verdict_current(
                         cand,
                         old_summary=target.summary,
                         old_content_head=getattr(target, "content_head", None),
+                        new_summary=source.summary,
+                        new_content_head=source.content,
                     )
-                    if not stale and is_parallel(cand):
+                    if current and is_parallel(cand):
                         # The judge said these are two facts, not an update —
                         # kept in the column so the pair is not re-judged,
                         # never surfaced.
                         continue
-                    verified = not stale and is_verified(cand, min_confidence=min_confidence)
+                    verified = current and is_verified(cand, min_confidence=min_confidence)
                     resolved[source_id] = SupersedeCandidate(
                         memory_id=target.id,
                         summary=target.summary,
@@ -6972,6 +7042,81 @@ _SUPERSEDE_SUGGEST_LAST_SEEN: bool | None = None
 _KNN_SEED_NO_CONSUMER_REPORTED: set[tuple[str, int]] = set()
 
 
+async def _source_text_moved(db: AsyncSession, memory: Memory) -> bool:
+    """Re-read ``memory``'s text and candidate column; True when the text moved.
+
+    #2059: the embedding task loaded ``memory`` before embedding it and the
+    session does not expire it on commit, so the object still holds the text
+    this run embedded. ``update_memory`` can commit a new text (and start a
+    second embedding run) while this one is between its search and its write
+    — the judge's round trip is seconds long. When the text moved, the newer
+    run owns the column: this run's result is about text that no longer
+    exists. The column is re-read in the same round trip so the caller can
+    re-check a dismissal or an accept committed meanwhile.
+    """
+    from services.supersede_verify import text_fingerprint
+
+    embedded = text_fingerprint(memory.summary, memory.content)
+    await db.refresh(memory, attribute_names=["supersede_candidate", "summary", "content"])
+    return text_fingerprint(memory.summary, memory.content) != embedded
+
+
+async def _clear_supersede_candidate_without_neighbour(db: AsyncSession, *, memory: Memory) -> None:
+    """Clear a live suggestion the re-embed no longer supports (#2059).
+
+    The column holds "the nearest neighbour scored at or above
+    ``_SUPERSEDE_SUGGEST_THRESHOLD`` at the last embed". When this embed finds
+    no such neighbour — typically an edit moved the memory away from the
+    pair, and also a reindex under an embedder that scores the pair lower —
+    a stored candidate (and any verdict about the memory's earlier text)
+    would otherwise keep surfacing. A tombstone is never cleared: it is the
+    caller's rejection (#1504) or ``remember(dedupe="off")``'s permanent
+    opt-out, and must hold the next time the pair is a neighbour.
+    """
+    from services.supersede_dismissal import dismissed_entry
+
+    def live_target(stored: Any) -> str | None:
+        """The target id of a live (non-tombstone) suggestion, else None."""
+        if not isinstance(stored, dict) or dismissed_entry(stored) is not None:
+            return None
+        target = stored.get("memory_id")
+        return str(target) if target else None
+
+    from sqlalchemy import update
+    from sqlalchemy.orm.attributes import set_committed_value
+
+    if live_target(memory.supersede_candidate) is None:
+        return
+    if await _source_text_moved(db, memory):
+        logger.info("supersede_candidate_skipped_source_edited", memory_id=str(memory.id))
+        return
+    target_id = live_target(memory.supersede_candidate)
+    if target_id is None:
+        return  # a dismissal or an accept committed meanwhile
+    # Conditional on the row still naming that target: a dismissal committed
+    # after the re-read above (a tombstone has no top-level memory_id) or a
+    # newer candidate must not be wiped. Not a user edit: updated_at stays
+    # (#1317), as for the detection write.
+    result = await db.execute(
+        update(Memory)
+        .where(
+            Memory.id == memory.id,
+            Memory.supersede_candidate["memory_id"].as_string() == target_id,
+        )
+        .values(supersede_candidate=None)
+        .execution_options(synchronize_session=False)
+    )
+    await db.commit()
+    if int(getattr(result, "rowcount", 0) or 0) == 0:
+        return
+    set_committed_value(memory, "supersede_candidate", None)
+    logger.info(
+        "supersede_candidate_cleared_no_neighbour",
+        memory_id=str(memory.id),
+        candidate_memory_id=target_id,
+    )
+
+
 async def _detect_supersede_candidate(
     db: AsyncSession,
     *,
@@ -7008,7 +7153,9 @@ async def _detect_supersede_candidate(
     the Sleep judge first (``services.supersede_verify``) and its verdict is
     stored beside the candidate; an earlier verdict for the same, unmoved pair
     is reused instead of re-judged. A judge that is off, capped or failing
-    leaves the candidate exactly as before.
+    leaves the candidate exactly as before. #2059: when this memory's text was
+    edited during the judge's round trip, nothing is written — the edit's own
+    embedding run owns the column.
     """
     from models.memory import EDGE_TYPE_SUPERSEDES
     from services.supersede_dismissal import is_dismissed
@@ -7104,10 +7251,18 @@ async def _detect_supersede_candidate(
                         new=memory,
                         old=old,
                     )
-                    # The judge took a round trip; a dismissal or an accept
-                    # committed meanwhile by update_memory / create_edge must
-                    # win over this write (re-read the column, then re-check).
-                    await db.refresh(memory, attribute_names=["supersede_candidate"])
+                    # The judge took a round trip; an edit, a dismissal or an
+                    # accept committed meanwhile by update_memory / create_edge
+                    # must win over this write (re-read, then re-check). An
+                    # edit (#2059): the verdict is about this memory's earlier
+                    # text, and the edit's own embedding run writes the column.
+                    if await _source_text_moved(db, memory):
+                        logger.info(
+                            "supersede_candidate_skipped_source_edited",
+                            memory_id=memory_id_str,
+                            candidate_memory_id=target_id_str,
+                        )
+                        return
                     if is_dismissed(
                         memory.supersede_candidate,
                         target_id=target_id_str,
@@ -7347,9 +7502,9 @@ async def _create_knn_seed_edges(
         edge_repo = NeuralEdgeRepository(db)
 
         non_self = [c for c in candidates if str(c["id"]) != memory_id_str]
-        if non_self and suggest_enabled:
-            raw_top = max(non_self, key=lambda c: float(c["score"]))
-            if float(raw_top["score"]) >= _SUPERSEDE_SUGGEST_THRESHOLD:
+        if suggest_enabled:
+            raw_top = max(non_self, key=lambda c: float(c["score"])) if non_self else None
+            if raw_top is not None and float(raw_top["score"]) >= _SUPERSEDE_SUGGEST_THRESHOLD:
                 await _detect_supersede_candidate(
                     db,
                     memory=memory,
@@ -7359,6 +7514,17 @@ async def _create_knn_seed_edges(
                     workspace_id_str=workspace_id_str,
                     context_id_str=context_id_str,
                 )
+            elif len(non_self) < len(candidates) and (
+                raw_top is None
+                or float(raw_top["score"])
+                < _SUPERSEDE_SUGGEST_THRESHOLD - RESURFACE_SIMILARITY_DELTA
+            ):
+                # #2059: no near-duplicate any more. Only when the search
+                # returned this memory's own point (just upserted): a result
+                # without it is no evidence that the neighbour is gone. And
+                # only a clear margin below the threshold, so a pair hovering
+                # at it is not cleared and re-judged on every re-embed.
+                await _clear_supersede_candidate_without_neighbour(db, memory=memory)
 
         # #2006: everything below creates seed edges, which needs a calibrated
         # (or operator) threshold. Without one — or with seeding switched off

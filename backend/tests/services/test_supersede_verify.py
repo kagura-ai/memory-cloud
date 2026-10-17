@@ -147,25 +147,72 @@ class TestVerificationRecord:
         assert sv.stored_verification({"verification": {"verdict": "bogus"}}) is None
         assert sv.stored_verification({"verification": {"verdict": ["parallel"]}}) is None
 
-    def test_stale_when_the_old_text_is_not_what_the_judge_saw(self):
-        seen = sv.text_fingerprint("old summary", "old content")
+    def test_current_only_while_both_texts_are_what_the_judge_saw(self):
+        """#2059: one rule for the read, dismiss and write paths — a verdict is
+        about two texts, so an edit of EITHER memory sets it aside."""
+        old, new = (
+            _memory(summary="old summary", content="old content"),
+            _memory(summary="new summary", content="new content"),
+        )
         cand = {
             "memory_id": "x",
             "similarity": 0.9,
-            "verification": {"verdict": "parallel", "old_fingerprint": seen},
+            "verification": {
+                "verdict": "parallel",
+                "fingerprint": sv.pair_fingerprint(old, new),
+                "old_fingerprint": sv.text_fingerprint(old.summary, old.content),
+            },
         }
-        stale = sv.verification_stale
-        assert stale(cand, old_summary="old summary", old_content_head="old content") is False
-        # Content past the head the judge never saw does not count.
-        assert (
-            stale(cand, old_summary="old summary", old_content_head="old content" + "x" * 0)
-            is False
+
+        def current(candidate=cand, **over):
+            texts = {
+                "old_summary": "old summary",
+                "old_content_head": "old content",
+                "new_summary": "new summary",
+                "new_content_head": "new content",
+            }
+            texts.update(over)
+            return sv.verdict_current(candidate, **texts)
+
+        assert current() is True
+        assert current(old_summary="Old summary") is False
+        assert current(old_content_head="edited") is False
+        # The NEW side moved (F2): the verdict is about the new memory's old text.
+        assert current(new_summary="new summary, edited") is False
+        assert current(new_content_head="rewritten") is False
+        # A verdict without fingerprints is never current.
+        assert current({"memory_id": "x", "verification": {"verdict": "parallel"}}) is False
+        only_old = {
+            "memory_id": "x",
+            "verification": {
+                "verdict": "parallel",
+                "old_fingerprint": sv.text_fingerprint("old summary", "old content"),
+            },
+        }
+        assert current(only_old) is False
+        # No verdict at all: nothing to be current.
+        assert current({"memory_id": "x"}) is False
+        assert current(None) is False
+
+    def test_the_head_cut_matches_the_judges_view(self):
+        """The read path passes ``substr(content, 1, 600)`` for the target and the
+        whole content for the source; both must digest to the same value."""
+        old = _memory(summary="o", content="o" * 2_000)
+        new = _memory(summary="n", content="n" * 2_000)
+        cand = {
+            "verification": {
+                "verdict": "supersedes",
+                "fingerprint": sv.pair_fingerprint(old, new),
+                "old_fingerprint": sv.text_fingerprint(old.summary, old.content),
+            }
+        }
+        assert sv.verdict_current(
+            cand,
+            old_summary="o",
+            old_content_head="o" * sv.CONTENT_HEAD_CHARS,
+            new_summary="n",
+            new_content_head="n" * 2_000,
         )
-        assert stale(cand, old_summary="Old summary", old_content_head="old content") is True
-        assert stale(cand, old_summary="old summary", old_content_head="edited") is True
-        cand["verification"] = {"verdict": "parallel"}  # no fingerprint recorded
-        assert stale(cand, old_summary="old summary", old_content_head="old content") is True
-        assert stale({"memory_id": "x"}, old_summary="s", old_content_head="c") is False
 
     def test_min_confidence_from_env_never_raises(self, monkeypatch):
         monkeypatch.delenv("SUPERSEDE_VERIFY_MIN_CONFIDENCE", raising=False)
@@ -357,6 +404,39 @@ class TestJudgePair:
                 old=_memory(),
             )
         assert record is not None and record["at"] == "2026-10-01T00:00:01Z"
+
+    @pytest.mark.asyncio
+    async def test_fingerprints_are_of_the_texts_sent_not_read_after_the_call(self):
+        """#2059: the record must describe the texts in the prompt. A caller
+        whose object is refreshed during the round trip must not get a
+        fingerprint of the edited text on a verdict about the old one."""
+        new, old = _memory(summary="before", content="c"), _memory(summary="o", content="c")
+        sent_fp = sv.pair_fingerprint(old, new)
+        sent_old_fp = sv.text_fingerprint(old.summary, old.content)
+
+        async def answer(**_kwargs):
+            new.summary = "edited during the call"
+            old.summary = "old edited during the call"
+            return self._response({"verdict": "supersedes", "confidence": 0.9, "reason": "r"})
+
+        llm = MagicMock()
+        llm.complete_json = AsyncMock(side_effect=answer)
+        with (
+            patch("services.llm_service.LLMService", return_value=llm),
+            patch("db.redis.incrby_counter", new=AsyncMock(return_value=1)),
+        ):
+            record = await sv.judge_pair(
+                MagicMock(),
+                config=_config(),
+                user_id="u",
+                workspace_id="w",
+                context_id="c",
+                new=new,
+                old=old,
+            )
+        assert record is not None
+        assert record["fingerprint"] == sent_fp
+        assert record["old_fingerprint"] == sent_old_fp
 
     @pytest.mark.asyncio
     async def test_redis_outage_skips_the_paid_call(self):

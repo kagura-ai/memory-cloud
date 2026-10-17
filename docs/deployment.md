@@ -1076,7 +1076,9 @@ WARNING events below.
 | `supersede_candidate_suppressed_by_dismissal` | INFO | a dismissal tombstone (#1504, or `remember(dedupe="off")`) held, so no candidate was stored. Also logged when a dismissal committed while the judge was running |
 | `supersede_suggestion_accepted` | INFO | a `supersedes` edge accepted the stored candidate, and the candidate was cleared |
 | `supersede_suggestion_dismissed` | INFO | an edit dismissed the candidate and wrote a tombstone |
-| `supersede_dismiss_noop` | INFO | there was nothing to dismiss (`reason=parallel`: the judge had already set the pair aside) |
+| `supersede_dismiss_noop` | INFO | there was nothing to dismiss (`reason=parallel`: the judge had set the pair aside and its verdict still matches both memories' texts, so the pair was not shown; a verdict that no longer matches is dismissed like any shown candidate) |
+| `supersede_candidate_skipped_source_edited` | INFO | the memory was edited while this embedding run was judging or clearing its candidate, so this run wrote nothing; the edit's own run writes the column |
+| `supersede_candidate_cleared_no_neighbour` | INFO | a re-embed found no neighbour within 0.02 of the suggestion threshold (usually an edit moved the memory away from the pair), so the stored candidate was cleared. The margin keeps a pair that hovers at the threshold from being cleared and re-judged on every re-embed. Dismissal tombstones are never cleared |
 | `supersede_dismiss_malformed_candidate` / `supersede_accept_check_failed` / `supersede_candidate_resolve_failed` | WARNING | the stored candidate could not be dismissed, accepted or read. The edit, edge or read still succeeds; only the suggestion is skipped |
 | `supersede_shadowing_applied` | INFO | recall-side: a recall applied the shadowing of memories superseded by an accepted `supersedes` edge (`shadowed` of `candidates` results were hidden) |
 | `supersede_shadowing_failed` | WARNING | recall-side: the shadowing lookup failed, so the recall returned without hiding superseded memories |
