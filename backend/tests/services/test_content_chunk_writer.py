@@ -513,3 +513,135 @@ async def test_resource_indexer_rows_are_never_chunked():
     db.execute.assert_not_awaited()
     delete.assert_not_awaited()
     svc.embed_batch.assert_not_awaited()
+
+
+# --------------------------------------------------------------------- #2049
+# The embedding pipeline must not stamp a memory `success` whose chunks were
+# dropped: with fail_open=False a chunk failure is logged and raised, so
+# process_pending_embedding marks the row failed and the sweep retries it.
+
+
+@pytest.mark.parametrize("stage", ["embed", "upsert", "flag"])
+async def test_fail_closed_logs_and_raises(stage):
+    import structlog
+
+    from utils.exceptions import SelfHostedUnreachableError
+
+    error = SelfHostedUnreachableError("Cannot connect to self-hosted inference server")
+    svc = _embed_svc()
+    db = _db(True)
+    upsert = AsyncMock()
+    if stage == "embed":
+        svc.embed_batch = AsyncMock(side_effect=error)
+    elif stage == "upsert":
+        upsert = AsyncMock(side_effect=error)
+    else:
+        db.execute = AsyncMock(side_effect=error)
+    with (
+        structlog.testing.capture_logs() as logs,
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(writer, "upsert_chunk_points", upsert),
+        pytest.raises(SelfHostedUnreachableError),
+    ):
+        await writer.write_content_chunks(
+            db,
+            _memory(LONG),
+            base_payload={},
+            embed_svc=svc,
+            collection_name="c",
+            fail_open=False,
+        )
+    event = next(e for e in logs if e["event"] == "content_chunks_failed")
+    assert event["error_class"] == "SelfHostedUnreachableError"
+
+
+async def test_process_pending_embedding_marks_the_row_failed_when_chunks_fail():
+    """#2049: a transient chunk-embed failure ends `failed`, never `success`.
+
+    The failure takes the normal path: the row is stamped failed (a
+    configuration-class failure keeps its retry budget), so
+    ``sweep_pending_embeddings`` re-embeds it and rewrites the chunks.
+    """
+    from sqlalchemy.dialects import postgresql
+
+    from services import memory_service
+    from tests.services.test_embedding_retry_claim import _claimed, _memory_row
+    from utils.exceptions import SelfHostedUnreachableError
+
+    memory_id = uuid4()
+    failed = MagicMock()
+    failed.scalar_one_or_none.return_value = 0
+    statements = []
+    results = iter([_claimed(memory_id), _memory_row(memory_id), failed])
+
+    async def _execute(stmt, *a, **k):
+        statements.append(stmt)
+        return next(results)
+
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=_execute)
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+
+    async def _aiter():
+        yield db
+
+    embed_svc = MagicMock()
+    embed_svc.embed = AsyncMock(return_value=[0.1])
+    embed_svc.model = "m"
+    knn = AsyncMock()
+
+    with (
+        patch("db.base.get_db", return_value=_aiter()),
+        patch("services.embedding_service.EmbeddingService", MagicMock()),
+        patch(
+            "services.context_routing.resolve_context_routing",
+            AsyncMock(return_value=("coll", embed_svc)),
+        ),
+        patch.object(memory_service, "add_memory_to_qdrant", AsyncMock()),
+        patch.object(memory_service, "build_memory_point", return_value=({}, [], [])),
+        patch.object(
+            memory_service,
+            "write_content_chunks",
+            AsyncMock(side_effect=SelfHostedUnreachableError("stall")),
+        ) as write,
+        patch.object(memory_service, "_create_knn_seed_edges", knn),
+        patch.object(memory_service, "_create_tag_cooccurrence_seed_edges", AsyncMock()),
+    ):
+        await memory_service.process_pending_embedding(memory_id)
+
+    assert write.await_args.kwargs["fail_open"] is False
+    db.rollback.assert_awaited()
+    knn.assert_not_awaited()
+    last = str(
+        statements[-1].compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+    ).upper()
+    assert "'FAILED'" in last
+    assert "'SUCCESS'" not in last
+    # A configuration-class failure does not spend the retry budget (#1496).
+    assert "EMBEDDING_RETRY_COUNT=0" in last.replace(" ", "")
+
+
+async def test_fail_closed_never_raises_the_chunk_text():
+    """#2049: the raised message is stored and logged by the caller — a foreign
+    error that echoes its input is reduced to its class name."""
+    svc = MagicMock()
+    svc.embed_batch = AsyncMock(side_effect=ValueError("secret body text"))
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()),
+        pytest.raises(writer.ContentChunkWriteError) as err,
+    ):
+        await writer.write_content_chunks(
+            _db(True),
+            _memory(LONG),
+            base_payload={},
+            embed_svc=svc,
+            collection_name="c",
+            fail_open=False,
+        )
+    assert "secret body text" not in str(err.value)
+    assert "ValueError" in str(err.value)
+    assert err.value.__cause__ is None and err.value.__suppress_context__

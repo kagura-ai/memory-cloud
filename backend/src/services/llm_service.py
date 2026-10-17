@@ -90,6 +90,17 @@ class LLMResponse:
         yield self.total_tokens
 
 
+def billed_usage(exc: BaseException) -> LLMResponse | None:
+    """Return the tokens a failed ``complete_json`` call still spent (#2038).
+
+    That is ``LLMServiceError.usage`` (#2019) when an attempt answered before
+    the call failed, ``None`` otherwise — including for any other exception,
+    which carries no usage. Cost accounting adds it so a failed call's spend
+    is not lost.
+    """
+    return exc.usage if isinstance(exc, LLMServiceError) else None
+
+
 # Provider registry ---------------------------------------------------------
 
 _PROVIDERS: dict[str, type[LLMProvider]] = {

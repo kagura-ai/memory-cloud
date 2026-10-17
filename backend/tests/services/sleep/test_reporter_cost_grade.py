@@ -24,10 +24,12 @@ from uuid import uuid4
 import pytest
 
 from models.sleep import SleepReportLLMUsage
+from services.llm_service import LLMResponse
 from services.sleep.reporter import (
     LLMCallBreakdown,
     PhaseResult,
     SleepReporter,
+    accumulate_llm_response,
 )
 
 
@@ -50,6 +52,33 @@ class TestLLMCallBreakdown:
         assert b.cached_input_tokens == 30
         assert b.calls == 2
         assert b.total_tokens == 460  # 300 + 130 + 30
+
+    def test_add_call_without_counting_the_call(self):
+        """#2038: a failed call's tokens add up, but ``calls`` stays the success count."""
+        b = LLMCallBreakdown(provider="anthropic", model="claude-sonnet-4-6")
+        b.add_call(input_tokens=100, output_tokens=50, cached_input_tokens=10, count_call=False)
+        assert b.total_tokens == 160
+        assert b.calls == 0
+
+    def test_accumulate_llm_response_count_call_false(self):
+        """#2038: lazy-init from a failed call's usage keeps ``calls`` at 0."""
+        usage = LLMResponse(
+            parsed={},
+            total_tokens=70,
+            input_tokens=50,
+            output_tokens=20,
+            cached_input_tokens=0,
+            provider="openai",
+            model="gpt-5-nano",
+            tokenizer_version="o200k_base",
+        )
+        b = accumulate_llm_response(None, usage, count_call=False)
+        assert (b.provider, b.model, b.tokenizer_version) == ("openai", "gpt-5-nano", "o200k_base")
+        assert b.total_tokens == 70
+        assert b.calls == 0
+        b = accumulate_llm_response(b, usage)
+        assert b.total_tokens == 140
+        assert b.calls == 1
 
 
 class TestReporterCostGradeChildRows:

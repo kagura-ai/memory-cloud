@@ -38,7 +38,7 @@ from db.qdrant import search_memories_qdrant
 from models.memory import EDGE_ORIGIN_SEMANTIC, Memory, NeuralMemoryEdge
 from repositories.neural_edge import NeuralEdgeRepository
 from services.embedding_service import EmbeddingService
-from services.llm_service import LLMService
+from services.llm_service import LLMService, billed_usage
 from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import (
     EDGE_DISCOVERY_PROMPT_REVISION,
@@ -874,8 +874,9 @@ class EdgeDiscoveryPhase:
         # counted. Otherwise a failing LLM provider could trigger many more
         # batches than `max_llm_calls` permits — `execute()`'s budget check
         # would never see the consumption from the failure path. Tokens are
-        # still only added on success (no tokens consumed when the call
-        # failed). Addresses Copilot review #371 finding (loop 2).
+        # added on success, and on a failure only when the error carries the
+        # usage of an attempt that answered (#2038). Addresses Copilot
+        # review #371 finding (loop 2).
         budget.consume(llm_calls=1)
         try:
             llm_resp = await self.llm_service.complete_json(
@@ -895,6 +896,14 @@ class EdgeDiscoveryPhase:
         except Exception as e:
             logger.warning("edge_discovery_llm_failed", error=str(e))
             stats.failures = 1
+            if (usage := billed_usage(e)) is not None:
+                # #2038: the failed call still spent these tokens — count them in the
+                # run's totals, but not as a successful call (the budget was
+                # consumed before the call).
+                self._tokens_used += usage.total_tokens
+                self._llm_breakdown = accumulate_llm_response(
+                    self._llm_breakdown, usage, count_call=False
+                )
             return [], stats
 
         # Parse response with label validation

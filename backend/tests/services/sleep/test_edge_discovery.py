@@ -704,6 +704,35 @@ class TestLLMJudgeBatch:
         assert confirmed[1].confidence == 0.0
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_usage", [True, False])
+    async def test_failed_call_usage_is_counted(
+        self, failed_llm_error, llm_judge_phase, with_usage
+    ):
+        """#2038: a failed call's spent tokens reach the totals; calls stay 0."""
+        config = _make_config()
+        budget = SleepBudget()
+        _, batch, memory_map = _make_batch_pair(n=2)
+        llm_judge_phase.llm_service.complete_json.side_effect = failed_llm_error(with_usage)
+        llm_judge_phase._tokens_used = 0
+        llm_judge_phase._llm_breakdown = None
+
+        confirmed, stats = await llm_judge_phase._llm_judge_batch(
+            batch, memory_map, "user-1", "ctx-1", "ws-1", budget, config
+        )
+
+        assert confirmed == []
+        assert stats.failures == 1
+        assert budget.llm_calls_used == 1  # pre-consumed, unchanged by #2038
+        if with_usage:
+            assert llm_judge_phase._tokens_used == 70
+            assert llm_judge_phase._llm_breakdown is not None
+            assert llm_judge_phase._llm_breakdown.total_tokens == 70
+            assert llm_judge_phase._llm_breakdown.calls == 0
+        else:
+            assert llm_judge_phase._tokens_used == 0
+            assert llm_judge_phase._llm_breakdown is None
+
+    @pytest.mark.asyncio
     async def test_complete_json_raises_increments_failures(self, llm_judge_phase):
         """Exception in complete_json yields ([], BatchStats(failures=1))."""
         config = _make_config()

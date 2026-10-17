@@ -760,6 +760,33 @@ class TestEvaluateBatch:
         assert budget.llm_calls_used == 0  # consume() never reached
         assert phase._llm_breakdown is None
 
+    @pytest.mark.parametrize("with_usage", [True, False])
+    async def test_failed_call_usage_is_counted(
+        self, failed_llm_error, reeval_phase_mockdb, with_usage
+    ):
+        """#2038: a failed call's spent tokens reach the totals; calls stay 0."""
+        phase = reeval_phase_mockdb
+        m_a = _make_mock_memory()
+        phase.llm_service.complete_json = AsyncMock(side_effect=failed_llm_error(with_usage))
+        phase._tokens_used = 0
+        phase._llm_failures = 0
+
+        budget = SleepBudget()
+        scores = await phase._evaluate_batch([m_a], "u", None, None, budget, _make_config())
+
+        assert scores == {}
+        assert phase._llm_failures == 1
+        # A billed failure counts against the budget; an unbilled one does not.
+        assert budget.llm_calls_used == (1 if with_usage else 0)
+        if with_usage:
+            assert phase._tokens_used == 70
+            assert phase._llm_breakdown is not None
+            assert phase._llm_breakdown.total_tokens == 70
+            assert phase._llm_breakdown.calls == 0
+        else:
+            assert phase._tokens_used == 0
+            assert phase._llm_breakdown is None
+
     async def test_missing_scores_key_defaults_empty(self, reeval_phase_mockdb):
         """A parsed payload without a 'scores' key yields no scores."""
         phase = reeval_phase_mockdb

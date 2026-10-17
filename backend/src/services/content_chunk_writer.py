@@ -33,10 +33,13 @@ in the chunk payload would close it. The summary point has the same race and
 is not guarded here.
 
 A failed delete of the old chunk points is raised (the row is retried, the
-old body never survives an edit). Any other failure is fail-open: the summary
-point is already written, so it is logged (``content_chunks_failed``, error
-class only — never the text) and the memory stays summary-only until its
-next re-embed.
+old body never survives an edit). Any other failure is logged
+(``content_chunks_failed``, error class only — never the text). By default it
+is then fail-open: the summary point is already written and the memory stays
+summary-only until its next re-embed. ``process_pending_embedding`` passes
+``fail_open=False`` (#2049) so the failure is raised and the row is marked
+failed and retried by the embedding sweep, never stamped ``success`` without
+its chunks.
 """
 
 from __future__ import annotations
@@ -51,6 +54,7 @@ from db.qdrant import chunk_points_supported, delete_chunk_points, upsert_chunk_
 from models.config import ContextSearchConfig
 from models.memory import Memory
 from utils.content_chunks import build_chunk_payload, chunk_point_id, split_content
+from utils.exceptions import MemoryCloudException
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -171,13 +175,15 @@ async def write_content_chunks(
     embed_svc: Any,
     collection_name: str,
     chunks_enabled: bool | None = None,
+    fail_open: bool = True,
 ) -> int:
     """Replace the memory's chunk points; return how many were written.
 
     A failed delete of the old chunk points is raised — the caller's normal
     failure path (``process_pending_embedding`` marks the row failed and
     retries it), so an edit never leaves the old body in ``chunk_text``. A
-    failed flag lookup, embedding or upsert is logged and returns 0.
+    failed flag lookup, embedding or upsert is logged, then returns 0 — or,
+    with ``fail_open=False``, is raised (``_without_text``).
 
     Args:
         db: Session used for the flag lookups.
@@ -188,6 +194,12 @@ async def write_content_chunks(
         chunks_enabled: The context's flag when the caller already has it
             (a per-context batch); ``None`` looks it up. Either way the flag
             is read again, fresh, right before the upsert.
+        fail_open: False re-raises a failed flag lookup, embedding or upsert
+            after logging it (#2049), so the caller's failure path retries.
+
+    Raises:
+        Exception: a failed delete of the old chunk points; with
+            ``fail_open=False`` also a failed flag lookup, embedding or upsert.
     """
     if _is_resource_row(memory):
         return 0
@@ -199,6 +211,8 @@ async def write_content_chunks(
             chunks_enabled = await content_chunks_enabled(db, memory.context_id)
     except Exception as e:
         _log_failure(memory, collection_name, e)
+        if not fail_open:
+            raise _without_text(e) from None
         return 0
     if not chunks_enabled or not chunk_points_supported():
         return 0
@@ -249,6 +263,8 @@ async def write_content_chunks(
         )
     except Exception as e:
         _log_failure(memory, collection_name, e)
+        if not fail_open:
+            raise _without_text(e) from None
         return 0
     logger.info(
         "content_chunks_written",
@@ -258,6 +274,24 @@ async def write_content_chunks(
         chars=len(content or ""),
     )
     return len(points)
+
+
+class ContentChunkWriteError(RuntimeError):
+    """A chunk write failed outside this project's own errors (#2049)."""
+
+
+def _without_text(error: Exception) -> Exception:
+    """The error to raise for a failed chunk write: never the chunk text.
+
+    The caller stores and logs the message (``embedding_error``,
+    ``embedding_failed``). The project's own errors keep their type — the
+    retry budget is decided by it (``is_configuration_failure``) — and their
+    message, which names no content. Anything else (a Qdrant or validation
+    error can echo its input) becomes its class name only.
+    """
+    if isinstance(error, MemoryCloudException):
+        return error
+    return ContentChunkWriteError(f"Content chunk write failed ({type(error).__name__})")
 
 
 def _log_failure(memory: Memory, collection_name: str, error: Exception) -> None:
