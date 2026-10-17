@@ -99,19 +99,93 @@ is an image build that fails for lack of space.
 
 Every service in the single-server compose files
 (`terraform/single-server/docker-compose.{prod,app,data,ollama}.yml`) therefore
-declares the following, so the stack is bounded on any host — not only on one
-whose Docker daemon was configured for it:
+declares a `json-file` logging block, so the stack is bounded on any host — not
+only on one whose Docker daemon was configured for it. With the knobs below
+left unset, every service renders these defaults:
 
 ```yaml
 logging:
   driver: json-file
   options:
-    max-size: "50m"   # rotate at 50 MB ...
-    max-file: "3"     # ... keep 3 files: at most ~150 MB per container
+    max-size: "50m"   # default: rotate at 50 MB ...
+    max-file: "3"     # default: keep 3 files, at most ~150 MB per container
 ```
 
 For Caddy that is still enough access log for incident triage; ship the logs
 elsewhere if you need longer retention.
+
+#### Changing the cap — Issue #2025
+
+The two values are read from `.env.prod` (the `--env-file` `deploy.sh` always
+passes), with the API colors on their own pair so that a longer API retention
+does not grow the web, proxy and data-tier logs. Unset, every service renders
+exactly the block above.
+
+| Variable | Default | Applies to |
+|---|---|---|
+| `API_LOG_MAX_SIZE` | `50m` | `api-blue` / `api-green`: size at which the log file rotates |
+| `API_LOG_MAX_FILE` | `3` | `api-blue` / `api-green`: rotated files kept |
+| `LOG_MAX_SIZE` | `50m` | every other service (`web`, `caddy`, `postgres`, `qdrant`, `redis`, `ollama`) |
+| `LOG_MAX_FILE` | `3` | the same services |
+
+Accepted formats: a size is a whole number with a lowercase `k`, `m` or `g`
+unit (`^[1-9][0-9]*[kmg]$`, e.g. `200m`); a file count is a positive whole number
+(`^[1-9][0-9]*$`). An empty value means the default. `deploy.sh` checks the
+values it will pass (the shell environment first, then `.env.prod`) and stops
+before it touches a container; Docker itself would reject a bad value only when
+it creates the container. The API writes one line per request plus the
+structured events operators tally (scheduled-job results, `supersede_verify_*`),
+so its logs are the first to rotate out; raising `API_LOG_MAX_*` keeps them
+longer. Setting `log-opts` in `/etc/docker/daemon.json` does not change any of
+this: a compose `logging:` block overrides the daemon default.
+
+- **Takes effect only when a container is recreated** — `docker compose
+  restart` keeps the old options, as described below.
+- **Blue-green recreates only the incoming color.** The next `deploy.sh` run
+  applies `API_LOG_MAX_*` to the color it deploys to; the other color follows
+  with the deploy after that. `caddy` and `web` (and the data tier) pick up
+  `LOG_MAX_*` only through their own recreate (the commands below).
+- **A reboot recreates whatever is pending.** The systemd unit `startup.sh`
+  installs (`kagura-memory.service`, once enabled) runs a plain
+  `docker compose -f docker-compose.prod.yml --env-file .env.prod up -d` at
+  boot, and a plain `up -d` recreates every service whose configuration
+  changed — `caddy`, `web` and the data tier included, with nobody watching. A
+  changed `LOG_MAX_*` therefore means the next reboot restarts `postgres`,
+  `qdrant` and `redis`. Apply it deliberately: right after setting it, recreate
+  those services yourself in a maintenance window (commands below), and do not
+  leave the change pending. The same recreate moves `qdrant` to the image the
+  compose file pins, so the
+  [Qdrant upgrade runbook](ops/qdrant-upgrade-runbook.md) caveat in the table
+  below applies to a reboot too. Setting only `API_LOG_MAX_*` and leaving
+  `LOG_MAX_*` unset changes no data-tier configuration, so nothing restarts
+  the databases.
+- **Plan the disk for both colors.** A stopped standby color keeps its log
+  files until it is recreated, so the API takes up to
+  `2 × API_LOG_MAX_SIZE × API_LOG_MAX_FILE`, plus
+  `LOG_MAX_SIZE × LOG_MAX_FILE` for each other service.
+- **Split host:** the app VM's `docker-compose.app.yml` reads all four; the
+  data VM's `docker-compose.data.yml` reads `LOG_MAX_*` from the env file passed
+  there, and its copy of the file is updated by hand (as for
+  [Issue #1980](#rolling-it-out)).
+
+Check a recreated container with
+`docker inspect -f '{{json .HostConfig.LogConfig}}' kagura-api-blue` (or
+`kagura-api-green`, `kagura-caddy`, ...).
+
+**Who made an MCP request.** Since #2025 the per-request
+`MCP auth success: method=…, user=…` line is logged at DEBUG, so the INFO log
+no longer names the principal of each MCP request (failed auths still log at
+WARNING). For incident tracing, agent-bound requests leave an append-only
+`memory_access_events` row (user, principal type, API key prefix, agent,
+context, operation, outcome; see
+[memory_access_events retention](ops/memory-access-events-retention.md)), and
+`api_keys.last_used_at` shows when each API key was last used (written at most
+once per `API_KEY_LAST_USED_THROTTLE_SECONDS`, default 60). OAuth and
+session-cookie requests have no per-request row; set `LOG_LEVEL=debug` in
+`.env.prod` and recreate the API colors to bring the per-request line back,
+along with every other DEBUG line, while you investigate. DEBUG also logs
+token and session-id prefixes, so set `LOG_LEVEL` back and recreate the API
+colors again when you are done.
 
 **Applying it to a running stack.** `logging` options are fixed when a container
 is *created* — `docker compose restart` does not apply them. After updating to a
@@ -119,7 +193,7 @@ release that carries the block:
 
 | Service | How it picks the option up |
 |---|---|
-| `api-blue` / `api-green` | `deploy.sh` recreates the color it deploys to on every run — nothing to do (the other color follows with the next deploy). |
+| `api-blue` / `api-green` | `deploy.sh` recreates the color it deploys to on every run — nothing to do (the other color follows with the next deploy). The same holds for a changed `API_LOG_MAX_*`. |
 | `web` | Recreated by `deploy.sh --web`, or once by hand (below). |
 | `caddy` | **Never recreated by `deploy.sh`** (it only restarts Caddy) — recreate it once by hand (below). |
 | `postgres` / `qdrant` / `redis` (and `ollama`) | Recreating them **restarts the database**, so do it in a maintenance window. Their logs are small; it can wait for the next planned one. Recreating `qdrant` also moves it to the image the compose file pins: a volume from before v0.87.0 must first be upgraded one minor at a time ([Qdrant upgrade runbook](ops/qdrant-upgrade-runbook.md)), or Qdrant crash-loops. |

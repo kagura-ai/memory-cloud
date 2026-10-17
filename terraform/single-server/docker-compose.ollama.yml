@@ -7,6 +7,7 @@
 #   docker compose \
 #     -f docker-compose.prod.yml \
 #     -f docker-compose.ollama.yml \
+#     --env-file .env.prod \
 #     up -d
 #
 # Model pre-pull is a manual step, run AFTER `up`:
@@ -20,7 +21,8 @@
 # =============================================================================
 
 # Container log rotation (#1591) — json-file capped at 50m x 3 on every service
-# this file defines, so the disk is bounded without relying on the host's
+# this file defines (configurable since #2025: LOG_MAX_SIZE / LOG_MAX_FILE,
+# defaults unchanged), so the disk is bounded without relying on the host's
 # daemon.json. Rationale, and how to apply it to a running stack (`logging` is
 # fixed at container creation), are in docker-compose.app.yml / README.md "Logs".
 # YAML anchors are per-file, hence the repeat; log_hygiene_static.bats pins it.
@@ -29,8 +31,8 @@
 x-logging: &default-logging
   driver: json-file
   options:
-    max-size: "50m"
-    max-file: "3"
+    max-size: "${LOG_MAX_SIZE:-50m}"
+    max-file: "${LOG_MAX_FILE:-3}"
 
 services:
   ollama:
