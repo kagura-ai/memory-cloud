@@ -1193,6 +1193,7 @@ class ResourceIndexer:
         *,
         collection_name: str,
         embedding_service: EmbeddingService,
+        usage: dict[str, int] | None = None,
     ) -> UUID:
         """Write the point of a resource-ingested row again, from the row (#1870).
 
@@ -1217,6 +1218,9 @@ class ResourceIndexer:
             memory: A row for which ``owns_resource_point`` holds.
             collection_name: The context's collection (``resolve_context_routing``).
             embedding_service: The context's EmbeddingService.
+            usage: Optional out-parameter for a caller that accounts embedding
+                cost (Sleep reindex, #2053): ``usage["tokens"]`` is set to the
+                embedding's token count (0 on a cache hit).
 
         Returns:
             The id of the point written, equal to ``memory.point_id``.
@@ -1256,12 +1260,16 @@ class ResourceIndexer:
 
         projected = self._project_payload(document, schema)
         content = resource_document_text(projected, doc_id)
-        embedding = await embedding_service.embed(
-            text=content,
-            user_id=str(context.created_by),
-            context_id=str(context.id),
-            workspace_id=str(context.workspace_id) if context.workspace_id else None,
-        )
+        embed_kwargs: dict[str, Any] = {
+            "text": content,
+            "user_id": str(context.created_by),
+            "context_id": str(context.id),
+            "workspace_id": str(context.workspace_id) if context.workspace_id else None,
+        }
+        if usage is None:
+            embedding = await embedding_service.embed(**embed_kwargs)
+        else:
+            embedding, usage["tokens"] = await embedding_service.embed_with_usage(**embed_kwargs)
 
         # The indexer stamps the point with the event's time. The event is
         # still there unless it was pruned; the row's own time (set when the
