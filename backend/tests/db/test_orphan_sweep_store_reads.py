@@ -107,7 +107,8 @@ class TestScrollPointRefs:
         first, second = mock_client.scroll.await_args_list
         assert first.kwargs["with_vectors"] is False
         # #1829: the sweep also reads the document key and the write time of
-        # resource points — never content.
+        # resource points, and (#2015) the memory id of a content chunk point
+        # — never content.
         assert first.kwargs["with_payload"] == [
             "context_id",
             "resource_id",
@@ -115,6 +116,7 @@ class TestScrollPointRefs:
             "version",
             "updated_at",
             "indexed_at",
+            "chunk_of",
         ]
         assert second.kwargs["offset"] == "next"
 
