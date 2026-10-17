@@ -810,3 +810,21 @@ class TestModuleConstants:
         assert STALENESS_DAYS == 7
         assert BATCH_SIZE == 10
         assert IMPORTANCE_MIN < IMPORTANCE_MAX
+
+
+class TestChunkCascadeGate:
+    """#2015: on a context without content chunks the importance sync makes no
+    chunk calls; the flag is read once per context."""
+
+    @pytest.mark.asyncio
+    async def test_flag_read_once_per_context_and_unknown_context_cascades(self):
+        from services.sleep.importance_reeval import ImportanceReevalPhase
+
+        phase = ImportanceReevalPhase(MagicMock(), MagicMock())
+        ctx = str(uuid4())
+        needed = AsyncMock(return_value=False)
+        with patch("services.content_chunk_writer.chunk_cascade_needed", needed):
+            assert await phase._chunk_cascade(ctx) is False
+            assert await phase._chunk_cascade(ctx) is False
+            assert await phase._chunk_cascade(None) is True
+        needed.assert_awaited_once()

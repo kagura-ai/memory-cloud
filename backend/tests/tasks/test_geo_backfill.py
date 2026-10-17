@@ -39,6 +39,8 @@ async def test_backfill_writes_location_payload_per_located_row():
     first = mock_update.await_args_list[0].kwargs
     assert first["payload_updates"]["location"] == {"lat": 35.68, "lon": 139.76}
     assert first["memory_id"] == rows[0].id
+    # #2015: chunk points copy location when they are written; no cascade.
+    assert all(c.kwargs["cascade_chunks"] is False for c in mock_update.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -141,3 +143,42 @@ async def test_reconcile_scrolls_summary_points_only():
     assert any(
         isinstance(c, IsEmptyCondition) and c.is_empty.key == "chunk_of" for c in flt.must or []
     )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_cascades_only_for_contexts_with_chunks():
+    """#2015: on a deployment that never opted in, the reconcile makes no chunk
+    calls — the cascade is gated on the point's context flag."""
+    from types import SimpleNamespace
+
+    from tasks.geo_backfill import reconcile_stale_location_payloads
+
+    flagged_ctx, plain_ctx = str(uuid4()), str(uuid4())
+    p1 = SimpleNamespace(id=str(uuid4()), payload={"context_id": flagged_ctx})
+    p2 = SimpleNamespace(id=str(uuid4()), payload={"context_id": plain_ctx})
+    collection_stub = MagicMock()
+    collection_stub.name = "kagura_memories"
+    client = AsyncMock()
+    client.get_collections.return_value = MagicMock(collections=[collection_stub])
+    client.scroll = AsyncMock(return_value=([p1, p2], None))
+    db = MagicMock()
+    pg_result = MagicMock()
+    pg_result.scalars.return_value = []
+    db.execute = AsyncMock(return_value=pg_result)
+
+    async def _needed(_db, context_id):
+        return str(context_id) == flagged_ctx
+
+    with (
+        patch("db.qdrant.get_qdrant_client", return_value=client),
+        patch("db.vector_store.get_active_store", return_value=None),
+        patch("db.qdrant.update_memory_payload_in_qdrant", new=AsyncMock()) as update_mock,
+        patch("services.content_chunk_writer.chunk_cascade_needed", new=_needed),
+    ):
+        await reconcile_stale_location_payloads(db)
+
+    by_id = {c.kwargs["memory_id"]: c.kwargs["cascade_chunks"] for c in update_mock.await_args_list}
+    from uuid import UUID
+
+    assert by_id == {UUID(p1.id): True, UUID(p2.id): False}
+    assert client.scroll.await_args.kwargs["with_payload"] == ["context_id"]

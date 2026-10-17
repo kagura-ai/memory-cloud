@@ -73,6 +73,25 @@ class ImportanceReevalPhase:
         # #1183: judge-failure counter (init here so ``_evaluate_batch`` can
         # be unit-tested without execute()).
         self._llm_failures: int = 0
+        # #2015: per-context "does a payload change reach chunk points".
+        self._cascade_by_context: dict[str | None, bool] = {}
+
+    async def _chunk_cascade(self, context_id: str | None) -> bool:
+        """Whether the importance sync must also reach content chunk points.
+
+        A context with ``content_chunks_enabled`` off has none, so the extra
+        Qdrant call is skipped; an unknown context cascades (the safe side).
+        """
+        if context_id not in self._cascade_by_context:
+            if context_id is None:
+                self._cascade_by_context[context_id] = True
+            else:
+                from services.content_chunk_writer import chunk_cascade_needed
+
+                self._cascade_by_context[context_id] = await chunk_cascade_needed(
+                    self.db, UUID(context_id)
+                )
+        return self._cascade_by_context[context_id]
 
     async def execute(
         self,
@@ -157,6 +176,7 @@ class ImportanceReevalPhase:
                         memory_id=memory_id,
                         payload_updates={"importance": smoothed},
                         collection_name=self.collection_name or "kagura_memories",
+                        cascade_chunks=await self._chunk_cascade(context_id),
                     )
                 except Exception as e:
                     logger.warning(

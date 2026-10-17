@@ -540,10 +540,16 @@ async def _undo_update_importance(
         summary["importance_kept"] += 1
         return
     try:
+        from services.content_chunk_writer import chunk_cascade_needed
+
         await update_memory_payload_in_qdrant(
             memory_id=action.memory_id,
             payload_updates={"importance": old_importance},
             collection_name=ctx.collection_name,
+            # #2015: a context with content_chunks_enabled off has no chunks.
+            cascade_chunks=(
+                await chunk_cascade_needed(db, UUID(ctx.ctx_id_str)) if ctx.ctx_id_str else True
+            ),
         )
     except Exception:
         pass  # Non-fatal: Qdrant payload sync

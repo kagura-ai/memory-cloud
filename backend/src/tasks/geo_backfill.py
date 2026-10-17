@@ -66,6 +66,8 @@ async def backfill_location_payloads(db: AsyncSession) -> int:
                 memory_id=row.id,
                 payload_updates={"location": {"lat": row.location_lat, "lon": row.location_lon}},
                 collection_name=collection,
+                # #2015: chunk points copy location when they are written.
+                cascade_chunks=False,
             )
             count += 1
         except Exception as e:  # noqa: BLE001 — best-effort per row
@@ -102,6 +104,7 @@ async def reconcile_stale_location_payloads(db: AsyncSession) -> int:
     from db.qdrant import get_qdrant_client, update_memory_payload_in_qdrant
     from db.vector_store import get_active_store
     from models.memory import Memory
+    from services.content_chunk_writer import chunk_cascade_needed
 
     if get_active_store() is not None:
         return 0
@@ -119,13 +122,15 @@ async def reconcile_stale_location_payloads(db: AsyncSession) -> int:
         must_not=[IsEmptyCondition(is_empty=PayloadField(key="location"))],
     )
     cleared = 0
+    # #2015: whether a context's points need the chunk cascade (memoized).
+    cascade_by_context: dict[str, bool] = {}
     for collection in collections:
         offset = None
         while True:
             points, offset = await client.scroll(
                 collection_name=collection,
                 scroll_filter=located_filter,
-                with_payload=False,
+                with_payload=["context_id"],
                 with_vectors=False,
                 limit=256,
                 offset=offset,
@@ -136,11 +141,15 @@ async def reconcile_stale_location_payloads(db: AsyncSession) -> int:
             # points use non-memory ids and never carry a location payload,
             # but guard the parse anyway.
             point_ids: list[_UUID] = []
+            context_of: dict[_UUID, str | None] = {}
             for p in points:
                 try:
-                    point_ids.append(_UUID(str(p.id)))
+                    pid = _UUID(str(p.id))
                 except ValueError:
                     continue
+                point_ids.append(pid)
+                payload = p.payload if isinstance(p.payload, dict) else {}
+                context_of[pid] = payload.get("context_id")
             if point_ids:
                 located = set(
                     (
@@ -158,11 +167,21 @@ async def reconcile_stale_location_payloads(db: AsyncSession) -> int:
                     if pid in located:
                         continue
                     try:
+                        context_id = context_of.get(pid)
+                        if context_id is None:
+                            cascade = True  # unknown context: the safe side
+                        else:
+                            if context_id not in cascade_by_context:
+                                cascade_by_context[context_id] = await chunk_cascade_needed(
+                                    db, _UUID(context_id)
+                                )
+                            cascade = cascade_by_context[context_id]
                         await update_memory_payload_in_qdrant(
                             memory_id=pid,
                             payload_updates={},
                             collection_name=collection,
                             delete_keys=["location"],
+                            cascade_chunks=cascade,
                         )
                         cleared += 1
                     except Exception as e:  # noqa: BLE001 — best-effort per row
