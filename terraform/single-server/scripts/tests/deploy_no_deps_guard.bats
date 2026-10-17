@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # =============================================================================
 # Regression guard for the #1302 postgres footgun: every `dc up -d` that
-# targets an api color (deploy Step 2, rollback restart) must pass --no-deps,
+# targets an api color (deploy Step 3, rollback restart) must pass --no-deps,
 # so a routine blue-green deploy can never recreate shared stateful services
 # (postgres/redis/qdrant) whose compose config has drifted from the running
 # containers — e.g. the PG18 image + fresh-volume change, where a dependency
@@ -47,7 +47,7 @@ DEPLOY_SH="$BATS_TEST_DIRNAME/../deploy.sh"
 }
 
 @test "api colors are started through dc_up_service (guard not vacuous)" {
-    # Both cmd_deploy (Step 2) and cmd_rollback must route through the helper;
+    # Both cmd_deploy (Step 3) and cmd_rollback must route through the helper;
     # a direct `dc up` for an api color would bypass the check above.
     [ -r "$DEPLOY_SH" ]
     run bash -o pipefail -c 'grep -cE "dc_up_service \"api-" "$1"' _ "$DEPLOY_SH"

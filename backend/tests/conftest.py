@@ -176,6 +176,23 @@ def _clear_vocabulary_cache():
     clear_vocabulary_cache()
 
 
+@pytest.fixture(autouse=True)
+def _clear_self_hosted_reachability_cache():
+    """Reset the process-local self-hosted probe cache around every test (#2049).
+
+    ``ensure_self_hosted_reachable`` remembers a successful ``/v1/models`` probe
+    per base URL; without clearing it, one test's mocked success would skip
+    another test's probe. Cheap (a dict clear).
+    """
+    from services.llm_providers.self_hosted_provider import (
+        clear_self_hosted_reachability_cache,
+    )
+
+    clear_self_hosted_reachability_cache()
+    yield
+    clear_self_hosted_reachability_cache()
+
+
 @pytest.fixture
 def no_identity_links():
     """No account is linked to another (#1784, #1807).

@@ -9,7 +9,7 @@
 # repeated warning.
 #
 # The issue proposed reordering the switch (start → health → marker → drain).
-# That order was ALREADY implemented (deploy Step 2→7, and rollback starts and
+# That order was ALREADY implemented (deploy Step 3→7, and rollback starts and
 # waits for readiness before writing the marker), so reordering would have been
 # a no-op. What was missing:
 #

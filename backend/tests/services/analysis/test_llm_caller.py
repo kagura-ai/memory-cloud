@@ -149,7 +149,7 @@ async def test_failed_attempt_billed_tokens_are_accumulated() -> None:
 
     The primary model fails *after* the provider round-trip completed
     (unparseable JSON on both internal tries) — the ``LLMServiceError``
-    carries that call's usage via ``response``. The fallback model then
+    carries that call's usage via ``usage`` (#2019). The fallback model then
     succeeds. The returned ``CallResult`` exposes the failed usage in
     ``prior_usages``, and the labeler's breakdown accumulation sums both.
     """
@@ -162,10 +162,9 @@ async def test_failed_attempt_billed_tokens_are_accumulated() -> None:
         provider="openai",
         model="gpt-5-nano",
     )
-    primary_error = LLMServiceError("nano returned unparseable json twice")
-    # Real ``LLMServiceError`` is a plain Exception; the caller reads an
-    # optional ``response`` carrying the billed usage of the failed call.
-    primary_error.response = failed_usage  # type: ignore[attr-defined]
+    # Built the way LLMService raises it (#2019): ``usage`` carries the billed
+    # tokens of the failed call.
+    primary_error = LLMServiceError("nano returned unparseable json twice", usage=failed_usage)
 
     llm_service = AsyncMock()
     llm_service.complete_json = AsyncMock(side_effect=[primary_error, _ok_response("gpt-5.5")])

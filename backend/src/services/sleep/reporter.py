@@ -71,22 +71,30 @@ class LLMCallBreakdown:
         input_tokens: int,
         output_tokens: int,
         cached_input_tokens: int,
+        count_call: bool = True,
     ) -> None:
         """Accumulate one LLM call's tokens into this breakdown.
 
         Used by phases that make multiple LLM calls against the same
         (provider, model) within a single phase (e.g. edge_discovery
         running N batches of pair judgments).
+
+        ``count_call=False`` (#2038) adds the tokens of a call that failed
+        after spending them without counting the call: ``calls`` stays the
+        number of successful calls, which run-status grading relies on.
         """
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
         self.cached_input_tokens += cached_input_tokens
-        self.calls += 1
+        if count_call:
+            self.calls += 1
 
 
 def accumulate_llm_response(
     breakdown: LLMCallBreakdown | None,
     resp,  # services.llm_service.LLMResponse — late-bound to avoid import cycle
+    *,
+    count_call: bool = True,
 ) -> LLMCallBreakdown:
     """Lazy-init + add_call combined for the four sleep phases (#471).
 
@@ -94,6 +102,9 @@ def accumulate_llm_response(
     pattern — null-check, construct on first call, add tokens. Wrapping
     that in a helper means a future field rename on ``LLMResponse``
     only needs to be applied here, not in four phase files.
+
+    ``count_call=False`` (#2038) is for the usage a failed call carries on
+    ``LLMServiceError.usage``: its tokens count, the call does not.
     """
     if breakdown is None:
         breakdown = LLMCallBreakdown(
@@ -105,6 +116,7 @@ def accumulate_llm_response(
         input_tokens=resp.input_tokens,
         output_tokens=resp.output_tokens,
         cached_input_tokens=resp.cached_input_tokens,
+        count_call=count_call,
     )
     return breakdown
 
@@ -138,7 +150,8 @@ class PhaseResult:
     # the reporter can grade the RUN (completed/degraded/failed) without
     # spelunking per-phase details dicts. Counts failures only — successful
     # calls are ``sum(b.calls for b in llm_breakdown)`` (breakdown accumulates
-    # inside the try block, after the response parsed).
+    # inside the try block, after the response parsed; a failed call's spent
+    # tokens are added with ``count_call=False``, #2038).
     llm_call_failures: int = 0
     # #471: cost-grade fields.
     llm_breakdown: list[LLMCallBreakdown] = field(default_factory=list)
@@ -356,7 +369,9 @@ class SleepReporter:
 
             # Sanity invariant: ``breakdown`` counts only successful
             # LLM calls (the accumulate_llm_response() call is inside
-            # the ``try`` block, after the response is parsed).
+            # the ``try`` block, after the response is parsed; a failed
+            # call's spent tokens go into both ``breakdown`` and
+            # ``tokens_used`` without counting the call, #2038).
             # ``llm_calls_used`` / ``tokens_used`` are populated from the
             # ``budget`` tracker, which in edge_discovery's pre-consume
             # pattern (``edge_discovery.py`` line 768) counts FAILED

@@ -174,6 +174,49 @@ dc_up_service() {
     fi
 }
 
+# Run `alembic upgrade head` from api-$1's image in a one-off container, BEFORE
+# that color's API process starts (#2048).
+#
+# The API lifespan starts background tasks the moment uvicorn boots; migrating
+# only after the new color was up let those tasks read the OLD schema (a column
+# a release adds -> undefined-column errors on every such deploy). `compose run`
+# uses the same image, env_file and project network as the service, but the
+# `alembic` command replaces uvicorn, so no lifespan task runs; --rm discards
+# the container (Compose v2.27 ignores `restart: always` for it), and --no-deps
+# keeps the #1302 guard: a deploy never recreates postgres/redis/qdrant.
+#
+# `compose run` has no --no-build, so in registry mode the dc_up_service guard
+# is mirrored by hand: a missing local tag would otherwise be BUILT from
+# whatever source tree is present, migrating with HEAD's scripts under a
+# "registry" log line. Two checks: compose must resolve the SAME name Step 1
+# tagged (it would not if COMPOSE_PROJECT_NAME is set only in .env.prod, or a
+# top-level `name:` appears; `config --images` lists the dependencies' images
+# too, hence the exact-line match), and that name must exist locally.
+run_migrations() {
+    local svc="api-$1"
+    if [ "$KAGURA_IMAGE_SOURCE" = "registry" ]; then
+        local name images
+        name="$(compose_image_name "$svc")"
+        images="$(dc config --images "$svc")" \
+            || error "docker compose config --images ${svc} failed; cannot verify the local image."
+        grep -qxF -- "$name" <<< "$images" \
+            || error "docker compose does not resolve ${svc} to ${name}, the name Step 1 tagged
+       (it resolves: $(echo "$images" | tr '\n' ' ')). Refusing to run migrations:
+       compose would build its own name from the source tree. Make the project
+       names agree (COMPOSE_PROJECT_NAME), then re-run."
+        "$DOCKER" image inspect "$name" > /dev/null 2>&1 \
+            || error "Image ${name} is not present locally (KAGURA_IMAGE_SOURCE=registry).
+       Refusing to run migrations: compose would build it from the source tree."
+    fi
+    # Explicit `|| error` rather than relying on set -e, which a caller in a
+    # conditional context would silently switch off. Not "nothing changed":
+    # revisions that commit outside the alembic transaction (autocommit blocks,
+    # CREATE INDEX CONCURRENTLY) may already have applied.
+    dc run --rm --no-deps -T "$svc" alembic upgrade head \
+        || error "alembic upgrade head failed; ${svc} was not started and traffic was not moved.
+       Check \`alembic current\` and any INVALID indexes before re-running."
+}
+
 # Abort a registry-mode rollback that has nothing to roll back TO.
 #
 # cmd_rollback restarts the previous color from local Docker state that nothing
@@ -829,10 +872,18 @@ cmd_deploy() {
     log "Step 1/7: Acquiring api-${inactive} image (source: ${KAGURA_IMAGE_SOURCE})..."
     acquire_api_image "$inactive"
 
-    # Step 2: Start the inactive color (uses new image)
+    # Step 2: Migrate the database from the NEW image, before the new color
+    # boots (#2048). Forward-compatible by convention: the old color keeps
+    # serving on the migrated schema until Step 6, as it always has. A failing
+    # migration stops the deploy here, before api-${inactive} exists.
+    DEPLOY_STAGE="Step 2/7: alembic upgrade head (one-off api-${inactive} container)"
+    log "Step 2/7: Running database migrations from the api-${inactive} image..."
+    run_migrations "$inactive"
+
+    # Step 3: Start the inactive color (uses new image, already-migrated schema)
     # Re-enable restart policy in case it was disabled by a previous deploy.
-    DEPLOY_STAGE="Step 2/7: start api-${inactive}"
-    log "Step 2/7: Starting api-${inactive}..."
+    DEPLOY_STAGE="Step 3/7: start api-${inactive}"
+    log "Step 3/7: Starting api-${inactive}..."
     # --no-deps: a routine deploy must never recreate postgres/redis/qdrant.
     # After #1302 the postgres service definition (image + volume) changed;
     # without this flag a plain deploy would recreate postgres onto the empty
@@ -841,16 +892,10 @@ cmd_deploy() {
     dc_up_service "api-${inactive}"
     docker update --restart=always "kagura-api-${inactive}" 2>/dev/null || true
 
-    # Step 3: Wait for readiness (DB + Qdrant + Redis all reachable)
-    DEPLOY_STAGE="Step 3/7: wait for api-${inactive} readiness"
-    log "Step 3/7: Waiting for api-${inactive} readiness (timeout: ${READINESS_TIMEOUT}s)..."
+    # Step 4: Wait for readiness (DB + Qdrant + Redis all reachable)
+    DEPLOY_STAGE="Step 4/7: wait for api-${inactive} readiness"
+    log "Step 4/7: Waiting for api-${inactive} readiness (timeout: ${READINESS_TIMEOUT}s)..."
     wait_for_readiness "$inactive"
-
-    # Step 4: Run Alembic migrations on the NEW container
-    # Forward-compatible by convention: both old and new code work with new schema.
-    DEPLOY_STAGE="Step 4/7: alembic upgrade on api-${inactive}"
-    log "Step 4/7: Running database migrations on api-${inactive}..."
-    dc exec -T "api-${inactive}" alembic upgrade head
 
     # Step 5: Write marker BEFORE switching Caddy (crash-safe ordering), and
     # write it IN PLACE so single-file bind-mount readers see it (#1480).
