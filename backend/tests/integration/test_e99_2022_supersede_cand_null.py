@@ -6,6 +6,9 @@
    left exactly as they were;
 3. downgrade is a no-op — the rewritten rows stay SQL NULL.
 
+Every seeded row carries a ``user_id`` under one per-run prefix and is deleted
+again in ``finally``.
+
 Not executed in the local unit run — needs the DB container.
 """
 
@@ -61,9 +64,9 @@ def _stored(conn: Connection, user: str) -> list[str | None]:
 def test_e99_rewrites_json_null_only() -> None:
     _reset_alembic_state()
     engine = _sync_engine()
-    tag = uuid.uuid4().hex[:8]
+    prefix = f"e99-{uuid.uuid4().hex[:8]}-"
     json_null, candidate, tombstone, sql_null = (
-        f"e99-{kind}-{tag}" for kind in ("jsonnull", "candidate", "tombstone", "sqlnull")
+        f"{prefix}{kind}" for kind in ("jsonnull", "candidate", "tombstone", "sqlnull")
     )
     try:
         _upgrade_to(PRIOR_HEAD)
@@ -81,7 +84,11 @@ def test_e99_rewrites_json_null_only() -> None:
             assert [json.loads(v) for v in _stored(conn, tombstone)] == [_TOMBSTONE]
             assert _stored(conn, sql_null) == [None]
             remaining = conn.execute(
-                text("SELECT count(*) FROM memories WHERE supersede_candidate::text = 'null'")
+                text(
+                    "SELECT count(*) FROM memories "
+                    "WHERE user_id LIKE :p AND supersede_candidate::text = 'null'"
+                ),
+                {"p": f"{prefix}%"},
             ).scalar_one()
             assert remaining == 0
 
@@ -93,4 +100,10 @@ def test_e99_rewrites_json_null_only() -> None:
         try:
             _upgrade_to("head")
         finally:
-            engine.dispose()
+            try:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text("DELETE FROM memories WHERE user_id LIKE :p"), {"p": f"{prefix}%"}
+                    )
+            finally:
+                engine.dispose()
