@@ -26,6 +26,7 @@ from config.constants import EMBEDDING_MODEL_REGISTRY
 from config.settings import get_settings
 from models.auth import Context, Workspace, WorkspaceMember
 from models.config import ContextSearchConfig
+from services.reranker_service import default_reranker_model_for
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -75,11 +76,11 @@ async def provision_eval_context(
 
     # An explicit embedding_model (Day-4 factorial arm) overrides the
     # settings-derived stamp entirely; None keeps the settings-derived behavior.
+    settings = get_settings()
     if embedding_model is not None:
         emb_model = embedding_model
         emb_dims = EMBEDDING_MODEL_REGISTRY[emb_model][0]
     else:
-        settings = get_settings()
         emb_model = settings.embedding_model
         emb_dims = EMBEDDING_MODEL_REGISTRY.get(emb_model, (settings.embedding_dimensions, ""))[0]
     db.add(
@@ -89,11 +90,11 @@ async def provision_eval_context(
             fetch_factor=3,
             use_rerank=False,
             reranker_provider="self_hosted",
-            # None = resolve at recall time to the deployment's model
-            # (RERANK_MODEL on the /v1/rerank path, else
-            # SELF_HOSTED_RERANK_MODEL). A hard-coded name is sent as-is and
-            # fails open silently on an endpoint that serves another model (#2020).
-            reranker_model=None,
+            # The deployment's self-hosted model (RERANK_MODEL on the
+            # /v1/rerank path, else SELF_HOSTED_RERANK_MODEL), resolved like the
+            # production default writers. A hard-coded name is sent as-is and
+            # fails open silently on an endpoint serving another model (#2020).
+            reranker_model=default_reranker_model_for("self_hosted", settings),
             embedding_model=emb_model,
             embedding_dimensions=emb_dims,
             # #1207 flipped the product default to enabled; the eval stamp pins
