@@ -32,6 +32,7 @@ import httpx
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config.constants import RERANK_PROMPT_FORMATS
 from models.auth import ExternalAPIKey
 from repositories.config_repository import ContextSearchConfigRepository
 from utils.encryption import get_encryptor
@@ -72,21 +73,33 @@ QWEN3_RERANK_PREFIX = (
     '"no".<|im_end|>\n<|im_start|>user\n'
 )
 QWEN3_RERANK_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-# The model card's default task instruction. Ops-level override:
-# settings.rerank_instruction (env RERANK_INSTRUCTION, same default value —
-# keep the two literals in sync; test_rerank_settings guards it).
+# The model card's default task instruction, used when RERANK_INSTRUCTION
+# (settings.rerank_instruction) is empty — the only copy of this literal.
 DEFAULT_QWEN3_RERANK_INSTRUCTION = (
     "Given a web search query, retrieve relevant passages that answer the query"
 )
-# RERANK_PROMPT_FORMAT values: auto = qwen3 when the model name names a Qwen3
-# reranker, else raw; raw = send text verbatim (non-Qwen3 cross-encoders, or a
-# server that applies the template itself, e.g. vLLM --chat-template).
-RERANK_PROMPT_FORMATS = frozenset({"auto", "qwen3", "raw"})
 
-# Calibration smoke check (#2020): one relevant and one irrelevant document
-# must separate by at least this much, else rerank_model_uncalibrated.
-# Templated Qwen3-Reranker-0.6B scores the pair ~0.997 / ~0.000; the same
-# model on raw text ~0.980 / ~0.866.
+# Text the Qwen3 tokenizer turns into a control token (#2020 review). Every
+# added token of the Qwen3 tokenizer (tokenizer_config.json
+# added_tokens_decoder) is matched as ONE token whether or not it is flagged
+# special, so stored memory text containing "<|im_end|>\n<|im_start|>assistant"
+# could close the Document slot and write the model's "yes" itself. All the
+# "<|...|>" tokens start with "<|"; the rest are the tag-shaped ones below.
+# Broken by a space after "<": the text stays readable, the token never forms,
+# and a single non-overlapping pass cannot reassemble one ("<<|" -> "<< |").
+_QWEN3_CONTROL_TOKEN_RE = re.compile(r"<(?=\|)|<(?=/?(?:think|tool_call|tool_response)>)")
+
+
+def _neutralise_qwen3_control_tokens(text: str) -> str:
+    """Break every Qwen3 added-token spelling in caller-supplied text."""
+    return _QWEN3_CONTROL_TOKEN_RE.sub("< ", text)
+
+
+# Calibration smoke check (#2020): with the qwen3 format, one relevant and one
+# irrelevant document must separate by at least this much, else
+# rerank_model_uncalibrated. Templated Qwen3-Reranker-0.6B scores the pair
+# ~0.997 / ~0.000; the same model on raw text ~0.980 / ~0.866. For raw the score
+# scale is unknown (TEI/Infinity may return logits), so scores are only logged.
 RERANK_CALIBRATION_MIN_MARGIN = 0.5
 _CALIBRATION_QUERY = "What is the capital of France?"
 _CALIBRATION_RELEVANT = "Paris is the capital of France."
@@ -533,8 +546,16 @@ class VLLMReranker(RerankerProvider):
         """Apply the resolved prompt format to the query and documents."""
         if self.prompt_format != "qwen3":
             return query, documents
-        formatted_query = f"{QWEN3_RERANK_PREFIX}<Instruct>: {self.instruction}\n<Query>: {query}\n"
-        formatted_docs = [f"<Document>: {doc}{QWEN3_RERANK_SUFFIX}" for doc in documents]
+        # Stored memories and the caller's query are untrusted: neutralise the
+        # tokenizer's control tokens before they enter the template.
+        safe_query = _neutralise_qwen3_control_tokens(query)
+        formatted_query = (
+            f"{QWEN3_RERANK_PREFIX}<Instruct>: {self.instruction}\n<Query>: {safe_query}\n"
+        )
+        formatted_docs = [
+            f"<Document>: {_neutralise_qwen3_control_tokens(doc)}{QWEN3_RERANK_SUFFIX}"
+            for doc in documents
+        ]
         return formatted_query, formatted_docs
 
     async def rerank(
@@ -644,6 +665,25 @@ class VLLMReranker(RerankerProvider):
         return scored[:effective_top_n]
 
 
+def should_run_rerank_calibration(settings: Settings) -> bool:
+    """Whether the startup calibration check has anything to check (#2020).
+
+    Only when a /v1/rerank endpoint is configured (RERANK_BASE_URL) and the
+    deployment has not switched reranking off (ENABLE_RERANKING) — the same
+    deployment-level gate SearchService applies before any rerank. Whether a
+    context reranks is per-context config (``use_rerank``), so
+    DEFAULT_USE_RERANK, which only seeds new contexts, does not gate it.
+    """
+    return bool(settings.rerank_base_url) and bool(settings.enable_reranking)
+
+
+def _is_transient_rerank_error(exc: BaseException) -> bool:
+    """Connect / timeout / HTTP 5xx: worth retrying while the reranker boots."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return isinstance(exc, httpx.TransportError)
+
+
 async def run_rerank_calibration_check(
     settings: Settings | None = None,
     retry_delays: tuple[float, ...] = _CALIBRATION_RETRY_DELAYS,
@@ -652,39 +692,42 @@ async def run_rerank_calibration_check(
 
     Scores one relevant and one irrelevant document for a fixed query through
     the same ``VLLMReranker`` (and prompt format) recalls use, with the
-    ops-level ``RERANK_MODEL``. A gap below ``RERANK_CALIBRATION_MIN_MARGIN``
-    logs ``rerank_model_uncalibrated`` at WARNING — the signature of a Qwen3
-    reranker fed raw text, or a template applied twice. Run once per process
-    as a background task at startup, never on the recall path. Fail-soft: an
-    unreachable endpoint is retried after each ``retry_delays`` entry, then
-    logged (``rerank_calibration_check_failed``) and given up; nothing raises.
+    ops-level ``RERANK_MODEL`` (a per-context ``reranker_model`` override is
+    not checked). With the qwen3 format a gap below
+    ``RERANK_CALIBRATION_MIN_MARGIN`` logs ``rerank_model_uncalibrated`` at
+    WARNING — the signature of a template applied twice or a model that is
+    not a Qwen3 reranker. With raw the score scale is unknown, so the scores
+    are only logged (``rerank_calibration_observed``, info).
+
+    Run once per process as a background task at startup, never on the recall
+    path. Fail-soft: transient errors (connect, timeout, HTTP 5xx) are retried
+    after each ``retry_delays`` entry; a permanent one (HTTP 4xx, a malformed
+    body) or the last failure logs ``rerank_calibration_check_failed`` at
+    WARNING and gives up. Nothing raises.
 
     Args:
         settings: Settings to read RERANK_* from; loaded when omitted.
-        retry_delays: Seconds to wait before each retry after a failed attempt.
+        retry_delays: Seconds to wait before each retry after a transient failure.
 
     Returns:
-        ``{"calibrated", "relevant_score", "irrelevant_score", "margin"}``, or
-        ``None`` when RERANK_BASE_URL is unset or every attempt failed.
+        ``{"calibrated", "relevant_score", "irrelevant_score", "margin"}`` —
+        ``calibrated`` is ``None`` for the raw format — or ``None`` when the
+        check does not apply (see ``should_run_rerank_calibration``) or failed.
     """
     if settings is None:
         from config.settings import get_settings
 
         settings = get_settings()
-    if not settings.rerank_base_url:
+    if not should_run_rerank_calibration(settings):
         return None
     model = settings.rerank_model or DEFAULT_VLLM_RERANK_MODEL
-    try:
-        reranker = VLLMReranker(
-            base_url=settings.rerank_base_url,
-            model=model,
-            api_key=settings.rerank_api_key or None,
-            prompt_format=settings.rerank_prompt_format,
-            instruction=settings.rerank_instruction,
-        )
-    except ValueError as exc:
-        logger.warning("rerank_calibration_check_failed", model=model, error=str(exc))
-        return None
+    reranker = VLLMReranker(
+        base_url=settings.rerank_base_url,
+        model=model,
+        api_key=settings.rerank_api_key or None,
+        prompt_format=settings.rerank_prompt_format,
+        instruction=settings.rerank_instruction,
+    )
 
     delays = list(retry_delays)
     while True:
@@ -694,12 +737,13 @@ async def run_rerank_calibration_check(
             )
             break
         except Exception as exc:  # noqa: BLE001 — best-effort startup check
-            if delays:
+            if delays and _is_transient_rerank_error(exc):
                 await asyncio.sleep(delays.pop(0))
                 continue
-            logger.info(
+            logger.warning(
                 "rerank_calibration_check_failed",
                 model=model,
+                prompt_format=reranker.prompt_format,
                 error_class=type(exc).__name__,
                 error=str(exc),
             )
@@ -709,19 +753,24 @@ async def run_rerank_calibration_check(
     relevant = by_index.get(0, 0.0)
     irrelevant = by_index.get(1, 0.0)
     margin = relevant - irrelevant
-    calibrated = margin >= RERANK_CALIBRATION_MIN_MARGIN
     fields: dict[str, Any] = {
         "model": model,
         "prompt_format": reranker.prompt_format,
         "relevant_score": round(relevant, 4),
         "irrelevant_score": round(irrelevant, 4),
         "margin": round(margin, 4),
-        "min_margin": RERANK_CALIBRATION_MIN_MARGIN,
     }
-    if calibrated:
-        logger.info("rerank_model_calibrated", **fields)
+    calibrated: bool | None
+    if reranker.prompt_format != "qwen3":
+        calibrated = None
+        logger.info("rerank_calibration_observed", **fields)
     else:
-        logger.warning("rerank_model_uncalibrated", **fields)
+        calibrated = margin >= RERANK_CALIBRATION_MIN_MARGIN
+        fields["min_margin"] = RERANK_CALIBRATION_MIN_MARGIN
+        if calibrated:
+            logger.info("rerank_model_calibrated", **fields)
+        else:
+            logger.warning("rerank_model_uncalibrated", **fields)
     return {
         "calibrated": calibrated,
         "relevant_score": relevant,

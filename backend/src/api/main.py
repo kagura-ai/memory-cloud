@@ -160,10 +160,13 @@ async def lifespan(app: FastAPI):
     # raw text — or a template applied twice — surfaces as
     # rerank_model_uncalibrated instead of silently wrecking recall. Background
     # and fail-soft: never on the recall path, never a reason not to boot.
-    # No-op when RERANK_BASE_URL is unset.
-    if get_settings().rerank_base_url:
-        from services.reranker_service import run_rerank_calibration_check
+    # Only when RERANK_BASE_URL is set and ENABLE_RERANKING is on.
+    from services.reranker_service import (
+        run_rerank_calibration_check,
+        should_run_rerank_calibration,
+    )
 
+    if should_run_rerank_calibration(get_settings()):
         app.state.rerank_calibration_task = asyncio.create_task(run_rerank_calibration_check())
 
     logger.info("application_started")

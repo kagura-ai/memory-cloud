@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from config.constants import RerankPromptFormat
 from utils.media_types import MEDIA_TYPE_RE, normalize_media_type
 
 if TYPE_CHECKING:
@@ -942,7 +943,7 @@ class Settings(BaseSettings):
             "Sent as 'Authorization: Bearer ...' by VLLMReranker; empty = no header."
         ),
     )
-    rerank_prompt_format: Literal["auto", "qwen3", "raw"] = Field(
+    rerank_prompt_format: RerankPromptFormat = Field(
         default="auto",
         description=(
             "How VLLMReranker formats the query and documents for the /v1/rerank "
@@ -956,12 +957,13 @@ class Settings(BaseSettings):
         ),
     )
     rerank_instruction: str = Field(
-        default="Given a web search query, retrieve relevant passages that answer the query",
+        default="",
         description=(
             "The <Instruct> line of the Qwen3-Reranker template (used only when "
             "the prompt format resolves to 'qwen3'). Empty = the model card "
-            "default. Keep in sync with "
-            "reranker_service.DEFAULT_QWEN3_RERANK_INSTRUCTION."
+            "default (reranker_service.DEFAULT_QWEN3_RERANK_INSTRUCTION, "
+            "'Given a web search query, retrieve relevant passages that answer "
+            "the query')."
         ),
     )
     self_hosted_rerank_model: str = Field(

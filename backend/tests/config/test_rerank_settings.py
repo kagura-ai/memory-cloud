@@ -45,12 +45,23 @@ def test_defaults_when_unset(clean_rerank_env):
 
 def test_rerank_prompt_defaults(clean_rerank_env):
     """#2020: auto = detect the Qwen3-Reranker template from the model name;
-    an empty instruction means the model card's default."""
-    from services.reranker_service import DEFAULT_QWEN3_RERANK_INSTRUCTION
-
+    an empty instruction means the model card's default (applied by
+    VLLMReranker, so the literal lives in one place)."""
     s = _fresh_settings()
     assert s.rerank_prompt_format == "auto"
-    assert s.rerank_instruction == DEFAULT_QWEN3_RERANK_INSTRUCTION
+    assert s.rerank_instruction == ""
+
+
+def test_rerank_prompt_formats_derive_from_the_literal():
+    from typing import get_args
+
+    from config.constants import RERANK_PROMPT_FORMATS, RerankPromptFormat
+
+    assert RERANK_PROMPT_FORMATS == frozenset(get_args(RerankPromptFormat))
+    assert RERANK_PROMPT_FORMATS == {"auto", "qwen3", "raw"}
+    assert get_args(Settings.model_fields["rerank_prompt_format"].annotation) == get_args(
+        RerankPromptFormat
+    )
 
 
 @pytest.mark.parametrize("value", ["raw", " QWEN3 ", "Auto"])
