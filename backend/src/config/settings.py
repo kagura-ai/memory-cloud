@@ -953,14 +953,19 @@ class Settings(BaseSettings):
             "meaninglessly (#2020). 'raw' sends text verbatim: non-Qwen3 cross-"
             "encoders, or a server that applies the template itself (vLLM "
             "--chat-template). 'auto' = 'qwen3' when the model name contains "
-            "'qwen3-reranker' (case-insensitive), else 'raw'."
+            "'qwen3-reranker' (case-insensitive), else 'raw'. Without "
+            "RERANK_BASE_URL it picks SelfHostedReranker's format on "
+            "SELF_HOSTED_BASE_URL (#2033): 'qwen3' = the same template on "
+            "Ollama's /api/generate scored from the yes/no logprobs (Ollama "
+            ">= 0.12.11), 'raw' = the generic score prompt on /v1/completions."
         ),
     )
     rerank_instruction: str = Field(
         default="",
         description=(
             "The <Instruct> line of the Qwen3-Reranker template (used only when "
-            "the prompt format resolves to 'qwen3'). Empty = the model card "
+            "the prompt format resolves to 'qwen3', on either local rerank "
+            "path). Empty = the model card "
             "default (reranker_service.DEFAULT_QWEN3_RERANK_INSTRUCTION, "
             "'Given a web search query, retrieve relevant passages that answer "
             "the query')."
@@ -969,9 +974,10 @@ class Settings(BaseSettings):
     self_hosted_rerank_model: str = Field(
         default="dengcao/Qwen3-Reranker-8B:Q5_K_M",
         description=(
-            "Default model for the prompt-scoring SelfHostedReranker on "
-            "SELF_HOSTED_BASE_URL (the /v1/completions path, used when "
-            "RERANK_BASE_URL is unset). Defaults to the Ollama-registry id; a "
+            "Default model for the per-document SelfHostedReranker on "
+            "SELF_HOSTED_BASE_URL (used when RERANK_BASE_URL is unset; a Qwen3 "
+            "reranker is scored via Ollama /api/generate logprobs, #2033). "
+            "Defaults to the Ollama-registry id; a "
             "pure-vLLM self-hosted stack must override it (env "
             "SELF_HOSTED_RERANK_MODEL) with a model the backend actually serves "
             "so scoring does not 404 to all-zero relevance. Keep in sync with "

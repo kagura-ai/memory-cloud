@@ -17,12 +17,16 @@ Architecture:
   endpoint (vLLM/TEI/Infinity); selected when settings.rerank_base_url is set.
   Issue #2020: wraps query/documents in the Qwen3-Reranker prompt template
   when the served model is a Qwen3 reranker (RERANK_PROMPT_FORMAT)
+  Issue #2033: SelfHostedReranker asks a Qwen3 reranker the same template on
+  Ollama's /api/generate and scores the yes/no logprobs; a rerank whose scores
+  carry no ranking raises RerankNotDiscriminatingError (fail open)
 - RerankerService: Factory pattern to select active provider from DB
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
@@ -97,15 +101,130 @@ def _neutralise_qwen3_control_tokens(text: str) -> str:
     return _QWEN3_CONTROL_TOKEN_RE.sub("< ", text)
 
 
+class RerankNotDiscriminatingError(RuntimeError):
+    """A rerank whose scores carry no ranking (#2033).
+
+    Every output was unparseable or failed, or every candidate scored 0 (the
+    measured all-"0" of a Qwen3 reranker behind the generic score prompt).
+    Writing those scores over hybrid_score would erase the hybrid order's
+    signal, so the call raises and SearchService fails open
+    (``rerank_failed_open``) to the un-reranked results.
+    """
+
+
+class RerankGenerateUnsupportedError(RuntimeError):
+    """SELF_HOSTED_BASE_URL serves no Ollama ``/api/generate`` (HTTP 404, #2033).
+
+    The qwen3 format of SelfHostedReranker needs Ollama's native API; a vLLM
+    backend 404s it. Raised for the whole call (one clear failure, logged once
+    per process as ``self_hosted_rerank_generate_unsupported``) instead of
+    every document failing on its own.
+    """
+
+
+# self_hosted_rerank_generate_unsupported is logged once per process.
+_GENERATE_UNSUPPORTED_WARNED = False
+
+# Share of documents SelfHostedReranker may leave unscored (failed or
+# unparseable) before the call fails open (#2033). Up to it, unscored
+# documents keep their hybrid position and score after the scored ones;
+# above it, they would make up too much of the "ranking".
+SELF_HOSTED_RERANK_MAX_UNSCORED_RATIO = 0.2
+
+
 # Character budget for a document body in the qwen3 format (#2020 gate2). The
 # template's suffix (<|im_end|> + the assistant turn + the empty think block)
 # must reach the model: a server that truncates an over-long input from the
 # right cuts it off and the yes/no score is meaningless. So the body is cut
 # here, before the suffix is appended. 2000 characters keeps a whole memory
-# summary (capped at 500) and most of its context summary — SelfHostedReranker
-# scores only doc[:500] — and is at most ~2000 tokens even for CJK text, so
-# prefix + query + document + suffix fit a 4096-token --max-model-len.
+# summary (capped at 500) and most of its context summary — the generic score
+# prompt (SelfHostedReranker raw) scores only doc[:500] — and is at most ~2000
+# tokens even for CJK text, so prefix + query + document + suffix fit a
+# 4096-token --max-model-len (or Ollama num_ctx).
 QWEN3_RERANK_MAX_DOC_CHARS = 2000
+
+
+def _qwen3_query_part(query: str, instruction: str) -> str:
+    """System prefix + instruction + neutralised query (the template's head)."""
+    # Stored memories and the caller's query are untrusted: neutralise the
+    # tokenizer's control tokens before they enter the template.
+    safe_query = _neutralise_qwen3_control_tokens(query)
+    return f"{QWEN3_RERANK_PREFIX}<Instruct>: {instruction}\n<Query>: {safe_query}\n"
+
+
+def _qwen3_document_part(doc: str) -> str:
+    """Truncated, neutralised document + assistant suffix (the template's tail)."""
+    # Truncate the body (not the formatted string) so the suffix survives;
+    # cutting first also means a split token ("<|im_") is no token at all.
+    body = _neutralise_qwen3_control_tokens(doc[:QWEN3_RERANK_MAX_DOC_CHARS])
+    return f"<Document>: {body}{QWEN3_RERANK_SUFFIX}"
+
+
+def _resolve_rerank_format(prompt_format: str, model: str) -> str:
+    """``auto`` -> ``qwen3`` for a Qwen3 reranker model name, else ``raw``.
+
+    Raises:
+        ValueError: If prompt_format is not one of auto, qwen3, raw.
+    """
+    if prompt_format not in RERANK_PROMPT_FORMATS:
+        raise ValueError(
+            f"prompt_format must be one of {sorted(RERANK_PROMPT_FORMATS)}, got {prompt_format!r}"
+        )
+    if prompt_format == "auto":
+        return "qwen3" if _is_qwen3_reranker(model) else "raw"
+    return prompt_format
+
+
+# How many alternatives Ollama returns for the first generated token (#2033).
+# "yes"/"no" and their case/space variants sit at the top for a working Qwen3
+# reranker; 20 is the OpenAI-compatible maximum.
+SELF_HOSTED_QWEN3_TOP_LOGPROBS = 20
+
+
+def _is_ollama_model_error(response: httpx.Response) -> bool:
+    """Whether a 404 is Ollama's ``{"error": "model '…' not found"}`` (vs. no route)."""
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001 — a non-JSON 404 is no Ollama model error
+        return False
+    error = body.get("error") if isinstance(body, dict) else None
+    return isinstance(error, str) and "model" in error.lower()
+
+
+def _qwen3_yes_probability(payload: Any) -> float | None:
+    """P(yes) / (P(yes) + P(no)) from an Ollama /api/generate reply (#2033).
+
+    Reads the first generated token's ``top_logprobs`` (plus the token itself)
+    and sums the probability of every spelling of "yes" and of "no"
+    (case-insensitive, surrounding whitespace ignored: the 8B GGUF puts most
+    of its mass on " no" / " No"). The ratio is the model card's score. A
+    missing word counts as probability 0.
+
+    Returns:
+        The score in [0, 1], or ``None`` when the reply carries no logprobs
+        (Ollama < 0.12.11 ignores the field) or neither word is among the
+        alternatives (a model that does not answer yes/no).
+    """
+    if not isinstance(payload, dict):
+        return None
+    logprobs = payload.get("logprobs")
+    if not isinstance(logprobs, list) or not logprobs or not isinstance(logprobs[0], dict):
+        return None
+    first = logprobs[0]
+    candidates = [first, *(first.get("top_logprobs") or [])]
+    by_token: dict[str, float] = {}
+    for c in candidates:
+        if not isinstance(c, dict):
+            continue
+        token, lp = c.get("token"), c.get("logprob")
+        if isinstance(token, str) and isinstance(lp, int | float) and not isinstance(lp, bool):
+            by_token.setdefault(token, float(lp))
+    p_yes = sum(math.exp(lp) for t, lp in by_token.items() if t.strip().lower() == "yes")
+    p_no = sum(math.exp(lp) for t, lp in by_token.items() if t.strip().lower() == "no")
+    if p_yes + p_no <= 0.0:
+        return None
+    return p_yes / (p_yes + p_no)
+
 
 # Calibration smoke check (#2020): with the qwen3 format, one relevant and one
 # irrelevant document must separate by at least this much, else
@@ -372,14 +491,30 @@ class CohereReranker(RerankerProvider):
 
 
 class SelfHostedReranker(RerankerProvider):
-    """Self-hosted reranker using prompt-based relevance scoring (Issue #70).
+    """Self-hosted reranker scoring each document with a local LLM (Issue #70).
 
-    Uses a self-hosted LLM to score document relevance on a 0-1 scale via the
-    OpenAI-compatible ``/v1/completions`` endpoint, which is served by both
-    Ollama and vLLM. No API key required for keyless backends; an optional
-    bearer token supports backends started with ``--api-key`` (e.g. vLLM).
+    Two request formats (``prompt_format``, RERANK_PROMPT_FORMAT, #2033):
 
-    Registers under the "self_hosted" provider key (Issue #1160).
+    - ``qwen3`` (``auto`` for a Qwen3 reranker model name — the default
+      model is one): the #2020 Qwen3-Reranker template is sent to Ollama's
+      native ``/api/generate`` with ``raw`` (no Modelfile chat template on
+      top) and ``logprobs``; the score is P(yes) / (P(yes) + P(no)) of the
+      first generated token. Needs Ollama 0.12.11+; vLLM does not serve
+      ``/api/generate`` (use RERANK_BASE_URL there).
+    - ``raw``: the generic "Score the relevance ... Score: " prompt on the
+      OpenAI-compatible ``/v1/completions`` (Ollama and vLLM), the number in
+      the reply parsed as the score — for general instruction models. A
+      Qwen3 reranker answers it with "0" or "!!!!!" (measured, #2033).
+
+    Memory text and the query are run through the Qwen3 control-token
+    neutraliser in both formats. A call whose scores carry no ranking —
+    every output unparseable, or every document scored the same — raises
+    (``RerankNotDiscriminatingError``) so recall fails open instead of
+    overwriting every hybrid_score with one value.
+
+    No API key required for keyless backends; an optional bearer token
+    supports backends started with ``--api-key`` (e.g. vLLM). Registers under
+    the "self_hosted" provider key (Issue #1160).
     """
 
     provider_name = "self_hosted"
@@ -389,19 +524,128 @@ class SelfHostedReranker(RerankerProvider):
         base_url: str,
         model: str = DEFAULT_SELF_HOSTED_RERANK_MODEL,
         api_key: str | None = None,
+        prompt_format: str = "auto",
+        instruction: str | None = None,
     ):
         """Initialize the self-hosted reranker.
 
         Args:
-            base_url: OpenAI-compatible base URL (e.g. http://localhost:11434
-                for Ollama, http://localhost:8000 for vLLM)
+            base_url: Backend base URL (e.g. http://localhost:11434 for
+                Ollama, http://localhost:8000 for vLLM)
             model: Model name for reranking
             api_key: Optional bearer token for backends that require one
                 (e.g. vLLM launched with ``--api-key``)
+            prompt_format: ``auto`` | ``qwen3`` | ``raw`` (RERANK_PROMPT_FORMAT).
+                ``auto`` resolves to ``qwen3`` when ``model`` names a Qwen3
+                reranker, else ``raw`` (#2033).
+            instruction: Qwen3 ``<Instruct>`` text (RERANK_INSTRUCTION); blank
+                or ``None`` = the model card default.
+
+        Raises:
+            ValueError: If prompt_format is not one of auto, qwen3, raw.
         """
         self.base_url = base_url.rstrip("/")
+        # Log/exception-safe form: SELF_HOSTED_BASE_URL may carry user:pass@.
+        self.safe_base_url = redact_generic_url(self.base_url)
         self.model = model
         self.api_key = api_key or None
+        self.prompt_format = _resolve_rerank_format(prompt_format, model)
+        self.instruction = (instruction or "").strip() or DEFAULT_QWEN3_RERANK_INSTRUCTION
+
+    async def _score_one(self, client: httpx.AsyncClient, query: str, doc: str) -> float | None:
+        """Score one document; ``None`` when the reply holds no usable score.
+
+        Raises:
+            httpx.HTTPError: If the backend call fails.
+            Exception: If the reply body has an unexpected shape.
+        """
+        headers = _bearer_headers(self.api_key)
+        if self.prompt_format == "qwen3":
+            resp = await client.post(
+                f"{self.base_url}/api/generate",
+                json={
+                    "model": self.model,
+                    "prompt": _qwen3_query_part(query, self.instruction)
+                    + _qwen3_document_part(doc),
+                    "raw": True,
+                    "stream": False,
+                    "logprobs": True,
+                    "top_logprobs": SELF_HOSTED_QWEN3_TOP_LOGPROBS,
+                    "options": {"num_predict": 1, "temperature": 0},
+                },
+                headers=headers,
+            )
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404 and not _is_ollama_model_error(exc.response):
+                    raise RerankGenerateUnsupportedError(
+                        f"self_hosted rerank: {self.safe_base_url}/api/generate returned 404 — "
+                        "the backend has no Ollama native API (vLLM?). The qwen3 format "
+                        "needs Ollama >= 0.12.11; for vLLM set RERANK_BASE_URL (/v1/rerank)"
+                    ) from exc
+                raise
+            return _qwen3_yes_probability(resp.json())
+
+        safe_query = _neutralise_qwen3_control_tokens(query)
+        safe_doc = _neutralise_qwen3_control_tokens(doc[:500])
+        resp = await client.post(
+            f"{self.base_url}/v1/completions",
+            json={
+                "model": self.model,
+                "prompt": (
+                    "Score the relevance of the document to the query "
+                    "on a scale of 0 to 1.\n\n"
+                    f"Query: {safe_query}\n"
+                    f"Document: {safe_doc}\n\n"
+                    "Score: "
+                ),
+                "max_tokens": 5,
+                "temperature": 0,
+                "stop": ["\n"],
+            },
+            headers=headers,
+        )
+        resp.raise_for_status()
+        return _try_parse_relevance_score(resp.json()["choices"][0]["text"])
+
+    async def score_documents(
+        self, query: str, documents: list[str]
+    ) -> list[float | None | Exception]:
+        """Score every document; no fail-safe applied (the calibration check reads this).
+
+        Returns:
+            One entry per document, in order: the score, ``None`` for an
+            unparseable reply, or the exception the request raised (logged
+            as ``self_hosted_rerank_score_failed``, except
+            ``RerankGenerateUnsupportedError``, which ``rerank`` reports once).
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            semaphore = asyncio.Semaphore(5)  # Limit concurrent backend requests
+
+            async def score_doc(idx: int, doc: str) -> float | None | Exception:
+                async with semaphore:
+                    try:
+                        return await self._score_one(client, query, doc)
+                    except RerankGenerateUnsupportedError as e:
+                        return e
+                    except Exception as e:  # noqa: BLE001 — one doc never fails the call
+                        # No str(e): httpx messages embed the request URL, which
+                        # may carry SELF_HOSTED_BASE_URL credentials.
+                        logger.warning(
+                            "self_hosted_rerank_score_failed",
+                            index=idx,
+                            error_class=type(e).__name__,
+                            status_code=(
+                                e.response.status_code
+                                if isinstance(e, httpx.HTTPStatusError)
+                                else None
+                            ),
+                            endpoint=self.safe_base_url,
+                        )
+                        return e
+
+            return list(await asyncio.gather(*(score_doc(i, d) for i, d in enumerate(documents))))
 
     async def rerank(
         self,
@@ -409,10 +653,7 @@ class SelfHostedReranker(RerankerProvider):
         documents: list[str],
         top_n: int,
     ) -> list[dict[str, Any]]:
-        """Rerank using a self-hosted OpenAI-compatible model.
-
-        Scores each document individually via ``/v1/completions`` with a
-        relevance prompt.
+        """Rerank by scoring each document individually.
 
         Args:
             query: Search query
@@ -423,83 +664,99 @@ class SelfHostedReranker(RerankerProvider):
             Reranked results with index and relevance_score
 
         Raises:
-            Exception: If the backend API call fails
+            ValueError: If top_n is non-positive.
+            RerankGenerateUnsupportedError: If the backend 404s /api/generate
+                (qwen3 format on a non-Ollama backend).
+            RuntimeError: If every document scoring failed (backend down).
+            RerankNotDiscriminatingError: If more than
+                ``SELF_HOSTED_RERANK_MAX_UNSCORED_RATIO`` of the documents are
+                unscored (failed or unparseable).
+
+        Returns are sorted by score; an unscored document comes last with
+        ``relevance_score`` ``None``.
         """
         if not documents:
             return []
         if top_n <= 0:
             raise ValueError("top_n must be positive")
 
-        scored: list[dict[str, Any]] = []
-        failed: set[int] = set()
-
-        headers = _bearer_headers(self.api_key)
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Score documents concurrently in batches
-            semaphore = asyncio.Semaphore(5)  # Limit concurrent backend requests
-
-            async def score_doc(idx: int, doc: str) -> dict[str, Any]:
-                async with semaphore:
-                    prompt = (
-                        f"Score the relevance of the document to the query "
-                        f"on a scale of 0 to 1.\n\n"
-                        f"Query: {query}\n"
-                        f"Document: {doc[:500]}\n\n"
-                        f"Score: "
-                    )
-                    try:
-                        resp = await client.post(
-                            f"{self.base_url}/v1/completions",
-                            json={
-                                "model": self.model,
-                                "prompt": prompt,
-                                "max_tokens": 5,
-                                "temperature": 0,
-                                "stop": ["\n"],
-                            },
-                            headers=headers,
-                        )
-                        resp.raise_for_status()
-                        text = resp.json()["choices"][0]["text"].strip()
-                        # Parse score — extract first float-like value
-                        score = _parse_relevance_score(text)
-                    except Exception as e:
-                        logger.warning(
-                            "self_hosted_rerank_score_failed",
-                            index=idx,
-                            error=str(e),
-                        )
-                        failed.add(idx)
-                        score = 0.0
-
-                    return {"index": idx, "relevance_score": score}
-
-            tasks = [score_doc(i, doc) for i, doc in enumerate(documents)]
-            scored = await asyncio.gather(*tasks)
-
-        # A partial failure keeps the per-doc zero above. When EVERY scoring
-        # failed the backend is down (or 404s the model) and an all-zero list
-        # would be returned in arbitrary order as if it were a ranking — raise
-        # instead so SearchService fails open to the un-reranked hybrid results
-        # and emits rerank_failed_open (#1572).
-        if len(failed) == len(documents):
-            raise RuntimeError(
-                f"self_hosted rerank backend unavailable: all {len(documents)} "
-                f"document scorings failed (model={self.model})"
+        outcomes = await self.score_documents(query, documents)
+        n = len(documents)
+        unsupported = next(
+            (o for o in outcomes if isinstance(o, RerankGenerateUnsupportedError)), None
+        )
+        if unsupported is not None:
+            global _GENERATE_UNSUPPORTED_WARNED
+            if not _GENERATE_UNSUPPORTED_WARNED:
+                _GENERATE_UNSUPPORTED_WARNED = True
+                logger.warning(
+                    "self_hosted_rerank_generate_unsupported",
+                    model=self.model,
+                    endpoint=self.safe_base_url,
+                    hint="set RERANK_BASE_URL for vLLM /v1/rerank",
+                )
+            raise unsupported
+        failed = sum(1 for o in outcomes if isinstance(o, Exception))
+        unparseable = sum(1 for o in outcomes if o is None)
+        unscored = failed + unparseable
+        if unscored:
+            # Once per call with the counts — not one line per document.
+            rerank_format = self.prompt_format
+            logger.warning(
+                "self_hosted_rerank_unscored",
+                model=self.model,
+                rerank_format=rerank_format,
+                unparseable_count=unparseable,
+                failed_count=failed,
+                doc_count=n,
             )
 
-        # Sort by score descending and take top_n
-        scored.sort(key=lambda x: x["relevance_score"], reverse=True)
+        # When EVERY scoring failed the backend is down (or 404s the model)
+        # and an all-zero list would be returned in arbitrary order as if it
+        # were a ranking — raise instead so SearchService fails open to the
+        # un-reranked hybrid results and emits rerank_failed_open (#1572).
+        if failed == n:
+            raise RuntimeError(
+                f"self_hosted rerank backend unavailable: all {n} "
+                f"document scorings failed (model={self.model})"
+            )
+        # Too many unscored documents (e.g. 9 of 10 timing out on the 8B model)
+        # and the "ranking" is mostly the unscored tail: fail open (#2033).
+        if unscored / n > SELF_HOSTED_RERANK_MAX_UNSCORED_RATIO:
+            raise RerankNotDiscriminatingError(
+                f"self_hosted rerank left {unscored} of {n} documents unscored "
+                f"({unparseable} unparseable, {failed} failed; max ratio "
+                f"{SELF_HOSTED_RERANK_MAX_UNSCORED_RATIO}) (model={self.model}, "
+                f"format={self.prompt_format})"
+            )
+        # Scored documents by score, then the unscored ones with
+        # relevance_score None in input (= hybrid) order: RerankerService keeps
+        # those at their hybrid position with their hybrid_score, instead of a
+        # 0.0 that would sink them. Whether the scores rank at all is
+        # RerankerService's shared guard.
+        scored = sorted(
+            (
+                {"index": i, "relevance_score": o}
+                for i, o in enumerate(outcomes)
+                if isinstance(o, float)
+            ),
+            key=lambda x: x["relevance_score"],
+            reverse=True,
+        )
+        tail = [
+            {"index": i, "relevance_score": None}
+            for i, o in enumerate(outcomes)
+            if not isinstance(o, float)
+        ]
 
         logger.debug(
             "self_hosted_rerank_completed",
             model=self.model,
-            doc_count=len(documents),
+            doc_count=n,
             top_n=top_n,
         )
 
-        return scored[:top_n]
+        return (scored + tail)[:top_n]
 
 
 class VLLMReranker(RerankerProvider):
@@ -541,39 +798,20 @@ class VLLMReranker(RerankerProvider):
         Raises:
             ValueError: If prompt_format is not one of auto, qwen3, raw.
         """
-        if prompt_format not in RERANK_PROMPT_FORMATS:
-            raise ValueError(
-                f"prompt_format must be one of {sorted(RERANK_PROMPT_FORMATS)}, "
-                f"got {prompt_format!r}"
-            )
+        self.prompt_format = _resolve_rerank_format(prompt_format, model)
         self.base_url = base_url.rstrip("/")
         # Log/exception-safe form: RERANK_BASE_URL may carry user:pass@.
         self.safe_base_url = redact_generic_url(self.base_url)
         self.model = model
         self.api_key = api_key
-        if prompt_format == "auto":
-            prompt_format = "qwen3" if _is_qwen3_reranker(model) else "raw"
-        self.prompt_format = prompt_format
         self.instruction = (instruction or "").strip() or DEFAULT_QWEN3_RERANK_INSTRUCTION
 
     def _format(self, query: str, documents: list[str]) -> tuple[str, list[str]]:
         """Apply the resolved prompt format to the query and documents."""
         if self.prompt_format != "qwen3":
             return query, documents
-        # Stored memories and the caller's query are untrusted: neutralise the
-        # tokenizer's control tokens before they enter the template.
-        safe_query = _neutralise_qwen3_control_tokens(query)
-        formatted_query = (
-            f"{QWEN3_RERANK_PREFIX}<Instruct>: {self.instruction}\n<Query>: {safe_query}\n"
-        )
-        # Truncate the body (not the formatted string) so the suffix survives;
-        # cutting first also means a split token ("<|im_") is no token at all.
-        formatted_docs = [
-            "<Document>: "
-            f"{_neutralise_qwen3_control_tokens(doc[:QWEN3_RERANK_MAX_DOC_CHARS])}"
-            f"{QWEN3_RERANK_SUFFIX}"
-            for doc in documents
-        ]
+        formatted_query = _qwen3_query_part(query, self.instruction)
+        formatted_docs = [_qwen3_document_part(doc) for doc in documents]
         return formatted_query, formatted_docs
 
     async def rerank(
@@ -622,7 +860,9 @@ class VLLMReranker(RerankerProvider):
                     "model": self.model,
                     "query": sent_query,
                     "documents": sent_documents,
-                    "top_n": effective_top_n,
+                    # Every score, not the top_n cut: RerankerService's shared
+                    # no-signal guard needs the full list (#2033).
+                    "top_n": len(documents),
                 },
                 headers=headers,
             )
@@ -684,15 +924,29 @@ class VLLMReranker(RerankerProvider):
 
 
 def should_run_rerank_calibration(settings: Settings) -> bool:
-    """Whether the startup calibration check has anything to check (#2020).
+    """Whether the startup calibration check has anything to check (#2020, #2033).
 
-    Only when a /v1/rerank endpoint is configured (RERANK_BASE_URL) and the
-    deployment has not switched reranking off (ENABLE_RERANKING) — the same
-    deployment-level gate SearchService applies before any rerank. Whether a
-    context reranks is per-context config (``use_rerank``), so
-    DEFAULT_USE_RERANK, which only seeds new contexts, does not gate it.
+    Only when the deployment has not switched reranking off
+    (ENABLE_RERANKING) — the same deployment-level gate SearchService applies
+    before any rerank — and a local rerank path is in play: a /v1/rerank
+    endpoint (RERANK_BASE_URL), or, without one, a deployment whose new
+    contexts default to the self-hosted reranker with reranking on
+    (DEFAULT_RERANKER_PROVIDER=self_hosted and DEFAULT_USE_RERANK=true,
+    scored by SelfHostedReranker on SELF_HOSTED_BASE_URL) — without
+    DEFAULT_USE_RERANK the check would load an 8B model at boot for nothing. SELF_HOSTED_BASE_URL alone does not count: it also
+    serves self-hosted embeddings, and pinging a reranker model nobody uses
+    would make Ollama load it. The RERANK_BASE_URL path keeps #2020's gate:
+    whether a context reranks is per-context config (``use_rerank``), so
+    DEFAULT_USE_RERANK, which only seeds new contexts, does not gate it there.
     """
-    return bool(settings.rerank_base_url) and bool(settings.enable_reranking)
+    if not settings.enable_reranking:
+        return False
+    if settings.rerank_base_url:
+        return True
+    return (
+        getattr(settings, "default_reranker_provider", None) == "self_hosted"
+        and getattr(settings, "default_use_rerank", False) is True
+    )
 
 
 def _is_transient_rerank_error(exc: BaseException) -> bool:
@@ -702,12 +956,13 @@ def _is_transient_rerank_error(exc: BaseException) -> bool:
     return isinstance(exc, httpx.TransportError)
 
 
-def _log_calibration_failed(reranker: VLLMReranker, **fields: Any) -> None:
+def _log_calibration_failed(reranker: VLLMReranker | SelfHostedReranker, **fields: Any) -> None:
     """WARNING for a calibration check that produced no verdict (redacted URL)."""
     # A format name, not prompt text (the #1720 log-redaction test keys on names).
     rerank_format = reranker.prompt_format
     logger.warning(
         "rerank_calibration_check_failed",
+        provider=reranker.provider_name,
         model=reranker.model,
         rerank_format=rerank_format,
         endpoint=reranker.safe_base_url,
@@ -715,20 +970,79 @@ def _log_calibration_failed(reranker: VLLMReranker, **fields: Any) -> None:
     )
 
 
+def _calibration_reranker(settings: Settings) -> VLLMReranker | SelfHostedReranker:
+    """The reranker recalls use under these settings, built from the ops-level model."""
+    if settings.rerank_base_url:
+        return VLLMReranker(
+            base_url=settings.rerank_base_url,
+            model=settings.rerank_model or DEFAULT_VLLM_RERANK_MODEL,
+            api_key=settings.rerank_api_key or None,
+            prompt_format=settings.rerank_prompt_format,
+            instruction=settings.rerank_instruction,
+        )
+    return SelfHostedReranker(
+        base_url=settings.self_hosted_base_url,
+        model=settings.self_hosted_rerank_model or DEFAULT_SELF_HOSTED_RERANK_MODEL,
+        api_key=settings.self_hosted_api_key or None,
+        prompt_format=settings.rerank_prompt_format,
+        instruction=settings.rerank_instruction,
+    )
+
+
+async def _calibration_scores(
+    reranker: VLLMReranker | SelfHostedReranker,
+) -> tuple[dict[int, float], int]:
+    """Score the calibration pair: ``({index: score}, unparseable_count)``.
+
+    SelfHostedReranker is read through ``score_documents`` (no fail-safe): an
+    unparseable or identical pair is the uncalibrated signal itself, not a
+    failed check. An unparseable output counts as 0.0.
+
+    Raises:
+        Exception: A transient request error on ANY document (retried by the
+            caller), or the first error when every document failed.
+    """
+    docs = [_CALIBRATION_RELEVANT, _CALIBRATION_IRRELEVANT]
+    if isinstance(reranker, VLLMReranker):
+        results = await reranker.rerank(_CALIBRATION_QUERY, docs, top_n=2)
+        return {r["index"]: r["relevance_score"] for r in results}, 0
+    outcomes = await reranker.score_documents(_CALIBRATION_QUERY, docs)
+    by_index: dict[int, float] = {}
+    unparseable = 0
+    errors: list[Exception] = []
+    for i, o in enumerate(outcomes):
+        if isinstance(o, Exception):
+            if _is_transient_rerank_error(o):
+                raise o
+            errors.append(o)
+        elif o is None:
+            unparseable += 1
+            by_index[i] = 0.0
+        else:
+            by_index[i] = o
+    if errors and not by_index:
+        raise errors[0]
+    return by_index, unparseable
+
+
 async def run_rerank_calibration_check(
     settings: Settings | None = None,
     retry_delays: tuple[float, ...] = _CALIBRATION_RETRY_DELAYS,
 ) -> dict[str, Any] | None:
-    """Smoke-check that the /v1/rerank model separates relevant from irrelevant (#2020).
+    """Smoke-check that the local reranker separates relevant from irrelevant (#2020, #2033).
 
     Scores one relevant and one irrelevant document for a fixed query through
-    the same ``VLLMReranker`` (and prompt format) recalls use, with the
-    ops-level ``RERANK_MODEL`` (a per-context ``reranker_model`` override is
-    not checked). With the qwen3 format a gap below
+    the reranker recalls use — ``VLLMReranker`` when RERANK_BASE_URL is set,
+    else ``SelfHostedReranker`` on SELF_HOSTED_BASE_URL — with the same prompt
+    format and the ops-level model (``RERANK_MODEL`` / ``SELF_HOSTED_RERANK_MODEL``;
+    a per-context ``reranker_model`` override is not checked). A gap below
     ``RERANK_CALIBRATION_MIN_MARGIN`` logs ``rerank_model_uncalibrated`` at
-    WARNING — the signature of a template applied twice or a model that is
-    not a Qwen3 reranker. With raw the score scale is unknown, so the scores
-    are only logged (``rerank_calibration_observed``, info).
+    WARNING. That applies to the /v1/rerank qwen3 format (a template applied
+    twice, a model that is not a Qwen3 reranker) and to both self-hosted
+    formats, whose scores are always in [0, 1] (an all-"0" or unparseable
+    score prompt, an Ollama without logprobs). With /v1/rerank raw the score
+    scale is unknown, so the scores are only logged
+    (``rerank_calibration_observed``, info).
 
     Run once per process as a background task at startup, never on the recall
     path. Fail-soft: transient errors (connect, timeout, HTTP 5xx) are retried
@@ -737,13 +1051,14 @@ async def run_rerank_calibration_check(
     WARNING and gives up. Nothing raises.
 
     Args:
-        settings: Settings to read RERANK_* from; loaded when omitted.
+        settings: Settings to read RERANK_* / SELF_HOSTED_* from; loaded when omitted.
         retry_delays: Seconds to wait before each retry after a transient failure.
 
     Returns:
         ``{"calibrated", "relevant_score", "irrelevant_score", "margin"}`` —
-        ``calibrated`` is ``None`` for the raw format — or ``None`` when the
-        check does not apply (see ``should_run_rerank_calibration``) or failed.
+        ``calibrated`` is ``None`` for the /v1/rerank raw format — or ``None``
+        when the check does not apply (see ``should_run_rerank_calibration``)
+        or failed.
     """
     if settings is None:
         from config.settings import get_settings
@@ -751,21 +1066,12 @@ async def run_rerank_calibration_check(
         settings = get_settings()
     if not should_run_rerank_calibration(settings):
         return None
-    model = settings.rerank_model or DEFAULT_VLLM_RERANK_MODEL
-    reranker = VLLMReranker(
-        base_url=settings.rerank_base_url,
-        model=model,
-        api_key=settings.rerank_api_key or None,
-        prompt_format=settings.rerank_prompt_format,
-        instruction=settings.rerank_instruction,
-    )
+    reranker = _calibration_reranker(settings)
 
     delays = list(retry_delays)
     while True:
         try:
-            results = await reranker.rerank(
-                _CALIBRATION_QUERY, [_CALIBRATION_RELEVANT, _CALIBRATION_IRRELEVANT], top_n=2
-            )
+            by_index, unparseable = await _calibration_scores(reranker)
             break
         except Exception as exc:  # noqa: BLE001 — best-effort startup check
             if delays and _is_transient_rerank_error(exc):
@@ -773,35 +1079,41 @@ async def run_rerank_calibration_check(
                 continue
             # No str(exc): httpx messages and the shape errors embed the
             # request URL, which may carry RERANK_BASE_URL credentials.
+            # RerankGenerateUnsupportedError wraps the 404 it was raised from.
+            http_exc = exc if isinstance(exc, httpx.HTTPStatusError) else exc.__cause__
             _log_calibration_failed(
                 reranker,
                 error_class=type(exc).__name__,
                 status_code=(
-                    exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                    http_exc.response.status_code
+                    if isinstance(http_exc, httpx.HTTPStatusError)
+                    else None
                 ),
             )
             return None
 
-    by_index = {r["index"]: r["relevance_score"] for r in results}
     if set(by_index) != {0, 1}:
         # A missing score is not a 0.0 score: one result could otherwise
         # pass as "calibrated".
         _log_calibration_failed(
-            reranker, error_class="IncompleteResults", result_count=len(results)
+            reranker, error_class="IncompleteResults", result_count=len(by_index)
         )
         return None
     relevant = by_index[0]
     irrelevant = by_index[1]
     margin = relevant - irrelevant
     fields: dict[str, Any] = {
-        "model": model,
+        "provider": reranker.provider_name,
+        "model": reranker.model,
         "prompt_format": reranker.prompt_format,
         "relevant_score": round(relevant, 4),
         "irrelevant_score": round(irrelevant, 4),
         "margin": round(margin, 4),
     }
+    if unparseable:
+        fields["unparseable_count"] = unparseable
     calibrated: bool | None
-    if reranker.prompt_format != "qwen3":
+    if isinstance(reranker, VLLMReranker) and reranker.prompt_format != "qwen3":
         calibrated = None
         logger.info("rerank_calibration_observed", **fields)
     else:
@@ -819,17 +1131,18 @@ async def run_rerank_calibration_check(
     }
 
 
-def _parse_relevance_score(text: str) -> float:
+def _try_parse_relevance_score(text: str) -> float | None:
     """Parse a relevance score from model output.
 
     Handles formats: "0.8", "0.8/1", "80%", "0", "1", etc.
 
     Returns:
-        Float between 0.0 and 1.0
+        Float between 0.0 and 1.0, or ``None`` when the text holds no number
+        (#2033: an unparseable reply is not a zero score)
     """
     text = text.strip()
     if not text:
-        return 0.0
+        return None
 
     # Try percentage anywhere: "80%" -> 0.8
     pct_match = re.search(r"(\d+(?:\.\d+)?)\s*%", text)
@@ -847,7 +1160,7 @@ def _parse_relevance_score(text: str) -> float:
     if num_match:
         return min(float(num_match.group(1)), 1.0)
 
-    return 0.0
+    return None
 
 
 class RerankerService:
@@ -972,6 +1285,8 @@ class RerankerService:
                     base_url=settings.self_hosted_base_url,
                     model=model,
                     api_key=settings.self_hosted_api_key or None,
+                    prompt_format=settings.rerank_prompt_format,
+                    instruction=settings.rerank_instruction,
                 )
 
         # API-key providers (Voyage, Cohere).
@@ -1085,19 +1400,49 @@ class RerankerService:
         # #2015: plus the matched chunk's text when a content chunk found it.
         documents = [rerank_document(c) for c in candidates]
 
-        # Rerank
-        results = await provider.rerank(query, documents, k)
+        # Every candidate is scored (the cut to k comes after) so the shared
+        # no-signal guard below sees the whole list, for every provider (#2033).
+        n = len(candidates)
+        results = await provider.rerank(query, documents, n)
 
         if outcome is not None:
             outcome["scored"] = True
-        # Map reranked results back to candidates
+        # The guard judges only a list that covers every candidate. A provider
+        # that returns fewer results than candidates is not judged (and only
+        # its returned results are mapped below).
+        if n >= 2 and len(results) == n:
+            # A relevance_score of None is a document the provider could not
+            # score (self_hosted, #2033); the verdict is on the scored ones.
+            # Exact equality on purpose: a near-flat tolerance is to be
+            # decided from eval numbers (kagura-memory-eval N7-R), not guessed.
+            scores = {r["relevance_score"] for r in results if r["relevance_score"] is not None}
+            if scores == {0.0}:
+                # The measured Qwen3-on-Ollama case: raise so SearchService
+                # fails open (rerank_failed_open) and the hybrid scores stay.
+                raise RerankNotDiscriminatingError(
+                    f"{provider.provider_name} rerank scored all {n} candidates 0"
+                )
+            if len(scores) == 1:
+                # Identical non-zero scores: a legitimate tie is possible on a
+                # small list (two relevant docs at 1, duplicate memories), so
+                # not a failure — but no ranking either. Keep the hybrid order
+                # and scores rather than overwrite them with one constant.
+                logger.info("rerank_no_signal", provider=provider.provider_name, doc_count=n)
+                return candidates[:k]
+
+        # Map reranked results back to candidates: scored ones in score order,
+        # then unscored ones (None) untouched in their hybrid order.
         reranked = []
+        unscored_idx: list[int] = []
         for result in results:
-            idx = result["index"]
-            candidate = candidates[idx]
+            candidate = candidates[result["index"]]
+            if result["relevance_score"] is None:
+                unscored_idx.append(result["index"])
+                continue
             candidate["rerank_score"] = result["relevance_score"]
             candidate["hybrid_score"] = result["relevance_score"]  # Override hybrid score
             reranked.append(candidate)
+        reranked = (reranked + [candidates[i] for i in sorted(unscored_idx)])[:k]
 
         logger.debug(
             "reranking_completed",

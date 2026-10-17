@@ -1,7 +1,7 @@
 """Coverage tests for services.reranker_service.
 
 Targets:
-- _parse_relevance_score: pure score-string parser (percent / fraction / plain / garbage)
+- _try_parse_relevance_score: pure score-string parser (percent / fraction / plain; None for no number)
 - VoyageReranker / CohereReranker: input validation + success/error mapping
   (external clients are imported lazily inside rerank(), so we inject fakes
   into sys.modules — never a real network call)
@@ -33,7 +33,7 @@ from services.reranker_service import (
     RerankerService,
     SelfHostedReranker,
     VoyageReranker,
-    _parse_relevance_score,
+    _try_parse_relevance_score,
 )
 from utils.exceptions import CohereError, VoyageError
 
@@ -71,7 +71,7 @@ class _FakeHttpResponse:
 
 
 # ---------------------------------------------------------------------------
-# _parse_relevance_score (pure)
+# _try_parse_relevance_score (pure)
 # ---------------------------------------------------------------------------
 
 
@@ -80,61 +80,61 @@ class TestParseRelevanceScore:
 
     def test_plain_decimal(self):
         """'0.83' parses to 0.83."""
-        assert _parse_relevance_score("0.83") == pytest.approx(0.83)
+        assert _try_parse_relevance_score("0.83") == pytest.approx(0.83)
 
     def test_plain_integer_zero_and_one(self):
         """Bare '0' and '1' parse to their float values."""
-        assert _parse_relevance_score("0") == 0.0
-        assert _parse_relevance_score("1") == 1.0
+        assert _try_parse_relevance_score("0") == 0.0
+        assert _try_parse_relevance_score("1") == 1.0
 
     def test_percentage(self):
         """'80%' converts to 0.8."""
-        assert _parse_relevance_score("80%") == pytest.approx(0.8)
+        assert _try_parse_relevance_score("80%") == pytest.approx(0.8)
 
     def test_percentage_over_100_clamped(self):
         """'150%' clamps to 1.0."""
-        assert _parse_relevance_score("150%") == 1.0
+        assert _try_parse_relevance_score("150%") == 1.0
 
     def test_fraction(self):
         """'0.8/1' parses the numerator/denominator to 0.8."""
-        assert _parse_relevance_score("0.8/1") == pytest.approx(0.8)
+        assert _try_parse_relevance_score("0.8/1") == pytest.approx(0.8)
 
     def test_fraction_score_label(self):
         """'Score: 5/10' parses the embedded fraction to 0.5."""
-        assert _parse_relevance_score("Score: 5/10") == pytest.approx(0.5)
+        assert _try_parse_relevance_score("Score: 5/10") == pytest.approx(0.5)
 
     def test_fraction_zero_denominator_returns_zero(self):
         """Division by zero in a fraction yields 0.0, not a crash."""
-        assert _parse_relevance_score("5/0") == 0.0
+        assert _try_parse_relevance_score("5/0") == 0.0
 
     def test_fraction_over_one_clamped(self):
         """A fraction > 1 (e.g. 9/4) clamps to 1.0."""
-        assert _parse_relevance_score("9/4") == 1.0
+        assert _try_parse_relevance_score("9/4") == 1.0
 
     def test_plain_number_out_of_range_clamped(self):
         """A plain number above 1 clamps to 1.0."""
-        assert _parse_relevance_score("7") == 1.0
+        assert _try_parse_relevance_score("7") == 1.0
 
     def test_embedded_plain_number(self):
         """A decimal embedded in prose is extracted."""
-        assert _parse_relevance_score("relevance is 0.42 overall") == pytest.approx(0.42)
+        assert _try_parse_relevance_score("relevance is 0.42 overall") == pytest.approx(0.42)
 
-    def test_empty_string_returns_zero(self):
-        """Empty input returns 0.0."""
-        assert _parse_relevance_score("") == 0.0
+    def test_empty_string_returns_none(self):
+        """Empty input holds no score (None)."""
+        assert _try_parse_relevance_score("") is None
 
-    def test_whitespace_only_returns_zero(self):
-        """Whitespace-only input returns 0.0 (stripped to empty)."""
-        assert _parse_relevance_score("   ") == 0.0
+    def test_whitespace_only_returns_none(self):
+        """Whitespace-only input holds no score (None)."""
+        assert _try_parse_relevance_score("   ") is None
 
-    def test_garbage_returns_zero(self):
-        """Non-numeric garbage returns 0.0."""
-        assert _parse_relevance_score("not a number at all") == 0.0
+    def test_garbage_returns_none(self):
+        """Non-numeric garbage holds no score (None)."""
+        assert _try_parse_relevance_score("not a number at all") is None
 
     def test_percentage_takes_priority_over_plain(self):
         """When a '%' is present, percentage parsing wins over plain-number."""
         # "80%" would parse as 80.0 -> clamp 1.0 if treated as plain; percentage gives 0.8.
-        assert _parse_relevance_score("80%") == pytest.approx(0.8)
+        assert _try_parse_relevance_score("80%") == pytest.approx(0.8)
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +305,15 @@ class TestCohereReranker:
 # ---------------------------------------------------------------------------
 
 
+def _exc(raiser):
+    """The exception ``raiser()`` raises (to hand to _FakeHttpResponse)."""
+    try:
+        raiser()
+    except Exception as e:  # noqa: BLE001
+        return e
+    raise AssertionError("raiser did not raise")
+
+
 def _patch_ollama_post(monkeypatch, handler):
     """Patch httpx.AsyncClient.post with an async ``handler(url, json=...)``."""
 
@@ -315,7 +324,13 @@ def _patch_ollama_post(monkeypatch, handler):
 
 
 class TestSelfHostedReranker:
-    """SelfHostedReranker scoring, sorting, and per-doc error fallback."""
+    """SelfHostedReranker scoring, sorting, and per-doc error fallback.
+
+    These exercise the generic score prompt on /v1/completions, so they force
+    ``prompt_format="raw"`` — the default model is a Qwen3 reranker, which
+    resolves to the /api/generate yes/no format (#2033,
+    test_self_hosted_reranker.py).
+    """
 
     def test_init_strips_trailing_slash(self):
         """base_url trailing slash is stripped; default model is used."""
@@ -347,7 +362,7 @@ class TestSelfHostedReranker:
 
         _patch_ollama_post(monkeypatch, handler)
 
-        out = await SelfHostedReranker("http://x").rerank(
+        out = await SelfHostedReranker("http://x", prompt_format="raw").rerank(
             "q", ["alpha doc", "bravo doc", "charlie doc"], 2
         )
 
@@ -356,61 +371,64 @@ class TestSelfHostedReranker:
         assert out[1]["relevance_score"] == pytest.approx(0.5)
         assert len(out) == 2
 
-    async def test_http_error_falls_back_to_zero(self, monkeypatch):
-        """A raise_for_status error on one doc yields score 0.0 for that doc."""
+    # #2033: an unscored document (failed / unparseable) is no 0.0 any more:
+    # it comes back with relevance_score None so RerankerService keeps it at
+    # its hybrid position, after the scored ones. Up to 20% unscored is kept;
+    # above that the call fails open (test_self_hosted_reranker.py). Each test
+    # pairs the bad document with four healthy ones: 1 of 5 = 20%.
+    _HEALTHY = {"c1": "0.1", "c2": "0.2", "c3": "0.3"}
 
+    async def _rerank_with_one_bad(self, monkeypatch, bad_reply, good_text):
         def handler(url, json):
-            if "good" in json["prompt"]:
-                return _FakeHttpResponse(json_data={"choices": [{"text": "0.8"}]})
-            return _FakeHttpResponse(
-                raise_exc=httpx.HTTPStatusError("500", request=MagicMock(), response=MagicMock())
-            )
+            prompt = json["prompt"]
+            if "bad" in prompt:
+                return bad_reply()
+            for doc, text in self._HEALTHY.items():
+                if doc in prompt:
+                    return _FakeHttpResponse(json_data={"choices": [{"text": text}]})
+            return _FakeHttpResponse(json_data={"choices": [{"text": good_text}]})
 
         _patch_ollama_post(monkeypatch, handler)
+        out = await SelfHostedReranker("http://x", prompt_format="raw").rerank(
+            "q", ["good", "bad", "c1", "c2", "c3"], 5
+        )
+        return {d["index"]: d["relevance_score"] for d in out}
 
-        out = await SelfHostedReranker("http://x").rerank("q", ["good", "bad"], 5)
-        scores = {d["index"]: d["relevance_score"] for d in out}
+    async def test_http_error_leaves_that_doc_unscored(self, monkeypatch):
+        """A raise_for_status error on one doc leaves it unscored (None)."""
+
+        def bad():
+            raise httpx.HTTPStatusError("500", request=MagicMock(), response=MagicMock())
+
+        scores = await self._rerank_with_one_bad(
+            monkeypatch, lambda: _FakeHttpResponse(raise_exc=_exc(bad)), "0.8"
+        )
         assert scores[0] == pytest.approx(0.8)
-        assert scores[1] == 0.0
+        assert scores[1] is None
 
-    async def test_timeout_on_one_doc_falls_back_to_zero(self, monkeypatch):
-        """A timeout on one doc yields 0.0 for that doc; the others keep their
-        score (no raise). #1572 narrowed the old single-doc variant: a lone
-        document that times out is now "every doc failed" and raises instead."""
+    async def test_timeout_on_one_doc_leaves_it_unscored(self, monkeypatch):
+        """A timeout on one doc leaves it unscored; the others keep their score.
+        #1572: a lone document that times out is "every doc failed" and raises."""
 
-        def handler(url, json):
-            if "slow" in json["prompt"]:
-                raise httpx.TimeoutException("slow")
-            return _FakeHttpResponse(json_data={"choices": [{"text": "0.7"}]})
+        def bad():
+            raise httpx.TimeoutException("slow")
 
-        _patch_ollama_post(monkeypatch, handler)
-
-        out = await SelfHostedReranker("http://x").rerank("q", ["fast", "slow"], 2)
-        scores = {d["index"]: d["relevance_score"] for d in out}
+        scores = await self._rerank_with_one_bad(monkeypatch, bad, "0.7")
         assert scores[0] == pytest.approx(0.7)
-        assert scores[1] == 0.0
+        assert scores[1] is None
 
-    async def test_malformed_completion_body_scores_zero(self, monkeypatch):
-        """A malformed /v1/completions body (no 'choices') scores 0.0 for that doc.
+    async def test_malformed_completion_body_leaves_that_doc_unscored(self, monkeypatch):
+        """A malformed /v1/completions body (no 'choices') leaves that doc unscored.
 
         The reranker reads ``resp.json()["choices"][0]["text"]``; an empty
-        ``{}`` raises KeyError, which the per-doc ``except`` swallows to 0.0.
-        This exercises that fallback path (also hit by ``{"choices": []}`` /
-        ``{"choices": [{}]}`` from a real backend). Paired with a healthy doc
-        because an all-malformed batch now raises (#1572).
+        ``{}`` raises KeyError, which the per-doc ``except`` catches (also hit
+        by ``{"choices": []}`` / ``{"choices": [{}]}`` from a real backend).
         """
-
-        def handler(url, json):
-            if "bad" in json["prompt"]:
-                return _FakeHttpResponse(json_data={})
-            return _FakeHttpResponse(json_data={"choices": [{"text": "0.6"}]})
-
-        _patch_ollama_post(monkeypatch, handler)
-
-        out = await SelfHostedReranker("http://x").rerank("q", ["good", "bad"], 2)
-        scores = {d["index"]: d["relevance_score"] for d in out}
+        scores = await self._rerank_with_one_bad(
+            monkeypatch, lambda: _FakeHttpResponse(json_data={}), "0.6"
+        )
         assert scores[0] == pytest.approx(0.6)
-        assert scores[1] == 0.0
+        assert scores[1] is None
 
     async def test_every_doc_failing_raises_instead_of_arbitrary_order(self, monkeypatch):
         """#1572: when EVERY scoring fails (backend down, model 404) the reranker
@@ -425,9 +443,11 @@ class TestSelfHostedReranker:
         _patch_ollama_post(monkeypatch, handler)
 
         with pytest.raises(RuntimeError, match="self_hosted rerank backend unavailable"):
-            await SelfHostedReranker("http://x").rerank("q", ["a", "b", "c"], 2)
+            await SelfHostedReranker("http://x", prompt_format="raw").rerank(
+                "q", ["a", "b", "c"], 2
+            )
         with pytest.raises(RuntimeError, match="all 1 document"):
-            await SelfHostedReranker("http://x").rerank("q", ["only"], 1)
+            await SelfHostedReranker("http://x", prompt_format="raw").rerank("q", ["only"], 1)
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +610,8 @@ class TestRerankerServiceOllamaContextConfig:
         settings.self_hosted_base_url = "http://ollama:11434"
         settings.self_hosted_api_key = ""
         settings.rerank_base_url = ""  # not set → SelfHostedReranker, not the vLLM path
+        settings.rerank_prompt_format = "auto"
+        settings.rerank_instruction = ""
         monkeypatch.setattr("config.settings.get_settings", lambda: settings, raising=True)
 
         cfg = self._ctx_config("self_hosted", True, "custom-ollama-model")
@@ -613,6 +635,8 @@ class TestRerankerServiceOllamaContextConfig:
         settings.self_hosted_api_key = ""
         settings.self_hosted_rerank_model = DEFAULT_SELF_HOSTED_RERANK_MODEL
         settings.rerank_base_url = ""  # not set → SelfHostedReranker, not the vLLM path
+        settings.rerank_prompt_format = "auto"
+        settings.rerank_instruction = ""
         monkeypatch.setattr("config.settings.get_settings", lambda: settings, raising=True)
 
         cfg = self._ctx_config("self_hosted", True, "rerank-multilingual-v3.0")
@@ -631,6 +655,8 @@ class TestRerankerServiceOllamaContextConfig:
         settings.self_hosted_api_key = ""
         settings.self_hosted_rerank_model = DEFAULT_SELF_HOSTED_RERANK_MODEL
         settings.rerank_base_url = ""  # not set → SelfHostedReranker, not the vLLM path
+        settings.rerank_prompt_format = "auto"
+        settings.rerank_instruction = ""
         monkeypatch.setattr("config.settings.get_settings", lambda: settings, raising=True)
 
         cfg = self._ctx_config("self_hosted", True, None)

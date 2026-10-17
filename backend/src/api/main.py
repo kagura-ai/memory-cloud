@@ -162,13 +162,15 @@ async def lifespan(app: FastAPI):
 
     app.state.chunk_of_index_task = asyncio.create_task(ensure_chunk_of_index_on_all())
 
-    # #2020: one cheap calibration smoke check of the /v1/rerank model (a
+    # #2020 / #2033: one cheap calibration smoke check of the local rerank
+    # model — /v1/rerank, or the Ollama path for a self_hosted default — (a
     # relevant vs an irrelevant document) per process, so a mis-formatted
     # reranker shows up in the log (rerank_model_uncalibrated, or the raw
     # scores as rerank_calibration_observed) instead of silently wrecking
     # recall. Background
     # and fail-soft: never on the recall path, never a reason not to boot.
-    # Only when RERANK_BASE_URL is set and ENABLE_RERANKING is on.
+    # Only when ENABLE_RERANKING is on and RERANK_BASE_URL is set or
+    # DEFAULT_RERANKER_PROVIDER=self_hosted with DEFAULT_USE_RERANK=true.
     from tasks.rerank_calibration import start_rerank_calibration
 
     app.state.rerank_calibration_task = start_rerank_calibration(get_settings())
