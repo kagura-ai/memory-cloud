@@ -1071,13 +1071,15 @@ WARNING events below.
 
 | event | level | meaning |
 |---|---|---|
-| `supersede_suggest_disabled` | INFO | `SUPERSEDE_SUGGEST_ENABLED=false` was seen. Logged once each time the switch goes from on to off (and on the first ingest), not on every ingest |
-| `supersede_candidate_detected` | INFO | a candidate was stored. `verdict` is set when the judge ran, and is null otherwise |
+| `supersede_suggest_disabled` | INFO | `SUPERSEDE_SUGGEST_ENABLED=false` was seen. The flag is read from the environment only (#2010), so this is logged once per process, on its first ingest, not on every ingest: N API or worker processes give N lines |
+| `supersede_candidate_detected` | INFO | a candidate was stored. `verdict` is set when the pair has a verdict, either from a judge call or reused from an earlier verdict on the same unchanged pair (no call); it is null otherwise. Count judge calls with `supersede_verify_judged` or the `llm_call_log` rows, not with detected lines that carry a verdict |
 | `supersede_candidate_suppressed_by_dismissal` | INFO | a dismissal tombstone (#1504, or `remember(dedupe="off")`) held, so no candidate was stored. Also logged when a dismissal committed while the judge was running |
 | `supersede_suggestion_accepted` | INFO | a `supersedes` edge accepted the stored candidate, and the candidate was cleared |
 | `supersede_suggestion_dismissed` | INFO | an edit dismissed the candidate and wrote a tombstone |
 | `supersede_dismiss_noop` | INFO | there was nothing to dismiss (`reason=parallel`: the judge had already set the pair aside) |
 | `supersede_dismiss_malformed_candidate` / `supersede_accept_check_failed` / `supersede_candidate_resolve_failed` | WARNING | the stored candidate could not be dismissed, accepted or read. The edit, edge or read still succeeds; only the suggestion is skipped |
+| `supersede_shadowing_applied` | INFO | recall-side: a recall applied the shadowing of memories superseded by an accepted `supersedes` edge (`shadowed` of `candidates` results were hidden) |
+| `supersede_shadowing_failed` | WARNING | recall-side: the shadowing lookup failed, so the recall returned without hiding superseded memories |
 
 **The judge** (`SUPERSEDE_VERIFY_MODE=llm`, `services/supersede_verify.py`, #2016)
 
@@ -1110,6 +1112,8 @@ missing from that table.
 | `knn_seed_disabled_no_calibration` | DEBUG | the threshold resolver found no calibration row. Below D3 this is the normal state of a new deployment or a small context |
 | `knn_seed_skip_already_seeded` / `knn_seed_no_neighbors` | DEBUG | a re-embed of a memory that already has edges, or no neighbour above the threshold |
 | `knn_seed_edge_failed` / `knn_seed_bootstrap_trigger_failed` / `knn_seed_bootstrap_rollback_failed` / `knn_seeding_failed` | WARNING | best-effort failures. The memory itself is stored |
+| `knn_seeding_rollback_failed` | DEBUG | the rollback after `knn_seeding_failed` failed too. The original error is the WARNING line |
+| `knn_seed_lazy_ttl_enqueue_no_loop` / `knn_seed_lazy_ttl_enqueue_unavailable` | DEBUG | an expired calibration row could not queue its recalibration (no running event loop, or the task module is not available). The expired threshold is still used, and the scheduled recalibration catches up |
 
 `knn_seed_skip_no_threshold` and `knn_seed_disabled_no_calibration` stay at
 DEBUG. Once the gate is crossed, `knn_seed_uncalibrated_embedder` already
