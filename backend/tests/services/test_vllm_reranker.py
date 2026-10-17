@@ -23,6 +23,7 @@ from services import reranker_service
 from services.reranker_service import (
     DEFAULT_QWEN3_RERANK_INSTRUCTION,
     DEFAULT_VLLM_RERANK_MODEL,
+    QWEN3_RERANK_MAX_DOC_CHARS,
     RERANK_CALIBRATION_MIN_MARGIN,
     RerankerService,
     SelfHostedReranker,
@@ -890,3 +891,106 @@ class TestRerankCalibrationReview:
         settings = _settings_for_check(enable_reranking=False)
         assert await run_rerank_calibration_check(settings, retry_delays=()) is None
         assert calls == []
+
+
+class TestGate2Findings:
+    """#2020 gate2: incomplete calibration results, log redaction, truncation."""
+
+    @pytest.mark.parametrize(
+        "results",
+        [
+            [{"index": 0, "relevance_score": 0.99}],
+            [{"index": 0, "relevance_score": 0.99}, {"index": 0, "relevance_score": 0.98}],
+            [],
+        ],
+        ids=["one-result", "duplicate-index", "empty"],
+    )
+    async def test_incomplete_results_fail_the_check(self, monkeypatch, results):
+        _capture_post(monkeypatch, results=results)
+        with structlog.testing.capture_logs() as logs:
+            result = await run_rerank_calibration_check(_settings_for_check(), retry_delays=())
+        assert result is None
+        failed = [e for e in logs if e["event"] == "rerank_calibration_check_failed"]
+        assert len(failed) == 1 and failed[0]["log_level"] == "warning"
+        assert failed[0]["error_class"] == "IncompleteResults"
+        assert not [
+            e
+            for e in logs
+            if e["event"]
+            in (
+                "rerank_model_calibrated",
+                "rerank_model_uncalibrated",
+                "rerank_calibration_observed",
+            )
+        ]
+
+    @pytest.mark.parametrize(
+        ("raise_exc", "json_data", "status"),
+        [
+            (httpx.ConnectError("boom http://user:s3cret@gpu:8002/v1/rerank"), None, None),
+            (None, {"detail": "nope"}, None),
+            ("http-404", None, 404),
+        ],
+        ids=["connect", "malformed", "404"],
+    )
+    async def test_failure_log_never_carries_url_credentials(
+        self, monkeypatch, raise_exc, json_data, status
+    ):
+        url = "http://user:s3cret@gpu:8002"
+        if raise_exc == "http-404":
+            request = httpx.Request("POST", f"{url}/v1/rerank")
+            raise_exc = httpx.HTTPStatusError(
+                "404 for http://user:s3cret@gpu:8002/v1/rerank",
+                request=request,
+                response=httpx.Response(404, request=request),
+            )
+
+        async def post(self, u, json=None, **kwargs):
+            if isinstance(raise_exc, httpx.ConnectError):
+                raise raise_exc
+            return _FakeHttpResponse(json_data=json_data, raise_exc=raise_exc)
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", post, raising=True)
+        with structlog.testing.capture_logs() as logs:
+            await run_rerank_calibration_check(
+                _settings_for_check(rerank_base_url=url), retry_delays=()
+            )
+        failed = [e for e in logs if e["event"] == "rerank_calibration_check_failed"]
+        assert len(failed) == 1
+        assert "s3cret" not in repr(failed[0])
+        assert "error" not in failed[0]
+        assert failed[0]["endpoint"] == "http://user:***@gpu:8002"
+        assert failed[0].get("status_code") == status
+
+    async def test_value_error_messages_redact_the_base_url(self, monkeypatch):
+        """The shape errors surface in rerank_failed_open's error=str(e)."""
+        _capture_post(monkeypatch, results=[{"index": 9, "relevance_score": 0.5}])
+        r = VLLMReranker(base_url="http://user:s3cret@gpu:8002", model="m")
+        with pytest.raises(ValueError) as excinfo:
+            await r.rerank("q", ["a"], top_n=1)
+        assert "s3cret" not in str(excinfo.value)
+        assert "http://user:***@gpu:8002" in str(excinfo.value)
+
+    async def test_long_document_keeps_the_suffix(self, monkeypatch):
+        calls = _capture_post(monkeypatch)
+        r = VLLMReranker(base_url="http://gpu:8002", model="qwen3-reranker-0.6b")
+        await r.rerank("q", ["x" * (QWEN3_RERANK_MAX_DOC_CHARS * 3)], top_n=1)
+        doc = calls[0]["documents"][0]
+        assert doc.endswith(_QWEN3_SUFFIX)
+        body = doc[len("<Document>: ") : -len(_QWEN3_SUFFIX)]
+        assert body == "x" * QWEN3_RERANK_MAX_DOC_CHARS
+
+    async def test_short_document_is_not_truncated(self, monkeypatch):
+        calls = _capture_post(monkeypatch)
+        r = VLLMReranker(base_url="http://gpu:8002", model="qwen3-reranker-0.6b")
+        text = "y" * QWEN3_RERANK_MAX_DOC_CHARS
+        await r.rerank("q", [text], top_n=1)
+        assert calls[0]["documents"][0] == f"<Document>: {text}{_QWEN3_SUFFIX}"
+
+    async def test_raw_format_is_not_truncated(self, monkeypatch):
+        """raw leaves length to the server: there is no suffix to protect."""
+        calls = _capture_post(monkeypatch)
+        r = VLLMReranker(base_url="http://gpu:8002", model="bge-reranker-v2-m3")
+        text = "z" * (QWEN3_RERANK_MAX_DOC_CHARS * 2)
+        await r.rerank("q", [text], top_n=1)
+        assert calls[0]["documents"] == [text]

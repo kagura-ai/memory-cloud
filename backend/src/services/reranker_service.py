@@ -38,6 +38,7 @@ from repositories.config_repository import ContextSearchConfigRepository
 from utils.encryption import get_encryptor
 from utils.exceptions import CohereError, VoyageError
 from utils.logger import get_logger
+from utils.url_redact import redact_generic_url
 
 if TYPE_CHECKING:
     from config.settings import Settings
@@ -94,6 +95,16 @@ def _neutralise_qwen3_control_tokens(text: str) -> str:
     """Break every Qwen3 added-token spelling in caller-supplied text."""
     return _QWEN3_CONTROL_TOKEN_RE.sub("< ", text)
 
+
+# Character budget for a document body in the qwen3 format (#2020 gate2). The
+# template's suffix (<|im_end|> + the assistant turn + the empty think block)
+# must reach the model: a server that truncates an over-long input from the
+# right cuts it off and the yes/no score is meaningless. So the body is cut
+# here, before the suffix is appended. 2000 characters keeps a whole memory
+# summary (capped at 500) and most of its context summary — SelfHostedReranker
+# scores only doc[:500] — and is at most ~2000 tokens even for CJK text, so
+# prefix + query + document + suffix fit a 4096-token --max-model-len.
+QWEN3_RERANK_MAX_DOC_CHARS = 2000
 
 # Calibration smoke check (#2020): with the qwen3 format, one relevant and one
 # irrelevant document must separate by at least this much, else
@@ -535,6 +546,8 @@ class VLLMReranker(RerankerProvider):
                 f"got {prompt_format!r}"
             )
         self.base_url = base_url.rstrip("/")
+        # Log/exception-safe form: RERANK_BASE_URL may carry user:pass@.
+        self.safe_base_url = redact_generic_url(self.base_url)
         self.model = model
         self.api_key = api_key
         if prompt_format == "auto":
@@ -552,8 +565,12 @@ class VLLMReranker(RerankerProvider):
         formatted_query = (
             f"{QWEN3_RERANK_PREFIX}<Instruct>: {self.instruction}\n<Query>: {safe_query}\n"
         )
+        # Truncate the body (not the formatted string) so the suffix survives;
+        # cutting first also means a split token ("<|im_") is no token at all.
         formatted_docs = [
-            f"<Document>: {_neutralise_qwen3_control_tokens(doc)}{QWEN3_RERANK_SUFFIX}"
+            "<Document>: "
+            f"{_neutralise_qwen3_control_tokens(doc[:QWEN3_RERANK_MAX_DOC_CHARS])}"
+            f"{QWEN3_RERANK_SUFFIX}"
             for doc in documents
         ]
         return formatted_query, formatted_docs
@@ -617,7 +634,7 @@ class VLLMReranker(RerankerProvider):
             if not isinstance(results, list):
                 keys = list(payload)[:5] if isinstance(payload, dict) else None
                 raise ValueError(
-                    f"Unexpected /v1/rerank response from {self.base_url}: "
+                    f"Unexpected /v1/rerank response from {self.safe_base_url}: "
                     f"expected a 'results' list, got {type(payload).__name__}"
                     + (f" with keys {keys}" if keys is not None else "")
                 )
@@ -633,7 +650,7 @@ class VLLMReranker(RerankerProvider):
         for i, r in enumerate(results):
             if not isinstance(r, dict) or "index" not in r or "relevance_score" not in r:
                 raise ValueError(
-                    f"Unexpected /v1/rerank result item {i} from {self.base_url}: "
+                    f"Unexpected /v1/rerank result item {i} from {self.safe_base_url}: "
                     "expected an object with 'index' and 'relevance_score'"
                 )
             # index must be an int (reject bool, which is an int subclass) in
@@ -641,14 +658,14 @@ class VLLMReranker(RerankerProvider):
             idx = r["index"]
             if isinstance(idx, bool) or not isinstance(idx, int) or not (0 <= idx < n):
                 raise ValueError(
-                    f"Unexpected /v1/rerank result item {i} from {self.base_url}: "
+                    f"Unexpected /v1/rerank result item {i} from {self.safe_base_url}: "
                     f"'index' must be an int in [0, {n}), got {idx!r}"
                 )
             try:
                 score = float(r["relevance_score"])
             except (TypeError, ValueError) as exc:
                 raise ValueError(
-                    f"Unexpected /v1/rerank result item {i} from {self.base_url}: "
+                    f"Unexpected /v1/rerank result item {i} from {self.safe_base_url}: "
                     f"'relevance_score' is not a number ({r.get('relevance_score')!r})"
                 ) from exc
             scored.append({"index": idx, "relevance_score": score})
@@ -682,6 +699,17 @@ def _is_transient_rerank_error(exc: BaseException) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code >= 500
     return isinstance(exc, httpx.TransportError)
+
+
+def _log_calibration_failed(reranker: VLLMReranker, **fields: Any) -> None:
+    """WARNING for a calibration check that produced no verdict (redacted URL)."""
+    logger.warning(
+        "rerank_calibration_check_failed",
+        model=reranker.model,
+        prompt_format=reranker.prompt_format,
+        endpoint=reranker.safe_base_url,
+        **fields,
+    )
 
 
 async def run_rerank_calibration_check(
@@ -740,18 +768,27 @@ async def run_rerank_calibration_check(
             if delays and _is_transient_rerank_error(exc):
                 await asyncio.sleep(delays.pop(0))
                 continue
-            logger.warning(
-                "rerank_calibration_check_failed",
-                model=model,
-                prompt_format=reranker.prompt_format,
+            # No str(exc): httpx messages and the shape errors embed the
+            # request URL, which may carry RERANK_BASE_URL credentials.
+            _log_calibration_failed(
+                reranker,
                 error_class=type(exc).__name__,
-                error=str(exc),
+                status_code=(
+                    exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+                ),
             )
             return None
 
     by_index = {r["index"]: r["relevance_score"] for r in results}
-    relevant = by_index.get(0, 0.0)
-    irrelevant = by_index.get(1, 0.0)
+    if set(by_index) != {0, 1}:
+        # A missing score is not a 0.0 score: one result could otherwise
+        # pass as "calibrated".
+        _log_calibration_failed(
+            reranker, error_class="IncompleteResults", result_count=len(results)
+        )
+        return None
+    relevant = by_index[0]
+    irrelevant = by_index[1]
     margin = relevant - irrelevant
     fields: dict[str, Any] = {
         "model": model,
