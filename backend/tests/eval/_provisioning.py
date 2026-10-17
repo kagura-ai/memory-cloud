@@ -89,7 +89,11 @@ async def provision_eval_context(
             fetch_factor=3,
             use_rerank=False,
             reranker_provider="self_hosted",
-            reranker_model="qwen3-reranker-4b",
+            # None = resolve at recall time to the deployment's model
+            # (RERANK_MODEL on the /v1/rerank path, else
+            # SELF_HOSTED_RERANK_MODEL). A hard-coded name is sent as-is and
+            # fails open silently on an endpoint that serves another model (#2020).
+            reranker_model=None,
             embedding_model=emb_model,
             embedding_dimensions=emb_dims,
             # #1207 flipped the product default to enabled; the eval stamp pins

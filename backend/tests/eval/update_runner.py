@@ -465,7 +465,8 @@ async def run_update_eval(
                 fetch_factor=3,
                 use_rerank=False,
                 reranker_provider="self_hosted",
-                reranker_model="qwen3-reranker-4b",
+                # None = resolve to the deployment's RERANK_MODEL (#2020).
+                reranker_model=None,
                 embedding_model=emb_model,
                 embedding_dimensions=emb_dims,
                 reinforce_enabled=False,
@@ -478,7 +479,8 @@ async def run_update_eval(
                 fetch_factor=3,
                 use_rerank=False,
                 reranker_provider="self_hosted",
-                reranker_model="qwen3-reranker-4b",
+                # None = resolve to the deployment's RERANK_MODEL (#2020).
+                reranker_model=None,
                 embedding_model=emb_model,
                 embedding_dimensions=emb_dims,
                 reinforce_enabled=True,
