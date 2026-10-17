@@ -164,3 +164,39 @@ class TestRerankDocument:
         assert doc.startswith("S C\n")
         assert doc.endswith("q" * RERANK_CHUNK_TEXT_MAX_CHARS)
         assert len(doc) == len("S C\n") + RERANK_CHUNK_TEXT_MAX_CHARS
+
+
+def test_chunk_payload_keeps_every_field_of_the_real_summary_point():
+    """#2015: built from build_memory_point's own payload, a chunk keeps every
+    filterable and isolation-relevant field (user_id here; workspace_id and
+    context_id are added by the upsert, as for the summary point)."""
+    from models.memory import Memory
+    from services.memory_service import build_memory_point
+    from utils.datetime import utcnow
+
+    memory = Memory(
+        id=uuid4(),
+        user_id="owner-1",
+        workspace_id=uuid4(),
+        context_id=uuid4(),
+        summary="a summary",
+        context_summary="why",
+        content="body",
+        type="note",
+        importance=0.7,
+        tags=["a"],
+        scope="context",
+        client="pytest",
+        created_at=utcnow(),
+        updated_at=utcnow(),
+    )
+    base, _, _ = build_memory_point(memory)
+    payload = build_chunk_payload(base, memory_id=memory.id, chunk_index=0, chunk_text="t")
+
+    token_fields = {"summary_tokens", "context_summary_tokens", "content_tokens", "summary_reading"}
+    for key, value in base.items():
+        if key in token_fields:
+            assert key not in payload
+        else:
+            assert payload[key] == value, key
+    assert payload["user_id"] == "owner-1"

@@ -85,7 +85,9 @@ async def collection(qdrant: AsyncQdrantClient) -> AsyncIterator[str]:
     await qdrant.delete_collection(name)
 
 
-async def _write(collection: str, memory_id, *, chunks: int = 2, tags=None) -> None:
+async def _write(
+    collection: str, memory_id, *, chunks: int = 2, tags=None, user=_USER, ctx=_CTX
+) -> None:
     payload = {
         "summary": "summary",
         "context_summary": "",
@@ -98,12 +100,12 @@ async def _write(collection: str, memory_id, *, chunks: int = 2, tags=None) -> N
         "updated_at": "2026-10-17T00:00:00+00:00",
     }
     await add_memory_to_qdrant(
-        user_id=_USER,
+        user_id=user,
         memory_id=memory_id,
         vector=_SUMMARY_VEC,
         payload=dict(payload),
         workspace_id=_WS,
-        context_id=_CTX,
+        context_id=ctx,
         collection_name=collection,
     )
     await upsert_chunk_points(
@@ -117,9 +119,9 @@ async def _write(collection: str, memory_id, *, chunks: int = 2, tags=None) -> N
             )
             for i in range(chunks)
         ],
-        user_id=_USER,
+        user_id=user,
         workspace_id=_WS,
-        context_id=_CTX,
+        context_id=ctx,
         collection_name=collection,
     )
 
@@ -311,3 +313,24 @@ async def test_flag_turned_off_mid_write_leaves_no_chunks(qdrant, collection, mo
 
     assert n == 0
     assert await _count(qdrant, collection, memory_id) == (1, 0)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_chunks_never_cross_user_or_context_isolation(qdrant, collection):
+    """#2015: include_chunks=True returns only the caller's chunk points — not
+    another user's in the same private context, not another context's, and
+    not those of another user's private context."""
+    own, other_user, other_ctx, other_private = uuid4(), uuid4(), uuid4(), uuid4()
+    second_ctx, private_ctx = str(uuid4()), str(uuid4())
+    await _write(collection, own)
+    await _write(collection, other_user, user="someone_else")
+    await _write(collection, other_ctx, ctx=second_ctx)
+    await _write(collection, other_private, user="someone_else", ctx=private_ctx)
+
+    hits = await _search(collection, include_chunks=True)  # private: user filter on
+
+    owners = {str(h["payload"].get(CHUNK_OF_FIELD) or h["id"]) for h in hits}
+    assert owners == {str(own)}
+    assert len(hits) == 3  # its summary point + 2 chunks
+    assert all(h["payload"]["user_id"] == _USER for h in hits)
+    assert all(h["payload"]["context_id"] == _CTX for h in hits)
