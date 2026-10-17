@@ -12,6 +12,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from typing import Literal
 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -122,6 +123,24 @@ class LLMService:
         self.db = db
         self._self_hosted_provider: SelfHostedProvider | None = None
         self._last_self_hosted_base_url: str | None = None
+        # #2019: where the most recent provider resolution took its credential
+        # (``"stored"`` = an ``external_api_keys`` row, ``"env"`` = the
+        # platform env / settings value). ``resolve_paid_by`` maps it to the
+        # ledger's ``paid_by``, the way ``EmbeddingService._last_key_source``
+        # does. One instance per call site, so it is never shared across
+        # concurrent calls.
+        self._last_key_source: Literal["stored", "env"] | None = None
+
+    def resolve_paid_by(self) -> str:
+        """``llm_call_log.paid_by`` for the most recent call (#2019).
+
+        ``"byok"`` when the call used a stored workspace / context key (for
+        ``self_hosted``: a stored base URL — the workspace's own server);
+        ``"platform"`` when it used the platform env / settings credential,
+        including the #1569 managed lane (``platform_only``), which never
+        reads stored keys, and before any call was made.
+        """
+        return "byok" if self._last_key_source == "stored" else "platform"
 
     # -- public API --------------------------------------------------------
 
@@ -422,6 +441,9 @@ class LLMService:
             # unless the platform lane (#1569) or RESOLVE_STORED_BYOK_KEYS=false
             # rules the stored row out, in which case settings alone decide.
             base_url: str | None = None
+            # A stored base URL is recorded as ``"stored"`` by
+            # ``_get_user_api_key``; every other branch is the platform's.
+            self._last_key_source = "env"
             if not platform_only and not stored_byok_keys_disabled():
                 try:
                     # The self-hosted base URL is stored under provider="self_hosted"
@@ -550,6 +572,7 @@ class LLMService:
         if api_key_entry:
             encryptor = get_encryptor()
             api_key = encryptor.decrypt(str(api_key_entry.encrypted_value))
+            self._last_key_source = "stored"
             logger.debug(
                 "llm_api_key_from_db",
                 provider=provider,
@@ -599,6 +622,7 @@ class LLMService:
         env_var = env_var_map.get(provider, "OPENAI_API_KEY")
         env_key = os.getenv(env_var)
         if env_key:
+            self._last_key_source = "env"
             logger.debug("llm_api_key_from_env", provider=provider, user_id=user_id)
             return env_key
 

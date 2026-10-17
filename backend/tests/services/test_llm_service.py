@@ -533,3 +533,94 @@ class TestResolveStoredByokKeysDisabled:
         provider = await llm_service._get_provider("u1", "self_hosted", workspace_id=str(uuid4()))
         assert provider is not None
         mock_db.execute.assert_not_called()
+
+
+class TestResolvePaidBy:
+    """#2019: ``paid_by`` for a ledger row follows the key the call used.
+
+    Mirrors ``EmbeddingService.resolve_paid_by``: a stored (BYOK) key →
+    ``"byok"``; the platform env credential (incl. the #1569 managed lane,
+    which never reads stored keys) → ``"platform"``.
+    """
+
+    @staticmethod
+    def _row_result(entry):
+        from unittest.mock import MagicMock
+
+        result = MagicMock()
+        result.scalar_one_or_none = MagicMock(return_value=entry)
+        return result
+
+    @pytest.mark.asyncio
+    async def test_no_call_yet_is_platform(self, llm_service):
+        assert llm_service.resolve_paid_by() == "platform"
+
+    @pytest.mark.asyncio
+    async def test_env_key_is_platform(self, llm_service, mock_db, monkeypatch):
+        from uuid import uuid4
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        mock_db.execute = AsyncMock(return_value=self._row_result(None))
+        await llm_service._get_user_api_key("u1", "openai", workspace_id=str(uuid4()))
+        assert llm_service.resolve_paid_by() == "platform"
+
+    @pytest.mark.asyncio
+    async def test_stored_key_is_byok(self, llm_service, mock_db, monkeypatch):
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        entry = MagicMock(encrypted_value="blob")
+        mock_db.execute = AsyncMock(return_value=self._row_result(entry))
+        enc = MagicMock()
+        enc.decrypt = MagicMock(return_value="sk-db")
+        with patch("services.llm_service.get_encryptor", return_value=enc):
+            await llm_service._get_user_api_key("u1", "openai", workspace_id=str(uuid4()))
+        assert llm_service.resolve_paid_by() == "byok"
+
+    @pytest.mark.asyncio
+    async def test_managed_lane_is_platform_even_with_a_stored_key(
+        self, llm_service, mock_db, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+        mock_db.execute = AsyncMock(return_value=self._row_result(MagicMock()))
+        await llm_service._get_user_api_key(
+            "u1", "openai", workspace_id=str(uuid4()), platform_only=True
+        )
+        mock_db.execute.assert_not_called()
+        assert llm_service.resolve_paid_by() == "platform"
+
+    @pytest.mark.asyncio
+    async def test_self_hosted_stored_base_url_is_byok(self, llm_service, mock_db, monkeypatch):
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+
+        monkeypatch.delenv("SELF_HOSTED_BASE_URL", raising=False)
+        mock_db.execute = AsyncMock(return_value=self._row_result(MagicMock()))
+        enc = MagicMock()
+        enc.decrypt = MagicMock(return_value="http://ws-box:8000")
+        with patch("services.llm_service.get_encryptor", return_value=enc):
+            await llm_service._get_provider("u1", "self_hosted", workspace_id=str(uuid4()))
+        assert llm_service.resolve_paid_by() == "byok"
+
+    @pytest.mark.asyncio
+    async def test_self_hosted_env_base_url_is_platform(self, llm_service, mock_db, monkeypatch):
+        from uuid import uuid4
+
+        monkeypatch.setenv("SELF_HOSTED_BASE_URL", "http://platform:8000")
+        mock_db.execute = AsyncMock(return_value=self._row_result(None))
+        await llm_service._get_provider("u1", "self_hosted", workspace_id=str(uuid4()))
+        assert llm_service.resolve_paid_by() == "platform"
+
+    @pytest.mark.asyncio
+    async def test_self_hosted_settings_base_url_is_platform(self, llm_service, monkeypatch):
+        monkeypatch.delenv("SELF_HOSTED_BASE_URL", raising=False)
+        llm_service._get_user_api_key = AsyncMock(side_effect=ConfigurationError("none"))
+        with patch("config.settings.get_settings") as settings:
+            settings.return_value.self_hosted_base_url = "http://platform:8000"
+            settings.return_value.self_hosted_api_key = ""
+            await llm_service._get_provider("u1", "self_hosted", workspace_id="ws")
+        assert llm_service.resolve_paid_by() == "platform"
