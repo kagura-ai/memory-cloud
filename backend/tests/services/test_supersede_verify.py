@@ -216,10 +216,13 @@ class TestReuseVerification:
 class TestJudgePair:
     @pytest.fixture(autouse=True)
     def _fresh_once_flags(self):
+        # The ledger write (#2019) is covered by TestJudgeLedger; stub it here
+        # so these tests never open a real session.
         with (
             patch.object(sv, "_CAP_REPORTED", set()),
             patch.object(sv, "_CAP_REPORTED_DAY", ""),
             patch.object(sv, "_NO_PROVIDER_REPORTED", False),
+            patch.object(sv, "_record_judge_call", new=AsyncMock()),
         ):
             yield
 
@@ -445,3 +448,260 @@ class TestJudgePair:
                 old=_memory(),
             )
         assert llm.complete_json.await_args.kwargs["platform_only"] is True
+
+
+class TestJudgeLedger:
+    """#2019: every billed judge call leaves one ``llm_call_log`` row."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_once_flags(self):
+        with (
+            patch.object(sv, "_CAP_REPORTED", set()),
+            patch.object(sv, "_CAP_REPORTED_DAY", ""),
+            patch.object(sv, "_NO_PROVIDER_REPORTED", False),
+        ):
+            yield
+
+    @staticmethod
+    def _response(parsed):
+        return SimpleNamespace(
+            parsed=parsed,
+            provider="openai",
+            model="gpt-5-nano",
+            total_tokens=150,
+            input_tokens=100,
+            output_tokens=40,
+            cached_input_tokens=10,
+            cache_write_tokens=0,
+        )
+
+    @staticmethod
+    def _llm(*, response=None, error=None, paid_by="platform"):
+        llm = MagicMock()
+        llm.complete_json = AsyncMock(return_value=response, side_effect=error)
+        llm.resolve_paid_by = MagicMock(return_value=paid_by)
+        return llm
+
+    @staticmethod
+    def _ledger():
+        """A fake isolated session + writer; returns (session, writer_cls)."""
+        from contextlib import asynccontextmanager
+
+        session = MagicMock()
+        session.commit = AsyncMock()
+
+        @asynccontextmanager
+        async def _session(_db):
+            yield session
+
+        writer = MagicMock()
+        writer.return_value.record = AsyncMock(return_value=MagicMock())
+        return session, writer, _session
+
+    async def _judge(
+        self, llm, *, session_cm, writer, workspace_id="11111111-1111-1111-1111-111111111111"
+    ):
+        with (
+            patch("services.llm_service.LLMService", return_value=llm),
+            patch("db.redis.incrby_counter", new=AsyncMock(return_value=1)),
+            patch.object(sv, "_ledger_session", session_cm),
+            patch("services.llm_call_log_writer.LLMCallLogWriter", writer),
+        ):
+            return await sv.judge_pair(
+                MagicMock(),
+                config=_config(),
+                user_id="u",
+                workspace_id=workspace_id,
+                context_id="22222222-2222-2222-2222-222222222222",
+                new=_memory(summary="SECRET-NEW"),
+                old=_memory(summary="SECRET-OLD"),
+            )
+
+    @pytest.mark.asyncio
+    async def test_judge_call_records_one_completion_row(self):
+        session, writer, session_cm = self._ledger()
+        llm = self._llm(
+            response=self._response({"verdict": "supersedes", "confidence": 0.9, "reason": "r"}),
+            paid_by="byok",
+        )
+        record = await self._judge(llm, session_cm=session_cm, writer=writer)
+        assert record is not None
+        writer.return_value.record.assert_awaited_once()
+        kwargs = writer.return_value.record.await_args.kwargs
+        assert kwargs["caller"] == "supersede_verify"
+        assert kwargs["call_type"] == "completion"
+        assert (kwargs["provider"], kwargs["model"]) == ("openai", "gpt-5-nano")
+        assert kwargs["user_id"] == "u"
+        assert kwargs["workspace_id"] == "11111111-1111-1111-1111-111111111111"
+        assert kwargs["context_id"] == "22222222-2222-2222-2222-222222222222"
+        assert kwargs["input_tokens"] == 100
+        assert kwargs["output_tokens"] == 40
+        assert kwargs["cached_input_tokens"] == 10
+        assert kwargs["paid_by"] == "byok"
+        assert kwargs["fail_on_error"] is False
+        meta = kwargs["call_metadata"]
+        assert meta["verdict"] == "supersedes"
+        assert meta["confidence"] == 0.9 and meta["verified"] is True
+        assert meta["prompt_revision"] == sv.PROMPT_REVISION
+        # Never the memory text.
+        assert "SECRET" not in str(kwargs)
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_failed_call_records_nothing(self):
+        session, writer, session_cm = self._ledger()
+        llm = self._llm(error=RuntimeError("boom"))
+        assert await self._judge(llm, session_cm=session_cm, writer=writer) is None
+        writer.return_value.record.assert_not_called()
+        session.commit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unparseable_answer_still_records_the_billed_call(self):
+        """The provider billed the tokens even though the verdict is unusable."""
+        session, writer, session_cm = self._ledger()
+        llm = self._llm(response=self._response({"verdict": "maybe"}))
+        assert await self._judge(llm, session_cm=session_cm, writer=writer) is None
+        kwargs = writer.return_value.record.await_args.kwargs
+        assert kwargs["call_metadata"] == {
+            "outcome": "unparseable",
+            "prompt_revision": sv.PROMPT_REVISION,
+        }
+        assert kwargs["input_tokens"] == 100
+
+    @pytest.mark.asyncio
+    async def test_writer_failure_never_reaches_the_caller(self):
+        session, writer, session_cm = self._ledger()
+        writer.return_value.record = AsyncMock(return_value=None)  # fail-open writer
+        llm = self._llm(
+            response=self._response({"verdict": "parallel", "confidence": 0.8, "reason": "r"})
+        )
+        record = await self._judge(llm, session_cm=session_cm, writer=writer)
+        assert record is not None and record["verdict"] == "parallel"
+        session.commit.assert_not_called()
+
+        # Even a raising ledger (session unavailable) leaves the verdict intact.
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _broken(_db):
+            raise ConnectionError("db down")
+            yield  # pragma: no cover
+
+        with patch("services.supersede_verify.logger") as log:
+            record = await self._judge(llm, session_cm=_broken, writer=writer)
+        assert record is not None
+        warned = [
+            c for c in log.warning.call_args_list if c.args[0] == "supersede_verify_ledger_failed"
+        ]
+        assert warned and warned[0].kwargs["error_type"] == "ConnectionError"
+
+    @pytest.mark.asyncio
+    async def test_paid_by_comes_from_the_resolved_key(self):
+        _, writer, session_cm = self._ledger()
+        llm = self._llm(
+            response=self._response({"verdict": "parallel", "confidence": 0.8, "reason": "r"}),
+            paid_by="platform",
+        )
+        await self._judge(llm, session_cm=session_cm, writer=writer)
+        assert writer.return_value.record.await_args.kwargs["paid_by"] == "platform"
+        llm.resolve_paid_by.assert_called_once()
+
+
+class TestJudgeLedgerDB:
+    """#2019 acceptance against Postgres: one priced row per judge call."""
+
+    @pytest.mark.asyncio
+    async def test_judge_call_leaves_one_priced_row(self, db_session):
+        from decimal import Decimal
+
+        from sqlalchemy import delete, select
+
+        from models.llm_call_log import LLMCallLog
+        from models.llm_pricing import LLMPricing
+
+        model = f"judge-test-{uuid4().hex[:8]}"
+        workspace_id = uuid4()
+        db_session.add_all(
+            [
+                LLMPricing(
+                    provider="openai",
+                    model=model,
+                    unit_type=unit,
+                    effective_from=datetime(2020, 1, 1),
+                    price_per_unit=Decimal(price),
+                    unit_denominator=1_000_000,
+                )
+                for unit, price in (
+                    ("input_tokens", "1"),
+                    ("output_tokens", "4"),
+                    ("cache_read_tokens", "0.1"),
+                )
+            ]
+        )
+        await db_session.commit()
+
+        response = SimpleNamespace(
+            parsed={"verdict": "supersedes", "confidence": 0.95, "reason": "r"},
+            provider="openai",
+            model=model,
+            total_tokens=1_500_000,
+            input_tokens=1_000_000,
+            output_tokens=500_000,
+            cached_input_tokens=0,
+            cache_write_tokens=0,
+        )
+        llm = MagicMock()
+        llm.complete_json = AsyncMock(return_value=response)
+        llm.resolve_paid_by = MagicMock(return_value="platform")
+        try:
+            with (
+                patch("services.llm_service.LLMService", return_value=llm),
+                patch("db.redis.incrby_counter", new=AsyncMock(return_value=1)),
+                patch.object(sv, "_NO_PROVIDER_REPORTED", False),
+            ):
+                record = await sv.judge_pair(
+                    db_session,
+                    config=_config(sleep_llm_model=model),
+                    user_id="judge-ledger-user",
+                    workspace_id=str(workspace_id),
+                    context_id=str(uuid4()),
+                    new=_memory(),
+                    old=_memory(),
+                )
+                assert record is not None
+                llm.complete_json = AsyncMock(side_effect=RuntimeError("boom"))
+                assert (
+                    await sv.judge_pair(
+                        db_session,
+                        config=_config(sleep_llm_model=model),
+                        user_id="judge-ledger-user",
+                        workspace_id=str(workspace_id),
+                        context_id=str(uuid4()),
+                        new=_memory(),
+                        old=_memory(),
+                    )
+                    is None
+                )
+
+            rows = (
+                (
+                    await db_session.execute(
+                        select(LLMCallLog).where(LLMCallLog.workspace_id == workspace_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert len(rows) == 1, "one row for the billed call, none for the failed one"
+            row = rows[0]
+            assert row.caller == "supersede_verify" and row.call_type == "completion"
+            assert (row.input_tokens, row.output_tokens) == (1_000_000, 500_000)
+            assert row.cost_usd == Decimal("3")  # 1M x $1/M + 0.5M x $4/M
+            assert row.paid_by == "platform"
+            assert row.call_metadata["verdict"] == "supersedes"
+        finally:
+            await db_session.execute(
+                delete(LLMCallLog).where(LLMCallLog.workspace_id == workspace_id)
+            )
+            await db_session.execute(delete(LLMPricing).where(LLMPricing.model == model))
+            await db_session.commit()

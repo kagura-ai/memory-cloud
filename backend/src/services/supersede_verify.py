@@ -36,6 +36,15 @@ matches what the judge saw (``verification_stale``). Text, not
 ``updated_at``: Sleep stamps ``updated_at`` for importance and tag changes
 that the judge never looked at.
 
+Every billed judge call leaves one ``llm_call_log`` row (#2019,
+``caller='supersede_verify'``, ``call_type='completion'``): tokens, the
+write-time cost snapshot, ``paid_by`` from the credential the call actually
+used, and the verdict in ``call_metadata``. The row goes through its own
+short session, so it lands even when the ingest path returns early and a
+ledger failure never touches the embedding task's session. A call that
+raised (no answer, nothing billed that we can count) writes no row; an
+unparseable answer does, since its tokens were spent.
+
 The judge never creates an edge: the #1208 over-supersede prevention keeps
 edge authorship with the user / agent. Memory text goes into the prompt only
 between the untrusted-content markers Sleep uses (#919); trusted metadata
@@ -46,6 +55,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from services.sleep.judge_lane import judge_platform_only
@@ -344,6 +355,79 @@ def counter_key(workspace_id: str) -> str:
     return f"supersede_verify:{workspace_id}:{utcnow().strftime('%Y-%m-%d')}"
 
 
+# ``llm_call_log.caller`` for the judge's ledger rows (#2019).
+LEDGER_CALLER = "supersede_verify"
+
+
+@asynccontextmanager
+async def _ledger_session(db: AsyncSession) -> AsyncIterator[AsyncSession]:
+    """A fresh session on ``db``'s engine for the ledger write (#1985 pattern).
+
+    The ledger row must land whatever the ingest path does next (it may return
+    without committing), and a failed ledger write must not leave the
+    embedding task's session needing a rollback (which would expire the
+    memory it is still working on).
+    """
+    from sqlalchemy.ext.asyncio import AsyncEngine
+    from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
+
+    bind = getattr(db, "bind", None)
+    if isinstance(bind, AsyncEngine):
+        session = _AsyncSession(bind=bind, expire_on_commit=False)
+    else:
+        from db.base import _get_session_factory
+
+        session = _get_session_factory()()
+    async with session:
+        yield session
+
+
+async def _record_judge_call(
+    db: AsyncSession,
+    response: Any,
+    *,
+    paid_by: str,
+    user_id: str,
+    workspace_id: str,
+    context_id: str,
+    call_metadata: dict[str, Any],
+) -> None:
+    """Write the judge call's ``llm_call_log`` row; never raises.
+
+    Fail-open like the recall ledger: a lost row is an observability gap, not
+    a reason to drop the verdict. ``call_metadata`` carries the verdict only,
+    never memory text.
+    """
+    from services.llm_call_log_writer import LLMCallLogWriter
+
+    try:
+        async with _ledger_session(db) as session:
+            row = await LLMCallLogWriter(session).record(
+                caller=LEDGER_CALLER,
+                call_type="completion",
+                provider=response.provider,
+                model=response.model,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                context_id=context_id,
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+                cached_input_tokens=response.cached_input_tokens,
+                cache_write_tokens=response.cache_write_tokens,
+                paid_by=paid_by,
+                call_metadata=call_metadata,
+                fail_on_error=False,
+            )
+            if row is not None:
+                await session.commit()
+    except Exception as exc:  # noqa: BLE001 — never raises into the embedding task
+        logger.warning(
+            "supersede_verify_ledger_failed",
+            workspace_id=workspace_id,
+            error_type=type(exc).__name__,
+        )
+
+
 # Workspaces whose cap was already reported today (reset when the UTC day
 # changes, so the set never grows past the day's capped workspaces).
 _CAP_REPORTED_DAY = ""
@@ -447,8 +531,9 @@ async def judge_pair(
         new_type=new.type,
         new_created_at=new.created_at,
     )
+    llm = LLMService(db)
     try:
-        response = await LLMService(db).complete_json(
+        response = await llm.complete_json(
             user_id=user_id,
             prompt=prompt,
             system_prompt=SUPERSEDE_VERIFY_SYSTEM,
@@ -470,8 +555,20 @@ async def judge_pair(
         )
         return None
 
+    ledger = {
+        "paid_by": llm.resolve_paid_by(),
+        "user_id": user_id,
+        "workspace_id": workspace_id,
+        "context_id": context_id,
+    }
     judgement = parse_judgement(response.parsed)
     if judgement is None:
+        await _record_judge_call(
+            db,
+            response,
+            call_metadata={"outcome": "unparseable", "prompt_revision": PROMPT_REVISION},
+            **ledger,
+        )
         logger.warning(
             "supersede_verify_unparseable",
             memory_id=str(new.id),
@@ -490,6 +587,17 @@ async def judge_pair(
         fingerprint=pair_fingerprint(old, new),
         old_fingerprint=text_fingerprint(old.summary, old.content),
         at=read_at,
+    )
+    await _record_judge_call(
+        db,
+        response,
+        call_metadata={
+            "verdict": verdict,
+            "confidence": record["confidence"],
+            "verified": record["verified"],
+            "prompt_revision": PROMPT_REVISION,
+        },
+        **ledger,
     )
     logger.info(
         "supersede_verify_judged",
