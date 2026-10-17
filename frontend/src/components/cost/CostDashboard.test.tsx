@@ -113,3 +113,33 @@ describe("CostDashboard rows", () => {
     expect(screen.queryByText("Team Alpha")).toBeNull(); // no workspace column
   });
 });
+
+describe("CostDashboard by-source breakdown (#2019)", () => {
+  it("labels the supersede judge as its own source", async () => {
+    render(
+      <CostDashboard
+        title="t"
+        description="d"
+        fetchData={async () => ({
+          rows: [
+            row({
+              cost_breakdown_by_source: [
+                { source: "sleep", calls: 1, cost_usd: 0.5, cost_usd_byok: 0 },
+                {
+                  source: "supersede_verify",
+                  calls: 4,
+                  cost_usd: 0.012,
+                  cost_usd_byok: 0,
+                },
+              ],
+            }),
+          ],
+        })}
+      />,
+    );
+    expect(await screen.findByText("bySource.title")).toBeInTheDocument();
+    expect(screen.getByText("source.supersede_verify")).toBeInTheDocument();
+    expect(screen.getByText("source.sleep")).toBeInTheDocument();
+    expect(screen.getByText("$0.0120")).toBeInTheDocument();
+  });
+});

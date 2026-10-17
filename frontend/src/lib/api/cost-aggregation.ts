@@ -23,11 +23,13 @@ export const COST_AGGREGATION_PERIODS = ["day", "week", "month"] as const;
 export type CostAggregationPeriod = (typeof COST_AGGREGATION_PERIODS)[number];
 
 /**
- * Source classification for a cost row. Mirrors the DB enum on
- * ``sleep_reports.source`` (#523): scheduler-driven sleep runs vs
- * on-demand Memory Analysis.
+ * Source classification for a cost row. Mirrors backend ``COST_SOURCES``:
+ * the ``sleep_reports.source`` enum (#523: scheduler-driven sleep runs vs
+ * on-demand Memory Analysis) followed by the ``llm_call_log`` callers the
+ * aggregation reads (#2019: ``supersede_verify``, the ingest-time supersede
+ * judge).
  */
-export const COST_SOURCES = ["sleep", "analysis"] as const;
+export const COST_SOURCES = ["sleep", "analysis", "supersede_verify"] as const;
 export type CostSource = (typeof COST_SOURCES)[number];
 
 /**
