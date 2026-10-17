@@ -104,6 +104,9 @@ class _VectorStore:
             patch.object(svc, "list_context_point_ids", AsyncMock(side_effect=self.list_ids)),
             patch.object(svc, "delete_points_from_qdrant", AsyncMock(side_effect=self.delete)),
             patch.object(svc, "ensure_kagura_memories_collection", AsyncMock()),
+            # #2015: this store holds no content chunk points.
+            patch.object(svc, "count_context_chunk_points", AsyncMock(return_value={})),
+            patch.object(svc, "delete_chunk_points", AsyncMock()),
         )
 
 

@@ -15,7 +15,10 @@ Steps (each is a flag; ``--run`` chains the first three):
                   and listed
     --verify      every live memory has a point in the target; drops target points
                   whose memory was forgotten meanwhile. Resource-ingested memories
-                  that cannot be rebuilt are listed, and do not fail the step
+                  that cannot be rebuilt are listed, and do not fail the step.
+                  With content_chunks_enabled (#2015) the re-embed also rebuilds
+                  content chunk points; memories whose chunks are incomplete are
+                  listed on a CHUNKS_MISSING line, and do not fail the step
     --switch      flip routing + re-queue the delta since the re-embed started
     --purge       delete the source points, in the same invocation as --switch
     --purge-source MODEL  delete MODEL's points for the context in a later run,
@@ -43,6 +46,7 @@ from db.base import get_db  # noqa: E402
 from services.context_routing import resolve_context_embedding  # noqa: E402
 from services.embedding_migration_service import (  # noqa: E402
     MigrationPlan,
+    VerifyResult,
     list_migratable_context_ids,
     plan_context_migration,
     purge_source_points,
@@ -59,6 +63,11 @@ def _print_plan(plan: MigrationPlan) -> None:
     print(f"  source  {plan.source_model} / {plan.source_dimensions}d  -> {plan.source_collection}")
     print(f"  target  {plan.target_model} / {plan.target_dimensions}d  -> {plan.target_collection}")
     print(f"  memories {plan.memory_count}")
+    if plan.content_chunks_on:
+        print(
+            f"  content chunks on: the re-embed also writes ~{plan.chunk_estimate} "
+            "chunk point(s), one embedding input each"
+        )
 
 
 def _print_unrebuildable(memory_ids: list[UUID]) -> None:
@@ -73,6 +82,26 @@ def _print_unrebuildable(memory_ids: list[UUID]) -> None:
         "longer holds a JSON document. Ingest the documents again as a newer version "
         f"to make them searchable: {shown}{more}"
     )
+
+
+def _print_chunks(verified: VerifyResult) -> None:
+    """Content chunk points of the target (#2015); reported, never a failure."""
+    if verified.chunks_expected or verified.chunks_present:
+        print(f"  content chunks: {verified.chunks_present}/{verified.chunks_expected} present")
+    if verified.chunks_stale_removed:
+        print(
+            f"  removed the content chunks of {verified.chunks_stale_removed} memory(ies) "
+            "that are no longer live (or the context has content_chunks_enabled off)"
+        )
+    if verified.chunks_missing:
+        ids = verified.chunks_missing
+        shown = ", ".join(str(memory_id) for memory_id in ids[:20])
+        more = f" (+{len(ids) - 20} more)" if len(ids) > 20 else ""
+        print(
+            f"  CHUNKS_MISSING {len(ids)} memory(ies) whose content chunks in the target do "
+            "not match their content (recall finds them through their summary meanwhile). "
+            f"Re-run --reembed to rebuild them: {shown}{more}"
+        )
 
 
 def _confirm(prompt: str, assume_yes: bool) -> bool:
@@ -135,7 +164,8 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
 
         result = await reembed_context(db, plan, batch_size=args.batch_size, progress=_progress)
         requeue_since = result.started_at
-        print(f"  re-embed done: {result.embedded} points in {result.batches} batches")
+        chunks = f", {result.chunks_written} content chunk points" if plan.content_chunks_on else ""
+        print(f"  re-embed done: {result.embedded} points in {result.batches} batches{chunks}")
         skipped = result.unrebuildable
         if not (args.verify or args.run):
             _print_unrebuildable(skipped)
@@ -149,6 +179,7 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
         # One line for both steps. Verify alone would leave out a row the
         # re-embed skipped whose point another live row keeps in the target.
         _print_unrebuildable(sorted({*skipped, *verified.unrebuildable}))
+        _print_chunks(verified)
         if not verified.ok:
             print(
                 f"  MISSING {len(verified.missing)}: {', '.join(str(m) for m in verified.missing[:20])}"

@@ -89,6 +89,20 @@ def split_content(content: str | None) -> list[str]:
     return chunks
 
 
+def expected_chunk_count(content_length: int) -> int:
+    """How many chunks ``split_content`` makes of a content this long.
+
+    Lets a caller that only has ``char_length(content)`` (the embedding
+    migration's verify) know how many chunk points a memory should have,
+    without loading the content.
+    """
+    if content_length < CONTENT_CHUNK_MIN_CONTENT_CHARS:
+        return 0
+    step = CONTENT_CHUNK_CHARS - CONTENT_CHUNK_OVERLAP_CHARS
+    beyond_first = content_length - CONTENT_CHUNK_CHARS
+    return min(CONTENT_CHUNK_MAX_PER_MEMORY, 1 + -(-beyond_first // step))
+
+
 def chunk_point_id(memory_id: UUID | str, chunk_index: int) -> str:
     """Deterministic Qdrant point id of a memory's ``chunk_index``-th chunk."""
     return str(uuid5(_CHUNK_NAMESPACE, f"{memory_id}:{chunk_index}"))

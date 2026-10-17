@@ -188,3 +188,129 @@ def _log_failure(memory: Memory, collection_name: str, error: Exception) -> None
         collection=collection_name,
         error_class=type(error).__name__,
     )
+
+
+#: Chunk texts per ``embed_batch`` request in :func:`rebuild_content_chunks`
+#: (a page of 64 long memories is up to 1,024 chunks; one request for all of
+#: them would exceed a provider's per-request token limit).
+CHUNK_EMBED_BATCH_SIZE = 64
+
+
+async def rebuild_content_chunks(
+    db: AsyncSession,
+    rows: list[Memory],
+    *,
+    base_payloads: dict[Any, dict[str, Any]],
+    embed_svc: Any,
+    collection_name: str,
+    context_id: Any,
+) -> int:
+    """Rebuild the chunk points of a page of one context's memories in ``collection_name``.
+
+    The embedding migration's re-embed (#2015 PR 2a): its target collection
+    is not routed yet, so nothing else writes there, and a page's chunks are
+    embedded in batches across memories, not one memory at a time. The
+    contract is :func:`write_content_chunks`'s: delete first (content that
+    is now too short loses its chunks, chunks an earlier migration to the
+    same model left are replaced), then write; the flag is read fresh before the delete
+    and again right before the upsert, and each read's transaction is ended
+    before the next embedding or vector store call. Unlike that writer it is
+    not fail-open: a failed delete, embedding or upsert is logged and raised,
+    so the migration stops and can be re-run (point ids are deterministic).
+
+    Args:
+        db: Session for the flag reads.
+        rows: The page's memories (resource rows are skipped).
+        base_payloads: Memory id -> its summary-point payload (``build_memory_point``).
+        embed_svc: The target model's embedding service.
+        collection_name: The target collection.
+        context_id: The context of ``rows``.
+
+    Returns:
+        The number of chunk points written.
+    """
+    plain = [memory for memory in rows if not _is_resource_row(memory)]
+    if not plain or not chunk_points_supported():
+        return 0
+    enabled = await content_chunks_enabled(db, context_id)
+    await db.commit()
+    if not enabled:
+        logger.info("content_chunks_skipped_flag_off", context_id=str(context_id))
+        return 0
+    await delete_chunk_points([memory.id for memory in plain], collection_name)
+    # Every chunk of the page, embedded in runs of one user (embed_batch
+    # takes one user_id for the credential lookup) of at most
+    # CHUNK_EMBED_BATCH_SIZE texts per request.
+    split = [(memory, split_content(memory.content)) for memory in plain]
+    jobs = [(memory, index, text) for memory, chunks in split for index, text in enumerate(chunks)]
+    if not jobs:
+        return 0
+    vectors: dict[tuple[Any, int], list[float]] = {}
+    current: Memory | None = None
+    try:
+        start = 0
+        while start < len(jobs):
+            user_id = jobs[start][0].user_id
+            end = start
+            while (
+                end < len(jobs)
+                and end - start < CHUNK_EMBED_BATCH_SIZE
+                and jobs[end][0].user_id == user_id
+            ):
+                end += 1
+            part = jobs[start:end]
+            current = part[0][0]
+            got = await embed_svc.embed_batch(
+                [text for _, _, text in part],
+                user_id,
+                context_id=str(context_id),
+                workspace_id=str(current.workspace_id),
+            )
+            if len(got) != len(part):
+                raise RuntimeError(f"embed_batch returned {len(got)} vectors for {len(part)} texts")
+            for (memory, index, _), vector in zip(part, got, strict=True):
+                vectors[(memory.id, index)] = vector
+            start = end
+        current = None
+        # The flag may have been turned off (and every collection purged)
+        # while the chunks were embedded: re-read it fresh.
+        enabled = await content_chunks_enabled(db, context_id)
+        await db.commit()
+        if not enabled:
+            logger.info("content_chunks_skipped_flag_off", context_id=str(context_id))
+            return 0
+        written = 0
+        for memory, chunks in split:
+            if not chunks:
+                continue
+            current = memory
+            base_payload = base_payloads[memory.id]
+            await upsert_chunk_points(
+                [
+                    (
+                        chunk_point_id(memory.id, index),
+                        vectors[(memory.id, index)],
+                        build_chunk_payload(
+                            base_payload, memory_id=memory.id, chunk_index=index, chunk_text=text
+                        ),
+                    )
+                    for index, text in enumerate(chunks)
+                ],
+                user_id=memory.user_id,
+                workspace_id=str(memory.workspace_id),
+                context_id=str(memory.context_id),
+                collection_name=collection_name,
+            )
+            written += len(chunks)
+    except Exception as e:
+        if current is not None:
+            _log_failure(current, collection_name, e)
+        raise
+    logger.info(
+        "content_chunks_rebuilt",
+        context_id=str(context_id),
+        collection=collection_name,
+        memories=sum(1 for _, chunks in split if chunks),
+        chunks=written,
+    )
+    return written
