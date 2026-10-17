@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
 from services.content_chunk_writer import _superseded
+from utils.datetime import utcnow
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -39,7 +40,7 @@ async def row(db_session: AsyncSession) -> AsyncIterator[Memory]:
         type="note",
         scope="working",
         client="test",
-        created_at=datetime.utcnow(),
+        created_at=utcnow(),
         embedding_status="processing",
         embedding_attempted_at=datetime(2026, 1, 2, 3, 4, 5, 678901),
     )
@@ -86,5 +87,5 @@ async def test_a_content_change_supersedes(db_session, row):
 
 async def test_a_soft_delete_supersedes(db_session, row):
     claimed = row.embedding_attempted_at
-    await _set(db_session, row, deleted_at=datetime.utcnow())
+    await _set(db_session, row, deleted_at=utcnow())
     assert await _superseded(db_session, row.id, _CONTENT, claimed) is True
