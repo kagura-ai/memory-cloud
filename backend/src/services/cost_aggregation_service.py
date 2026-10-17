@@ -239,38 +239,41 @@ LEFT JOIN LATERAL (
 """
 
 
-def _build_filter_clauses(
+def _filter_params(
     *,
     workspace_id: UUID | None,
     user_id: str | None,
     source: str | None,
     paid_by: str | None,
-    alias: str = "sr",
-    source_column: str = "source",
-) -> tuple[list[str], dict[str, Any]]:
-    """Return (where-fragment list, bound-param dict) for caller filters.
+) -> dict[str, Any]:
+    """The bound parameters of the caller's filters (only the ones set).
 
-    Fragments are concatenated with ``AND`` into the WHERE clause; only
-    bound parameter names appear in the strings, never user input.
-    ``alias`` / ``source_column`` are hardcoded at the call sites
-    (``sr`` / ``source`` for ``sleep_reports``, ``l`` / ``caller`` for
-    ``llm_call_log``); both legs bind the same parameter values.
+    Built once per query and shared by every leg, so each leg's WHERE
+    fragments (:func:`_filter_clauses`) bind the same values by construction.
     """
-    clauses: list[str] = []
-    params: dict[str, Any] = {}
-    if workspace_id is not None:
-        clauses.append(f"{alias}.workspace_id = :workspace_id")
-        params["workspace_id"] = workspace_id
-    if user_id is not None:
-        clauses.append(f"{alias}.user_id = :user_id")
-        params["user_id"] = user_id
-    if source is not None:
-        clauses.append(f"{alias}.{source_column} = :source")
-        params["source"] = source
-    if paid_by is not None:
-        clauses.append(f"{alias}.paid_by = :paid_by")
-        params["paid_by"] = paid_by
-    return clauses, params
+    candidates: dict[str, Any] = {
+        "workspace_id": workspace_id,
+        "user_id": user_id,
+        "source": source,
+        "paid_by": paid_by,
+    }
+    return {name: value for name, value in candidates.items() if value is not None}
+
+
+def _filter_clauses(params: dict[str, Any], *, alias: str, source_column: str) -> list[str]:
+    """WHERE fragments for ``params`` on one leg, concatenated with ``AND``.
+
+    Only bound parameter names appear in the strings, never user input;
+    ``alias`` / ``source_column`` are hardcoded at the call sites (``sr`` /
+    ``source`` for ``sleep_reports``, ``l`` / ``caller`` for ``llm_call_log``).
+    """
+    columns = {
+        "workspace_id": "workspace_id",
+        "user_id": "user_id",
+        "source": source_column,
+        "paid_by": "paid_by",
+    }
+    return [f"{alias}.{columns[name]} = :{name}" for name in columns if name in params]
 
 
 class CostAggregationService:
@@ -346,23 +349,20 @@ class CostAggregationService:
             raise ValueError(f"date range exceeds {MAX_LOOKBACK_DAYS}-day cap (got {end - start})")
 
         # ---- Build filter fragments ---------------------------------------
-        filter_clauses, filter_params = _build_filter_clauses(
+        filter_params = _filter_params(
             workspace_id=workspace_id,
             user_id=user_id,
             source=source,
             paid_by=paid_by,
         )
         base_where = " AND ".join(
-            ["sr.started_at >= :start", "sr.started_at < :end", *filter_clauses]
+            [
+                "sr.started_at >= :start",
+                "sr.started_at < :end",
+                *_filter_clauses(filter_params, alias="sr", source_column="source"),
+            ]
         )
-        ledger_clauses, _ = _build_filter_clauses(
-            workspace_id=workspace_id,
-            user_id=user_id,
-            source=source,
-            paid_by=paid_by,
-            alias="l",
-            source_column="caller",
-        )
+        ledger_clauses = _filter_clauses(filter_params, alias="l", source_column="caller")
         ledger_callers = ", ".join(f"'{c}'" for c in LEDGER_COST_SOURCES)
         ledger_where = " AND ".join(
             [
