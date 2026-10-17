@@ -72,34 +72,53 @@ async def test_a_malformed_chunk_context_id_is_refused(mock_client):
     mock_client.query_points.assert_not_awaited()
 
 
-async def test_purge_everywhere_asks_every_memory_collection(mock_client, monkeypatch):
+async def test_purge_everywhere_asks_every_memory_collection_routed_first(mock_client, monkeypatch):
     monkeypatch.setattr(
-        qmod, "list_memory_collections", AsyncMock(return_value=["kagura_memories", "kagura_b"])
+        qmod, "list_memory_collections", AsyncMock(return_value=["kagura_a", "kagura_b"])
     )
-    names = await purge_context_chunk_points_everywhere(WS, CTX_ON)
-    assert names == ["kagura_memories", "kagura_b"]
-    assert [c.kwargs["collection_name"] for c in mock_client.delete.await_args_list] == names
+    failed = await purge_context_chunk_points_everywhere(WS, CTX_ON, routed_collection="kagura_b")
+    assert failed == []
+    asked = [c.kwargs["collection_name"] for c in mock_client.delete.await_args_list]
+    assert asked == ["kagura_b", "kagura_a"]
     for call in mock_client.delete.await_args_list:
         selector = call.kwargs["points_selector"]
         assert isinstance(selector, FilterSelector)
         assert _is_chunk_exclusion(selector.filter.must_not[0])  # chunk points only
 
 
-async def test_purge_everywhere_tries_every_collection_before_raising(mock_client, monkeypatch):
+async def test_a_failing_other_collection_is_reported_not_raised(mock_client, monkeypatch):
+    """An unrelated broken collection must not keep the owner from turning
+    the flag off."""
     monkeypatch.setattr(
         qmod, "list_memory_collections", AsyncMock(return_value=["kagura_a", "kagura_b"])
     )
-    mock_client.delete.side_effect = [RuntimeError("down"), None]
-    with pytest.raises(QdrantError, match="1 collection"):
-        await purge_context_chunk_points_everywhere(WS, CTX_ON)
-    assert mock_client.delete.await_count == 2
+    mock_client.delete.side_effect = [None, RuntimeError("down")]
+    failed = await purge_context_chunk_points_everywhere(WS, CTX_ON, routed_collection="kagura_a")
+    assert failed == ["kagura_b"]
+
+
+async def test_a_failing_routed_collection_is_raised(mock_client, monkeypatch):
+    monkeypatch.setattr(
+        qmod, "list_memory_collections", AsyncMock(return_value=["kagura_a", "kagura_b"])
+    )
+    mock_client.delete.side_effect = RuntimeError("down")
+    with pytest.raises(QdrantError):
+        await purge_context_chunk_points_everywhere(WS, CTX_ON, routed_collection="kagura_a")
+
+
+async def test_a_failed_listing_still_purges_the_routed_collection(mock_client, monkeypatch):
+    monkeypatch.setattr(
+        qmod, "list_memory_collections", AsyncMock(side_effect=QdrantError("list failed"))
+    )
+    assert await purge_context_chunk_points_everywhere(WS, CTX_ON, routed_collection="r") == []
+    assert [c.kwargs["collection_name"] for c in mock_client.delete.await_args_list] == ["r"]
 
 
 async def test_purge_everywhere_is_a_noop_off_qdrant(monkeypatch):
     monkeypatch.setattr(qmod, "_active_store", lambda: object())
     listed = AsyncMock()
     monkeypatch.setattr(qmod, "list_memory_collections", listed)
-    assert await purge_context_chunk_points_everywhere(WS, CTX_ON) == []
+    assert await purge_context_chunk_points_everywhere(WS, CTX_ON, routed_collection="r") == []
     listed.assert_not_awaited()
 
 
@@ -119,3 +138,19 @@ async def test_count_context_chunk_points_failure_is_a_qdrant_error(mock_client)
     mock_client.scroll.side_effect = RuntimeError("down")
     with pytest.raises(QdrantError):
         await count_context_chunk_points(WS, CTX_ON, "coll")
+
+
+async def test_a_single_context_id_string_is_one_context_not_its_characters(mock_client):
+    await search_memories_qdrant(UID, [0.1], WS, [CTX_ON, CTX_OFF], include_chunks=CTX_ON)
+    flt = mock_client.query_points.await_args.kwargs["query_filter"]
+    nested = [c for c in flt.must if getattr(c, "should", None)]
+    assert nested[0].should[1].match == MatchAny(any=[CTX_ON])
+
+
+async def test_a_routed_collection_that_does_not_exist_yet_is_skipped(mock_client, monkeypatch):
+    """A context whose model never had a memory written has no collection:
+    nothing to purge, and no 404 that would block the flag change."""
+    monkeypatch.setattr(qmod, "list_memory_collections", AsyncMock(return_value=["kagura_a"]))
+    assert await purge_context_chunk_points_everywhere(WS, CTX_ON, routed_collection="new") == []
+    asked = [c.kwargs["collection_name"] for c in mock_client.delete.await_args_list]
+    assert asked == ["kagura_a"]

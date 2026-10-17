@@ -101,6 +101,8 @@ async def test_turning_the_flag_off_purges_the_contexts_chunk_points():
     """#2015 invariant: a context with the flag off has no chunk points."""
     from unittest.mock import patch
 
+    from db.qdrant import get_collection_name
+
     ws, ctx = uuid4(), uuid4()
     config = _flagged_config(True)
     repo, db = _repo_with(config, ws)
@@ -108,15 +110,19 @@ async def test_turning_the_flag_off_purges_the_contexts_chunk_points():
     db.commit.side_effect = lambda: order.append("commit")
     with patch(
         "db.qdrant.purge_context_chunk_points_everywhere",
-        AsyncMock(side_effect=lambda *a: order.append("purge") or ["c1", "c2"]),
+        AsyncMock(side_effect=lambda *a, **k: order.append("purge") or []),
     ) as purge:
         await repo.update(ctx, ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=False))
     # Before the commit (a failure keeps the flag on) and again after it, for
     # a writer that read "on" in between (self-repairing invariant).
     assert order == ["purge", "commit", "purge"]
     # Every collection, not only the routed one (PR 2a): a migration keeps
-    # the context's points in its source and its target collection.
+    # the context's points in its source and its target collection. The
+    # routed one is the one whose failure blocks the change.
     assert purge.await_args.args == (str(ws), str(ctx))
+    assert purge.await_args.kwargs == {
+        "routed_collection": get_collection_name("text-embedding-3-small", 512)
+    }
 
 
 @pytest.mark.asyncio
@@ -130,7 +136,7 @@ async def test_turning_the_flag_on_purges_leftovers_before_the_commit():
     db.commit.side_effect = lambda: order.append("commit")
     with patch(
         "db.qdrant.purge_context_chunk_points_everywhere",
-        AsyncMock(side_effect=lambda *a: order.append("purge") or []),
+        AsyncMock(side_effect=lambda *a, **k: order.append("purge") or []),
     ):
         await repo.update(uuid4(), ContextSearchConfigUpdate(**_BASE, content_chunks_enabled=True))
     assert order == ["purge", "commit"]

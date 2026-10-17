@@ -449,9 +449,10 @@ async def test_migration_rebuild_writes_chunks_into_the_target_and_flag_off_purg
     assert [str(h["id"]) for h in collapsed] == [str(memory_id)]
     assert collapsed[0]["matched_chunk_text"]
 
-    await purge_context_chunk_points_everywhere(
-        _WS, ctx, collections=[collection, second_collection]
+    failed = await purge_context_chunk_points_everywhere(
+        _WS, ctx, routed_collection=second_collection, collections=[collection]
     )
+    assert failed == []
     for name in (collection, second_collection):
         assert await count_context_chunk_points(_WS, ctx, name) == {}
         # summary points stay

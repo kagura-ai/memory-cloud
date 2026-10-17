@@ -849,7 +849,11 @@ async def search_memories_qdrant(
         # #2015 PR 2a: per-context chunk points — a point is a summary point,
         # or a chunk of one of the listed (opted-in) contexts. A leftover
         # chunk of a context whose flag is off never matches.
-        chunk_contexts = [str(cid) for cid in include_chunks]
+        chunk_contexts = (
+            [include_chunks]
+            if isinstance(include_chunks, str)
+            else [str(cid) for cid in include_chunks]
+        )
         for cid in chunk_contexts:
             _validate_uuid_format(cid, "include_chunks")
         per_context_chunks = Filter(
@@ -1140,41 +1144,77 @@ async def purge_context_chunk_points(
 
 
 async def purge_context_chunk_points_everywhere(
-    workspace_id: str, context_id: str, *, collections: list[str] | None = None
+    workspace_id: str,
+    context_id: str,
+    *,
+    routed_collection: str,
+    collections: list[str] | None = None,
 ) -> list[str]:
     """Delete a context's content chunk points (#2015) from every ``kagura_memories*`` collection.
 
     A context routes to one collection, but an embedding migration keeps its
     points in two (the source until it is purged, the target from the
     re-embed on), so "flag off ⇒ no chunk points" has to hold in every
-    collection, not only the routed one. One filter delete per collection.
-    A no-op on a non-Qdrant store.
+    collection, not only the routed one. One filter delete per collection,
+    the routed one first.
+
+    Only the routed collection is required: recall reads chunk points from
+    it alone, so its failure is raised (the caller keeps the flag as it
+    was). A failure in any other collection is logged and returned, so an
+    unrelated broken collection never keeps an owner from turning the flag
+    off; the embedding migration's verify removes a context's chunk points
+    from its target again while the flag is off. A no-op on a non-Qdrant
+    store.
 
     Args:
-        collections: The collections to purge (default: list them now).
+        routed_collection: The collection the context routes to.
+        collections: The other collections to purge, next to the routed one
+            (default: list them now — a routed collection the listing does
+            not show does not exist yet and is skipped; a failed listing
+            purges the routed collection only, and is logged).
 
     Returns:
-        The collections purged.
+        The other collections whose purge failed.
 
     Raises:
-        QdrantError: If listing fails, or — after every collection has been
-            tried — if any single purge failed.
+        QdrantError: If the routed collection's purge fails.
     """
     if _active_store() is not None:
         return []
-    names = collections if collections is not None else await list_memory_collections()
+    if collections is None:
+        try:
+            listed = await list_memory_collections()
+        except QdrantError as e:
+            logger.warning(
+                "content_chunks_purge_list_failed",
+                context_id=context_id,
+                error_class=type(e).__name__,
+            )
+            names = [routed_collection]
+        else:
+            # A routed collection that does not exist yet (no memory was ever
+            # written under that model) holds nothing to purge.
+            names = [
+                *([routed_collection] if routed_collection in listed else []),
+                *(c for c in listed if c != routed_collection),
+            ]
+    else:
+        names = [routed_collection, *(c for c in collections if c != routed_collection)]
     failed: list[str] = []
     for collection_name in names:
         try:
             await purge_context_chunk_points(workspace_id, context_id, collection_name)
         except QdrantError as e:
-            # The collection that actually holds the chunks may come later.
-            failed.append(f"{collection_name}: {e}")
-    if failed:
-        raise QdrantError(
-            f"Failed to purge content chunks from {len(failed)} collection(s): {'; '.join(failed)}"
-        )
-    return names
+            if collection_name == routed_collection:
+                raise
+            failed.append(collection_name)
+            logger.warning(
+                "content_chunks_purge_failed",
+                context_id=context_id,
+                collection=collection_name,
+                error_class=type(e).__name__,
+            )
+    return failed
 
 
 async def count_context_chunk_points(
