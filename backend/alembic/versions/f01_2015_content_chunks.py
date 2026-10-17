@@ -10,7 +10,7 @@ Blue-green safety: ADD COLUMN with a server_default is metadata-only on
 PG 11+ (no table rewrite); old app code never references the column.
 
 Revision ID: f01_2015_content_chunks
-Revises: e99_2022_supersede_cand_null
+Revises: f00_2019_llm_log_supersede
 """
 
 import sqlalchemy as sa
@@ -19,7 +19,7 @@ from alembic import op
 
 # revision identifiers
 revision = "f01_2015_content_chunks"
-down_revision = "e99_2022_supersede_cand_null"
+down_revision = "f00_2019_llm_log_supersede"
 branch_labels = None
 depends_on = None
 
