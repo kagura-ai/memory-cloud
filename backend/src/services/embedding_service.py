@@ -119,7 +119,6 @@ class EmbeddingService:
         # Issue #1525: what to call the model on the wire when the backend
         # serves it under a different id than the registry name.
         self.self_hosted_model_aliases = getattr(settings, "self_hosted_model_aliases", "") or ""
-        self._self_hosted_verified = False
         # Issue #713: the credential tier the most recent ``_get_client`` OpenAI
         # call resolved (set in ``_get_client``). ``resolve_paid_by`` reads it to
         # derive ``paid_by`` without re-probing ``external_api_keys`` — the
@@ -541,20 +540,21 @@ class EmbeddingService:
             AsyncOpenAI client configured for the provider
         """
         if self.provider == "self_hosted":
-            # Verify the self-hosted backend is reachable on first use only,
-            # via the OpenAI-compatible /v1/models endpoint (served by both
-            # Ollama and vLLM). Shared with SelfHostedProvider._verify (#18).
-            if not self._self_hosted_verified:
-                from services.llm_providers.self_hosted_provider import (
-                    verify_self_hosted_reachable,
-                )
+            # Verify the self-hosted backend is reachable via the
+            # OpenAI-compatible /v1/models endpoint (served by both Ollama and
+            # vLLM). Shared with SelfHostedProvider._verify (#18). #2049: the
+            # result is remembered per process, not per instance — this
+            # service is built per memory, so a per-instance flag probed on
+            # almost every cache-miss embed. A cache hit is a dict lookup.
+            from services.llm_providers.self_hosted_provider import (
+                ensure_self_hosted_reachable,
+            )
 
-                await verify_self_hosted_reachable(
-                    self.self_hosted_base_url,
-                    self.self_hosted_api_key,
-                    label="inference server",
-                )
-                self._self_hosted_verified = True
+            await ensure_self_hosted_reachable(
+                self.self_hosted_base_url,
+                self.self_hosted_api_key,
+                label="inference server",
+            )
             return AsyncOpenAI(
                 base_url=f"{self.self_hosted_base_url}/v1",
                 # Placeholder for keyless backends (Ollama ignores it); a real
