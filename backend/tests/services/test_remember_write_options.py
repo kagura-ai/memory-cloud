@@ -283,34 +283,25 @@ async def test_find_duplicate_candidate_applies_the_detection_threshold(db_sessi
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("chunks_on", [False, True])
-async def test_find_duplicate_candidate_sees_content_chunks_when_the_context_opts_in(
-    db_session, quiet_write, chunks_on
-):
-    """#2015: with content_chunks_enabled the probe also searches chunk points
-    and collapses a chunk hit to its memory; without it the call is unchanged."""
+async def test_find_duplicate_candidate_ignores_content_chunks(db_session, quiet_write):
+    """#2015: the dedupe probe compares summaries only, even on a context with
+    content_chunks_enabled — a paragraph of a long memory matching the new
+    summary is not a duplicate of it."""
     from models.config import ContextSearchConfig
 
     owner = f"o-{uuid4().hex[:6]}"
     ws, ctx = await _scope(db_session, owner)
-    existing = _existing(owner, ws, ctx)
-    db_session.add(existing)
     db_session.add(
         ContextSearchConfig(
             context_id=ctx.id,
             embedding_model="text-embedding-3-small",
             embedding_dimensions=1536,
-            content_chunks_enabled=chunks_on,
+            content_chunks_enabled=True,
         )
     )
     await db_session.commit()
     embedder = MagicMock(embed=AsyncMock(return_value=[0.1, 0.2]))
-    chunk_hit = {
-        "id": str(uuid4()),
-        "score": 0.93,
-        "payload": {"chunk_of": str(existing.id), "chunk_text": "t", "chunk_index": 0},
-    }
-    search = AsyncMock(return_value=[chunk_hit] if chunks_on else [])
+    search = AsyncMock(return_value=[])
     with (
         patch(
             "services.context_routing.resolve_context_routing",
@@ -318,20 +309,13 @@ async def test_find_duplicate_candidate_sees_content_chunks_when_the_context_opt
         ),
         patch("db.qdrant.search_memories_qdrant", new=search),
     ):
-        found = await MemoryService(db_session)._find_duplicate_candidate(
+        await MemoryService(db_session)._find_duplicate_candidate(
             user_id=owner,
             workspace_id_str=str(ws.id),
             context_id_str=str(ctx.id),
             summary="JWT expiry caused a 401",
         )
-    kwargs = search.await_args.kwargs
-    if chunks_on:
-        assert kwargs["include_chunks"] is True
-        assert found is not None and found["memory_id"] == str(existing.id)
-        assert found["similarity"] == 0.93
-    else:
-        assert "include_chunks" not in kwargs
-        assert found is None
+    assert "include_chunks" not in search.await_args.kwargs
 
 
 # ------------------------------------------------------ inner review (#1853)
