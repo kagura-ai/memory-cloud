@@ -61,7 +61,7 @@ EOF
 }
 
 @test "a size without a k/m/g unit fails and names the variable" {
-    for bad in 50 50mb 50M 1.5g m -1m; do
+    for bad in 50 50mb 50M 1.5g m -1m 0m 007m; do
         printf 'LOG_MAX_SIZE=%s\n' "$bad" > "$ENV_FILE"
         run validate_log_rotation_env
         [ "$status" -ne 0 ] || { echo "accepted LOG_MAX_SIZE=$bad"; return 1; }

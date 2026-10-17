@@ -129,7 +129,7 @@ exactly the block above.
 | `LOG_MAX_FILE` | `3` | the same services |
 
 Accepted formats: a size is a whole number with a lowercase `k`, `m` or `g`
-unit (`^[0-9]+[kmg]$`, e.g. `200m`); a file count is a positive whole number
+unit (`^[1-9][0-9]*[kmg]$`, e.g. `200m`); a file count is a positive whole number
 (`^[1-9][0-9]*$`). An empty value means the default. `deploy.sh` checks the
 values it will pass (the shell environment first, then `.env.prod`) and stops
 before it touches a container; Docker itself would reject a bad value only when

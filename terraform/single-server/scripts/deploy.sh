@@ -133,7 +133,7 @@ validate_log_rotation_env() {
         [ -n "$value" ] || continue
         case " ${LOG_ROTATION_SIZE_VARS[*]} " in
             *" $key "*)
-                [[ "$value" =~ ^[0-9]+[kmg]$ ]] \
+                [[ "$value" =~ ^[1-9][0-9]*[kmg]$ ]] \
                     || error "$key must be a number with a k, m or g unit, e.g. 50m (got: $value)" ;;
             *)
                 [[ "$value" =~ ^[1-9][0-9]*$ ]] \
