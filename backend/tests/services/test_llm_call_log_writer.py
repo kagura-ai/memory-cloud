@@ -134,6 +134,38 @@ class TestInputValidation:
             )
 
     @pytest.mark.asyncio
+    async def test_subscription_pricing_excluded_for_supersede_verify_only(
+        self, writer, mock_pricing
+    ):
+        """#2019: the judge's rows follow the cost aggregation's Sleep-leg rule
+        (subscription rows are not a per-token price); recall keeps the lookup
+        it always had."""
+        mock_pricing.compute_cost_usd.return_value = 0.001
+        identity = {
+            "user_id": "u",
+            "workspace_id": "11111111-1111-1111-1111-111111111111",
+            "context_id": "22222222-2222-2222-2222-222222222222",
+        }
+        await writer.record(
+            caller="supersede_verify",
+            call_type="completion",
+            provider="openai",
+            model="gpt-5-nano",
+            input_tokens=10,
+            **identity,
+        )
+        assert mock_pricing.compute_cost_usd.await_args.kwargs["exclude_subscription"] is True
+        await writer.record(
+            caller="recall",
+            call_type="embedding",
+            provider="openai",
+            model="text-embedding-3-small",
+            embedding_tokens=10,
+            **identity,
+        )
+        assert mock_pricing.compute_cost_usd.await_args.kwargs["exclude_subscription"] is False
+
+    @pytest.mark.asyncio
     async def test_admin_caller_allows_null_identity(self, writer, mock_pricing):
         """admin caller may legitimately run without user/workspace/context."""
         mock_pricing.compute_cost_usd.return_value = 0.0

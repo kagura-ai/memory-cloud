@@ -472,3 +472,33 @@ async def test_check_constraint_tier_max_must_exceed_min(db_session):
     with pytest.raises(IntegrityError):
         await db_session.flush()
     await db_session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_subscription_row_is_a_miss_only_when_excluded(db_session):
+    """#2019: ``exclude_subscription=True`` skips ``pricing_model='subscription'``
+    rows (the cost aggregation's Sleep-leg rule); the default lookup does not."""
+    from decimal import Decimal
+
+    model = f"sub-{uuid4().hex[:8]}"
+    db_session.add(
+        LLMPricing(
+            provider="ollama_cloud",
+            model=model,
+            unit_type="input_tokens",
+            effective_from=datetime(2020, 1, 1),
+            pricing_model="subscription",
+            price_per_unit=Decimal("20"),
+            unit_denominator=1_000_000,
+        )
+    )
+    await db_session.flush()
+    service = LLMPricingService(db_session)
+    kwargs = {
+        "provider": "ollama_cloud",
+        "model": model,
+        "unit_type": "input_tokens",
+        "started_at": datetime(2026, 1, 1),
+    }
+    assert await service.lookup(**kwargs) is not None
+    assert await service.lookup(**kwargs, exclude_subscription=True) is None

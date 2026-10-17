@@ -31,8 +31,12 @@ Event-shaped callers (#2019): ``llm_call_log`` rows of the callers in
 :data:`LEDGER_COST_SOURCES` (today the ingest-time supersede judge,
 ``supersede_verify``) join as a third leg, tagged with their caller as the
 ``source``. Their cost is the row's write-time snapshot (``cost_usd``), not a
-read-time pricing join; a row flagged ``call_metadata.pricing_miss`` makes its
-bucket "cost unknown" like an unpriced Sleep usage row. The other ledger
+read-time pricing join: a later ``llm_pricing`` change re-prices the Sleep legs
+on the next read but leaves ledger rows at what they cost when written. The
+snapshot follows the same row rule as the Sleep LLM leg (``subscription``
+rows are skipped, so such a model is a pricing miss); a row flagged
+``call_metadata.pricing_miss`` makes its bucket "cost unknown" like an
+unpriced Sleep usage row. The other ledger
 callers (recall embeddings, reranks) are not part of this view yet.
 
 v1 limitation: pricing-tier lookup uses ``context_min_tokens=0`` because

@@ -2101,6 +2101,11 @@ record of Sleep cost.
 
 The admin and workspace cost dashboards combine Sleep, Memory Analysis and the
 supersede check, and each one appears as its own row in the *By Source* table.
+They price the two kinds differently: Sleep and Memory Analysis usage is
+priced from `llm_pricing` each time the dashboard is read, so a price change
+also changes past Sleep figures, while a supersede-check row keeps the cost it
+was given when written. Both skip `pricing_model = 'subscription'` rows, so a
+model billed by subscription shows as cost unknown (`—`) in either.
 Recall embeddings are in `llm_call_log` but are not shown in the dashboards
 yet. Because the ledger is a table, you can still answer questions such as
 "how did the supersede verdicts split last week, and what did they cost?"
