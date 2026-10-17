@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Sequence
 
 # Separator characters an author might use interchangeably inside one tag.
 _SEPARATORS = re.compile(r"[\s_\-./]+")
@@ -96,6 +97,40 @@ def normalize_tag(tag: str) -> str:
         True
     """
     return _drop_long_vowel(_fold_before_long_vowel(tag))
+
+
+def group_tags_by_fold(tags: Sequence[str]) -> list[list[str]]:
+    """Group a tag filter into one list per tag, however each is spelled (#2058).
+
+    The ``tags_normalize`` read widens a filter to every stored spelling with
+    the same :func:`normalize_tag` fold as a requested tag
+    (``services.tag_resolution.expand_tag_filter``) and hands the store a flat
+    list. Under ``tags_match='all'`` that list has to be read back as one group
+    per tag, any spelling of which satisfies it; requiring every spelling would
+    make the tolerant filter narrower than the exact one. Grouping by the same
+    fold the widening used recovers exactly those groups.
+
+    Args:
+        tags: Tag strings, in filter order.
+
+    Returns:
+        One list per distinct fold, in first-seen order, each holding that
+        fold's spellings in first-seen order without duplicates. A tag with an
+        empty fold (only punctuation) is its own group, matched exactly, so
+        such tags never merge with one another.
+
+    Example:
+        >>> group_tags_by_fold(["ログ", "デプロイ", "ろぐ"])
+        [['ログ', 'ろぐ'], ['デプロイ']]
+    """
+    groups: dict[tuple[bool, str], list[str]] = {}
+    for tag in tags:
+        folded = normalize_tag(tag)
+        key = (True, folded) if folded else (False, tag)
+        group = groups.setdefault(key, [])
+        if tag not in group:
+            group.append(tag)
+    return list(groups.values())
 
 
 def _fold_before_long_vowel(tag: str) -> str:
