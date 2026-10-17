@@ -32,7 +32,13 @@ This guide helps you make the most of this architecture by adopting effective **
 
 **Key Insight**: Layer 1 (summary) is already within the optimal chunk size range (100-500 characters ≈ 100-500 tokens) recommended by RAG best practices (2025). No automatic chunking needed!
 
-**Opt-in content chunks ([#2015](https://github.com/kagura-ai/memory-cloud/issues/2015))**: by default only Layer 1 has a dense vector, and Layer 3 reaches search only through BM25 (its first 2,000 characters). A context with `content_chunks_enabled` (set with `update_search_config`, off by default) also embeds a content of 1,500 characters or more as fixed-size chunks (1,200 characters with 200 overlap, at most 16 per memory). Recall collapses the chunk hits back to one result per memory, so a fact in the body can be found by meaning, not only by keyword. Only memories written or re-embedded after the flag is turned on get chunks. The advice below still holds: one coherent topic per memory ranks and dedupes better than one long memory, chunks or not.
+**Opt-in content chunks ([#2015](https://github.com/kagura-ai/memory-cloud/issues/2015))**: by default only Layer 1 has a dense vector, and Layer 3 reaches search only through BM25 (its first 2,000 characters). A context with `content_chunks_enabled` (set with `update_search_config`, off by default) also embeds a content of 1,500 characters or more as fixed-size chunks (1,200 characters with 200 overlap, at most 16 per memory). Recall collapses the chunk hits back to one result per memory, so a fact in the body can be found by meaning, not only by keyword. Only memories written or re-embedded after the flag is turned on get chunks; turning it off deletes the context's chunk points.
+
+**What leaves your deployment**: with the flag off, only summaries are sent to the embedding provider and the reranker. Turning it on is the first time memory **content** is sent to them: every chunk of a long memory is embedded by the context's embedding provider, and the passage that matched is sent to the reranker with the summary. On a self-hosted embedder and reranker nothing leaves the host; with a hosted provider (OpenAI, Voyage, Cohere) the body text does.
+
+Known limit in this first version: a memory found only through one of its chunks takes no part in Hebbian co-activation for that recall (there is no summary vector in the hit to compare).
+
+The advice below still holds: one coherent topic per memory ranks and dedupes better than one long memory, chunks or not.
 
 ---
 

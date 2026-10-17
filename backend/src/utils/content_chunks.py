@@ -123,6 +123,10 @@ def collapse_chunk_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     an empty embedding). ``matched_chunk_text`` / ``matched_chunk_index`` are
     set when a chunk point scored best, else ``None``. Output is sorted by
     score, highest first. Hits without any chunk point are returned unchanged.
+
+    Known PR-1 limit: a memory found only through its chunks has an empty
+    ``embedding``, so recall's Hebbian co-activation skips it (a chunk vector
+    embeds other text than the summary vectors it would be compared with).
     """
     if not any(CHUNK_OF_FIELD in (h.get("payload") or {}) for h in hits):
         return hits

@@ -1404,7 +1404,9 @@ class ContextSearchConfigUpdate(BaseModel):
         default=False,
         description="Embed long content (>= 1500 chars) as chunk vectors so dense "
         "retrieval sees the body, not only the summary. Applies to writes and "
-        "re-embeds after it is turned on",
+        "re-embeds after it is turned on; turning it off deletes the chunks. "
+        "When on, memory content (not only summaries) is sent to the embedding "
+        "and rerank providers",
     )
 
     @model_validator(mode="after")
