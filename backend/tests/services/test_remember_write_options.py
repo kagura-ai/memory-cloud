@@ -545,6 +545,18 @@ async def test_tags_normalize_never_maps_a_tag_onto_one_with_other_numbers(
 
 
 @pytest.mark.asyncio
+async def test_tags_normalize_maps_a_kana_variant_onto_the_stored_spelling(db_session, quiet_write):
+    """#2028: でぷろい is stored as the established デプロイ and says so."""
+    owner = f"o-{uuid4().hex[:6]}"
+    ws, ctx = await _scope(db_session, owner)
+    db_session.add_all([_tagged(owner, ws, ctx, ["デプロイ", "サーバ"]) for _ in range(2)])
+    await db_session.commit()
+    tags, mapped = await _remember_tags(db_session, owner, ws, ctx, ["でぷろい", "サーバー"])
+    assert tags == ["デプロイ", "サーバ"]
+    assert mapped == {"でぷろい": "デプロイ", "サーバー": "サーバ"}
+
+
+@pytest.mark.asyncio
 async def test_tags_normalize_still_maps_mechanical_variants_that_carry_numbers(
     db_session, quiet_write
 ):

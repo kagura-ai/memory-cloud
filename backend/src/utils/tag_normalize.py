@@ -122,7 +122,9 @@ _LONG_VOWEL_MARK = "\u30fc"
 _KATAKANA_LETTER_FIRST, _KATAKANA_LETTER_LAST = "\u30a1", "\u30fa"
 
 # Shortest final katakana word whose trailing mark may be dropped: below this
-# (``ゲー`` / ``ゲ``) a dropped mark cannot be told from a different word.
+# (``ゲー`` / ``ゲ``) a dropped mark cannot be told from a different word. It
+# counts characters, not morae, so a small kana counts as one: ``ヴァー``,
+# ``ジャー``, ``ティー`` and ``チャー`` are 3 characters and fold.
 _MIN_LONG_VOWEL_LEN = 3
 
 
@@ -142,8 +144,10 @@ def _drop_long_vowel(folded: str) -> str:
     spelling split. Runs after separator removal, so a separator cannot hide
     the mark (``サーバー-``) or shorten the word (``-ゲー``). The length guard
     is on the FINAL katakana word — the trailing run of katakana letters and
-    marks — not the whole tag, so ``category:ゲー`` keeps its mark while
-    ``category:サーバー`` loses it. At most one mark is ever dropped, and only
+    marks, starting at a letter — not the whole tag, so ``category:ゲー``
+    keeps its mark while ``category:サーバー`` loses it, and a leading mark
+    does not count (``ーサー`` keeps its mark). Small kana count as one
+    character (``ティー`` / ``ティ`` fold). At most one mark is ever dropped, and only
     after a letter: ``サーバーー`` is left as written, which keeps the fold
     idempotent.
 
@@ -158,12 +162,13 @@ def _drop_long_vowel(folded: str) -> str:
         return folded
     if not _is_katakana_letter(folded[-2]):
         return folded
-    run = 0
-    for char in reversed(folded):
-        if char != _LONG_VOWEL_MARK and not _is_katakana_letter(char):
-            break
-        run += 1
-    return folded[:-1] if run >= _MIN_LONG_VOWEL_LEN else folded
+    start = len(folded)
+    while start > 0 and (
+        folded[start - 1] == _LONG_VOWEL_MARK or _is_katakana_letter(folded[start - 1])
+    ):
+        start -= 1
+    word = folded[start:].lstrip(_LONG_VOWEL_MARK)  # the word starts at a letter
+    return folded[:-1] if len(word) >= _MIN_LONG_VOWEL_LEN else folded
 
 
 # Two-letter endings that are almost never an English plural, so stripping the

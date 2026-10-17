@@ -78,9 +78,11 @@ class TestNormalizeTag:
 class TestJapaneseKanaFold:
     """#2028: hiragana / katakana and a word-final long-vowel mark fold together.
 
-    Both rules are character-level, with no dictionary: hiragana maps to
-    katakana, and one trailing ``ー`` after a katakana character is dropped when
-    the tag is at least 3 characters long.
+    Both rules are character-level, with no dictionary. Hiragana (and ゝ ゞ)
+    maps to katakana right after NFKC + casefold. After separator removal, one
+    trailing ``ー`` is dropped when it directly follows a katakana LETTER
+    (ァ-ヺ) and the final katakana word — the trailing run of letters and marks,
+    starting at a letter — is at least 3 characters (small kana count as one).
     """
 
     @pytest.mark.parametrize(
@@ -131,6 +133,14 @@ class TestJapaneseKanaFold:
             # The final katakana word is what must be 3+ characters, not the tag.
             ("category:ゲー", "category:ゲー"),
             ("category:サーバー", "category:サーバ"),
+            # Small kana count as one character each: these are 3-character words.
+            ("ヴァー", "ヴァ"),
+            ("ジャー", "ジャ"),
+            ("ティー", "ティ"),
+            ("チャー", "チャ"),
+            # A leading mark is not part of the final word, which starts at a letter.
+            ("ーサー", "ーサー"),
+            ("ーサーバー", "ーサーバ"),
             # Iteration marks map with the hiragana.
             ("いすゞ", "イスヾ"),
             # A mark after a non-katakana character stays.
