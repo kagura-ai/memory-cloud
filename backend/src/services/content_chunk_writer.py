@@ -18,6 +18,15 @@ embedding was in flight while the flag was turned off writes nothing; the
 config update also purges after its commit and again when the flag is turned
 back on, so a leftover from the remaining window never becomes visible.
 
+Two overlapping re-embeds of one memory write the same chunk ids (#2041). So
+the row is also read again right before the upsert: a run whose memory was
+deleted, edited (its content changed or it was re-queued ``pending``) or
+claimed by a newer embedding run (``embedding_attempted_at`` moved) writes
+nothing — the newer write rewrites the chunks from the current content.
+``updated_at`` is not used: metadata-only changes move it without a re-embed,
+and the old chunks are already deleted, so skipping on it would leave the
+memory without chunks. (The summary point has the same race; not guarded.)
+
 A failed delete of the old chunk points is raised (the row is retried, the
 old body never survives an edit). Any other failure is fail-open: the summary
 point is already written, so it is logged (``content_chunks_failed``, error
@@ -98,6 +107,28 @@ def _is_resource_row(memory: Memory) -> bool:
     return owns_resource_point(memory)
 
 
+async def _superseded(
+    db: AsyncSession, memory_id: Any, content: str | None, claimed_at: Any
+) -> bool:
+    """Whether a newer write owns the memory's chunks now (#2041).
+
+    True when the row is gone or soft-deleted, its content is no longer what
+    this run split, it was re-queued (``pending``: an edit, picked up by the
+    embedding sweep) or a newer run claimed it (``embedding_attempted_at`` is
+    stamped on every claim). One lookup by primary key.
+    """
+    result = await db.execute(
+        select(Memory.id).where(
+            Memory.id == memory_id,
+            Memory.deleted_at.is_(None),
+            Memory.content == content,
+            Memory.embedding_status != "pending",
+            Memory.embedding_attempted_at.is_not_distinct_from(claimed_at),
+        )
+    )
+    return result.scalar_one_or_none() is None
+
+
 async def write_content_chunks(
     db: AsyncSession,
     memory: Memory,
@@ -126,6 +157,9 @@ async def write_content_chunks(
     """
     if _is_resource_row(memory):
         return 0
+    # #2041: what this run embeds, taken before anything is awaited.
+    content = memory.content
+    claimed_at = getattr(memory, "embedding_attempted_at", None)
     try:
         if chunks_enabled is None:
             chunks_enabled = await content_chunks_enabled(db, memory.context_id)
@@ -135,7 +169,7 @@ async def write_content_chunks(
     if not chunks_enabled or not chunk_points_supported():
         return 0
     await delete_chunk_points([memory.id], collection_name)
-    chunks = split_content(memory.content)
+    chunks = split_content(content)
     if not chunks:
         return 0
     points: list[tuple[str, list[float], dict[str, Any]]] = []
@@ -160,6 +194,11 @@ async def write_content_chunks(
         # the chunks were embedded: re-read it fresh, never from a cache.
         if not await content_chunks_enabled(db, memory.context_id):
             logger.info("content_chunks_skipped_flag_off", memory_id=str(memory.id))
+            return 0
+        # #2041: an edit or a newer embedding run landed while the chunks were
+        # embedded; that run writes the chunks of the current content.
+        if await _superseded(db, memory.id, content, claimed_at):
+            logger.info("content_chunks_skipped_superseded", memory_id=str(memory.id))
             return 0
         await upsert_chunk_points(
             points,

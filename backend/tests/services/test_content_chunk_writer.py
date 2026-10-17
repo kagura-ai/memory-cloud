@@ -322,6 +322,145 @@ async def test_upsert_failure_stays_fail_open():
     assert n == 0
 
 
+# --------------------------------------------------------------------- #2041
+# Two overlapping re-embeds of one memory write the same chunk ids. Right
+# before its upsert the writer re-reads the row; a run an edit or a newer
+# embedding run superseded writes nothing — the newer run writes the chunks.
+
+
+def _db_superseded_check(still_current: bool):
+    """Flag lookup on, flag re-read on, then the superseded check."""
+    flag = MagicMock()
+    flag.scalar_one_or_none.return_value = True
+    check = MagicMock()
+    check.scalar_one_or_none.return_value = uuid4() if still_current else None
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=[flag, flag, check])
+    return db
+
+
+async def _write_with(db, memory):
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()) as upsert,
+    ):
+        n = await writer.write_content_chunks(
+            db, memory, base_payload={}, embed_svc=_embed_svc(), collection_name="c"
+        )
+    return n, upsert
+
+
+async def test_a_superseded_run_writes_no_chunks():
+    import structlog
+
+    memory = _memory(LONG)
+    with structlog.testing.capture_logs() as logs:
+        n, upsert = await _write_with(_db_superseded_check(False), memory)
+    assert n == 0
+    upsert.assert_not_awaited()
+    event = next(e for e in logs if e["event"] == "content_chunks_skipped_superseded")
+    assert event["memory_id"] == str(memory.id)
+    assert event["log_level"] == "info"
+
+
+async def test_a_current_run_writes_its_chunks():
+    n, upsert = await _write_with(_db_superseded_check(True), _memory(LONG))
+    assert n == len(split_content(LONG))
+    upsert.assert_awaited_once()
+
+
+async def test_the_check_runs_after_the_embedding_and_before_the_upsert():
+    """The window an edit can land in is the embedding; check after it."""
+    order = []
+    results = list(_db_superseded_check(True).execute.side_effect)
+
+    async def _execute(stmt, *a, **k):
+        order.append("execute")
+        return results.pop(0)
+
+    db = MagicMock()
+    db.execute = AsyncMock(side_effect=_execute)
+    svc = _embed_svc()
+    svc.embed_batch.side_effect = lambda texts, *a, **k: (
+        order.append("embed") or [[0.1] for _ in texts]
+    )
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(
+            writer,
+            "upsert_chunk_points",
+            AsyncMock(side_effect=lambda *a, **k: order.append("upsert")),
+        ),
+    ):
+        await writer.write_content_chunks(
+            db, _memory(LONG), base_payload={}, embed_svc=svc, collection_name="c"
+        )
+    assert order == ["execute", "embed", "execute", "execute", "upsert"]
+
+
+async def test_the_superseded_check_compares_content_status_and_claim():
+    """One indexed lookup by id: live, same content, not re-queued, same claim."""
+    from datetime import datetime
+
+    from sqlalchemy.dialects import postgresql
+
+    claimed_at = datetime(2026, 1, 2, 3, 4, 5, 678901)
+    memory = _memory(LONG, embedding_attempted_at=claimed_at)
+    db = _db_superseded_check(True)
+    await _write_with(db, memory)
+
+    stmt = db.execute.await_args_list[2].args[0]
+    compiled = stmt.compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+    assert "memories.id = " in sql
+    assert "memories.deleted_at IS NULL" in sql
+    assert "memories.content = " in sql
+    assert "memories.embedding_status != " in sql
+    assert "memories.embedding_attempted_at IS NOT DISTINCT FROM " in sql
+    params = compiled.params
+    assert memory.id in params.values()
+    assert LONG in params.values()  # the content this run split and embedded
+    assert "pending" in params.values()
+    assert claimed_at in params.values()
+
+
+async def test_the_snapshot_is_taken_before_anything_is_awaited():
+    """A row object refreshed mid-write must not make a stale run look current."""
+    memory = _memory(LONG, embedding_attempted_at=None)
+    db = _db_superseded_check(True)
+    svc = _embed_svc()
+
+    def _edit_lands(texts, *a, **k):
+        memory.content = "edited " + LONG
+        return [[0.1] for _ in texts]
+
+    svc.embed_batch.side_effect = _edit_lands
+    with (
+        patch.object(writer, "chunk_points_supported", return_value=True),
+        patch.object(writer, "delete_chunk_points", AsyncMock()),
+        patch.object(writer, "upsert_chunk_points", AsyncMock()),
+    ):
+        await writer.write_content_chunks(
+            db, memory, base_payload={}, embed_svc=svc, collection_name="c"
+        )
+    stmt = db.execute.await_args_list[2].args[0]
+    params = stmt.compile().params
+    assert LONG in params.values()
+    assert "edited " + LONG not in params.values()
+
+
+async def test_a_failed_superseded_check_is_fail_open():
+    db = _db_superseded_check(True)
+    flag = MagicMock()
+    flag.scalar_one_or_none.return_value = True
+    db.execute = AsyncMock(side_effect=[flag, flag, RuntimeError("db")])
+    n, upsert = await _write_with(db, _memory(LONG))
+    assert n == 0
+    upsert.assert_not_awaited()
+
+
 async def test_resource_indexer_rows_are_never_chunked():
     db = _db(True)
     svc = _embed_svc()
