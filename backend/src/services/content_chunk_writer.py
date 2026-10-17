@@ -120,17 +120,21 @@ async def _superseded(
     True when the row is gone or soft-deleted, its content is no longer what
     this run split, it was re-queued (``pending``: an edit, picked up by the
     embedding sweep) or a newer run claimed it (``embedding_attempted_at`` is
-    stamped on every claim). One lookup by primary key.
+    stamped on every claim). One lookup by primary key, inside a SAVEPOINT:
+    on Postgres a failed statement aborts the whole transaction, so without it
+    a failed check would also fail the later checks (the run would delete the
+    old chunks and write nothing) and leave the caller's session unusable.
     """
-    result = await db.execute(
-        select(Memory.id).where(
-            Memory.id == memory_id,
-            Memory.deleted_at.is_(None),
-            Memory.content == content,
-            Memory.embedding_status != "pending",
-            Memory.embedding_attempted_at.is_not_distinct_from(claimed_at),
+    async with db.begin_nested():
+        result = await db.execute(
+            select(Memory.id).where(
+                Memory.id == memory_id,
+                Memory.deleted_at.is_(None),
+                Memory.content == content,
+                Memory.embedding_status != "pending",
+                Memory.embedding_attempted_at.is_not_distinct_from(claimed_at),
+            )
         )
-    )
     return result.scalar_one_or_none() is None
 
 

@@ -11,13 +11,16 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, update
+from sqlalchemy import delete, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.memory import Memory
+from services import content_chunk_writer
 from services.content_chunk_writer import _superseded
 from utils.datetime import utcnow
 
@@ -89,3 +92,17 @@ async def test_a_soft_delete_supersedes(db_session, row):
     claimed = row.embedding_attempted_at
     await _set(db_session, row, deleted_at=utcnow())
     assert await _superseded(db_session, row.id, _CONTENT, claimed) is True
+
+
+async def test_a_failed_check_leaves_the_session_usable(db_session, row):
+    # On Postgres a failed statement aborts the transaction; the check runs in
+    # a SAVEPOINT so the later checks and the caller's commit still work.
+    class _FailingSelect:
+        def where(self, *_a):
+            return text("SELECT 1 / 0")
+
+    with patch.object(content_chunk_writer, "select", lambda *_a: _FailingSelect()):
+        with pytest.raises(DBAPIError):
+            await _superseded(db_session, row.id, _CONTENT, row.embedding_attempted_at)
+    assert (await db_session.execute(text("SELECT 1"))).scalar_one() == 1
+    assert await _superseded(db_session, row.id, _CONTENT, row.embedding_attempted_at) is False
