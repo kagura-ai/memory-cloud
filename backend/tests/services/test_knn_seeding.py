@@ -15,6 +15,14 @@ from services import memory_service
 from services.memory_service import _create_knn_seed_edges
 
 
+@pytest.fixture(autouse=True)
+def _fresh_no_consumer_reported(monkeypatch):
+    """#2023: whether ``knn_seed_skip_no_consumer`` logs at INFO or DEBUG
+    depends on this process-wide set, so every test starts with it empty
+    instead of inheriting what an earlier test reported."""
+    monkeypatch.setattr(memory_service, "_KNN_SEED_NO_CONSUMER_REPORTED", set())
+
+
 def _make_memory(workspace_id=None, context_id=None, user_id="user1"):
     """Build a Memory mock with the fields _create_knn_seed_edges reads."""
     memory = MagicMock()
