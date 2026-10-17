@@ -217,3 +217,62 @@ async def test_orphan_sweep_keeps_live_chunks_and_removes_rowless_ones(
     assert await _count(qdrant, collection, live_id) == (1, 2)
     assert await _count(qdrant, collection, gone_id) == (0, 0)
     assert result.orphans >= 3
+
+
+class _Embedder:
+    async def embed_batch(self, texts, *args, **kwargs):
+        return [_CHUNK_VEC for _ in texts]
+
+
+def _row(memory_id, content: str):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        id=memory_id, user_id=_USER, workspace_id=_WS, context_id=_CTX, content=content
+    )
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_content_that_shrinks_loses_its_chunks(qdrant, collection):
+    """#2015: removed body text must not survive in chunk_text."""
+    from services.content_chunk_writer import write_content_chunks
+
+    memory_id = uuid4()
+    await _write(collection, memory_id, chunks=3)
+    assert await _count(qdrant, collection, memory_id) == (1, 3)
+
+    n = await write_content_chunks(
+        None,  # type: ignore[arg-type] — the flag is passed, no lookup
+        _row(memory_id, "now short"),
+        base_payload={"summary": "summary"},
+        embed_svc=_Embedder(),
+        collection_name=collection,
+        chunks_enabled=True,
+    )
+
+    assert n == 0
+    assert await _count(qdrant, collection, memory_id) == (1, 0)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_turning_the_flag_off_purges_and_later_edits_write_none(qdrant, collection):
+    from db.qdrant import purge_context_chunk_points
+    from services.content_chunk_writer import write_content_chunks
+
+    memory_id = uuid4()
+    await _write(collection, memory_id, chunks=2)
+
+    await purge_context_chunk_points(_WS, _CTX, collection)
+    assert await _count(qdrant, collection, memory_id) == (1, 0)
+
+    # An edit while the flag is off writes no chunks.
+    n = await write_content_chunks(
+        None,  # type: ignore[arg-type]
+        _row(memory_id, "x" * 6000),
+        base_payload={"summary": "summary"},
+        embed_svc=_Embedder(),
+        collection_name=collection,
+        chunks_enabled=False,
+    )
+    assert n == 0
+    assert await _count(qdrant, collection, memory_id) == (1, 0)
