@@ -1035,6 +1035,47 @@ class TestContentChunks:
         assert result.chunks_written == 5
 
     @pytest.mark.asyncio
+    async def test_rebuild_target_chunks_rebuilds_the_listed_memories_page_by_page(self):
+        """F8: the chunks verify found incomplete are rebuilt in the target
+        with the target model before the switch; resource rows are skipped."""
+        plan = _plan()
+        a, b, doc, c = _memory(), _memory(), _resource_memory(), _memory()
+        db = _db([_result(scalars=[a, b]), _result(scalars=[doc, c])])
+        service = MagicMock()
+        with (
+            patch.object(svc, "build_memory_point", return_value=({"p": 1}, [], [])),
+            patch.object(svc, "rebuild_content_chunks", AsyncMock(side_effect=[4, 2])) as rebuild,
+        ):
+            written = await svc.rebuild_target_chunks(
+                db, plan, [c.id, a.id, b.id, doc.id, a.id], batch_size=2, embedding_service=service
+            )
+
+        assert written == 6
+        assert db.execute.await_count == 2  # 4 distinct ids, pages of 2
+        first, second = rebuild.await_args_list
+        assert first.args == (db, [a, b])
+        assert second.args == (db, [c])  # the resource row is the indexer's
+        for call in (first, second):
+            assert call.kwargs["collection_name"] == plan.target_collection
+            assert call.kwargs["embed_svc"] is service
+            assert call.kwargs["context_id"] == plan.context_id
+        assert second.kwargs["base_payloads"] == {c.id: {"p": 1}}
+        compiled = str(db.execute.await_args_list[0].args[0].compile())
+        assert "deleted_at IS NULL" in compiled and "context_id" in compiled
+        # Each page's read transaction ends before the embedding calls.
+        assert db.commit.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_rebuild_target_chunks_with_no_ids_does_nothing(self):
+        db = _db([])
+        with patch.object(svc, "rebuild_content_chunks", AsyncMock()) as rebuild:
+            assert (
+                await svc.rebuild_target_chunks(db, _plan(), [], embedding_service=MagicMock()) == 0
+            )
+        rebuild.assert_not_awaited()
+        db.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_reembed_without_the_flag_writes_no_chunks(self):
         db = _db([_result(scalars=[_memory()]), _result(scalars=[])])
         service = MagicMock()

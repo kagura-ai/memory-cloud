@@ -18,7 +18,9 @@ Steps (each is a flag; ``--run`` chains the first three):
                   that cannot be rebuilt are listed, and do not fail the step.
                   With content_chunks_enabled (#2015) the re-embed also rebuilds
                   content chunk points; memories whose chunks are incomplete are
-                  listed on a CHUNKS_MISSING line, and do not fail the step
+                  listed on a CHUNKS_MISSING line, and do not fail the step. When
+                  a switch follows (--run, --verify --switch) their chunks are
+                  rebuilt first, and the switch is refused while any are left
     --switch      flip routing + re-queue the delta since the re-embed started
     --purge       delete the source points, in the same invocation as --switch
     --purge-source MODEL  delete MODEL's points for the context in a later run,
@@ -27,7 +29,8 @@ Steps (each is a flag; ``--run`` chains the first three):
     --rollback-to MODEL   route back to MODEL and re-queue everything written
                   since the switch (its collection must still exist)
 
-Exit codes: 0 ok · 1 error · 2 verification found missing points.
+Exit codes: 0 ok · 1 error · 2 verification found missing points (or, before a
+switch, memories whose content chunks could not be completed).
 """
 
 from __future__ import annotations
@@ -50,6 +53,7 @@ from services.embedding_migration_service import (  # noqa: E402
     list_migratable_context_ids,
     plan_context_migration,
     purge_source_points,
+    rebuild_target_chunks,
     reembed_context,
     rollback_context_embedding,
     switch_context_embedding,
@@ -84,8 +88,35 @@ def _print_unrebuildable(memory_ids: list[UUID]) -> None:
     )
 
 
-def _print_chunks(verified: VerifyResult) -> None:
-    """Content chunk points of the target (#2015); reported, never a failure."""
+_CHUNKS_REMEDY_NO_SWITCH = (
+    "Not switched yet: re-run --reembed (idempotent) or --run, which rebuilds them "
+    "before it switches. Once switched, the migration cannot rebuild them; see the runbook"
+)
+_CHUNKS_REMEDY_BEFORE_SWITCH = "Rebuilding them before the switch"
+_CHUNKS_REMEDY_STILL_MISSING = (
+    "Still incomplete after the rebuild, so the context was NOT switched. Run --run "
+    "again; if the same memories stay listed, look for content_chunks_* errors in the log"
+)
+
+
+def _print_verify(verified: VerifyResult) -> None:
+    print(
+        f"  verify: {verified.present}/{verified.expected} present, "
+        f"{verified.stale_removed} stale target point(s) removed"
+    )
+
+
+def _print_missing(verified: VerifyResult) -> None:
+    print(f"  MISSING {len(verified.missing)}: {', '.join(str(m) for m in verified.missing[:20])}")
+
+
+def _print_chunks(verified: VerifyResult, remedy: str = _CHUNKS_REMEDY_NO_SWITCH) -> None:
+    """Content chunk points of the target (#2015).
+
+    ``remedy`` ends the CHUNKS_MISSING line: what this invocation does about
+    them, or what the operator can do (a re-embed works only before the
+    switch: afterwards the plan refuses the model the context already uses).
+    """
     if verified.chunks_expected or verified.chunks_present:
         print(f"  content chunks: {verified.chunks_present}/{verified.chunks_expected} present")
     if verified.chunks_stale_removed:
@@ -101,7 +132,7 @@ def _print_chunks(verified: VerifyResult) -> None:
             f"  CHUNKS_MISSING {len(ids)} memory(ies) whose number of content chunks in the "
             "target differs from what their content splits into (recall finds them through "
             "their summary meanwhile). "
-            f"Re-run --reembed to rebuild them: {shown}{more}"
+            f"{remedy}: {shown}{more}"
         )
 
 
@@ -172,20 +203,39 @@ async def _one_context(db, context_id: UUID, args: argparse.Namespace) -> int:
             _print_unrebuildable(skipped)
 
     if args.verify or args.run:
+        switching = bool(args.switch or args.run)
         verified = await verify_context_migration(db, plan)
-        print(
-            f"  verify: {verified.present}/{verified.expected} present, "
-            f"{verified.stale_removed} stale target point(s) removed"
-        )
+        _print_verify(verified)
         # One line for both steps. Verify alone would leave out a row the
         # re-embed skipped whose point another live row keeps in the target.
         _print_unrebuildable(sorted({*skipped, *verified.unrebuildable}))
-        _print_chunks(verified)
+        rebuild_first = switching and verified.ok and bool(verified.chunks_missing)
+        _print_chunks(
+            verified,
+            _CHUNKS_REMEDY_BEFORE_SWITCH if rebuild_first else _CHUNKS_REMEDY_NO_SWITCH,
+        )
         if not verified.ok:
-            print(
-                f"  MISSING {len(verified.missing)}: {', '.join(str(m) for m in verified.missing[:20])}"
-            )
+            _print_missing(verified)
             return 2
+        if rebuild_first:
+            # After the switch a re-embed to this target is refused (the
+            # context already uses it), so chunks verify found incomplete are
+            # rebuilt now: e.g. content_chunks_enabled turned on while the
+            # re-embed ran (verify read the flag again; the plan had it off).
+            if not plan.content_chunks_on:
+                print("  content_chunks_enabled was turned on after the plan")
+            written = await rebuild_target_chunks(
+                db, plan, verified.chunks_missing, batch_size=args.batch_size
+            )
+            print(f"  rebuilt {written} content chunk points")
+            verified = await verify_context_migration(db, plan)
+            _print_verify(verified)
+            _print_chunks(verified, _CHUNKS_REMEDY_STILL_MISSING)
+            if not verified.ok:
+                _print_missing(verified)
+                return 2
+            if verified.chunks_missing:
+                return 2
 
     if args.switch or args.run:
         if requeue_since is None:

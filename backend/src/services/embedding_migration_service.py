@@ -43,7 +43,8 @@ routing — the dual-collection shape::
   the target model right after its summary points
   (``rebuild_content_chunks``), ``verify`` reports memories whose chunk
   count does not match their content (without failing ``ok``: re-running the re-embed
-  fills them) and removes the chunks of memories that are no longer live,
+  fills them, and :func:`rebuild_target_chunks` rebuilds just those before a
+  switch) and removes the chunks of memories that are no longer live,
   and ``switch`` removes those of memories forgotten since the re-embed
   started, so a context serves chunk hits right after the switch.
 """
@@ -153,8 +154,9 @@ class VerifyResult:
     longer content). Counts only: an edit that keeps the count is not seen
     here (an edit after the re-embed started is re-queued by the switch
     anyway). Reported, not part of
-    ``ok``: a re-run of the re-embed rewrites them, and after the switch the
-    memory is still found through its summary point."""
+    ``ok``: a re-run of the re-embed, or :func:`rebuild_target_chunks`,
+    rewrites them before the switch (the CLI does the latter before it
+    switches), and a memory is still found through its summary point."""
     chunks_stale_removed: int = 0
     """Memories whose target chunk points were deleted: not live any more, or
     the context has ``content_chunks_enabled`` off."""
@@ -568,6 +570,68 @@ async def reembed_context(
         unrebuildable=unrebuildable,
         chunks_written=chunks_written,
     )
+
+
+async def rebuild_target_chunks(
+    db: AsyncSession,
+    plan: MigrationPlan,
+    memory_ids: Iterable[UUID],
+    *,
+    batch_size: int = 64,
+    embedding_service: EmbeddingService | None = None,
+) -> int:
+    """Rebuild the content chunk points of ``memory_ids`` in the target (#2015).
+
+    For the memories :func:`verify_context_migration` lists in
+    ``chunks_missing``, before the switch: a flag turned on after the plan
+    was made (``reembed_context`` wrote no chunks then), or a chunk count
+    that no longer matches the content. The same writer as the re-embed
+    (``rebuild_content_chunks``: the flag read fresh, delete first, then
+    write), page by page; rows that are no longer live or own a resource
+    point are skipped. Returns the number of chunk points written.
+    """
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    ids = sorted(set(memory_ids))
+    if not ids:
+        return 0
+    service = embedding_service or EmbeddingService(
+        db, model=plan.target_model, dimensions=plan.target_dimensions
+    )
+    written = 0
+    for i in range(0, len(ids), batch_size):
+        result = await db.execute(
+            select(Memory)
+            .where(
+                Memory.id.in_(ids[i : i + batch_size]),
+                Memory.context_id == plan.context_id,
+                Memory.deleted_at.is_(None),
+            )
+            .order_by(Memory.id)
+        )
+        rows = [memory for memory in result.scalars().all() if not owns_resource_point(memory)]
+        # As in the re-embed: end the read transaction before the embedding calls.
+        db.expunge_all()
+        await db.commit()
+        if not rows:
+            continue
+        payloads = {memory.id: build_memory_point(memory)[0] for memory in rows}
+        written += await rebuild_content_chunks(
+            db,
+            rows,
+            base_payloads=payloads,
+            embed_svc=service,
+            collection_name=plan.target_collection,
+            context_id=plan.context_id,
+        )
+    logger.info(
+        "context_embedding_chunks_rebuilt",
+        context_id=str(plan.context_id),
+        target_collection=plan.target_collection,
+        memories=len(ids),
+        chunks_written=written,
+    )
+    return written
 
 
 async def verify_context_migration(
