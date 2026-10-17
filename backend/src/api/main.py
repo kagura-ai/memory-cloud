@@ -155,6 +155,13 @@ async def lifespan(app: FastAPI):
 
     app.state.dense_vector_config_task = asyncio.create_task(run_dense_vector_config_reconcile())
 
+    # #2015: every dense search / delete / payload update filters on chunk_of,
+    # so collections created before it need the payload index. Idempotent and
+    # fail-soft, once per process, in the background.
+    from db.qdrant import ensure_chunk_of_index_on_all
+
+    app.state.chunk_of_index_task = asyncio.create_task(ensure_chunk_of_index_on_all())
+
     logger.info("application_started")
 
     yield
@@ -182,6 +189,14 @@ async def lifespan(app: FastAPI):
             await dense_task
         except asyncio.CancelledError:
             logger.info("dense_vector_config_cancelled_on_shutdown")
+
+    chunk_index_task = getattr(app.state, "chunk_of_index_task", None)
+    if chunk_index_task is not None and not chunk_index_task.done():
+        chunk_index_task.cancel()
+        try:
+            await chunk_index_task
+        except asyncio.CancelledError:
+            pass  # expected: we cancelled it ourselves
 
     # Stop this worker's MCP session cleanup loop (#1980).
     cleanup_task = getattr(app.state, "mcp_session_cleanup_task", None)

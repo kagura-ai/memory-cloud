@@ -1827,6 +1827,46 @@ async def list_memory_collections() -> list[str]:
     )
 
 
+async def ensure_chunk_of_index_on_all() -> list[str]:
+    """Add the ``chunk_of`` payload index (#2015) to every ``kagura_memories*``
+    collection that lacks it; return the collections it was added to.
+
+    Every dense search, point delete and payload update now filters on
+    ``chunk_of``, so a collection created before #2015 needs the index even
+    when it never holds a chunk point. Startup pass, once per process:
+    idempotent (an existing index is left alone; Qdrant also accepts a
+    repeated create) and fail-soft — a collection that fails is logged and
+    skipped, and nothing is raised. A no-op on a non-Qdrant store.
+    """
+    if _active_store() is not None:
+        return []
+    created: list[str] = []
+    try:
+        names = await list_memory_collections()
+    except Exception as e:  # noqa: BLE001 — best-effort startup pass
+        logger.warning("chunk_of_index_pass_failed", error_class=type(e).__name__)
+        return created
+    client = get_qdrant_client()
+    for name in names:
+        try:
+            info = await client.get_collection(name)
+            existing = set(info.payload_schema.keys()) if info.payload_schema else set()
+            if CHUNK_OF_FIELD in existing:
+                continue
+            await client.create_payload_index(
+                collection_name=name,
+                field_name=CHUNK_OF_FIELD,
+                field_schema="keyword",  # type: ignore[arg-type]
+            )
+            created.append(name)
+            logger.info("created_missing_index", field=CHUNK_OF_FIELD, collection=name)
+        except Exception as e:  # noqa: BLE001 — one collection must not stop the pass
+            logger.warning(
+                "chunk_of_index_create_failed", collection=name, error_class=type(e).__name__
+            )
+    return created
+
+
 async def delete_context_points_everywhere(
     workspace_id: str, context_id: str, *, collections: list[str] | None = None
 ) -> dict[str, int]:

@@ -179,3 +179,49 @@ async def test_failed_payload_cascade_and_failed_delete_raise(mock_client):
 async def test_cascade_can_be_skipped_for_a_context_without_chunks(mock_client):
     await update_memory_payload_in_qdrant(uuid4(), {"tags": ["a"]}, cascade_chunks=False)
     assert mock_client.set_payload.await_count == 1
+
+
+async def test_chunk_of_index_pass_adds_the_index_where_missing(mock_client):
+    from db.qdrant import ensure_chunk_of_index_on_all
+
+    mock_client.get_collections.return_value = SimpleNamespace(
+        collections=[
+            SimpleNamespace(name="kagura_memories"),
+            SimpleNamespace(name="kagura_memories_x_8"),
+            SimpleNamespace(name="other"),
+        ]
+    )
+    schemas = {
+        "kagura_memories": {"tags": object()},
+        "kagura_memories_x_8": {CHUNK_OF_FIELD: object()},
+    }
+    mock_client.get_collection.side_effect = lambda name: SimpleNamespace(
+        payload_schema=schemas[name]
+    )
+
+    assert await ensure_chunk_of_index_on_all() == ["kagura_memories"]
+    kwargs = mock_client.create_payload_index.await_args.kwargs
+    assert kwargs == {
+        "collection_name": "kagura_memories",
+        "field_name": CHUNK_OF_FIELD,
+        "field_schema": "keyword",
+    }
+
+
+async def test_chunk_of_index_pass_is_fail_soft(mock_client):
+    from db.qdrant import ensure_chunk_of_index_on_all
+
+    mock_client.get_collections.return_value = SimpleNamespace(
+        collections=[
+            SimpleNamespace(name="kagura_memories"),
+            SimpleNamespace(name="kagura_memories_b"),
+        ]
+    )
+    mock_client.get_collection.side_effect = [
+        RuntimeError("down"),
+        SimpleNamespace(payload_schema={}),
+    ]
+    assert await ensure_chunk_of_index_on_all() == ["kagura_memories_b"]
+
+    mock_client.get_collections.side_effect = RuntimeError("down")
+    assert await ensure_chunk_of_index_on_all() == []
