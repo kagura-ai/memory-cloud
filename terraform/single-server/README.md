@@ -473,6 +473,15 @@ docker compose -f docker-compose.prod.yml --env-file .env.prod \
 docker inspect -f '{{json .HostConfig.LogConfig}}' kagura-caddy   # max-size 50m, max-file 3
 ```
 
+**Configurable cap (#2025).** Set `API_LOG_MAX_SIZE` / `API_LOG_MAX_FILE` in
+`.env.prod` to change the API colors' cap, and `LOG_MAX_SIZE` / `LOG_MAX_FILE`
+for every other service; unset, all four default to `50m` / `3`. A new value
+applies only when a container is recreated: the next `deploy.sh` run recreates
+the incoming API color only (the other one follows with the next deploy), and
+`caddy` / `web` need the recreate above. A stopped standby color keeps its log
+files, so count both colors' API logs when planning the disk. Details:
+[`docs/deployment.md` → Changing the cap](../../docs/deployment.md#changing-the-cap--issue-2025).
+
 Recreating a container also discards its old, possibly oversized, log file.
 The data services (`postgres` / `qdrant` / `redis`) restart when recreated — do
 those in a maintenance window, and upgrade a pre-v0.87.0 Qdrant volume first

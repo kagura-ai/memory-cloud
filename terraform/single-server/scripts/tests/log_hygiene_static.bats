@@ -4,7 +4,9 @@
 # template (#1591):
 #
 #   1. ROTATION — every service a compose file defines carries the json-file
-#      50m x 3 logging block. Docker's default json-file driver has no size
+#      logging block, 50m x 3 unless the operator overrides it (#2025:
+#      LOG_MAX_SIZE / LOG_MAX_FILE, and API_LOG_MAX_SIZE / API_LOG_MAX_FILE for
+#      the API colors). Docker's default json-file driver has no size
 #      limit, and Caddy logs every request, so on a host that was not
 #      provisioned by startup.sh (which writes a daemon.json) an access log
 #      grows until the disk is full. The compose files must not depend on host
@@ -53,14 +55,14 @@ top_level_block() {   # $1 file, $2 key
 }
 
 # Print "<service> <verdict>" for every entry under `services:`.
-#   ok      — defines the service and carries `logging: *default-logging`,
-#             directly or through `<<: *api-common`
+#   ok      — defines the service and carries `logging: *default-logging`
+#             directly, or `logging: *api-logging` through `<<: *api-common`
 #   MISSING — defines the service (image / build / api-common) without it
 #   patch   — only patches a service defined in another file (no image, no
 #             build, no api-common): exempt, the base definition carries it
 service_logging_report() {   # $1 file
     local common_has_logging=0
-    if top_level_block "$1" x-api-common | grep -qE '^  logging: \*default-logging[[:space:]]*$'; then
+    if top_level_block "$1" x-api-common | grep -qE '^  logging: \*api-logging[[:space:]]*$'; then
         common_has_logging=1
     fi
     awk -v common="$common_has_logging" '
@@ -104,14 +106,44 @@ default_log_block() {   # $1 file
 # 1. Rotation
 # ---------------------------------------------------------------------------
 
-@test "rotation: each compose file anchors json-file / 50m / 3 as x-logging" {
+@test "rotation: each compose file anchors json-file with the LOG_MAX_* knobs (default 50m / 3) as x-logging" {
     for f in "${COMPOSE_FILES[@]}"; do
         grep -qE '^x-logging: &default-logging[[:space:]]*$' "$PROJECT_DIR/$f" \
             || { echo "$f: no top-level 'x-logging: &default-logging'"; return 1; }
         block="$(top_level_block "$PROJECT_DIR/$f" x-logging)"
         [[ "$block" == *'driver: json-file'* ]] || { echo "$f: driver is not json-file"; return 1; }
-        [[ "$block" == *'max-size: "50m"'* ]]   || { echo "$f: max-size is not \"50m\""; return 1; }
-        [[ "$block" == *'max-file: "3"'* ]]     || { echo "$f: max-file is not \"3\""; return 1; }
+        # Quoted, so the default renders as the same string as before (#2025).
+        # shellcheck disable=SC2016  # literal ${VAR:-default}: the file text
+        [[ "$block" == *'max-size: "${LOG_MAX_SIZE:-50m}"'* ]] \
+            || { echo "$f: max-size is not the quoted LOG_MAX_SIZE form"; return 1; }
+        # shellcheck disable=SC2016
+        [[ "$block" == *'max-file: "${LOG_MAX_FILE:-3}"'* ]] \
+            || { echo "$f: max-file is not the quoted LOG_MAX_FILE form"; return 1; }
+    done
+}
+
+@test "rotation: the files that define the API colors anchor their own x-api-logging (#2025)" {
+    for f in docker-compose.app.yml docker-compose.prod.yml; do
+        grep -qE '^x-api-logging: &api-logging[[:space:]]*$' "$PROJECT_DIR/$f" \
+            || { echo "$f: no top-level 'x-api-logging: &api-logging'"; return 1; }
+        block="$(top_level_block "$PROJECT_DIR/$f" x-api-logging)"
+        [[ "$block" == *'driver: json-file'* ]] || { echo "$f: driver is not json-file"; return 1; }
+        # shellcheck disable=SC2016  # literal ${VAR:-default}: the file text
+        [[ "$block" == *'max-size: "${API_LOG_MAX_SIZE:-50m}"'* ]] \
+            || { echo "$f: max-size is not the quoted API_LOG_MAX_SIZE form"; return 1; }
+        # shellcheck disable=SC2016
+        [[ "$block" == *'max-file: "${API_LOG_MAX_FILE:-3}"'* ]] \
+            || { echo "$f: max-file is not the quoted API_LOG_MAX_FILE form"; return 1; }
+        # api-blue / api-green get it through x-api-common, and nothing else does.
+        top_level_block "$PROJECT_DIR/$f" x-api-common | grep -qE '^  logging: \*api-logging[[:space:]]*$' \
+            || { echo "$f: x-api-common does not carry 'logging: *api-logging'"; return 1; }
+        run grep -cE '^    logging: \*api-logging' "$PROJECT_DIR/$f"
+        [ "$output" -eq 0 ] || { echo "$f: a non-API service uses *api-logging"; return 1; }
+    done
+    # The other files define no API color (ollama.yml only patches them).
+    for f in docker-compose.data.yml docker-compose.ollama.yml; do
+        run grep -c 'api-logging' "$PROJECT_DIR/$f"
+        [ "$output" -eq 0 ] || { echo "$f: unexpected api-logging"; return 1; }
     done
 }
 
@@ -150,10 +182,10 @@ default_log_block() {   # $1 file
     [ "$output" -eq 0 ]
 }
 
-@test "rotation: every documented composition renders 50m x 3 on every service" {
-    docker compose version > /dev/null 2>&1 || skip "docker compose not available"
-
-    work="$BATS_TEST_TMPDIR/render"   # bats removes it, also on a failed run
+# Copy the compose files into a scratch tree with a test .env.prod; extra
+# arguments are appended to it as KEY=value lines. Prints the work dir.
+render_tree() {   # [KEY=value ...]
+    local work="$BATS_TEST_TMPDIR/render"   # bats removes it, also on a failed run
     mkdir -p "$work/single-server" "$work/backend" "$work/frontend"
     cp "$PROJECT_DIR"/docker-compose.*.yml "$work/single-server/"
     cat > "$work/single-server/.env.prod" <<'ENVEOF'
@@ -163,6 +195,55 @@ KAGURA_DOMAIN=memory.example.com
 NEXT_PUBLIC_ENABLE_GRAPH_VIZ=
 NEXT_PUBLIC_PLAN_DISPLAY_NAMES=
 ENVEOF
+    [ "$#" -eq 0 ] || printf '%s\n' "$@" >> "$work/single-server/.env.prod"
+    echo "$work"
+}
+
+# `docker compose config --format json` of one composition, read with
+# --env-file .env.prod as deploy.sh does. Scrubbed environment, as in the
+# parity suite: an operator's exported secrets — or rotation knobs — must
+# neither steer the render nor reach the test output.
+render_composition() {   # $1 work dir, $2 compose -f arguments
+    # shellcheck disable=SC2086  # $2 is a deliberate word-split arg list
+    (cd "$1/single-server" \
+        && env -u QDRANT_API_KEY -u DB_PASSWORD -u KAGURA_DOMAIN \
+               -u POSTGRES_HOST -u QDRANT_HOST -u REDIS_HOST \
+               -u REDIS_PASSWORD -u REDIS_URL \
+               -u LOG_MAX_SIZE -u LOG_MAX_FILE -u API_LOG_MAX_SIZE -u API_LOG_MAX_FILE \
+               -u COMPOSE_PROJECT_NAME -u COMPOSE_FILE \
+               DATA_BIND_ADDR=192.0.2.10 \
+            docker compose -p single-server $2 --env-file .env.prod \
+                config --format json)
+}
+
+# "<service count> <services whose logging is off, or OK>" for a rendered
+# composition: api-* services are held to $2 / $3, every other one to $4 / $5.
+logging_verdict() {   # $1 render.json, $2 api max-size, $3 api max-file, $4 max-size, $5 max-file
+    python3 - "$@" <<'PYEOF'
+import json, sys
+
+path, api_size, api_files, size, files = sys.argv[1:6]
+
+
+def want(max_size, max_file):
+    return {"driver": "json-file", "options": {"max-size": max_size, "max-file": max_file}}
+
+
+services = json.load(open(path))["services"]
+bad = sorted(
+    name
+    for name, svc in services.items()
+    if svc.get("logging")
+    != (want(api_size, api_files) if name.startswith("api-") else want(size, files))
+)
+print(f"{len(services)} {' '.join(bad) if bad else 'OK'}")
+PYEOF
+}
+
+@test "rotation: every documented composition renders 50m x 3 on every service" {
+    docker compose version > /dev/null 2>&1 || skip "docker compose not available"
+
+    work="$(render_tree)"
 
     # "<expected service count>|<compose -f arguments>" — the compositions the
     # README documents, plus the split pair the parity suite renders.
@@ -178,34 +259,57 @@ ENVEOF
     for entry in "${compositions[@]}"; do
         want_n="${entry%%|*}"
         files="${entry#*|}"
-        # Scrubbed environment, as in the parity suite: an operator's exported
-        # secrets must neither steer the render nor reach the test output.
-        # shellcheck disable=SC2086  # $files is a deliberate word-split arg list
-        if ! (cd "$work/single-server" \
-                && env -u QDRANT_API_KEY -u DB_PASSWORD -u KAGURA_DOMAIN \
-                       -u POSTGRES_HOST -u QDRANT_HOST -u REDIS_HOST \
-                       -u REDIS_PASSWORD -u REDIS_URL \
-                       -u COMPOSE_PROJECT_NAME -u COMPOSE_FILE \
-                       DATA_BIND_ADDR=192.0.2.10 \
-                    docker compose -p single-server $files --env-file .env.prod \
-                        config --format json) > "$work/render.json" 2> "$work/render.err"; then
+        if ! render_composition "$work" "$files" > "$work/render.json" 2> "$work/render.err"; then
             echo "render failed: $files"; cat "$work/render.err"
             failed=1
             continue
         fi
-        verdict="$(python3 - "$work/render.json" <<'PYEOF'
-import json, sys
-
-want = {"driver": "json-file", "options": {"max-size": "50m", "max-file": "3"}}
-services = json.load(open(sys.argv[1]))["services"]
-bad = sorted(name for name, svc in services.items() if svc.get("logging") != want)
-print(f"{len(services)} {' '.join(bad) if bad else 'OK'}")
-PYEOF
-)"
+        # Unset knobs render exactly the pre-#2025 block, as strings, everywhere.
+        verdict="$(logging_verdict "$work/render.json" 50m 3 50m 3)"
         if [ "$verdict" != "$want_n OK" ]; then
             echo "$files -> '$verdict' (want '$want_n OK')"
             failed=1
         fi
+    done
+    [ "$failed" -eq 0 ]
+}
+
+@test "rotation: API_LOG_* and LOG_* overrides in .env.prod render independently (#2025)" {
+    docker compose version > /dev/null 2>&1 || skip "docker compose not available"
+
+    # "<expected service count>|<compose -f arguments>" — every composition
+    # that runs the API colors next to other services.
+    compositions=(
+        "4|-f docker-compose.app.yml"
+        "7|-f docker-compose.prod.yml"
+        "7|-f docker-compose.data.yml -f docker-compose.app.yml"
+        "8|-f docker-compose.prod.yml -f docker-compose.ollama.yml"
+    )
+    # "<.env.prod lines>|<api max-size> <api max-file> <max-size> <max-file>":
+    # each pair of knobs moves its own services and leaves the others at 50m x 3.
+    cases=(
+        "API_LOG_MAX_SIZE=200m API_LOG_MAX_FILE=7|200m 7 50m 3"
+        "LOG_MAX_SIZE=20m LOG_MAX_FILE=5|50m 3 20m 5"
+    )
+    failed=0
+    for case in "${cases[@]}"; do
+        read -r -a env_lines <<< "${case%%|*}"
+        read -r -a want <<< "${case#*|}"
+        work="$(render_tree "${env_lines[@]}")"
+        for entry in "${compositions[@]}"; do
+            want_n="${entry%%|*}"
+            files="${entry#*|}"
+            if ! render_composition "$work" "$files" > "$work/render.json" 2> "$work/render.err"; then
+                echo "render failed: $files (${case%%|*})"; cat "$work/render.err"
+                failed=1
+                continue
+            fi
+            verdict="$(logging_verdict "$work/render.json" "${want[@]}")"
+            if [ "$verdict" != "$want_n OK" ]; then
+                echo "$files with ${case%%|*} -> '$verdict' (want '$want_n OK')"
+                failed=1
+            fi
+        done
     done
     [ "$failed" -eq 0 ]
 }

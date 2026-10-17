@@ -113,13 +113,53 @@ logging:
 For Caddy that is still enough access log for incident triage; ship the logs
 elsewhere if you need longer retention.
 
+#### Changing the cap — Issue #2025
+
+The two values are read from `.env.prod` (the `--env-file` `deploy.sh` always
+passes), with the API colors on their own pair so that a longer API retention
+does not grow the web, proxy and data-tier logs. Unset, every service renders
+exactly the block above.
+
+| Variable | Default | Applies to |
+|---|---|---|
+| `API_LOG_MAX_SIZE` | `50m` | `api-blue` / `api-green`: size at which the log file rotates |
+| `API_LOG_MAX_FILE` | `3` | `api-blue` / `api-green`: rotated files kept |
+| `LOG_MAX_SIZE` | `50m` | every other service (`web`, `caddy`, `postgres`, `qdrant`, `redis`, `ollama`) |
+| `LOG_MAX_FILE` | `3` | the same services |
+
+The values use the `json-file` driver's syntax: a size with a `k` / `m` / `g`
+unit, and a whole number of files. The API writes one line per request plus the
+structured events operators tally (scheduled-job results, `supersede_verify_*`),
+so its logs are the first to rotate out; raising `API_LOG_MAX_*` keeps them
+longer. Setting `log-opts` in `/etc/docker/daemon.json` does not change any of
+this: a compose `logging:` block overrides the daemon default.
+
+- **Takes effect only when a container is recreated** — `docker compose
+  restart` keeps the old options, as described below.
+- **Blue-green recreates only the incoming color.** The next `deploy.sh` run
+  applies `API_LOG_MAX_*` to the color it deploys to; the other color follows
+  with the deploy after that. `caddy` and `web` (and the data tier) pick up
+  `LOG_MAX_*` only through their own recreate (the commands below).
+- **Plan the disk for both colors.** A stopped standby color keeps its log
+  files until it is recreated, so the API takes up to
+  `2 × API_LOG_MAX_SIZE × API_LOG_MAX_FILE`, plus
+  `LOG_MAX_SIZE × LOG_MAX_FILE` for each other service.
+- **Split host:** the app VM's `docker-compose.app.yml` reads all four; the
+  data VM's `docker-compose.data.yml` reads `LOG_MAX_*` from the env file passed
+  there, and its copy of the file is updated by hand (as for
+  [Issue #1980](#rolling-it-out)).
+
+Check a recreated container with
+`docker inspect -f '{{json .HostConfig.LogConfig}}' kagura-api-blue` (or
+`kagura-api-green`, `kagura-caddy`, ...).
+
 **Applying it to a running stack.** `logging` options are fixed when a container
 is *created* — `docker compose restart` does not apply them. After updating to a
 release that carries the block:
 
 | Service | How it picks the option up |
 |---|---|
-| `api-blue` / `api-green` | `deploy.sh` recreates the color it deploys to on every run — nothing to do (the other color follows with the next deploy). |
+| `api-blue` / `api-green` | `deploy.sh` recreates the color it deploys to on every run — nothing to do (the other color follows with the next deploy). The same holds for a changed `API_LOG_MAX_*`. |
 | `web` | Recreated by `deploy.sh --web`, or once by hand (below). |
 | `caddy` | **Never recreated by `deploy.sh`** (it only restarts Caddy) — recreate it once by hand (below). |
 | `postgres` / `qdrant` / `redis` (and `ollama`) | Recreating them **restarts the database**, so do it in a maintenance window. Their logs are small; it can wait for the next planned one. Recreating `qdrant` also moves it to the image the compose file pins: a volume from before v0.87.0 must first be upgraded one minor at a time ([Qdrant upgrade runbook](ops/qdrant-upgrade-runbook.md)), or Qdrant crash-loops. |
