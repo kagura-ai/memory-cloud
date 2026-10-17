@@ -484,19 +484,14 @@ class TestJudgeLedger:
 
     @staticmethod
     def _ledger():
-        """A fake isolated session + writer; returns (session, writer_cls)."""
-        from contextlib import asynccontextmanager
-
+        """A fake isolated session + writer: (session, writer_cls, factory)."""
         session = MagicMock()
         session.commit = AsyncMock()
-
-        @asynccontextmanager
-        async def _session(_db):
-            yield session
-
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=False)
         writer = MagicMock()
         writer.return_value.record = AsyncMock(return_value=MagicMock())
-        return session, writer, _session
+        return session, writer, MagicMock(return_value=session)
 
     async def _judge(
         self, llm, *, session_cm, writer, workspace_id="11111111-1111-1111-1111-111111111111"
@@ -504,7 +499,7 @@ class TestJudgeLedger:
         with (
             patch("services.llm_service.LLMService", return_value=llm),
             patch("db.redis.incrby_counter", new=AsyncMock(return_value=1)),
-            patch.object(sv, "_ledger_session", session_cm),
+            patch.object(sv, "isolated_session", session_cm),
             patch("services.llm_call_log_writer.LLMCallLogWriter", writer),
         ):
             return await sv.judge_pair(
@@ -599,12 +594,7 @@ class TestJudgeLedger:
         session.commit.assert_not_called()
 
         # Even a raising ledger (session unavailable) leaves the verdict intact.
-        from contextlib import asynccontextmanager
-
-        @asynccontextmanager
-        async def _broken(_db):
-            raise ConnectionError("db down")
-            yield  # pragma: no cover
+        _broken = MagicMock(side_effect=ConnectionError("db down"))
 
         with patch("services.supersede_verify.logger") as log:
             record = await self._judge(llm, session_cm=_broken, writer=writer)

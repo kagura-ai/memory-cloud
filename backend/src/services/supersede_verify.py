@@ -58,10 +58,9 @@ from __future__ import annotations
 
 import hashlib
 import os
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
+from db.base import isolated_session
 from services.sleep.judge_lane import judge_platform_only
 from services.sleep.prompts import INJECTION_RESISTANCE_DIRECTIVE, wrap_untrusted_content
 from services.supersede_dismissal import RESURFACE_SIMILARITY_DELTA
@@ -362,29 +361,6 @@ def counter_key(workspace_id: str) -> str:
 LEDGER_CALLER = "supersede_verify"
 
 
-@asynccontextmanager
-async def _ledger_session(db: AsyncSession) -> AsyncIterator[AsyncSession]:
-    """A fresh session on ``db``'s engine for the ledger write (#1985 pattern).
-
-    The ledger row must land whatever the ingest path does next (it may return
-    without committing), and a failed ledger write must not leave the
-    embedding task's session needing a rollback (which would expire the
-    memory it is still working on).
-    """
-    from sqlalchemy.ext.asyncio import AsyncEngine
-    from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
-
-    bind = getattr(db, "bind", None)
-    if isinstance(bind, AsyncEngine):
-        session = _AsyncSession(bind=bind, expire_on_commit=False)
-    else:
-        from db.base import _get_session_factory
-
-        session = _get_session_factory()()
-    async with session:
-        yield session
-
-
 async def _record_judge_call(
     db: AsyncSession,
     response: Any,
@@ -400,11 +376,18 @@ async def _record_judge_call(
     Fail-open like the recall ledger: a lost row is an observability gap, not
     a reason to drop the verdict. ``call_metadata`` carries the verdict only,
     never memory text.
+
+    The row goes through ``isolated_session`` (the #1985 recipe): it must land
+    whatever the ingest path does next (it may return without committing), and
+    a failed ledger write must not leave the embedding task's session needing a
+    rollback, which would expire the memory it is still working on. The cost
+    is a second pooled connection held beside the task's own for the length
+    of this short write.
     """
     from services.llm_call_log_writer import LLMCallLogWriter
 
     try:
-        async with _ledger_session(db) as session:
+        async with isolated_session(db) as session:
             row = await LLMCallLogWriter(session).record(
                 caller=LEDGER_CALLER,
                 call_type="completion",

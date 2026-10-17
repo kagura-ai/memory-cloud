@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import ColumnElement, and_, exists, func, or_, select, tuple_
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.retention import should_promote_to_persistent
 from db.graph_learning_lock import try_lock_graph_learning
@@ -4433,13 +4433,11 @@ class MemoryService:
 
         Post-commit statistics writes use it so that their row locks and any
         failure stay out of the request transaction. The caller commits.
+        The recipe lives in ``db.base.isolated_session``.
         """
-        bind = getattr(self.db, "bind", None)
-        if isinstance(bind, AsyncEngine):
-            return AsyncSession(bind=bind, expire_on_commit=False)
-        from db.base import _get_session_factory
+        from db.base import isolated_session
 
-        return _get_session_factory()()
+        return isolated_session(self.db)
 
     @staticmethod
     def _promotion_due(memory: Memory, stats: AccessStats) -> bool:
