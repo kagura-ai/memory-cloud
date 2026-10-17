@@ -4,6 +4,53 @@ Release notes are published on [GitHub Releases](https://github.com/kagura-ai/me
 which is the canonical source for the complete release history. This file highlights the current
 release train and preserves selected historical development notes.
 
+## [v0.110.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.110.0) — 2026-10-17
+
+Retrieval that can see content and a reranker that cannot quietly make recall worse: opt-in content chunk vectors for dense retrieval, the Qwen3-Reranker prompt template on the vLLM and Ollama paths with a fail-safe for scores that carry no signal, the supersede judge's calls in the cost ledger, and Japanese tag variants folded together.
+
+### Added
+- **Opt-in content chunk vectors** ([#2015](https://github.com/kagura-ai/memory-cloud/issues/2015), PR 1 of 2): with the new per-context search setting `content_chunks_enabled` (default `false`), dense retrieval can see a memory's `content`, not only its summary.
+  - How it works: a memory whose `content` is at least 1,500 characters also gets up to 16 chunk vectors (1,200 characters each, overlapping by 200) in the same Qdrant collection. A recall hit on a chunk counts for its memory, and the reranker sees the matched passage.
+  - Data handling: chunks are removed with their memory on every delete path. Turning the setting off removes the context's chunks. Editing a memory rebuilds its chunks.
+  - Privacy: turning it on sends memory **content** to the embedding provider, and to the rerank provider when reranking is on. Only the context owner or a workspace owner or admin can change the setting.
+  - Defaults and backfill follow in v0.111.0, after eval numbers.
+- **Supersede judge calls in the cost ledger** ([#2019](https://github.com/kagura-ai/memory-cloud/issues/2019)): every call by the #2016 judge that spends tokens now writes a `llm_call_log` row with tokens, the cost at write time, `paid_by`, the verdict and the outcome. Verdict and token tallies survive log rotation. The admin and workspace cost dashboards show cost per source. Sleep keeps its per-run totals in `sleep_reports`.
+- **Qwen3-Reranker prompt template** ([#2020](https://github.com/kagura-ai/memory-cloud/issues/2020)): `VLLMReranker` (`RERANK_BASE_URL`) now formats the query and documents with the template the model was trained on. Without it, self-hosted rerank on the eval slice scored recall@5 0.101 against 0.839 with no rerank; with it, 0.874.
+  - New settings: `RERANK_PROMPT_FORMAT=auto|qwen3|raw` (default `auto`) and `RERANK_INSTRUCTION`.
+  - Prompt-injection fix: Qwen3 control tokens in memory text are neutralised, so a stored memory can no longer write its own "yes" verdict.
+  - At startup each API process runs one calibration check with a relevant and an irrelevant document, and logs `rerank_model_uncalibrated` if they don't separate.
+- **Japanese tag variants fold together** ([#2028](https://github.com/kagura-ai/memory-cloud/issues/2028)): `normalize_tag` now maps hiragana to katakana (`ろぐ` = `ログ`) and drops one word-final `ー` from a katakana word of 3 or more characters (`サーバー` = `サーバ`). This applies to `tags_normalize` on write, to recall filters, and to the `tag_near_duplicate` lint. Kanji and their readings, okurigana and a long-vowel mark inside a word stay apart.
+
+### Changed
+- **Container log rotation is configurable** ([#2025](https://github.com/kagura-ai/memory-cloud/issues/2025)): `API_LOG_MAX_SIZE` / `API_LOG_MAX_FILE` set the API colors' cap, and `LOG_MAX_SIZE` / `LOG_MAX_FILE` set every other service's. The defaults stay 50m × 3. `deploy.sh` checks the values before it touches a container. The per-request `MCP auth success` lines are now DEBUG; auth failures still log at WARNING.
+- **One recall row shape for recall and agent bootstrap** ([#2013](https://github.com/kagura-ai/memory-cloud/issues/2013)): `get_agent_bootstrap` (MCP and REST) builds its recall rows with the `recall` projection (`verbosity="full"`). See Migration.
+- **`knn_seed_skip_no_consumer` is visible at INFO** ([#2023](https://github.com/kagura-ai/memory-cloud/issues/2023)): it logs once per embedder per process at INFO, then at DEBUG. `docs/deployment.md` lists every supersede and k-NN seeding log event and its level.
+
+### Fixed
+- **Ollama rerank no longer zeroes every score** ([#2033](https://github.com/kagura-ai/memory-cloud/issues/2033)): the Ollama path asked Qwen3 rerankers for a number with a generic prompt and got `0` for almost every real memory, which overwrote every `hybrid_score`. It now scores Qwen3 rerankers by the yes/no probability through `/api/generate` (needs Ollama 0.12.11 or later). A guard shared by every provider fails open when scores are all zero or mostly unscored, and keeps the hybrid order when the scores are identical.
+- **`supersede_candidate` stores SQL NULL** ([#2022](https://github.com/kagura-ai/memory-cloud/issues/2022)): "no candidate" was stored as JSON `null`, so `WHERE supersede_candidate IS NULL` counted almost nothing. Migration `e99_2022_supersede_cand_null` rewrites existing rows in batches.
+- **A supersede candidate from a connector row no longer reaches a trusted recall** ([#2013](https://github.com/kagura-ai/memory-cloud/issues/2013)): under `trust_tier=trusted`, a connector-sourced memory could appear through another row's `supersede_candidate`.
+- **`dedupe="off"` is documented as permanent** ([#2024](https://github.com/kagura-ai/memory-cloud/issues/2024)): the guide and the tool description now say up front that `off` permanently opts that memory out of supersede suggestions.
+
+### Migration
+- **Bootstrap recall rows** (`get_agent_bootstrap` MCP tool, `POST /api/v1/agents/{id}/bootstrap`), [#2013](https://github.com/kagura-ai/memory-cloud/issues/2013):
+  - An empty `context_summary`, `tags`, `superseded_by` or `contradicts` is now **absent** instead of `null` / `[]`.
+  - `score` is rounded to 4 decimals.
+  - Rows never carry `supersede_candidate`.
+  - Read these keys with a default, e.g. `row.get("tags", [])`.
+- **Self-hosted rerank** ([#2020](https://github.com/kagura-ai/memory-cloud/issues/2020), [#2033](https://github.com/kagura-ai/memory-cloud/issues/2033)):
+  - If your vLLM server already applies a template with `--chat-template`, set `RERANK_PROMPT_FORMAT=raw`. Otherwise the template is applied twice.
+  - The Ollama path's `qwen3` scoring needs Ollama 0.12.11 or later. The `0.6B` Qwen3-Reranker GGUF does not work on Ollama; use the 8B model or `RERANK_BASE_URL`.
+
+### Notes
+- Migrations, in order:
+  1. `e99_2022_supersede_cand_null`: data only, batched and resumable.
+  2. `f00_2019_llm_log_supersede`: widens the `llm_call_log` caller CHECK without downtime.
+  3. `f01_2015_content_chunks`: adds a NOT NULL bool column with a server default.
+- New optional environment variables: `RERANK_PROMPT_FORMAT`, `RERANK_INSTRUCTION`, `API_LOG_MAX_SIZE`, `API_LOG_MAX_FILE`, `LOG_MAX_SIZE`, `LOG_MAX_FILE`.
+- New log rotation values take effect only when a container is recreated. A reboot recreates every service whose configuration changed.
+- With content chunks off (the default), recall is unchanged. At startup, each process adds the `chunk_of` payload index to existing memory collections in the background.
+
 ## [v0.109.0](https://github.com/kagura-ai/memory-cloud/releases/tag/v0.109.0) — 2026-10-17
 
 Supersede suggestions a client can trust: a deployment can put each cosine candidate to the Sleep judge before it surfaces, and the suggestion detection has its own switch instead of riding on the k-NN seed flag.
