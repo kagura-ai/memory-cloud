@@ -76,7 +76,7 @@ Manual: guide(["remember"]).""",
                     "dedupe": {
                         "type": "string",
                         "enum": ["suggest", "check", "off"],
-                        "description": "suggest (default): write, flag a near-duplicate on a later recall. check: ask first — a live memory scoring >= 0.85 comes back as {status: 'duplicate_candidate', candidate} and nothing is written. off: write, never suggest for this memory (permanent).",
+                        "description": "suggest (default): write, flag a near-duplicate on a later recall. check: ask first — a live memory scoring >= 0.85 comes back as {status: 'duplicate_candidate', candidate} and nothing is written. off: write, never suggest for this memory (permanent). Manual: guide(['remember']).",
                     },
                     "summary": {
                         "type": "string",
@@ -123,7 +123,7 @@ Manual: guide(["remember"]).""",
                     },
                     "source_uri": {
                         "type": "string",
-                        "description": "Origin URI, max 2048 chars (e.g. 'file:///path/note.md', 'vault://my-vault/note', 'https://example.com/page').",
+                        "description": "Origin URI, max 2048 chars (e.g. 'file:///path/note.md', 'vault://my-vault/note').",
                     },
                     "source_type": {
                         "type": "string",
