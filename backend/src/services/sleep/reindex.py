@@ -17,7 +17,6 @@ from models.memory import Memory
 from services.content_chunk_writer import content_chunks_enabled, write_content_chunks
 from services.embedding_service import EmbeddingService
 from services.sleep.reporter import PhaseResult
-from utils.datetime import to_utc_iso
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -61,6 +60,10 @@ class ReindexPhase:
         Returns:
             PhaseResult with reindex statistics
         """
+        # Call-time import: memory_service is a heavy module and this phase
+        # only needs its point builder.
+        from services.memory_service import build_memory_point
+
         result = PhaseResult(phase_name="reindex")
 
         if not changed_memory_ids:
@@ -116,27 +119,11 @@ class ReindexPhase:
                     result.embedding_provider = self.embedding_service.provider
                     result.embedding_model = self.embedding_service.model
 
-                # Payload aligned with memory_service.py canonical format
-                payload = {
-                    "user_id": user_id,
-                    "summary": memory.summary,
-                    "context_summary": memory.context_summary or "",
-                    "type": memory.type,
-                    "importance": memory.importance,
-                    "scope": memory.scope,
-                    "tags": memory.tags or [],
-                    "created_at": to_utc_iso(memory.created_at),
-                    "updated_at": to_utc_iso(memory.updated_at),
-                }
-                # WHERE axis (#1332): the upsert replaces the WHOLE payload —
-                # without carrying the geo field a reindexed located memory
-                # would vanish from filters.near (must semantics). The e69
-                # generated columns are the single validated source.
-                if memory.location_lat is not None and memory.location_lon is not None:
-                    payload["location"] = {
-                        "lat": memory.location_lat,
-                        "lon": memory.location_lon,
-                    }
+                # #2053: the upsert replaces the WHOLE point, so it must be
+                # the point the normal write path builds — BM25 sparse
+                # vector, tokenized/normalized payload and the geo field
+                # (#1332) included. Only the dense vector is built here.
+                payload, sparse_indices, sparse_values = build_memory_point(memory)
 
                 await add_memory_to_qdrant(
                     user_id=user_id,
@@ -145,6 +132,8 @@ class ReindexPhase:
                     payload=payload,
                     workspace_id=workspace_id,
                     context_id=context_id,
+                    sparse_indices=sparse_indices,
+                    sparse_values=sparse_values,
                     collection_name=self.collection_name,
                 )
                 # #2015: the summary point was rewritten from the current

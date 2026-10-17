@@ -40,6 +40,13 @@ def _make_memory(memory_id=None, summary="test summary", importance=0.7):
     m.updated_at = MagicMock()
     m.updated_at.isoformat.return_value = "2026-01-02T00:00:00"
     m.deleted_at = None
+    # #2053: build_memory_point reads these as real values.
+    m.user_id = "user-1"
+    m.content = "test content body"
+    m.client = "claude-code"
+    m.context = None
+    m.location_lat = None
+    m.location_lon = None
     return m
 
 
@@ -186,3 +193,47 @@ class TestReindexContentChunks:
         assert kwargs["chunks_enabled"] is True
         assert kwargs["embed_svc"] is reindex_phase.embedding_service
         assert kwargs["base_payload"]["summary"] == "test summary"
+
+
+class TestReindexPointShape:
+    """#2053: the reindexed point is the same point the normal write path builds."""
+
+    @pytest.mark.asyncio
+    @patch("services.sleep.reindex.add_memory_to_qdrant", new_callable=AsyncMock)
+    @patch("services.sleep.reindex.write_content_chunks", new_callable=AsyncMock)
+    async def test_upsert_carries_bm25_sparse_and_canonical_payload(
+        self, mock_write, mock_qdrant, reindex_phase, mock_db
+    ):
+        from services.memory_service import build_memory_point
+
+        mem = _make_memory(summary="Qdrant sparse vector survives Sleep reindex")
+        mem.context = {"issue": 2053}
+        mem.location_lat = 35.68
+        mem.location_lon = 139.76
+        _mock_batch_fetch(mock_db, [mem])
+        reindex_phase.embedding_service.embed_with_usage = AsyncMock(return_value=([0.1], 7))
+
+        result = await reindex_phase.execute(
+            changed_memory_ids={mem.id},
+            user_id="user-1",
+            workspace_id=str(uuid4()),
+            context_id=str(uuid4()),
+        )
+
+        assert result.details["reindexed"] == 1
+        # Dense embedding is unchanged: raw summary, usage still accounted.
+        call = reindex_phase.embedding_service.embed_with_usage.await_args
+        assert call.args[0] == "Qdrant sparse vector survives Sleep reindex"
+        assert result.embedding_tokens == 7
+
+        kwargs = mock_qdrant.await_args.kwargs
+        expected_payload, expected_idx, expected_vals = build_memory_point(mem)
+        assert kwargs["sparse_indices"]
+        assert kwargs["sparse_indices"] == expected_idx
+        assert kwargs["sparse_values"] == expected_vals
+        # add_memory_to_qdrant (mocked here) adds the isolation fields itself.
+        assert set(kwargs["payload"]) == set(expected_payload)
+        assert kwargs["payload"]["location"] == {"lat": 35.68, "lon": 139.76}
+        assert kwargs["payload"]["context"] == {"issue": 2053}
+        # The chunk writer copies the very same payload.
+        assert mock_write.await_args.kwargs["base_payload"] is kwargs["payload"]

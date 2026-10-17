@@ -191,6 +191,7 @@ async def re_embed_memory_to_qdrant(
     too when its context has ``content_chunks_enabled`` (delete-first).
     """
     from db.qdrant import add_memory_to_qdrant
+    from services.memory_service import build_memory_point
 
     vector = await embedding_svc.embed(
         memory.summary or "",
@@ -198,21 +199,10 @@ async def re_embed_memory_to_qdrant(
         context_id=context_id,
         workspace_id=workspace_id,
     )
-    payload = {
-        "user_id": user_id,
-        "summary": memory.summary,
-        "context_summary": memory.context_summary or "",
-        "type": memory.type,
-        "importance": memory.importance,
-        "scope": memory.scope,
-        "tags": memory.tags or [],
-        "created_at": (memory.created_at.isoformat() + "Z" if memory.created_at else None),
-        "updated_at": (memory.updated_at.isoformat() + "Z" if memory.updated_at else None),
-    }
-    # WHERE axis (#1332): full-payload upsert — carry the geo field or a
-    # restored located memory vanishes from filters.near (must semantics).
-    if memory.location_lat is not None and memory.location_lon is not None:
-        payload["location"] = {"lat": memory.location_lat, "lon": memory.location_lon}
+    # #2053: full-point upsert — build the same point the normal write path
+    # does (BM25 sparse vector, tokenized payload, geo field for #1332), or a
+    # restored memory drops out of the sparse leg of hybrid search.
+    payload, sparse_indices, sparse_values = build_memory_point(memory)
     await add_memory_to_qdrant(
         user_id=user_id,
         memory_id=memory.id,
@@ -220,6 +210,8 @@ async def re_embed_memory_to_qdrant(
         payload=payload,
         workspace_id=workspace_id,
         context_id=context_id,
+        sparse_indices=sparse_indices,
+        sparse_values=sparse_values,
         collection_name=collection_name,
     )
     if db is not None:

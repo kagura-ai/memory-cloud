@@ -353,11 +353,7 @@ async def test_re_embed_rebuilds_content_chunks_when_given_a_session() -> None:
     """#2015: the restore helper rewrites the chunk points after the summary point."""
     from services.sleep.undo import re_embed_memory_to_qdrant
 
-    memory = MagicMock()
-    memory.id = uuid4()
-    memory.summary = "s"
-    memory.location_lat = None
-    memory.location_lon = None
+    memory = _restorable_memory()
     svc = MagicMock()
     svc.embed = AsyncMock(return_value=[0.1])
     db = MagicMock()
@@ -373,3 +369,61 @@ async def test_re_embed_rebuilds_content_chunks_when_given_a_session() -> None:
         write.reset_mock()
         await re_embed_memory_to_qdrant(memory, "u", svc, "w", "c", "coll")
         write.assert_not_awaited()
+
+
+def _restorable_memory(**overrides: object) -> MagicMock:
+    """A merge loser with the real column values build_memory_point reads."""
+    from datetime import datetime
+
+    memory = MagicMock()
+    memory.id = uuid4()
+    memory.user_id = "u"
+    memory.summary = "s"
+    memory.context_summary = "why"
+    memory.content = "restored content body"
+    memory.type = "note"
+    memory.importance = 0.6
+    memory.scope = "persistent"
+    memory.tags = ["t"]
+    memory.client = "claude-code"
+    memory.context = None
+    memory.created_at = datetime(2026, 1, 1)
+    memory.updated_at = datetime(2026, 1, 2)
+    memory.location_lat = None
+    memory.location_lon = None
+    for key, value in overrides.items():
+        setattr(memory, key, value)
+    return memory
+
+
+@pytest.mark.asyncio
+async def test_re_embed_upsert_carries_bm25_sparse_and_canonical_payload() -> None:
+    """#2053: an undo restores the same point the normal write path builds."""
+    from services.memory_service import build_memory_point
+    from services.sleep.undo import re_embed_memory_to_qdrant
+
+    memory = _restorable_memory(
+        summary="Undo restores the BM25 sparse vector",
+        context={"issue": 2053},
+        location_lat=35.68,
+        location_lon=139.76,
+    )
+    svc = MagicMock()
+    svc.embed = AsyncMock(return_value=[0.1])
+    with (
+        patch("db.qdrant.add_memory_to_qdrant", new=AsyncMock()) as upsert,
+        patch("services.content_chunk_writer.write_content_chunks", new=AsyncMock()) as write,
+    ):
+        await re_embed_memory_to_qdrant(memory, "u", svc, "w", "c", "coll", db=MagicMock())
+
+    # Dense embedding is unchanged: the raw summary.
+    assert svc.embed.await_args.args[0] == "Undo restores the BM25 sparse vector"
+    kwargs = upsert.await_args.kwargs
+    expected_payload, expected_idx, expected_vals = build_memory_point(memory)
+    assert kwargs["sparse_indices"]
+    assert kwargs["sparse_indices"] == expected_idx
+    assert kwargs["sparse_values"] == expected_vals
+    assert set(kwargs["payload"]) == set(expected_payload)
+    assert kwargs["payload"]["location"] == {"lat": 35.68, "lon": 139.76}
+    assert kwargs["payload"]["context"] == {"issue": 2053}
+    assert write.await_args.kwargs["base_payload"] is kwargs["payload"]
